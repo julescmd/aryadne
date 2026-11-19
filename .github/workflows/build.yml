@@ -1,10 +1,10 @@
 name: release
 
-# Compile seulement quand tu publies une version (tag v*), ou à la main depuis l'onglet Actions.
-# Ça économise les minutes : environ 20-25 minutes du forfait par version (Windows compte double).
+# Compile quand tu publies une Release sur GitHub (bouton « Draft a new release »),
+# ou à la main depuis l'onglet Actions. Les exécutables sont ajoutés à la Release.
 on:
-  push:
-    tags: ["v*"]
+  release:
+    types: [published]
   workflow_dispatch:
 
 permissions:
