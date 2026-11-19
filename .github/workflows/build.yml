@@ -1,8 +1,9 @@
-name: build
+name: release
 
+# Compile seulement quand tu publies une version (tag v*), ou à la main depuis l'onglet Actions.
+# Ça économise les minutes : environ 20-25 minutes du forfait par version (Windows compte double).
 on:
   push:
-    branches: [main]
     tags: ["v*"]
   workflow_dispatch:
 
@@ -51,3 +52,4 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: ${{ matrix.out }}
+          generate_release_notes: true

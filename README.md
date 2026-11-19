@@ -4,13 +4,13 @@ Le fil entre tes idées. Notes, code, références et moodboards dans un dossier
 
 100 % Rust ([egui](https://github.com/emilk/egui)). Un seul exécutable portable pour Windows et Linux : **aucune installation, aucun droit admin**. Look éditeur de code (JetBrains Mono, angles droits), mode clair par défaut, mode sombre en un clic.
 
-## Fonctionnalités (v0.4)
+## Fonctionnalités (v0.5)
 
 **Fichiers**
 - Explorateur de tout le coffre : dossiers repliables, filtre, fichiers modifiés marqués d'un ●.
 - Clic droit : nouveau fichier ou dossier, renommer / déplacer, copier le chemin, supprimer.
 - Glisser un fichier sur un dossier de l'explorateur pour le déplacer.
-- Glisser des fichiers depuis ton bureau dans la fenêtre pour les importer (dans `refs/` par défaut, ou dans le dossier sélectionné).
+- Glisser des fichiers depuis ton bureau dans la fenêtre pour les importer (dans `refs/` par défaut, ou dans le dossier sélectionné). Au choix : **déplacer** (aucun doublon) ou copier ; réglable dans « ia ». Un fichier déjà dans le coffre n'est jamais recopié.
 - « Supprimer » envoie dans `.app/trash/` du coffre : rien n'est perdu par accident.
 
 **Éditeur**
@@ -19,7 +19,22 @@ Le fil entre tes idées. Notes, code, références et moodboards dans un dossier
 - Notes Markdown : liens `[[Note]]` et `[[Note|alias]]`, mode lecture, liens entrants.
 - Aperçu des images (png, jpg, webp, gif).
 
-**Cerveau** (`Ctrl+G`)
+**Refs** (`Ctrl+3`)
+- Galerie de toutes les images du coffre, miniatures en arrière-plan, tri récentes / nom / couleur, taille réglable.
+- Formats : PNG, JPG, WebP, GIF, BMP, TIFF, TGA, EXR, HDR (EXR/HDR avec tone mapping), extensions en majuscules, images géantes.
+- Palette de 5 couleurs extraite, clic pour copier le hex.
+
+**Boards** (`Ctrl+4`)
+- Canevas infini façon PureRef, enregistré dans `boards/*.board.json`.
+- Glisser des images ou des notes depuis l'explorateur, les refs ou le bureau. Déplacer, redimensionner (poignée), `Suppr`, `Ctrl+D`, double-clic pour du texte.
+- Moodboards automatiques : par mots-clés (nom, dossier, notes qui citent l'image) ou par couleurs proches d'une image.
+
+**Chat** (`Ctrl+5`)
+- Pose des questions sur ton coffre : Aryadne cherche les passages pertinents (notes, code, texte), les envoie au modèle et affiche la réponse en direct.
+- Les notes `[[ ]]` et chemins de fichiers cités sont cliquables, les sources sont listées sous chaque réponse.
+- Option : inclure le fichier ouvert. Conversation enregistrable en note.
+
+**Cerveau** (`Ctrl+G` ou `Ctrl+2`)
 - Graphe de tout le coffre : notes reliées par leurs liens, dossiers et racine en option, tous les fichiers en option.
 - Molette pour zoomer, glisser pour déplacer la vue ou un nœud, survol pour voir les voisins, clic pour ouvrir.
 
@@ -34,6 +49,7 @@ Le fil entre tes idées. Notes, code, références et moodboards dans un dossier
 | `Ctrl+P` | ouvrir n'importe quel fichier (ou créer une note) |
 | `Ctrl+N` | nouvelle note |
 | `Ctrl+E` | édition / lecture (Markdown) |
+| `Ctrl+1` à `Ctrl+5` | fichiers, cerveau, refs, boards, chat |
 | `Ctrl+G` | cerveau |
 | `Ctrl+S` | sauvegarder |
 | `Ctrl+W` | fermer l'onglet |
@@ -59,13 +75,16 @@ cargo test            # tests du coffre
 cargo build --release # exécutable final dans target/release/
 ```
 
-## Builds automatiques
+## Publier une version et mises à jour
 
-`.github/workflows/build.yml` compile Windows et Linux à chaque push sur `main` (Actions, section Artifacts). Un tag `v*` crée une Release avec les deux exécutables :
+`.github/workflows/build.yml` compile Windows et Linux **seulement quand tu pousses un tag `v*`** (ou à la main depuis l'onglet Actions), pour économiser les minutes GitHub Actions :
 
 ```
-git tag v0.3.0 && git push --tags
+# 1. mets à jour `version` dans Cargo.toml (ex. 0.5.1), commit
+git tag v0.5.1 && git push && git push --tags
 ```
+
+La Release est créée avec les deux exécutables. Aryadne vérifie les nouvelles versions au démarrage (toutes les 6 h) ; le bouton de version en haut à droite permet d'installer et de redémarrer. Repo privé : il faut un jeton GitHub en lecture seule (Contents: read), à coller dans cette fenêtre. Repo public : rien à faire, et les Actions sont gratuites.
 
 ## Structure
 
@@ -75,6 +94,10 @@ src/
   brain.rs     vue Cerveau (graphe à forces)
   ai.rs        résumé IA (API compatible OpenAI)
   ollama.rs    installation, démarrage et modèles Ollama, sans admin
+  images.rs    chargement d'images, miniatures, palettes
+  board.rs     boards (canevas infini)
+  chat.rs      chat avec le coffre (recherche + streaming)
+  updater.rs   mises à jour depuis l'application
   vault.rs     fichiers du coffre, liens, graphe (+ tests)
   preview.rs   mode lecture Markdown
   theme.rs     palettes claire/sombre, police, angles droits
@@ -83,8 +106,4 @@ assets/fonts/  JetBrains Mono (licence OFL)
 
 ## Prochaines étapes
 
-1. **refs** : grille d'images, tags, palette de couleurs extraite
-2. **boards** : canevas infini façon PureRef, sauvegardé dans `boards/`
-3. Recherche plein texte dans tout le coffre
-4. Recherche d'images par description (CLIP) et moodboards automatiques
-5. Terminal intégré, thèmes et plugins
+Voir la liste d'idées dans les issues / la discussion.

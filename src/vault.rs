@@ -20,6 +20,8 @@ pub struct Entry {
     pub name: String,
     pub is_dir: bool,
     pub depth: usize,
+    /// Dernière modification (secondes Unix).
+    pub modified: u64,
 }
 
 #[derive(Clone)]
@@ -98,7 +100,8 @@ pub fn scan(root: &str) -> Vec<Entry> {
             let path = e.path();
             let rel = path.strip_prefix(root).unwrap().to_string_lossy().replace('\\', "/");
             let is_dir = path.is_dir();
-            out.push(Entry { rel, name, is_dir, depth });
+            let modified = e.metadata().ok().and_then(|m| m.modified().ok()).and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map(|d| d.as_secs()).unwrap_or(0);
+            out.push(Entry { rel, name, is_dir, depth, modified });
             if is_dir {
                 walk(root, &path, depth + 1, out);
             }
@@ -163,8 +166,17 @@ pub fn trash(root: &str, rel: &str) -> Result<(), String> {
     fs::rename(src, bin.join(format!("{ts}_{name}"))).map_err(|e| e.to_string())
 }
 
-/// Copie un fichier externe dans le dossier `dir` du coffre, sans écraser.
-pub fn import(root: &str, dir: &str, src: &Path) -> Result<String, String> {
+/// Si `src` est déjà dans le coffre, son chemin relatif.
+pub fn inside(root: &str, src: &Path) -> Option<String> {
+    let root = fs::canonicalize(root).ok()?;
+    let src = fs::canonicalize(src).ok()?;
+    let rel = src.strip_prefix(&root).ok()?.to_string_lossy().replace('\\', "/");
+    (!rel.is_empty()).then_some(rel)
+}
+
+/// Importe un fichier externe dans le dossier `dir` du coffre, sans écraser.
+/// `move_file` : déplace au lieu de copier (pas de doublon sur le disque).
+pub fn import(root: &str, dir: &str, src: &Path, move_file: bool) -> Result<String, String> {
     let name = src.file_name().ok_or("Fichier sans nom.")?.to_string_lossy().to_string();
     let (base, ext) = match name.rsplit_once('.') {
         Some((b, e)) if !b.is_empty() => (b.to_string(), format!(".{e}")),
@@ -179,7 +191,16 @@ pub fn import(root: &str, dir: &str, src: &Path) -> Result<String, String> {
     if src.is_dir() {
         return Err(format!("« {name} » est un dossier : glisse plutôt les fichiers qu'il contient."));
     }
-    fs::copy(src, safe(root, &rel)?).map_err(|e| e.to_string())?;
+    let dest = safe(root, &rel)?;
+    if move_file {
+        // Même disque : simple renommage. Autre disque : copie puis suppression de l'original.
+        if fs::rename(src, &dest).is_err() {
+            fs::copy(src, &dest).map_err(|e| e.to_string())?;
+            fs::remove_file(src).map_err(|e| format!("Copié, mais l'original n'a pas pu être supprimé : {e}"))?;
+        }
+    } else {
+        fs::copy(src, &dest).map_err(|e| e.to_string())?;
+    }
     Ok(rel)
 }
 
@@ -294,7 +315,10 @@ mod tests {
         assert!(!dir.join("notes/main.rs").exists());
         let src = std::env::temp_dir().join("aryadne-import.txt");
         fs::write(&src, "x").unwrap();
-        assert_eq!(import(&v, "refs", &src).unwrap(), "refs/aryadne-import.txt");
-        assert_eq!(import(&v, "refs", &src).unwrap(), "refs/aryadne-import 2.txt");
+        assert_eq!(import(&v, "refs", &src, false).unwrap(), "refs/aryadne-import.txt");
+        assert_eq!(import(&v, "refs", &src, true).unwrap(), "refs/aryadne-import 2.txt");
+        assert!(!src.exists(), "déplacer ne doit pas laisser de doublon");
+        assert_eq!(inside(&v, &dir.join("refs/aryadne-import.txt")).as_deref(), Some("refs/aryadne-import.txt"));
+        assert!(inside(&v, &std::env::temp_dir()).is_none());
     }
 }

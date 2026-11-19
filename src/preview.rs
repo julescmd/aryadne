@@ -9,7 +9,9 @@ static LINK: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\[\[([^\]|#]+)(?:#[^\]|]*)?(?:\|([^\]]+))?\]\]").unwrap());
 
 /// Affiche la note et retourne le nom de la note cliquée, s'il y en a une.
-pub fn show(ui: &mut egui::Ui, text: &str, existing: &HashSet<String>) -> Option<String> {
+/// `existing` : noms de notes connus (minuscules). `paths` : chemins de fichiers du coffre,
+/// rendus cliquables quand ils apparaissent entre `accents graves`.
+pub fn show(ui: &mut egui::Ui, text: &str, existing: &HashSet<String>, paths: &HashSet<String>) -> Option<String> {
     let mut clicked = None;
     let mut in_code = false;
     let mut code = String::new();
@@ -35,7 +37,7 @@ pub fn show(ui: &mut egui::Ui, text: &str, existing: &HashSet<String>) -> Option
         } else if let Some((level, rest)) = heading(trimmed) {
             ui.add_space(if level == 1 { 10.0 } else { 6.0 });
             let size = match level { 1 => 26.0, 2 => 19.0, _ => 16.0 };
-            ui.horizontal_wrapped(|ui| inline(ui, rest, existing, &mut clicked, Some(size)));
+            ui.horizontal_wrapped(|ui| inline(ui, rest, existing, paths, &mut clicked, Some(size)));
             if level == 1 {
                 let w = ui.available_width();
                 let (r, _) = ui.allocate_exact_size(egui::vec2(w, 1.0), egui::Sense::hover());
@@ -44,15 +46,15 @@ pub fn show(ui: &mut egui::Ui, text: &str, existing: &HashSet<String>) -> Option
         } else if let Some(rest) = trimmed.strip_prefix("- ").or_else(|| trimmed.strip_prefix("* ")) {
             ui.horizontal_wrapped(|ui| {
                 ui.label(RichText::new(" ▪ ").color(theme::pal().accent));
-                inline(ui, rest, existing, &mut clicked, None);
+                inline(ui, rest, existing, paths, &mut clicked, None);
             });
         } else if let Some(rest) = trimmed.strip_prefix("> ") {
             ui.horizontal_wrapped(|ui| {
                 ui.label(RichText::new(" ▌ ").color(theme::pal().accent));
-                inline(ui, rest, existing, &mut clicked, None);
+                inline(ui, rest, existing, paths, &mut clicked, None);
             });
         } else {
-            ui.horizontal_wrapped(|ui| inline(ui, trimmed, existing, &mut clicked, None));
+            ui.horizontal_wrapped(|ui| inline(ui, trimmed, existing, paths, &mut clicked, None));
         }
     }
     if in_code && !code.is_empty() {
@@ -74,6 +76,7 @@ fn inline(
     ui: &mut egui::Ui,
     text: &str,
     existing: &HashSet<String>,
+    paths: &HashSet<String>,
     clicked: &mut Option<String>,
     size: Option<f32>,
 ) {
@@ -86,7 +89,15 @@ fn inline(
     // Les segments impairs entre `accents graves` sont du code.
     for (k, seg) in text.split('`').enumerate() {
         if k % 2 == 1 {
-            ui.label(RichText::new(seg).monospace().background_color(p.code_bg).color(p.accent));
+            let t = RichText::new(seg).monospace().background_color(p.code_bg);
+            if paths.contains(seg.trim_matches('/')) {
+                let r = ui.add(egui::Label::new(t.color(p.link).underline()).sense(egui::Sense::click()));
+                if r.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("ouvrir").clicked() {
+                    *clicked = Some(seg.trim_matches('/').to_string());
+                }
+            } else {
+                ui.label(t.color(p.accent));
+            }
             continue;
         }
         let mut last = 0;

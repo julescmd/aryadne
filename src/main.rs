@@ -1,10 +1,14 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod ai;
+mod board;
 mod brain;
+mod chat;
+mod images;
 mod ollama;
 mod preview;
 mod theme;
+mod updater;
 mod vault;
 
 use eframe::egui::{self, Key, KeyboardShortcut, Modifiers, RichText};
@@ -15,7 +19,6 @@ use std::time::{Duration, Instant};
 use vault::Entry;
 
 const APP: &str = "aryadne";
-const IMAGE_EXT: [&str; 6] = ["png", "jpg", "jpeg", "webp", "gif", "bmp"];
 
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
@@ -61,6 +64,25 @@ fn ext(rel: &str) -> String {
 enum View {
     Files,
     Brain,
+    Refs,
+    Boards,
+    Chat,
+}
+
+#[derive(PartialEq, Clone, Copy, Default)]
+enum RefSort {
+    #[default]
+    Recent,
+    Name,
+    Color,
+}
+
+#[derive(Default)]
+struct RefsState {
+    filter: String,
+    size: f32,
+    selected: Option<String>,
+    sort: RefSort,
 }
 
 enum Content {
@@ -93,6 +115,8 @@ enum Dialog {
     NewDir { dir: String },
     Rename { from: String },
     ConfirmTrash { rel: String },
+    Update,
+    Import { files: Vec<PathBuf>, dir: String, remember: bool },
     Settings(ai::Settings),
 }
 
@@ -123,6 +147,14 @@ struct App {
     summary: Option<(String, Summary)>,
     summary_rx: Option<Receiver<Result<String, String>>>,
     local: ollama::Local,
+    images: images::Images,
+    board: board::Board,
+    refs: RefsState,
+    chat: chat::Chat,
+    auto_query: String,
+    toast: Option<(String, Instant)>,
+    updater: updater::Updater,
+    github_token: String,
     error: Option<String>,
 }
 
@@ -133,6 +165,14 @@ impl App {
         theme::apply(ctx, load_config("theme").as_deref() == Some("dark"));
         let mut app = Self { view: Some(View::Files), ai: Some(ai::Settings::load()), ..Default::default() };
         app.local.refresh(&app.ai.clone().unwrap_or_default().url, ctx);
+        app.github_token = load_config("github_token").unwrap_or_default();
+        // Vérifie les mises à jour au plus toutes les 6 h (pas en mode dev).
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+        let last: u64 = load_config("last_update_check").and_then(|v| v.parse().ok()).unwrap_or(0);
+        if !cfg!(debug_assertions) && now.saturating_sub(last) > 6 * 3600 {
+            save_config("last_update_check", &now.to_string());
+            app.updater.check(app.github_token.clone(), ctx);
+        }
         if let Some(p) = load_config("last_vault") {
             app.load_vault(p);
         }
@@ -162,6 +202,11 @@ impl App {
         self.active = None;
         self.summary = None;
         self.brain = brain::Brain::default();
+        self.board = board::Board::default();
+        self.refs = RefsState::default();
+        self.chat = chat::Chat::default();
+        let root = self.root();
+        self.images.set_root(&root);
         self.refresh();
         if let Some(first) = self.entries.iter().find(|e| vault::is_md(&e.rel)).map(|e| e.rel.clone()) {
             self.open(first);
@@ -213,7 +258,11 @@ impl App {
         if let Some(i) = self.docs.iter().position(|d| d.rel == rel) {
             self.active = Some(i);
         } else {
-            let content = if IMAGE_EXT.contains(&ext(&rel).as_str()) {
+            if board::is_board(&rel) {
+                self.open_board(rel);
+                return;
+            }
+            let content = if images::is_image(&rel) {
                 Content::Image
             } else {
                 match vault::read(&self.root(), &rel) {
@@ -271,6 +320,10 @@ impl App {
             match a {
                 Action::Open(rel) => self.open(rel),
                 Action::OpenLink(name) => {
+                    if self.entries.iter().any(|e| e.rel == name && !e.is_dir) {
+                        self.open(name);
+                        continue;
+                    }
                     let rel = match self.md.get(&name.to_lowercase()) {
                         Some(r) => r.clone(),
                         None => {
@@ -336,6 +389,7 @@ impl App {
         if self.report(r).is_none() {
             return;
         }
+        self.images.forget(from);
         for d in &mut self.docs {
             if d.rel == from {
                 d.rel = to.to_string();
@@ -375,6 +429,11 @@ impl App {
         if pressed(Modifiers::COMMAND, Key::G) {
             self.view = Some(if self.view() == View::Brain { View::Files } else { View::Brain });
         }
+        for (k, v) in [(Key::Num1, View::Files), (Key::Num2, View::Brain), (Key::Num3, View::Refs), (Key::Num4, View::Boards), (Key::Num5, View::Chat)] {
+            if pressed(Modifiers::COMMAND, k) {
+                self.view = Some(v);
+            }
+        }
         if pressed(Modifiers::COMMAND, Key::E) {
             if let Some(d) = self.active.and_then(|i| self.docs.get_mut(i)) {
                 if vault::is_md(&d.rel) {
@@ -411,7 +470,7 @@ impl App {
                         self.pick_vault();
                     }
                     ui.add_space(18.0);
-                    let tabs = [("fichiers", Some(View::Files)), ("cerveau", Some(View::Brain)), ("refs", None), ("boards", None)];
+                    let tabs = [("fichiers", Some(View::Files)), ("cerveau", Some(View::Brain)), ("refs", Some(View::Refs)), ("boards", Some(View::Boards)), ("chat", Some(View::Chat))];
                     for (label, v) in tabs {
                         let active = v == Some(self.view());
                         let color = if active { p.text } else { p.muted };
@@ -434,6 +493,14 @@ impl App {
                         ui.add_space(8.0);
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if let Some(r) = self.updater.update_available() {
+                            let b = egui::Button::new(RichText::new(format!("↑ {}", r.version)).color(p.on_accent).family(theme::bold())).fill(p.accent).stroke(egui::Stroke::NONE);
+                            if ui.add(b).on_hover_text("Nouvelle version disponible").clicked() {
+                                self.dialog = Some(Dialog::Update);
+                            }
+                        } else if ui.add(egui::Button::new(RichText::new(format!("v{}", updater::CURRENT)).color(p.muted).size(11.0)).frame(false)).on_hover_text("Mises à jour").clicked() {
+                            self.dialog = Some(Dialog::Update);
+                        }
                         let label = if theme::is_dark() { "clair" } else { "sombre" };
                         if ui.button(label).clicked() {
                             self.set_dark(ui.ctx(), !theme::is_dark());
@@ -457,6 +524,9 @@ impl App {
                     let preview = self.current().is_some_and(|d| d.preview);
                     let (mode, color) = match self.view() {
                         View::Brain => ("CERVEAU", p.text),
+                        View::Refs => ("REFS", p.text),
+                        View::Boards => ("BOARD", p.text),
+                        View::Chat => ("CHAT", p.link),
                         View::Files if preview => ("LECTURE", p.link),
                         View::Files => ("ÉDITION", p.accent),
                     };
@@ -474,7 +544,7 @@ impl App {
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.add_space(8.0);
-                        ui.label(RichText::new("^P ouvrir  ^N note  ^E lecture  ^G cerveau  ^W fermer").color(p.muted).size(11.0));
+                        ui.label(RichText::new("^P ouvrir  ^N note  ^E lecture  ^1-5 vues  ^W fermer").color(p.muted).size(11.0));
                     });
                 });
             });
@@ -595,8 +665,10 @@ impl App {
                 (if self.collapsed.contains(&e.rel) { "▸" } else { "▾" }, p.muted)
             } else if vault::is_md(&e.rel) {
                 ("#", p.accent)
-            } else if IMAGE_EXT.contains(&ext(&e.rel).as_str()) {
+            } else if images::is_image(&e.rel) {
                 ("▣", p.link)
+            } else if board::is_board(&e.rel) {
+                ("▦", p.accent)
             } else {
                 ("·", p.muted)
             };
@@ -721,9 +793,9 @@ impl App {
             }
             self.tabs(ui);
             let Some(i) = self.active else { return };
-            let root = self.root();
             let dark = theme::is_dark();
             let existing: HashSet<String> = self.md.keys().cloned().collect();
+            let paths: HashSet<String> = self.entries.iter().map(|e| e.rel.clone()).collect();
             let rel = self.docs[i].rel.clone();
             let is_md = vault::is_md(&rel);
             let can_summarize = matches!(self.docs[i].content, Content::Text(_));
@@ -762,10 +834,34 @@ impl App {
                     ui.vertical_centered(|ui| ui.label(RichText::new(msg.as_str()).color(p.muted)));
                 }
                 Content::Image => {
-                    let path = std::path::Path::new(&root).join(&rel);
+                    let slot = self.images.get(&rel, images::Size::Full);
                     egui::ScrollArea::both().auto_shrink(false).show(ui, |ui| {
-                        egui::Frame::new().inner_margin(24).show(ui, |ui| {
-                            ui.add(egui::Image::new(format!("file://{}", path.to_string_lossy().replace('\\', "/"))).max_width(ui.available_width()).corner_radius(0.0));
+                        egui::Frame::new().inner_margin(24).show(ui, |ui| match slot {
+                            images::Slot::Ready(l) => {
+                                let size = l.tex.size_vec2();
+                                let scale = (ui.available_width() / size.x).min(1.0).max(0.05);
+                                ui.add(egui::Image::new(&l.tex).fit_to_exact_size(size * scale));
+                                ui.add_space(8.0);
+                                ui.horizontal(|ui| {
+                                    ui.label(RichText::new(format!("{} × {} px", l.dims[0], l.dims[1])).color(p.muted).size(11.5));
+                                    for c in &l.palette {
+                                        let (r, resp) = ui.allocate_exact_size(egui::vec2(22.0, 16.0), egui::Sense::click());
+                                        ui.painter().rect_filled(r, 0.0, *c);
+                                        if resp.on_hover_text(format!("{} · clic pour copier", images::hex(*c))).clicked() {
+                                            ui.ctx().copy_text(images::hex(*c));
+                                        }
+                                    }
+                                });
+                            }
+                            images::Slot::Loading => {
+                                ui.horizontal(|ui| {
+                                    ui.spinner();
+                                    ui.label(RichText::new("chargement…").color(p.muted));
+                                });
+                            }
+                            images::Slot::Failed(e) => {
+                                ui.label(RichText::new(e).color(p.missing));
+                            }
                         });
                     });
                 }
@@ -774,7 +870,7 @@ impl App {
                     egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
                         egui::Frame::new().inner_margin(egui::Margin::symmetric(40, 24)).show(ui, |ui| {
                             ui.set_max_width(820.0_f32.min(ui.available_width()));
-                            goto = preview::show(ui, text, &existing);
+                            goto = preview::show(ui, text, &existing, &paths);
                         });
                     });
                     if let Some(n) = goto {
@@ -879,7 +975,8 @@ impl App {
                             egui::Frame::new().fill(p.bg).stroke(egui::Stroke::new(1.0, p.line)).inner_margin(10).show(ui, |ui| {
                                 ui.set_width(ui.available_width());
                                 let existing: HashSet<String> = self.md.keys().cloned().collect();
-                                if let Some(n) = preview::show(ui, text, &existing) {
+                                let paths: HashSet<String> = self.entries.iter().map(|e| e.rel.clone()).collect();
+                                if let Some(n) = preview::show(ui, text, &existing, &paths) {
                                     self.actions.push(Action::OpenLink(n));
                                 }
                             });
@@ -945,6 +1042,512 @@ impl App {
                 }
             }
         });
+    }
+
+
+    // ---------- boards ----------
+
+    fn boards_list(&self) -> Vec<String> {
+        self.entries.iter().filter(|e| !e.is_dir && board::is_board(&e.rel)).map(|e| e.rel.clone()).collect()
+    }
+
+    fn save_board(&mut self) {
+        let root = self.root();
+        let r = self.board.save(&root);
+        self.report(r);
+    }
+
+    fn open_board(&mut self, rel: String) {
+        if self.board.rel.as_deref() != Some(rel.as_str()) {
+            self.save_board();
+            let root = self.root();
+            if let Some(b) = self.report(board::Board::load(&root, &rel)) {
+                self.board = b;
+                save_config("last_board", &rel);
+            }
+        }
+        self.selected = Some(rel);
+        self.view = Some(View::Boards);
+    }
+
+    fn new_board(&mut self, name: &str) -> Option<String> {
+        let dir = if self.entries.iter().any(|e| e.rel == "boards") { "boards" } else { "" };
+        let mut rel = vault::join(dir, &format!("{name}.board.json"));
+        let mut i = 2;
+        while self.entries.iter().any(|e| e.rel == rel) {
+            rel = vault::join(dir, &format!("{name} {i}.board.json"));
+            i += 1;
+        }
+        let r = vault::write(&self.root(), &rel, "{\n  \"items\": []\n}\n");
+        self.report(r)?;
+        self.refresh();
+        self.open_board(rel.clone());
+        Some(rel)
+    }
+
+    /// Board courant, ou le dernier ouvert, ou un nouveau.
+    fn ensure_board(&mut self) {
+        if self.board.rel.is_some() {
+            return;
+        }
+        let last = load_config("last_board").filter(|r| self.entries.iter().any(|e| &e.rel == r));
+        match last.or_else(|| self.boards_list().first().cloned()) {
+            Some(rel) => {
+                let root = self.root();
+                if let Ok(b) = board::Board::load(&root, &rel) {
+                    self.board = b;
+                }
+            }
+            None => {
+                self.new_board("Moodboard");
+            }
+        }
+    }
+
+    fn toast(&mut self, msg: impl Into<String>) {
+        self.toast = Some((msg.into(), Instant::now()));
+    }
+
+    fn all_images(&self) -> Vec<Entry> {
+        self.entries.iter().filter(|e| !e.is_dir && images::is_image(&e.rel)).cloned().collect()
+    }
+
+    fn aspect(&self, rel: &str) -> f32 {
+        self.images.peek(rel, images::Size::Thumb).map(|l| l.dims[0] as f32 / l.dims[1].max(1) as f32).unwrap_or(1.5)
+    }
+
+    /// Moodboard automatique par mots-clés (nom, dossier, notes qui parlent de l'image).
+    fn auto_board_keywords(&mut self, query: &str) -> usize {
+        let words: Vec<String> = chat::fold(query).split_whitespace().filter(|w| w.len() > 1).map(str::to_string).collect();
+        if words.is_empty() {
+            return 0;
+        }
+        let root = self.root();
+        // Texte associé à chaque image : son chemin + les lignes de notes qui la mentionnent.
+        let mut ctx_text: HashMap<String, String> = self.all_images().into_iter().map(|e| (e.rel.clone(), chat::fold(&e.rel))).collect();
+        for e in self.entries.iter().filter(|e| vault::is_md(&e.rel)) {
+            let Ok(t) = vault::read(&root, &e.rel) else { continue };
+            for line in t.lines() {
+                for (rel, acc) in ctx_text.iter_mut() {
+                    let name = rel.rsplit('/').next().unwrap_or(rel);
+                    if line.contains(name) {
+                        acc.push(' ');
+                        acc.push_str(&chat::fold(line));
+                        acc.push(' ');
+                        acc.push_str(&chat::fold(&e.rel));
+                    }
+                }
+            }
+        }
+        let on_board: HashSet<String> = self.board.data.items.iter().filter_map(|i| if let board::Kind::Image { rel } = &i.kind { Some(rel.clone()) } else { None }).collect();
+        let mut found: Vec<(String, usize)> = ctx_text
+            .into_iter()
+            .filter(|(rel, _)| !on_board.contains(rel))
+            .map(|(rel, t)| {
+                let score = words.iter().filter(|w| t.contains(w.as_str())).count();
+                (rel, score)
+            })
+            .filter(|(_, s)| *s > 0)
+            .collect();
+        found.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        let picks: Vec<(String, f32)> = found.into_iter().take(40).map(|(r, _)| (r.clone(), self.aspect(&r))).collect();
+        let n = picks.len();
+        self.board.add_grid(picks);
+        n
+    }
+
+    /// Moodboard automatique par couleurs proches de l'image `seed`.
+    fn auto_board_colors(&mut self, seed: &str) -> Result<usize, String> {
+        let Some(seed_pal) = self.images.peek(seed, images::Size::Thumb).map(|l| l.palette.clone()) else {
+            return Err("Palette pas encore prête, réessaie dans une seconde.".into());
+        };
+        let all = self.all_images();
+        let mut pending = 0;
+        let mut scored = vec![];
+        for e in &all {
+            if e.rel == seed {
+                continue;
+            }
+            match self.images.get(&e.rel, images::Size::Thumb) {
+                images::Slot::Ready(l) => scored.push((e.rel.clone(), images::palette_distance(&seed_pal, &l.palette))),
+                images::Slot::Loading => pending += 1,
+                images::Slot::Failed(_) => {}
+            }
+        }
+        if pending > 0 && scored.len() < 3 {
+            return Err(format!("Analyse des couleurs en cours ({pending} images restantes), réessaie dans un instant."));
+        }
+        scored.sort_by(|a, b| a.1.total_cmp(&b.1));
+        let mut picks = vec![(seed.to_string(), self.aspect(seed))];
+        picks.extend(scored.into_iter().take(15).filter(|(_, d)| *d < 90.0).map(|(r, _)| (r.clone(), self.aspect(&r))));
+        let n = picks.len();
+        self.board.add_grid(picks);
+        Ok(n)
+    }
+
+    fn boards_view(&mut self, ui: &mut egui::Ui) {
+        let p = theme::pal();
+        self.ensure_board();
+        let boards = self.boards_list();
+        egui::CentralPanel::default().frame(egui::Frame::new().fill(p.bg)).show(ui, |ui| {
+            egui::Frame::new().fill(p.panel).stroke(egui::Stroke::new(1.0, p.line)).inner_margin(egui::Margin::symmetric(12, 5)).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    ui.label(caps("board"));
+                    let current = self.board.rel.clone().unwrap_or_default();
+                    let mut pick = None;
+                    egui::ComboBox::from_id_salt("board-pick").selected_text(board::board_name(&current)).width(180.0).show_ui(ui, |ui| {
+                        for b in &boards {
+                            if ui.selectable_label(*b == current, board::board_name(b)).clicked() {
+                                pick = Some(b.clone());
+                            }
+                        }
+                    });
+                    if let Some(b) = pick {
+                        self.open_board(b);
+                    }
+                    if ui.button("+ board").clicked() {
+                        self.new_board("Moodboard");
+                    }
+                    ui.separator();
+                    if ui.button("+ texte").on_hover_text("ou double-clic dans le vide").clicked() {
+                        let c = self.board.view_center;
+                        self.board.add(board::Kind::Text { text: String::new() }, c, egui::vec2(260.0, 120.0));
+                        self.board.edit_selected();
+                    }
+                    ui.separator();
+                    ui.label(RichText::new("auto").color(p.accent).family(theme::bold()));
+                    ui.add(egui::TextEdit::singleline(&mut self.auto_query).hint_text("mots-clés : forêt brume…").desired_width(170.0));
+                    if ui.button("par mots-clés").on_hover_text("Ajoute les images dont le nom, le dossier ou les notes qui les citent correspondent").clicked() {
+                        let q = self.auto_query.clone();
+                        let n = self.auto_board_keywords(&q);
+                        self.toast(if n == 0 { "aucune image ne correspond".to_string() } else { format!("{n} images ajoutées") });
+                    }
+                    let seed = self.board.selected.and_then(|i| self.board.data.items.get(i)).and_then(|it| if let board::Kind::Image { rel } = &it.kind { Some(rel.clone()) } else { None });
+                    let btn = ui.add_enabled(seed.is_some(), egui::Button::new("par couleurs")).on_hover_text("Sélectionne une image du board : ajoute les refs aux couleurs proches").on_disabled_hover_text("sélectionne d'abord une image du board");
+                    if btn.clicked() {
+                        if let Some(seed) = seed {
+                            match self.auto_board_colors(&seed) {
+                                Ok(n) => self.toast(format!("{} images aux couleurs proches", n.saturating_sub(1))),
+                                Err(e) => self.toast(e),
+                            }
+                        }
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("cadrer").clicked() {
+                            self.board.fit();
+                        }
+                    });
+                });
+            });
+            let entries = self.entries.clone();
+            let root = self.root();
+            let summary = move |rel: &str| -> String {
+                let _ = &entries;
+                vault::read(&root, rel).map(|t| t.lines().filter(|l| !l.starts_with('#') && !l.trim().is_empty()).take(6).collect::<Vec<_>>().join("\n")).unwrap_or_default()
+            };
+            if let Some(board::Event::Open(rel)) = self.board.show(ui, &mut self.images, &summary) {
+                self.actions.push(Action::Open(rel));
+            }
+        });
+    }
+
+    // ---------- refs ----------
+
+    fn refs_view(&mut self, ui: &mut egui::Ui) {
+        let p = theme::pal();
+        if self.refs.size == 0.0 {
+            self.refs.size = 170.0;
+        }
+        let mut imgs = self.all_images();
+        let f = chat::fold(&self.refs.filter);
+        imgs.retain(|e| f.is_empty() || chat::fold(&e.rel).contains(&f));
+        match self.refs.sort {
+            RefSort::Recent => imgs.sort_by(|a, b| b.modified.cmp(&a.modified)),
+            RefSort::Name => imgs.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase())),
+            RefSort::Color => {
+                let hue = |rel: &str, me: &Self| {
+                    me.images.peek(rel, images::Size::Thumb).and_then(|l| l.palette.first().copied()).map(|c| {
+                        let hsva = egui::ecolor::Hsva::from(c);
+                        if hsva.s < 0.15 { 2.0 + hsva.v } else { hsva.h }
+                    }).unwrap_or(9.0)
+                };
+                let mut keyed: Vec<(f32, Entry)> = imgs.into_iter().map(|e| (hue(&e.rel, self), e)).collect();
+                keyed.sort_by(|a, b| a.0.total_cmp(&b.0));
+                imgs = keyed.into_iter().map(|(_, e)| e).collect();
+            }
+        }
+
+        // Panneau de détails
+        if let Some(sel) = self.refs.selected.clone() {
+            egui::Panel::right("ref-detail").resizable(true).default_size(320.0).min_size(240.0)
+                .frame(egui::Frame::new().fill(p.panel).stroke(egui::Stroke::new(1.0, p.line)).inner_margin(12))
+                .show(ui, |ui| {
+                    ui.label(caps("référence"));
+                    ui.label(RichText::new(&sel).size(11.5));
+                    ui.add_space(6.0);
+                    match self.images.get(&sel, images::Size::Full) {
+                        images::Slot::Ready(l) => {
+                            let s = l.tex.size_vec2();
+                            let scale = ui.available_width() / s.x;
+                            ui.add(egui::Image::new(&l.tex).fit_to_exact_size(s * scale));
+                            ui.label(RichText::new(format!("{} × {} px", l.dims[0], l.dims[1])).color(p.muted).size(11.0));
+                            ui.add_space(6.0);
+                            ui.label(caps("palette · clic pour copier"));
+                            ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing.x = 4.0;
+                                let w = ((ui.available_width() - 4.0 * (l.palette.len() as f32 - 1.0)) / l.palette.len().max(1) as f32).max(12.0);
+                                for c in &l.palette {
+                                    let (r, resp) = ui.allocate_exact_size(egui::vec2(w, 32.0), egui::Sense::click());
+                                    ui.painter().rect_filled(r, 0.0, *c);
+                                    if resp.on_hover_text(images::hex(*c)).clicked() {
+                                        ui.ctx().copy_text(images::hex(*c));
+                                        self.toast = Some((format!("{} copié", images::hex(*c)), Instant::now()));
+                                    }
+                                }
+                            });
+                            ui.horizontal_wrapped(|ui| {
+                                for c in &l.palette {
+                                    ui.label(RichText::new(images::hex(*c)).size(10.5).color(p.muted));
+                                }
+                            });
+                        }
+                        images::Slot::Loading => {
+                            ui.spinner();
+                        }
+                        images::Slot::Failed(e) => {
+                            ui.label(RichText::new(e).color(p.missing));
+                        }
+                    }
+                    ui.add_space(10.0);
+                    ui.horizontal_wrapped(|ui| {
+                        if ui.button("ouvrir").clicked() {
+                            self.actions.push(Action::Open(sel.clone()));
+                        }
+                        if ui.button("ajouter au board").clicked() {
+                            self.ensure_board();
+                            let c = self.board.view_center;
+                            self.board.drop_file(&sel, c, &mut self.images);
+                            self.toast(format!("ajouté à « {} »", board::board_name(self.board.rel.as_deref().unwrap_or(""))));
+                        }
+                        if ui.button("board auto (couleurs)").on_hover_text("Ajoute cette image et les refs aux couleurs proches au board").clicked() {
+                            self.ensure_board();
+                            match self.auto_board_colors(&sel) {
+                                Ok(n) => {
+                                    self.toast(format!("{n} images ajoutées au board"));
+                                    self.view = Some(View::Boards);
+                                }
+                                Err(e) => self.toast(e),
+                            }
+                        }
+                        if ui.button("explorateur").clicked() {
+                            self.selected = Some(sel.clone());
+                            self.collapsed.remove(&vault::parent(&sel));
+                        }
+                    });
+                });
+        }
+
+        egui::CentralPanel::default().frame(egui::Frame::new().fill(p.bg)).show(ui, |ui| {
+            egui::Frame::new().fill(p.panel).stroke(egui::Stroke::new(1.0, p.line)).inner_margin(egui::Margin::symmetric(12, 5)).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    ui.label(caps(&format!("refs · {}", imgs.len())));
+                    ui.add(egui::TextEdit::singleline(&mut self.refs.filter).hint_text("filtrer par nom ou dossier").desired_width(200.0));
+                    ui.separator();
+                    for (s, label) in [(RefSort::Recent, "récentes"), (RefSort::Name, "nom"), (RefSort::Color, "couleur")] {
+                        if ui.selectable_label(self.refs.sort == s, label).clicked() {
+                            self.refs.sort = s;
+                        }
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.add(egui::Slider::new(&mut self.refs.size, 90.0..=340.0).show_value(false));
+                        ui.label(RichText::new("taille").color(p.muted).size(11.0));
+                    });
+                });
+            });
+            if imgs.is_empty() {
+                ui.centered_and_justified(|ui| {
+                    ui.label(RichText::new("aucune image\n\nglisse des images dans la fenêtre pour les importer dans refs/").color(p.muted));
+                });
+                return;
+            }
+            let cell = self.refs.size;
+            let gap = 8.0;
+            egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
+                egui::Frame::new().inner_margin(12).show(ui, |ui| {
+                    let cols = ((ui.available_width() + gap) / (cell + gap)).floor().max(1.0) as usize;
+                    let rows = imgs.len().div_ceil(cols);
+                    for row in 0..rows {
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = gap;
+                            for e in imgs.iter().skip(row * cols).take(cols) {
+                                let (rect, resp) = ui.allocate_exact_size(egui::vec2(cell, cell), egui::Sense::click_and_drag());
+                                let selected = self.refs.selected.as_deref() == Some(&e.rel);
+                                // Ne charge que ce qui est visible
+                                if ui.is_rect_visible(rect) {
+                                    let painter = ui.painter();
+                                    painter.rect_filled(rect, 0.0, p.panel);
+                                    match self.images.get(&e.rel, images::Size::Thumb) {
+                                        images::Slot::Ready(l) => {
+                                            let s = l.tex.size_vec2();
+                                            let k = (cell / s.x).min(cell / s.y);
+                                            let r = egui::Rect::from_center_size(rect.center(), s * k);
+                                            painter.image(l.tex.id(), r, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), egui::Color32::WHITE);
+                                        }
+                                        images::Slot::Loading => {
+                                            painter.text(rect.center(), egui::Align2::CENTER_CENTER, "…", egui::FontId::monospace(14.0), p.muted);
+                                        }
+                                        images::Slot::Failed(_) => {
+                                            painter.text(rect.center(), egui::Align2::CENTER_CENTER, "illisible", egui::FontId::monospace(11.0), p.missing);
+                                        }
+                                    }
+                                    if resp.hovered() || selected {
+                                        let band = egui::Rect::from_min_max(egui::pos2(rect.left(), rect.bottom() - 20.0), rect.right_bottom());
+                                        painter.rect_filled(band, 0.0, p.bg.linear_multiply(0.85));
+                                        painter.with_clip_rect(band).text(band.left_center() + egui::vec2(6.0, 0.0), egui::Align2::LEFT_CENTER, &e.name, egui::FontId::monospace(10.5), p.text);
+                                    }
+                                    if selected {
+                                        painter.rect_stroke(rect, 0.0, egui::Stroke::new(2.0, p.accent), egui::StrokeKind::Inside);
+                                    }
+                                }
+                                if resp.drag_started() {
+                                    egui::DragAndDrop::set_payload(ui.ctx(), e.rel.clone());
+                                }
+                                if resp.clicked() {
+                                    self.refs.selected = Some(e.rel.clone());
+                                }
+                                if resp.double_clicked() {
+                                    self.actions.push(Action::Open(e.rel.clone()));
+                                }
+                            }
+                        });
+                        ui.add_space(gap - ui.spacing().item_spacing.y);
+                    }
+                });
+            });
+        });
+    }
+
+    // ---------- chat ----------
+
+    fn chat_view(&mut self, ui: &mut egui::Ui) {
+        let p = theme::pal();
+        self.chat.poll();
+        let existing: HashSet<String> = self.md.keys().cloned().collect();
+        let paths: HashSet<String> = self.entries.iter().map(|e| e.rel.clone()).collect();
+        let mut send = false;
+        let mut save = false;
+
+        egui::Panel::bottom("chat-input")
+            .frame(egui::Frame::new().fill(p.panel).stroke(egui::Stroke::new(1.0, p.line)).inner_margin(12))
+            .show(ui, |ui| {
+                let open_name = self.current().map(|d| d.rel.clone());
+                ui.horizontal(|ui| {
+                    let label = match &open_name {
+                        Some(n) => format!("inclure le fichier ouvert ({n})"),
+                        None => "inclure le fichier ouvert".into(),
+                    };
+                    ui.add_enabled(open_name.is_some(), egui::Checkbox::new(&mut self.chat.include_open, RichText::new(label).size(11.5)));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("nouvelle conversation").clicked() && !self.chat.busy() {
+                            self.chat.msgs.clear();
+                        }
+                        if ui.add_enabled(!self.chat.msgs.is_empty(), egui::Button::new("enregistrer en note")).clicked() {
+                            save = true;
+                        }
+                        let model = self.ai.clone().unwrap_or_default().model;
+                        ui.label(RichText::new(format!("modèle : {model}")).color(p.muted).size(11.0));
+                    });
+                });
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    let enter = ui.input(|i| i.key_pressed(Key::Enter) && !i.modifiers.shift);
+                    let edit = egui::TextEdit::multiline(&mut self.chat.input)
+                        .hint_text("demande n'importe quoi sur ton coffre…  (entrée : envoyer · maj+entrée : nouvelle ligne)")
+                        .desired_rows(2)
+                        .desired_width(ui.available_width() - 90.0);
+                    let r = ui.add(edit);
+                    if r.has_focus() && enter {
+                        // Retire le saut de ligne que l'Entrée vient d'ajouter
+                        while self.chat.input.ends_with('\n') {
+                            self.chat.input.pop();
+                        }
+                        send = true;
+                    }
+                    let btn = egui::Button::new(RichText::new("envoyer").color(p.on_accent).family(theme::bold())).fill(p.accent).stroke(egui::Stroke::NONE).min_size(egui::vec2(80.0, 40.0));
+                    if ui.add_enabled(!self.chat.busy(), btn).clicked() {
+                        send = true;
+                    }
+                    if self.chat.msgs.is_empty() && !self.chat.busy() {
+                        r.request_focus();
+                    }
+                });
+            });
+
+        egui::CentralPanel::default().frame(egui::Frame::new().fill(p.bg)).show(ui, |ui| {
+            let mut goto = None;
+            egui::ScrollArea::vertical().auto_shrink(false).stick_to_bottom(true).show(ui, |ui| {
+                egui::Frame::new().inner_margin(egui::Margin::symmetric(32, 20)).show(ui, |ui| {
+                    ui.set_max_width(860.0_f32.min(ui.available_width()));
+                    if self.chat.msgs.is_empty() && !self.chat.busy() {
+                        ui.add_space(30.0);
+                        ui.label(RichText::new("chat").size(22.0).family(theme::bold()));
+                        ui.label(RichText::new("// pose une question : je cherche dans tes notes, ton code et tes fichiers, et je te renvoie vers les bons.").color(p.muted));
+                        ui.add_space(14.0);
+                        for s in [
+                            "Résume mes projets en cours",
+                            "Quelles notes parlent du court métrage ?",
+                            "Qu'est-ce que fait le code dans le dossier code ?",
+                            "Quelles idées je n'ai pas encore développées ?",
+                        ] {
+                            if ui.button(format!("› {s}")).clicked() {
+                                self.chat.input = s.to_string();
+                                send = true;
+                            }
+                        }
+                    }
+                    let msgs = self.chat.msgs.clone();
+                    for m in &msgs {
+                        msg_block(ui, m.role == chat::Role::User, &m.text, &m.sources, m.error.as_deref(), None, &existing, &paths, &mut goto);
+                    }
+                    if let Some(live) = &self.chat.live {
+                        if let Ok(l) = live.lock() {
+                            let status = (!l.status.is_empty()).then_some(l.status.as_str());
+                            msg_block(ui, false, &l.text, &l.sources, l.error.as_deref(), status, &existing, &paths, &mut goto);
+                        }
+                    }
+                });
+            });
+            if let Some(g) = goto {
+                self.actions.push(Action::OpenLink(g));
+            }
+        });
+
+        if send && !self.chat.busy() && !self.chat.input.trim().is_empty() {
+            self.flush_all();
+            let open = if self.chat.include_open {
+                self.current().and_then(|d| if let Content::Text(t) = &d.content { Some((d.rel.clone(), t.clone())) } else { None })
+            } else {
+                None
+            };
+            let settings = self.ai.clone().unwrap_or_default();
+            self.chat.send(self.root(), self.entries.clone(), open, settings, self.local.clone(), ui.ctx().clone());
+        }
+        if save {
+            let dir = if self.entries.iter().any(|e| e.rel == "notes") { "notes" } else { "" };
+            let mut rel = vault::join(dir, "Conversation.md");
+            let mut i = 2;
+            while self.entries.iter().any(|e| e.rel == rel) {
+                rel = vault::join(dir, &format!("Conversation {i}.md"));
+                i += 1;
+            }
+            let md = self.chat.to_markdown();
+            if self.report(vault::write(&self.root(), &rel, &md)).is_some() {
+                self.refresh();
+                self.actions.push(Action::Open(rel));
+            }
+        }
     }
 
     // ---------- fenêtres ----------
@@ -1054,6 +1657,122 @@ impl App {
                 }
             }
             Dialog::Settings(_) => {}
+            Dialog::Import { files, dir, remember } => {
+                let (files, dir, mut remember) = (files.clone(), dir.clone(), *remember);
+                let mut choice = None;
+                let r = egui::Modal::new(egui::Id::unique("import")).frame(frame).show(ctx, |ui| {
+                    ui.set_width(480.0);
+                    ui.label(caps("importer dans le coffre"));
+                    ui.add_space(4.0);
+                    let names: Vec<String> = files.iter().take(4).map(|f| f.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()).collect();
+                    let more = if files.len() > 4 { format!(" et {} autres", files.len() - 4) } else { String::new() };
+                    ui.label(format!("{}{} → /{}", names.join(", "), more, dir));
+                    ui.add_space(8.0);
+                    let mv = egui::Button::new(RichText::new("déplacer dans le coffre").color(p.on_accent).family(theme::bold())).fill(p.accent).stroke(egui::Stroke::NONE);
+                    if ui.add(mv).clicked() {
+                        choice = Some(true);
+                    }
+                    ui.label(RichText::new("Le fichier quitte son dossier d'origine : aucun doublon, aucun espace en plus.").color(p.muted).size(11.0));
+                    ui.add_space(6.0);
+                    if ui.button("copier").clicked() {
+                        choice = Some(false);
+                    }
+                    ui.label(RichText::new("L'original reste en place : le fichier prend deux fois la place.").color(p.muted).size(11.0));
+                    ui.add_space(8.0);
+                    ui.checkbox(&mut remember, "retenir ce choix (modifiable dans les réglages)");
+                    if ui.button("annuler").clicked() {
+                        keep = false;
+                    }
+                });
+                if let Some(mv) = choice {
+                    if remember {
+                        save_config("import_mode", if mv { "move" } else { "copy" });
+                    }
+                    self.import_files(files, &dir, mv);
+                    return;
+                }
+                if r.should_close() || esc {
+                    keep = false;
+                }
+                if keep {
+                    self.dialog = Some(Dialog::Import { files, dir, remember });
+                }
+                return;
+            }
+            Dialog::Update => {
+                let up = self.updater.clone();
+                let st = up.snapshot();
+                let mut token_changed = false;
+                let r = egui::Modal::new(egui::Id::unique("update")).frame(frame).show(ctx, |ui| {
+                    ui.set_width(500.0);
+                    ui.label(caps("mises à jour"));
+                    ui.add_space(4.0);
+                    ui.label(format!("Version installée : v{}", updater::CURRENT));
+                    match up.update_available() {
+                        Some(rel) => {
+                            ui.label(RichText::new(format!("Nouvelle version : {}", rel.version)).color(p.accent).family(theme::bold()));
+                            if !rel.notes.trim().is_empty() {
+                                egui::ScrollArea::vertical().max_height(180.0).show(ui, |ui| {
+                                    ui.label(RichText::new(rel.notes.trim()).size(11.5).color(p.muted));
+                                });
+                            }
+                        }
+                        None if st.installed => {
+                            ui.label(RichText::new("Mise à jour installée. Redémarre pour l'utiliser.").color(p.accent));
+                        }
+                        None if st.checked && st.error.is_none() => {
+                            ui.label(RichText::new("Tu as la dernière version.").color(p.muted));
+                        }
+                        None => {}
+                    }
+                    if let Some(f) = st.progress {
+                        ui.add(egui::ProgressBar::new(f).corner_radius(0.0).fill(p.accent).text(format!("téléchargement… {:.0} %", f * 100.0)));
+                    }
+                    if st.checking {
+                        ui.horizontal(|ui| {
+                            ui.spinner();
+                            ui.label("vérification…");
+                        });
+                    }
+                    if let Some(e) = &st.error {
+                        ui.label(RichText::new(e).color(p.missing).size(12.0));
+                    }
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        if st.installed {
+                            if ui.button(RichText::new("redémarrer").family(theme::bold())).clicked() {
+                                self.flush_all();
+                                self.save_board();
+                                updater::restart(ctx);
+                            }
+                        } else if up.update_available().is_some() && st.progress.is_none() {
+                            if ui.button(RichText::new("installer").family(theme::bold())).clicked() {
+                                up.install(self.github_token.clone(), ctx);
+                            }
+                        }
+                        if !st.checking && st.progress.is_none() && ui.button("vérifier").clicked() {
+                            up.check(self.github_token.clone(), ctx);
+                        }
+                        if ui.button("fermer").clicked() {
+                            keep = false;
+                        }
+                    });
+                    ui.add_space(10.0);
+                    ui.separator();
+                    ui.label(RichText::new(format!("Repo privé ? Ajoute un jeton GitHub en lecture seule (Contents: read) pour {}.", updater::REPO)).color(p.muted).size(11.0));
+                    token_changed = ui.add(egui::TextEdit::singleline(&mut self.github_token).password(true).hint_text("github_pat_…").desired_width(f32::INFINITY)).changed();
+                });
+                if token_changed {
+                    save_config("github_token", self.github_token.trim());
+                }
+                if r.should_close() || esc {
+                    keep = false;
+                }
+                if keep {
+                    self.dialog = Some(Dialog::Update);
+                }
+                return;
+            }
         }
 
         if let Dialog::Settings(mut s) = dialog {
@@ -1061,7 +1780,20 @@ impl App {
             let mut save = false;
             let r = egui::Modal::new(egui::Id::unique("settings")).frame(frame).show(ctx, |ui| {
                 ui.set_width(520.0);
-                ui.label(caps("réglages · résumé ia"));
+                ui.label(caps("réglages"));
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.label("fichiers glissés dans la fenêtre :");
+                    let cur = load_config("import_mode").unwrap_or_else(|| "ask".into());
+                    for (v, label) in [("ask", "demander"), ("move", "déplacer"), ("copy", "copier")] {
+                        if ui.selectable_label(cur == v, label).clicked() {
+                            save_config("import_mode", v);
+                        }
+                    }
+                });
+                ui.add_space(10.0);
+                ui.separator();
+                ui.label(caps("résumé et chat ia"));
                 ui.add_space(4.0);
                 ui.label(RichText::new("Toute API compatible OpenAI. Par défaut : Ollama en local, gratuit et privé.").color(p.muted).size(11.5));
                 ui.add_space(8.0);
@@ -1165,17 +1897,54 @@ impl App {
         }
         if !dropped.is_empty() {
             let root = self.root();
-            let mut last = None;
+            let mut already = vec![];
+            let mut outside = vec![];
             for f in dropped {
-                let r = vault::import(&root, &dir, f.path());
-                if let Some(rel) = self.report(r) {
-                    last = Some(rel);
+                // Déjà dans le coffre : on l'utilise tel quel, sans copie.
+                match vault::inside(&root, f.path()) {
+                    Some(rel) => already.push(rel),
+                    None => outside.push(f.path().to_path_buf()),
                 }
             }
-            self.refresh();
-            if let Some(rel) = last {
-                self.actions.push(Action::Open(rel));
+            if !already.is_empty() {
+                self.place_imported(already);
             }
+            if !outside.is_empty() {
+                match load_config("import_mode").as_deref() {
+                    Some("move") => self.import_files(outside, &dir, true),
+                    Some("copy") => self.import_files(outside, &dir, false),
+                    _ => self.dialog = Some(Dialog::Import { files: outside, dir, remember: false }),
+                }
+            }
+        }
+    }
+
+    fn import_files(&mut self, files: Vec<PathBuf>, dir: &str, move_files: bool) {
+        let root = self.root();
+        let mut imported = vec![];
+        for f in files {
+            let r = vault::import(&root, dir, &f, move_files);
+            if let Some(rel) = self.report(r) {
+                imported.push(rel);
+            }
+        }
+        self.refresh();
+        self.place_imported(imported);
+    }
+
+    /// Après un import : sur le board, dans les refs, ou ouvert dans un onglet.
+    fn place_imported(&mut self, rels: Vec<String>) {
+        let last = rels.last().cloned();
+        if self.view() == View::Boards {
+            let center = self.board.view_center;
+            for (k, rel) in rels.iter().enumerate() {
+                let at = center + egui::vec2(k as f32 * 40.0, k as f32 * 40.0);
+                self.board.drop_file(rel, at, &mut self.images);
+            }
+        } else if self.view() == View::Refs {
+            self.refs.selected = last;
+        } else if let Some(rel) = last {
+            self.actions.push(Action::Open(rel));
         }
     }
 
@@ -1226,6 +1995,14 @@ impl eframe::App for App {
             ctx.request_repaint_after(Duration::from_millis(200));
         }
 
+        self.images.poll(&ctx);
+        if self.board.dirty_since.is_some_and(|t| t.elapsed() > Duration::from_millis(600)) || (closing && self.board.dirty_since.is_some()) {
+            self.save_board();
+        }
+        if self.board.dirty_since.is_some() || self.chat.busy() {
+            ctx.request_repaint_after(Duration::from_millis(100));
+        }
+
         // Résultat du résumé IA
         if let Some(rx) = &self.summary_rx {
             if let Ok(r) = rx.try_recv() {
@@ -1252,6 +2029,23 @@ impl eframe::App for App {
                     self.editor(ui);
                 }
                 View::Brain => self.brain_view(ui),
+                View::Refs => self.refs_view(ui),
+                View::Boards => self.boards_view(ui),
+                View::Chat => self.chat_view(ui),
+            }
+            if let Some((msg, t)) = self.toast.clone() {
+                if t.elapsed() < Duration::from_secs(3) {
+                    let p = theme::pal();
+                    let screen = ctx.content_rect();
+                    let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::unique("toast")));
+                    let galley = painter.layout_no_wrap(msg, egui::FontId::monospace(12.5), p.on_accent);
+                    let r = egui::Rect::from_center_size(egui::pos2(screen.center().x, screen.bottom() - 60.0), galley.size() + egui::vec2(28.0, 16.0));
+                    painter.rect_filled(r, 0.0, p.text);
+                    painter.galley(r.min + egui::vec2(14.0, 8.0), galley, p.bg);
+                    ctx.request_repaint_after(Duration::from_millis(200));
+                } else {
+                    self.toast = None;
+                }
             }
             self.switcher(&ctx);
             self.dialogs(&ctx);
@@ -1275,6 +2069,7 @@ impl eframe::App for App {
 
     fn on_exit(&mut self) {
         self.flush_all();
+        self.save_board();
         self.local.stop();
     }
 }
@@ -1355,5 +2150,54 @@ fn ollama_panel(ui: &mut egui::Ui, local: &ollama::Local, s: &ai::Settings, ctx:
     }
     if let Some(e) = &st.error {
         ui.label(RichText::new(e).color(p.missing).size(11.5));
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn msg_block(
+    ui: &mut egui::Ui,
+    user: bool,
+    text: &str,
+    sources: &[String],
+    error: Option<&str>,
+    status: Option<&str>,
+    existing: &HashSet<String>,
+    paths: &HashSet<String>,
+    goto: &mut Option<String>,
+) {
+    let p = theme::pal();
+    ui.add_space(10.0);
+    let (who, color) = if user { ("vous ›", p.muted) } else { ("aryadne ›", p.accent) };
+    ui.label(RichText::new(who).color(color).family(theme::bold()).size(12.0));
+    let fill = if user { p.panel } else { p.bg };
+    egui::Frame::new().fill(fill).stroke(egui::Stroke::new(1.0, p.line)).inner_margin(12).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        if let Some(s) = status {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label(RichText::new(s).color(p.muted).size(12.0));
+            });
+        }
+        if user {
+            ui.label(text);
+        } else if !text.is_empty() {
+            if let Some(n) = preview::show(ui, text, existing, paths) {
+                *goto = Some(n);
+            }
+        }
+        if let Some(e) = error {
+            ui.label(RichText::new(e).color(p.missing).size(12.0));
+        }
+    });
+    if !sources.is_empty() {
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new("sources :").color(p.muted).size(11.0));
+            for s in sources {
+                let name = if vault::is_md(s) { vault::stem(s) } else { s.clone() };
+                if ui.add(egui::Button::new(RichText::new(name).size(11.0).color(p.link))).on_hover_text(s).clicked() {
+                    *goto = Some(s.clone());
+                }
+            }
+        });
     }
 }
