@@ -10,5 +10,8 @@ egui_extras = { version = "0.37.0", features = ["all_loaders", "syntect"] }
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "webp", "gif"] }
 regex = "1.13.2"
 rfd = "0.18.0"
+ruzstd = "0.9.1"
 serde_json = "1.0.154"
-ureq = { version = "3.5.2", features = ["json"] }
+tar = "0.4.46"
+ureq = { version = "3.5.2", features = ["json", "platform-verifier"] }
+zip = { version = "9.7.3", default-features = false, features = ["deflate"] }

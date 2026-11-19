@@ -4,7 +4,7 @@ Le fil entre tes idées. Notes, code, références et moodboards dans un dossier
 
 100 % Rust ([egui](https://github.com/emilk/egui)). Un seul exécutable portable pour Windows et Linux : **aucune installation, aucun droit admin**. Look éditeur de code (JetBrains Mono, angles droits), mode clair par défaut, mode sombre en un clic.
 
-## Fonctionnalités (v0.3)
+## Fonctionnalités (v0.4)
 
 **Fichiers**
 - Explorateur de tout le coffre : dossiers repliables, filtre, fichiers modifiés marqués d'un ●.
@@ -25,8 +25,9 @@ Le fil entre tes idées. Notes, code, références et moodboards dans un dossier
 
 **Résumé IA**
 - Bouton « résumer » sur n'importe quel fichier texte ou de code. Le résumé peut être copié ou enregistré en note (liée au fichier source).
-- Fonctionne avec toute API compatible OpenAI. Par défaut : [Ollama](https://ollama.com) en local (gratuit, privé). Réglages via le bouton « ia » en haut à droite.
-- Avec Ollama : `ollama pull llama3.2`, puis c'est prêt.
+- Fonctionne avec toute API compatible OpenAI. Par défaut : [Ollama](https://ollama.com) en local (gratuit, privé).
+- **IA locale en un clic, sans admin** : bouton « ia » en haut à droite, puis « installer ollama ». Aryadne télécharge Ollama depuis ses releases GitHub, l'installe dans le dossier utilisateur (`%LOCALAPPDATA%\aryadne\ollama` ou `~/.local/share/aryadne/ollama`), le démarre, et télécharge le modèle choisi. Ollama est lancé automatiquement au besoin et arrêté à la fermeture d'Aryadne. Un Ollama déjà installé ailleurs est détecté et réutilisé.
+- Modèles conseillés : `llama3.2` (3B, ~2 Go), `qwen2.5:7b` (meilleur, ~4,7 Go), `qwen2.5:0.5b` (très léger).
 
 | Raccourci | Action |
 |---|---|
@@ -39,7 +40,7 @@ Le fil entre tes idées. Notes, code, références et moodboards dans un dossier
 
 ## Lancer
 
-- **Windows** : télécharge `aryadne-windows-x64.exe` (onglet Actions ou Releases) et double-clique. Tu peux le mettre n'importe où.
+- **Windows** : télécharge `aryadne-windows-x64.exe` (onglet Actions ou Releases) et double-clique. Tu peux le mettre n'importe où. L'exécutable n'est pas signé : si SmartScreen s'affiche, clique « Informations complémentaires » puis « Exécuter quand même » (aucun admin requis).
 - **Linux** : `chmod +x aryadne-linux-x64 && ./aryadne-linux-x64`
 
 Les réglages (dernier coffre, thème, IA) sont dans le dossier de config de l'utilisateur (`%APPDATA%\aryadne` ou `~/.config/aryadne`).
@@ -73,6 +74,7 @@ src/
   main.rs      interface : explorateur, onglets, éditeur, fenêtres, raccourcis
   brain.rs     vue Cerveau (graphe à forces)
   ai.rs        résumé IA (API compatible OpenAI)
+  ollama.rs    installation, démarrage et modèles Ollama, sans admin
   vault.rs     fichiers du coffre, liens, graphe (+ tests)
   preview.rs   mode lecture Markdown
   theme.rs     palettes claire/sombre, police, angles droits

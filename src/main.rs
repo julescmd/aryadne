@@ -2,6 +2,7 @@
 
 mod ai;
 mod brain;
+mod ollama;
 mod preview;
 mod theme;
 mod vault;
@@ -121,6 +122,7 @@ struct App {
     ai: Option<ai::Settings>,
     summary: Option<(String, Summary)>,
     summary_rx: Option<Receiver<Result<String, String>>>,
+    local: ollama::Local,
     error: Option<String>,
 }
 
@@ -130,6 +132,7 @@ impl App {
         theme::install_fonts(ctx);
         theme::apply(ctx, load_config("theme").as_deref() == Some("dark"));
         let mut app = Self { view: Some(View::Files), ai: Some(ai::Settings::load()), ..Default::default() };
+        app.local.refresh(&app.ai.clone().unwrap_or_default().url, ctx);
         if let Some(p) = load_config("last_vault") {
             app.load_vault(p);
         }
@@ -315,11 +318,17 @@ impl App {
                     let Content::Text(t) = &doc.content else { continue };
                     let (rel, text) = (doc.rel.clone(), t.clone());
                     let settings = self.ai.clone().unwrap_or_default();
-                    self.summary_rx = Some(ai::summarize(settings, rel.clone(), text, ctx.clone()));
+                    self.summary_rx = Some(ai::summarize(settings, rel.clone(), text, self.local.clone(), ctx.clone()));
                     self.summary = Some((rel, Summary::Loading));
                 }
             }
         }
+    }
+
+    fn open_settings(&mut self, ctx: &egui::Context) {
+        let s = self.ai.clone().unwrap_or_default();
+        self.local.refresh(&s.url, ctx);
+        self.dialog = Some(Dialog::Settings(s));
     }
 
     fn do_rename(&mut self, from: &str, to: &str) {
@@ -430,7 +439,7 @@ impl App {
                             self.set_dark(ui.ctx(), !theme::is_dark());
                         }
                         if ui.button("ia").on_hover_text("Réglages du résumé IA").clicked() {
-                            self.dialog = Some(Dialog::Settings(self.ai.clone().unwrap_or_default()));
+                            self.open_settings(ui.ctx());
                         }
                     });
                 });
@@ -862,7 +871,7 @@ impl App {
                             ui.label(RichText::new(rel).color(p.muted).size(11.0));
                             ui.label(RichText::new(e).color(p.missing).size(12.0));
                             if ui.button("réglages ia").clicked() {
-                                self.dialog = Some(Dialog::Settings(self.ai.clone().unwrap_or_default()));
+                                self.open_settings(ui.ctx());
                             }
                         }
                         Some((rel, Summary::Done(text))) => {
@@ -1048,6 +1057,7 @@ impl App {
         }
 
         if let Dialog::Settings(mut s) = dialog {
+            let local = self.local.clone();
             let mut save = false;
             let r = egui::Modal::new(egui::Id::unique("settings")).frame(frame).show(ctx, |ui| {
                 ui.set_width(520.0);
@@ -1078,6 +1088,12 @@ impl App {
                     ui.add(egui::TextEdit::singleline(&mut s.key).password(true).hint_text("vide pour Ollama / LM Studio").desired_width(360.0));
                     ui.end_row();
                 });
+                if ollama::is_local(&s.url) {
+                    ui.add_space(14.0);
+                    ui.separator();
+                    ui.add_space(4.0);
+                    ollama_panel(ui, &local, &s, ctx);
+                }
                 ui.add_space(10.0);
                 ui.horizontal(|ui| {
                     if ui.button("enregistrer").clicked() {
@@ -1259,5 +1275,85 @@ impl eframe::App for App {
 
     fn on_exit(&mut self) {
         self.flush_all();
+        self.local.stop();
+    }
+}
+
+/// Section « IA locale » des réglages : installer, démarrer, télécharger un modèle. Aucun admin.
+fn ollama_panel(ui: &mut egui::Ui, local: &ollama::Local, s: &ai::Settings, ctx: &egui::Context) {
+    let p = theme::pal();
+    let st = local.snapshot();
+    ui.label(caps("ia locale · ollama"));
+    ui.add_space(4.0);
+    let has_model = st.models.iter().any(|m| m == &s.model || m.starts_with(&format!("{}:", s.model)));
+    let (dot, status) = if !st.checked {
+        (p.muted, "vérification…".to_string())
+    } else if st.running {
+        (egui::Color32::from_rgb(0x22, 0xa0, 0x55), format!("en marche · {} modèle(s)", st.models.len()))
+    } else if st.binary.is_some() {
+        (p.accent, "installé, arrêté".to_string())
+    } else {
+        (p.missing, "pas installé".to_string())
+    };
+    ui.horizontal(|ui| {
+        let (r, _) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
+        ui.painter().rect_filled(r, 0.0, dot);
+        ui.label(status);
+        if let Some(b) = &st.binary {
+            ui.label(RichText::new(b.to_string_lossy()).color(p.muted).size(10.5));
+        }
+    });
+    if !st.models.is_empty() {
+        ui.label(RichText::new(st.models.join("  ·  ")).color(p.muted).size(11.0));
+    }
+    ui.add_space(6.0);
+    if let Some((msg, progress)) = &st.task {
+        match progress {
+            Some(f) => {
+                ui.add(egui::ProgressBar::new(*f).text(RichText::new(msg).size(11.0)).corner_radius(0.0).fill(p.accent));
+            }
+            None => {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label(RichText::new(msg).size(11.5));
+                });
+            }
+        }
+        return;
+    }
+    ui.horizontal(|ui| {
+        if st.checked && st.binary.is_none() && !st.running {
+            if ui.button("installer ollama (sans admin)").clicked() {
+                local.install(&s.url, ctx);
+            }
+        }
+        if st.binary.is_some() && !st.running && ui.button("démarrer").clicked() {
+            let l = local.clone();
+            let (url, c) = (s.url.clone(), ctx.clone());
+            std::thread::spawn(move || {
+                let r = l.ensure_running(&url);
+                if let (Err(e), Ok(mut st)) = (r, l.state.lock()) {
+                    st.error = Some(e);
+                }
+                l.refresh(&url, &c);
+            });
+        }
+        if (st.running || st.binary.is_some()) && !has_model && !s.model.trim().is_empty() {
+            if ui.button(format!("télécharger {}", s.model.trim())).clicked() {
+                local.pull(&s.url, &s.model, ctx);
+            }
+        }
+        if st.binary.is_some() && ui.button("mettre à jour").on_hover_text("Retélécharge la dernière version d'Ollama").clicked() {
+            local.install(&s.url, ctx);
+        }
+        if ui.small_button("↻").on_hover_text("Revérifier").clicked() {
+            local.refresh(&s.url, ctx);
+        }
+    });
+    if st.checked && st.binary.is_none() && !st.running {
+        ui.label(RichText::new(format!("~2 Go, installé dans {}", ollama::install_dir().to_string_lossy())).color(p.muted).size(10.5));
+    }
+    if let Some(e) = &st.error {
+        ui.label(RichText::new(e).color(p.missing).size(11.5));
     }
 }

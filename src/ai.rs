@@ -3,7 +3,6 @@
 use serde_json::{json, Value};
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver};
-use std::time::Duration;
 
 const MAX_CHARS: usize = 24_000;
 
@@ -45,10 +44,12 @@ impl Settings {
 }
 
 /// Lance le résumé dans un fil séparé pour ne pas figer l'interface.
-pub fn summarize(settings: Settings, name: String, text: String, ctx: eframe::egui::Context) -> Receiver<Result<String, String>> {
+pub fn summarize(settings: Settings, name: String, text: String, local: crate::ollama::Local, ctx: eframe::egui::Context) -> Receiver<Result<String, String>> {
     let (tx, rx) = channel();
     std::thread::spawn(move || {
-        let _ = tx.send(request(&settings, &name, &text));
+        // Ollama local installé mais arrêté : on le démarre d'abord.
+        let ready = if crate::ollama::is_local(&settings.url) { local.ensure_running(&settings.url).map_err(|e| format!("{e} Ouvre les réglages ia pour l'installer.")) } else { Ok(()) };
+        let _ = tx.send(ready.and_then(|_| request(&settings, &name, &text)));
         ctx.request_repaint();
     });
     rx
@@ -68,16 +69,16 @@ fn request(s: &Settings, name: &str, text: &str) -> Result<String, String> {
         ]
     });
     let url = format!("{}/chat/completions", s.url.trim_end_matches('/'));
-    let agent = ureq::Agent::config_builder().timeout_global(Some(Duration::from_secs(180))).build().new_agent();
+    let agent = crate::ollama::agent(180);
     let mut req = agent.post(&url);
     if !s.key.trim().is_empty() {
         req = req.header("Authorization", format!("Bearer {}", s.key.trim()));
     }
     let mut resp = req.send_json(&body).map_err(|e| match e {
         ureq::Error::Io(_) | ureq::Error::ConnectionFailed | ureq::Error::HostNotFound => {
-            format!("Impossible de joindre {url}. Ollama ou LM Studio est-il lancé ?")
+            format!("Impossible de joindre {url}. Le serveur IA est-il lancé ?")
         }
-        ureq::Error::StatusCode(404) => format!("Modèle « {} » introuvable (ou mauvaise adresse).", s.model),
+        ureq::Error::StatusCode(404) => format!("Modèle « {} » introuvable. Télécharge-le dans les réglages ia.", s.model),
         ureq::Error::StatusCode(401) => "Clé API refusée.".into(),
         other => other.to_string(),
     })?;
