@@ -201,10 +201,19 @@ pub fn safe(root: &str, rel: &str) -> Result<PathBuf, String> {
             return Ok(PathBuf::from(&folder.path));
         }
         check_parts(sub)?;
-        return Ok(Path::new(&folder.path).join(sub));
+        return Ok(join_parts(Path::new(&folder.path), sub));
     }
     check_parts(rel)?;
-    Ok(Path::new(root).join(rel))
+    Ok(join_parts(Path::new(root), rel))
+}
+
+/// Ajoute un chemin « a/b/c » segment par segment : séparateurs natifs (\ sous Windows).
+fn join_parts(base: &Path, rel: &str) -> PathBuf {
+    let mut p = base.to_path_buf();
+    for part in rel.split('/').filter(|s| !s.is_empty()) {
+        p.push(part);
+    }
+    p
 }
 
 pub fn init(root: &str) -> Result<(), String> {
@@ -256,22 +265,39 @@ fn mtime(p: &Path) -> u64 {
 /// Arborescence complète (dossiers d'abord, ordre alphabétique), sans fichiers cachés,
 /// suivie des dossiers et fichiers liés.
 pub fn scan(root: &str) -> Vec<Entry> {
-    let mut out = Vec::new();
-    walk(Path::new(root), Path::new(root), "", 0, &mut out);
+    let mut own = Vec::new();
+    walk(Path::new(root), Path::new(root), "", 0, &mut own);
+    // On regroupe par élément de premier niveau pour mêler les dossiers et fichiers liés
+    // aux autres, comme s'ils étaient dans le coffre.
+    let mut groups: Vec<Vec<Entry>> = vec![];
+    for e in own {
+        if e.depth == 0 {
+            groups.push(vec![e]);
+        } else if let Some(g) = groups.last_mut() {
+            g.push(e);
+        }
+    }
     let l = link_list();
     for f in &l.folders {
         let rel = format!("@{}", f.name);
-        out.push(Entry { rel: rel.clone(), name: format!("@{}", f.name), is_dir: true, depth: 0, modified: mtime(Path::new(&f.path)) });
-        walk(Path::new(&f.path), Path::new(&f.path), &rel, 1, &mut out);
+        let mut g = vec![Entry { rel: rel.clone(), name: f.name.clone(), is_dir: true, depth: 0, modified: mtime(Path::new(&f.path)) }];
+        walk(Path::new(&f.path), Path::new(&f.path), &rel, 1, &mut g);
+        groups.push(g);
     }
-    let files = linked_files(&l);
-    if !files.is_empty() {
-        out.push(Entry { rel: LINKED_FILES.into(), name: LINKED_FILES.into(), is_dir: true, depth: 0, modified: 0 });
-        for (name, p) in files {
-            out.push(Entry { rel: format!("{LINKED_FILES}/{name}"), name, is_dir: false, depth: 1, modified: mtime(&p) });
-        }
+    for (name, p) in linked_files(&l) {
+        groups.push(vec![Entry { rel: format!("{LINKED_FILES}/{name}"), name, is_dir: false, depth: 0, modified: mtime(&p) }]);
     }
-    out
+    groups.sort_by_key(|g| (!g[0].is_dir, g[0].name.to_lowercase()));
+    groups.into_iter().flatten().collect()
+}
+
+/// Chemin tel qu'on l'affiche : sans le « @ » des dossiers liés ni le dossier virtuel
+/// des fichiers liés.
+pub fn display_rel(rel: &str) -> String {
+    if let Some(rest) = rel.strip_prefix(&format!("{LINKED_FILES}/")) {
+        return rest.to_string();
+    }
+    rel.strip_prefix('@').unwrap_or(rel).to_string()
 }
 
 /// Déplace un fichier, même d'un disque à l'autre (copie puis suppression).
@@ -439,16 +465,22 @@ pub struct GraphNode {
     pub is_dir: bool,
 }
 
-pub fn graph(root: &str, entries: &[Entry], with_folders: bool, with_files: bool) -> Graph {
+pub fn graph(root: &str, entries: &[Entry], with_folders: bool, with_files: bool, scope: &str) -> Graph {
     let mut nodes = Vec::new();
     let mut idx: HashMap<String, usize> = HashMap::new();
     if with_folders {
-        // Nœud racine : tout le coffre se rattache à lui.
-        let name = Path::new(root).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "~".into());
-        idx.insert(String::new(), 0);
-        nodes.push(GraphNode { rel: String::new(), label: format!("~/{name}"), is_dir: true });
+        // Nœud racine : le dossier affiché (tout le coffre par défaut).
+        let label = if scope.is_empty() {
+            let name = Path::new(root).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "~".into());
+            format!("~/{name}")
+        } else {
+            scope.rsplit('/').next().unwrap_or(scope).to_string()
+        };
+        idx.insert(scope.to_string(), 0);
+        nodes.push(GraphNode { rel: scope.to_string(), label, is_dir: true });
     }
-    for e in entries {
+    let prefix = format!("{scope}/");
+    for e in entries.iter().filter(|e| scope.is_empty() || e.rel.starts_with(&prefix)) {
         let keep = if e.is_dir { with_folders } else { is_md(&e.rel) || with_files };
         if keep {
             idx.insert(e.rel.clone(), nodes.len());
@@ -460,7 +492,9 @@ pub fn graph(root: &str, entries: &[Entry], with_folders: bool, with_files: bool
     let mut edges = Vec::new();
     for (i, n) in nodes.iter().enumerate() {
         if with_folders {
-            if let Some(&p) = idx.get(&parent(&n.rel)).filter(|&&p| p != i) {
+            let par = parent(&n.rel);
+            let par = if par == LINKED_FILES { String::new() } else { par };
+            if let Some(&p) = idx.get(&par).filter(|&&p| p != i) {
                 edges.push((p, i, true));
             }
         }
@@ -498,7 +532,7 @@ mod tests {
         let bl = backlinks(&v, &entries, "notes/Idées.md");
         assert_eq!(bl.len(), 1);
         assert_eq!(bl[0].name, "Bienvenue");
-        let g = graph(&v, &entries, true, false);
+        let g = graph(&v, &entries, true, false, "");
         assert!(g.edges.iter().any(|e| !e.2));
         assert!(safe(&v, "../evil").is_err());
         assert!(safe(&v, "/etc/passwd").unwrap().starts_with(&dir));

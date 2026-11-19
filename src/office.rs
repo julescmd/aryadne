@@ -106,29 +106,29 @@ pub fn unescape(s: &str) -> String {
 
 // ---------- archive ----------
 
-struct Archive(zip::ZipArchive<std::io::BufReader<std::fs::File>>);
+pub struct Archive(zip::ZipArchive<std::io::BufReader<std::fs::File>>);
 
 impl Archive {
-    fn open(path: &Path) -> Result<Self, String> {
+    pub fn open(path: &Path) -> Result<Self, String> {
         let f = std::fs::File::open(path).map_err(|e| e.to_string())?;
         zip::ZipArchive::new(std::io::BufReader::new(f)).map(Self).map_err(|_| "Document illisible (archive Office invalide ou protégée).".to_string())
     }
-    fn bytes(&mut self, name: &str) -> Option<Vec<u8>> {
+    pub fn bytes(&mut self, name: &str) -> Option<Vec<u8>> {
         let mut f = self.0.by_name(name).ok()?;
         let mut v = vec![];
         f.read_to_end(&mut v).ok()?;
         Some(v)
     }
-    fn text(&mut self, name: &str) -> Option<String> {
+    pub fn text(&mut self, name: &str) -> Option<String> {
         self.bytes(name).map(|b| String::from_utf8_lossy(&b).to_string())
     }
-    fn names(&self) -> Vec<String> {
+    pub fn names(&self) -> Vec<String> {
         self.0.file_names().filter_map(|n| n.ok().map(|c| c.to_string())).collect()
     }
 }
 
 /// Résout « ../media/image1.png » par rapport au dossier d'une partie.
-fn resolve(base_dir: &str, target: &str) -> String {
+pub fn resolve(base_dir: &str, target: &str) -> String {
     let mut parts: Vec<&str> = base_dir.split('/').filter(|s| !s.is_empty()).collect();
     for seg in target.split('/') {
         match seg {
@@ -142,7 +142,7 @@ fn resolve(base_dir: &str, target: &str) -> String {
     parts.join("/")
 }
 
-fn rels(ar: &mut Archive, part: &str) -> HashMap<String, String> {
+pub fn rels(ar: &mut Archive, part: &str) -> HashMap<String, String> {
     let (dir, file) = part.rsplit_once('/').unwrap_or(("", part));
     let Some(xml) = ar.text(&format!("{dir}/_rels/{file}.rels")) else { return HashMap::new() };
     tokens(&xml)
@@ -388,6 +388,7 @@ pub fn thumbnail(path: &Path) -> Result<image::DynamicImage, String> {
 // ---------- affichage ----------
 
 pub struct Viewer {
+    slides: Option<crate::slides::Viewer>,
     pub doc: Result<Doc, String>,
     tex: HashMap<(usize, usize), Option<TextureHandle>>,
     sheet: usize,
@@ -395,7 +396,10 @@ pub struct Viewer {
 
 impl Viewer {
     pub fn open(path: &Path) -> Self {
-        Self { doc: load(path), tex: HashMap::new(), sheet: 0 }
+        let is_pptx = path.extension().is_some_and(|e| e.eq_ignore_ascii_case("pptx"));
+        let slides = is_pptx.then(|| crate::slides::Viewer::open(path)).filter(|v| v.deck.is_ok());
+        let doc = if slides.is_some() { Err(String::new()) } else { load(path) };
+        Self { slides, doc, tex: HashMap::new(), sheet: 0 }
     }
 
     fn texture(&mut self, ctx: &egui::Context, key: (usize, usize), bytes: &[u8]) -> Option<TextureHandle> {
@@ -411,6 +415,10 @@ impl Viewer {
     }
 
     pub fn show(&mut self, ui: &mut egui::Ui) {
+        if let Some(s) = &mut self.slides {
+            s.show(ui);
+            return;
+        }
         let p = crate::theme::pal();
         let ctx = ui.ctx().clone();
         let doc = match &self.doc {

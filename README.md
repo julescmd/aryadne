@@ -6,10 +6,12 @@ Le fil entre tes idées. Notes, code, références et moodboards dans un dossier
 
 100 % Rust ([egui](https://github.com/emilk/egui)). Un seul exécutable portable pour Windows et Linux : **aucune installation, aucun droit admin**. Look éditeur de code (JetBrains Mono, angles droits), mode clair par défaut, mode sombre en un clic.
 
-## Fonctionnalités (v0.9)
+## Fonctionnalités (v0.10)
 
 **3D**
-- Visionneuse intégrée pour OBJ, FBX (binaire), glTF / GLB et STL : tourner, déplacer, zoomer, filaire, axe Z en haut, nombre de triangles et dimensions.
+- Visionneuse intégrée pour OBJ, FBX (binaire), glTF / GLB et STL. Rendu par pixel avec profondeur (comme les pixols de ZBrush) : pas de trous ni de mouchetures, calculé sur tous les cœurs, et recalculé seulement quand la vue change.
+- Matériaux argile, gris, blanc, normales ou couleurs du fichier ; ombrage lisse ; lumière réglable (direction, hauteur, ambiance, ou L + glisser).
+- Navigation façon Blender : glisser pour tourner, Maj ou clic droit pour déplacer, Ctrl ou molette pour zoomer, 1 / 3 / 7 pour les vues (Maj : opposée), 5 pour l'orthographique, Origine ou « . » pour cadrer. Repère des axes.
 - Les modèles très lourds (millions de triangles) sont simplifiés pour l'affichage en gardant leur forme.
 - Miniatures 3D dans les refs et sur les boards.
 - Miniatures des fichiers `.blend` (aperçu enregistré par Blender, formats Blender 2.x à 5, fichiers compressés), aussi dans les refs.
@@ -25,7 +27,8 @@ Le fil entre tes idées. Notes, code, références et moodboards dans un dossier
 - ffmpeg : utilisé s'il est installé, sinon installé par Aryadne en un clic, sans admin.
 
 **Documents**
-- Aperçu des PowerPoint (diapos : textes et images), Excel (feuilles et cellules), Word, et LibreOffice (.odp, .ods, .odt), sans Office. Miniatures dans les refs et les boards.
+- PowerPoint affiché comme dans PowerPoint : formes, images, textes, couleurs du thème, fond et décor du masque, chacun à sa place. Double-clic sur un texte pour le modifier, glisser une forme pour la déplacer, puis « enregistrer » réécrit le .pptx (le reste du fichier n'est pas touché).
+- Aperçu des Excel (feuilles et cellules), Word, et LibreOffice (.odp, .ods, .odt), sans Office. Miniatures dans les refs et les boards.
 
 **Recherche** (`Ctrl+Maj+F`)
 - Dans tout le coffre, dossiers liés compris : notes, code, texte et noms de fichiers. Majuscules et accents ignorés, passages surlignés.
@@ -35,7 +38,7 @@ Le fil entre tes idées. Notes, code, références et moodboards dans un dossier
 - « compact » (`Ctrl+Maj+M`) : masque les panneaux, idéal pour garder un board de refs par-dessus Blender.
 
 **Fichiers liés : rien n'est copié**
-- Le coffre est une vue. Lie des dossiers ou des fichiers de ton disque (réglages → fichiers, ou glisse-les dans la fenêtre) : ils apparaissent dans l'explorateur (`@Dossier`, `@fichiers liés`) et restent à leur place.
+- Le coffre est une vue. Lie des dossiers ou des fichiers de ton disque (réglages → fichiers, ou glisse-les dans la fenêtre) : ils apparaissent dans l'explorateur comme n'importe quel dossier ou fichier du coffre (cerveau, recherche, refs, boards, assistant), et restent à leur place sur le disque. Survole-les pour voir leur emplacement d'origine.
 - Clic droit : « déplacer dans le coffre » ou « copier dans le coffre » seulement si tu le décides. « Retirer le lien » ne supprime jamais l'original.
 - Liste des liens dans `.app/links.json` du coffre.
 
@@ -52,6 +55,22 @@ Le fil entre tes idées. Notes, code, références et moodboards dans un dossier
 - Glisser un fichier sur un dossier de l'explorateur pour le déplacer.
 - Glisser des fichiers depuis ton bureau dans la fenêtre pour les importer (dans `refs/` par défaut, ou dans le dossier sélectionné). Au choix : **déplacer** (aucun doublon) ou copier ; réglable dans « ia ». Un fichier déjà dans le coffre n'est jamais recopié.
 - « Supprimer » envoie dans `.app/trash/` du coffre : rien n'est perdu par accident.
+
+**Éditeur de code**
+- Fermeture automatique des ( [ { " ' ` et des balises HTML (`<div>` → `</div>`, `</` complète la balise ouverte).
+- Entrée garde l'indentation et ajoute un niveau après { [ ( : ou entre deux balises ; listes Markdown continuées.
+- Suggestions pendant la frappe (mots du fichier, mots-clés du langage, balises, `[[notes]]`), Ctrl+Espace pour les forcer.
+- Abréviations Emmet en HTML : `!`, `div.carte#id`, `ul>li*3` puis Tab.
+- Tab / Maj+Tab sur plusieurs lignes, Ctrl+/ commenter, Ctrl+D dupliquer, Ctrl+Maj+K supprimer la ligne, Alt+↑↓ déplacer, parenthèse correspondante surlignée.
+- Ctrl+F chercher, Ctrl+H remplacer (tout ou un par un), F3 suivant.
+- « aperçu live » pour le HTML / SVG : la page s'ouvre dans ton navigateur et se recharge à chaque enregistrement.
+
+**Assistant IA partout** (`Ctrl+L`)
+- Panneau à côté de toutes les vues : il voit le fichier ouvert (ou ta sélection), ou le board courant. Boutons rapides (expliquer, corriger, améliorer, commenter...) et blocs de code insérables au curseur.
+
+**Cerveau**
+- Clic sur un dossier pour entrer dedans, fil d'Ariane pour remonter.
+- « ranger avec l'IA » : l'IA propose un rangement du dossier affiché, tu coches ce que tu veux appliquer.
 
 **Éditeur**
 - Onglets, sauvegarde automatique.

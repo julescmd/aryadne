@@ -60,12 +60,17 @@ fn request(s: &Settings, name: &str, text: &str) -> Result<String, String> {
     if content.len() < text.len() {
         content.push_str("\n\n[...fichier tronqué...]");
     }
+    complete(s, "Tu résumes des fichiers pour une base de notes personnelle. Réponds en français, en Markdown : une phrase d'ensemble, puis 3 à 7 points clés. Pour du code : ce que fait le fichier, ses parties principales et ses dépendances. Sois concis.", &format!("Fichier : {name}\n\n{content}"))
+}
+
+/// Une requête simple (non diffusée) au modèle configuré.
+pub fn complete(s: &Settings, system: &str, user: &str) -> Result<String, String> {
     let body = json!({
         "model": s.model,
         "temperature": 0.2,
         "messages": [
-            { "role": "system", "content": "Tu résumes des fichiers pour une base de notes personnelle. Réponds en français, en Markdown : une phrase d'ensemble, puis 3 à 7 points clés. Pour du code : ce que fait le fichier, ses parties principales et ses dépendances. Sois concis." },
-            { "role": "user", "content": format!("Fichier : {name}\n\n{content}") }
+            { "role": "system", "content": system },
+            { "role": "user", "content": user }
         ]
     });
     let url = format!("{}/chat/completions", s.url.trim_end_matches('/'));

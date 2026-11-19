@@ -4,7 +4,7 @@
 //! la forme reste complète, avec moins de triangles, pour rester fluide.
 //! `thumbnail` rend une image du modèle (z-buffer) pour les boards et les refs.
 use crate::theme;
-use eframe::egui::{self, epaint::Vertex, pos2, vec2, Color32, Mesh, Pos2, Sense, Shape, Stroke};
+use eframe::egui::{self, pos2, vec2, Color32, Key, Pos2, Sense, Stroke};
 use std::collections::HashMap;
 use std::io::BufRead;
 use std::path::Path;
@@ -290,78 +290,250 @@ fn load_gltf(path: &Path) -> Result<Model, String> {
     Model::new(positions, tris, Some(colors), false)
 }
 
-// ---------- rendu ----------
+// ---------- rendu « pixols » ----------
+//
+// Comme ZBrush : chaque pixel est calculé avec sa profondeur (z-buffer) dans une image,
+// puis affiché comme une texture. Pas de tri de triangles, pas de trous, et on ne
+// recalcule l'image que quand la vue, la lumière ou la taille changent.
 
-struct Camera {
-    yaw: f32,
-    pitch: f32,
-    dist: f32,
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Material {
+    Clay,
+    Gray,
+    White,
+    Normals,
+    Color,
+}
+
+impl Material {
+    pub const ALL: [(Material, &'static str); 5] =
+        [(Material::Clay, "argile"), (Material::Gray, "gris"), (Material::White, "blanc"), (Material::Normals, "normales"), (Material::Color, "couleurs")];
+}
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Camera {
+    pub yaw: f32,
+    pub pitch: f32,
+    pub dist: f32,
+    pub pan: [f32; 2],
+    pub ortho: bool,
+}
+
+impl Default for Camera {
+    fn default() -> Self {
+        Self { yaw: 0.6, pitch: 0.35, dist: 2.2, pan: [0.0, 0.0], ortho: false }
+    }
 }
 
 impl Camera {
-    fn view(&self, v: V3) -> V3 {
+    fn rotate(&self, v: V3) -> V3 {
         let (sy, cy) = self.yaw.sin_cos();
         let (sp, cp) = self.pitch.sin_cos();
         let x = v[0] * cy + v[2] * sy;
         let z = -v[0] * sy + v[2] * cy;
         let y = v[1] * cp - z * sp;
         let z = v[1] * sp + z * cp;
-        [x, y, z - self.dist]
+        [x, y, z]
+    }
+    /// Espace caméra : la caméra regarde vers -Z.
+    fn view(&self, v: V3) -> V3 {
+        let r = self.rotate(v);
+        [r[0] + self.pan[0], r[1] + self.pan[1], r[2] - self.dist]
     }
 }
 
-const LIGHT: V3 = [0.4, 0.8, 0.6];
-
-fn shade(col: Color32, a: V3, b: V3, c: V3) -> Color32 {
-    let n = norm(cross(sub(b, a), sub(c, a)));
-    // Faces vues de dos : éclairées comme si elles étaient retournées (maillages ouverts).
-    let nn = if dot(n, norm([-a[0], -a[1], -a[2]])) < 0.0 { [-n[0], -n[1], -n[2]] } else { n };
-    let s = 0.32 + 0.68 * dot(nn, norm(LIGHT)).max(0.0);
-    Color32::from_rgb((col.r() as f32 * s) as u8, (col.g() as f32 * s) as u8, (col.b() as f32 * s) as u8)
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Light {
+    /// Angle horizontal et hauteur, en radians.
+    pub azimuth: f32,
+    pub elevation: f32,
+    pub ambient: f32,
 }
 
-/// Image du modèle (z-buffer) pour les miniatures des boards et des refs.
-pub fn thumbnail(model: &Model, w: u32, h: u32, bg: [u8; 4]) -> image::RgbaImage {
-    let mut img = image::RgbaImage::from_pixel(w, h, image::Rgba(bg));
-    let mut depth = vec![f32::MIN; (w * h) as usize];
-    let cam = Camera { yaw: 0.6, pitch: 0.35, dist: 2.0 };
-    let pts: Vec<V3> = model.normalized(model.z_up).iter().map(|v| cam.view(*v)).collect();
-    let focal = w.min(h) as f32 * 1.15;
-    let proj = |v: V3| -> [f32; 3] { [w as f32 / 2.0 + v[0] / -v[2] * focal, h as f32 / 2.0 - v[1] / -v[2] * focal, v[2]] };
-    for (t, col) in model.tris.iter().zip(&model.colors) {
-        let (a, b, c) = (pts[t[0] as usize], pts[t[1] as usize], pts[t[2] as usize]);
-        if a[2] > -0.05 || b[2] > -0.05 || c[2] > -0.05 {
-            continue;
+impl Default for Light {
+    fn default() -> Self {
+        Self { azimuth: 0.6, elevation: 0.7, ambient: 0.28 }
+    }
+}
+
+impl Light {
+    fn dir(&self) -> V3 {
+        let (sa, ca) = self.azimuth.sin_cos();
+        let (se, ce) = self.elevation.sin_cos();
+        norm([sa * ce, se, ca * ce])
+    }
+}
+
+/// Normales lissées par sommet (moyenne des faces), pondérées par l'aire.
+fn vertex_normals(pos: &[V3], tris: &[[u32; 3]]) -> Vec<V3> {
+    let mut n = vec![[0.0f32; 3]; pos.len()];
+    for t in tris {
+        let (a, b, c) = (pos[t[0] as usize], pos[t[1] as usize], pos[t[2] as usize]);
+        let f = cross(sub(b, a), sub(c, a));
+        for &i in t {
+            let v = &mut n[i as usize];
+            v[0] += f[0];
+            v[1] += f[1];
+            v[2] += f[2];
         }
-        let col = shade(*col, a, b, c);
-        let (pa, pb, pc) = (proj(a), proj(b), proj(c));
-        let area = (pb[0] - pa[0]) * (pc[1] - pa[1]) - (pc[0] - pa[0]) * (pb[1] - pa[1]);
-        if area.abs() < 1e-6 {
-            continue;
+    }
+    n.into_iter().map(norm).collect()
+}
+
+/// Données prêtes pour le rendu (modèle centré, mis à l'échelle, normales).
+pub struct Prepared {
+    pos: Vec<V3>,
+    nrm: Vec<V3>,
+    tris: Vec<[u32; 3]>,
+    colors: Vec<Color32>,
+    pub floor: f32,
+}
+
+impl Prepared {
+    pub fn new(model: &Model, z_up: bool) -> Self {
+        let pos = model.normalized(z_up);
+        let nrm = vertex_normals(&pos, &model.tris);
+        let floor = pos.iter().map(|v| v[1]).fold(f32::MAX, f32::min);
+        Self { pos, nrm, tris: model.tris.clone(), colors: model.colors.clone(), floor }
+    }
+}
+
+pub struct Frame {
+    pub w: usize,
+    pub h: usize,
+    pub rgba: Vec<u8>,
+}
+
+/// Rendu z-buffer en parallèle (une bande d'image par cœur).
+pub fn render(m: &Prepared, cam: &Camera, light: &Light, mat: Material, smooth: bool, w: usize, h: usize, bg: [u8; 4]) -> Frame {
+    use rayon::prelude::*;
+    let focal = w.min(h) as f32 * 1.2;
+    let ortho_scale = focal / cam.dist;
+    let (cx, cy) = (w as f32 / 2.0, h as f32 / 2.0);
+    // Sommets → écran (x, y, profondeur) + normale en espace caméra.
+    let screen: Vec<[f32; 3]> = m
+        .pos
+        .par_iter()
+        .map(|v| {
+            let c = cam.view(*v);
+            if cam.ortho {
+                [cx + c[0] * ortho_scale, cy - c[1] * ortho_scale, c[2]]
+            } else if c[2] < -0.02 {
+                [cx + c[0] / -c[2] * focal, cy - c[1] / -c[2] * focal, c[2]]
+            } else {
+                [f32::NAN, f32::NAN, c[2]]
+            }
+        })
+        .collect();
+    let ld = cam.rotate(light.dir());
+    let shade_n = |n: V3, base: Color32| -> [f32; 3] {
+        let n = cam.rotate(n);
+        let n = if n[2] < 0.0 { [-n[0], -n[1], -n[2]] } else { n };
+        match mat {
+            Material::Normals => [(n[0] * 0.5 + 0.5) * 255.0, (n[1] * 0.5 + 0.5) * 255.0, (n[2] * 0.5 + 0.5) * 255.0],
+            _ => {
+                let base = match mat {
+                    Material::Clay => [196.0, 120.0, 98.0],
+                    Material::Gray => [175.0, 175.0, 178.0],
+                    Material::White => [235.0, 233.0, 228.0],
+                    _ => [base.r() as f32, base.g() as f32, base.b() as f32],
+                };
+                let diff = dot(n, ld).max(0.0);
+                // Reflet (Blinn) et léger contour, comme un matcap.
+                let half = norm([ld[0], ld[1], ld[2] + 1.0]);
+                let spec = dot(n, half).max(0.0).powf(if mat == Material::Clay { 24.0 } else { 40.0 }) * 0.35;
+                let rim = (1.0 - n[2]).powf(3.0) * 0.18;
+                let k = light.ambient + (1.0 - light.ambient) * diff;
+                [base[0] * k + 255.0 * (spec + rim), base[1] * k + 255.0 * (spec + rim), base[2] * k + 255.0 * (spec + rim)]
+            }
         }
-        let minx = pa[0].min(pb[0]).min(pc[0]).floor().max(0.0) as i32;
-        let maxx = pa[0].max(pb[0]).max(pc[0]).ceil().min(w as f32 - 1.0) as i32;
-        let miny = pa[1].min(pb[1]).min(pc[1]).floor().max(0.0) as i32;
-        let maxy = pa[1].max(pb[1]).max(pc[1]).ceil().min(h as f32 - 1.0) as i32;
-        for y in miny..=maxy {
-            for x in minx..=maxx {
-                let (px, py) = (x as f32 + 0.5, y as f32 + 0.5);
-                let w0 = ((pb[0] - px) * (pc[1] - py) - (pc[0] - px) * (pb[1] - py)) / area;
-                let w1 = ((pc[0] - px) * (pa[1] - py) - (pa[0] - px) * (pc[1] - py)) / area;
-                let w2 = 1.0 - w0 - w1;
-                if w0 < 0.0 || w1 < 0.0 || w2 < 0.0 {
-                    continue;
-                }
-                let z = w0 * pa[2] + w1 * pb[2] + w2 * pc[2];
-                let k = (y as u32 * w + x as u32) as usize;
-                if z > depth[k] {
-                    depth[k] = z;
-                    img.put_pixel(x as u32, y as u32, image::Rgba([col.r(), col.g(), col.b(), 255]));
+    };
+    // Couleur par sommet (Gouraud) ou par face (plat).
+    let vcol: Vec<[f32; 3]> = if smooth { m.nrm.par_iter().map(|n| shade_n(*n, Color32::from_gray(205))).collect() } else { vec![] };
+    let face: Vec<Option<([usize; 3], [[f32; 3]; 3])>> = m
+        .tris
+        .par_iter()
+        .zip(m.colors.par_iter())
+        .map(|(t, col)| {
+            let idx = [t[0] as usize, t[1] as usize, t[2] as usize];
+            if idx.iter().any(|&i| screen[i][0].is_nan()) {
+                return None;
+            }
+            let cols = if smooth && !matches!(mat, Material::Color) {
+                [vcol[idx[0]], vcol[idx[1]], vcol[idx[2]]]
+            } else {
+                let fnrm = norm(cross(sub(m.pos[idx[1]], m.pos[idx[0]]), sub(m.pos[idx[2]], m.pos[idx[0]])));
+                let c = if smooth {
+                    let avg = norm([m.nrm[idx[0]][0] + m.nrm[idx[1]][0] + m.nrm[idx[2]][0], m.nrm[idx[0]][1] + m.nrm[idx[1]][1] + m.nrm[idx[2]][1], m.nrm[idx[0]][2] + m.nrm[idx[1]][2] + m.nrm[idx[2]][2]]);
+                    shade_n(avg, *col)
+                } else {
+                    shade_n(fnrm, *col)
+                };
+                [c, c, c]
+            };
+            Some((idx, cols))
+        })
+        .collect();
+
+    let band = 32usize;
+    let mut rgba = vec![0u8; w * h * 4];
+    rgba.par_chunks_mut(w * 4 * band).enumerate().for_each(|(bi, chunk)| {
+        let y0 = bi * band;
+        let rows = chunk.len() / (w * 4);
+        let mut depth = vec![f32::MIN; w * rows];
+        for px in chunk.chunks_exact_mut(4) {
+            px.copy_from_slice(&bg);
+        }
+        for f in face.iter().flatten() {
+            let (a, b, c) = (screen[f.0[0]], screen[f.0[1]], screen[f.0[2]]);
+            let miny = a[1].min(b[1]).min(c[1]).floor().max(y0 as f32) as i32;
+            let maxy = a[1].max(b[1]).max(c[1]).ceil().min((y0 + rows) as f32 - 1.0) as i32;
+            if miny > maxy {
+                continue;
+            }
+            let minx = a[0].min(b[0]).min(c[0]).floor().max(0.0) as i32;
+            let maxx = a[0].max(b[0]).max(c[0]).ceil().min(w as f32 - 1.0) as i32;
+            if minx > maxx {
+                continue;
+            }
+            let area = (b[0] - a[0]) * (c[1] - a[1]) - (c[0] - a[0]) * (b[1] - a[1]);
+            if area.abs() < 1e-9 {
+                continue;
+            }
+            let inv = 1.0 / area;
+            for y in miny..=maxy {
+                let py = y as f32 + 0.5;
+                for x in minx..=maxx {
+                    let pxf = x as f32 + 0.5;
+                    let w0 = ((b[0] - pxf) * (c[1] - py) - (c[0] - pxf) * (b[1] - py)) * inv;
+                    let w1 = ((c[0] - pxf) * (a[1] - py) - (a[0] - pxf) * (c[1] - py)) * inv;
+                    let w2 = 1.0 - w0 - w1;
+                    if w0 < 0.0 || w1 < 0.0 || w2 < 0.0 {
+                        continue;
+                    }
+                    let z = w0 * a[2] + w1 * b[2] + w2 * c[2];
+                    let k = (y as usize - y0) * w + x as usize;
+                    if z > depth[k] {
+                        depth[k] = z;
+                        let col = f.1;
+                        let o = k * 4;
+                        for ch in 0..3 {
+                            chunk[o + ch] = (w0 * col[0][ch] + w1 * col[1][ch] + w2 * col[2][ch]).clamp(0.0, 255.0) as u8;
+                        }
+                        chunk[o + 3] = 255;
+                    }
                 }
             }
         }
-    }
-    img
+    });
+    Frame { w, h, rgba }
+}
+
+/// Image du modèle pour les miniatures des boards et des refs.
+pub fn thumbnail(model: &Model, w: u32, h: u32, bg: [u8; 4]) -> image::RgbaImage {
+    let prep = Prepared::new(model, model.z_up);
+    let f = render(&prep, &Camera { dist: 2.0, ..Default::default() }, &Light::default(), Material::Gray, true, w as usize, h as usize, bg);
+    image::RgbaImage::from_raw(w, h, f.rgba).unwrap_or_else(|| image::RgbaImage::new(w, h))
 }
 
 // ---------- visionneuse ----------
@@ -375,9 +547,15 @@ pub enum State {
 pub struct Viewer {
     pub state: State,
     cam: Camera,
-    pan: egui::Vec2,
-    pub wireframe: bool,
+    light: Light,
+    material: Material,
+    smooth: bool,
     pub z_up: Option<bool>,
+    prepared: Option<(bool, Prepared)>,
+    tex: Option<egui::TextureHandle>,
+    /// Paramètres du dernier rendu (on ne recalcule que si ça change).
+    last: Option<(Camera, Light, Material, bool, [usize; 2], bool)>,
+    show_light: bool,
 }
 
 impl Viewer {
@@ -388,7 +566,18 @@ impl Viewer {
             let _ = tx.send(load(&path));
             ctx.request_repaint();
         });
-        Self { state: State::Loading(rx), cam: Camera { yaw: 0.6, pitch: 0.35, dist: 2.2 }, pan: egui::Vec2::ZERO, wireframe: false, z_up: None }
+        Self {
+            state: State::Loading(rx),
+            cam: Camera::default(),
+            light: Light::default(),
+            material: Material::Clay,
+            smooth: true,
+            z_up: None,
+            prepared: None,
+            tex: None,
+            last: None,
+            show_light: false,
+        }
     }
 
     pub fn show(&mut self, ui: &mut egui::Ui) {
@@ -417,87 +606,170 @@ impl Viewer {
             State::Ready(m) => m,
         };
         let z_up = *self.z_up.get_or_insert(model.z_up);
+        if self.prepared.as_ref().is_none_or(|(z, _)| *z != z_up) {
+            self.prepared = Some((z_up, Prepared::new(model, z_up)));
+            self.last = None;
+        }
 
-        // Barre : réglages à droite, statistiques tronquées dans l'espace restant.
+        // Barre d'outils
         ui.horizontal(|ui| {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button("recentrer").clicked() {
-                    self.cam = Camera { yaw: 0.6, pitch: 0.35, dist: 2.2 };
-                    self.pan = egui::Vec2::ZERO;
+                if ui.button("cadrer").on_hover_text("Home ou .").clicked() {
+                    self.cam = Camera { ortho: self.cam.ortho, ..Default::default() };
                 }
+                ui.toggle_value(&mut self.show_light, "lumière");
                 let mut z = z_up;
                 if ui.checkbox(&mut z, "Z en haut").changed() {
                     self.z_up = Some(z);
                 }
-                ui.checkbox(&mut self.wireframe, "filaire");
+                ui.checkbox(&mut self.cam.ortho, "ortho").on_hover_text("5");
+                ui.checkbox(&mut self.smooth, "lisse");
+                egui::ComboBox::from_id_salt("mat").selected_text(Material::ALL.iter().find(|m| m.0 == self.material).map(|m| m.1).unwrap_or("")).width(90.0).show_ui(ui, |ui| {
+                    for (m, l) in Material::ALL {
+                        ui.selectable_value(&mut self.material, m, l);
+                    }
+                });
                 let s = model.size();
-                let simplified = if model.tris.len() < model.total_tris { format!(" · simplifié à {} pour l'affichage", fmt_n(model.tris.len())) } else { String::new() };
+                let simplified = if model.tris.len() < model.total_tris { format!(" · affiché : {}", fmt_n(model.tris.len())) } else { String::new() };
                 let text = format!("{} triangles · {} sommets · {:.2} × {:.2} × {:.2}{simplified}", fmt_n(model.total_tris), fmt_n(model.total_vertices), s[0], s[1], s[2]);
                 ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                     ui.add(egui::Label::new(egui::RichText::new(text).color(p.muted).size(11.5)).truncate());
                 });
             });
         });
+        if self.show_light {
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("lumière").color(p.muted).size(11.5));
+                ui.add(egui::Slider::new(&mut self.light.azimuth, -std::f32::consts::PI..=std::f32::consts::PI).text("direction").show_value(false));
+                ui.add(egui::Slider::new(&mut self.light.elevation, -1.5..=1.5).text("hauteur").show_value(false));
+                ui.add(egui::Slider::new(&mut self.light.ambient, 0.0..=0.9).text("ambiance").show_value(false));
+                if ui.small_button("défaut").clicked() {
+                    self.light = Light::default();
+                }
+            });
+        }
 
         let (rect, resp) = ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
         let painter = ui.painter_at(rect);
         painter.rect_filled(rect, 0.0, p.panel);
-        if resp.dragged_by(egui::PointerButton::Primary) {
+
+        // ---------- navigation façon Blender ----------
+        // Molette : zoom · bouton du milieu (ou gauche) : tourner · Maj + glisser : déplacer
+        // Ctrl + glisser : zoom · bouton droit : déplacer · L + glisser : lumière
+        // 1 / 3 / 7 : face, droite, dessus (Maj : opposé) · 5 : ortho · Home ou . : cadrer
+        let (mods, lkey) = ui.input(|i| (i.modifiers, i.key_down(Key::L)));
+        let dragging = resp.dragged_by(egui::PointerButton::Middle) || resp.dragged_by(egui::PointerButton::Primary) || resp.dragged_by(egui::PointerButton::Secondary);
+        if dragging {
             let d = resp.drag_delta();
-            self.cam.yaw -= d.x * 0.01;
-            self.cam.pitch = (self.cam.pitch + d.y * 0.01).clamp(-1.55, 1.55);
-        }
-        if resp.dragged_by(egui::PointerButton::Secondary) || resp.dragged_by(egui::PointerButton::Middle) {
-            self.pan += resp.drag_delta();
+            let right = resp.dragged_by(egui::PointerButton::Secondary);
+            if lkey {
+                self.light.azimuth -= d.x * 0.01;
+                self.light.elevation = (self.light.elevation - d.y * 0.01).clamp(-1.5, 1.5);
+            } else if mods.ctrl || mods.command {
+                self.cam.dist = (self.cam.dist * (d.y * 0.01).exp()).clamp(0.2, 50.0);
+            } else if mods.shift || right {
+                let k = self.cam.dist / (rect.height().min(rect.width()) * 1.2);
+                self.cam.pan[0] += d.x * k;
+                self.cam.pan[1] -= d.y * k;
+            } else {
+                self.cam.yaw -= d.x * 0.008;
+                self.cam.pitch = (self.cam.pitch + d.y * 0.008).clamp(-1.57, 1.57);
+            }
         }
         if resp.hovered() {
-            let scroll = ui.input(|i| i.smooth_scroll_delta.y);
-            self.cam.dist = (self.cam.dist * (-scroll * 0.002).exp()).clamp(0.3, 20.0);
+            let scroll = ui.input(|i| i.smooth_scroll_delta.y + i.zoom_delta().ln() * 300.0);
+            if scroll != 0.0 {
+                self.cam.dist = (self.cam.dist * (-scroll * 0.0015).exp()).clamp(0.2, 50.0);
+            }
+            let keys = ui.input(|i| {
+                [Key::Num1, Key::Num3, Key::Num7, Key::Num5, Key::Home, Key::Period].map(|k| i.key_pressed(k) && !i.modifiers.command)
+            });
+            let opposite = mods.shift;
+            let half = std::f32::consts::FRAC_PI_2;
+            if keys[0] {
+                self.cam.yaw = if opposite { std::f32::consts::PI } else { 0.0 };
+                self.cam.pitch = 0.0;
+            }
+            if keys[1] {
+                self.cam.yaw = if opposite { half } else { -half };
+                self.cam.pitch = 0.0;
+            }
+            if keys[2] {
+                self.cam.yaw = 0.0;
+                self.cam.pitch = if opposite { -half } else { half };
+            }
+            if keys[3] {
+                self.cam.ortho = !self.cam.ortho;
+            }
+            if keys[4] || keys[5] {
+                self.cam = Camera { ortho: self.cam.ortho, ..Default::default() };
+            }
         }
 
-        let focal = rect.height().min(rect.width()) * 1.2;
-        let center = rect.center() + self.pan;
-        let project = |v: V3| -> Option<Pos2> { (v[2] < -0.05).then(|| pos2(center.x + v[0] / -v[2] * focal, center.y - v[1] / -v[2] * focal)) };
+        // ---------- rendu (seulement si quelque chose a changé) ----------
+        let interacting = dragging || ui.input(|i| i.smooth_scroll_delta.y != 0.0);
+        let ppp = ui.ctx().pixels_per_point();
+        // Pendant le mouvement : demi-résolution pour rester fluide, pleine résolution à l'arrêt.
+        let scale = if interacting { 0.5 } else { ppp.min(2.0) };
+        let size = [(rect.width() * scale).max(16.0) as usize, (rect.height() * scale).max(16.0) as usize];
+        let key = (self.cam, self.light, self.material, self.smooth, size, z_up);
+        if self.last != Some(key) || self.tex.is_none() {
+            let prep = &self.prepared.as_ref().unwrap().1;
+            // Fond transparent : la grille du sol reste visible autour du modèle.
+            let bg = [0, 0, 0, 0];
+            let frame = render(prep, &self.cam, &self.light, self.material, self.smooth, size[0], size[1], bg);
+            let img = egui::ColorImage::from_rgba_unmultiplied([frame.w, frame.h], &frame.rgba);
+            match &mut self.tex {
+                Some(t) => t.set(img, egui::TextureOptions::LINEAR),
+                None => self.tex = Some(ui.ctx().load_texture("model3d", img, egui::TextureOptions::LINEAR)),
+            }
+            self.last = Some(key);
+        }
+        if interacting {
+            ui.ctx().request_repaint();
+        }
 
-        // Sol
-        let norm_pts = model.normalized(z_up);
-        let floor = norm_pts.iter().map(|v| v[1]).fold(f32::MAX, f32::min);
-        for k in -5..=5 {
-            let t = k as f32 * 0.2;
-            for (a, b) in [([t, floor, -1.0], [t, floor, 1.0]), ([-1.0, floor, t], [1.0, floor, t])] {
-                if let (Some(pa), Some(pb)) = (project(self.cam.view(a)), project(self.cam.view(b))) {
-                    painter.line_segment([pa, pb], Stroke::new(1.0, p.line));
+        // Grille du sol (sous le modèle)
+        if let Some((_, prep)) = &self.prepared {
+            let focal = rect.height().min(rect.width()) * 1.2;
+            let ortho_scale = focal / self.cam.dist;
+            let c = rect.center();
+            let project = |v: V3| -> Option<Pos2> {
+                let q = self.cam.view(v);
+                if self.cam.ortho {
+                    Some(pos2(c.x + q[0] * ortho_scale, c.y - q[1] * ortho_scale))
+                } else {
+                    (q[2] < -0.05).then(|| pos2(c.x + q[0] / -q[2] * focal, c.y - q[1] / -q[2] * focal))
                 }
-            }
-        }
-
-        let view: Vec<V3> = norm_pts.iter().map(|v| self.cam.view(*v)).collect();
-        let screen: Vec<Option<Pos2>> = view.iter().map(|v| project(*v)).collect();
-        let mut faces: Vec<(f32, [Pos2; 3], Color32)> = Vec::with_capacity(model.tris.len());
-        for (t, col) in model.tris.iter().zip(&model.colors) {
-            let (i, j, k) = (t[0] as usize, t[1] as usize, t[2] as usize);
-            let (Some(pa), Some(pb), Some(pc)) = (screen[i], screen[j], screen[k]) else { continue };
-            faces.push(((view[i][2] + view[j][2] + view[k][2]) / 3.0, [pa, pb, pc], shade(*col, view[i], view[j], view[k])));
-        }
-        faces.sort_by(|x, y| x.0.total_cmp(&y.0));
-        if self.wireframe {
-            for (_, pts, _) in &faces {
-                painter.add(Shape::closed_line(pts.to_vec(), Stroke::new(0.5, p.text.linear_multiply(0.5))));
-            }
-        } else {
-            for chunk in faces.chunks(20_000) {
-                let mut mesh = Mesh::default();
-                for (_, pts, col) in chunk {
-                    let base = mesh.vertices.len() as u32;
-                    for pt in pts {
-                        mesh.vertices.push(Vertex { pos: *pt, uv: egui::epaint::WHITE_UV, color: *col });
+            };
+            for k in -5..=5 {
+                let t = k as f32 * 0.2;
+                for (a, b) in [([t, prep.floor, -1.0], [t, prep.floor, 1.0]), ([-1.0, prep.floor, t], [1.0, prep.floor, t])] {
+                    if let (Some(pa), Some(pb)) = (project(a), project(b)) {
+                        painter.line_segment([pa, pb], Stroke::new(1.0, p.line));
                     }
-                    mesh.indices.extend([base, base + 1, base + 2]);
                 }
-                painter.add(Shape::mesh(mesh));
             }
         }
-        painter.text(rect.left_bottom() + vec2(12.0, -10.0), egui::Align2::LEFT_BOTTOM, "glisser : tourner · clic droit : déplacer · molette : zoom", egui::FontId::monospace(11.0), p.muted);
+        if let Some(t) = &self.tex {
+            painter.image(t.id(), rect, egui::Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+        }
+
+        // Repère des axes (en bas à gauche)
+        let o = rect.left_bottom() + vec2(36.0, -40.0);
+        for (axis, col, label) in [([1.0, 0.0, 0.0], Color32::from_rgb(230, 70, 70), "X"), ([0.0, 1.0, 0.0], Color32::from_rgb(110, 200, 80), if z_up { "Z" } else { "Y" }), ([0.0, 0.0, 1.0], Color32::from_rgb(80, 140, 240), if z_up { "-Y" } else { "Z" })] {
+            let r = self.cam.rotate(axis);
+            let end = o + vec2(r[0], -r[1]) * 22.0;
+            painter.line_segment([o, end], Stroke::new(2.0, col));
+            painter.text(end, egui::Align2::CENTER_CENTER, label, egui::FontId::monospace(10.0), col);
+        }
+        painter.text(
+            rect.right_bottom() + vec2(-12.0, -10.0),
+            egui::Align2::RIGHT_BOTTOM,
+            "glisser : tourner · Maj ou clic droit : déplacer · Ctrl / molette : zoom · L + glisser : lumière · 1 3 7 : vues · 5 : ortho",
+            egui::FontId::monospace(10.5),
+            p.muted,
+        );
     }
 }
 

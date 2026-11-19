@@ -15,6 +15,8 @@ pub struct Brain {
     pub with_folders: bool,
     pub with_files: bool,
     pub dirty: bool,
+    /// Dossier dans lequel on est entré ("" = tout le coffre).
+    pub scope: String,
     /// Cadre automatiquement le graphe tant que l'utilisateur n'a pas bougé la vue.
     auto_fit: bool,
 }
@@ -32,6 +34,7 @@ impl Default for Brain {
             with_folders: true,
             with_files: false,
             dirty: true,
+            scope: String::new(),
             auto_fit: true,
         }
     }

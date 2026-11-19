@@ -80,6 +80,12 @@ pub fn install_fonts(ctx: &egui::Context) {
     for fam in [FontFamily::Proportional, FontFamily::Monospace] {
         fonts.families.get_mut(&fam).unwrap().insert(0, "jbm".into());
     }
+    // Police proportionnelle pour les diapos PowerPoint (plus proche du rendu d'origine).
+    fonts.font_data.insert("lato".into(), Arc::new(egui::FontData::from_static(include_bytes!("../assets/fonts/Lato-Regular.ttf"))));
+    fonts.font_data.insert("lato-bold".into(), Arc::new(egui::FontData::from_static(include_bytes!("../assets/fonts/Lato-Bold.ttf"))));
+    let rest: Vec<String> = fonts.families[&FontFamily::Proportional].iter().skip(1).cloned().collect();
+    fonts.families.insert(FontFamily::Name("slide".into()), std::iter::once("lato".to_string()).chain(rest.iter().cloned()).collect());
+    fonts.families.insert(FontFamily::Name("slide-bold".into()), std::iter::once("lato-bold".to_string()).chain(rest.iter().cloned()).collect());
     let mut bold = vec!["jbm-bold".to_string()];
     bold.extend(fonts.families[&FontFamily::Proportional].iter().skip(1).cloned());
     fonts.families.insert(FontFamily::Name("bold".into()), bold);
@@ -159,10 +165,10 @@ pub fn logo(ui: &mut egui::Ui, height: f32) -> egui::Response {
     ui.add(egui::Image::from_bytes(uri, bytes).fit_to_exact_size(egui::vec2(height * 211.31 / 183.0, height)))
 }
 
-/// Le motif seul (sans hexagone), teinté avec la couleur du texte du thème.
+/// Le motif seul (sans hexagone), de la couleur d'accent choisie.
 pub fn mark(ui: &mut egui::Ui, height: f32) -> egui::Response {
     let img = egui::Image::from_bytes("bytes://mark.png", include_bytes!("../assets/mark.png"))
-        .tint(pal().text)
+        .tint(pal().accent)
         .fit_to_exact_size(egui::vec2(height * 134.85 / 125.79, height));
     ui.add(img)
 }

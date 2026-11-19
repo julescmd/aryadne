@@ -413,9 +413,22 @@ pub fn reveal(path: &std::path::Path, select: bool) {
 
 /// Ouvre un fichier avec l'application par défaut du système (Blender pour un .blend, etc.).
 pub fn open_external(path: &std::path::Path) -> Result<(), String> {
+    open::that_detached(path).map_err(|e| format!("Impossible d'ouvrir {} : {e}", path.display()))
+}
+
+/// Laisse choisir l'application (fenêtre « Ouvrir avec » de Windows).
+pub fn open_with(path: &std::path::Path) -> Result<(), String> {
     #[cfg(windows)]
-    let r = std::process::Command::new("explorer").arg(path).spawn();
+    {
+        std::process::Command::new("rundll32.exe")
+            .arg("shell32.dll,OpenAs_RunDLL")
+            .arg(path)
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| format!("Impossible d'ouvrir {} : {e}", path.display()))
+    }
     #[cfg(not(windows))]
-    let r = std::process::Command::new("xdg-open").arg(path).spawn();
-    r.map(|_| ()).map_err(|e| format!("Impossible d'ouvrir {} : {e}", path.display()))
+    {
+        open_external(path)
+    }
 }

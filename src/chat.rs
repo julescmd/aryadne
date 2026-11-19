@@ -233,7 +233,8 @@ fn build_messages(entries: &[Entry], hits: &[Hit], open: Option<&(String, String
          - Réponds en français, de façon concise et concrète, en Markdown simple.\n\
          - Appuie-toi sur les extraits fournis. Si l'information n'y est pas, dis-le et propose quel fichier ouvrir.\n\
          - Pour renvoyer vers une note .md, écris [[Nom de la note]] (sans .md). Pour un autre fichier, écris son chemin exact entre accents graves, par ex. `code/export.py`.\n\
-         - Ne cite que des fichiers présents dans la liste ci-dessous.\n\n",
+         - Ne cite que des fichiers présents dans la liste ci-dessous.\n\
+         - Quand tu proposes du code, donne-le complet dans un bloc ```langage, prêt à être inséré tel quel. Si une sélection est fournie, ta réponse porte d'abord sur elle.\n\n",
     );
     sys.push_str(&format!("Fichiers du coffre ({}) :\n{}\n", files.len(), files.join("\n")));
     if let Some((rel, text)) = open {
