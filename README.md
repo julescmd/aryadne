@@ -1,5 +1,7 @@
 # Aryadne
 
+> **Projet personnel.** Aryadne est un outil que je développe pour mon propre usage. Il n'est pas destiné à être distribué au grand public : pas de support, pas de garantie, et tout peut changer ou casser d'une version à l'autre.
+
 Le fil entre tes idées. Notes, code, références et moodboards dans un dossier qui t'appartient.
 
 100 % Rust ([egui](https://github.com/emilk/egui)). Un seul exécutable portable pour Windows et Linux : **aucune installation, aucun droit admin**. Look éditeur de code (JetBrains Mono, angles droits), mode clair par défaut, mode sombre en un clic.
