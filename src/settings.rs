@@ -370,6 +370,8 @@ fn tab_shortcuts(ui: &mut egui::Ui) {
         ("Ctrl+1 … 5", "fichiers, cerveau, refs, boards, chat"),
         ("Ctrl+G", "cerveau"),
         ("Ctrl + / − / 0", "taille de l'interface"),
+        ("Ctrl+Maj+F", "recherche dans tout le coffre"),
+        ("Ctrl+Maj+M", "mode compact"),
         ("", ""),
         ("board · V", "outil sélection"),
         ("board · B", "outil dessin"),
@@ -407,4 +409,13 @@ pub fn reveal(path: &std::path::Path, select: bool) {
         let target = if select { path.parent().unwrap_or(path) } else { path };
         let _ = std::process::Command::new("xdg-open").arg(target).spawn();
     }
+}
+
+/// Ouvre un fichier avec l'application par défaut du système (Blender pour un .blend, etc.).
+pub fn open_external(path: &std::path::Path) -> Result<(), String> {
+    #[cfg(windows)]
+    let r = std::process::Command::new("explorer").arg(path).spawn();
+    #[cfg(not(windows))]
+    let r = std::process::Command::new("xdg-open").arg(path).spawn();
+    r.map(|_| ()).map_err(|e| format!("Impossible d'ouvrir {} : {e}", path.display()))
 }

@@ -6,7 +6,19 @@ Le fil entre tes idées. Notes, code, références et moodboards dans un dossier
 
 100 % Rust ([egui](https://github.com/emilk/egui)). Un seul exécutable portable pour Windows et Linux : **aucune installation, aucun droit admin**. Look éditeur de code (JetBrains Mono, angles droits), mode clair par défaut, mode sombre en un clic.
 
-## Fonctionnalités (v0.6)
+## Fonctionnalités (v0.7)
+
+**3D**
+- Visionneuse intégrée pour OBJ, glTF / GLB et STL : tourner, déplacer, zoomer, filaire, axe Z en haut, nombre de triangles et dimensions.
+- Miniatures des fichiers `.blend` (aperçu enregistré par Blender, formats Blender 2.x à 5, fichiers compressés), aussi dans les refs.
+- « ouvrir dans Blender » / « ouvrir avec l'app par défaut » (clic droit ou bouton de l'éditeur).
+
+**Recherche** (`Ctrl+Maj+F`)
+- Dans tout le coffre, dossiers liés compris : notes, code, texte et noms de fichiers. Majuscules et accents ignorés, passages surlignés.
+
+**Travailler à côté de Blender**
+- « épingler » : Aryadne reste au-dessus des autres fenêtres.
+- « compact » (`Ctrl+Maj+M`) : masque les panneaux, idéal pour garder un board de refs par-dessus Blender.
 
 **Fichiers liés : rien n'est copié**
 - Le coffre est une vue. Lie des dossiers ou des fichiers de ton disque (réglages → fichiers, ou glisse-les dans la fenêtre) : ils apparaissent dans l'explorateur (`@Dossier`, `@fichiers liés`) et restent à leur place.
@@ -118,6 +130,9 @@ src/
   updater.rs   mises à jour depuis l'application
   settings.rs  fenêtre de réglages
   transfer.rs  export zip et transfert réseau
+  model3d.rs   visionneuse 3D (OBJ, glTF, STL)
+  blend.rs     miniatures des fichiers .blend
+  search.rs    recherche plein texte
   vault.rs     fichiers du coffre, liens, graphe (+ tests)
   preview.rs   mode lecture Markdown
   theme.rs     palettes claire/sombre, police, angles droits

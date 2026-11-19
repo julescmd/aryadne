@@ -8,7 +8,7 @@ use std::path::Path;
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
 
-pub const EXT: [&str; 12] = ["png", "jpg", "jpeg", "webp", "gif", "bmp", "tif", "tiff", "tga", "hdr", "exr", "jfif"];
+pub const EXT: [&str; 13] = ["png", "jpg", "jpeg", "webp", "gif", "bmp", "tif", "tiff", "tga", "hdr", "exr", "jfif", "blend"];
 const WORKERS: usize = 4;
 
 pub fn is_image(rel: &str) -> bool {
@@ -132,10 +132,18 @@ impl Images {
 }
 
 fn load(ctx: &egui::Context, path: &Path, rel: &str, size: Size) -> Result<Loaded, String> {
+    if rel.to_lowercase().ends_with(".blend") {
+        let img = crate::blend::thumbnail(path)?;
+        return finish(ctx, img, rel, size);
+    }
     let reader = image::ImageReader::open(path).map_err(|e| e.to_string())?.with_guessed_format().map_err(|e| e.to_string())?;
     let mut reader = reader;
     reader.no_limits();
     let img = reader.decode().map_err(|e| format!("Image illisible : {e}"))?;
+    finish(ctx, img, rel, size)
+}
+
+fn finish(ctx: &egui::Context, img: DynamicImage, rel: &str, size: Size) -> Result<Loaded, String> {
     let dims = [img.width(), img.height()];
     let img = to_display(img);
     let max = size.max_side();
