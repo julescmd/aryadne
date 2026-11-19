@@ -43,7 +43,7 @@ pub fn show(ui: &mut egui::Ui, text: &str, existing: &HashSet<String>) -> Option
             }
         } else if let Some(rest) = trimmed.strip_prefix("- ").or_else(|| trimmed.strip_prefix("* ")) {
             ui.horizontal_wrapped(|ui| {
-                ui.label(RichText::new("  ▪  ").color(theme::pal().accent));
+                ui.label(RichText::new(" ▪ ").color(theme::pal().accent));
                 inline(ui, rest, existing, &mut clicked, None);
             });
         } else if let Some(rest) = trimmed.strip_prefix("> ") {
@@ -78,27 +78,35 @@ fn inline(
     size: Option<f32>,
 ) {
     ui.spacing_mut().item_spacing.x = 0.0;
+    let p = theme::pal();
     let styled = |s: &str| {
         let t = RichText::new(s.to_owned());
         match size { Some(px) => t.size(px).family(theme::bold()), None => t }
     };
-    let mut last = 0;
-    for cap in LINK.captures_iter(text) {
-        let m = cap.get(0).unwrap();
-        if m.start() > last {
-            ui.label(styled(&text[last..m.start()]));
+    // Les segments impairs entre `accents graves` sont du code.
+    for (k, seg) in text.split('`').enumerate() {
+        if k % 2 == 1 {
+            ui.label(RichText::new(seg).monospace().background_color(p.code_bg).color(p.accent));
+            continue;
         }
-        let target = cap[1].trim().to_string();
-        let shown = cap.get(2).map(|a| a.as_str().trim()).unwrap_or(&target).to_string();
-        let color = if existing.contains(&target.to_lowercase()) { theme::pal().link } else { theme::pal().missing };
-        let resp = ui.add(egui::Label::new(styled(&shown).color(color).underline()).sense(egui::Sense::click()));
-        if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
-            *clicked = Some(target);
+        let mut last = 0;
+        for cap in LINK.captures_iter(seg) {
+            let m = cap.get(0).unwrap();
+            if m.start() > last {
+                ui.label(styled(&seg[last..m.start()]));
+            }
+            let target = cap[1].trim().to_string();
+            let shown = cap.get(2).map(|a| a.as_str().trim()).unwrap_or(&target).to_string();
+            let color = if existing.contains(&target.to_lowercase()) { p.link } else { p.missing };
+            let resp = ui.add(egui::Label::new(styled(&shown).color(color).underline()).sense(egui::Sense::click()));
+            if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                *clicked = Some(target);
+            }
+            last = m.end();
         }
-        last = m.end();
-    }
-    if last < text.len() {
-        ui.label(styled(&text[last..]));
+        if last < seg.len() {
+            ui.label(styled(&seg[last..]));
+        }
     }
 }
 

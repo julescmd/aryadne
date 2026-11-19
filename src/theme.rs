@@ -57,16 +57,17 @@ pub fn is_dark() -> bool {
     IS_DARK.load(Ordering::Relaxed)
 }
 
-/// Police Inter (OFL) intégrée à l'exécutable. « bold » = Inter SemiBold.
+/// JetBrains Mono (OFL) intégrée à l'exécutable, utilisée partout. « bold » = JetBrains Mono Bold.
 pub fn install_fonts(ctx: &egui::Context) {
     use std::sync::Arc;
     let mut fonts = egui::FontDefinitions::default();
-    fonts.font_data.insert("inter".into(), Arc::new(egui::FontData::from_static(include_bytes!("../assets/fonts/Inter-Regular.ttf"))));
-    fonts.font_data.insert("inter-semibold".into(), Arc::new(egui::FontData::from_static(include_bytes!("../assets/fonts/Inter-SemiBold.ttf"))));
-    let fallback = fonts.families.get(&FontFamily::Proportional).cloned().unwrap_or_default();
-    fonts.families.get_mut(&FontFamily::Proportional).unwrap().insert(0, "inter".into());
-    let mut bold = vec!["inter-semibold".to_string()];
-    bold.extend(fallback);
+    fonts.font_data.insert("jbm".into(), Arc::new(egui::FontData::from_static(include_bytes!("../assets/fonts/JetBrainsMono-Regular.ttf"))));
+    fonts.font_data.insert("jbm-bold".into(), Arc::new(egui::FontData::from_static(include_bytes!("../assets/fonts/JetBrainsMono-Bold.ttf"))));
+    for fam in [FontFamily::Proportional, FontFamily::Monospace] {
+        fonts.families.get_mut(&fam).unwrap().insert(0, "jbm".into());
+    }
+    let mut bold = vec!["jbm-bold".to_string()];
+    bold.extend(fonts.families[&FontFamily::Proportional].iter().skip(1).cloned());
     fonts.families.insert(FontFamily::Name("bold".into()), bold);
     ctx.set_fonts(fonts);
 }
@@ -82,10 +83,10 @@ pub fn apply(ctx: &egui::Context, dark: bool) {
     ctx.global_style_mut(|style| {
         style.text_styles = [
             (TextStyle::Small, prop(11.0)),
-            (TextStyle::Body, prop(14.0)),
-            (TextStyle::Button, prop(13.5)),
-            (TextStyle::Monospace, FontId::new(14.0, FontFamily::Monospace)),
-            (TextStyle::Heading, prop(20.0)),
+            (TextStyle::Body, prop(13.0)),
+            (TextStyle::Button, prop(12.5)),
+            (TextStyle::Monospace, FontId::new(13.0, FontFamily::Monospace)),
+            (TextStyle::Heading, prop(18.0)),
         ]
         .into();
         style.spacing.item_spacing = egui::vec2(8.0, 6.0);
