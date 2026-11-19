@@ -18,13 +18,13 @@ pub fn is_image(rel: &str) -> bool {
 
 /// A une miniature affichable (image, .blend, modèle 3D, document Office).
 pub fn has_preview(rel: &str) -> bool {
-    is_image(rel) || crate::model3d::is_model(rel) || crate::office::is_office(rel)
+    is_image(rel) || crate::model3d::is_model(rel) || crate::office::is_office(rel) || crate::video::is_video(rel)
 }
 
 /// Fichier dont la miniature est calculée (pas une image) : une seule taille suffit.
 fn is_rendered(rel: &str) -> bool {
     let r = rel.to_lowercase();
-    r.ends_with(".blend") || crate::model3d::is_model(&r) || crate::office::is_office(&r)
+    r.ends_with(".blend") || crate::model3d::is_model(&r) || crate::office::is_office(&r) || crate::video::is_video(&r)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -154,6 +154,10 @@ fn load(ctx: &egui::Context, path: &Path, rel: &str, size: Size) -> Result<Loade
         let model = crate::model3d::load(path)?;
         let img = crate::model3d::thumbnail(&model, 720, 720, [0, 0, 0, 0]);
         return finish(ctx, DynamicImage::ImageRgba8(crop_transparent(img)), rel, Size::Full);
+    }
+    if crate::video::is_video(&lower) {
+        let img = crate::video::poster(path)?;
+        return finish(ctx, img, rel, Size::Full);
     }
     if crate::office::is_office(&lower) {
         let img = crate::office::thumbnail(path)?;

@@ -6,6 +6,7 @@ mod board;
 mod brain;
 mod chat;
 mod fbx;
+mod ffmpeg;
 mod images;
 mod model3d;
 mod office;
@@ -16,6 +17,7 @@ mod settings;
 mod theme;
 mod transfer;
 mod updater;
+mod video;
 mod vault;
 
 use eframe::egui::{self, Key, KeyboardShortcut, Modifiers, RichText};
@@ -99,6 +101,9 @@ enum Content {
     Image,
     Model(model3d::Viewer),
     Office(office::Viewer),
+    Video(Box<video::Viewer>),
+    /// Vidéo ouverte alors que ffmpeg n'est pas encore installé.
+    NeedFfmpeg(Option<std::sync::Arc<std::sync::Mutex<ffmpeg::InstallState>>>),
     Unreadable(String),
 }
 
@@ -119,6 +124,7 @@ enum Action {
     Move(String, String),
     Close(usize),
     Summarize,
+    Reload(String),
 }
 
 enum Dialog {
@@ -282,6 +288,20 @@ impl App {
         }
     }
 
+    fn video_content(&self, rel: &str) -> Content {
+        if ffmpeg::find("ffmpeg").is_none() {
+            return Content::NeedFfmpeg(None);
+        }
+        let (Ok(path), Some(ctx)) = (vault::safe(&self.root(), rel), self.ctx.clone()) else {
+            return Content::Unreadable("Vidéo introuvable.".into());
+        };
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        rel.hash(&mut h);
+        let notes = std::path::Path::new(&self.root()).join(".app/annotations").join(format!("{:016x}.json", h.finish()));
+        Content::Video(Box::new(video::Viewer::open(path, notes, &ctx)))
+    }
+
     fn open(&mut self, rel: String) {
         self.view = Some(View::Files);
         self.selected = Some(rel.clone());
@@ -298,6 +318,8 @@ impl App {
                     (Err(e), _) => Content::Unreadable(e),
                     _ => Content::Unreadable("Contexte indisponible.".into()),
                 }
+            } else if video::is_video(&rel) {
+                self.video_content(&rel)
             } else if office::is_office(&rel) {
                 match vault::safe(&self.root(), &rel) {
                     Ok(path) => Content::Office(office::Viewer::open(&path)),
@@ -424,6 +446,13 @@ impl App {
                         self.active = if self.docs.is_empty() { None } else { Some(self.active.unwrap_or(0).min(self.docs.len() - 1)) };
                         self.update_backlinks();
                     }
+                }
+                Action::Reload(rel) => {
+                    if let Some(i) = self.docs.iter().position(|d| d.rel == rel) {
+                        self.docs.remove(i);
+                    }
+                    self.images.forget(&rel);
+                    self.open(rel);
                 }
                 Action::Summarize => {
                     let Some(doc) = self.current() else { continue };
@@ -746,6 +775,8 @@ impl App {
                 ("◆", p.accent)
             } else if office::is_office(&e.rel) {
                 ("▤", p.link)
+            } else if video::is_video(&e.rel) {
+                ("▶", p.accent)
             } else if images::is_image(&e.rel) {
                 ("▣", p.link)
             } else if board::is_board(&e.rel) {
@@ -973,6 +1004,50 @@ impl App {
                     if open {
                         let r = vault::safe(&root, &rel).and_then(|p| settings::open_external(&p));
                         self.report(r);
+                    }
+                }
+                Content::Video(viewer) => {
+                    egui::Frame::new().inner_margin(egui::Margin::symmetric(16, 10)).show(ui, |ui| viewer.show(ui));
+                }
+                Content::NeedFfmpeg(job) => {
+                    let mut reopen = false;
+                    egui::Frame::new().inner_margin(30).show(ui, |ui| {
+                        ui.label(RichText::new("Les vidéos ont besoin de ffmpeg.").family(theme::bold()));
+                        ui.label(RichText::new(format!("Aryadne peut l'installer pour toi, sans droits admin (~100 Mo, dans {}).", ffmpeg::install_dir().display())).color(p.muted).size(12.0));
+                        ui.add_space(10.0);
+                        match job {
+                            None => {
+                                let b = egui::Button::new(RichText::new("installer ffmpeg").color(p.on_accent).family(theme::bold())).fill(p.accent).stroke(egui::Stroke::NONE);
+                                if ui.add(b).clicked() {
+                                    *job = Some(ffmpeg::install(ui.ctx().clone()));
+                                }
+                            }
+                            Some(j) => {
+                                let st = j.lock().map(|s| s.clone()).unwrap_or_default();
+                                if let Some(e) = &st.error {
+                                    ui.label(RichText::new(e).color(p.missing));
+                                } else if st.done {
+                                    reopen = true;
+                                } else {
+                                    match st.progress {
+                                        Some(f) => {
+                                            ui.add(egui::ProgressBar::new(f).desired_width(360.0).corner_radius(0.0).fill(p.accent).text(&st.message));
+                                        }
+                                        None => {
+                                            ui.horizontal(|ui| {
+                                                ui.spinner();
+                                                ui.label(&st.message);
+                                            });
+                                        }
+                                    }
+                                    ui.ctx().request_repaint_after(Duration::from_millis(200));
+                                }
+                            }
+                        }
+                    });
+                    if reopen {
+                        doc.content = self_video_placeholder();
+                        self.actions.push(Action::Reload(rel.clone()));
                     }
                 }
                 Content::Office(viewer) => {
@@ -2773,4 +2848,8 @@ fn msg_block(
             }
         });
     }
+}
+
+fn self_video_placeholder() -> Content {
+    Content::Unreadable("rechargement…".into())
 }

@@ -6,7 +6,7 @@ Le fil entre tes idées. Notes, code, références et moodboards dans un dossier
 
 100 % Rust ([egui](https://github.com/emilk/egui)). Un seul exécutable portable pour Windows et Linux : **aucune installation, aucun droit admin**. Look éditeur de code (JetBrains Mono, angles droits), mode clair par défaut, mode sombre en un clic.
 
-## Fonctionnalités (v0.8)
+## Fonctionnalités (v0.9)
 
 **3D**
 - Visionneuse intégrée pour OBJ, FBX (binaire), glTF / GLB et STL : tourner, déplacer, zoomer, filaire, axe Z en haut, nombre de triangles et dimensions.
@@ -14,6 +14,15 @@ Le fil entre tes idées. Notes, code, références et moodboards dans un dossier
 - Miniatures 3D dans les refs et sur les boards.
 - Miniatures des fichiers `.blend` (aperçu enregistré par Blender, formats Blender 2.x à 5, fichiers compressés), aussi dans les refs.
 - « ouvrir dans Blender » / « ouvrir avec l'app par défaut » (clic droit ou bouton de l'éditeur).
+
+**Vidéo** (MP4, MOV, WebM, MKV, AVI)
+- Lecture image par image (← →, Espace), cadence réglable (12, 24, 30 i/s ou libre).
+- Lecture « en 1s / 2s / 4s / 8s » comme en animation : chaque image tenue N fois.
+- Pelures d'oignon (image précédente en rouge, suivante en vert).
+- Dessin par-dessus, image par image (couleur, épaisseur, Ctrl+Z), repères sur la ligne de temps, gardé dans `.app/annotations/`.
+- Export en séquence PNG / JPG (cadence, 1 image sur N, hauteur, dessins incrustés) ou en MP4 retimé (ex. 24 i/s en 2s).
+- Miniatures vidéo dans les refs et les boards.
+- ffmpeg : utilisé s'il est installé, sinon installé par Aryadne en un clic, sans admin.
 
 **Documents**
 - Aperçu des PowerPoint (diapos : textes et images), Excel (feuilles et cellules), Word, et LibreOffice (.odp, .ods, .odt), sans Office. Miniatures dans les refs et les boards.
@@ -140,6 +149,8 @@ src/
   search.rs    recherche plein texte
   fbx.rs       lecteur FBX binaire
   office.rs    aperçu PowerPoint, Excel, Word, LibreOffice
+  video.rs     lecteur vidéo, timing, dessin, export de séquences
+  ffmpeg.rs    installation de ffmpeg sans admin
 assets/        logo, icônes, polices
   vault.rs     fichiers du coffre, liens, graphe (+ tests)
   preview.rs   mode lecture Markdown

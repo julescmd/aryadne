@@ -1,6 +1,6 @@
 [package]
 name = "aryadne"
-version = "0.8.0"
+version = "0.9.0"
 edition = "2024"
 
 [dependencies]
@@ -11,6 +11,7 @@ egui_extras = { version = "0.37.0", features = ["all_loaders", "syntect"] }
 flate2 = "1.1.11"
 gltf = { version = "1.4.1", default-features = false, features = ["import", "utils"] }
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "webp", "gif", "bmp", "tiff", "tga", "hdr", "exr", "rayon"] }
+lzma-rs = "0.3.0"
 regex = "1.13.2"
 rfd = "0.18.0"
 ruzstd = "0.9.1"
