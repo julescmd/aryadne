@@ -2,6 +2,8 @@
 
 Le fil entre tes idées. Notes, références et moodboards dans un dossier qui t'appartient.
 
+Interface plate en mode clair par défaut (mode sombre avec le bouton en haut à droite), police Inter intégrée.
+
 100 % Rust ([egui](https://github.com/emilk/egui)), sans navigateur intégré. Un seul exécutable portable pour Windows et Linux : **aucune installation, aucun droit admin**.
 
 ## Ce qui marche (v0.1)
@@ -51,7 +53,8 @@ git tag v0.1.0 && git push --tags
 ```
 src/
   main.rs      interface : panneaux, éditeur, sélecteur Ctrl+P
-  theme.rs     le look (couleurs, police monospace, angles droits)
+  theme.rs     le look : palettes claire et sombre, police Inter, angles droits
+assets/fonts/ Inter (licence OFL)
   preview.rs   mode lecture : Markdown + liens [[ ]]
   vault.rs     lecture/écriture du coffre, backlinks (+ test)
 ```

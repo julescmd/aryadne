@@ -28,6 +28,22 @@ fn config_file() -> Option<PathBuf> {
     dirs::config_dir().map(|d| d.join(APP).join("last_vault"))
 }
 
+fn theme_file() -> Option<PathBuf> {
+    dirs::config_dir().map(|d| d.join(APP).join("theme"))
+}
+
+fn save_config(file: Option<PathBuf>, value: &str) {
+    if let Some(f) = file {
+        let _ = std::fs::create_dir_all(f.parent().unwrap());
+        let _ = std::fs::write(f, value);
+    }
+}
+
+/// Petit libellé en majuscules, utilisé pour les titres de section.
+fn caps(text: &str) -> RichText {
+    RichText::new(text.to_uppercase()).size(11.0).color(theme::pal().muted).family(theme::bold())
+}
+
 #[derive(Default)]
 struct App {
     vault: Option<String>,
@@ -45,7 +61,9 @@ struct App {
 
 impl App {
     fn new(ctx: &egui::Context) -> Self {
-        theme::apply(ctx);
+        let dark = theme_file().and_then(|f| std::fs::read_to_string(f).ok()).is_some_and(|t| t.trim() == "dark");
+        theme::install_fonts(ctx);
+        theme::apply(ctx, dark);
         let mut app = Self::default();
         if let Some(p) = config_file().and_then(|f| std::fs::read_to_string(f).ok()) {
             app.load_vault(p.trim().to_string());
@@ -62,10 +80,7 @@ impl App {
         if self.report(vault::open_vault(path.clone())).is_none() {
             return;
         }
-        if let Some(f) = config_file() {
-            let _ = std::fs::create_dir_all(f.parent().unwrap());
-            let _ = std::fs::write(f, &path);
-        }
+        save_config(config_file(), &path);
         self.vault = Some(path);
         self.refresh();
         self.current = None;
@@ -145,110 +160,168 @@ impl App {
     }
 
     fn topbar(&mut self, ui: &mut egui::Ui) {
-        egui::Panel::top("top").exact_size(30.0).show(ui, |ui| {
-            ui.horizontal_centered(|ui| {
-                ui.label(RichText::new("aryadne").color(theme::ACCENT).strong());
-                let path = self.vault.clone().unwrap_or_default();
-                if ui.button(RichText::new(format!("~ {path}")).color(theme::MUTED)).on_hover_text("Changer de coffre").clicked() {
-                    self.pick_vault();
-                }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    for (label, active) in [("boards", false), ("refs", false), ("notes", true)] {
-                        let t = if active {
-                            RichText::new(format!("[{label}]")).color(theme::ACCENT)
-                        } else {
-                            RichText::new(format!(" {label} ")).color(theme::MUTED)
-                        };
-                        ui.label(t).on_hover_text(if active { "" } else { "Bientôt" });
+        let p = theme::pal();
+        egui::Panel::top("top")
+            .exact_size(44.0)
+            .frame(egui::Frame::new().fill(p.bg).stroke(egui::Stroke::new(1.0, p.line)).inner_margin(egui::Margin::symmetric(14, 0)))
+            .show(ui, |ui| {
+                ui.horizontal_centered(|ui| {
+                    let (r, _) = ui.allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::hover());
+                    ui.painter().rect_filled(r, 0.0, p.accent);
+                    ui.label(RichText::new("ARYADNE").family(theme::bold()).size(14.0));
+                    ui.add_space(6.0);
+                    let path = self.vault.clone().unwrap_or_default();
+                    let short = path.split(['/', '\\']).filter(|s| !s.is_empty()).last().unwrap_or("").to_string();
+                    if ui.add(egui::Button::new(RichText::new(short).color(p.muted)).frame(false)).on_hover_text(format!("{path}\nChanger de coffre")).clicked() {
+                        self.pick_vault();
                     }
+                    ui.add_space(24.0);
+                    for (label, active) in [("Notes", true), ("Refs", false), ("Boards", false)] {
+                        let color = if active { p.text } else { p.muted };
+                        let r = ui.add(egui::Label::new(RichText::new(label).color(color).family(theme::bold())).sense(egui::Sense::hover()));
+                        if active {
+                            let rect = egui::Rect::from_min_max(egui::pos2(r.rect.left(), ui.max_rect().bottom() - 2.0), egui::pos2(r.rect.right(), ui.max_rect().bottom()));
+                            ui.painter().rect_filled(rect, 0.0, p.accent);
+                        } else {
+                            r.on_hover_text("Bientôt");
+                        }
+                        ui.add_space(10.0);
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let label = if theme::is_dark() { "Mode clair" } else { "Mode sombre" };
+                        if ui.button(label).clicked() {
+                            let dark = !theme::is_dark();
+                            theme::apply(ui.ctx(), dark);
+                            save_config(theme_file(), if dark { "dark" } else { "light" });
+                        }
+                    });
                 });
             });
-        });
     }
 
     fn statusbar(&mut self, ui: &mut egui::Ui) {
-        egui::Panel::bottom("status").exact_size(22.0).show(ui, |ui| {
-            ui.horizontal_centered(|ui| {
-                let (mode, color) = if self.preview { (" LECTURE ", theme::LINK) } else { (" ÉDITION ", theme::ACCENT) };
-                ui.label(RichText::new(mode).background_color(color).color(theme::BG).strong());
-                if let Some(n) = &self.current {
-                    ui.label(format!("{n}.md"));
-                    let words = self.text.split_whitespace().count();
-                    ui.label(RichText::new(format!("{words} mots")).color(theme::MUTED));
-                    let saved = if self.dirty_since.is_some() { "● non sauvé" } else { "✓ sauvé" };
-                    ui.label(RichText::new(saved).color(theme::MUTED));
-                }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(RichText::new("ctrl+p ouvrir · ctrl+n nouvelle · ctrl+e lecture").color(theme::MUTED).small());
+        let p = theme::pal();
+        egui::Panel::bottom("status")
+            .exact_size(26.0)
+            .frame(egui::Frame::new().fill(p.panel).stroke(egui::Stroke::new(1.0, p.line)).inner_margin(egui::Margin::symmetric(0, 0)))
+            .show(ui, |ui| {
+                ui.horizontal_centered(|ui| {
+                    ui.spacing_mut().item_spacing.x = 12.0;
+                    let (mode, color) = if self.preview { ("LECTURE", p.link) } else { ("ÉDITION", p.accent) };
+                    egui::Frame::new().fill(color).inner_margin(egui::Margin::symmetric(10, 5)).show(ui, |ui| {
+                        ui.label(RichText::new(mode).color(p.on_accent).family(theme::bold()).size(11.0));
+                    });
+                    if let Some(n) = &self.current {
+                        ui.label(RichText::new(format!("{n}.md")).size(12.0));
+                        let words = self.text.split_whitespace().count();
+                        ui.label(RichText::new(format!("{words} mots")).color(p.muted).size(12.0));
+                        let saved = if self.dirty_since.is_some() { "Non sauvé" } else { "Sauvé" };
+                        ui.label(RichText::new(saved).color(p.muted).size(12.0));
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.add_space(10.0);
+                        ui.label(RichText::new("Ctrl+P ouvrir   Ctrl+N nouvelle   Ctrl+E lecture").color(p.muted).size(11.0));
+                    });
                 });
             });
-        });
     }
 
     fn sidebar(&mut self, ui: &mut egui::Ui) {
-        egui::Panel::left("notes").resizable(true).default_size(230.0).min_size(160.0).show(ui, |ui| {
-            ui.add_space(6.0);
-            ui.horizontal(|ui| {
-                ui.label(RichText::new(">").color(theme::ACCENT));
-                ui.add(egui::TextEdit::singleline(&mut self.filter).hint_text("filtrer").frame(egui::Frame::NONE).desired_width(ui.available_width() - 28.0));
-                if ui.button("+").on_hover_text("Nouvelle note (Ctrl+N)").clicked() {
+        let p = theme::pal();
+        egui::Panel::left("notes")
+            .resizable(true)
+            .default_size(240.0)
+            .min_size(170.0)
+            .frame(egui::Frame::new().fill(p.panel).stroke(egui::Stroke::new(1.0, p.line)).inner_margin(12))
+            .show(ui, |ui| {
+                let full = ui.available_width();
+                let new_btn = egui::Button::new(RichText::new("+  Nouvelle note").color(p.on_accent).family(theme::bold()))
+                    .fill(p.accent)
+                    .stroke(egui::Stroke::NONE)
+                    .min_size(egui::vec2(full, 32.0));
+                if ui.add(new_btn).on_hover_text("Ctrl+N").clicked() {
                     self.new_note();
                 }
-            });
-            ui.separator();
-            let f = self.filter.to_lowercase();
-            let mut open = None;
-            egui::ScrollArea::vertical().show(ui, |ui| {
-                for n in self.notes.iter().filter(|n| n.name.to_lowercase().contains(&f)) {
-                    let active = self.current.as_deref() == Some(&n.name);
-                    let label = if active {
-                        RichText::new(format!("▸ {}", n.name)).color(theme::ACCENT)
-                    } else {
-                        RichText::new(format!("  {}", n.name)).color(theme::MUTED)
-                    };
-                    if ui.add(egui::Button::new(label).frame(false).truncate()).clicked() {
-                        open = Some(n.name.clone());
+                ui.add_space(8.0);
+                egui::Frame::new().fill(p.bg).stroke(egui::Stroke::new(1.0, p.line)).inner_margin(egui::Margin::symmetric(8, 4)).show(ui, |ui| {
+                    ui.add(egui::TextEdit::singleline(&mut self.filter).hint_text("Rechercher").frame(egui::Frame::NONE).margin(egui::Margin::ZERO).vertical_align(egui::Align::Center).min_size(egui::vec2(0.0, 18.0)).desired_width(f32::INFINITY));
+                });
+                ui.add_space(14.0);
+                ui.label(caps(&format!("Notes · {}", self.notes.len())));
+                ui.add_space(2.0);
+                let f = self.filter.to_lowercase();
+                let mut open = None;
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    ui.spacing_mut().item_spacing.y = 0.0;
+                    for n in self.notes.iter().filter(|n| n.name.to_lowercase().contains(&f)) {
+                        let active = self.current.as_deref() == Some(&n.name);
+                        let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 28.0), egui::Sense::click());
+                        let painter = ui.painter();
+                        if active {
+                            painter.rect_filled(rect, 0.0, p.bg);
+                            painter.rect_filled(egui::Rect::from_min_size(rect.min, egui::vec2(3.0, rect.height())), 0.0, p.accent);
+                        } else if resp.hovered() {
+                            painter.rect_filled(rect, 0.0, p.line.linear_multiply(0.5));
+                        }
+                        let galley = painter.layout(
+                            n.name.clone(),
+                            egui::FontId::proportional(13.5),
+                            if active { p.text } else { p.muted },
+                            rect.width() - 20.0,
+                        );
+                        painter.galley(egui::pos2(rect.left() + 12.0, rect.center().y - galley.size().y / 2.0), galley, p.text);
+                        if resp.clicked() {
+                            open = Some(n.name.clone());
+                        }
                     }
+                });
+                if let Some(n) = open {
+                    self.open_note(n);
                 }
             });
-            if let Some(n) = open {
-                self.open_note(n);
-            }
-        });
     }
 
     fn backlinks_panel(&mut self, ui: &mut egui::Ui) {
-        egui::Panel::right("backlinks").resizable(true).default_size(250.0).min_size(160.0).show(ui, |ui| {
-            ui.add_space(6.0);
-            ui.label(RichText::new("-- liens entrants --").color(theme::MUTED));
-            ui.add_space(4.0);
-            if self.backlinks.is_empty() {
-                ui.label(RichText::new("aucune note ne pointe ici").color(theme::MUTED).small());
-            }
-            let mut open = None;
-            egui::ScrollArea::vertical().show(ui, |ui| {
-                for b in &self.backlinks {
-                    let r = egui::Frame::new().stroke(egui::Stroke::new(1.0, theme::LINE)).inner_margin(6.0).show(ui, |ui| {
-                        ui.set_width(ui.available_width());
-                        ui.label(RichText::new(&b.name).color(theme::LINK));
-                        ui.label(RichText::new(&b.excerpt).color(theme::MUTED).small());
-                    });
-                    if r.response.interact(egui::Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
-                        open = Some(b.name.clone());
+        let p = theme::pal();
+        egui::Panel::right("backlinks")
+            .resizable(true)
+            .default_size(260.0)
+            .min_size(170.0)
+            .frame(egui::Frame::new().fill(p.panel).stroke(egui::Stroke::new(1.0, p.line)).inner_margin(12))
+            .show(ui, |ui| {
+                ui.label(caps(&format!("Liens entrants · {}", self.backlinks.len())));
+                ui.add_space(6.0);
+                if self.backlinks.is_empty() {
+                    ui.label(RichText::new("Aucune note ne pointe ici.").color(p.muted).size(12.5));
+                }
+                let mut open = None;
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    for b in &self.backlinks {
+                        let r = egui::Frame::new().fill(p.bg).stroke(egui::Stroke::new(1.0, p.line)).inner_margin(10).show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            ui.label(RichText::new(&b.name).family(theme::bold()));
+                            ui.label(RichText::new(&b.excerpt).color(p.muted).size(12.0));
+                        });
+                        let resp = r.response.interact(egui::Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
+                        if resp.hovered() {
+                            ui.painter().rect_stroke(resp.rect, 0.0, egui::Stroke::new(1.0, p.accent), egui::StrokeKind::Inside);
+                        }
+                        if resp.clicked() {
+                            open = Some(b.name.clone());
+                        }
                     }
+                });
+                if let Some(n) = open {
+                    self.open_note(n);
                 }
             });
-            if let Some(n) = open {
-                self.open_note(n);
-            }
-        });
     }
 
     fn central(&mut self, ui: &mut egui::Ui) {
-        let frame = egui::Frame::new().fill(theme::BG).inner_margin(egui::Margin::symmetric(24, 16));
+        let frame = egui::Frame::new().fill(theme::pal().bg).inner_margin(egui::Margin::symmetric(40, 28));
         egui::CentralPanel::default().frame(frame).show(ui, |ui| {
             if self.current.is_none() {
-                ui.centered_and_justified(|ui| ui.label(RichText::new("aucune note · ctrl+n pour commencer").color(theme::MUTED)));
+                ui.centered_and_justified(|ui| ui.label(RichText::new("Aucune note. Ctrl+N pour commencer.").color(theme::pal().muted)));
                 return;
             }
             let mut goto = None;
@@ -293,19 +366,18 @@ impl App {
         let modal = egui::Modal::new(egui::Id::unique("switcher")).show(ctx, |ui| {
             ui.set_width(480.0);
             ui.horizontal(|ui| {
-                ui.label(RichText::new(">").color(theme::ACCENT));
-                let r = ui.add(egui::TextEdit::singleline(&mut query).hint_text("ouvrir ou créer une note").frame(egui::Frame::NONE).desired_width(f32::INFINITY));
+                let r = ui.add(egui::TextEdit::singleline(&mut query).hint_text("Ouvrir ou créer une note").frame(egui::Frame::NONE).desired_width(f32::INFINITY));
                 r.request_focus();
             });
             ui.separator();
             for (i, name) in matches.iter().enumerate() {
-                let t = if i == sel { RichText::new(format!("▸ {name}")).color(theme::ACCENT) } else { RichText::new(format!("  {name}")) };
+                let t = if i == sel { RichText::new(format!("▌ {name}")).color(theme::pal().accent).family(theme::bold()) } else { RichText::new(format!("   {name}")) };
                 if ui.add(egui::Button::new(t).frame(false)).clicked() {
                     chosen = Some(name.clone());
                 }
             }
             if !query.trim().is_empty() && matches.is_empty() {
-                ui.label(RichText::new(format!("  ↵ crée « {} »", query.trim())).color(theme::MUTED).small());
+                ui.label(RichText::new(format!("Entrée pour créer « {} »", query.trim())).color(theme::pal().muted).small());
             }
         });
         if enter {
@@ -319,13 +391,21 @@ impl App {
     }
 
     fn welcome(&mut self, ui: &mut egui::Ui) {
-        egui::CentralPanel::default().frame(egui::Frame::new().fill(theme::BG)).show(ui, |ui| {
+        let p = theme::pal();
+        egui::CentralPanel::default().frame(egui::Frame::new().fill(p.bg)).show(ui, |ui| {
             ui.vertical_centered(|ui| {
-                ui.add_space(ui.available_height() * 0.33);
-                ui.label(RichText::new("aryadne").size(34.0).color(theme::ACCENT).strong());
-                ui.label(RichText::new("le fil entre tes idées").color(theme::MUTED));
-                ui.add_space(18.0);
-                if ui.button(RichText::new("[ ouvrir ou créer un coffre ]").size(15.0)).clicked() {
+                ui.add_space(ui.available_height() * 0.32);
+                let (r, _) = ui.allocate_exact_size(egui::vec2(28.0, 28.0), egui::Sense::hover());
+                ui.painter().rect_filled(r, 0.0, p.accent);
+                ui.add_space(10.0);
+                ui.label(RichText::new("ARYADNE").size(32.0).family(theme::bold()));
+                ui.label(RichText::new("Le fil entre tes idées.").color(p.muted));
+                ui.add_space(22.0);
+                let btn = egui::Button::new(RichText::new("Ouvrir ou créer un coffre").color(p.on_accent).family(theme::bold()).size(14.0))
+                    .fill(p.accent)
+                    .stroke(egui::Stroke::NONE)
+                    .min_size(egui::vec2(240.0, 40.0));
+                if ui.add(btn).clicked() {
                     self.pick_vault();
                 }
             });
@@ -360,9 +440,9 @@ impl eframe::App for App {
         }
 
         if let Some(e) = self.error.clone() {
-            egui::Window::new("erreur").collapsible(false).resizable(false).show(&ctx, |ui| {
-                ui.label(RichText::new(&e).color(theme::MISSING));
-                if ui.button("[ ok ]").clicked() {
+            egui::Window::new("Erreur").collapsible(false).resizable(false).show(&ctx, |ui| {
+                ui.label(RichText::new(&e).color(theme::pal().missing));
+                if ui.button("OK").clicked() {
                     self.error = None;
                 }
             });

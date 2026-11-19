@@ -34,20 +34,21 @@ pub fn show(ui: &mut egui::Ui, text: &str, existing: &HashSet<String>) -> Option
             ui.add_space(8.0);
         } else if let Some((level, rest)) = heading(trimmed) {
             ui.add_space(if level == 1 { 10.0 } else { 6.0 });
-            let size = match level { 1 => 22.0, 2 => 18.0, _ => 15.0 };
-            let prefix = "#".repeat(level);
-            ui.horizontal_wrapped(|ui| {
-                ui.label(RichText::new(prefix).color(theme::MUTED).size(size));
-                inline(ui, rest, existing, &mut clicked, Some(size));
-            });
+            let size = match level { 1 => 26.0, 2 => 19.0, _ => 16.0 };
+            ui.horizontal_wrapped(|ui| inline(ui, rest, existing, &mut clicked, Some(size)));
+            if level == 1 {
+                let w = ui.available_width();
+                let (r, _) = ui.allocate_exact_size(egui::vec2(w, 1.0), egui::Sense::hover());
+                ui.painter().rect_filled(r, 0.0, theme::pal().line);
+            }
         } else if let Some(rest) = trimmed.strip_prefix("- ").or_else(|| trimmed.strip_prefix("* ")) {
             ui.horizontal_wrapped(|ui| {
-                ui.label(RichText::new(" •").color(theme::ACCENT));
+                ui.label(RichText::new("  ▪  ").color(theme::pal().accent));
                 inline(ui, rest, existing, &mut clicked, None);
             });
         } else if let Some(rest) = trimmed.strip_prefix("> ") {
             ui.horizontal_wrapped(|ui| {
-                ui.label(RichText::new(" │").color(theme::MUTED));
+                ui.label(RichText::new(" ▌ ").color(theme::pal().accent));
                 inline(ui, rest, existing, &mut clicked, None);
             });
         } else {
@@ -79,7 +80,7 @@ fn inline(
     ui.spacing_mut().item_spacing.x = 0.0;
     let styled = |s: &str| {
         let t = RichText::new(s.to_owned());
-        match size { Some(px) => t.size(px).strong(), None => t }
+        match size { Some(px) => t.size(px).family(theme::bold()), None => t }
     };
     let mut last = 0;
     for cap in LINK.captures_iter(text) {
@@ -89,7 +90,7 @@ fn inline(
         }
         let target = cap[1].trim().to_string();
         let shown = cap.get(2).map(|a| a.as_str().trim()).unwrap_or(&target).to_string();
-        let color = if existing.contains(&target.to_lowercase()) { theme::LINK } else { theme::MISSING };
+        let color = if existing.contains(&target.to_lowercase()) { theme::pal().link } else { theme::pal().missing };
         let resp = ui.add(egui::Label::new(styled(&shown).color(color).underline()).sense(egui::Sense::click()));
         if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
             *clicked = Some(target);
@@ -103,11 +104,11 @@ fn inline(
 
 fn code_block(ui: &mut egui::Ui, code: &str) {
     egui::Frame::new()
-        .fill(theme::CODE_BG)
-        .stroke(egui::Stroke::new(1.0, theme::LINE))
+        .fill(theme::pal().code_bg)
+        .stroke(egui::Stroke::new(1.0, theme::pal().line))
         .inner_margin(8.0)
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
-            ui.label(RichText::new(code.trim_end()).color(theme::ACCENT));
+            ui.label(RichText::new(code.trim_end()).monospace());
         });
 }

@@ -1,45 +1,113 @@
-//! Style « éditeur de code » : monospace partout, sombre, angles droits.
-//! Pour changer le look, modifie les couleurs ci-dessous.
+//! Look plat, angles droits, bordures fines. Mode clair par défaut, mode sombre en option.
+//! Pour ajuster les couleurs, modifie LIGHT et DARK ci-dessous.
 use eframe::egui::{self, Color32, CornerRadius, FontFamily, FontId, Stroke, TextStyle};
+use std::sync::atomic::{AtomicBool, Ordering};
 
-pub const BG: Color32 = Color32::from_rgb(0x0d, 0x0e, 0x10);
-pub const PANEL: Color32 = Color32::from_rgb(0x12, 0x13, 0x16);
-pub const LINE: Color32 = Color32::from_rgb(0x25, 0x27, 0x2c);
-pub const TEXT: Color32 = Color32::from_rgb(0xc8, 0xcb, 0xd0);
-pub const MUTED: Color32 = Color32::from_rgb(0x6a, 0x6f, 0x79);
-pub const ACCENT: Color32 = Color32::from_rgb(0x9e, 0xce, 0x6a);
-pub const LINK: Color32 = Color32::from_rgb(0x7a, 0xa2, 0xf7);
-pub const MISSING: Color32 = Color32::from_rgb(0xc0, 0x6c, 0x6c);
-pub const CODE_BG: Color32 = Color32::from_rgb(0x17, 0x19, 0x1d);
+#[derive(Clone, Copy)]
+pub struct Palette {
+    pub bg: Color32,      // zone d'édition
+    pub panel: Color32,   // panneaux latéraux et barres
+    pub line: Color32,    // bordures
+    pub text: Color32,
+    pub muted: Color32,
+    pub accent: Color32,  // couleur de la marque
+    pub on_accent: Color32,
+    pub link: Color32,
+    pub missing: Color32, // lien vers une note inexistante
+    pub code_bg: Color32,
+}
 
-pub fn apply(ctx: &egui::Context) {
-    let mono = |size: f32| FontId::new(size, FontFamily::Monospace);
+const fn rgb(hex: u32) -> Color32 {
+    Color32::from_rgb((hex >> 16) as u8, (hex >> 8) as u8, hex as u8)
+}
+
+pub const LIGHT: Palette = Palette {
+    bg: rgb(0xffffff),
+    panel: rgb(0xf3f3f1),
+    line: rgb(0xdcdcd7),
+    text: rgb(0x18181b),
+    muted: rgb(0x7a7a80),
+    accent: rgb(0xff4f1f),
+    on_accent: rgb(0xffffff),
+    link: rgb(0x1d4ed8),
+    missing: rgb(0xb42318),
+    code_bg: rgb(0xf3f3f1),
+};
+
+pub const DARK: Palette = Palette {
+    bg: rgb(0x141416),
+    panel: rgb(0x1b1b1e),
+    line: rgb(0x2e2e33),
+    text: rgb(0xe6e6e8),
+    muted: rgb(0x8a8a92),
+    accent: rgb(0xff6a3d),
+    on_accent: rgb(0x141416),
+    link: rgb(0x7aa2f7),
+    missing: rgb(0xf07167),
+    code_bg: rgb(0x1f1f23),
+};
+
+static IS_DARK: AtomicBool = AtomicBool::new(false);
+
+pub fn pal() -> Palette {
+    if IS_DARK.load(Ordering::Relaxed) { DARK } else { LIGHT }
+}
+
+pub fn is_dark() -> bool {
+    IS_DARK.load(Ordering::Relaxed)
+}
+
+/// Police Inter (OFL) intégrée à l'exécutable. « bold » = Inter SemiBold.
+pub fn install_fonts(ctx: &egui::Context) {
+    use std::sync::Arc;
+    let mut fonts = egui::FontDefinitions::default();
+    fonts.font_data.insert("inter".into(), Arc::new(egui::FontData::from_static(include_bytes!("../assets/fonts/Inter-Regular.ttf"))));
+    fonts.font_data.insert("inter-semibold".into(), Arc::new(egui::FontData::from_static(include_bytes!("../assets/fonts/Inter-SemiBold.ttf"))));
+    let fallback = fonts.families.get(&FontFamily::Proportional).cloned().unwrap_or_default();
+    fonts.families.get_mut(&FontFamily::Proportional).unwrap().insert(0, "inter".into());
+    let mut bold = vec!["inter-semibold".to_string()];
+    bold.extend(fallback);
+    fonts.families.insert(FontFamily::Name("bold".into()), bold);
+    ctx.set_fonts(fonts);
+}
+
+pub fn bold() -> FontFamily {
+    FontFamily::Name("bold".into())
+}
+
+pub fn apply(ctx: &egui::Context, dark: bool) {
+    IS_DARK.store(dark, Ordering::Relaxed);
+    let p = pal();
+    let prop = |size: f32| FontId::new(size, FontFamily::Proportional);
     ctx.global_style_mut(|style| {
         style.text_styles = [
-            (TextStyle::Small, mono(11.0)),
-            (TextStyle::Body, mono(13.5)),
-            (TextStyle::Button, mono(13.5)),
-            (TextStyle::Monospace, mono(13.5)),
-            (TextStyle::Heading, mono(18.0)),
+            (TextStyle::Small, prop(11.0)),
+            (TextStyle::Body, prop(14.0)),
+            (TextStyle::Button, prop(13.5)),
+            (TextStyle::Monospace, FontId::new(14.0, FontFamily::Monospace)),
+            (TextStyle::Heading, prop(20.0)),
         ]
         .into();
-        style.spacing.item_spacing = egui::vec2(8.0, 4.0);
-        style.spacing.button_padding = egui::vec2(6.0, 2.0);
+        style.spacing.item_spacing = egui::vec2(8.0, 6.0);
+        style.spacing.button_padding = egui::vec2(10.0, 4.0);
+        style.spacing.interact_size.y = 26.0;
 
         let v = &mut style.visuals;
-        *v = egui::Visuals::dark();
-        v.panel_fill = PANEL;
-        v.window_fill = PANEL;
-        v.extreme_bg_color = BG;
-        v.faint_bg_color = CODE_BG;
-        v.override_text_color = Some(TEXT);
-        v.hyperlink_color = LINK;
-        v.selection.bg_fill = ACCENT.linear_multiply(0.25);
-        v.selection.stroke = Stroke::new(1.0, ACCENT);
-        v.window_stroke = Stroke::new(1.0, LINE);
+        *v = if dark { egui::Visuals::dark() } else { egui::Visuals::light() };
+        v.panel_fill = p.panel;
+        v.window_fill = p.bg;
+        v.extreme_bg_color = p.bg;
+        v.faint_bg_color = p.code_bg;
+        v.override_text_color = Some(p.text);
+        v.hyperlink_color = p.link;
+        v.selection.bg_fill = p.accent.linear_multiply(0.28);
+        v.selection.stroke = Stroke::new(1.0, p.accent);
+        v.window_stroke = Stroke::new(1.0, p.line);
+        v.window_shadow = egui::Shadow::NONE;
+        v.popup_shadow = egui::Shadow::NONE;
         v.window_corner_radius = CornerRadius::ZERO;
         v.menu_corner_radius = CornerRadius::ZERO;
-        v.text_cursor.stroke = Stroke::new(2.0, ACCENT);
+        v.text_cursor.stroke = Stroke::new(2.0, p.accent);
         for w in [
             &mut v.widgets.noninteractive,
             &mut v.widgets.inactive,
@@ -48,13 +116,19 @@ pub fn apply(ctx: &egui::Context) {
             &mut v.widgets.open,
         ] {
             w.corner_radius = CornerRadius::ZERO;
+            w.expansion = 0.0;
+            w.fg_stroke.color = p.text;
         }
-        v.widgets.noninteractive.bg_stroke = Stroke::new(1.0, LINE);
-        v.widgets.inactive.weak_bg_fill = Color32::TRANSPARENT;
-        v.widgets.inactive.bg_fill = BG;
-        v.widgets.hovered.weak_bg_fill = LINE;
-        v.widgets.hovered.bg_stroke = Stroke::new(1.0, MUTED);
-        v.widgets.active.weak_bg_fill = LINE;
-        v.widgets.active.bg_stroke = Stroke::new(1.0, ACCENT);
+        v.widgets.noninteractive.bg_stroke = Stroke::new(1.0, p.line);
+        v.widgets.noninteractive.fg_stroke.color = p.text;
+        v.widgets.inactive.bg_fill = p.bg;
+        v.widgets.inactive.weak_bg_fill = p.bg;
+        v.widgets.inactive.bg_stroke = Stroke::new(1.0, p.line);
+        v.widgets.hovered.bg_fill = p.panel;
+        v.widgets.hovered.weak_bg_fill = p.panel;
+        v.widgets.hovered.bg_stroke = Stroke::new(1.0, p.text);
+        v.widgets.active.bg_fill = p.line;
+        v.widgets.active.weak_bg_fill = p.line;
+        v.widgets.active.bg_stroke = Stroke::new(1.0, p.accent);
     });
 }
