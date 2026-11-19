@@ -554,7 +554,7 @@ impl App {
             .frame(egui::Frame::new().fill(p.bg).stroke(egui::Stroke::new(1.0, p.line)).inner_margin(egui::Margin::symmetric(12, 0)))
             .show(ui, |ui| {
                 ui.horizontal_centered(|ui| {
-                    theme::logo(ui, 18.0);
+                    theme::mark(ui, 16.0);
                     ui.label(RichText::new("aryadne").family(theme::bold()));
                     let path = self.root();
                     let short = path.split(['/', '\\']).filter(|s| !s.is_empty()).last().unwrap_or("").to_string();
@@ -2076,7 +2076,7 @@ impl App {
         let p = theme::pal();
         egui::Panel::top("compact").exact_size(26.0).frame(egui::Frame::new().fill(p.panel).inner_margin(egui::Margin::symmetric(8, 0))).show(ui, |ui| {
             ui.horizontal_centered(|ui| {
-                theme::logo(ui, 12.0);
+                theme::mark(ui, 11.0);
                 for (label, v) in [("fichiers", View::Files), ("refs", View::Refs), ("boards", View::Boards)] {
                     let t = if self.view() == v { RichText::new(label).size(11.0).color(p.text) } else { RichText::new(label).size(11.0).color(p.muted) };
                     if ui.add(egui::Button::new(t).frame(false)).clicked() {

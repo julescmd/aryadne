@@ -159,6 +159,14 @@ pub fn logo(ui: &mut egui::Ui, height: f32) -> egui::Response {
     ui.add(egui::Image::from_bytes(uri, bytes).fit_to_exact_size(egui::vec2(height * 211.31 / 183.0, height)))
 }
 
+/// Le motif seul (sans hexagone), teinté avec la couleur du texte du thème.
+pub fn mark(ui: &mut egui::Ui, height: f32) -> egui::Response {
+    let img = egui::Image::from_bytes("bytes://mark.png", include_bytes!("../assets/mark.png"))
+        .tint(pal().text)
+        .fit_to_exact_size(egui::vec2(height * 134.85 / 125.79, height));
+    ui.add(img)
+}
+
 /// Icône de la fenêtre.
 pub fn window_icon() -> Option<egui::IconData> {
     let img = image::load_from_memory(include_bytes!("../assets/icon.png")).ok()?.to_rgba8();
