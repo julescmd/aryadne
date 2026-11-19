@@ -48,9 +48,23 @@ pub const DARK: Palette = Palette {
 };
 
 static IS_DARK: AtomicBool = AtomicBool::new(false);
+/// Couleur d'accent choisie dans les réglages (0 = celle du thème).
+static ACCENT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+pub fn set_accent(c: Option<Color32>) {
+    let v = c.map(|c| 0x0100_0000 | (c.r() as u32) << 16 | (c.g() as u32) << 8 | c.b() as u32).unwrap_or(0);
+    ACCENT.store(v, Ordering::Relaxed);
+}
 
 pub fn pal() -> Palette {
-    if IS_DARK.load(Ordering::Relaxed) { DARK } else { LIGHT }
+    let mut p = if IS_DARK.load(Ordering::Relaxed) { DARK } else { LIGHT };
+    let a = ACCENT.load(Ordering::Relaxed);
+    if a != 0 {
+        p.accent = rgb(a & 0xff_ffff);
+        let lum = 0.2126 * p.accent.r() as f32 + 0.7152 * p.accent.g() as f32 + 0.0722 * p.accent.b() as f32;
+        p.on_accent = if lum > 150.0 { rgb(0x18181b) } else { rgb(0xffffff) };
+    }
+    p
 }
 
 pub fn is_dark() -> bool {
@@ -122,7 +136,8 @@ pub fn apply(ctx: &egui::Context, dark: bool) {
         }
         v.widgets.noninteractive.bg_stroke = Stroke::new(1.0, p.line);
         v.widgets.noninteractive.fg_stroke.color = p.text;
-        v.widgets.inactive.bg_fill = p.bg;
+        v.widgets.inactive.bg_fill = p.line;
+        v.slider_trailing_fill = true;
         v.widgets.inactive.weak_bg_fill = p.bg;
         v.widgets.inactive.bg_stroke = Stroke::new(1.0, p.line);
         v.widgets.hovered.bg_fill = p.panel;

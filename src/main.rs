@@ -7,7 +7,9 @@ mod chat;
 mod images;
 mod ollama;
 mod preview;
+mod settings;
 mod theme;
+mod transfer;
 mod updater;
 mod vault;
 
@@ -117,7 +119,9 @@ enum Dialog {
     ConfirmTrash { rel: String },
     Update,
     Import { files: Vec<PathBuf>, dir: String, remember: bool },
-    Settings(ai::Settings),
+    MoveIn { rel: String, copy: bool },
+    Transfer { send: bool },
+    Settings(settings::SettingsState),
 }
 
 enum Summary {
@@ -154,6 +158,17 @@ struct App {
     auto_query: String,
     toast: Option<(String, Instant)>,
     updater: updater::Updater,
+    prefs: settings::Prefs,
+    links_dirty: bool,
+    /// La fenêtre ouverte a déjà été affichée au moins une fois.
+    dialog_shown: bool,
+    receiver: Option<transfer::Receiver>,
+    ctx: Option<egui::Context>,
+    jobs: Vec<transfer::Shared>,
+    peers: std::sync::Arc<std::sync::Mutex<Vec<transfer::Peer>>>,
+    send_files: Vec<String>,
+    send_addr: String,
+    send_code: String,
     github_token: String,
     error: Option<String>,
 }
@@ -162,14 +177,16 @@ impl App {
     fn new(ctx: &egui::Context) -> Self {
         egui_extras::install_image_loaders(ctx);
         theme::install_fonts(ctx);
-        theme::apply(ctx, load_config("theme").as_deref() == Some("dark"));
-        let mut app = Self { view: Some(View::Files), ai: Some(ai::Settings::load()), ..Default::default() };
+        let prefs = settings::Prefs::load();
+        prefs.apply(ctx);
+        let mut app = Self { view: Some(View::Files), ai: Some(ai::Settings::load()), prefs, ..Default::default() };
+        app.ctx = Some(ctx.clone());
         app.local.refresh(&app.ai.clone().unwrap_or_default().url, ctx);
         app.github_token = load_config("github_token").unwrap_or_default();
         // Vérifie les mises à jour au plus toutes les 6 h (pas en mode dev).
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
         let last: u64 = load_config("last_update_check").and_then(|v| v.parse().ok()).unwrap_or(0);
-        if !cfg!(debug_assertions) && now.saturating_sub(last) > 6 * 3600 {
+        if app.prefs.auto_update && !cfg!(debug_assertions) && now.saturating_sub(last) > 6 * 3600 {
             save_config("last_update_check", &now.to_string());
             app.updater.check(app.github_token.clone(), ctx);
         }
@@ -207,6 +224,7 @@ impl App {
         self.chat = chat::Chat::default();
         let root = self.root();
         self.images.set_root(&root);
+        vault::load_links(&root);
         self.refresh();
         if let Some(first) = self.entries.iter().find(|e| vault::is_md(&e.rel)).map(|e| e.rel.clone()) {
             self.open(first);
@@ -286,8 +304,15 @@ impl App {
         }
     }
 
+    /// Dossier des nouvelles notes (réglage), s'il existe dans le coffre.
+    fn notes_dir(&self) -> String {
+        let d = self.prefs.notes_dir.trim().trim_matches('/').to_string();
+        if !d.is_empty() && self.entries.iter().any(|e| e.rel == d && e.is_dir) { d } else { String::new() }
+    }
+
     fn new_note(&mut self) {
-        let dir = self.target_dir("notes");
+        let nd = self.notes_dir();
+        let dir = self.target_dir(&nd);
         let mut name = "Sans titre.md".to_string();
         let mut i = 2;
         while self.entries.iter().any(|e| e.rel == vault::join(&dir, &name)) {
@@ -308,13 +333,17 @@ impl App {
     }
 
     fn set_dark(&mut self, ctx: &egui::Context, dark: bool) {
-        theme::apply(ctx, dark);
-        save_config("theme", if dark { "dark" } else { "light" });
+        self.prefs.dark = dark;
+        self.prefs.save();
+        self.prefs.apply(ctx);
     }
 
     // ---------- actions différées (évite les conflits d'emprunt pendant le dessin) ----------
 
     fn run_actions(&mut self, ctx: &egui::Context) {
+        if std::mem::take(&mut self.links_dirty) {
+            self.refresh();
+        }
         let root = self.root();
         for a in std::mem::take(&mut self.actions) {
             match a {
@@ -327,7 +356,8 @@ impl App {
                     let rel = match self.md.get(&name.to_lowercase()) {
                         Some(r) => r.clone(),
                         None => {
-                            let dir = if self.entries.iter().any(|e| e.rel == "notes") { "notes" } else { "" };
+                            let nd = self.notes_dir();
+                            let dir = nd.as_str();
                             let rel = vault::join(dir, &format!("{name}.md"));
                             if self.report(vault::create_file(&root, &rel)).is_none() {
                                 continue;
@@ -350,7 +380,13 @@ impl App {
                     self.dialog_text = from.clone();
                     self.dialog = Some(Dialog::Rename { from });
                 }
-                Action::Trash(rel) => self.dialog = Some(Dialog::ConfirmTrash { rel }),
+                Action::Trash(rel) => {
+                    if self.prefs.confirm_delete {
+                        self.dialog = Some(Dialog::ConfirmTrash { rel });
+                    } else {
+                        self.do_trash(&rel);
+                    }
+                }
                 Action::Move(from, to_dir) => {
                     let name = from.rsplit('/').next().unwrap_or(&from).to_string();
                     let to = vault::join(&to_dir, &name);
@@ -379,9 +415,7 @@ impl App {
     }
 
     fn open_settings(&mut self, ctx: &egui::Context) {
-        let s = self.ai.clone().unwrap_or_default();
-        self.local.refresh(&s.url, ctx);
-        self.dialog = Some(Dialog::Settings(s));
+        self.open_settings_tab(ctx, settings::Tab::Ai);
     }
 
     fn do_rename(&mut self, from: &str, to: &str) {
@@ -505,8 +539,11 @@ impl App {
                         if ui.button(label).clicked() {
                             self.set_dark(ui.ctx(), !theme::is_dark());
                         }
-                        if ui.button("ia").on_hover_text("Réglages du résumé IA").clicked() {
-                            self.open_settings(ui.ctx());
+                        if ui.button("transfert").on_hover_text("Envoyer ou recevoir des fichiers entre deux ordinateurs").clicked() {
+                            self.dialog = Some(Dialog::Transfer { send: !self.send_files.is_empty() });
+                        }
+                        if ui.button("réglages").clicked() {
+                            self.open_settings_tab(ui.ctx(), settings::Tab::Appearance);
                         }
                     });
                 });
@@ -569,7 +606,7 @@ impl App {
                             self.actions.push(Action::NewDir(self.target_dir("")));
                         }
                         if ui.small_button("+fichier").on_hover_text("Nouveau fichier").clicked() {
-                            self.actions.push(Action::NewFile(self.target_dir("notes")));
+                            self.actions.push(Action::NewFile(self.target_dir(&self.notes_dir())));
                         }
                     });
                 });
@@ -661,7 +698,9 @@ impl App {
                 painter.line_segment([egui::pos2(gx, rect.top()), egui::pos2(gx, rect.bottom())], egui::Stroke::new(1.0, p.line));
             }
             let font = egui::FontId::monospace(12.5);
-            let (icon, icon_color) = if e.is_dir {
+            let (icon, icon_color) = if e.is_dir && vault::is_external(&e.rel) && e.depth == 0 {
+                ("↗", p.accent)
+            } else if e.is_dir {
                 (if self.collapsed.contains(&e.rel) { "▸" } else { "▾" }, p.muted)
             } else if vault::is_md(&e.rel) {
                 ("#", p.accent)
@@ -723,14 +762,52 @@ impl App {
                     self.actions.push(Action::NewDir(dir.clone()));
                 }
                 ui.separator();
-                if ui.button("renommer / déplacer").clicked() {
+                let link_root = vault::is_link_root(&e.rel) || e.rel == vault::LINKED_FILES;
+                if !link_root && ui.button("renommer / déplacer").clicked() {
                     self.actions.push(Action::Rename(e.rel.clone()));
                 }
-                if ui.button("copier le chemin").clicked() {
-                    ui.ctx().copy_text(e.rel.clone());
+                if vault::is_external(&e.rel) && !e.is_dir {
+                    if ui.button("déplacer dans le coffre").on_hover_text("Le fichier quitte son dossier d'origine").clicked() {
+                        self.dialog = Some(Dialog::MoveIn { rel: e.rel.clone(), copy: false });
+                    }
+                    if ui.button("copier dans le coffre").clicked() {
+                        self.dialog = Some(Dialog::MoveIn { rel: e.rel.clone(), copy: true });
+                    }
                 }
-                if ui.button(RichText::new("supprimer").color(p.missing)).clicked() {
-                    self.actions.push(Action::Trash(e.rel.clone()));
+                ui.separator();
+                if ui.button("exporter en zip…").clicked() {
+                    self.export_zip(vec![e.rel.clone()], false);
+                }
+                if (vault::is_md(&e.rel) || board::is_board(&e.rel)) && ui.button("exporter avec ses liens en zip…").on_hover_text("Ajoute les notes liées, les images citées et le contenu du board").clicked() {
+                    self.export_zip(vec![e.rel.clone()], true);
+                }
+                if ui.button("envoyer à un autre ordi…").clicked() {
+                    let root = self.root();
+                    self.send_files = transfer::collect(&root, &self.entries, &[e.rel.clone()], false);
+                    self.dialog = Some(Dialog::Transfer { send: true });
+                }
+                ui.separator();
+                if ui.button("afficher dans le dossier").clicked() {
+                    if let Ok(path) = vault::safe(&self.root(), &e.rel) {
+                        settings::reveal(&path, !e.is_dir);
+                    }
+                }
+                if ui.button("copier le chemin").clicked() {
+                    let full = vault::safe(&self.root(), &e.rel).map(|p| p.to_string_lossy().to_string()).unwrap_or(e.rel.clone());
+                    ui.ctx().copy_text(full);
+                }
+                let label = if link_root { "retirer le lien (le fichier reste en place)" } else { "supprimer" };
+                if ui.button(RichText::new(label).color(p.missing)).clicked() {
+                    if link_root {
+                        let r = vault::trash(&self.root(), &e.rel);
+                        if self.report(r).is_some() {
+                            self.docs.retain(|d| !(d.rel == e.rel || d.rel.starts_with(&format!("{}/", e.rel))));
+                            self.active = if self.docs.is_empty() { None } else { Some(0) };
+                            self.links_dirty = true;
+                        }
+                    } else {
+                        self.actions.push(Action::Trash(e.rel.clone()));
+                    }
                 }
             });
         }
@@ -879,8 +956,10 @@ impl App {
                 }
                 Content::Text(text) => {
                     let lang = if is_md { "md".to_string() } else { ext(&rel) };
-                    let theme = if dark { egui_extras::syntax_highlighting::CodeTheme::dark(13.0) } else { egui_extras::syntax_highlighting::CodeTheme::light(13.0) };
-                    let wrap = is_md || lang.is_empty() || lang == "txt";
+                    let fs = self.prefs.editor_size;
+                    let theme = if dark { egui_extras::syntax_highlighting::CodeTheme::dark(fs) } else { egui_extras::syntax_highlighting::CodeTheme::light(fs) };
+                    let wrap = is_md || lang.is_empty() || lang == "txt" || self.prefs.wrap_code;
+                    let numbers = !is_md && self.prefs.line_numbers;
                     let mut layouter = |ui: &egui::Ui, buf: &dyn egui::TextBuffer, width: f32| {
                         let mut job = egui_extras::syntax_highlighting::highlight(ui.ctx(), ui.style(), &theme, buf.as_str(), &lang);
                         job.wrap.max_width = if wrap { width } else { f32::INFINITY };
@@ -891,10 +970,10 @@ impl App {
                     scroll.auto_shrink(false).show(ui, |ui| {
                         egui::Frame::new().inner_margin(egui::Margin { left: if wrap { 40 } else { 8 }, right: 24, top: 16, bottom: 120 }).show(ui, |ui| {
                             ui.horizontal_top(|ui| {
-                                if !wrap {
+                                if numbers && !wrap {
                                     let n = text.lines().count().max(1) + usize::from(text.ends_with('\n'));
                                     let nums: String = (1..=n).map(|k| format!("{k:>4}\n")).collect();
-                                    ui.add(egui::Label::new(RichText::new(nums.trim_end()).monospace().size(13.0).color(p.muted.linear_multiply(0.7))).selectable(false));
+                                    ui.add(egui::Label::new(RichText::new(nums.trim_end()).monospace().size(fs).color(p.muted.linear_multiply(0.7))).selectable(false));
                                     ui.add_space(10.0);
                                 }
                                 let edit = egui::TextEdit::multiline(text)
@@ -992,7 +1071,8 @@ impl App {
                     }
                     if let Some((rel, text)) = save {
                         let name = vault::stem(&rel);
-                        let dir = if self.entries.iter().any(|e| e.rel == "notes") { "notes" } else { "" };
+                        let nd = self.notes_dir();
+                            let dir = nd.as_str();
                         let note = vault::join(dir, &format!("Résumé - {name}.md"));
                         let source = if vault::is_md(&rel) { format!("[[{name}]]") } else { format!("`{rel}`") };
                         let body = format!("# Résumé - {name}\n\nSource : {source}\n\n{text}\n");
@@ -1104,6 +1184,43 @@ impl App {
         }
     }
 
+    /// Colle l'image du presse-papier sur le board (enregistrée dans refs/),
+    /// ou un chemin de fichier copié (lié, pas copié).
+    fn paste_image(&mut self, at: egui::Vec2) {
+        let mut cb = match arboard::Clipboard::new() {
+            Ok(c) => c,
+            Err(e) => return self.toast(format!("presse-papier indisponible : {e}")),
+        };
+        if let Ok(img) = cb.get_image() {
+            let Some(buf) = image::RgbaImage::from_raw(img.width as u32, img.height as u32, img.bytes.into_owned()) else {
+                return self.toast("image du presse-papier illisible");
+            };
+            let dir = if self.entries.iter().any(|e| e.rel == "refs") { "refs" } else { "" };
+            let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+            let rel = vault::join(dir, &format!("collé-{ts}.png"));
+            let saved = vault::safe(&self.root(), &rel).and_then(|path| buf.save(&path).map_err(|e| e.to_string()));
+            if self.report(saved).is_some() {
+                self.refresh();
+                self.board.drop_file(&rel, at, &mut self.images);
+                self.toast(format!("image collée → {rel}"));
+            }
+            return;
+        }
+        if let Ok(text) = cb.get_text() {
+            let path = std::path::PathBuf::from(text.trim().trim_matches('"'));
+            if path.exists() {
+                let root = self.root();
+                let rel = vault::inside(&root, &path).map(Ok).unwrap_or_else(|| vault::link_external(&root, &path));
+                if let Some(rel) = self.report(rel) {
+                    self.refresh();
+                    self.board.drop_file(&rel, at, &mut self.images);
+                }
+                return;
+            }
+        }
+        self.toast("rien à coller : copie une image d'abord");
+    }
+
     fn toast(&mut self, msg: impl Into<String>) {
         self.toast = Some((msg.into(), Instant::now()));
     }
@@ -1139,7 +1256,7 @@ impl App {
                 }
             }
         }
-        let on_board: HashSet<String> = self.board.data.items.iter().filter_map(|i| if let board::Kind::Image { rel } = &i.kind { Some(rel.clone()) } else { None }).collect();
+        let on_board: HashSet<String> = self.board.data.items.iter().filter_map(|i| if let board::Kind::Image { rel, .. } = &i.kind { Some(rel.clone()) } else { None }).collect();
         let mut found: Vec<(String, usize)> = ctx_text
             .into_iter()
             .filter(|(rel, _)| !on_board.contains(rel))
@@ -1210,21 +1327,52 @@ impl App {
                         self.new_board("Moodboard");
                     }
                     ui.separator();
-                    if ui.button("+ texte").on_hover_text("ou double-clic dans le vide").clicked() {
-                        let c = self.board.view_center;
-                        self.board.add(board::Kind::Text { text: String::new() }, c, egui::vec2(260.0, 120.0));
-                        self.board.edit_selected();
+                    // Outils
+                    for (tool, label, key) in [(board::Tool::Select, "sélection", "V"), (board::Tool::Pen, "dessin", "B"), (board::Tool::Eraser, "gomme", "E"), (board::Tool::Text, "texte", "T")] {
+                        if ui.selectable_label(self.board.tool == tool, label).on_hover_text(key).clicked() {
+                            self.board.tool = tool;
+                        }
+                    }
+                    if matches!(self.board.tool, board::Tool::Pen) {
+                        ui.separator();
+                        for c in [p.accent, egui::Color32::from_rgb(0x18, 0x18, 0x1b), egui::Color32::WHITE, egui::Color32::from_rgb(0x25, 0x63, 0xeb), egui::Color32::from_rgb(0x16, 0xa3, 0x4a), egui::Color32::from_rgb(0xea, 0xb3, 0x08)] {
+                            let (r, resp) = ui.allocate_exact_size(egui::vec2(18.0, 18.0), egui::Sense::click());
+                            ui.painter().rect_filled(r, 0.0, c);
+                            ui.painter().rect_stroke(r, 0.0, egui::Stroke::new(if self.board.pen_color == c { 2.0 } else { 1.0 }, if self.board.pen_color == c { p.text } else { p.line }), egui::StrokeKind::Inside);
+                            if resp.clicked() {
+                                self.board.pen_color = c;
+                            }
+                        }
+                        ui.color_edit_button_srgba(&mut self.board.pen_color);
+                        ui.add(egui::Slider::new(&mut self.board.pen_width, 1.0..=40.0).show_value(false)).on_hover_text("épaisseur");
                     }
                     ui.separator();
+                    if ui.add_enabled(self.board.can_undo(), egui::Button::new("↶")).on_hover_text("annuler (Ctrl+Z)").clicked() {
+                        self.board.undo();
+                    }
+                    if ui.add_enabled(self.board.can_redo(), egui::Button::new("↷")).on_hover_text("rétablir (Ctrl+Y)").clicked() {
+                        self.board.redo();
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("cadrer").clicked() {
+                            self.board.fit();
+                        }
+                    });
+                });
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
                     ui.label(RichText::new("auto").color(p.accent).family(theme::bold()));
-                    ui.add(egui::TextEdit::singleline(&mut self.auto_query).hint_text("mots-clés : forêt brume…").desired_width(170.0));
+                    ui.add(egui::TextEdit::singleline(&mut self.auto_query).hint_text("mots-clés : forêt brume…").desired_width(200.0));
                     if ui.button("par mots-clés").on_hover_text("Ajoute les images dont le nom, le dossier ou les notes qui les citent correspondent").clicked() {
                         let q = self.auto_query.clone();
                         let n = self.auto_board_keywords(&q);
                         self.toast(if n == 0 { "aucune image ne correspond".to_string() } else { format!("{n} images ajoutées") });
                     }
-                    let seed = self.board.selected.and_then(|i| self.board.data.items.get(i)).and_then(|it| if let board::Kind::Image { rel } = &it.kind { Some(rel.clone()) } else { None });
-                    let btn = ui.add_enabled(seed.is_some(), egui::Button::new("par couleurs")).on_hover_text("Sélectionne une image du board : ajoute les refs aux couleurs proches").on_disabled_hover_text("sélectionne d'abord une image du board");
+                    let seed = (self.board.selection.len() == 1)
+                        .then(|| self.board.selection[0])
+                        .and_then(|i| self.board.data.items.get(i))
+                        .and_then(|it| if let board::Kind::Image { rel, .. } = &it.kind { Some(rel.clone()) } else { None });
+                    let btn = ui.add_enabled(seed.is_some(), egui::Button::new("par couleurs")).on_hover_text("Ajoute les refs aux couleurs proches de l'image sélectionnée").on_disabled_hover_text("sélectionne d'abord une seule image du board");
                     if btn.clicked() {
                         if let Some(seed) = seed {
                             match self.auto_board_colors(&seed) {
@@ -1233,11 +1381,6 @@ impl App {
                             }
                         }
                     }
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.button("cadrer").clicked() {
-                            self.board.fit();
-                        }
-                    });
                 });
             });
             let entries = self.entries.clone();
@@ -1246,8 +1389,10 @@ impl App {
                 let _ = &entries;
                 vault::read(&root, rel).map(|t| t.lines().filter(|l| !l.starts_with('#') && !l.trim().is_empty()).take(6).collect::<Vec<_>>().join("\n")).unwrap_or_default()
             };
-            if let Some(board::Event::Open(rel)) = self.board.show(ui, &mut self.images, &summary) {
-                self.actions.push(Action::Open(rel));
+            match self.board.show(ui, &mut self.images, &summary) {
+                Some(board::Event::Open(rel)) => self.actions.push(Action::Open(rel)),
+                Some(board::Event::PasteImage(at)) => self.paste_image(at.to_vec2()),
+                None => {}
             }
         });
     }
@@ -1535,7 +1680,8 @@ impl App {
             self.chat.send(self.root(), self.entries.clone(), open, settings, self.local.clone(), ui.ctx().clone());
         }
         if save {
-            let dir = if self.entries.iter().any(|e| e.rel == "notes") { "notes" } else { "" };
+            let nd = self.notes_dir();
+                            let dir = nd.as_str();
             let mut rel = vault::join(dir, "Conversation.md");
             let mut i = 2;
             while self.entries.iter().any(|e| e.rel == rel) {
@@ -1548,6 +1694,222 @@ impl App {
                 self.actions.push(Action::Open(rel));
             }
         }
+    }
+
+
+    // ---------- export et transfert ----------
+
+    fn export_zip(&mut self, rels: Vec<String>, with_links: bool) {
+        let root = self.root();
+        let files = transfer::collect(&root, &self.entries, &rels, with_links);
+        if files.is_empty() {
+            return self.toast("rien à exporter");
+        }
+        let base = rels.first().map(|r| vault::stem(r)).unwrap_or_else(|| "export".into()).trim_start_matches('@').to_string();
+        let Some(dest) = rfd::FileDialog::new().set_title("Exporter en zip").set_file_name(format!("{base}.zip")).add_filter("zip", &["zip"]).save_file() else { return };
+        let job = transfer::export_zip(root, files, dest, self.ctx.clone().unwrap());
+        self.jobs.push(job);
+    }
+
+    fn poll_jobs(&mut self) {
+        let mut msgs = vec![];
+        self.jobs.retain(|j| {
+            let p = j.lock().map(|p| p.clone()).unwrap_or_default();
+            if p.finished {
+                msgs.push(p.error.map(|e| format!("erreur : {e}")).or(p.result).unwrap_or_default());
+                false
+            } else {
+                true
+            }
+        });
+        let mut got_files = false;
+        if let Some(rx) = &self.receiver {
+            if let Ok(mut p) = rx.progress.lock() {
+                if p.finished {
+                    p.finished = false;
+                    if let Some(r) = p.result.take() {
+                        msgs.push(r);
+                    }
+                    got_files = true;
+                }
+                if let Some(e) = p.error.take() {
+                    msgs.push(format!("erreur : {e}"));
+                }
+            }
+        }
+        if got_files {
+            self.refresh();
+        }
+        if let Some(m) = msgs.into_iter().filter(|m| !m.is_empty()).last() {
+            self.toast(m);
+        }
+    }
+
+    fn transfer_dialog(&mut self, ctx: &egui::Context, mut send: bool) -> bool {
+        let p = theme::pal();
+        let mut keep = true;
+        let frame = egui::Frame::new().fill(p.bg).stroke(egui::Stroke::new(1.0, p.text)).inner_margin(16);
+        let r = egui::Modal::new(egui::Id::unique("transfer")).frame(frame).show(ctx, |ui| {
+            ui.set_width(560.0);
+            ui.horizontal(|ui| {
+                ui.label(caps("transfert entre ordinateurs"));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("fermer").clicked() {
+                        keep = false;
+                    }
+                });
+            });
+            ui.label(RichText::new("Sur le même réseau (wifi ou câble), sans cloud et sans limite de taille. Idéal pour les fichiers 3D.").color(p.muted).size(11.5));
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if ui.selectable_label(!send, "recevoir").clicked() {
+                    send = false;
+                }
+                if ui.selectable_label(send, "envoyer").clicked() {
+                    send = true;
+                    let (found, c) = (self.peers.clone(), ctx.clone());
+                    if let Ok(mut f) = found.lock() {
+                        f.clear();
+                    }
+                    transfer::discover(found, c);
+                }
+            });
+            ui.separator();
+            if !send {
+                match &self.receiver {
+                    None => {
+                        ui.label("Mets cet ordinateur en réception, puis envoie depuis l'autre.");
+                        ui.add_space(6.0);
+                        let b = egui::Button::new(RichText::new("commencer à recevoir").color(p.on_accent).family(theme::bold())).fill(p.accent).stroke(egui::Stroke::NONE);
+                        if ui.add(b).clicked() {
+                            match transfer::Receiver::start(self.root(), ctx.clone()) {
+                                Ok(r) => self.receiver = Some(r),
+                                Err(e) => self.error = Some(e),
+                            }
+                        }
+                        ui.label(RichText::new("Windows peut demander d'autoriser Aryadne sur le réseau : accepte pour les réseaux privés.").color(p.muted).size(11.0));
+                    }
+                    Some(rx) => {
+                        let ip = transfer::local_ip().unwrap_or_else(|| "?".into());
+                        egui::Grid::new("rx").num_columns(2).spacing([16.0, 6.0]).show(ui, |ui| {
+                            ui.label("ordinateur");
+                            ui.label(RichText::new(transfer::hostname()).family(theme::bold()));
+                            ui.end_row();
+                            ui.label("adresse");
+                            ui.label(RichText::new(format!("{ip}:{}", rx.port)).family(theme::bold()));
+                            ui.end_row();
+                            ui.label("code");
+                            ui.label(RichText::new(&rx.code).size(28.0).color(p.accent).family(theme::bold()));
+                            ui.end_row();
+                        });
+                        let pr = rx.progress.lock().map(|p| p.clone()).unwrap_or_default();
+                        ui.add_space(6.0);
+                        if pr.total > 0 && pr.done < pr.total {
+                            ui.add(egui::ProgressBar::new(pr.done as f32 / pr.total as f32).corner_radius(0.0).fill(p.accent).text(format!("{} / {}", transfer::human(pr.done), transfer::human(pr.total))));
+                        }
+                        ui.horizontal(|ui| {
+                            ui.spinner();
+                            ui.label(RichText::new(&pr.label).color(p.muted).size(11.5));
+                        });
+                        if !pr.received.is_empty() {
+                            ui.label(RichText::new(format!("derniers fichiers reçus : {}", pr.received.len())).size(11.5));
+                        }
+                        ui.horizontal(|ui| {
+                            if ui.button("arrêter").clicked() {
+                                self.receiver = None;
+                            }
+                            if ui.button("ouvrir reçus/").clicked() {
+                                if let Ok(path) = vault::safe(&self.root(), "reçus") {
+                                    let _ = std::fs::create_dir_all(&path);
+                                    settings::reveal(&path, false);
+                                }
+                            }
+                        });
+                    }
+                }
+            } else {
+                ui.label(caps(&format!("fichiers · {} · {}", self.send_files.len(), transfer::human(transfer::total_size(&self.root(), &self.send_files)))));
+                egui::ScrollArea::vertical().max_height(120.0).show(ui, |ui| {
+                    let mut remove = None;
+                    for (k, f) in self.send_files.iter().enumerate() {
+                        ui.horizontal(|ui| {
+                            if ui.small_button("×").clicked() {
+                                remove = Some(k);
+                            }
+                            ui.label(RichText::new(f).size(11.5));
+                        });
+                    }
+                    if let Some(k) = remove {
+                        self.send_files.remove(k);
+                    }
+                });
+                ui.horizontal(|ui| {
+                    if ui.button("+ fichiers de l'ordi…").clicked() {
+                        if let Some(paths) = rfd::FileDialog::new().pick_files() {
+                            let root = self.root();
+                            for pth in paths {
+                                let rel = vault::inside(&root, &pth).map(Ok).unwrap_or_else(|| vault::link_external(&root, &pth));
+                                if let Some(rel) = self.report(rel) {
+                                    self.send_files.push(rel);
+                                }
+                            }
+                            self.links_dirty = true;
+                        }
+                    }
+                    if let Some(d) = self.current().map(|d| d.rel.clone()) {
+                        if ui.button("+ fichier ouvert").clicked() && !self.send_files.contains(&d) {
+                            self.send_files.push(d);
+                        }
+                    }
+                    ui.label(RichText::new("ou clic droit dans l'explorateur").color(p.muted).size(11.0));
+                });
+                ui.add_space(8.0);
+                ui.label(caps("vers"));
+                let peers = self.peers.lock().map(|p| p.clone()).unwrap_or_default();
+                if peers.is_empty() {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("aucun ordinateur trouvé (l'autre doit être en mode « recevoir »)").color(p.muted).size(11.5));
+                        if ui.small_button("chercher").clicked() {
+                            transfer::discover(self.peers.clone(), ctx.clone());
+                        }
+                    });
+                }
+                for peer in peers {
+                    let t = if self.send_addr == peer.addr { RichText::new(format!("▌ {} · {}", peer.name, peer.addr)).color(p.accent) } else { RichText::new(format!("  {} · {}", peer.name, peer.addr)) };
+                    if ui.add(egui::Button::new(t).frame(false)).clicked() {
+                        self.send_addr = peer.addr.clone();
+                    }
+                }
+                ui.horizontal(|ui| {
+                    ui.label("adresse");
+                    ui.add(egui::TextEdit::singleline(&mut self.send_addr).hint_text("192.168.1.42:47123").desired_width(200.0));
+                    ui.label("code");
+                    ui.add(egui::TextEdit::singleline(&mut self.send_code).hint_text("1234").desired_width(60.0));
+                });
+                ui.add_space(8.0);
+                let ready = !self.send_files.is_empty() && !self.send_addr.trim().is_empty() && self.send_code.trim().len() == 4;
+                let b = egui::Button::new(RichText::new("envoyer").color(p.on_accent).family(theme::bold())).fill(p.accent).stroke(egui::Stroke::NONE);
+                if ui.add_enabled(ready, b).clicked() {
+                    self.flush_all();
+                    let job = transfer::send(self.root(), self.send_files.clone(), self.send_addr.trim().to_string(), self.send_code.clone(), ctx.clone());
+                    self.jobs.push(job);
+                }
+            }
+            // Progression des envois et exports en cours
+            for j in &self.jobs {
+                let pr = j.lock().map(|p| p.clone()).unwrap_or_default();
+                if pr.total > 0 {
+                    ui.add(egui::ProgressBar::new(pr.done as f32 / pr.total as f32).corner_radius(0.0).fill(p.accent).text(RichText::new(format!("{} · {} / {}", pr.label, transfer::human(pr.done), transfer::human(pr.total))).size(11.0)));
+                }
+            }
+        });
+        if r.should_close() || ctx.input(|i| i.key_pressed(Key::Escape)) {
+            keep = false;
+        }
+        if keep {
+            self.dialog = Some(Dialog::Transfer { send });
+        }
+        keep
     }
 
     // ---------- fenêtres ----------
@@ -1604,6 +1966,17 @@ impl App {
     }
 
     fn dialogs(&mut self, ctx: &egui::Context) {
+        // Une fenêtre s'affiche à l'image suivante : sinon le clic qui l'ouvre compte
+        // comme un clic à l'extérieur et la referme aussitôt.
+        if self.dialog.is_none() {
+            self.dialog_shown = false;
+            return;
+        }
+        if !self.dialog_shown {
+            self.dialog_shown = true;
+            ctx.request_repaint();
+            return;
+        }
         let p = theme::pal();
         let Some(dialog) = self.dialog.take() else { return };
         let (enter, esc) = ctx.input(|i| (i.key_pressed(Key::Enter), i.key_pressed(Key::Escape)));
@@ -1641,7 +2014,11 @@ impl App {
                     ui.set_width(420.0);
                     ui.label(caps("supprimer"));
                     ui.add_space(6.0);
-                    ui.label(format!("Mettre « {rel} » à la corbeille du coffre (.app/trash) ?"));
+                    if vault::is_external(rel) {
+                        ui.label(format!("« {rel} » est dans un dossier lié : il sera retiré de son dossier d'origine et mis dans la corbeille du coffre (.app/trash)."));
+                    } else {
+                        ui.label(format!("Mettre « {rel} » à la corbeille du coffre (.app/trash) ?"));
+                    }
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
                         if ui.button(RichText::new("supprimer").color(p.missing)).clicked() {
@@ -1656,7 +2033,64 @@ impl App {
                     keep = false;
                 }
             }
-            Dialog::Settings(_) => {}
+            Dialog::Settings(_) | Dialog::Transfer { .. } => {}
+            Dialog::MoveIn { rel, copy } => {
+                let (rel, copy) = (rel.clone(), *copy);
+                let name = rel.rsplit('/').next().unwrap_or(&rel).to_string();
+                let default_dir = if images::is_image(&rel) && self.entries.iter().any(|e| e.rel == "refs") { "refs".to_string() } else { self.notes_dir() };
+                let mut go = None;
+                let r = egui::Modal::new(egui::Id::unique("movein")).frame(frame).show(ctx, |ui| {
+                    ui.set_width(460.0);
+                    ui.label(caps(if copy { "copier dans le coffre" } else { "déplacer dans le coffre" }));
+                    ui.add_space(4.0);
+                    ui.label(&name);
+                    if !copy {
+                        ui.label(RichText::new("Le fichier quittera son dossier d'origine.").color(p.muted).size(11.0));
+                    }
+                    ui.add_space(8.0);
+                    ui.label("dans quel dossier du coffre ?");
+                    let dirs: Vec<String> = std::iter::once(String::new()).chain(self.entries.iter().filter(|e| e.is_dir && !vault::is_external(&e.rel)).map(|e| e.rel.clone())).collect();
+                    for d in dirs {
+                        let label = if d.is_empty() { "/ (racine)".to_string() } else { format!("/{d}") };
+                        let t = if d == default_dir { RichText::new(label).color(p.accent).family(theme::bold()) } else { RichText::new(label) };
+                        if ui.add(egui::Button::new(t).frame(false)).clicked() {
+                            go = Some(d);
+                        }
+                    }
+                    ui.add_space(8.0);
+                    if ui.button("annuler").clicked() {
+                        keep = false;
+                    }
+                });
+                if let Some(dir) = go {
+                    let root = self.root();
+                    let target = vault::join(&dir, &name);
+                    let res = if copy {
+                        vault::safe(&root, &rel).and_then(|src| vault::import(&root, &dir, &src, false))
+                    } else {
+                        vault::rename(&root, &rel, &target).map(|_| target.clone())
+                    };
+                    if let Some(new_rel) = self.report(res) {
+                        if !copy {
+                            for d in &mut self.docs {
+                                if d.rel == rel {
+                                    d.rel = new_rel.clone();
+                                }
+                            }
+                        }
+                        self.refresh();
+                        self.actions.push(Action::Open(new_rel));
+                    }
+                    return;
+                }
+                if r.should_close() || esc {
+                    keep = false;
+                }
+                if keep {
+                    self.dialog = Some(Dialog::MoveIn { rel, copy });
+                }
+                return;
+            }
             Dialog::Import { files, dir, remember } => {
                 let (files, dir, mut remember) = (files.clone(), dir.clone(), *remember);
                 let mut choice = None;
@@ -1668,14 +2102,19 @@ impl App {
                     let more = if files.len() > 4 { format!(" et {} autres", files.len() - 4) } else { String::new() };
                     ui.label(format!("{}{} → /{}", names.join(", "), more, dir));
                     ui.add_space(8.0);
-                    let mv = egui::Button::new(RichText::new("déplacer dans le coffre").color(p.on_accent).family(theme::bold())).fill(p.accent).stroke(egui::Stroke::NONE);
-                    if ui.add(mv).clicked() {
-                        choice = Some(true);
+                    let link = egui::Button::new(RichText::new("lier (garder à sa place)").color(p.on_accent).family(theme::bold())).fill(p.accent).stroke(egui::Stroke::NONE);
+                    if ui.add(link).clicked() {
+                        choice = Some("link");
                     }
-                    ui.label(RichText::new("Le fichier quitte son dossier d'origine : aucun doublon, aucun espace en plus.").color(p.muted).size(11.0));
+                    ui.label(RichText::new("Recommandé. Le fichier reste dans son dossier ; Aryadne l'affiche sans le copier.").color(p.muted).size(11.0));
                     ui.add_space(6.0);
-                    if ui.button("copier").clicked() {
-                        choice = Some(false);
+                    if ui.button("déplacer dans le coffre").clicked() {
+                        choice = Some("move");
+                    }
+                    ui.label(RichText::new("Le fichier quitte son dossier d'origine. Aucun doublon.").color(p.muted).size(11.0));
+                    ui.add_space(6.0);
+                    if ui.button("copier dans le coffre").clicked() {
+                        choice = Some("copy");
                     }
                     ui.label(RichText::new("L'original reste en place : le fichier prend deux fois la place.").color(p.muted).size(11.0));
                     ui.add_space(8.0);
@@ -1684,11 +2123,12 @@ impl App {
                         keep = false;
                     }
                 });
-                if let Some(mv) = choice {
+                if let Some(mode) = choice {
                     if remember {
-                        save_config("import_mode", if mv { "move" } else { "copy" });
+                        self.prefs.import_mode = mode.to_string();
+                        self.prefs.save();
                     }
-                    self.import_files(files, &dir, mv);
+                    self.import_files(files, &dir, mode);
                     return;
                 }
                 if r.should_close() || esc {
@@ -1775,73 +2215,12 @@ impl App {
             }
         }
 
-        if let Dialog::Settings(mut s) = dialog {
-            let local = self.local.clone();
-            let mut save = false;
-            let r = egui::Modal::new(egui::Id::unique("settings")).frame(frame).show(ctx, |ui| {
-                ui.set_width(520.0);
-                ui.label(caps("réglages"));
-                ui.add_space(4.0);
-                ui.horizontal(|ui| {
-                    ui.label("fichiers glissés dans la fenêtre :");
-                    let cur = load_config("import_mode").unwrap_or_else(|| "ask".into());
-                    for (v, label) in [("ask", "demander"), ("move", "déplacer"), ("copy", "copier")] {
-                        if ui.selectable_label(cur == v, label).clicked() {
-                            save_config("import_mode", v);
-                        }
-                    }
-                });
-                ui.add_space(10.0);
-                ui.separator();
-                ui.label(caps("résumé et chat ia"));
-                ui.add_space(4.0);
-                ui.label(RichText::new("Toute API compatible OpenAI. Par défaut : Ollama en local, gratuit et privé.").color(p.muted).size(11.5));
-                ui.add_space(8.0);
-                ui.horizontal(|ui| {
-                    if ui.button("ollama").clicked() {
-                        s.url = "http://localhost:11434/v1".into();
-                    }
-                    if ui.button("lm studio").clicked() {
-                        s.url = "http://localhost:1234/v1".into();
-                    }
-                    if ui.button("openai").clicked() {
-                        s.url = "https://api.openai.com/v1".into();
-                    }
-                });
-                ui.add_space(6.0);
-                egui::Grid::new("ai-grid").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
-                    ui.label("adresse");
-                    ui.add(egui::TextEdit::singleline(&mut s.url).desired_width(360.0));
-                    ui.end_row();
-                    ui.label("modèle");
-                    ui.add(egui::TextEdit::singleline(&mut s.model).hint_text("llama3.2, qwen2.5, gpt-4o-mini…").desired_width(360.0));
-                    ui.end_row();
-                    ui.label("clé api");
-                    ui.add(egui::TextEdit::singleline(&mut s.key).password(true).hint_text("vide pour Ollama / LM Studio").desired_width(360.0));
-                    ui.end_row();
-                });
-                if ollama::is_local(&s.url) {
-                    ui.add_space(14.0);
-                    ui.separator();
-                    ui.add_space(4.0);
-                    ollama_panel(ui, &local, &s, ctx);
-                }
-                ui.add_space(10.0);
-                ui.horizontal(|ui| {
-                    if ui.button("enregistrer").clicked() {
-                        save = true;
-                    }
-                    if ui.button("annuler").clicked() {
-                        keep = false;
-                    }
-                });
-            });
-            if save {
-                s.save();
-                self.ai = Some(s);
-            } else if keep && !esc && !r.should_close() {
-                self.dialog = Some(Dialog::Settings(s));
-            }
+        if let Dialog::Settings(st) = dialog {
+            self.settings_window(ctx, st);
+            return;
+        }
+        if let Dialog::Transfer { send } = dialog {
+            self.transfer_dialog(ctx, send);
             return;
         }
 
@@ -1910,20 +2289,23 @@ impl App {
                 self.place_imported(already);
             }
             if !outside.is_empty() {
-                match load_config("import_mode").as_deref() {
-                    Some("move") => self.import_files(outside, &dir, true),
-                    Some("copy") => self.import_files(outside, &dir, false),
-                    _ => self.dialog = Some(Dialog::Import { files: outside, dir, remember: false }),
+                match self.prefs.import_mode.as_str() {
+                    "ask" => self.dialog = Some(Dialog::Import { files: outside, dir, remember: false }),
+                    mode => {
+                        let mode = mode.to_string();
+                        self.import_files(outside, &dir, &mode);
+                    }
                 }
             }
         }
     }
 
-    fn import_files(&mut self, files: Vec<PathBuf>, dir: &str, move_files: bool) {
+    /// `mode` : « link » (garder en place), « move » ou « copy ». Les dossiers sont toujours liés.
+    fn import_files(&mut self, files: Vec<PathBuf>, dir: &str, mode: &str) {
         let root = self.root();
         let mut imported = vec![];
         for f in files {
-            let r = vault::import(&root, dir, &f, move_files);
+            let r = if mode == "link" || f.is_dir() { vault::link_external(&root, &f) } else { vault::import(&root, dir, &f, mode == "move") };
             if let Some(rel) = self.report(r) {
                 imported.push(rel);
             }
@@ -1981,7 +2363,7 @@ impl eframe::App for App {
         let mut waiting = false;
         for i in 0..self.docs.len() {
             if let Some(t) = self.docs[i].dirty_since {
-                if closing || t.elapsed() > Duration::from_millis(500) {
+                if closing || t.elapsed() > Duration::from_millis(self.prefs.autosave_ms) {
                     self.flush(i);
                     if Some(i) == self.active {
                         self.update_backlinks();
@@ -1996,6 +2378,15 @@ impl eframe::App for App {
         }
 
         self.images.poll(&ctx);
+        self.poll_jobs();
+        // Ctrl + / Ctrl − / Ctrl 0 (gérés par egui) : on retient la taille choisie.
+        if self.dialog.is_none() && (ctx.zoom_factor() - self.prefs.ui_zoom).abs() > 0.001 && !ctx.input(|i| i.pointer.any_down()) {
+            self.prefs.ui_zoom = ctx.zoom_factor();
+            self.prefs.save();
+        }
+        if !self.jobs.is_empty() || self.receiver.is_some() {
+            ctx.request_repaint_after(Duration::from_millis(250));
+        }
         if self.board.dirty_since.is_some_and(|t| t.elapsed() > Duration::from_millis(600)) || (closing && self.board.dirty_since.is_some()) {
             self.save_board();
         }

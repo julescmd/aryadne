@@ -6,7 +6,19 @@ Le fil entre tes idées. Notes, code, références et moodboards dans un dossier
 
 100 % Rust ([egui](https://github.com/emilk/egui)). Un seul exécutable portable pour Windows et Linux : **aucune installation, aucun droit admin**. Look éditeur de code (JetBrains Mono, angles droits), mode clair par défaut, mode sombre en un clic.
 
-## Fonctionnalités (v0.5)
+## Fonctionnalités (v0.6)
+
+**Fichiers liés : rien n'est copié**
+- Le coffre est une vue. Lie des dossiers ou des fichiers de ton disque (réglages → fichiers, ou glisse-les dans la fenêtre) : ils apparaissent dans l'explorateur (`@Dossier`, `@fichiers liés`) et restent à leur place.
+- Clic droit : « déplacer dans le coffre » ou « copier dans le coffre » seulement si tu le décides. « Retirer le lien » ne supprime jamais l'original.
+- Liste des liens dans `.app/links.json` du coffre.
+
+**Export et transfert**
+- Clic droit → « exporter en zip » (fichier ou dossier), ou « exporter avec ses liens » : notes liées, images citées, contenu d'un board.
+- « transfert » : envoie des fichiers à un autre ordinateur du même réseau, sans cloud ni limite de taille (fichiers 3D). L'ordi qui reçoit affiche un code à 4 chiffres ; les fichiers arrivent dans `reçus/`.
+
+**Réglages**
+- Thème, couleur d'accent, taille de l'interface, taille du texte de l'éditeur, numéros de ligne, retour à la ligne, délai de sauvegarde, dossier des notes, import (lier / déplacer / copier / demander), dossiers liés, IA, mises à jour, liste des raccourcis.
 
 **Fichiers**
 - Explorateur de tout le coffre : dossiers repliables, filtre, fichiers modifiés marqués d'un ●.
@@ -27,8 +39,12 @@ Le fil entre tes idées. Notes, code, références et moodboards dans un dossier
 - Palette de 5 couleurs extraite, clic pour copier le hex.
 
 **Boards** (`Ctrl+4`)
-- Canevas infini façon PureRef, enregistré dans `boards/*.board.json`.
-- Glisser des images ou des notes depuis l'explorateur, les refs ou le bureau. Déplacer, redimensionner (poignée), `Suppr`, `Ctrl+D`, double-clic pour du texte.
+- Canevas infini façon PureRef, enregistré dans `boards/*.board.json`. Les images gardent leurs proportions.
+- Outils : sélection (V), dessin à main levée (B, Maj = ligne droite), gomme (E), texte (T). Couleur et épaisseur du trait.
+- Sélection multiple au lasso ou Maj+clic, 4 poignées de redimensionnement (Maj = proportions libres), annuler / rétablir (`Ctrl+Z` / `Ctrl+Y`), `Ctrl+A`, `Ctrl+D`, `Suppr`.
+- Coller une image du presse-papier (`Ctrl+V`, enregistrée dans `refs/`).
+- Clic droit : premier plan / arrière-plan, retourner l'image, taille d'origine, taille du texte.
+- Vue : molette pour zoomer, clic milieu / clic droit / Espace + glisser pour se déplacer.
 - Moodboards automatiques : par mots-clés (nom, dossier, notes qui citent l'image) ou par couleurs proches d'une image.
 
 **Chat** (`Ctrl+5`)
@@ -100,6 +116,8 @@ src/
   board.rs     boards (canevas infini)
   chat.rs      chat avec le coffre (recherche + streaming)
   updater.rs   mises à jour depuis l'application
+  settings.rs  fenêtre de réglages
+  transfer.rs  export zip et transfert réseau
   vault.rs     fichiers du coffre, liens, graphe (+ tests)
   preview.rs   mode lecture Markdown
   theme.rs     palettes claire/sombre, police, angles droits

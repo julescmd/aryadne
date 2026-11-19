@@ -117,9 +117,10 @@ impl Images {
                 continue;
             }
             self.inflight += 1;
-            let (tx, ctx, path) = (self.tx.clone(), ctx.clone(), Path::new(&self.root).join(&key.0));
+            let (tx, ctx) = (self.tx.clone(), ctx.clone());
+            let path = crate::vault::safe(&self.root, &key.0);
             std::thread::spawn(move || {
-                let r = load(&ctx, &path, &key.0, key.1);
+                let r = path.and_then(|path| load(&ctx, &path, &key.0, key.1));
                 let _ = tx.send((key, r));
                 ctx.request_repaint();
             });

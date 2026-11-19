@@ -1,9 +1,10 @@
 [package]
 name = "aryadne"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2024"
 
 [dependencies]
+arboard = "3.7.0"
 dirs = "7.0.0"
 eframe = "0.37.0"
 egui_extras = { version = "0.37.0", features = ["all_loaders", "syntect"] }

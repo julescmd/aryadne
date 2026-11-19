@@ -4,7 +4,8 @@ use regex::Regex;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
-use std::sync::LazyLock;
+use serde::{Deserialize, Serialize};
+use std::sync::{LazyLock, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const SUBDIRS: [&str; 4] = ["notes", "refs", "boards", ".app"];
@@ -48,12 +49,127 @@ pub fn is_md(rel: &str) -> bool {
     rel.to_lowercase().ends_with(".md")
 }
 
-/// Chemin absolu sûr : refuse « .. », les chemins absolus et le dossier interne .app.
-pub fn safe(root: &str, rel: &str) -> Result<PathBuf, String> {
-    let rel = rel.trim().trim_matches('/');
-    if rel.is_empty() {
-        return Err("Chemin vide.".into());
+// ---------- fichiers et dossiers liés ----------
+//
+// Le coffre peut afficher des fichiers qui vivent ailleurs sur le disque, sans les copier.
+// Dans l'application ils ont un chemin virtuel :
+//   « @Nom/sous/dossier/fichier »  pour un dossier lié,
+//   « @fichiers liés/nom.png »     pour un fichier lié seul.
+// La liste est enregistrée dans .app/links.json du coffre.
+
+pub const LINKED_FILES: &str = "@fichiers liés";
+
+#[derive(Clone, Default, Serialize, Deserialize, Debug, PartialEq)]
+pub struct LinkedFolder {
+    pub name: String,
+    pub path: String,
+}
+
+#[derive(Clone, Default, Serialize, Deserialize, Debug, PartialEq)]
+pub struct Links {
+    #[serde(default)]
+    pub folders: Vec<LinkedFolder>,
+    #[serde(default)]
+    pub files: Vec<String>,
+}
+
+static LINKS: LazyLock<RwLock<Links>> = LazyLock::new(|| RwLock::new(Links::default()));
+
+pub fn link_list() -> Links {
+    LINKS.read().map(|l| l.clone()).unwrap_or_default()
+}
+
+pub fn load_links(root: &str) -> Links {
+    let l: Links = fs::read_to_string(Path::new(root).join(".app/links.json")).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
+    if let Ok(mut g) = LINKS.write() {
+        *g = l.clone();
     }
+    l
+}
+
+pub fn save_links(root: &str, l: &Links) -> Result<(), String> {
+    if let Ok(mut g) = LINKS.write() {
+        *g = l.clone();
+    }
+    fs::create_dir_all(Path::new(root).join(".app")).map_err(|e| e.to_string())?;
+    fs::write(Path::new(root).join(".app/links.json"), serde_json::to_string_pretty(l).unwrap()).map_err(|e| e.to_string())
+}
+
+/// Chemin hors du coffre (dossier ou fichier lié) ?
+pub fn is_external(rel: &str) -> bool {
+    rel.starts_with('@')
+}
+
+/// Racine d'un dossier lié (« @Nom ») ou fichier lié seul.
+pub fn is_link_root(rel: &str) -> bool {
+    is_external(rel) && (!rel.contains('/') || rel.starts_with(&format!("{LINKED_FILES}/")))
+}
+
+/// Noms affichés des fichiers liés (sans doublons) → chemin réel.
+pub fn linked_files(l: &Links) -> Vec<(String, PathBuf)> {
+    let mut out: Vec<(String, PathBuf)> = vec![];
+    for f in &l.files {
+        let p = PathBuf::from(f);
+        let base = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| f.clone());
+        let mut name = base.clone();
+        let mut i = 2;
+        while out.iter().any(|(n, _)| *n == name) {
+            name = match base.rsplit_once('.') {
+                Some((b, e)) => format!("{b} ({i}).{e}"),
+                None => format!("{base} ({i})"),
+            };
+            i += 1;
+        }
+        out.push((name, p));
+    }
+    out
+}
+
+/// Ajoute un fichier ou un dossier externe sans le copier. Retourne son chemin virtuel.
+pub fn link_external(root: &str, src: &Path) -> Result<String, String> {
+    let abs = fs::canonicalize(src).map_err(|e| e.to_string())?;
+    let mut l = link_list();
+    if abs.is_dir() {
+        if let Some(f) = l.folders.iter().find(|f| Path::new(&f.path) == abs) {
+            return Ok(format!("@{}", f.name));
+        }
+        let base = abs.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "dossier".into());
+        let base: String = base.chars().filter(|c| !"\\/:*?\"<>|".contains(*c)).collect();
+        let mut name = base.clone();
+        let mut i = 2;
+        while l.folders.iter().any(|f| f.name == name) || format!("@{name}") == LINKED_FILES {
+            name = format!("{base} {i}");
+            i += 1;
+        }
+        l.folders.push(LinkedFolder { name: name.clone(), path: abs.to_string_lossy().to_string() });
+        save_links(root, &l)?;
+        Ok(format!("@{name}"))
+    } else {
+        let s = abs.to_string_lossy().to_string();
+        if !l.files.contains(&s) {
+            l.files.push(s.clone());
+            save_links(root, &l)?;
+        }
+        let name = linked_files(&l).into_iter().find(|(_, p)| p.to_string_lossy() == s).map(|(n, _)| n).unwrap_or_default();
+        Ok(format!("{LINKED_FILES}/{name}"))
+    }
+}
+
+/// Retire un lien (le fichier ou dossier d'origine n'est jamais touché).
+pub fn unlink(root: &str, rel: &str) -> Result<(), String> {
+    let mut l = link_list();
+    if let Some(name) = rel.strip_prefix(&format!("{LINKED_FILES}/")) {
+        let target = linked_files(&l).into_iter().find(|(n, _)| n == name).map(|(_, p)| p);
+        l.files.retain(|f| Some(PathBuf::from(f)) != target);
+    } else if rel == LINKED_FILES {
+        l.files.clear();
+    } else if let Some(name) = rel.strip_prefix('@') {
+        l.folders.retain(|f| f.name != name);
+    }
+    save_links(root, &l)
+}
+
+fn check_parts(rel: &str) -> Result<(), String> {
     let p = Path::new(rel);
     if p.components().any(|c| !matches!(c, Component::Normal(_))) {
         return Err(format!("Chemin invalide : « {rel} »"));
@@ -61,7 +177,34 @@ pub fn safe(root: &str, rel: &str) -> Result<PathBuf, String> {
     if rel.split('/').any(|part| part.contains(['\\', ':', '*', '?', '"', '<', '>', '|'])) {
         return Err(format!("Caractère interdit dans « {rel} »"));
     }
-    Ok(Path::new(root).join(p))
+    Ok(())
+}
+
+/// Chemin réel d'un chemin du coffre. Refuse « .. » et les chemins absolus.
+/// Gère les dossiers liés (« @Nom/... ») et les fichiers liés.
+pub fn safe(root: &str, rel: &str) -> Result<PathBuf, String> {
+    let rel = rel.trim().trim_matches('/');
+    if rel.is_empty() {
+        return Err("Chemin vide.".into());
+    }
+    if let Some(rest) = rel.strip_prefix('@') {
+        let (name, sub) = rest.split_once('/').unwrap_or((rest, ""));
+        let l = link_list();
+        if format!("@{name}") == LINKED_FILES {
+            if sub.is_empty() {
+                return Err("« fichiers liés » est un dossier virtuel : crée tes fichiers ailleurs.".into());
+            }
+            return linked_files(&l).into_iter().find(|(n, _)| n == sub).map(|(_, p)| p).ok_or_else(|| format!("Fichier lié introuvable : {sub}"));
+        }
+        let folder = l.folders.iter().find(|f| f.name == name).ok_or_else(|| format!("Dossier lié introuvable : {name}"))?;
+        if sub.is_empty() {
+            return Ok(PathBuf::from(&folder.path));
+        }
+        check_parts(sub)?;
+        return Ok(Path::new(&folder.path).join(sub));
+    }
+    check_parts(rel)?;
+    Ok(Path::new(root).join(rel))
 }
 
 pub fn init(root: &str) -> Result<(), String> {
@@ -83,33 +226,64 @@ pub fn init(root: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Arborescence complète (dossiers d'abord, ordre alphabétique), sans fichiers cachés.
-pub fn scan(root: &str) -> Vec<Entry> {
-    fn walk(root: &Path, dir: &Path, depth: usize, out: &mut Vec<Entry>) {
-        let Ok(rd) = fs::read_dir(dir) else { return };
-        let mut items: Vec<_> = rd.flatten().collect();
-        items.sort_by_key(|e| {
-            let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
-            (!is_dir, e.file_name().to_string_lossy().to_lowercase())
-        });
-        for e in items {
-            let name = e.file_name().to_string_lossy().to_string();
-            if name.starts_with('.') || IGNORED.contains(&name.as_str()) {
-                continue;
-            }
-            let path = e.path();
-            let rel = path.strip_prefix(root).unwrap().to_string_lossy().replace('\\', "/");
-            let is_dir = path.is_dir();
-            let modified = e.metadata().ok().and_then(|m| m.modified().ok()).and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map(|d| d.as_secs()).unwrap_or(0);
-            out.push(Entry { rel, name, is_dir, depth, modified });
-            if is_dir {
-                walk(root, &path, depth + 1, out);
-            }
+fn walk(base: &Path, dir: &Path, prefix: &str, depth: usize, out: &mut Vec<Entry>) {
+    let Ok(rd) = fs::read_dir(dir) else { return };
+    let mut items: Vec<_> = rd.flatten().collect();
+    items.sort_by_key(|e| {
+        let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
+        (!is_dir, e.file_name().to_string_lossy().to_lowercase())
+    });
+    for e in items {
+        let name = e.file_name().to_string_lossy().to_string();
+        if name.starts_with('.') || IGNORED.contains(&name.as_str()) {
+            continue;
+        }
+        let path = e.path();
+        let sub = path.strip_prefix(base).unwrap().to_string_lossy().replace('\\', "/");
+        let rel = join(prefix, &sub);
+        let is_dir = path.is_dir();
+        out.push(Entry { rel, name, is_dir, depth, modified: mtime(&path) });
+        if is_dir && depth < 24 {
+            walk(base, &path, prefix, depth + 1, out);
         }
     }
+}
+
+fn mtime(p: &Path) -> u64 {
+    fs::metadata(p).ok().and_then(|m| m.modified().ok()).and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map(|d| d.as_secs()).unwrap_or(0)
+}
+
+/// Arborescence complète (dossiers d'abord, ordre alphabétique), sans fichiers cachés,
+/// suivie des dossiers et fichiers liés.
+pub fn scan(root: &str) -> Vec<Entry> {
     let mut out = Vec::new();
-    walk(Path::new(root), Path::new(root), 0, &mut out);
+    walk(Path::new(root), Path::new(root), "", 0, &mut out);
+    let l = link_list();
+    for f in &l.folders {
+        let rel = format!("@{}", f.name);
+        out.push(Entry { rel: rel.clone(), name: format!("@{}", f.name), is_dir: true, depth: 0, modified: mtime(Path::new(&f.path)) });
+        walk(Path::new(&f.path), Path::new(&f.path), &rel, 1, &mut out);
+    }
+    let files = linked_files(&l);
+    if !files.is_empty() {
+        out.push(Entry { rel: LINKED_FILES.into(), name: LINKED_FILES.into(), is_dir: true, depth: 0, modified: 0 });
+        for (name, p) in files {
+            out.push(Entry { rel: format!("{LINKED_FILES}/{name}"), name, is_dir: false, depth: 1, modified: mtime(&p) });
+        }
+    }
     out
+}
+
+/// Déplace un fichier, même d'un disque à l'autre (copie puis suppression).
+fn move_path(a: &Path, b: &Path) -> Result<(), String> {
+    if fs::rename(a, b).is_ok() {
+        return Ok(());
+    }
+    if a.is_dir() {
+        return Err("Impossible de déplacer un dossier vers un autre disque.".into());
+    }
+    fs::copy(a, b).map_err(|e| e.to_string())?;
+    fs::remove_file(a).map_err(|e| format!("Copié, mais l'original n'a pas pu être supprimé : {e}"))
 }
 
 pub fn read(root: &str, rel: &str) -> Result<String, String> {
@@ -150,28 +324,52 @@ pub fn rename(root: &str, from: &str, to: &str) -> Result<(), String> {
     if b.starts_with(&a) {
         return Err("Impossible de déplacer un dossier dans lui-même.".into());
     }
+    if is_link_root(from) && is_external(to) {
+        return Err("Un élément lié se renomme depuis son dossier d'origine.".into());
+    }
     if let Some(dir) = b.parent() {
         fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
-    fs::rename(a, b).map_err(|e| e.to_string())
+    move_path(&a, &b)?;
+    // Un fichier lié déplacé dans le coffre n'est plus un lien.
+    if from.starts_with(&format!("{LINKED_FILES}/")) {
+        let mut l = link_list();
+        l.files.retain(|f| Path::new(f) != a);
+        save_links(root, &l)?;
+    }
+    Ok(())
 }
 
 /// « Supprimer » déplace dans .app/trash : rien n'est jamais perdu par accident.
 pub fn trash(root: &str, rel: &str) -> Result<(), String> {
+    if is_link_root(rel) || rel == LINKED_FILES {
+        return unlink(root, rel);
+    }
     let src = safe(root, rel)?;
     let bin = Path::new(root).join(".app/trash");
     fs::create_dir_all(&bin).map_err(|e| e.to_string())?;
     let ts = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
     let name = rel.rsplit('/').next().unwrap_or(rel);
-    fs::rename(src, bin.join(format!("{ts}_{name}"))).map_err(|e| e.to_string())
+    move_path(&src, &bin.join(format!("{ts}_{name}")))
 }
 
 /// Si `src` est déjà dans le coffre, son chemin relatif.
 pub fn inside(root: &str, src: &Path) -> Option<String> {
-    let root = fs::canonicalize(root).ok()?;
     let src = fs::canonicalize(src).ok()?;
-    let rel = src.strip_prefix(&root).ok()?.to_string_lossy().replace('\\', "/");
-    (!rel.is_empty()).then_some(rel)
+    let rootp = fs::canonicalize(root).ok()?;
+    if let Ok(r) = src.strip_prefix(&rootp) {
+        let rel = r.to_string_lossy().replace('\\', "/");
+        return (!rel.is_empty()).then_some(rel);
+    }
+    // Dans un dossier déjà lié ?
+    let l = link_list();
+    for f in &l.folders {
+        if let Ok(r) = src.strip_prefix(fs::canonicalize(&f.path).ok()?) {
+            return Some(join(&format!("@{}", f.name), &r.to_string_lossy().replace('\\', "/")));
+        }
+    }
+    let s = src.to_string_lossy();
+    linked_files(&l).into_iter().find(|(_, p)| p.to_string_lossy() == s).map(|(n, _)| format!("{LINKED_FILES}/{n}"))
 }
 
 /// Importe un fichier externe dans le dossier `dir` du coffre, sans écraser.
@@ -193,11 +391,7 @@ pub fn import(root: &str, dir: &str, src: &Path, move_file: bool) -> Result<Stri
     }
     let dest = safe(root, &rel)?;
     if move_file {
-        // Même disque : simple renommage. Autre disque : copie puis suppression de l'original.
-        if fs::rename(src, &dest).is_err() {
-            fs::copy(src, &dest).map_err(|e| e.to_string())?;
-            fs::remove_file(src).map_err(|e| format!("Copié, mais l'original n'a pas pu être supprimé : {e}"))?;
-        }
+        move_path(src, &dest)?;
     } else {
         fs::copy(src, &dest).map_err(|e| e.to_string())?;
     }
@@ -320,5 +514,28 @@ mod tests {
         assert!(!src.exists(), "déplacer ne doit pas laisser de doublon");
         assert_eq!(inside(&v, &dir.join("refs/aryadne-import.txt")).as_deref(), Some("refs/aryadne-import.txt"));
         assert!(inside(&v, &std::env::temp_dir()).is_none());
+
+        // Liens : rien n'est copié, le fichier reste à sa place.
+        let ext = std::env::temp_dir().join("aryadne-ext");
+        let _ = fs::remove_dir_all(&ext);
+        fs::create_dir_all(ext.join("sous")).unwrap();
+        fs::write(ext.join("sous/photo.png"), "x").unwrap();
+        fs::write(ext.join("seul.txt"), "salut").unwrap();
+        let d = link_external(&v, &ext).unwrap();
+        assert_eq!(d, "@aryadne-ext");
+        let f = link_external(&v, &ext.join("seul.txt")).unwrap();
+        assert_eq!(f, "@fichiers liés/seul.txt");
+        let all = scan(&v);
+        assert!(all.iter().any(|e| e.rel == "@aryadne-ext/sous/photo.png" && e.depth == 2));
+        assert_eq!(read(&v, "@fichiers liés/seul.txt").unwrap(), "salut");
+        assert!(!dir.join("seul.txt").exists());
+        assert!(safe(&v, "@aryadne-ext/../x").is_err());
+        assert_eq!(inside(&v, &ext.join("sous/photo.png")).as_deref(), Some("@aryadne-ext/sous/photo.png"));
+        // Supprimer un lien ne supprime jamais l'original.
+        trash(&v, "@fichiers liés/seul.txt").unwrap();
+        assert!(ext.join("seul.txt").exists());
+        trash(&v, "@aryadne-ext").unwrap();
+        assert!(ext.join("sous/photo.png").exists());
+        assert!(link_list().folders.is_empty() && link_list().files.is_empty());
     }
 }
