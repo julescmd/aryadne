@@ -332,7 +332,7 @@ impl Board {
     }
 
     pub fn drop_file(&mut self, rel: &str, at: Vec2, images: &mut Images) {
-        if crate::images::is_image(rel) {
+        if crate::images::has_preview(rel) {
             let aspect = images.peek(rel, Size::Thumb).map(|l| l.dims[0] as f32 / l.dims[1].max(1) as f32).unwrap_or(1.5);
             let h = 260.0;
             self.add(Kind::Image { rel: rel.to_string(), flip: false }, at, vec2(h * aspect, h));
@@ -448,9 +448,14 @@ impl Board {
                             painter.rect_filled(r, 0.0, p.line);
                         }
                         Slot::Failed(e) => {
+                            // Pas d'aperçu : carte avec le nom et le type du fichier.
                             painter.rect_filled(r, 0.0, p.bg);
-                            painter.rect_stroke(r, 0.0, Stroke::new(1.0, p.missing), egui::StrokeKind::Inside);
-                            painter.with_clip_rect(r).text(r.center(), egui::Align2::CENTER_CENTER, format!("{rel}\n{e}"), egui::FontId::monospace(11.0), p.missing);
+                            painter.rect_stroke(r, 0.0, Stroke::new(1.0, p.line), egui::StrokeKind::Inside);
+                            let clip = painter.with_clip_rect(r.shrink(2.0).intersect(rect));
+                            let ext = rel.rsplit_once('.').map(|(_, e)| e.to_uppercase()).unwrap_or_default();
+                            clip.text(r.min + vec2(12.0, 12.0) * zoom, egui::Align2::LEFT_TOP, ext, egui::FontId::new((22.0 * zoom).max(3.0), theme::bold()), p.accent);
+                            clip.text(r.min + vec2(12.0, 44.0) * zoom, egui::Align2::LEFT_TOP, rel.rsplit('/').next().unwrap_or(rel), egui::FontId::monospace((13.0 * zoom).max(3.0)), p.text);
+                            clip.text(r.min + vec2(12.0, 64.0) * zoom, egui::Align2::LEFT_TOP, e, egui::FontId::monospace((10.0 * zoom).max(3.0)), p.muted);
                         }
                     }
                 }

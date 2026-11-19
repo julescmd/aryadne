@@ -6,12 +6,17 @@ Le fil entre tes idées. Notes, code, références et moodboards dans un dossier
 
 100 % Rust ([egui](https://github.com/emilk/egui)). Un seul exécutable portable pour Windows et Linux : **aucune installation, aucun droit admin**. Look éditeur de code (JetBrains Mono, angles droits), mode clair par défaut, mode sombre en un clic.
 
-## Fonctionnalités (v0.7)
+## Fonctionnalités (v0.8)
 
 **3D**
-- Visionneuse intégrée pour OBJ, glTF / GLB et STL : tourner, déplacer, zoomer, filaire, axe Z en haut, nombre de triangles et dimensions.
+- Visionneuse intégrée pour OBJ, FBX (binaire), glTF / GLB et STL : tourner, déplacer, zoomer, filaire, axe Z en haut, nombre de triangles et dimensions.
+- Les modèles très lourds (millions de triangles) sont simplifiés pour l'affichage en gardant leur forme.
+- Miniatures 3D dans les refs et sur les boards.
 - Miniatures des fichiers `.blend` (aperçu enregistré par Blender, formats Blender 2.x à 5, fichiers compressés), aussi dans les refs.
 - « ouvrir dans Blender » / « ouvrir avec l'app par défaut » (clic droit ou bouton de l'éditeur).
+
+**Documents**
+- Aperçu des PowerPoint (diapos : textes et images), Excel (feuilles et cellules), Word, et LibreOffice (.odp, .ods, .odt), sans Office. Miniatures dans les refs et les boards.
 
 **Recherche** (`Ctrl+Maj+F`)
 - Dans tout le coffre, dossiers liés compris : notes, code, texte et noms de fichiers. Majuscules et accents ignorés, passages surlignés.
@@ -133,6 +138,9 @@ src/
   model3d.rs   visionneuse 3D (OBJ, glTF, STL)
   blend.rs     miniatures des fichiers .blend
   search.rs    recherche plein texte
+  fbx.rs       lecteur FBX binaire
+  office.rs    aperçu PowerPoint, Excel, Word, LibreOffice
+assets/        logo, icônes, polices
   vault.rs     fichiers du coffre, liens, graphe (+ tests)
   preview.rs   mode lecture Markdown
   theme.rs     palettes claire/sombre, police, angles droits

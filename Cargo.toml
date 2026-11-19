@@ -1,6 +1,6 @@
 [package]
 name = "aryadne"
-version = "0.7.0"
+version = "0.8.0"
 edition = "2024"
 
 [dependencies]
@@ -8,6 +8,7 @@ arboard = "3.7.0"
 dirs = "7.0.0"
 eframe = "0.37.0"
 egui_extras = { version = "0.37.0", features = ["all_loaders", "syntect"] }
+flate2 = "1.1.11"
 gltf = { version = "1.4.1", default-features = false, features = ["import", "utils"] }
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "webp", "gif", "bmp", "tiff", "tga", "hdr", "exr", "rayon"] }
 regex = "1.13.2"
@@ -19,3 +20,6 @@ serde_json = "1.0.154"
 tar = "0.4.46"
 ureq = { version = "3.5.2", features = ["json", "platform-verifier"] }
 zip = { version = "9.7.3", default-features = false, features = ["deflate"] }
+
+[build-dependencies]
+winresource = "0.1.34"

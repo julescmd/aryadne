@@ -5,8 +5,10 @@ mod blend;
 mod board;
 mod brain;
 mod chat;
+mod fbx;
 mod images;
 mod model3d;
+mod office;
 mod ollama;
 mod preview;
 mod search;
@@ -32,7 +34,8 @@ fn main() -> eframe::Result {
             .with_app_id(APP)
             .with_inner_size([1360.0, 860.0])
             .with_min_inner_size([760.0, 480.0])
-            .with_drag_and_drop(true),
+            .with_drag_and_drop(true)
+            .with_icon(std::sync::Arc::new(theme::window_icon().unwrap_or_default())),
         ..Default::default()
     };
     eframe::run_native(APP, options, Box::new(|cc| Ok(Box::new(App::new(&cc.egui_ctx)))))
@@ -95,6 +98,7 @@ enum Content {
     Text(String),
     Image,
     Model(model3d::Viewer),
+    Office(office::Viewer),
     Unreadable(String),
 }
 
@@ -293,6 +297,11 @@ impl App {
                     (Ok(path), Some(ctx)) => Content::Model(model3d::Viewer::open(path, &ctx)),
                     (Err(e), _) => Content::Unreadable(e),
                     _ => Content::Unreadable("Contexte indisponible.".into()),
+                }
+            } else if office::is_office(&rel) {
+                match vault::safe(&self.root(), &rel) {
+                    Ok(path) => Content::Office(office::Viewer::open(&path)),
+                    Err(e) => Content::Unreadable(e),
                 }
             } else if images::is_image(&rel) {
                 Content::Image
@@ -516,8 +525,7 @@ impl App {
             .frame(egui::Frame::new().fill(p.bg).stroke(egui::Stroke::new(1.0, p.line)).inner_margin(egui::Margin::symmetric(12, 0)))
             .show(ui, |ui| {
                 ui.horizontal_centered(|ui| {
-                    let (r, _) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
-                    ui.painter().rect_filled(r, 0.0, p.accent);
+                    theme::logo(ui, 18.0);
                     ui.label(RichText::new("aryadne").family(theme::bold()));
                     let path = self.root();
                     let short = path.split(['/', '\\']).filter(|s| !s.is_empty()).last().unwrap_or("").to_string();
@@ -736,6 +744,8 @@ impl App {
                 ("#", p.accent)
             } else if e.rel.to_lowercase().ends_with(".blend") || model3d::is_model(&e.rel) {
                 ("◆", p.accent)
+            } else if office::is_office(&e.rel) {
+                ("▤", p.link)
             } else if images::is_image(&e.rel) {
                 ("▣", p.link)
             } else if board::is_board(&e.rel) {
@@ -964,6 +974,9 @@ impl App {
                         let r = vault::safe(&root, &rel).and_then(|p| settings::open_external(&p));
                         self.report(r);
                     }
+                }
+                Content::Office(viewer) => {
+                    egui::Frame::new().inner_margin(egui::Margin::symmetric(16, 10)).show(ui, |ui| viewer.show(ui));
                 }
                 Content::Model(viewer) => {
                     egui::Frame::new().inner_margin(egui::Margin::symmetric(16, 10)).show(ui, |ui| viewer.show(ui));
@@ -1286,7 +1299,7 @@ impl App {
     }
 
     fn all_images(&self) -> Vec<Entry> {
-        self.entries.iter().filter(|e| !e.is_dir && images::is_image(&e.rel)).cloned().collect()
+        self.entries.iter().filter(|e| !e.is_dir && images::has_preview(&e.rel)).cloned().collect()
     }
 
     fn aspect(&self, rel: &str) -> f32 {
@@ -1604,7 +1617,9 @@ impl App {
                                             painter.text(rect.center(), egui::Align2::CENTER_CENTER, "…", egui::FontId::monospace(14.0), p.muted);
                                         }
                                         images::Slot::Failed(_) => {
-                                            painter.text(rect.center(), egui::Align2::CENTER_CENTER, "illisible", egui::FontId::monospace(11.0), p.missing);
+                                            let ext = e.rel.rsplit_once('.').map(|(_, x)| x.to_uppercase()).unwrap_or_default();
+                                            painter.text(rect.center() - egui::vec2(0.0, 10.0), egui::Align2::CENTER_CENTER, ext, egui::FontId::new(22.0, theme::bold()), p.accent);
+                                            painter.with_clip_rect(rect.shrink(6.0)).text(rect.center() + egui::vec2(0.0, 16.0), egui::Align2::CENTER_CENTER, &e.name, egui::FontId::monospace(10.5), p.muted);
                                         }
                                     }
                                     if resp.hovered() || selected {
@@ -1986,8 +2001,7 @@ impl App {
         let p = theme::pal();
         egui::Panel::top("compact").exact_size(26.0).frame(egui::Frame::new().fill(p.panel).inner_margin(egui::Margin::symmetric(8, 0))).show(ui, |ui| {
             ui.horizontal_centered(|ui| {
-                let (r, _) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
-                ui.painter().rect_filled(r, 0.0, p.accent);
+                theme::logo(ui, 12.0);
                 for (label, v) in [("fichiers", View::Files), ("refs", View::Refs), ("boards", View::Boards)] {
                     let t = if self.view() == v { RichText::new(label).size(11.0).color(p.text) } else { RichText::new(label).size(11.0).color(p.muted) };
                     if ui.add(egui::Button::new(t).frame(false)).clicked() {
@@ -2497,9 +2511,8 @@ impl App {
         egui::CentralPanel::default().frame(egui::Frame::new().fill(p.bg)).show(ui, |ui| {
             ui.vertical_centered(|ui| {
                 ui.add_space(ui.available_height() * 0.3);
-                let (r, _) = ui.allocate_exact_size(egui::vec2(24.0, 24.0), egui::Sense::hover());
-                ui.painter().rect_filled(r, 0.0, p.accent);
-                ui.add_space(10.0);
+                theme::logo(ui, 64.0);
+                ui.add_space(12.0);
                 ui.label(RichText::new("aryadne").size(30.0).family(theme::bold()));
                 ui.label(RichText::new("// le fil entre tes idées").color(p.muted));
                 ui.add_space(22.0);

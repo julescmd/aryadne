@@ -16,6 +16,17 @@ pub fn is_image(rel: &str) -> bool {
     EXT.contains(&e.as_str())
 }
 
+/// A une miniature affichable (image, .blend, modèle 3D, document Office).
+pub fn has_preview(rel: &str) -> bool {
+    is_image(rel) || crate::model3d::is_model(rel) || crate::office::is_office(rel)
+}
+
+/// Fichier dont la miniature est calculée (pas une image) : une seule taille suffit.
+fn is_rendered(rel: &str) -> bool {
+    let r = rel.to_lowercase();
+    r.ends_with(".blend") || crate::model3d::is_model(&r) || crate::office::is_office(&r)
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Size {
     Thumb,
@@ -72,6 +83,7 @@ impl Images {
 
     /// État de l'image ; lance le chargement si besoin.
     pub fn get(&mut self, rel: &str, size: Size) -> Slot {
+        let size = if is_rendered(rel) { Size::Thumb } else { size };
         let key = (rel.to_string(), size);
         if let Some(s) = self.slots.get(&key) {
             return s.clone();
@@ -88,6 +100,7 @@ impl Images {
 
     /// Image déjà prête, sans en lancer le chargement.
     pub fn peek(&self, rel: &str, size: Size) -> Option<Arc<Loaded>> {
+        let size = if is_rendered(rel) { Size::Thumb } else { size };
         match self.slots.get(&(rel.to_string(), size)) {
             Some(Slot::Ready(l)) => Some(l.clone()),
             _ => None,
@@ -132,9 +145,19 @@ impl Images {
 }
 
 fn load(ctx: &egui::Context, path: &Path, rel: &str, size: Size) -> Result<Loaded, String> {
-    if rel.to_lowercase().ends_with(".blend") {
+    let lower = rel.to_lowercase();
+    if lower.ends_with(".blend") {
         let img = crate::blend::thumbnail(path)?;
         return finish(ctx, img, rel, size);
+    }
+    if crate::model3d::is_model(&lower) {
+        let model = crate::model3d::load(path)?;
+        let img = crate::model3d::thumbnail(&model, 720, 720, [0, 0, 0, 0]);
+        return finish(ctx, DynamicImage::ImageRgba8(crop_transparent(img)), rel, Size::Full);
+    }
+    if crate::office::is_office(&lower) {
+        let img = crate::office::thumbnail(path)?;
+        return finish(ctx, img, rel, Size::Full);
     }
     let reader = image::ImageReader::open(path).map_err(|e| e.to_string())?.with_guessed_format().map_err(|e| e.to_string())?;
     let mut reader = reader;
@@ -250,4 +273,25 @@ mod tests {
         assert!(palette_distance(&pal, &pal) < 1.0);
         assert!(is_image("refs/PHOTO.JPG") && is_image("rendu.exr") && !is_image("note.md"));
     }
+}
+
+/// Retire les bords transparents d'une miniature 3D (le modèle remplit l'image).
+fn crop_transparent(img: image::RgbaImage) -> image::RgbaImage {
+    let (w, h) = img.dimensions();
+    let (mut x0, mut y0, mut x1, mut y1) = (w, h, 0, 0);
+    for (x, y, p) in img.enumerate_pixels() {
+        if p[3] > 0 {
+            x0 = x0.min(x);
+            y0 = y0.min(y);
+            x1 = x1.max(x);
+            y1 = y1.max(y);
+        }
+    }
+    if x1 < x0 || y1 < y0 {
+        return img;
+    }
+    let pad = 12;
+    let (x0, y0) = (x0.saturating_sub(pad), y0.saturating_sub(pad));
+    let (x1, y1) = ((x1 + pad).min(w - 1), (y1 + pad).min(h - 1));
+    image::imageops::crop_imm(&img, x0, y0, x1 - x0 + 1, y1 - y0 + 1).to_image()
 }

@@ -148,3 +148,19 @@ pub fn apply(ctx: &egui::Context, dark: bool) {
         v.widgets.active.bg_stroke = Stroke::new(1.0, p.accent);
     });
 }
+
+/// Le logo Aryadne, adapté au thème (hexagone sombre en clair, clair en sombre).
+pub fn logo(ui: &mut egui::Ui, height: f32) -> egui::Response {
+    let (uri, bytes): (&str, &'static [u8]) = if is_dark() {
+        ("bytes://logo-dark.png", include_bytes!("../assets/logo-dark.png"))
+    } else {
+        ("bytes://logo-light.png", include_bytes!("../assets/logo-light.png"))
+    };
+    ui.add(egui::Image::from_bytes(uri, bytes).fit_to_exact_size(egui::vec2(height * 211.31 / 183.0, height)))
+}
+
+/// Icône de la fenêtre.
+pub fn window_icon() -> Option<egui::IconData> {
+    let img = image::load_from_memory(include_bytes!("../assets/icon.png")).ok()?.to_rgba8();
+    Some(egui::IconData { width: img.width(), height: img.height(), rgba: img.into_raw() })
+}
