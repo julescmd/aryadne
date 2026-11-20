@@ -6,11 +6,16 @@ Le fil entre tes idées. Notes, code, références et moodboards dans un dossier
 
 100 % Rust ([egui](https://github.com/emilk/egui)). Un seul exécutable portable pour Windows et Linux : **aucune installation, aucun droit admin**. Look éditeur de code (JetBrains Mono, angles droits), mode clair par défaut, mode sombre en un clic.
 
-## Fonctionnalités (v0.10)
+## Fonctionnalités (v0.11)
 
 **3D**
 - Visionneuse intégrée pour OBJ, FBX (binaire), glTF / GLB et STL. Rendu par pixel avec profondeur (comme les pixols de ZBrush) : pas de trous ni de mouchetures, calculé sur tous les cœurs, et recalculé seulement quand la vue change.
-- Matériaux argile, gris, blanc, normales ou couleurs du fichier ; ombrage lisse ; lumière réglable (direction, hauteur, ambiance, ou L + glisser).
+- Éclairage façon Substance : environnements HDRI (studio, studio doux, extérieur, coucher de soleil, nuit, neutre) ou tes propres fichiers .hdr / .exr (ceux du coffre sont listés), rotation (H + glisser), intensité, exposition, HDRI en fond net ou flou, plus une lumière directionnelle réglable (L + glisser, couleur, intensité).
+- Matériaux argile, gris, blanc, chrome, normales ou couleurs du fichier ; ombrage lisse.
+- Fil de fer par-dessus le modèle (opacité, noir / blanc / accent, ou fil de fer seul), sans les diagonales des quads.
+- Subdivisions (lissage de Loop, jusqu'à 2,5 millions de triangles).
+- Rotation automatique (platine) et capture PNG 2400 px à côté du modèle.
+- Menus « affichage », « éclairage » et « vue » pour garder la barre propre.
 - Navigation façon Blender : glisser pour tourner, Maj ou clic droit pour déplacer, Ctrl ou molette pour zoomer, 1 / 3 / 7 pour les vues (Maj : opposée), 5 pour l'orthographique, Origine ou « . » pour cadrer. Repère des axes.
 - Les modèles très lourds (millions de triangles) sont simplifiés pour l'affichage en gardant leur forme.
 - Miniatures 3D dans les refs et sur les boards.
@@ -64,6 +69,21 @@ Le fil entre tes idées. Notes, code, références et moodboards dans un dossier
 - Tab / Maj+Tab sur plusieurs lignes, Ctrl+/ commenter, Ctrl+D dupliquer, Ctrl+Maj+K supprimer la ligne, Alt+↑↓ déplacer, parenthèse correspondante surlignée.
 - Ctrl+F chercher, Ctrl+H remplacer (tout ou un par un), F3 suivant.
 - « aperçu live » pour le HTML / SVG : la page s'ouvre dans ton navigateur et se recharge à chaque enregistrement.
+
+**Organisation**
+- Palette de commandes (`Ctrl+Maj+P`) : toutes les actions au clavier.
+- Barre du haut épurée : menu du coffre (nouvelle note, modèles, import, transfert, sauvegarde), menu « fenêtre » (thème, épingler, compact), réglages.
+- Vue **tâches** : toutes les cases `- [ ]` des notes, cochables, filtrables, et ajout rapide.
+- **Note du jour** (`Ctrl+J`) et **modèles** de notes (fiche personnage, plan de shot, réunion, projet, critique) dans `modèles/`, avec `{{titre}}` et `{{date}}`.
+- **Tags** `#mot` : nuage de tags dans la recherche.
+- **Historique** : chaque fichier texte garde ses 40 dernières versions, consultables et restaurables.
+- **Sauvegarde** automatique du coffre en zip, une fois par jour (7 gardées).
+- **Minuteur** de concentration dans la barre du bas.
+- Images depuis une URL (menu du coffre, ou Ctrl+V d'un lien dans les refs).
+
+**Linux et Windows**
+- Aryadne s'ajoute tout seul au menu des applications (Linux) ou au menu Démarrer (Windows), avec son icône.
+- Sous Wayland, Aryadne passe par XWayland pour que le glisser-déposer de fichiers marche (réglable). Boutons « importer des fichiers… » et « lier un dossier… » partout.
 
 **Assistant IA partout** (`Ctrl+L`)
 - Panneau à côté de toutes les vues : il voit le fichier ouvert (ou ta sélection), ou le board courant. Boutons rapides (expliquer, corriger, améliorer, commenter...) et blocs de code insérables au curseur.

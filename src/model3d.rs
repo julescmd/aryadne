@@ -25,6 +25,8 @@ pub struct Model {
     pub positions: Vec<V3>,
     pub tris: Vec<[u32; 3]>,
     pub colors: Vec<Color32>,
+    /// Arêtes réelles (pas les diagonales des quads) : bit 0 v0-v1, bit 1 v1-v2, bit 2 v2-v0.
+    pub edges: Vec<u8>,
     pub min: V3,
     pub max: V3,
     /// Avant simplification
@@ -50,7 +52,13 @@ fn norm(a: V3) -> V3 {
 
 impl Model {
     fn new(positions: Vec<V3>, tris: Vec<[u32; 3]>, colors: Option<Vec<Color32>>, z_up: bool) -> Result<Self, String> {
-        let tris: Vec<[u32; 3]> = tris.into_iter().filter(|t| t.iter().all(|&i| (i as usize) < positions.len())).collect();
+        Self::with_edges(positions, tris, colors, None, z_up)
+    }
+
+    fn with_edges(positions: Vec<V3>, tris: Vec<[u32; 3]>, colors: Option<Vec<Color32>>, edges: Option<Vec<u8>>, z_up: bool) -> Result<Self, String> {
+        let n0 = tris.len();
+        let edges = edges.filter(|e| e.len() == n0).unwrap_or_else(|| vec![7; n0]);
+        let (tris, edges): (Vec<[u32; 3]>, Vec<u8>) = tris.into_iter().zip(edges).filter(|(t, _)| t.iter().all(|&i| (i as usize) < positions.len())).unzip();
         if tris.is_empty() {
             return Err("Aucun triangle dans ce fichier.".into());
         }
@@ -64,7 +72,7 @@ impl Model {
             }
         }
         let (total_tris, total_vertices) = (tris.len(), positions.len());
-        let mut m = Self { positions, tris, colors, min, max, total_tris, total_vertices, z_up };
+        let mut m = Self { positions, tris, colors, edges, min, max, total_tris, total_vertices, z_up };
         m.simplify(MAX_TRIS);
         Ok(m)
     }
@@ -123,6 +131,7 @@ impl Model {
             }
             if tris.len() <= target || cells < 20.0 {
                 self.positions = sums.iter().map(|(s, n)| [(s[0] / *n as f64) as f32, (s[1] / *n as f64) as f32, (s[2] / *n as f64) as f32]).collect();
+                self.edges = vec![7; tris.len()];
                 self.tris = tris;
                 self.colors = colors;
                 return;
@@ -155,7 +164,7 @@ pub fn load(path: &Path) -> Result<Model, String> {
         "stl" => load_stl(&std::fs::read(path).map_err(|e| e.to_string())?),
         "fbx" => {
             let m = crate::fbx::load(&std::fs::read(path).map_err(|e| e.to_string())?)?;
-            Model::new(m.positions, m.tris, None, false)
+            Model::with_edges(m.positions, m.tris, None, Some(m.edges), false)
         }
         "glb" | "gltf" => load_gltf(path),
         _ => Err("Format 3D non pris en charge.".into()),
@@ -166,6 +175,7 @@ pub fn load(path: &Path) -> Result<Model, String> {
 pub fn load_obj(reader: impl BufRead) -> Result<Model, String> {
     let mut verts: Vec<V3> = vec![];
     let mut tris = vec![];
+    let mut edges = vec![];
     let mut poly: Vec<u32> = vec![];
     for line in reader.lines() {
         let line = line.map_err(|e| e.to_string())?;
@@ -184,12 +194,26 @@ pub fn load_obj(reader: impl BufRead) -> Result<Model, String> {
                     poly.push(idx as u32);
                 }
             }
-            for k in 1..poly.len().saturating_sub(1) {
+            let n = poly.len();
+            for k in 1..n.saturating_sub(1) {
                 tris.push([poly[0], poly[k], poly[k + 1]]);
+                edges.push(fan_mask(k, n));
             }
         }
     }
-    Model::new(verts, tris, None, false)
+    Model::with_edges(verts, tris, None, Some(edges), false)
+}
+
+/// Arêtes réelles du triangle k d'un polygone de n côtés découpé en éventail depuis le sommet 0.
+pub fn fan_mask(k: usize, n: usize) -> u8 {
+    let mut m = 0b010; // v1-v2 : toujours un côté du polygone
+    if k == 1 {
+        m |= 0b001;
+    }
+    if k + 2 == n {
+        m |= 0b100;
+    }
+    m
 }
 
 pub fn load_stl(bytes: &[u8]) -> Result<Model, String> {
@@ -293,21 +317,39 @@ fn load_gltf(path: &Path) -> Result<Model, String> {
 // ---------- rendu « pixols » ----------
 //
 // Comme ZBrush : chaque pixel est calculé avec sa profondeur (z-buffer) dans une image,
-// puis affiché comme une texture. Pas de tri de triangles, pas de trous, et on ne
-// recalcule l'image que quand la vue, la lumière ou la taille changent.
+// puis affiché comme une texture. Rendu en deux passes : on trouve d'abord le triangle
+// visible de chaque pixel, puis on l'éclaire (HDRI + lumière), avec le fil de fer
+// éventuel par-dessus. On ne recalcule l'image que quand quelque chose change.
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Material {
     Clay,
     Gray,
     White,
+    Chrome,
     Normals,
     Color,
 }
 
 impl Material {
-    pub const ALL: [(Material, &'static str); 5] =
-        [(Material::Clay, "argile"), (Material::Gray, "gris"), (Material::White, "blanc"), (Material::Normals, "normales"), (Material::Color, "couleurs")];
+    pub const ALL: [(Material, &'static str); 6] = [
+        (Material::Clay, "argile"),
+        (Material::Gray, "gris"),
+        (Material::White, "blanc"),
+        (Material::Chrome, "chrome"),
+        (Material::Normals, "normales"),
+        (Material::Color, "couleurs du fichier"),
+    ];
+    /// Couleur de base (linéaire) et rugosité.
+    fn params(self) -> ([f32; 3], f32, f32) {
+        match self {
+            Material::Clay => ([0.56, 0.21, 0.13], 0.75, 0.04),
+            Material::Gray => ([0.40, 0.40, 0.42], 0.45, 0.04),
+            Material::White => ([0.80, 0.79, 0.76], 0.55, 0.04),
+            Material::Chrome => ([0.0, 0.0, 0.0], 0.08, 0.9),
+            Material::Normals | Material::Color => ([0.6, 0.6, 0.6], 0.5, 0.04),
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -335,6 +377,14 @@ impl Camera {
         let z = v[1] * sp + z * cp;
         [x, y, z]
     }
+    /// Inverse de `rotate` : de l'espace caméra vers le monde.
+    fn unrotate(&self, v: V3) -> V3 {
+        let (sy, cy) = self.yaw.sin_cos();
+        let (sp, cp) = self.pitch.sin_cos();
+        let y = v[1] * cp + v[2] * sp;
+        let z1 = -v[1] * sp + v[2] * cp;
+        [v[0] * cy - z1 * sy, y, v[0] * sy + z1 * cy]
+    }
     /// Espace caméra : la caméra regarde vers -Z.
     fn view(&self, v: V3) -> V3 {
         let r = self.rotate(v);
@@ -347,12 +397,13 @@ pub struct Light {
     /// Angle horizontal et hauteur, en radians.
     pub azimuth: f32,
     pub elevation: f32,
-    pub ambient: f32,
+    pub intensity: f32,
+    pub color: [f32; 3],
 }
 
 impl Default for Light {
     fn default() -> Self {
-        Self { azimuth: 0.6, elevation: 0.7, ambient: 0.28 }
+        Self { azimuth: 0.6, elevation: 0.7, intensity: 1.2, color: [1.0, 0.97, 0.92] }
     }
 }
 
@@ -363,6 +414,274 @@ impl Light {
         norm([sa * ce, se, ca * ce])
     }
 }
+
+// ---------- environnements (HDRI) ----------
+
+/// Image d'environnement en latitude-longitude, en valeurs HDR linéaires, avec ses
+/// versions floues (reflets plus ou moins nets) et l'éclairage diffus (harmoniques sphériques).
+pub struct Env {
+    pub name: String,
+    bg: Map,
+    bg_blur: Map,
+    sharp: Map,
+    rough: Map,
+    sh: [[f32; 3]; 9],
+}
+
+#[derive(Clone)]
+struct Map {
+    w: usize,
+    h: usize,
+    px: Vec<[f32; 3]>,
+}
+
+impl Map {
+    fn dir_of(&self, x: f32, y: f32) -> V3 {
+        let phi = (x / self.w as f32 - 0.5) * std::f32::consts::TAU;
+        let theta = y / self.h as f32 * std::f32::consts::PI;
+        let (st, ct) = theta.sin_cos();
+        [st * phi.sin(), ct, -st * phi.cos()]
+    }
+    fn sample(&self, d: V3) -> [f32; 3] {
+        let u = d[0].atan2(-d[2]) / std::f32::consts::TAU + 0.5;
+        let v = d[1].clamp(-1.0, 1.0).acos() / std::f32::consts::PI;
+        let x = u * self.w as f32 - 0.5;
+        let y = (v * self.h as f32 - 0.5).clamp(0.0, self.h as f32 - 1.0);
+        let (x0, y0) = (x.floor(), y.floor());
+        let (fx, fy) = (x - x0, y - y0);
+        let xi = |k: f32| ((k as i64).rem_euclid(self.w as i64)) as usize;
+        let yi = |k: f32| (k as usize).min(self.h - 1);
+        let p = |xx: usize, yy: usize| self.px[yy * self.w + xx];
+        let (a, b, c, e) = (p(xi(x0), yi(y0)), p(xi(x0 + 1.0), yi(y0)), p(xi(x0), yi(y0 + 1.0)), p(xi(x0 + 1.0), yi(y0 + 1.0)));
+        let mut out = [0.0; 3];
+        for k in 0..3 {
+            out[k] = (a[k] * (1.0 - fx) + b[k] * fx) * (1.0 - fy) + (c[k] * (1.0 - fx) + e[k] * fx) * fy;
+        }
+        out
+    }
+    fn resized(&self, w: usize, h: usize) -> Map {
+        // Moyenne par blocs (réduction) ou échantillonnage (agrandissement).
+        let mut px = vec![[0.0f32; 3]; w * h];
+        let (sx, sy) = (self.w as f32 / w as f32, self.h as f32 / h as f32);
+        for y in 0..h {
+            for x in 0..w {
+                let (x0, x1) = ((x as f32 * sx) as usize, (((x + 1) as f32 * sx) as usize).max((x as f32 * sx) as usize + 1).min(self.w));
+                let (y0, y1) = ((y as f32 * sy) as usize, (((y + 1) as f32 * sy) as usize).max((y as f32 * sy) as usize + 1).min(self.h));
+                let mut s = [0.0f32; 3];
+                let mut n = 0.0;
+                for yy in y0..y1 {
+                    for xx in x0..x1 {
+                        let c = self.px[yy * self.w + xx];
+                        s[0] += c[0];
+                        s[1] += c[1];
+                        s[2] += c[2];
+                        n += 1.0;
+                    }
+                }
+                px[y * w + x] = [s[0] / n, s[1] / n, s[2] / n];
+            }
+        }
+        Map { w, h, px }
+    }
+    /// Flou séparable (3 passes de boîte, le bord gauche/droit se rejoint).
+    fn blurred(&self, r: usize) -> Map {
+        let mut m = self.clone();
+        for _ in 0..3 {
+            let mut tmp = m.px.clone();
+            for y in 0..m.h {
+                // Plus on monte vers les pôles, plus les pixels sont serrés : flou horizontal élargi.
+                let lat = ((y as f32 + 0.5) / m.h as f32 * std::f32::consts::PI).sin().max(0.15);
+                let rx = ((r as f32 / lat) as usize).min(m.w / 2);
+                for x in 0..m.w {
+                    let mut s = [0.0; 3];
+                    for k in 0..=2 * rx {
+                        let xx = (x + m.w * 2 + k - rx) % m.w;
+                        let c = m.px[y * m.w + xx];
+                        s[0] += c[0];
+                        s[1] += c[1];
+                        s[2] += c[2];
+                    }
+                    let n = (2 * rx + 1) as f32;
+                    tmp[y * m.w + x] = [s[0] / n, s[1] / n, s[2] / n];
+                }
+            }
+            for y in 0..m.h {
+                for x in 0..m.w {
+                    let mut s = [0.0; 3];
+                    let mut n = 0.0;
+                    for yy in y.saturating_sub(r)..(y + r + 1).min(m.h) {
+                        let c = tmp[yy * m.w + x];
+                        s[0] += c[0];
+                        s[1] += c[1];
+                        s[2] += c[2];
+                        n += 1.0;
+                    }
+                    m.px[y * m.w + x] = [s[0] / n, s[1] / n, s[2] / n];
+                }
+            }
+        }
+        m
+    }
+}
+
+fn sh_basis(d: V3) -> [f32; 9] {
+    let (x, y, z) = (d[0], d[1], d[2]);
+    [0.282095, 0.488603 * y, 0.488603 * z, 0.488603 * x, 1.092548 * x * y, 1.092548 * y * z, 0.315392 * (3.0 * z * z - 1.0), 1.092548 * x * z, 0.546274 * (x * x - y * y)]
+}
+
+impl Env {
+    fn from_map(name: &str, full: Map) -> Env {
+        let bg = if full.w > 1024 { full.resized(1024, 512) } else { full };
+        let small = bg.resized(128, 64);
+        let sharp = small.blurred(1);
+        let rough = small.resized(64, 32).blurred(4);
+        let bg_blur = small.blurred(2);
+        // Éclairage diffus : projection sur 9 harmoniques sphériques.
+        let sh_src = small.resized(64, 32);
+        let mut sh = [[0.0f32; 3]; 9];
+        let dphi = std::f32::consts::TAU / sh_src.w as f32;
+        let dtheta = std::f32::consts::PI / sh_src.h as f32;
+        for y in 0..sh_src.h {
+            let theta = (y as f32 + 0.5) * dtheta;
+            let dw = dphi * dtheta * theta.sin();
+            for x in 0..sh_src.w {
+                let d = sh_src.dir_of(x as f32 + 0.5, y as f32 + 0.5);
+                let b = sh_basis(d);
+                let c = sh_src.px[y * sh_src.w + x];
+                for k in 0..9 {
+                    for ch in 0..3 {
+                        sh[k][ch] += c[ch] * b[k] * dw;
+                    }
+                }
+            }
+        }
+        Env { name: name.to_string(), bg, bg_blur, sharp, rough, sh }
+    }
+
+    /// Lumière diffuse reçue par une surface de normale `n` (déjà divisée par π).
+    fn irradiance(&self, n: V3) -> [f32; 3] {
+        let b = sh_basis(n);
+        let a = [1.0, 2.0 / 3.0, 2.0 / 3.0, 2.0 / 3.0, 0.25, 0.25, 0.25, 0.25, 0.25];
+        let mut e = [0.0f32; 3];
+        for k in 0..9 {
+            for ch in 0..3 {
+                e[ch] += a[k] * self.sh[k][ch] * b[k];
+            }
+        }
+        [e[0].max(0.0), e[1].max(0.0), e[2].max(0.0)]
+    }
+
+    fn reflect(&self, d: V3, rough: f32) -> [f32; 3] {
+        let a = self.sharp.sample(d);
+        let b = self.rough.sample(d);
+        let t = (rough * 1.6).clamp(0.0, 1.0);
+        [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t]
+    }
+
+    /// Ouvre un fichier .hdr ou .exr.
+    pub fn load_file(path: &Path) -> Result<Env, String> {
+        let img = image::open(path).map_err(|e| format!("HDRI illisible : {e}"))?;
+        let img = img.to_rgb32f();
+        let (w, h) = (img.width() as usize, img.height() as usize);
+        let px: Vec<[f32; 3]> = img.pixels().map(|p| [p[0].max(0.0), p[1].max(0.0), p[2].max(0.0)]).collect();
+        let full = Map { w, h, px };
+        // On réduit tout de suite les très grandes images (8K et plus).
+        let full = if w > 2048 { full.resized(2048, 1024) } else { full };
+        let name = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "hdri".into());
+        Ok(Env::from_map(&name, full))
+    }
+
+    pub fn preset(i: usize) -> std::sync::Arc<Env> {
+        static CACHE: std::sync::OnceLock<std::sync::Mutex<HashMap<usize, std::sync::Arc<Env>>>> = std::sync::OnceLock::new();
+        let cache = CACHE.get_or_init(Default::default);
+        if let Some(e) = cache.lock().ok().and_then(|c| c.get(&i).cloned()) {
+            return e;
+        }
+        let i = i.min(PRESETS.len() - 1);
+        let (w, h) = (512, 256);
+        let mut m = Map { w, h, px: vec![[0.0; 3]; w * h] };
+        for y in 0..h {
+            for x in 0..w {
+                let d = m.dir_of(x as f32 + 0.5, y as f32 + 0.5);
+                m.px[y * w + x] = preset_radiance(i, d);
+            }
+        }
+        let e = std::sync::Arc::new(Env::from_map(PRESETS[i], m));
+        if let Ok(mut c) = cache.lock() {
+            c.insert(i, e.clone());
+        }
+        e
+    }
+}
+
+pub const PRESETS: [&str; 6] = ["studio", "studio doux", "extérieur", "coucher de soleil", "nuit", "neutre"];
+
+fn spot(d: V3, az: f32, el: f32) -> f32 {
+    let (sa, ca) = az.to_radians().sin_cos();
+    let (se, ce) = el.to_radians().sin_cos();
+    dot(d, [sa * ce, se, -ca * ce])
+}
+
+fn lerp3(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
+    [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t]
+}
+
+fn preset_radiance(i: usize, d: V3) -> [f32; 3] {
+    let up = d[1];
+    let soft = |c: f32, edge: f32| ((c - edge) / (1.0 - edge)).clamp(0.0, 1.0).powf(0.6);
+    match i {
+        // Studio : boîtes à lumière (principale, d'appoint, contre-jour) sur fond gris.
+        0 | 1 => {
+            let base = lerp3([0.05, 0.05, 0.055], [0.30, 0.30, 0.32], (up * 0.5 + 0.5).powf(1.5));
+            let k = if i == 0 { 1.0 } else { 0.35 };
+            let key = soft(spot(d, -40.0, 35.0), 0.93) * 9.0 * k;
+            let fill = soft(spot(d, 65.0, 15.0), 0.9) * 2.0 * k;
+            let rim = soft(spot(d, 170.0, 40.0), 0.95) * 7.0 * k;
+            let top = soft(up, 0.9) * 2.5 * k;
+            let add = key + fill + rim + top + if i == 1 { 0.4 } else { 0.0 };
+            [base[0] + add, base[1] + add * 0.99, base[2] + add * 0.97]
+        }
+        // Extérieur : ciel bleu, soleil, sol.
+        2 => {
+            let sun = spot(d, 30.0, 40.0);
+            let mut c = if up > 0.0 { lerp3([0.85, 0.9, 1.0], [0.25, 0.45, 0.95], up.powf(0.5)) } else { lerp3([0.35, 0.32, 0.28], [0.12, 0.11, 0.09], (-up).powf(0.4)) };
+            if sun > 0.9985 {
+                c = [500.0, 470.0, 420.0];
+            } else {
+                let g = soft(sun, 0.9) * 2.0;
+                c = [c[0] + g, c[1] + g * 0.95, c[2] + g * 0.85];
+            }
+            c
+        }
+        // Coucher de soleil : horizon orange, ciel violet, soleil rasant.
+        3 => {
+            let sun = spot(d, -60.0, 4.0);
+            let mut c = if up > 0.0 { lerp3([1.6, 0.6, 0.25], [0.12, 0.10, 0.30], up.powf(0.45)) } else { lerp3([0.25, 0.12, 0.08], [0.03, 0.03, 0.04], (-up).powf(0.4)) };
+            if sun > 0.998 {
+                c = [200.0, 110.0, 40.0];
+            } else {
+                let g = soft(sun, 0.8) * 3.0;
+                c = [c[0] + g, c[1] + g * 0.5, c[2] + g * 0.2];
+            }
+            c
+        }
+        // Nuit : ciel sombre et lune.
+        4 => {
+            let moon = spot(d, 120.0, 35.0);
+            let mut c = if up > 0.0 { lerp3([0.05, 0.06, 0.12], [0.01, 0.015, 0.04], up.powf(0.5)) } else { [0.01, 0.01, 0.015] };
+            if moon > 0.9993 {
+                c = [30.0, 32.0, 40.0];
+            } else {
+                let g = soft(moon, 0.95) * 0.3;
+                c = [c[0] + g, c[1] + g, c[2] + g * 1.2];
+            }
+            c
+        }
+        _ => [0.6, 0.6, 0.6],
+    }
+}
+
+// ---------- maillage préparé ----------
 
 /// Normales lissées par sommet (moyenne des faces), pondérées par l'aire.
 fn vertex_normals(pos: &[V3], tris: &[[u32; 3]]) -> Vec<V3> {
@@ -380,21 +699,180 @@ fn vertex_normals(pos: &[V3], tris: &[[u32; 3]]) -> Vec<V3> {
     n.into_iter().map(norm).collect()
 }
 
+/// Subdivision de Loop (lisse) : chaque triangle devient 4.
+pub fn subdivide(pos: &[V3], tris: &[[u32; 3]], colors: &[Color32], edges: &[u8]) -> (Vec<V3>, Vec<[u32; 3]>, Vec<Color32>, Vec<u8>) {
+    let key = |a: u32, b: u32| if a < b { (a, b) } else { (b, a) };
+    // Arête → (sommets opposés)
+    let mut opp: HashMap<(u32, u32), Vec<u32>> = HashMap::with_capacity(tris.len() * 2);
+    for t in tris {
+        for k in 0..3 {
+            opp.entry(key(t[k], t[(k + 1) % 3])).or_default().push(t[(k + 2) % 3]);
+        }
+    }
+    let mut neigh: Vec<Vec<u32>> = vec![vec![]; pos.len()];
+    let mut boundary = vec![false; pos.len()];
+    for (&(a, b), o) in &opp {
+        neigh[a as usize].push(b);
+        neigh[b as usize].push(a);
+        if o.len() == 1 {
+            boundary[a as usize] = true;
+            boundary[b as usize] = true;
+        }
+    }
+    // Nouvelles positions des anciens sommets
+    let mut out: Vec<V3> = pos
+        .iter()
+        .enumerate()
+        .map(|(i, v)| {
+            let ns = &neigh[i];
+            if ns.is_empty() {
+                return *v;
+            }
+            if boundary[i] {
+                let b: Vec<&u32> = ns.iter().filter(|&&j| opp.get(&key(i as u32, j)).is_some_and(|o| o.len() == 1)).collect();
+                if b.len() == 2 {
+                    let (p, q) = (pos[*b[0] as usize], pos[*b[1] as usize]);
+                    return [0.75 * v[0] + 0.125 * (p[0] + q[0]), 0.75 * v[1] + 0.125 * (p[1] + q[1]), 0.75 * v[2] + 0.125 * (p[2] + q[2])];
+                }
+                return *v;
+            }
+            let n = ns.len() as f32;
+            let beta = if ns.len() == 3 { 3.0 / 16.0 } else { 3.0 / (8.0 * n) };
+            let mut s = [0.0; 3];
+            for &j in ns {
+                let q = pos[j as usize];
+                s[0] += q[0];
+                s[1] += q[1];
+                s[2] += q[2];
+            }
+            [v[0] * (1.0 - n * beta) + s[0] * beta, v[1] * (1.0 - n * beta) + s[1] * beta, v[2] * (1.0 - n * beta) + s[2] * beta]
+        })
+        .collect();
+    // Sommets au milieu des arêtes
+    let mut mid: HashMap<(u32, u32), u32> = HashMap::with_capacity(opp.len());
+    for (&(a, b), o) in &opp {
+        let (p, q) = (pos[a as usize], pos[b as usize]);
+        let v = if o.len() == 2 {
+            let (c, d) = (pos[o[0] as usize], pos[o[1] as usize]);
+            [0.375 * (p[0] + q[0]) + 0.125 * (c[0] + d[0]), 0.375 * (p[1] + q[1]) + 0.125 * (c[1] + d[1]), 0.375 * (p[2] + q[2]) + 0.125 * (c[2] + d[2])]
+        } else {
+            [(p[0] + q[0]) * 0.5, (p[1] + q[1]) * 0.5, (p[2] + q[2]) * 0.5]
+        };
+        out.push(v);
+        mid.insert((a, b), (out.len() - 1) as u32);
+    }
+    let mut nt = Vec::with_capacity(tris.len() * 4);
+    let mut nc = Vec::with_capacity(tris.len() * 4);
+    let mut ne = Vec::with_capacity(tris.len() * 4);
+    for ((t, c), &e) in tris.iter().zip(colors).zip(edges) {
+        let m01 = mid[&key(t[0], t[1])];
+        let m12 = mid[&key(t[1], t[2])];
+        let m20 = mid[&key(t[2], t[0])];
+        let (b0, b1, b2) = (e & 1, (e >> 1) & 1, (e >> 2) & 1);
+        // Arêtes d'origine gardées. Une arête interne qui tourne autour d'un sommet n'est
+        // visible que si le côté opposé à ce sommet l'est : un quad subdivisé reste une
+        // grille de quads, sans diagonales.
+        nt.push([t[0], m01, m20]);
+        ne.push(b0 | (b1 << 1) | (b2 << 2));
+        nt.push([m01, t[1], m12]);
+        ne.push(b0 | (b1 << 1) | (b2 << 2));
+        nt.push([m20, m12, t[2]]);
+        ne.push(b0 | (b1 << 1) | (b2 << 2));
+        nt.push([m01, m12, m20]);
+        ne.push(b2 | (b0 << 1) | (b1 << 2));
+        for _ in 0..4 {
+            nc.push(*c);
+        }
+    }
+    (out, nt, nc, ne)
+}
+
 /// Données prêtes pour le rendu (modèle centré, mis à l'échelle, normales).
 pub struct Prepared {
     pos: Vec<V3>,
     nrm: Vec<V3>,
     tris: Vec<[u32; 3]>,
-    colors: Vec<Color32>,
+    colors: Vec<[f32; 3]>,
+    edges: Vec<u8>,
     pub floor: f32,
 }
 
 impl Prepared {
-    pub fn new(model: &Model, z_up: bool) -> Self {
-        let pos = model.normalized(z_up);
-        let nrm = vertex_normals(&pos, &model.tris);
+    pub fn new(model: &Model, z_up: bool, levels: u8) -> Self {
+        let mut pos = model.normalized(z_up);
+        let mut tris = model.tris.clone();
+        let mut colors = model.colors.clone();
+        let mut edges = model.edges.clone();
+        for _ in 0..levels {
+            if tris.len() * 4 > MAX_SUBDIV_TRIS {
+                break;
+            }
+            let r = subdivide(&pos, &tris, &colors, &edges);
+            (pos, tris, colors, edges) = r;
+        }
+        let nrm = vertex_normals(&pos, &tris);
         let floor = pos.iter().map(|v| v[1]).fold(f32::MAX, f32::min);
-        Self { pos, nrm, tris: model.tris.clone(), colors: model.colors.clone(), floor }
+        let lin = |c: u8| (c as f32 / 255.0).powf(2.2);
+        let colors = colors.iter().map(|c| [lin(c.r()), lin(c.g()), lin(c.b())]).collect();
+        Self { pos, nrm, tris, colors, edges, floor }
+    }
+    pub fn tri_count(&self) -> usize {
+        self.tris.len()
+    }
+}
+
+pub const MAX_SUBDIV_TRIS: usize = 2_500_000;
+
+/// Réglages d'affichage (comme le panneau d'affichage de Substance).
+#[derive(Clone)]
+pub struct Look {
+    pub material: Material,
+    pub smooth: bool,
+    pub env: std::sync::Arc<Env>,
+    pub env_rot: f32,
+    pub env_strength: f32,
+    pub exposure: f32,
+    pub light: Light,
+    pub show_bg: bool,
+    pub blur_bg: bool,
+    pub wire: f32,
+    pub wire_color: [f32; 3],
+    pub wire_only: bool,
+}
+
+impl Default for Look {
+    fn default() -> Self {
+        Self {
+            material: Material::Clay,
+            smooth: true,
+            env: Env::preset(0),
+            env_rot: 0.0,
+            env_strength: 1.0,
+            exposure: 0.0,
+            light: Light::default(),
+            show_bg: false,
+            blur_bg: true,
+            wire: 0.0,
+            wire_color: [0.02, 0.02, 0.02],
+            wire_only: false,
+        }
+    }
+}
+
+impl Look {
+    /// Clé de comparaison : l'image n'est recalculée que si elle change.
+    fn key(&self) -> (Material, bool, usize, [u32; 4], Light, bool, bool, [u32; 4], bool) {
+        (
+            self.material,
+            self.smooth,
+            std::sync::Arc::as_ptr(&self.env) as usize,
+            [self.env_rot.to_bits(), self.env_strength.to_bits(), self.exposure.to_bits(), 0],
+            self.light,
+            self.show_bg,
+            self.blur_bg,
+            [self.wire.to_bits(), self.wire_color[0].to_bits(), self.wire_color[1].to_bits(), self.wire_color[2].to_bits()],
+            self.wire_only,
+        )
     }
 }
 
@@ -404,13 +882,28 @@ pub struct Frame {
     pub rgba: Vec<u8>,
 }
 
-/// Rendu z-buffer en parallèle (une bande d'image par cœur).
-pub fn render(m: &Prepared, cam: &Camera, light: &Light, mat: Material, smooth: bool, w: usize, h: usize, bg: [u8; 4]) -> Frame {
+fn rot_y(d: V3, a: f32) -> V3 {
+    let (s, c) = a.sin_cos();
+    [d[0] * c + d[2] * s, d[1], -d[0] * s + d[2] * c]
+}
+
+/// Courbe de tons « filmique » (ACES approchée) puis sRGB.
+fn tone(c: [f32; 3], exposure: f32) -> [u8; 3] {
+    let k = exposure;
+    let f = |x: f32| {
+        let x = (x * k).max(0.0);
+        let y = (x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14);
+        (y.clamp(0.0, 1.0).powf(1.0 / 2.2) * 255.0 + 0.5) as u8
+    };
+    [f(c[0]), f(c[1]), f(c[2])]
+}
+
+/// Rendu en parallèle (une bande d'image par cœur).
+pub fn render(m: &Prepared, cam: &Camera, look: &Look, w: usize, h: usize) -> Frame {
     use rayon::prelude::*;
     let focal = w.min(h) as f32 * 1.2;
     let ortho_scale = focal / cam.dist;
     let (cx, cy) = (w as f32 / 2.0, h as f32 / 2.0);
-    // Sommets → écran (x, y, profondeur) + normale en espace caméra.
     let screen: Vec<[f32; 3]> = m
         .pos
         .par_iter()
@@ -425,67 +918,27 @@ pub fn render(m: &Prepared, cam: &Camera, light: &Light, mat: Material, smooth: 
             }
         })
         .collect();
-    let ld = cam.rotate(light.dir());
-    let shade_n = |n: V3, base: Color32| -> [f32; 3] {
-        let n = cam.rotate(n);
-        let n = if n[2] < 0.0 { [-n[0], -n[1], -n[2]] } else { n };
-        match mat {
-            Material::Normals => [(n[0] * 0.5 + 0.5) * 255.0, (n[1] * 0.5 + 0.5) * 255.0, (n[2] * 0.5 + 0.5) * 255.0],
-            _ => {
-                let base = match mat {
-                    Material::Clay => [196.0, 120.0, 98.0],
-                    Material::Gray => [175.0, 175.0, 178.0],
-                    Material::White => [235.0, 233.0, 228.0],
-                    _ => [base.r() as f32, base.g() as f32, base.b() as f32],
-                };
-                let diff = dot(n, ld).max(0.0);
-                // Reflet (Blinn) et léger contour, comme un matcap.
-                let half = norm([ld[0], ld[1], ld[2] + 1.0]);
-                let spec = dot(n, half).max(0.0).powf(if mat == Material::Clay { 24.0 } else { 40.0 }) * 0.35;
-                let rim = (1.0 - n[2]).powf(3.0) * 0.18;
-                let k = light.ambient + (1.0 - light.ambient) * diff;
-                [base[0] * k + 255.0 * (spec + rim), base[1] * k + 255.0 * (spec + rim), base[2] * k + 255.0 * (spec + rim)]
-            }
-        }
-    };
-    // Couleur par sommet (Gouraud) ou par face (plat).
-    let vcol: Vec<[f32; 3]> = if smooth { m.nrm.par_iter().map(|n| shade_n(*n, Color32::from_gray(205))).collect() } else { vec![] };
-    let face: Vec<Option<([usize; 3], [[f32; 3]; 3])>> = m
-        .tris
-        .par_iter()
-        .zip(m.colors.par_iter())
-        .map(|(t, col)| {
-            let idx = [t[0] as usize, t[1] as usize, t[2] as usize];
-            if idx.iter().any(|&i| screen[i][0].is_nan()) {
-                return None;
-            }
-            let cols = if smooth && !matches!(mat, Material::Color) {
-                [vcol[idx[0]], vcol[idx[1]], vcol[idx[2]]]
-            } else {
-                let fnrm = norm(cross(sub(m.pos[idx[1]], m.pos[idx[0]]), sub(m.pos[idx[2]], m.pos[idx[0]])));
-                let c = if smooth {
-                    let avg = norm([m.nrm[idx[0]][0] + m.nrm[idx[1]][0] + m.nrm[idx[2]][0], m.nrm[idx[0]][1] + m.nrm[idx[1]][1] + m.nrm[idx[2]][1], m.nrm[idx[0]][2] + m.nrm[idx[1]][2] + m.nrm[idx[2]][2]]);
-                    shade_n(avg, *col)
-                } else {
-                    shade_n(fnrm, *col)
-                };
-                [c, c, c]
-            };
-            Some((idx, cols))
-        })
-        .collect();
+    let exposure = 2f32.powf(look.exposure);
+    let env = &look.env;
+    let ld = look.light.dir();
+    let (albedo0, rough, metal) = look.material.params();
+    let wire = look.wire;
 
-    let band = 32usize;
+    let band = 16usize;
     let mut rgba = vec![0u8; w * h * 4];
     rgba.par_chunks_mut(w * 4 * band).enumerate().for_each(|(bi, chunk)| {
         let y0 = bi * band;
         let rows = chunk.len() / (w * 4);
-        let mut depth = vec![f32::MIN; w * rows];
-        for px in chunk.chunks_exact_mut(4) {
-            px.copy_from_slice(&bg);
-        }
-        for f in face.iter().flatten() {
-            let (a, b, c) = (screen[f.0[0]], screen[f.0[1]], screen[f.0[2]]);
+        let n = w * rows;
+        let mut depth = vec![f32::MIN; n];
+        let mut tri = vec![u32::MAX; n];
+        let mut bary = vec![[0.0f32; 2]; n];
+        // Passe 1 : triangle visible de chaque pixel
+        for (ti, t) in m.tris.iter().enumerate() {
+            let (a, b, c) = (screen[t[0] as usize], screen[t[1] as usize], screen[t[2] as usize]);
+            if a[0].is_nan() || b[0].is_nan() || c[0].is_nan() {
+                continue;
+            }
             let miny = a[1].min(b[1]).min(c[1]).floor().max(y0 as f32) as i32;
             let maxy = a[1].max(b[1]).max(c[1]).ceil().min((y0 + rows) as f32 - 1.0) as i32;
             if miny > maxy {
@@ -515,24 +968,130 @@ pub fn render(m: &Prepared, cam: &Camera, light: &Light, mat: Material, smooth: 
                     let k = (y as usize - y0) * w + x as usize;
                     if z > depth[k] {
                         depth[k] = z;
-                        let col = f.1;
-                        let o = k * 4;
-                        for ch in 0..3 {
-                            chunk[o + ch] = (w0 * col[0][ch] + w1 * col[1][ch] + w2 * col[2][ch]).clamp(0.0, 255.0) as u8;
-                        }
-                        chunk[o + 3] = 255;
+                        tri[k] = ti as u32;
+                        bary[k] = [w0, w1];
                     }
                 }
             }
+        }
+        // Passe 2 : éclairage
+        for k in 0..n {
+            let x = k % w;
+            let y = y0 + k / w;
+            let o = k * 4;
+            // Direction du regard (du pixel vers la scène) en espace monde
+            let ray_view = if cam.ortho { [0.0, 0.0, -1.0] } else { norm([(x as f32 + 0.5 - cx) / focal, -(y as f32 + 0.5 - cy) / focal, -1.0]) };
+            let ray = cam.unrotate(ray_view);
+            let ti = tri[k];
+            if ti == u32::MAX {
+                if look.show_bg {
+                    let d = rot_y(ray, -look.env_rot);
+                    let c = if look.blur_bg { env.bg_blur.sample(d) } else { env.bg.sample(d) };
+                    let s = look.env_strength;
+                    let t = tone([c[0] * s, c[1] * s, c[2] * s], exposure);
+                    chunk[o..o + 3].copy_from_slice(&t);
+                    chunk[o + 3] = 255;
+                }
+                continue;
+            }
+            let t = m.tris[ti as usize];
+            let [w0, w1] = bary[k];
+            let w2 = 1.0 - w0 - w1;
+            let (pa, pb, pc) = (m.pos[t[0] as usize], m.pos[t[1] as usize], m.pos[t[2] as usize]);
+            let face = norm(cross(sub(pb, pa), sub(pc, pa)));
+            let mut nrm = if look.smooth {
+                let (na, nb, nc) = (m.nrm[t[0] as usize], m.nrm[t[1] as usize], m.nrm[t[2] as usize]);
+                norm([na[0] * w0 + nb[0] * w1 + nc[0] * w2, na[1] * w0 + nb[1] * w1 + nc[1] * w2, na[2] * w0 + nb[2] * w1 + nc[2] * w2])
+            } else {
+                face
+            };
+            let v = [-ray[0], -ray[1], -ray[2]];
+            // Faces arrière : on retourne la normale pour éviter les trous noirs.
+            if dot(face, v) < 0.0 {
+                nrm = [-nrm[0], -nrm[1], -nrm[2]];
+            }
+            let mut col = if look.wire_only {
+                let bg = if look.show_bg { None } else { Some([0.0f32; 3]) };
+                bg.unwrap_or([0.0; 3])
+            } else if look.material == Material::Normals {
+                let nv = cam.rotate(nrm);
+                let lin = |x: f32| (x * 0.5 + 0.5).powf(2.2);
+                [lin(nv[0]) / exposure, lin(nv[1]) / exposure, lin(nv[2]) / exposure]
+            } else {
+                let albedo = if look.material == Material::Color { m.colors[ti as usize] } else { albedo0 };
+                let ndv = dot(nrm, v).clamp(0.0, 1.0);
+                let ne = rot_y(nrm, -look.env_rot);
+                let s = look.env_strength;
+                let irr = env.irradiance(ne);
+                let r = sub([2.0 * dot(nrm, v) * nrm[0], 2.0 * dot(nrm, v) * nrm[1], 2.0 * dot(nrm, v) * nrm[2]], v);
+                let refl = env.reflect(rot_y(r, -look.env_rot), rough);
+                let f0 = if metal > 0.5 { [0.95, 0.93, 0.88] } else { [0.04; 3] };
+                let fres = (1.0 - ndv).powf(5.0);
+                let ndl = dot(nrm, ld).max(0.0);
+                let half = norm([ld[0] + v[0], ld[1] + v[1], ld[2] + v[2]]);
+                let shin = 2.0 / (rough * rough).max(0.002) - 2.0;
+                let spec_l = dot(nrm, half).max(0.0).powf(shin) * (shin + 8.0) / 25.0;
+                let li = look.light.intensity;
+                let lc = look.light.color;
+                let mut out = [0.0f32; 3];
+                for ch in 0..3 {
+                    let f = f0[ch] + (1.0 - f0[ch]) * fres * (1.0 - rough).powf(2.0);
+                    let diff = albedo[ch] * (irr[ch] * s + lc[ch] * li * ndl) * (1.0 - metal);
+                    let spec = (refl[ch] * s + lc[ch] * li * spec_l * 0.25) * f;
+                    out[ch] = diff * (1.0 - f) + spec;
+                }
+                out
+            };
+            if look.wire_only && !look.show_bg {
+                chunk[o + 3] = 0;
+            } else {
+                chunk[o + 3] = 255;
+            }
+            let mut rgb = tone(col, exposure);
+            // Fil de fer : distance du pixel à chaque arête réelle du triangle
+            if wire > 0.0 {
+                let e = m.edges[ti as usize];
+                let (a, b, c) = (screen[t[0] as usize], screen[t[1] as usize], screen[t[2] as usize]);
+                let area2 = ((b[0] - a[0]) * (c[1] - a[1]) - (c[0] - a[0]) * (b[1] - a[1])).abs();
+                let len = |p: [f32; 3], q: [f32; 3]| ((p[0] - q[0]).powi(2) + (p[1] - q[1]).powi(2)).sqrt().max(1e-6);
+                let mut dmin = f32::MAX;
+                if e & 0b001 != 0 {
+                    dmin = dmin.min(w2 * area2 / len(a, b));
+                }
+                if e & 0b010 != 0 {
+                    dmin = dmin.min(w0 * area2 / len(b, c));
+                }
+                if e & 0b100 != 0 {
+                    dmin = dmin.min(w1 * area2 / len(c, a));
+                }
+                let cover = (1.4 - dmin).clamp(0.0, 1.0) * wire;
+                if cover > 0.0 {
+                    let wc = tone([look.wire_color[0] / exposure * 1.0, look.wire_color[1] / exposure, look.wire_color[2] / exposure], exposure);
+                    if look.wire_only && !look.show_bg {
+                        rgb = wc;
+                        chunk[o + 3] = (cover * 255.0) as u8;
+                    } else {
+                        for ch in 0..3 {
+                            rgb[ch] = (rgb[ch] as f32 * (1.0 - cover) + wc[ch] as f32 * cover) as u8;
+                        }
+                    }
+                } else if look.wire_only && !look.show_bg {
+                    chunk[o + 3] = 0;
+                }
+                col = [0.0; 3];
+            }
+            let _ = col;
+            chunk[o..o + 3].copy_from_slice(&rgb);
         }
     });
     Frame { w, h, rgba }
 }
 
 /// Image du modèle pour les miniatures des boards et des refs.
-pub fn thumbnail(model: &Model, w: u32, h: u32, bg: [u8; 4]) -> image::RgbaImage {
-    let prep = Prepared::new(model, model.z_up);
-    let f = render(&prep, &Camera { dist: 2.0, ..Default::default() }, &Light::default(), Material::Gray, true, w as usize, h as usize, bg);
+pub fn thumbnail(model: &Model, w: u32, h: u32, _bg: [u8; 4]) -> image::RgbaImage {
+    let prep = Prepared::new(model, model.z_up, 0);
+    let look = Look { material: Material::Gray, ..Default::default() };
+    let f = render(&prep, &Camera { dist: 2.0, ..Default::default() }, &look, w as usize, h as usize);
     image::RgbaImage::from_raw(w, h, f.rgba).unwrap_or_else(|| image::RgbaImage::new(w, h))
 }
 
@@ -546,38 +1105,76 @@ pub enum State {
 
 pub struct Viewer {
     pub state: State,
+    path: std::path::PathBuf,
     cam: Camera,
-    light: Light,
-    material: Material,
-    smooth: bool,
+    look: Look,
+    /// HDRI du coffre proposés dans le menu (nom, chemin).
+    pub hdr_files: Vec<(String, std::path::PathBuf)>,
+    env_loading: Option<Receiver<Result<Env, String>>>,
+    env_error: Option<String>,
+    subdiv: u8,
+    turntable: bool,
     pub z_up: Option<bool>,
-    prepared: Option<(bool, Prepared)>,
+    prepared: Option<(bool, u8, Prepared)>,
     tex: Option<egui::TextureHandle>,
-    /// Paramètres du dernier rendu (on ne recalcule que si ça change).
-    last: Option<(Camera, Light, Material, bool, [usize; 2], bool)>,
-    show_light: bool,
+    last: Option<(Camera, [usize; 2], bool, u8, String)>,
+    capture_msg: Option<String>,
 }
 
 impl Viewer {
     pub fn open(path: std::path::PathBuf, ctx: &egui::Context) -> Self {
         let (tx, rx) = channel();
         let ctx = ctx.clone();
+        let p = path.clone();
         std::thread::spawn(move || {
-            let _ = tx.send(load(&path));
+            let _ = tx.send(load(&p));
             ctx.request_repaint();
         });
         Self {
             state: State::Loading(rx),
+            path,
             cam: Camera::default(),
-            light: Light::default(),
-            material: Material::Clay,
-            smooth: true,
+            look: Look::default(),
+            hdr_files: vec![],
+            env_loading: None,
+            env_error: None,
+            subdiv: 0,
+            turntable: false,
             z_up: None,
             prepared: None,
             tex: None,
             last: None,
-            show_light: false,
+            capture_msg: None,
         }
+    }
+
+    fn load_env(&mut self, path: std::path::PathBuf, ctx: &egui::Context) {
+        let (tx, rx) = channel();
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(Env::load_file(&path));
+            ctx.request_repaint();
+        });
+        self.env_loading = Some(rx);
+        self.env_error = None;
+    }
+
+    fn capture(&mut self) {
+        let Some((_, _, prep)) = &self.prepared else { return };
+        let mut look = self.look.clone();
+        if !look.show_bg {
+            look.show_bg = false;
+        }
+        let f = render(prep, &self.cam, &look, 2400, 2400);
+        let img = image::RgbaImage::from_raw(2400, 2400, f.rgba).unwrap_or_default();
+        let img = image::DynamicImage::ImageRgba8(img);
+        let stem = self.path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "modele".into());
+        let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+        let out = self.path.with_file_name(format!("{stem}-rendu-{ts}.png"));
+        self.capture_msg = Some(match img.save(&out) {
+            Ok(()) => format!("capture : {}", out.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()),
+            Err(e) => format!("capture impossible : {e}"),
+        });
     }
 
     pub fn show(&mut self, ui: &mut egui::Ui) {
@@ -588,6 +1185,18 @@ impl Viewer {
                     Ok(m) => State::Ready(Box::new(m)),
                     Err(e) => State::Failed(e),
                 };
+            }
+        }
+        if let Some(rx) = &self.env_loading {
+            if let Ok(r) = rx.try_recv() {
+                match r {
+                    Ok(e) => {
+                        self.look.env = std::sync::Arc::new(e);
+                        self.look.show_bg = true;
+                    }
+                    Err(e) => self.env_error = Some(e),
+                }
+                self.env_loading = None;
             }
         }
         let model = match &self.state {
@@ -606,47 +1215,131 @@ impl Viewer {
             State::Ready(m) => m,
         };
         let z_up = *self.z_up.get_or_insert(model.z_up);
-        if self.prepared.as_ref().is_none_or(|(z, _)| *z != z_up) {
-            self.prepared = Some((z_up, Prepared::new(model, z_up)));
+        if self.prepared.as_ref().is_none_or(|(z, l, _)| *z != z_up || *l != self.subdiv) {
+            self.prepared = Some((z_up, self.subdiv, Prepared::new(model, z_up, self.subdiv)));
             self.last = None;
         }
+        let shown_tris = self.prepared.as_ref().map(|p| p.2.tri_count()).unwrap_or(0);
+        let max_level = (0..=4u8).take_while(|l| model.tris.len() * 4usize.pow(*l as u32) <= MAX_SUBDIV_TRIS).last().unwrap_or(0);
+        let ctx = ui.ctx().clone();
+        let mut pick_hdr: Option<std::path::PathBuf> = None;
+        let mut do_capture = false;
 
-        // Barre d'outils
+        // ---------- barre d'outils : trois menus et quelques boutons ----------
+        let stay = egui::containers::menu::MenuConfig::new().close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
         ui.horizontal(|ui| {
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button("cadrer").on_hover_text("Home ou .").clicked() {
-                    self.cam = Camera { ortho: self.cam.ortho, ..Default::default() };
+            egui::containers::menu::MenuButton::new("affichage ▾").config(stay.clone()).ui(ui, |ui| {
+                ui.set_min_width(240.0);
+                ui.label(egui::RichText::new("matériau").color(p.muted).size(11.0));
+                for (m, l) in Material::ALL {
+                    ui.radio_value(&mut self.look.material, m, l);
                 }
-                ui.toggle_value(&mut self.show_light, "lumière");
-                let mut z = z_up;
-                if ui.checkbox(&mut z, "Z en haut").changed() {
-                    self.z_up = Some(z);
+                ui.separator();
+                ui.checkbox(&mut self.look.smooth, "ombrage lisse");
+                ui.horizontal(|ui| {
+                    ui.label("subdivisions");
+                    let top = max_level.max(self.subdiv);
+                    ui.add_enabled(top > 0, egui::Slider::new(&mut self.subdiv, 0..=top));
+                });
+                if max_level == 0 && self.subdiv == 0 {
+                    ui.label(egui::RichText::new("modèle déjà trop dense pour subdiviser").color(p.muted).size(10.5));
                 }
-                ui.checkbox(&mut self.cam.ortho, "ortho").on_hover_text("5");
-                ui.checkbox(&mut self.smooth, "lisse");
-                egui::ComboBox::from_id_salt("mat").selected_text(Material::ALL.iter().find(|m| m.0 == self.material).map(|m| m.1).unwrap_or("")).width(90.0).show_ui(ui, |ui| {
-                    for (m, l) in Material::ALL {
-                        ui.selectable_value(&mut self.material, m, l);
+                ui.separator();
+                ui.label(egui::RichText::new("fil de fer").color(p.muted).size(11.0));
+                ui.add(egui::Slider::new(&mut self.look.wire, 0.0..=1.0).text("opacité"));
+                ui.horizontal(|ui| {
+                    for (c, l) in [([0.02, 0.02, 0.02], "noir"), ([1.0, 1.0, 1.0], "blanc"), (lin_accent(p.accent), "accent")] {
+                        if ui.selectable_label(self.look.wire_color == c, l).clicked() {
+                            self.look.wire_color = c;
+                            if self.look.wire == 0.0 {
+                                self.look.wire = 0.6;
+                            }
+                        }
                     }
                 });
-                let s = model.size();
-                let simplified = if model.tris.len() < model.total_tris { format!(" · affiché : {}", fmt_n(model.tris.len())) } else { String::new() };
-                let text = format!("{} triangles · {} sommets · {:.2} × {:.2} × {:.2}{simplified}", fmt_n(model.total_tris), fmt_n(model.total_vertices), s[0], s[1], s[2]);
-                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                    ui.add(egui::Label::new(egui::RichText::new(text).color(p.muted).size(11.5)).truncate());
-                });
+                ui.checkbox(&mut self.look.wire_only, "fil de fer seul");
+                ui.separator();
+                let mut z = z_up;
+                if ui.checkbox(&mut z, "axe Z vers le haut").changed() {
+                    self.z_up = Some(z);
+                }
+                ui.checkbox(&mut self.cam.ortho, "vue orthographique (5)");
             });
-        });
-        if self.show_light {
-            ui.horizontal(|ui| {
-                ui.label(egui::RichText::new("lumière").color(p.muted).size(11.5));
-                ui.add(egui::Slider::new(&mut self.light.azimuth, -std::f32::consts::PI..=std::f32::consts::PI).text("direction").show_value(false));
-                ui.add(egui::Slider::new(&mut self.light.elevation, -1.5..=1.5).text("hauteur").show_value(false));
-                ui.add(egui::Slider::new(&mut self.light.ambient, 0.0..=0.9).text("ambiance").show_value(false));
-                if ui.small_button("défaut").clicked() {
-                    self.light = Light::default();
+            egui::containers::menu::MenuButton::new("éclairage ▾").config(stay.clone()).ui(ui, |ui| {
+                ui.set_min_width(280.0);
+                ui.label(egui::RichText::new("environnement (HDRI)").color(p.muted).size(11.0));
+                for (i, name) in PRESETS.iter().enumerate() {
+                    if ui.selectable_label(self.look.env.name == *name, *name).clicked() {
+                        self.look.env = Env::preset(i);
+                    }
+                }
+                for (name, path) in self.hdr_files.clone() {
+                    if ui.selectable_label(self.look.env.name == std::path::Path::new(&path).file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default(), format!("{name}")).clicked() {
+                        pick_hdr = Some(path);
+                    }
+                }
+                if ui.button("charger un .hdr / .exr…").clicked() {
+                    pick_hdr = rfd::FileDialog::new().add_filter("HDRI", &["hdr", "exr"]).pick_file();
+                }
+                if self.env_loading.is_some() {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label("chargement du HDRI…");
+                    });
+                }
+                if let Some(e) = &self.env_error {
+                    ui.label(egui::RichText::new(e).color(p.missing).size(11.0));
+                }
+                ui.add(egui::Slider::new(&mut self.look.env_rot, -std::f32::consts::PI..=std::f32::consts::PI).text("rotation (H + glisser)").show_value(false));
+                ui.add(egui::Slider::new(&mut self.look.env_strength, 0.0..=3.0).text("intensité"));
+                ui.add(egui::Slider::new(&mut self.look.exposure, -4.0..=4.0).text("exposition (EV)"));
+                ui.checkbox(&mut self.look.show_bg, "afficher le HDRI en fond");
+                ui.add_enabled(self.look.show_bg, egui::Checkbox::new(&mut self.look.blur_bg, "fond flou"));
+                ui.separator();
+                ui.label(egui::RichText::new("lumière directionnelle (L + glisser)").color(p.muted).size(11.0));
+                ui.add(egui::Slider::new(&mut self.look.light.intensity, 0.0..=5.0).text("intensité"));
+                ui.add(egui::Slider::new(&mut self.look.light.azimuth, -std::f32::consts::PI..=std::f32::consts::PI).text("direction").show_value(false));
+                ui.add(egui::Slider::new(&mut self.look.light.elevation, -1.5..=1.5).text("hauteur").show_value(false));
+                ui.horizontal(|ui| {
+                    ui.label("couleur");
+                    let mut c = self.look.light.color;
+                    if ui.color_edit_button_rgb(&mut c).changed() {
+                        self.look.light.color = c;
+                    }
+                });
+                if ui.button("réinitialiser l'éclairage").clicked() {
+                    let mat = self.look.material;
+                    let (wire, wc) = (self.look.wire, self.look.wire_color);
+                    self.look = Look { material: mat, wire, wire_color: wc, ..Default::default() };
                 }
             });
+            egui::containers::menu::MenuButton::new("vue ▾").config(stay).ui(ui, |ui| {
+                let half = std::f32::consts::FRAC_PI_2;
+                for (label, yaw, pitch) in [("face (1)", 0.0, 0.0), ("arrière (Maj+1)", std::f32::consts::PI, 0.0), ("droite (3)", -half, 0.0), ("gauche (Maj+3)", half, 0.0), ("dessus (7)", 0.0, half), ("dessous (Maj+7)", 0.0, -half)] {
+                    if ui.button(label).clicked() {
+                        self.cam.yaw = yaw;
+                        self.cam.pitch = pitch;
+                    }
+                }
+                ui.separator();
+                if ui.button("cadrer (Origine ou .)").clicked() {
+                    self.cam = Camera { ortho: self.cam.ortho, ..Default::default() };
+                }
+            });
+            ui.toggle_value(&mut self.turntable, "tourner").on_hover_text("Rotation automatique (platine)");
+            if ui.button("capture").on_hover_text("Enregistre un rendu PNG 2400 px à côté du modèle").clicked() {
+                do_capture = true;
+            }
+            let s = model.size();
+            let shown = if shown_tris != model.total_tris { format!(" · affiché : {}", fmt_n(shown_tris)) } else { String::new() };
+            let text = format!("{} triangles{shown} · {} sommets · {:.2} × {:.2} × {:.2}", fmt_n(model.total_tris), fmt_n(model.total_vertices), s[0], s[1], s[2]);
+            ui.add(egui::Label::new(egui::RichText::new(text).color(p.muted).size(11.5)).truncate());
+        });
+        if let Some(path) = pick_hdr {
+            self.load_env(path, &ctx);
+        }
+        if do_capture {
+            self.capture();
         }
 
         let (rect, resp) = ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
@@ -654,17 +1347,16 @@ impl Viewer {
         painter.rect_filled(rect, 0.0, p.panel);
 
         // ---------- navigation façon Blender ----------
-        // Molette : zoom · bouton du milieu (ou gauche) : tourner · Maj + glisser : déplacer
-        // Ctrl + glisser : zoom · bouton droit : déplacer · L + glisser : lumière
-        // 1 / 3 / 7 : face, droite, dessus (Maj : opposé) · 5 : ortho · Home ou . : cadrer
-        let (mods, lkey) = ui.input(|i| (i.modifiers, i.key_down(Key::L)));
+        let (mods, lkey, hkey) = ui.input(|i| (i.modifiers, i.key_down(Key::L), i.key_down(Key::H)));
         let dragging = resp.dragged_by(egui::PointerButton::Middle) || resp.dragged_by(egui::PointerButton::Primary) || resp.dragged_by(egui::PointerButton::Secondary);
         if dragging {
             let d = resp.drag_delta();
             let right = resp.dragged_by(egui::PointerButton::Secondary);
             if lkey {
-                self.light.azimuth -= d.x * 0.01;
-                self.light.elevation = (self.light.elevation - d.y * 0.01).clamp(-1.5, 1.5);
+                self.look.light.azimuth -= d.x * 0.01;
+                self.look.light.elevation = (self.look.light.elevation - d.y * 0.01).clamp(-1.5, 1.5);
+            } else if hkey {
+                self.look.env_rot = (self.look.env_rot + d.x * 0.01 + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI;
             } else if mods.ctrl || mods.command {
                 self.cam.dist = (self.cam.dist * (d.y * 0.01).exp()).clamp(0.2, 50.0);
             } else if mods.shift || right {
@@ -681,9 +1373,7 @@ impl Viewer {
             if scroll != 0.0 {
                 self.cam.dist = (self.cam.dist * (-scroll * 0.0015).exp()).clamp(0.2, 50.0);
             }
-            let keys = ui.input(|i| {
-                [Key::Num1, Key::Num3, Key::Num7, Key::Num5, Key::Home, Key::Period].map(|k| i.key_pressed(k) && !i.modifiers.command)
-            });
+            let keys = ui.input(|i| [Key::Num1, Key::Num3, Key::Num7, Key::Num5, Key::Home, Key::Period].map(|k| i.key_pressed(k) && !i.modifiers.command));
             let opposite = mods.shift;
             let half = std::f32::consts::FRAC_PI_2;
             if keys[0] {
@@ -705,19 +1395,23 @@ impl Viewer {
                 self.cam = Camera { ortho: self.cam.ortho, ..Default::default() };
             }
         }
+        if self.turntable && !dragging {
+            let dt = ui.input(|i| i.stable_dt).min(0.1);
+            self.cam.yaw -= dt * 0.6;
+        }
 
         // ---------- rendu (seulement si quelque chose a changé) ----------
-        let interacting = dragging || ui.input(|i| i.smooth_scroll_delta.y != 0.0);
+        let interacting = dragging || self.turntable || ui.input(|i| i.smooth_scroll_delta.y != 0.0);
         let ppp = ui.ctx().pixels_per_point();
         // Pendant le mouvement : demi-résolution pour rester fluide, pleine résolution à l'arrêt.
-        let scale = if interacting { 0.5 } else { ppp.min(2.0) };
+        let heavy = shown_tris > 600_000;
+        let scale = if interacting { if heavy { 0.4 } else { 0.6 } } else { ppp.min(2.0) };
         let size = [(rect.width() * scale).max(16.0) as usize, (rect.height() * scale).max(16.0) as usize];
-        let key = (self.cam, self.light, self.material, self.smooth, size, z_up);
-        if self.last != Some(key) || self.tex.is_none() {
-            let prep = &self.prepared.as_ref().unwrap().1;
-            // Fond transparent : la grille du sol reste visible autour du modèle.
-            let bg = [0, 0, 0, 0];
-            let frame = render(prep, &self.cam, &self.light, self.material, self.smooth, size[0], size[1], bg);
+        let look_key = format!("{:?}", self.look.key());
+        let key = (self.cam, size, z_up, self.subdiv, look_key);
+        if self.last.as_ref() != Some(&key) || self.tex.is_none() {
+            let prep = &self.prepared.as_ref().unwrap().2;
+            let frame = render(prep, &self.cam, &self.look, size[0], size[1]);
             let img = egui::ColorImage::from_rgba_unmultiplied([frame.w, frame.h], &frame.rgba);
             match &mut self.tex {
                 Some(t) => t.set(img, egui::TextureOptions::LINEAR),
@@ -730,23 +1424,25 @@ impl Viewer {
         }
 
         // Grille du sol (sous le modèle)
-        if let Some((_, prep)) = &self.prepared {
-            let focal = rect.height().min(rect.width()) * 1.2;
-            let ortho_scale = focal / self.cam.dist;
-            let c = rect.center();
-            let project = |v: V3| -> Option<Pos2> {
-                let q = self.cam.view(v);
-                if self.cam.ortho {
-                    Some(pos2(c.x + q[0] * ortho_scale, c.y - q[1] * ortho_scale))
-                } else {
-                    (q[2] < -0.05).then(|| pos2(c.x + q[0] / -q[2] * focal, c.y - q[1] / -q[2] * focal))
-                }
-            };
-            for k in -5..=5 {
-                let t = k as f32 * 0.2;
-                for (a, b) in [([t, prep.floor, -1.0], [t, prep.floor, 1.0]), ([-1.0, prep.floor, t], [1.0, prep.floor, t])] {
-                    if let (Some(pa), Some(pb)) = (project(a), project(b)) {
-                        painter.line_segment([pa, pb], Stroke::new(1.0, p.line));
+        if let Some((_, _, prep)) = &self.prepared {
+            if !self.look.show_bg {
+                let focal = rect.height().min(rect.width()) * 1.2;
+                let ortho_scale = focal / self.cam.dist;
+                let c = rect.center();
+                let project = |v: V3| -> Option<Pos2> {
+                    let q = self.cam.view(v);
+                    if self.cam.ortho {
+                        Some(pos2(c.x + q[0] * ortho_scale, c.y - q[1] * ortho_scale))
+                    } else {
+                        (q[2] < -0.05).then(|| pos2(c.x + q[0] / -q[2] * focal, c.y - q[1] / -q[2] * focal))
+                    }
+                };
+                for k in -5..=5 {
+                    let t = k as f32 * 0.2;
+                    for (a, b) in [([t, prep.floor, -1.0], [t, prep.floor, 1.0]), ([-1.0, prep.floor, t], [1.0, prep.floor, t])] {
+                        if let (Some(pa), Some(pb)) = (project(a), project(b)) {
+                            painter.line_segment([pa, pb], Stroke::new(1.0, p.line));
+                        }
                     }
                 }
             }
@@ -757,20 +1453,21 @@ impl Viewer {
 
         // Repère des axes (en bas à gauche)
         let o = rect.left_bottom() + vec2(36.0, -40.0);
+        painter.circle_filled(o, 30.0, p.panel.gamma_multiply(0.6));
         for (axis, col, label) in [([1.0, 0.0, 0.0], Color32::from_rgb(230, 70, 70), "X"), ([0.0, 1.0, 0.0], Color32::from_rgb(110, 200, 80), if z_up { "Z" } else { "Y" }), ([0.0, 0.0, 1.0], Color32::from_rgb(80, 140, 240), if z_up { "-Y" } else { "Z" })] {
             let r = self.cam.rotate(axis);
             let end = o + vec2(r[0], -r[1]) * 22.0;
             painter.line_segment([o, end], Stroke::new(2.0, col));
             painter.text(end, egui::Align2::CENTER_CENTER, label, egui::FontId::monospace(10.0), col);
         }
-        painter.text(
-            rect.right_bottom() + vec2(-12.0, -10.0),
-            egui::Align2::RIGHT_BOTTOM,
-            "glisser : tourner · Maj ou clic droit : déplacer · Ctrl / molette : zoom · L + glisser : lumière · 1 3 7 : vues · 5 : ortho",
-            egui::FontId::monospace(10.5),
-            p.muted,
-        );
+        let hint = self.capture_msg.clone().unwrap_or_else(|| "glisser : tourner · Maj / clic droit : déplacer · molette : zoom · L : lumière · H : HDRI · 1 3 7 : vues".into());
+        painter.text(rect.right_bottom() + vec2(-12.0, -10.0), egui::Align2::RIGHT_BOTTOM, hint, egui::FontId::monospace(10.5), if self.look.show_bg { Color32::from_gray(220) } else { p.muted });
     }
+}
+
+fn lin_accent(c: Color32) -> [f32; 3] {
+    let l = |x: u8| (x as f32 / 255.0).powf(2.2);
+    [l(c.r()), l(c.g()), l(c.b())]
 }
 
 pub fn fmt_n(n: usize) -> String {
@@ -834,5 +1531,31 @@ mod tests {
         assert!(img.pixels().any(|p| p[3] == 255), "la miniature doit contenir le modèle");
         assert!(is_model("assets/Maison.FBX") && !is_model("a.png"));
         assert_eq!(fmt_n(31457508), "31 457 508");
+    }
+}
+
+#[cfg(test)]
+mod look_tests {
+    use super::*;
+
+    #[test]
+    fn subdivision_et_fil_de_fer() {
+        // Cube en quads : 12 triangles, diagonales cachées dans le fil de fer
+        let obj = "v -1 -1 -1\nv 1 -1 -1\nv 1 1 -1\nv -1 1 -1\nv -1 -1 1\nv 1 -1 1\nv 1 1 1\nv -1 1 1\nf 1 4 3 2\nf 5 6 7 8\nf 1 2 6 5\nf 2 3 7 6\nf 3 4 8 7\nf 4 1 5 8\n";
+        let m = load_obj(obj.as_bytes()).unwrap();
+        assert_eq!(m.edges.iter().map(|e| e.count_ones()).sum::<u32>(), 24, "4 arêtes par quad, pas de diagonale");
+        let p = Prepared::new(&m, false, 2);
+        assert_eq!(p.tri_count(), 12 * 16);
+        // Après 2 niveaux, chaque quad devient 16 quads : 6 * 16 * 4 arêtes vues des deux côtés
+        assert_eq!(p.edges.iter().map(|e| e.count_ones()).sum::<u32>(), 6 * 16 * 4);
+        // Sommets lissés : le cube s'arrondit (plus aucun sommet au coin)
+        assert!(p.pos.iter().all(|v| v[0].abs() < 0.5 - 1e-3 || v[1].abs() < 0.5 - 1e-3 || v[2].abs() < 0.5 - 1e-3));
+        if std::env::var("ARYADNE_SHOTS").is_ok() {
+            for (i, (env, wire, bg, mat)) in [(0, 0.8, false, Material::Clay), (2, 0.0, true, Material::Chrome), (3, 0.5, true, Material::White)].into_iter().enumerate() {
+                let look = Look { env: Env::preset(env), wire, show_bg: bg, material: mat, ..Default::default() };
+                let f = render(&p, &Camera::default(), &look, 400, 300);
+                image::RgbaImage::from_raw(400, 300, f.rgba).unwrap().save(format!("/tmp/look{i}.png")).unwrap();
+            }
+        }
     }
 }

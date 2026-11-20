@@ -150,6 +150,8 @@ pub fn parse(d: &[u8]) -> Result<Vec<Node>, String> {
 pub struct Mesh {
     pub positions: Vec<[f32; 3]>,
     pub tris: Vec<[u32; 3]>,
+    /// Arêtes réelles de chaque triangle (bit 0 : v0-v1, bit 1 : v1-v2, bit 2 : v2-v0).
+    pub edges: Vec<u8>,
 }
 
 fn id_of(n: &Node) -> Option<i64> {
@@ -211,6 +213,7 @@ pub fn load(d: &[u8]) -> Result<Mesh, String> {
     }
     let mut positions = vec![];
     let mut tris = vec![];
+    let mut edges = vec![];
     for g in objects.children.iter().filter(|n| n.name == "Geometry") {
         let (Some(Prop::Floats(v)), Some(Prop::Ints(idx))) = (g.child("Vertices").and_then(|n| n.props.first()), g.child("PolygonVertexIndex").and_then(|n| n.props.first())) else {
             continue;
@@ -230,8 +233,10 @@ pub fn load(d: &[u8]) -> Result<Mesh, String> {
             let (real, last) = if i < 0 { ((-i - 1) as u32, true) } else { (i as u32, false) };
             poly.push(base + real);
             if last {
-                for k in 1..poly.len().saturating_sub(1) {
+                let n = poly.len();
+                for k in 1..n.saturating_sub(1) {
                     tris.push([poly[0], poly[k], poly[k + 1]]);
+                    edges.push(crate::model3d::fan_mask(k, n));
                 }
                 poly.clear();
             }
@@ -240,7 +245,7 @@ pub fn load(d: &[u8]) -> Result<Mesh, String> {
     if tris.is_empty() {
         return Err("Aucun maillage dans ce FBX.".into());
     }
-    Ok(Mesh { positions, tris })
+    Ok(Mesh { positions, tris, edges })
 }
 
 #[cfg(test)]

@@ -18,6 +18,14 @@ pub struct Prefs {
     pub notes_dir: String,
     pub confirm_delete: bool,
     pub auto_update: bool,
+    /// Garder Aryadne dans le menu des applications (Linux) / menu Démarrer (Windows).
+    pub menu_entry: bool,
+    /// Linux : Wayland natif (net en mise à l'échelle fractionnaire, mais sans glisser-déposer).
+    pub wayland_native: bool,
+    /// Sauvegarde zip quotidienne du coffre.
+    pub backup_daily: bool,
+    /// Dossier des sauvegardes ("" = Documents/Aryadne-sauvegardes).
+    pub backup_dir: String,
 }
 
 impl Default for Prefs {
@@ -34,6 +42,10 @@ impl Default for Prefs {
             notes_dir: "notes".into(),
             confirm_delete: true,
             auto_update: true,
+            menu_entry: true,
+            wayland_native: false,
+            backup_daily: true,
+            backup_dir: String::new(),
         }
     }
 }
@@ -255,6 +267,22 @@ impl App {
             }
         }
         ui.add_space(14.0);
+        ui.label(caps("sauvegarde"));
+        changed |= ui.checkbox(&mut self.prefs.backup_daily, "sauvegarder le coffre en zip une fois par jour (7 gardées)").changed();
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(format!("dans : {}", extras::backup_dir(&self.prefs).display())).color(p.muted).size(11.0));
+            if ui.small_button("changer…").clicked() {
+                if let Some(d) = rfd::FileDialog::new().set_title("Dossier des sauvegardes").pick_folder() {
+                    self.prefs.backup_dir = d.display().to_string();
+                    changed = true;
+                }
+            }
+            if ui.small_button("sauvegarder maintenant").clicked() {
+                self.start_backup(true);
+            }
+        });
+        ui.label(RichText::new("Les fichiers de plus de 50 Mo et la corbeille ne sont pas inclus. Chaque note garde aussi ses 40 dernières versions (historique).").color(p.muted).size(11.0));
+        ui.add_space(14.0);
         ui.label(caps("dossiers liés"));
         ui.label(RichText::new("Des dossiers de ton disque affichés dans Aryadne sans rien copier (refs, projets Blender, cours…).").color(p.muted).size(11.0));
         let root = self.root();
@@ -354,7 +382,24 @@ impl App {
         ui.checkbox(&mut self.prefs.auto_update, "vérifier au démarrage (toutes les 6 h)");
         ui.label(RichText::new(format!("Source : releases de github.com/{}", updater::REPO)).color(p.muted).size(11.0));
         ui.add_space(8.0);
-        ui.button("vérifier maintenant").clicked()
+        let check = ui.button("vérifier maintenant").clicked();
+        ui.add_space(16.0);
+        ui.label(caps("système"));
+        let label = if cfg!(windows) { "Aryadne dans le menu Démarrer" } else { "Aryadne dans le menu des applications (avec son icône)" };
+        if ui.checkbox(&mut self.prefs.menu_entry, label).changed() {
+            if self.prefs.menu_entry {
+                if let Err(e) = desktop::install() {
+                    self.error = Some(e);
+                }
+            } else {
+                desktop::uninstall();
+            }
+        }
+        if cfg!(target_os = "linux") {
+            ui.checkbox(&mut self.prefs.wayland_native, "Wayland natif (plus net si l'écran est mis à l'échelle, mais le glisser-déposer de fichiers ne marche pas)");
+            ui.label(RichText::new("Prend effet au prochain démarrage.").color(p.muted).size(11.0));
+        }
+        check
     }
 }
 
