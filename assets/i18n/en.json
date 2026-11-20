@@ -843,5 +843,12 @@
  "métal peint usé": "worn painted metal",
  "pierre aux creux sombres": "stone with dark cavities",
  "baker les textures": "bake textures",
- "Écrit couleur, rugosité, métal, normale et courbure dans le dossier textures/, à partir des UV et des matériaux de chaque ID": "Writes color, roughness, metal, normal and curvature into the textures/ folder, from the UVs and each ID's material"
+ "Écrit couleur, rugosité, métal, normale et courbure dans le dossier textures/, à partir des UV et des matériaux de chaque ID": "Writes color, roughness, metal, normal and curvature into the textures/ folder, from the UVs and each ID's material",
+ "sans occlusion": "no occlusion",
+ "rayons": "rays",
+ "8 (brouillon)": "8 (draft)",
+ "128 (lisse)": "128 (smooth)",
+ "haute définition": "high-poly",
+ "chemin du sculpt (facultatif)": "path to the sculpt (optional)",
+ "Les détails de ce modèle sont reportés dans une normale en espace tangent. Il doit occuper la même place que le modèle ouvert.": "This model's details are transferred into a tangent-space normal map. It must occupy the same space as the open model."
 }

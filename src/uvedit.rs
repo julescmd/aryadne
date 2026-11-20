@@ -884,8 +884,12 @@ mod tests {
         e.bake_size = 128;
         let prog = crate::nodes::Program::compile(&crate::nodes::material_preset("métal peint usé").unwrap(), "", 64).ok().unwrap();
         let dir = std::env::temp_dir().join("aryadne-bake");
-        let files = e.bake(&[None, Some(std::sync::Arc::new(prog))], &dir, "cube").unwrap();
-        assert!(files.len() >= 5);
+        e.bake_rays = 8;
+        let files = e.bake(&[None, Some(std::sync::Arc::new(prog))], &dir, "cube", None).unwrap();
+        assert!(files.len() >= 7);
+        // Un cube convexe n'est ombré par rien : occlusion blanche
+        let ao = image::open(files.iter().find(|f| f.to_string_lossy().contains("occlusion")).unwrap()).unwrap().to_luma8();
+        assert!(ao.pixels().filter(|p| p.0[0] > 240).count() > ao.pixels().count() * 9 / 10);
         let col = image::open(&files[0]).unwrap().to_rgb8();
         // Les UV couvrent une bonne partie de la texture, et les deux IDs donnent des couleurs différentes
         let distinct: std::collections::HashSet<[u8; 3]> = col.pixels().map(|p| p.0).collect();
@@ -973,6 +977,25 @@ mod tests {
 #[cfg(test)]
 mod vrai {
     use super::*;
+    /// ARYADNE_BAKE_OBJ=bas.obj [ARYADNE_BAKE_HIGH=haut.obj] cargo test bake_reel -- --nocapture
+    #[test]
+    fn bake_reel() {
+        let Ok(p) = std::env::var("ARYADNE_BAKE_OBJ") else { return };
+        let m = crate::model3d::load(std::path::Path::new(&p)).unwrap();
+        let mesh = crate::modifiers::Mesh::from_model(&m, false);
+        let mut e = Edit::open(&mesh, std::env::temp_dir().join("aryadne-bake-reel.json"), 1.0);
+        e.data = EditData::fresh(&e.topo);
+        e.auto_now(true);
+        e.bake_size = 1024;
+        e.bake_rays = std::env::var("ARYADNE_BAKE_RAYS").ok().and_then(|v| v.parse().ok()).unwrap_or(24);
+        let high = std::env::var("ARYADNE_BAKE_HIGH").ok().map(|h| {
+            let hm = crate::modifiers::Mesh::from_model(&crate::model3d::load(std::path::Path::new(&h)).unwrap(), false);
+            (hm.pos, hm.tris)
+        });
+        let t0 = std::time::Instant::now();
+        let files = e.bake(&[None], &std::env::temp_dir().join("aryadne-bake-reel"), "m", high.as_ref()).unwrap();
+        println!("{} cartes en {:?}", files.len(), t0.elapsed());
+    }
     /// ARYADNE_UV_OBJ=chemin.obj cargo test uv_reel -- --nocapture
     #[test]
     fn uv_reel() {
@@ -1678,6 +1701,10 @@ pub struct Edit {
     /// Demande de bake des textures (traitée par la vue 3D, qui connaît les matériaux)
     pub bake_request: bool,
     pub bake_size: u32,
+    /// Rayons par texel pour l'occlusion et l'épaisseur (0 : pas de calcul)
+    pub bake_rays: u32,
+    /// Modèle haute définition dont on reporte les détails dans la normale (chemin, vide si aucun)
+    pub bake_high: String,
 }
 
 impl Edit {
@@ -1686,7 +1713,7 @@ impl Edit {
         let data = std::fs::read_to_string(&file).ok().and_then(|t| serde_json::from_str::<EditData>(&t).ok()).filter(|d| d.fits(&topo)).unwrap_or_else(|| EditData::fresh(&topo));
         let n = topo.polys.len();
         let checker = data.has_uv();
-        Edit { topo, data, sel: BTreeSet::new(), tool: Tool::Faces, tab: 0, version: 1, seam_angle: 45.0, smart_angle: 66.0, min_faces: (n / 400).clamp(4, 300), optimize: true, rotate: true, density_target: 1024.0, file, scale, message: None, owner: vec![], uv_view: Rect::NOTHING, uv_drag: false, checker, auto: AutoOptions::default(), retopo_opt: crate::retopo::Options { faces: (n * 2).clamp(200, 8000) / 100 * 100, ..Default::default() }, retopo: None, retopo_job: None, retopo_export: false, retopo_show: true, guide_now: vec![], mat_request: None, tri_mat: vec![], bake_request: false, bake_size: 1024 }
+        Edit { topo, data, sel: BTreeSet::new(), tool: Tool::Faces, tab: 0, version: 1, seam_angle: 45.0, smart_angle: 66.0, min_faces: (n / 400).clamp(4, 300), optimize: true, rotate: true, density_target: 1024.0, file, scale, message: None, owner: vec![], uv_view: Rect::NOTHING, uv_drag: false, checker, auto: AutoOptions::default(), retopo_opt: crate::retopo::Options { faces: (n * 2).clamp(200, 8000) / 100 * 100, ..Default::default() }, retopo: None, retopo_job: None, retopo_export: false, retopo_show: true, guide_now: vec![], mat_request: None, tri_mat: vec![], bake_request: false, bake_size: 1024, bake_rays: 24, bake_high: String::new() }
     }
 
     pub fn save(&self) {
@@ -2153,7 +2180,7 @@ impl Edit {
     /// Écrit les textures du modèle à partir de ses UV : couleur, rugosité, métal, émission
     /// (matériaux en nodes de chaque ID, ou couleur de l'ID), normale et courbure.
     /// Les texels sont calculés en parallèle ; le bord des îlots est étendu pour éviter les coutures visibles.
-    pub fn bake(&self, progs: &[Option<std::sync::Arc<crate::nodes::Program>>], dir: &std::path::Path, stem: &str) -> Result<Vec<PathBuf>, String> {
+    pub fn bake(&self, progs: &[Option<std::sync::Arc<crate::nodes::Program>>], dir: &std::path::Path, stem: &str, high: Option<&(Vec<V3>, Vec<[u32; 3]>)>) -> Result<Vec<PathBuf>, String> {
         use rayon::prelude::*;
         if !self.data.has_uv() || self.data.uv.len() != self.topo.polys.len() {
             return Err("déplie d'abord les UV (onglet UV › auto)".into());
@@ -2209,8 +2236,51 @@ impl Edit {
             }
         }
         let data = &self.data;
+        // Lancer de rayons : le modèle lui-même (occlusion, épaisseur) et le modèle haute définition
+        let rays = self.bake_rays.min(256) as usize;
+        // Distances relatives à la taille du modèle
+        let diag = {
+            let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
+            for q in pos.iter() {
+                for k in 0..3 {
+                    lo[k] = lo[k].min(q[k]);
+                    hi[k] = hi[k].max(q[k]);
+                }
+            }
+            ((hi[0] - lo[0]).powi(2) + (hi[1] - lo[1]).powi(2) + (hi[2] - lo[2]).powi(2)).sqrt().max(1e-9)
+        };
+        let (eps, ao_far, th_far, cage) = (diag * 1e-4, diag * 0.25, diag * 0.2, diag * 0.02);
+        let bvh = (rays > 0).then(|| crate::bvh::Bvh::new(pos, &all_tris));
+        let high_data = high.map(|(hp, ht)| {
+            let mut hn = vec![[0.0f32; 3]; hp.len()];
+            for t in ht {
+                let (a, b, c) = (hp[t[0] as usize], hp[t[1] as usize], hp[t[2] as usize]);
+                let (u, v) = ([b[0] - a[0], b[1] - a[1], b[2] - a[2]], [c[0] - a[0], c[1] - a[1], c[2] - a[2]]);
+                let fnm = [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]];
+                for &i in t {
+                    for k in 0..3 {
+                        hn[i as usize][k] += fnm[k];
+                    }
+                }
+            }
+            (crate::bvh::Bvh::new(hp, ht), hn, ht)
+        });
+        // Tangente de chaque triangle (direction où u augmente), pour la normale en espace tangent
+        let tangents: Vec<V3> = rec
+            .iter()
+            .zip(&all_tris)
+            .map(|((f, tr), t)| {
+                let uv = &self.data.uv[*f];
+                let (p0, p1, p2) = (pos[t[0] as usize], pos[t[1] as usize], pos[t[2] as usize]);
+                let (e1, e2) = ([p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2]], [p2[0] - p0[0], p2[1] - p0[1], p2[2] - p0[2]]);
+                let (du1, dv1, du2, dv2) = (uv[tr[1]][0] - uv[tr[0]][0], uv[tr[1]][1] - uv[tr[0]][1], uv[tr[2]][0] - uv[tr[0]][0], uv[tr[2]][1] - uv[tr[0]][1]);
+                let det = du1 * dv2 - du2 * dv1;
+                let k = if det.abs() > 1e-12 { 1.0 / det } else { 0.0 };
+                [(e1[0] * dv2 - e2[0] * dv1) * k, (e1[1] * dv2 - e2[1] * dv1) * k, (e1[2] * dv2 - e2[2] * dv1) * k]
+            })
+            .collect();
         // Évaluation des matériaux, texel par texel
-        let texels: Vec<Option<[[f32; 3]; 5]>> = cover
+        let texels: Vec<Option<[[f32; 3]; 7]>> = cover
             .par_iter()
             .enumerate()
             .map_init(Vec::new, |regs, (i, c)| {
@@ -2235,7 +2305,64 @@ impl Edit {
                     }
                 };
                 let k = (0.5 + cv).clamp(0.0, 1.0);
-                Some([col, [rough, metal, k], emit, [nn[0] * 0.5 + 0.5, nn[1] * 0.5 + 0.5, nn[2] * 0.5 + 0.5], p])
+                // Repère local autour de la normale
+                let dotp = |a: V3, b: V3| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+                let crossp = |a: V3, b: V3| [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+                let unit = |a: V3| { let l = dotp(a, a).sqrt().max(1e-12); [a[0] / l, a[1] / l, a[2] / l] };
+                let tg = tangents[ti as usize];
+                let tg = { let d = dotp(tg, nn); [tg[0] - nn[0] * d, tg[1] - nn[1] * d, tg[2] - nn[2] * d] };
+                let tg = if dotp(tg, tg) > 1e-12 { unit(tg) } else { unit(crossp(nn, if nn[0].abs() < 0.9 { [1.0, 0.0, 0.0] } else { [0.0, 1.0, 0.0] })) };
+                let bt = crossp(nn, tg);
+                // Normale géométrique du triangle : les rayons partent de ce côté, même si la normale lissée penche
+                let ng = {
+                    let (a, b, c) = (pos[t[0] as usize], pos[t[1] as usize], pos[t[2] as usize]);
+                    let g = unit(crossp([b[0] - a[0], b[1] - a[1], b[2] - a[2]], [c[0] - a[0], c[1] - a[1], c[2] - a[2]]));
+                    if dotp(g, nn) < 0.0 { [-g[0], -g[1], -g[2]] } else { g }
+                };
+                // Occlusion (rayons vers l'extérieur) et épaisseur (vers l'intérieur)
+                let (mut ao, mut thick) = (1.0f32, 1.0f32);
+                if let Some(bvh) = &bvh {
+                    let mut seed = (i as u32).wrapping_mul(747796405).wrapping_add(2891336453);
+                    let mut rnd = || {
+                        seed ^= seed << 13;
+                        seed ^= seed >> 17;
+                        seed ^= seed << 5;
+                        (seed >> 8) as f32 / 16777216.0
+                    };
+                    let (mut open, mut depth) = (0.0f32, 0.0f32);
+                    for _ in 0..rays {
+                        // Direction tirée selon le cosinus autour de la normale
+                        let (r1, r2) = (rnd(), rnd());
+                        let (rad, phi) = (r1.sqrt(), r2 * std::f32::consts::TAU);
+                        let (x, y, z) = (rad * phi.cos(), rad * phi.sin(), (1.0 - r1).max(0.0).sqrt());
+                        let mut d = [tg[0] * x + bt[0] * y + nn[0] * z, tg[1] * x + bt[1] * y + nn[1] * z, tg[2] * x + bt[2] * y + nn[2] * z];
+                        let below = dotp(d, ng);
+                        if below < 1e-3 {
+                            let r = 2.0 * (1e-3 - below);
+                            d = unit([d[0] + ng[0] * r, d[1] + ng[1] * r, d[2] + ng[2] * r]);
+                        }
+                        if !bvh.occluded([p[0] + ng[0] * eps, p[1] + ng[1] * eps, p[2] + ng[2] * eps], d, eps, ao_far) {
+                            open += 1.0;
+                        }
+                        let inw = [-d[0], -d[1], -d[2]];
+                        depth += bvh.closest([p[0] - ng[0] * eps, p[1] - ng[1] * eps, p[2] - ng[2] * eps], inw, eps, th_far).map(|h| h.t).unwrap_or(th_far) / th_far;
+                    }
+                    ao = open / rays as f32;
+                    thick = depth / rays as f32;
+                }
+                // Détails du modèle haute définition, exprimés dans le repère tangent
+                let mut tn = [0.5f32, 0.5, 1.0];
+                if let Some((hb, hn, ht)) = &high_data {
+                    let o = [p[0] + nn[0] * cage, p[1] + nn[1] * cage, p[2] + nn[2] * cage];
+                    if let Some(h) = hb.closest(o, [-nn[0], -nn[1], -nn[2]], 0.0, cage * 2.0) {
+                        let t = ht[h.tri as usize];
+                        let w0 = 1.0 - h.u - h.v;
+                        let n3 = [0, 1, 2].map(|k| hn[t[0] as usize][k] * w0 + hn[t[1] as usize][k] * h.u + hn[t[2] as usize][k] * h.v);
+                        let n3 = unit(n3);
+                        tn = [dotp(n3, tg) * 0.5 + 0.5, dotp(n3, bt) * 0.5 + 0.5, dotp(n3, nn).max(0.0) * 0.5 + 0.5];
+                    }
+                }
+                Some([col, [rough, metal, k], emit, [nn[0] * 0.5 + 0.5, nn[1] * 0.5 + 0.5, nn[2] * 0.5 + 0.5], p, [ao, thick, 0.0], tn])
             })
             .collect();
         // Extension des bords : chaque texel vide prend la valeur d'un voisin rempli (8 passes)
@@ -2262,13 +2389,17 @@ impl Edit {
         let q = |x: f32| (x.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
         let any_emit = tex.iter().flatten().any(|t| t[2].iter().any(|x| *x > 0.003));
         let mut out = vec![];
-        let maps: [(&str, Box<dyn Fn(&[[f32; 3]; 5]) -> [u8; 3] + Sync>, [u8; 3], bool); 6] = [
+        let (has_rays, has_high) = (rays > 0, high.is_some());
+        let maps: [(&str, Box<dyn Fn(&[[f32; 3]; 7]) -> [u8; 3] + Sync>, [u8; 3], bool); 9] = [
             ("couleur", Box::new(move |t| [q(t[0][0]), q(t[0][1]), q(t[0][2])]), [128, 128, 128], true),
             ("rugosite", Box::new(move |t| [q(t[1][0]); 3]), [128; 3], true),
             ("metal", Box::new(move |t| [q(t[1][1]); 3]), [0; 3], true),
             ("emission", Box::new(move |t| [q(t[2][0]), q(t[2][1]), q(t[2][2])]), [0; 3], any_emit),
             ("normale", Box::new(move |t| [q(t[3][0]), q(t[3][1]), q(t[3][2])]), [128, 128, 255], true),
             ("courbure", Box::new(move |t| [q(t[1][2]); 3]), [128; 3], true),
+            ("occlusion", Box::new(move |t| [q(t[5][0]); 3]), [255; 3], has_rays),
+            ("epaisseur", Box::new(move |t| [q(t[5][1]); 3]), [255; 3], has_rays),
+            ("normale_tangente", Box::new(move |t| [q(t[6][0]), q(t[6][1]), q(t[6][2])]), [128, 128, 255], has_high),
         ];
         for (name, f, empty, wanted) in maps.iter() {
             if !*wanted {
@@ -2285,9 +2416,18 @@ impl Edit {
     fn tab_uv(&mut self, ui: &mut egui::Ui) {
         let p = crate::theme::pal();
         ui.horizontal(|ui| {
+            ui.label(RichText::new(crate::i18n::t("haute définition")).size(11.0).color(p.muted));
+            ui.add(egui::TextEdit::singleline(&mut self.bake_high).hint_text(crate::i18n::t("chemin du sculpt (facultatif)")).desired_width(220.0)).on_hover_text(crate::i18n::t("Les détails de ce modèle sont reportés dans une normale en espace tangent. Il doit occuper la même place que le modèle ouvert."));
+        });
+        ui.horizontal(|ui| {
             if ui.add_enabled(self.data.has_uv(), egui::Button::new(crate::i18n::t("baker les textures"))).on_hover_text(crate::i18n::t("Écrit couleur, rugosité, métal, normale et courbure dans le dossier textures/, à partir des UV et des matériaux de chaque ID")).clicked() {
                 self.bake_request = true;
             }
+            egui::ComboBox::from_id_salt("bake-rays").selected_text(if self.bake_rays == 0 { crate::i18n::t("sans occlusion") } else { format!("{} {}", self.bake_rays, crate::i18n::t("rayons")) }).width(96.0).show_ui(ui, |ui| {
+                for (r, l) in [(0u32, "sans occlusion"), (8, "8 (brouillon)"), (24, "24"), (64, "64"), (128, "128 (lisse)")] {
+                    ui.selectable_value(&mut self.bake_rays, r, crate::i18n::t(l));
+                }
+            });
             egui::ComboBox::from_id_salt("bake-size").selected_text(format!("{} px", self.bake_size)).width(80.0).show_ui(ui, |ui| {
                 for s in [512u32, 1024, 2048, 4096] {
                     ui.selectable_value(&mut self.bake_size, s, format!("{s} px"));

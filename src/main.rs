@@ -3,6 +3,7 @@
 mod cloud;
 mod dock;
 mod retopo;
+mod bvh;
 mod convert;
 mod uvedit;
 mod zoomview;

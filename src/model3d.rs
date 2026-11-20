@@ -1546,7 +1546,18 @@ impl Viewer {
                 let dir = std::path::Path::new(&self.root).join("textures");
                 let stem = self.path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "modele".into());
                 let t0 = std::time::Instant::now();
-                e.message = Some(match e.bake(&progs, &dir, &stem) {
+                // Modèle haute définition : même mise à l'échelle que le modèle ouvert
+                let high = (!e.bake_high.trim().is_empty())
+                    .then(|| {
+                        let raw = std::path::PathBuf::from(e.bake_high.trim());
+                        let path = if raw.is_absolute() { raw } else { std::path::Path::new(&self.root).join(raw) };
+                        load(&path).ok().map(|m| {
+                            let mesh = crate::modifiers::Mesh::from_model(&m, z_up);
+                            (mesh.pos, mesh.tris)
+                        })
+                    })
+                    .flatten();
+                e.message = Some(match e.bake(&progs, &dir, &stem, high.as_ref()) {
                     Ok(files) => format!("{} textures écrites dans textures/ ({} px, {:.1} s)", files.len(), e.bake_size, t0.elapsed().as_secs_f32()),
                     Err(err) => format!("bake impossible : {err}"),
                 });
