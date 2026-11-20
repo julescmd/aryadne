@@ -6,7 +6,7 @@ Le fil entre tes idées. Notes, code, références et moodboards dans un dossier
 
 100 % Rust ([egui](https://github.com/emilk/egui)). Un seul exécutable portable pour Windows et Linux : **aucune installation, aucun droit admin**. Look éditeur de code (JetBrains Mono, angles droits), mode clair par défaut, mode sombre en un clic.
 
-## Fonctionnalités (v0.12)
+## Fonctionnalités (v0.13)
 
 **3D**
 - Visionneuse intégrée pour OBJ, FBX (binaire), glTF / GLB et STL. Rendu par pixel avec profondeur (comme les pixols de ZBrush) : pas de trous ni de mouchetures, calculé sur tous les cœurs, et recalculé seulement quand la vue change.
@@ -61,7 +61,19 @@ Le fil entre tes idées. Notes, code, références et moodboards dans un dossier
 - Glisser des fichiers depuis ton bureau dans la fenêtre pour les importer (dans `refs/` par défaut, ou dans le dossier sélectionné). Au choix : **déplacer** (aucun doublon) ou copier ; réglable dans « ia ». Un fichier déjà dans le coffre n'est jamais recopié.
 - « Supprimer » envoie dans `.app/trash/` du coffre : rien n'est perdu par accident.
 
+**Panneau des fichiers**
+- Sections « épinglés » (clic droit → épingler) et « récents », puis l'arbre du coffre replié par défaut (Aryadne se souvient de ce qui est ouvert).
+- Filtres par type en un clic (notes, images, 3D, code, documents, vidéos, boards, nodes), recherche à plat avec le dossier de chaque fichier.
+- Icônes et couleurs par type, nombre de fichiers par dossier, extensions discrètes, tri par nom / date / type, menu « + » pour tout créer.
+
 **Éditeur de code**
+- Numéros de ligne alignés même avec le retour à la ligne, ligne courante surlignée, guides d'indentation.
+- Plusieurs curseurs : Ctrl+D (occurrence suivante), Ctrl+Maj+L (toutes), frappe et effacement partout à la fois.
+- Aller à la ligne (Ctrl+G), aller au symbole (Ctrl+Maj+O), panneau « structure » (fonctions, classes, titres) à droite.
+- Vérification à l'enregistrement (Python, JavaScript, Bash, Lua, JSON) : ligne soulignée, point rouge, message au survol.
+- Formater (Alt+Maj+F) avec rustfmt, ruff/black, prettier, clang-format, gofmt… s'ils sont installés (JSON en interne).
+- Extraits par langage (def, class, fn, for, opérateur Blender…) et suggestions tirées des autres fichiers du projet.
+- Terminal intégré (Ctrl+`), Ctrl+L, Ctrl+Entrée, Ctrl+] [, Origine intelligente, Alt+Maj+↑↓ pour dupliquer, Alt+Z retour à la ligne.
 - Fermeture automatique des ( [ { " ' ` et des balises HTML (`<div>` → `</div>`, `</` complète la balise ouverte).
 - Entrée garde l'indentation et ajoute un niveau après { [ ( : ou entre deux balises ; listes Markdown continuées.
 - Suggestions pendant la frappe (mots du fichier, mots-clés du langage, balises, `[[notes]]`), Ctrl+Espace pour les forcer.
@@ -74,6 +86,7 @@ Le fil entre tes idées. Notes, code, références et moodboards dans un dossier
 - Éditeur de nodes (glisser une sortie sur une entrée, Maj+A pour ajouter, zoom, déplacement), aperçu en direct à gauche, enregistré en JSON dans le coffre.
 - Matériaux (`.mat.json`) : bruit, Voronoï, damier, dégradés, rayures, Fresnel, géométrie (normale, position, pente), rampes, mélanges (multiplier, écran, incrustation…), teinte/saturation, niveaux, maths… vers couleur, rugosité, métal, émission. Appliqués aux modèles dans la visionneuse 3D (menu affichage), mis à jour en direct.
 - Compositing (`.comp.json`) : images du coffre, flou, netteté, halo, vignette, grain, aberration chromatique, pixeliser, postériser, contours, niveaux, couleurs… Export PNG en pleine résolution.
+- Préréglages de matériaux (bois, pierre, métal rouillé, toon, céramique, or) et exemples de shaders.
 - Node **shader perso** : un petit langage d'expressions (`r = mix(ar, br, fbm(x*6, y*6, 0))`), avec variables, fonctions de bruit et conditions, exécuté pixel par pixel.
 
 **Organisation**

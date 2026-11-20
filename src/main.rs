@@ -8,6 +8,7 @@ mod chat;
 mod code;
 mod desktop;
 mod extras;
+mod files;
 mod fbx;
 mod ffmpeg;
 mod images;
@@ -178,7 +179,7 @@ struct App {
     view: Option<View>,
     brain: brain::Brain,
     filter: String,
-    collapsed: HashSet<String>,
+    files: files::FilesState,
     selected: Option<String>,
     backlinks: Vec<vault::Backlink>,
     actions: Vec<Action>,
@@ -206,6 +207,10 @@ struct App {
     tasks: extras::TasksState,
     tags: Option<(Instant, Vec<(String, usize)>)>,
     stats: Option<extras::Stats>,
+    want_format: bool,
+    want_term: bool,
+    terminal: Option<extras::Terminal>,
+    proj_words: HashMap<String, (Instant, std::sync::Arc<Vec<String>>)>,
     run: Option<extras::Run>,
     auto_query: String,
     toast: Option<(String, Instant)>,
@@ -325,6 +330,22 @@ impl App {
             live::bump();
             if r.is_ok() {
                 extras::snapshot(&root, &rel, &t);
+                // Vérification de la syntaxe en arrière-plan
+                let lang = ext(&rel);
+                if matches!(lang.as_str(), "py" | "js" | "mjs" | "cjs" | "json" | "sh" | "bash" | "lua") {
+                    if let (Ok(path), Some(doc)) = (vault::safe(&root, &rel), self.docs.get_mut(i)) {
+                        let (tx, rx) = std::sync::mpsc::channel();
+                        let ctx = self.ctx.clone();
+                        let t2 = t.clone();
+                        std::thread::spawn(move || {
+                            let _ = tx.send(code::check(&path, &lang, &t2));
+                            if let Some(c) = ctx {
+                                c.request_repaint();
+                            }
+                        });
+                        doc.code.diag_rx = Some(rx);
+                    }
+                }
             }
             if self.report(r).is_some() && vault::is_md(&rel) {
                 self.brain.dirty = true;
@@ -360,6 +381,8 @@ impl App {
     fn open(&mut self, rel: String) {
         self.view = Some(View::Files);
         self.selected = Some(rel.clone());
+        self.files.reveal(&rel);
+        self.files.touch(&rel);
         if let Some(i) = self.docs.iter().position(|d| d.rel == rel) {
             self.active = Some(i);
         } else {
@@ -612,7 +635,23 @@ impl App {
         if pressed(Modifiers::COMMAND | Modifiers::SHIFT, Key::M) {
             self.compact = !self.compact;
         }
-        if pressed(Modifiers::COMMAND, Key::G) {
+        let text_open = self.view() == View::Files && self.current().is_some_and(|d| matches!(d.content, Content::Text(_)));
+        if text_open && pressed(Modifiers::COMMAND | Modifiers::SHIFT, Key::O) {
+            if let Some(i) = self.active {
+                self.docs[i].code.goto = Some("@".into());
+            }
+        }
+        if text_open && pressed(Modifiers::ALT | Modifiers::SHIFT, Key::F) {
+            self.format_current();
+        }
+        if pressed(Modifiers::COMMAND, Key::Backtick) {
+            self.toggle_terminal();
+        }
+        if text_open && pressed(Modifiers::COMMAND, Key::G) {
+            if let Some(i) = self.active {
+                self.docs[i].code.goto = Some(String::new());
+            }
+        } else if pressed(Modifiers::COMMAND, Key::G) {
             self.view = Some(if self.view() == View::Brain { View::Files } else { View::Brain });
         }
         for (k, v) in [(Key::Num1, View::Files), (Key::Num2, View::Brain), (Key::Num3, View::Refs), (Key::Num4, View::Boards), (Key::Num5, View::Tasks), (Key::Num6, View::Chat)] {
@@ -819,255 +858,6 @@ impl App {
 
     // ---------- explorateur ----------
 
-    fn explorer(&mut self, ui: &mut egui::Ui) {
-        let p = theme::pal();
-        egui::Panel::left("explorer")
-            .resizable(true)
-            .default_size(250.0)
-            .min_size(170.0)
-            .frame(egui::Frame::new().fill(p.panel).stroke(egui::Stroke::new(1.0, p.line)).inner_margin(egui::Margin::symmetric(0, 10)))
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.add_space(12.0);
-                    ui.label(caps("explorateur"));
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.add_space(8.0);
-                        if ui.small_button("+dir").on_hover_text("Nouveau dossier").clicked() {
-                            self.actions.push(Action::NewDir(self.target_dir("")));
-                        }
-                        if ui.small_button("+fichier").on_hover_text("Nouveau fichier").clicked() {
-                            self.actions.push(Action::NewFile(self.target_dir(&self.notes_dir())));
-                        }
-                    });
-                });
-                ui.add_space(6.0);
-                ui.horizontal(|ui| {
-                    ui.add_space(10.0);
-                    egui::Frame::new().fill(p.bg).stroke(egui::Stroke::new(1.0, p.line)).inner_margin(egui::Margin::symmetric(8, 4)).show(ui, |ui| {
-                        ui.label(RichText::new("/").color(p.accent));
-                        ui.add(
-                            egui::TextEdit::singleline(&mut self.filter)
-                                .hint_text("filtrer")
-                                .frame(egui::Frame::NONE)
-                                .margin(egui::Margin::ZERO),
-                        );
-                    });
-                });
-                ui.add_space(8.0);
-
-                let resp = egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
-                    ui.spacing_mut().item_spacing.y = 0.0;
-                    self.tree(ui);
-                    // Zone vide en bas : déposer ici = racine du coffre ; clic droit = menu racine.
-                    let (rect, bg) = ui.allocate_exact_size(egui::vec2(ui.available_width(), ui.available_height().max(40.0)), egui::Sense::click());
-                    if let Some(from) = bg.dnd_release_payload::<String>() {
-                        self.actions.push(Action::Move((*from).clone(), String::new()));
-                    }
-                    if bg.dnd_hover_payload::<String>().is_some() {
-                        ui.painter().rect_stroke(rect.shrink(4.0), 0.0, egui::Stroke::new(1.0, p.accent), egui::StrokeKind::Inside);
-                    }
-                    if bg.clicked() {
-                        self.selected = None;
-                    }
-                    bg.context_menu(|ui| {
-                        if ui.button("nouveau fichier").clicked() {
-                            self.actions.push(Action::NewFile(String::new()));
-                        }
-                        if ui.button("nouveau dossier").clicked() {
-                            self.actions.push(Action::NewDir(String::new()));
-                        }
-                    });
-                });
-                let _ = resp;
-            });
-    }
-
-    fn tree(&mut self, ui: &mut egui::Ui) {
-        let p = theme::pal();
-        let filter = self.filter.to_lowercase();
-        let active_rel = self.current().map(|d| d.rel.clone());
-        let dirty: HashSet<String> = self.docs.iter().filter(|d| d.dirty_since.is_some()).map(|d| d.rel.clone()).collect();
-        let mut hidden_under: Option<String> = None;
-
-        let entries = self.entries.clone();
-        for e in &entries {
-            if let Some(h) = &hidden_under {
-                if e.rel.starts_with(&format!("{h}/")) {
-                    continue;
-                }
-                hidden_under = None;
-            }
-            if !filter.is_empty() {
-                if e.is_dir || !e.rel.to_lowercase().contains(&filter) {
-                    continue;
-                }
-            } else if e.is_dir && self.collapsed.contains(&e.rel) {
-                hidden_under = Some(e.rel.clone());
-            }
-
-            let depth = if filter.is_empty() { e.depth } else { 0 };
-            let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 24.0), egui::Sense::click_and_drag());
-            let selected = self.selected.as_deref() == Some(&e.rel);
-            let active = active_rel.as_deref() == Some(&e.rel);
-            let painter = ui.painter();
-            let drop_target = e.is_dir && resp.dnd_hover_payload::<String>().is_some_and(|f| *f != e.rel);
-            if drop_target {
-                painter.rect_filled(rect, 0.0, p.accent.linear_multiply(0.15));
-            } else if active {
-                painter.rect_filled(rect, 0.0, p.bg);
-            } else if selected || resp.hovered() {
-                painter.rect_filled(rect, 0.0, p.line.linear_multiply(0.45));
-            }
-            if active {
-                painter.rect_filled(egui::Rect::from_min_size(rect.min, egui::vec2(2.0, rect.height())), 0.0, p.accent);
-            }
-            let x = rect.left() + 14.0 + depth as f32 * 14.0;
-            // Guides d'indentation
-            for d in 0..depth {
-                let gx = rect.left() + 18.0 + d as f32 * 14.0;
-                painter.line_segment([egui::pos2(gx, rect.top()), egui::pos2(gx, rect.bottom())], egui::Stroke::new(1.0, p.line));
-            }
-            let font = egui::FontId::monospace(12.5);
-            let (icon, icon_color) = if e.is_dir {
-                (if self.collapsed.contains(&e.rel) { "▸" } else { "▾" }, p.muted)
-            } else if vault::is_md(&e.rel) {
-                ("#", p.accent)
-            } else if e.rel.to_lowercase().ends_with(".blend") || model3d::is_model(&e.rel) {
-                ("◆", p.accent)
-            } else if office::is_office(&e.rel) {
-                ("▤", p.link)
-            } else if video::is_video(&e.rel) {
-                ("▶", p.accent)
-            } else if images::is_image(&e.rel) {
-                ("▣", p.link)
-            } else if board::is_board(&e.rel) {
-                ("▦", p.accent)
-            } else {
-                ("·", p.muted)
-            };
-            painter.text(egui::pos2(x, rect.center().y), egui::Align2::LEFT_CENTER, icon, font.clone(), icon_color);
-            let label = if e.is_dir { format!("{}/", e.name) } else if filter.is_empty() { e.name.clone() } else { vault::display_rel(&e.rel) };
-            let color = if active || e.is_dir { p.text } else { p.muted };
-            let galley = painter.layout_no_wrap(label, font.clone(), color);
-            painter.galley(egui::pos2(x + 14.0, rect.center().y - galley.size().y / 2.0), galley, color);
-            if dirty.contains(&e.rel) {
-                painter.text(egui::pos2(rect.right() - 12.0, rect.center().y), egui::Align2::RIGHT_CENTER, "●", font.clone(), p.accent);
-            }
-
-            let resp = if e.depth == 0 && vault::is_external(&e.rel) {
-                let real = vault::safe(&self.root(), &e.rel).map(|p| p.display().to_string()).unwrap_or_default();
-                resp.on_hover_text(format!("à son emplacement d'origine : {real}"))
-            } else {
-                resp
-            };
-            // Glisser-déposer pour déplacer
-            if resp.drag_started() {
-                egui::DragAndDrop::set_payload(ui.ctx(), e.rel.clone());
-            }
-            if resp.dragged() {
-                if let Some(pos) = ui.ctx().pointer_interact_pos() {
-                    let layer = ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::unique("drag-ghost")));
-                    layer.text(pos + egui::vec2(14.0, 0.0), egui::Align2::LEFT_CENTER, format!("→ {}", e.name), font.clone(), p.accent);
-                }
-            }
-            if e.is_dir {
-                if let Some(from) = resp.dnd_release_payload::<String>() {
-                    if *from != e.rel {
-                        self.actions.push(Action::Move((*from).clone(), e.rel.clone()));
-                    }
-                }
-            }
-
-            if resp.clicked() {
-                self.selected = Some(e.rel.clone());
-                if e.is_dir {
-                    if !self.collapsed.remove(&e.rel) {
-                        self.collapsed.insert(e.rel.clone());
-                    }
-                } else {
-                    self.actions.push(Action::Open(e.rel.clone()));
-                }
-            }
-            let dir = if e.is_dir { e.rel.clone() } else { vault::parent(&e.rel) };
-            resp.context_menu(|ui| {
-                ui.label(RichText::new(&e.rel).color(p.muted).size(11.0));
-                ui.separator();
-                if !e.is_dir && ui.button("ouvrir").clicked() {
-                    self.actions.push(Action::Open(e.rel.clone()));
-                }
-                if ui.button("nouveau fichier ici").clicked() {
-                    self.actions.push(Action::NewFile(dir.clone()));
-                }
-                if ui.button("nouveau dossier ici").clicked() {
-                    self.actions.push(Action::NewDir(dir.clone()));
-                }
-                ui.separator();
-                let link_root = vault::is_link_root(&e.rel) || e.rel == vault::LINKED_FILES;
-                if !link_root && ui.button("renommer / déplacer").clicked() {
-                    self.actions.push(Action::Rename(e.rel.clone()));
-                }
-                if vault::is_external(&e.rel) && !e.is_dir {
-                    if ui.button("déplacer dans le coffre").on_hover_text("Le fichier quitte son dossier d'origine").clicked() {
-                        self.dialog = Some(Dialog::MoveIn { rel: e.rel.clone(), copy: false });
-                    }
-                    if ui.button("copier dans le coffre").clicked() {
-                        self.dialog = Some(Dialog::MoveIn { rel: e.rel.clone(), copy: true });
-                    }
-                }
-                if !e.is_dir && ui.button(if e.rel.to_lowercase().ends_with(".blend") { "ouvrir dans Blender" } else { "ouvrir avec l'app par défaut" }).clicked() {
-                    let r = vault::safe(&self.root(), &e.rel).and_then(|p| settings::open_external(&p));
-                    if let Err(err) = r {
-                        self.error = Some(err);
-                    }
-                }
-                if !e.is_dir && ui.button("ouvrir avec…").clicked() {
-                    let r = vault::safe(&self.root(), &e.rel).and_then(|p| settings::open_with(&p));
-                    if let Err(err) = r {
-                        self.error = Some(err);
-                    }
-                }
-                ui.separator();
-                if ui.button("exporter en zip…").clicked() {
-                    self.export_zip(vec![e.rel.clone()], false);
-                }
-                if (vault::is_md(&e.rel) || board::is_board(&e.rel)) && ui.button("exporter avec ses liens en zip…").on_hover_text("Ajoute les notes liées, les images citées et le contenu du board").clicked() {
-                    self.export_zip(vec![e.rel.clone()], true);
-                }
-                if ui.button("envoyer à un autre ordi…").clicked() {
-                    let root = self.root();
-                    self.send_files = transfer::collect(&root, &self.entries, &[e.rel.clone()], false);
-                    self.dialog = Some(Dialog::Transfer { send: true });
-                }
-                ui.separator();
-                if ui.button("afficher dans le dossier").clicked() {
-                    if let Ok(path) = vault::safe(&self.root(), &e.rel) {
-                        settings::reveal(&path, !e.is_dir);
-                    }
-                }
-                if ui.button("copier le chemin").clicked() {
-                    let full = vault::safe(&self.root(), &e.rel).map(|p| p.to_string_lossy().to_string()).unwrap_or(e.rel.clone());
-                    ui.ctx().copy_text(full);
-                }
-                let label = if link_root { "retirer le lien (le fichier reste en place)" } else { "supprimer" };
-                if ui.button(RichText::new(label).color(p.missing)).clicked() {
-                    if link_root {
-                        let r = vault::trash(&self.root(), &e.rel);
-                        if self.report(r).is_some() {
-                            self.docs.retain(|d| !(d.rel == e.rel || d.rel.starts_with(&format!("{}/", e.rel))));
-                            self.active = if self.docs.is_empty() { None } else { Some(0) };
-                            self.links_dirty = true;
-                        }
-                    } else {
-                        self.actions.push(Action::Trash(e.rel.clone()));
-                    }
-                }
-            });
-        }
-        if self.entries.is_empty() {
-            ui.label(RichText::new("   coffre vide").color(p.muted));
-        }
-    }
-
     // ---------- éditeur ----------
 
     fn tabs(&mut self, ui: &mut egui::Ui) {
@@ -1118,10 +908,17 @@ impl App {
         if run_now {
             self.run_current();
         }
+        if std::mem::take(&mut self.want_format) {
+            self.format_current();
+        }
+        if std::mem::take(&mut self.want_term) {
+            self.toggle_terminal();
+        }
     }
 
     fn editor_inner(&mut self, ui: &mut egui::Ui, run_now: &mut bool) {
         let p = theme::pal();
+        self.feed_project_words();
         egui::CentralPanel::default().frame(egui::Frame::new().fill(p.bg)).show(ui, |ui| {
             if self.docs.is_empty() {
                 ui.centered_and_justified(|ui| {
@@ -1181,6 +978,42 @@ impl App {
                         };
                         if let Err(e) = r {
                             self.error = Some(e);
+                        }
+                        if matches!(self.docs[i].content, Content::Text(_)) && !vault::is_md(&rel) {
+                            let mut act = 0;
+                            egui::containers::menu::MenuButton::new("code ▾").ui(ui, |ui| {
+                                ui.set_min_width(260.0);
+                                for (k, l) in [(1, "formater le fichier   Alt+Maj+F"), (2, "aller à la ligne   Ctrl+G"), (3, "aller au symbole   Ctrl+Maj+O"), (4, "retour à la ligne   Alt+Z"), (5, "terminal   Ctrl+`"), (6, "vérifier maintenant")] {
+                                    if ui.button(l).clicked() {
+                                        act = k;
+                                    }
+                                }
+                                ui.separator();
+                                ui.label(RichText::new("Ctrl+D : occurrence suivante (plusieurs curseurs)\nCtrl+Maj+L : toutes les occurrences\nCtrl+L : sélectionner la ligne\nAlt+↑↓ : déplacer · Alt+Maj+↑↓ : dupliquer\nCtrl+/ : commenter · Ctrl+] [ : indenter\nCtrl+Entrée : ligne en dessous\nCtrl+Espace : suggestions · Tab : extrait").color(p.muted).size(10.5));
+                            });
+                            match act {
+                                1 => self.want_format = true,
+                                2 => self.docs[i].code.goto = Some(String::new()),
+                                3 => self.docs[i].code.goto = Some("@".into()),
+                                4 => {
+                                    let w = self.docs[i].code.wrap.unwrap_or(self.prefs.wrap_code);
+                                    self.docs[i].code.wrap = Some(!w);
+                                }
+                                5 => self.want_term = true,
+                                6 => {
+                                    if let Content::Text(t) = &self.docs[i].content {
+                                        let lang = ext(&rel);
+                                        let t = t.clone();
+                                        if let Ok(path) = vault::safe(&root, &rel) {
+                                            self.docs[i].code.diags = code::check(&path, &lang, &t);
+                                            if self.docs[i].code.diags.is_empty() {
+                                                self.toast = Some(("aucune erreur trouvée".into(), Instant::now()));
+                                            }
+                                        }
+                                    }
+                                }
+                                _ => {}
+                            }
                         }
                         if extras::runner_for(&rel).is_some() && ui.button("▶ exécuter").on_hover_text("Lance le script et affiche sa sortie (F5)").clicked() {
                             *run_now = true;
@@ -1328,41 +1161,49 @@ impl App {
                     let lang = if is_md { "md".to_string() } else { ext(&rel) };
                     let fs = self.prefs.editor_size;
                     let theme = if dark { egui_extras::syntax_highlighting::CodeTheme::dark(fs) } else { egui_extras::syntax_highlighting::CodeTheme::light(fs) };
-                    let wrap = is_md || lang.is_empty() || lang == "txt" || self.prefs.wrap_code;
+                    let id = egui::Id::unique(("code", &rel));
+                    let notes: Vec<String> = existing.iter().cloned().collect();
+                    let ed = &mut doc.code;
+                    let wrap = ed.wrap.unwrap_or(is_md || lang.is_empty() || lang == "txt" || self.prefs.wrap_code);
                     let numbers = !is_md && self.prefs.line_numbers;
                     let mut layouter = |ui: &egui::Ui, buf: &dyn egui::TextBuffer, width: f32| {
                         let mut job = egui_extras::syntax_highlighting::highlight(ui.ctx(), ui.style(), &theme, buf.as_str(), &lang);
                         job.wrap.max_width = if wrap { width } else { f32::INFINITY };
                         ui.painter().layout_job(job)
                     };
-                    let id = egui::Id::unique(("code", &rel));
-                    let notes: Vec<String> = existing.iter().cloned().collect();
-                    let ed = &mut doc.code;
                     let mut changed = code::find_bar(ui, ed, text, id);
+                    code::goto_bar(ui, ed, text, &lang);
                     changed |= code::before(ui, ed, text, &lang, id, &notes);
                     let typed_now = ui.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Text(_))));
+                    // Erreurs trouvées à l'enregistrement
+                    if !ed.diags.is_empty() {
+                        let d = ed.diags[0].clone();
+                        let n = ed.diags.len();
+                        egui::Frame::new().fill(p.missing.gamma_multiply(0.12)).inner_margin(egui::Margin::symmetric(12, 4)).show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            let t = format!("⚠ ligne {} : {}{}", d.line + 1, d.msg, if n > 1 { format!("  (+{} autre(s))", n - 1) } else { String::new() });
+                            if ui.add(egui::Button::new(RichText::new(t).color(p.missing).size(11.5)).frame(false)).on_hover_text("aller à l'erreur").clicked() {
+                                ed.jump = Some(d.line);
+                            }
+                        });
+                    }
+                    let digits = text.lines().count().max(1).to_string().len().max(3) as f32;
+                    let gutter = if numbers { (digits * fs * 0.62 + 26.0) as i8 } else if wrap { 40 } else { 12 };
                     let scroll = if wrap { egui::ScrollArea::vertical() } else { egui::ScrollArea::both() };
                     scroll.id_salt(("scroll", &rel)).auto_shrink(false).show(ui, |ui| {
-                        egui::Frame::new().inner_margin(egui::Margin { left: if wrap { 40 } else { 8 }, right: 24, top: 16, bottom: 120 }).show(ui, |ui| {
-                            ui.horizontal_top(|ui| {
-                                if numbers && !wrap {
-                                    let n = text.lines().count().max(1) + usize::from(text.ends_with('\n'));
-                                    let nums: String = (1..=n).map(|k| format!("{k:>4}\n")).collect();
-                                    ui.add(egui::Label::new(RichText::new(nums.trim_end()).monospace().size(fs).color(p.muted.linear_multiply(0.7))).selectable(false));
-                                    ui.add_space(10.0);
-                                }
-                                let edit = egui::TextEdit::multiline(text)
-                                    .id(id)
-                                    .frame(egui::Frame::NONE)
-                                    .code_editor()
-                                    .lock_focus(true)
-                                    .desired_rows(40)
-                                    .desired_width(if wrap { (ui.available_width()).min(820.0) } else { f32::INFINITY })
-                                    .layouter(&mut layouter);
-                                let out = edit.show(ui);
-                                changed |= out.response.changed();
-                                code::after(ui, ed, text, &lang, &out, &notes, typed_now && out.response.changed());
-                            });
+                        egui::Frame::new().inner_margin(egui::Margin { left: gutter, right: 24, top: 16, bottom: 120 }).show(ui, |ui| {
+                            let bg = ui.painter().add(egui::Shape::Noop);
+                            let edit = egui::TextEdit::multiline(text)
+                                .id(id)
+                                .frame(egui::Frame::NONE)
+                                .code_editor()
+                                .lock_focus(true)
+                                .desired_rows(40)
+                                .desired_width(if wrap { (ui.available_width()).min(if is_md { 820.0 } else { 2000.0 }) } else { f32::INFINITY })
+                                .layouter(&mut layouter);
+                            let out = edit.show(ui);
+                            changed |= out.response.changed();
+                            code::after(ui, ed, text, &lang, &out, &notes, typed_now && out.response.changed(), code::View { gutter: numbers, font_size: fs, bg });
                         });
                     });
                     if changed {
@@ -1383,6 +1224,32 @@ impl App {
             .show(ui, |ui| {
                 egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
                     let is_md = self.current().is_some_and(|d| vault::is_md(&d.rel));
+                    // Structure : fonctions, classes, titres… (clic = aller à la ligne)
+                    let syms = self.current().and_then(|d| if let Content::Text(t) = &d.content { Some(code::symbols(t, &if vault::is_md(&d.rel) { "md".to_string() } else { ext(&d.rel) })) } else { None }).unwrap_or_default();
+                    if !syms.is_empty() {
+                        ui.label(caps(&format!("structure · {}", syms.len())));
+                        ui.add_space(4.0);
+                        let mut jump = None;
+                        for sy in syms.iter().take(300) {
+                            ui.horizontal(|ui| {
+                                ui.add_space(sy.depth.min(6) as f32 * 12.0);
+                                let col = match sy.kind {
+                                    "fn" | "méthode" => egui::Color32::from_rgb(0x4f, 0x8a, 0xb8),
+                                    "type" | "impl" => egui::Color32::from_rgb(0x8a, 0x5c, 0xd6),
+                                    "titre" => p.accent,
+                                    _ => p.muted,
+                                };
+                                ui.label(RichText::new(match sy.kind { "fn" | "méthode" => "ƒ", "type" | "impl" => "◇", "titre" => "#", _ => "·" }).color(col).size(11.0));
+                                if ui.add(egui::Button::new(RichText::new(&sy.name).size(11.5)).frame(false)).on_hover_text(format!("ligne {}", sy.line + 1)).clicked() {
+                                    jump = Some(sy.line);
+                                }
+                            });
+                        }
+                        if let (Some(l), Some(i)) = (jump, self.active) {
+                            self.docs[i].code.jump = Some(l);
+                        }
+                        ui.add_space(16.0);
+                    }
                     if is_md {
                         ui.label(caps(&format!("liens entrants · {}", self.backlinks.len())));
                         ui.add_space(4.0);
@@ -1526,7 +1393,7 @@ impl App {
                         self.brain.dirty = true;
                         self.brain.recenter();
                         self.selected = Some(target.clone());
-                        self.collapsed.remove(&target);
+                        self.files.expanded.insert(target.clone());
                     }
                 } else {
                     self.actions.push(Action::Open(rel));
@@ -2030,7 +1897,7 @@ impl App {
                         }
                         if ui.button("explorateur").clicked() {
                             self.selected = Some(sel.clone());
-                            self.collapsed.remove(&vault::parent(&sel));
+                            self.files.reveal(&sel);
                         }
                     });
                 });
@@ -3294,6 +3161,9 @@ impl eframe::App for App {
                 self.topbar(ui);
                 self.statusbar(ui);
                 self.explorer(ui);
+            }
+            if self.terminal.is_some() {
+                self.terminal_panel(ui);
             }
             if self.assistant_open {
                 self.assistant_panel(ui);

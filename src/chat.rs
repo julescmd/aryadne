@@ -132,6 +132,9 @@ pub struct Live {
     pub status: String,
     pub done: bool,
     pub error: Option<String>,
+    /// Début de la réponse et nombre de morceaux reçus (pour la vitesse)
+    pub started: Option<std::time::Instant>,
+    pub chunks: usize,
 }
 
 #[derive(Default)]
@@ -141,6 +144,8 @@ pub struct Chat {
     pub live: Option<Arc<Mutex<Live>>>,
     pub include_open: bool,
     pub attachments: Vec<Attachment>,
+    /// Vitesse de la dernière réponse (jetons par seconde, approximatif)
+    pub last_speed: Option<f32>,
 }
 
 impl Chat {
@@ -204,6 +209,8 @@ impl Chat {
                     set(&move |l: &mut Live| {
                         l.text.push_str(&d);
                         l.status.clear();
+                        l.started.get_or_insert_with(std::time::Instant::now);
+                        l.chunks += 1;
                     });
                 })
             });
@@ -218,11 +225,12 @@ impl Chat {
 
     /// À appeler à chaque image : range la réponse terminée dans l'historique.
     pub fn poll(&mut self) {
-        let finished = self.live.as_ref().and_then(|l| l.lock().ok().filter(|l| l.done).map(|l| (l.text.clone(), l.sources.clone(), l.error.clone(), l.stop.load(Ordering::Relaxed))));
-        if let Some((mut text, sources, error, stopped)) = finished {
+        let finished = self.live.as_ref().and_then(|l| l.lock().ok().filter(|l| l.done).map(|l| (l.text.clone(), l.sources.clone(), l.error.clone(), l.stop.load(Ordering::Relaxed), l.started.map(|t| t.elapsed().as_secs_f32()), l.chunks)));
+        if let Some((mut text, sources, error, stopped, secs, chunks)) = finished {
             if stopped {
                 text.push_str("\n\n*(arrêté)*");
             }
+            self.last_speed = secs.filter(|s| *s > 0.2 && chunks > 3).map(|s| chunks as f32 / s);
             self.msgs.push(Msg { role: Role::Assistant, text, sources, error, attached: vec![] });
             self.live = None;
         }

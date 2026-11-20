@@ -235,6 +235,104 @@ impl Graph {
     }
 }
 
+pub const SHADER_EXAMPLES: &[(&str, &str)] = &[
+    ("mélange par bruit", DEFAULT_SHADER),
+    ("dégradé radial", "d = len(x - 0.5, y - 0.5) * 2\nr = mix(ar, br, d)\ng = mix(ag, bg, d)\nb = mix(ab, bb, d)\n"),
+    ("rayures animables (F = décalage)", "k = step(0.5, fract((x + y + f) * 10))\nr = mix(ar, br, k)\ng = mix(ag, bg, k)\nb = mix(ab, bb, k)\n"),
+    ("noir et blanc contrasté", "l = ar * 0.2126 + ag * 0.7152 + ab * 0.0722\nl = smoothstep(0.2, 0.8, l)\nr = l ; g = l ; b = l\n"),
+    ("teinte cinéma (orange / bleu)", "l = ar * 0.3 + ag * 0.6 + ab * 0.1\nr = mix(ar, l * 1.15 + 0.05, 0.35)\ng = mix(ag, l * 1.0, 0.35)\nb = mix(ab, l * 0.85 + (1 - l) * 0.2, 0.35)\n"),
+    ("cel shading (matériau)", "d = max(0, nx * 0.5 + ny * 0.8 + nz * 0.3)\nk = if(d > 0.6, 1, if(d > 0.2, 0.6, 0.3))\nr = ar * k ; g = ag * k ; b = ab * k\n"),
+    ("mousse sur le dessus (matériau)", "k = smoothstep(0.4, 0.8, ny + (fbm(px * 8, py * 8, pz * 8) - 0.5) * 0.6)\nr = mix(ar, 0.25, k)\ng = mix(ag, 0.45, k)\nb = mix(ab, 0.15, k)\n"),
+    ("pixels (mosaïque de couleur B)", "s = 24\nk = rand(floor(x * s), floor(y * s))\nr = mix(ar, br, k) ; g = mix(ag, bg, k) ; b = mix(ab, bb, k)\n"),
+    ("vignette ronde", "d = len(x - 0.5, y - 0.5)\nk = 1 - smoothstep(0.3, 0.75, d)\nr = ar * k ; g = ag * k ; b = ab * k\n"),
+    ("bandes de scan", "k = 0.85 + 0.15 * step(0.5, fract(y * h / 3))\nr = ar * k ; g = ag * k ; b = ab * k\n"),
+];
+
+/// Matériaux prêts à l'emploi (menu « + » de l'éditeur).
+pub fn material_preset(name: &str) -> Option<Graph> {
+    let mut g = Graph { kind: GraphKind::Material, nodes: vec![], links: vec![], next_id: 0 };
+    let out = g.add("mat_out", [700.0, 40.0]);
+    let set = |g: &mut Graph, id: u32, k: usize, v: V| {
+        if let Some(n) = g.nodes.iter_mut().find(|n| n.id == id) {
+            n.values[k] = v;
+        }
+    };
+    match name {
+        "bois" => {
+            let st = g.add("stripes", [0.0, 0.0]);
+            set(&mut g, st, 0, f(14.0));
+            let no = g.add("noise", [0.0, 200.0]);
+            set(&mut g, no, 0, f(3.0));
+            let mx = g.add("mix", [230.0, 60.0]);
+            let rp = g.add("ramp", [460.0, 40.0]);
+            set(&mut g, rp, 1, [0.25, 0.12, 0.05, 1.0]);
+            set(&mut g, rp, 2, [0.55, 0.32, 0.15, 1.0]);
+            set(&mut g, rp, 3, [0.75, 0.52, 0.30, 1.0]);
+            g.connect(st, 0, mx, 1);
+            g.connect(no, 1, mx, 2);
+            g.connect(mx, 0, rp, 0);
+            g.connect(rp, 0, out, 0);
+            set(&mut g, out, 1, f(0.6));
+        }
+        "pierre" => {
+            let vo = g.add("voronoi", [0.0, 0.0]);
+            set(&mut g, vo, 0, f(6.0));
+            let no = g.add("noise", [0.0, 200.0]);
+            set(&mut g, no, 0, f(12.0));
+            let mx = g.add("mix", [230.0, 60.0]);
+            set(&mut g, mx, 0, f(0.4));
+            let rp = g.add("ramp", [460.0, 40.0]);
+            set(&mut g, rp, 1, [0.18, 0.18, 0.19, 1.0]);
+            set(&mut g, rp, 2, [0.45, 0.44, 0.42, 1.0]);
+            set(&mut g, rp, 3, [0.70, 0.69, 0.66, 1.0]);
+            g.connect(vo, 1, mx, 1);
+            g.connect(no, 1, mx, 2);
+            g.connect(mx, 0, rp, 0);
+            g.connect(rp, 0, out, 0);
+            set(&mut g, out, 1, f(0.85));
+        }
+        "métal rouillé" => {
+            let no = g.add("noise", [0.0, 0.0]);
+            set(&mut g, no, 0, f(5.0));
+            set(&mut g, no, 1, f(6.0));
+            let th = g.add("threshold", [230.0, 0.0]);
+            set(&mut g, th, 1, f(0.55));
+            let mx = g.add("mix", [460.0, 0.0]);
+            set(&mut g, mx, 1, [0.62, 0.63, 0.66, 1.0]);
+            set(&mut g, mx, 2, [0.45, 0.20, 0.08, 1.0]);
+            let inv = g.add("invert", [460.0, 200.0]);
+            g.connect(no, 1, th, 0);
+            g.connect(th, 0, mx, 0);
+            g.connect(mx, 0, out, 0);
+            g.connect(th, 0, inv, 0);
+            g.connect(inv, 0, out, 2);
+            set(&mut g, out, 1, f(0.5));
+        }
+        "toon" => {
+            let sh = g.add("shader", [300.0, 0.0]);
+            if let Some(n) = g.nodes.iter_mut().find(|n| n.id == sh) {
+                n.params.insert("code".into(), Param::S(SHADER_EXAMPLES[5].1.to_string()));
+                n.values[0] = [0.95, 0.45, 0.25, 1.0];
+            }
+            g.connect(sh, 0, out, 0);
+            set(&mut g, out, 1, f(1.0));
+        }
+        "céramique" => {
+            set(&mut g, out, 0, [0.92, 0.9, 0.85, 1.0]);
+            set(&mut g, out, 1, f(0.08));
+        }
+        "or" => {
+            set(&mut g, out, 0, [1.0, 0.78, 0.34, 1.0]);
+            set(&mut g, out, 1, f(0.25));
+            set(&mut g, out, 2, f(1.0));
+        }
+        _ => return None,
+    }
+    Some(g)
+}
+
+pub const MATERIAL_PRESETS: [&str; 6] = ["bois", "pierre", "métal rouillé", "toon", "céramique", "or"];
+
 pub const DEFAULT_SHADER: &str = "// r g b a : couleur A · ar ag ab : A · br bg bb : B · f : entrée F\n// x y : coordonnées 0..1 · nx ny nz / px py pz : normale et position (matériau)\n// fonctions : sin cos abs min max clamp mix step smoothstep pow sqrt fract floor noise fbm rand…\nk = smoothstep(0.3, 0.7, fbm(x * 6, y * 6, 0))\nr = mix(ar, br, k)\ng = mix(ag, bg, k)\nb = mix(ab, bb, k)\n";
 
 // ---------- langage du shader perso ----------
@@ -1180,6 +1278,7 @@ impl Editor {
         let kind = self.graph.kind;
         // Barre
         let mut add: Option<&'static str> = None;
+        let mut preset: Option<&'static str> = None;
         ui.horizontal(|ui| {
             egui::containers::menu::MenuButton::new("＋ ajouter ▾").ui(ui, |ui| {
                 for cat in ["entrée", "motif", "couleur", "math", "filtre", "shader", "sortie"] {
@@ -1196,6 +1295,15 @@ impl Editor {
                     });
                 }
             });
+            if kind == GraphKind::Material {
+                egui::containers::menu::MenuButton::new("préréglages ▾").ui(ui, |ui| {
+                    for name in MATERIAL_PRESETS {
+                        if ui.button(name).on_hover_text("remplace le graphe actuel").clicked() {
+                            preset = Some(name);
+                        }
+                    }
+                });
+            }
             ui.label(RichText::new("Maj+A : ajouter · glisser une sortie sur une entrée · Suppr : effacer · molette : zoom").color(p.muted).size(11.0));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if kind == GraphKind::Compositor && ui.button("exporter PNG").clicked() {
@@ -1209,6 +1317,11 @@ impl Editor {
                 }
             });
         });
+        if let Some(g) = preset.and_then(material_preset) {
+            self.graph = g;
+            self.scene = Rect::ZERO;
+            self.changed();
+        }
         if let Err((_, e)) = &self.program {
             ui.label(RichText::new(format!("⚠ {e}")).color(p.missing).size(11.5));
         }
@@ -1374,7 +1487,7 @@ impl Editor {
             .iter()
             .filter_map(|n| {
                 let d = def(&n.op)?;
-                let rows = d.outputs.len() + d.inputs.len() + d.params.iter().map(|pp| if matches!(pp, ParamDef::Text(_)) { 7 } else { 1 }).sum::<usize>();
+                let rows = d.outputs.len() + d.inputs.len() + d.params.iter().map(|pp| if matches!(pp, ParamDef::Text(_)) { 8 } else { 1 }).sum::<usize>();
                 let h = HEAD + rows as f32 * ROW + 8.0;
                 let r = Rect::from_min_size(pos2(n.pos[0], n.pos[1]), vec2(NW, h));
                 Some((n.id, r, d, h))
@@ -1497,7 +1610,7 @@ impl Editor {
             let mut y = r.top() + HEAD + (d.outputs.len() + d.inputs.len()) as f32 * ROW;
             for pd in d.params {
                 let (h, name) = match pd {
-                    ParamDef::Text(n) => (7.0 * ROW, *n),
+                    ParamDef::Text(n) => (8.0 * ROW, *n),
                     ParamDef::Choice(n, _) | ParamDef::Float(n, ..) | ParamDef::File(n) => (ROW, *n),
                 };
                 let row = Rect::from_min_size(pos2(r.left() + 8.0, y + 1.0), vec2(NW - 16.0, h - 2.0));
@@ -1521,6 +1634,18 @@ impl Editor {
                         }
                     }
                     (ParamDef::Text(_), Param::S(code)) => {
+                        let mut pick = None;
+                        egui::ComboBox::from_id_salt(("snip", *id)).selected_text(RichText::new("exemples").size(10.5)).width(NW - 24.0).show_ui(&mut child, |ui| {
+                            for (name, c) in SHADER_EXAMPLES {
+                                if ui.button(*name).clicked() {
+                                    pick = Some(c.to_string());
+                                }
+                            }
+                        });
+                        if let Some(c) = pick {
+                            *code = c;
+                            actions.push(Act::Changed);
+                        }
                         let te = egui::TextEdit::multiline(code).code_editor().desired_width(NW - 18.0).desired_rows(7).font(egui::FontId::monospace(10.5));
                         if child.add(te).changed() {
                             actions.push(Act::Changed);
@@ -1702,6 +1827,13 @@ mod tests {
         let px = img.px[40];
         assert!((px[0] - 0.8).abs() < 1e-4 && (px[2] - 0.4).abs() < 1e-4, "{px:?}");
 
+        for name in MATERIAL_PRESETS {
+            let g = material_preset(name).unwrap();
+            assert!(Program::compile(&g, "/tmp", 64).is_ok(), "{name}");
+        }
+        for (_, c) in SHADER_EXAMPLES {
+            assert!(Shader::compile(c).is_ok(), "{c}");
+        }
         // Matériau par défaut
         let m = Graph::new_material();
         let prog = Program::compile(&m, "/tmp", 64).unwrap();

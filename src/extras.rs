@@ -51,6 +51,7 @@ pub enum Cmd {
     NewCompositor,
     Stats,
     RunFile,
+    NewBoard,
 }
 
 impl App {
@@ -67,6 +68,7 @@ impl App {
             ("nouvelle note", "Ctrl+N", Cmd::NewNote),
             ("note du jour", "Ctrl+J", Cmd::Daily),
             ("nouvelle note depuis un modèle", "", Cmd::FromTemplate),
+            ("nouveau board", "", Cmd::NewBoard),
             ("nouveau matériau (nodes)", "", Cmd::NewMaterial),
             ("nouveau compositing (nodes)", "", Cmd::NewCompositor),
             ("importer des fichiers…", "", Cmd::Import),
@@ -185,6 +187,10 @@ impl App {
                     self.refresh();
                     self.open(rel);
                 }
+            }
+            Cmd::NewBoard => {
+                self.new_board("Moodboard");
+                self.view = Some(View::Boards);
             }
             Cmd::Stats => self.stats = Some(compute_stats(&self.root(), &self.entries)),
             Cmd::RunFile => self.run_current(),
@@ -1023,6 +1029,9 @@ pub fn chat_bar(ui: &mut egui::Ui, chat: &mut chat::Chat, local: &ollama::Local,
             chat.attachments.remove(i);
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if let Some(v) = chat.last_speed.filter(|_| !chat.busy()) {
+                ui.label(RichText::new(format!("{v:.0} jetons/s")).color(p.muted).size(10.5)).on_hover_text("vitesse de la dernière réponse");
+            }
             if chat.busy() {
                 let b = egui::Button::new(RichText::new("■ arrêter").color(p.on_accent)).fill(p.missing).stroke(egui::Stroke::NONE);
                 if ui.add(b).on_hover_text("Arrêter la réponse").clicked() {
@@ -1351,4 +1360,295 @@ pub fn runner_for(rel: &str) -> Option<(String, Vec<String>)> {
         "bat" | "cmd" => ("cmd".into(), vec!["/C".into()]),
         _ => return None,
     })
+}
+
+// ---------- code : formatage, mots du projet ----------
+
+impl App {
+    pub(super) fn format_current(&mut self) {
+        let Some(i) = self.active else { return };
+        let rel = self.docs[i].rel.clone();
+        let lang = ext(&rel);
+        let name = rel.rsplit('/').next().unwrap_or(&rel).to_string();
+        let Content::Text(t) = &self.docs[i].content else { return };
+        match code::format(t, &lang, &name) {
+            Ok(new) => {
+                if new != *t {
+                    if let Content::Text(t) = &mut self.docs[i].content {
+                        *t = new;
+                    }
+                    self.docs[i].dirty_since = Some(Instant::now());
+                    self.toast = Some(("fichier formaté (Ctrl+Z pour annuler)".into(), Instant::now()));
+                } else {
+                    self.toast = Some(("déjà bien formaté".into(), Instant::now()));
+                }
+            }
+            Err(e) => self.error = Some(e),
+        }
+    }
+
+    /// Mots des autres fichiers du même langage, pour les suggestions (rafraîchi toutes les 30 s).
+    pub(super) fn feed_project_words(&mut self) {
+        let Some(i) = self.active else { return };
+        if !matches!(self.docs[i].content, Content::Text(_)) {
+            return;
+        }
+        let lang = ext(&self.docs[i].rel);
+        if lang.is_empty() || lang == "md" || lang == "txt" {
+            return;
+        }
+        let fresh = self.proj_words.get(&lang).is_some_and(|(t, _)| t.elapsed() < Duration::from_secs(30));
+        if !fresh {
+            let root = self.root();
+            let me = self.docs[i].rel.clone();
+            let mut words: HashSet<String> = HashSet::new();
+            let re = regex::Regex::new(r"[A-Za-z_][A-Za-z0-9_]{3,40}").unwrap();
+            for e in self.entries.iter().filter(|e| !e.is_dir && e.rel != me && ext(&e.rel) == lang).take(200) {
+                if let Ok(t) = vault::read(&root, &e.rel) {
+                    for m in re.find_iter(&t[..t.len().min(300_000)]) {
+                        if words.len() > 8000 {
+                            break;
+                        }
+                        words.insert(m.as_str().to_string());
+                    }
+                }
+            }
+            let mut v: Vec<String> = words.into_iter().collect();
+            v.sort();
+            self.proj_words.insert(lang.clone(), (Instant::now(), std::sync::Arc::new(v)));
+        }
+        if let Some((_, w)) = self.proj_words.get(&lang) {
+            self.docs[i].code.project = w.clone();
+        }
+    }
+
+    pub(super) fn toggle_terminal(&mut self) {
+        if self.terminal.is_some() {
+            self.terminal = None;
+        } else {
+            let cwd = self.current().and_then(|d| vault::safe(&self.root(), &vault::parent(&d.rel)).ok()).unwrap_or_else(|| PathBuf::from(self.root()));
+            self.terminal = Some(Terminal::new(cwd));
+        }
+    }
+
+    pub(super) fn terminal_panel(&mut self, ui: &mut egui::Ui) {
+        let Some(t) = &mut self.terminal else { return };
+        let mut close = false;
+        let bg = egui::Color32::from_gray(20);
+        egui::Panel::bottom("terminal").resizable(true).default_size(220.0).min_size(90.0).frame(egui::Frame::new().fill(bg).inner_margin(8)).show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(format!("terminal · {}", t.cwd.display())).color(egui::Color32::from_gray(160)).size(11.0));
+                if t.busy() {
+                    ui.add(egui::Spinner::new().size(10.0));
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    close = ui.small_button("×").on_hover_text("Ctrl+`").clicked();
+                    if ui.small_button("effacer").clicked() {
+                        if let Ok(mut o) = t.out.lock() {
+                            o.clear();
+                        }
+                    }
+                    if t.busy() && ui.small_button("arrêter (Ctrl+C)").clicked() {
+                        t.kill();
+                    }
+                });
+            });
+            let text = t.out.lock().map(|o| o.clone()).unwrap_or_default();
+            egui::Panel::bottom("terminal-input").frame(egui::Frame::NONE).show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("❯").color(theme::pal().accent).monospace());
+                    let r = ui.add(egui::TextEdit::singleline(&mut t.input).font(egui::FontId::monospace(12.5)).text_color(egui::Color32::from_gray(235)).frame(egui::Frame::NONE).desired_width(f32::INFINITY).hint_text("commande… (↑ ↓ historique)"));
+                    if t.focus {
+                        r.request_focus();
+                        t.focus = false;
+                    }
+                    if r.has_focus() {
+                        let (up, down, ctrl_c) = ui.input(|i| (i.key_pressed(Key::ArrowUp), i.key_pressed(Key::ArrowDown), i.modifiers.command && i.key_pressed(Key::C) && !i.events.iter().any(|e| matches!(e, egui::Event::Copy))));
+                        if up {
+                            t.history_step(true);
+                        }
+                        if down {
+                            t.history_step(false);
+                        }
+                        if ctrl_c && t.busy() {
+                            t.kill();
+                        }
+                    }
+                    if r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
+                        let cmd = std::mem::take(&mut t.input);
+                        t.run(cmd, ui.ctx());
+                        t.focus = true;
+                    }
+                });
+            });
+            egui::ScrollArea::vertical().stick_to_bottom(true).auto_shrink(false).show(ui, |ui| {
+                ui.add(egui::Label::new(RichText::new(text).monospace().size(12.0).color(egui::Color32::from_gray(225))).wrap_mode(egui::TextWrapMode::Wrap));
+            });
+        });
+        if close {
+            if let Some(t) = &mut self.terminal {
+                t.kill();
+            }
+            self.terminal = None;
+        }
+    }
+}
+
+/// Terminal simple : chaque ligne est lancée dans le shell du système, dans le dossier courant.
+pub struct Terminal {
+    pub cwd: PathBuf,
+    pub out: std::sync::Arc<std::sync::Mutex<String>>,
+    pub input: String,
+    history: Vec<String>,
+    hist: Option<usize>,
+    child: Option<std::sync::Arc<std::sync::Mutex<std::process::Child>>>,
+    done: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    focus: bool,
+}
+
+impl Terminal {
+    pub fn new(cwd: PathBuf) -> Self {
+        let shell = if cfg!(windows) { "cmd" } else { "bash" };
+        Terminal {
+            out: std::sync::Arc::new(std::sync::Mutex::new(format!("Terminal ({shell}) dans {}\ncd, clear, et ↑ ↓ pour l'historique. Les programmes interactifs (vim, python sans script) ne sont pas pris en charge.\n\n", cwd.display()))),
+            cwd,
+            input: String::new(),
+            history: vec![],
+            hist: None,
+            child: None,
+            done: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            focus: true,
+        }
+    }
+
+    fn busy(&self) -> bool {
+        !self.done.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    fn push(&self, s: &str) {
+        if let Ok(mut o) = self.out.lock() {
+            o.push_str(s);
+            if o.len() > 400_000 {
+                let cut = o.len() - 300_000;
+                let cut = (cut..o.len()).find(|i| o.is_char_boundary(*i)).unwrap_or(0);
+                o.drain(..cut);
+            }
+        }
+    }
+
+    fn history_step(&mut self, up: bool) {
+        if self.history.is_empty() {
+            return;
+        }
+        let n = self.history.len();
+        let i = match (self.hist, up) {
+            (None, true) => n - 1,
+            (None, false) => return,
+            (Some(i), true) => i.saturating_sub(1),
+            (Some(i), false) => {
+                if i + 1 >= n {
+                    self.hist = None;
+                    self.input.clear();
+                    return;
+                }
+                i + 1
+            }
+        };
+        self.hist = Some(i);
+        self.input = self.history[i].clone();
+    }
+
+    fn kill(&mut self) {
+        if let Some(c) = &self.child {
+            if let Ok(mut c) = c.lock() {
+                let _ = c.kill();
+            }
+        }
+    }
+
+    fn run(&mut self, cmd: String, ctx: &egui::Context) {
+        let cmd = cmd.trim().to_string();
+        if cmd.is_empty() {
+            return;
+        }
+        self.history.retain(|h| *h != cmd);
+        self.history.push(cmd.clone());
+        self.hist = None;
+        self.push(&format!("❯ {cmd}\n"));
+        if cmd == "clear" || cmd == "cls" {
+            if let Ok(mut o) = self.out.lock() {
+                o.clear();
+            }
+            return;
+        }
+        if let Some(dir) = cmd.strip_prefix("cd").filter(|r| r.is_empty() || r.starts_with(' ')) {
+            let dir = dir.trim().trim_matches('"');
+            let target = if dir.is_empty() || dir == "~" { dirs::home_dir().unwrap_or(self.cwd.clone()) } else { self.cwd.join(dir) };
+            match target.canonicalize() {
+                Ok(p) if p.is_dir() => self.cwd = p,
+                _ => self.push(&format!("cd : dossier introuvable : {dir}\n")),
+            }
+            return;
+        }
+        if self.busy() {
+            self.push("(une commande tourne déjà : arrête-la d'abord)\n");
+            return;
+        }
+        let mut c = if cfg!(windows) {
+            let mut c = std::process::Command::new("cmd");
+            c.args(["/C", &cmd]);
+            c
+        } else {
+            let mut c = std::process::Command::new("bash");
+            c.args(["-c", &cmd]);
+            c
+        };
+        c.current_dir(&self.cwd).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).env("TERM", "dumb").env("NO_COLOR", "1");
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            c.creation_flags(0x0800_0000);
+        }
+        match c.spawn() {
+            Ok(mut child) => {
+                self.done.store(false, std::sync::atomic::Ordering::Relaxed);
+                let (so, se) = (child.stdout.take(), child.stderr.take());
+                let child = std::sync::Arc::new(std::sync::Mutex::new(child));
+                self.child = Some(child.clone());
+                let (out, done, ctx) = (self.out.clone(), self.done.clone(), ctx.clone());
+                std::thread::spawn(move || {
+                    use std::io::Read;
+                    let pump = |mut r: Box<dyn Read + Send>, out: std::sync::Arc<std::sync::Mutex<String>>, ctx: egui::Context| {
+                        let mut buf = [0u8; 4096];
+                        while let Ok(n) = r.read(&mut buf) {
+                            if n == 0 {
+                                break;
+                            }
+                            if let Ok(mut o) = out.lock() {
+                                o.push_str(&String::from_utf8_lossy(&buf[..n]));
+                            }
+                            ctx.request_repaint();
+                        }
+                    };
+                    let (o2, c2) = (out.clone(), ctx.clone());
+                    let t = se.map(|e| std::thread::spawn(move || pump(Box::new(e), o2, c2)));
+                    if let Some(s) = so {
+                        pump(Box::new(s), out.clone(), ctx.clone());
+                    }
+                    if let Some(t) = t {
+                        let _ = t.join();
+                    }
+                    let code = child.lock().ok().and_then(|mut c| c.wait().ok()).and_then(|s| s.code());
+                    if let Ok(mut o) = out.lock() {
+                        if code.is_some_and(|c| c != 0) {
+                            o.push_str(&format!("(code {})\n", code.unwrap()));
+                        }
+                    }
+                    done.store(true, std::sync::atomic::Ordering::Relaxed);
+                    ctx.request_repaint();
+                });
+            }
+            Err(e) => self.push(&format!("impossible de lancer : {e}\n")),
+        }
+    }
 }

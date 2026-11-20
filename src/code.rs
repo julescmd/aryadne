@@ -9,6 +9,7 @@
 //! - suggestions (mots du fichier, mots-clés du langage, [[notes]]) · Ctrl+Espace pour forcer
 
 use eframe::egui::{self, text::CCursor, text::CCursorRange, Event, Id, Key, RichText};
+use std::collections::HashMap;
 
 use crate::theme;
 
@@ -21,6 +22,25 @@ pub struct Editor {
     click_accept: Option<usize>,
     scroll_to: Option<(usize, usize)>,
     force_popup: bool,
+    /// Curseurs supplémentaires (sélections en octets), en plus du curseur principal.
+    pub multi: Vec<(usize, usize)>,
+    /// Barre « aller à la ligne » (Ctrl+G)
+    pub goto: Option<String>,
+    /// Ligne où sauter (depuis la structure, une erreur, la recherche…)
+    pub jump: Option<usize>,
+    /// Erreurs trouvées à l'enregistrement
+    pub diags: Vec<Diag>,
+    pub diag_rx: Option<std::sync::mpsc::Receiver<Vec<Diag>>>,
+    /// Retour à la ligne forcé pour ce fichier (Alt+Z)
+    pub wrap: Option<bool>,
+    /// Mots des autres fichiers du même langage (suggestions)
+    pub project: std::sync::Arc<Vec<String>>,
+}
+
+#[derive(Clone, Debug)]
+pub struct Diag {
+    pub line: usize,
+    pub msg: String,
 }
 
 struct Popup {
@@ -258,8 +278,67 @@ pub fn before(ui: &egui::Ui, ed: &mut Editor, text: &mut String, lang: &str, id:
             moved = true;
         }
     }
-    if ed.find.as_ref().is_some_and(|f| f.focus) {
-        // la barre de recherche a le focus : rien à intercepter ici
+    if let Some(rx) = &ed.diag_rx {
+        if let Ok(d) = rx.try_recv() {
+            ed.diags = d;
+            ed.diag_rx = None;
+        }
+    }
+    if let Some(line) = ed.jump.take() {
+        let pos = c.text.split_inclusive('\n').take(line).map(|l| l.len()).sum::<usize>().min(c.text.len());
+        let pos = pos + c.text[pos..].len() - c.text[pos..].trim_start_matches([' ', '\t']).len();
+        c.a = pos;
+        c.b = pos;
+        moved = true;
+        ed.scroll_to = Some((pos, pos));
+        ed.multi.clear();
+        ui.ctx().memory_mut(|m| m.request_focus(id));
+    }
+    // Plusieurs curseurs : chaque frappe s'applique partout
+    if focused && !ed.multi.is_empty() {
+        let events = ui.input(|i| i.events.clone());
+        let mut eat = vec![false; events.len()];
+        for (k, ev) in events.iter().enumerate() {
+            let op = match ev {
+                Event::Text(t) => Some(MultiOp::Insert(t.clone())),
+                Event::Paste(t) => Some(MultiOp::Insert(t.clone())),
+                Event::Key { key: Key::Backspace, pressed: true, .. } => Some(MultiOp::Back),
+                Event::Key { key: Key::Delete, pressed: true, .. } => Some(MultiOp::Del),
+                Event::Key { key: Key::Enter, pressed: true, .. } => Some(MultiOp::Insert("\n".into())),
+                Event::Key { key: Key::ArrowLeft, pressed: true, modifiers: m, .. } if !m.shift && !m.command => Some(MultiOp::Left),
+                Event::Key { key: Key::ArrowRight, pressed: true, modifiers: m, .. } if !m.shift && !m.command => Some(MultiOp::Right),
+                Event::Key { key: Key::Escape, pressed: true, .. } => {
+                    ed.multi.clear();
+                    eat[k] = true;
+                    None
+                }
+                Event::Key { key: Key::D, pressed: true, modifiers: m, .. } if m.command && !m.shift => None,
+                Event::Key { pressed: true, modifiers: m, key, .. } if !(m.command && matches!(key, Key::C | Key::Z | Key::S)) => {
+                    // Autre touche (flèches haut/bas, Origine…) : retour à un seul curseur
+                    ed.multi.clear();
+                    None
+                }
+                _ => None,
+            };
+            if let Some(op) = op {
+                multi_apply(&mut c, &mut ed.multi, &op);
+                eat[k] = true;
+                moved = true;
+            }
+            if ed.multi.is_empty() {
+                break;
+            }
+        }
+        if eat.iter().any(|e| *e) {
+            ui.ctx().input_mut(|i| {
+                let mut k = 0;
+                i.events.retain(|_| {
+                    let keep = !eat.get(k).copied().unwrap_or(false);
+                    k += 1;
+                    keep
+                });
+            });
+        }
     }
 
     if focused {
@@ -344,12 +423,84 @@ pub fn before(ui: &egui::Ui, ed: &mut Editor, text: &mut String, lang: &str, id:
                             toggle_comment(&mut c, lang);
                             eat[k] = true;
                         }
-                        Key::D if cmd => {
-                            let (s, e) = line_span(c.text, c.a, c.b);
-                            let block = c.text[s..e].to_string();
-                            let off = block.len() + 1;
-                            let (a, b) = (c.a + off, c.b + off);
-                            c.set(e, e, &format!("\n{block}"), (a, b));
+                        // Ctrl+D : sélectionne le mot, puis l'occurrence suivante (curseurs multiples)
+                        Key::D if cmd && !m.shift => {
+                            select_next(&mut c, &mut ed.multi);
+                            ed.scroll_to = Some((c.a, c.b));
+                            eat[k] = true;
+                        }
+                        // Ctrl+Maj+L : toutes les occurrences
+                        Key::L if cmd && m.shift => {
+                            select_all_occurrences(&mut c, &mut ed.multi);
+                            eat[k] = true;
+                        }
+                        // Ctrl+L : sélectionner la ligne (et les suivantes)
+                        Key::L if cmd => {
+                            let s0 = line_start(c.text, c.a);
+                            let e0 = line_end(c.text, c.b.max(c.a));
+                            let e0 = if c.a != c.b && c.text[..c.b].ends_with('\n') { line_end(c.text, c.b) } else { e0 };
+                            let e1 = (e0 + 1).min(c.text.len());
+                            c.a = s0;
+                            c.b = e1;
+                            eat[k] = true;
+                        }
+                        // Dupliquer la ligne : Ctrl+Maj+D ou Alt+Maj+↓/↑
+                        Key::D if cmd && m.shift => {
+                            duplicate(&mut c, true);
+                            eat[k] = true;
+                        }
+                        Key::ArrowUp | Key::ArrowDown if m.alt && m.shift => {
+                            duplicate(&mut c, key == Key::ArrowDown);
+                            eat[k] = true;
+                        }
+                        // Ctrl+Entrée : nouvelle ligne dessous ; Ctrl+Maj+Entrée : dessus
+                        Key::Enter if cmd => {
+                            let ls = line_start(c.text, c.a);
+                            let ind = indent_of(&c.text[ls..line_end(c.text, ls)]).to_string();
+                            if m.shift {
+                                let ins = format!("{ind}\n");
+                                let pos = ls + ind.len();
+                                c.set(ls, ls, &ins, (pos, pos));
+                            } else {
+                                let le = line_end(c.text, c.b);
+                                let ins = format!("\n{ind}");
+                                let pos = le + ins.len();
+                                c.set(le, le, &ins, (pos, pos));
+                            }
+                            eat[k] = true;
+                        }
+                        // Ctrl+] / Ctrl+[ : indenter, désindenter
+                        Key::CloseBracket if cmd => {
+                            let (a, b) = (c.a, c.b);
+                            let s0 = line_start(c.text, a);
+                            c.a = s0;
+                            indent(&mut c, &unit);
+                            let _ = b;
+                            eat[k] = true;
+                        }
+                        Key::OpenBracket if cmd => {
+                            outdent(&mut c, &unit);
+                            eat[k] = true;
+                        }
+                        // Origine intelligente : début du texte, puis début de ligne
+                        Key::Home if !cmd && !m.alt => {
+                            let ls = line_start(c.text, c.b);
+                            let first = ls + indent_of(&c.text[ls..line_end(c.text, ls)]).len();
+                            let target = if c.b == first { ls } else { first };
+                            if m.shift {
+                                c.b = target;
+                                let (x, y) = (c.a.min(c.b), c.a.max(c.b));
+                                // garde l'ancre à l'autre bout
+                                c.a = if target < c.a { y } else { x };
+                                c.b = target;
+                            } else {
+                                c.a = target;
+                                c.b = target;
+                            }
+                            eat[k] = true;
+                        }
+                        Key::Z if m.alt => {
+                            ed.wrap = Some(!ed.wrap.unwrap_or(false));
                             eat[k] = true;
                         }
                         Key::K if cmd && m.shift => {
@@ -362,7 +513,7 @@ pub fn before(ui: &egui::Ui, ed: &mut Editor, text: &mut String, lang: &str, id:
                             c.b = p;
                             eat[k] = true;
                         }
-                        Key::ArrowUp | Key::ArrowDown if m.alt => {
+                        Key::ArrowUp | Key::ArrowDown if m.alt && !m.shift => {
                             move_lines(&mut c, key == Key::ArrowUp);
                             eat[k] = true;
                         }
@@ -454,6 +605,17 @@ fn accept(c: &mut Ctx, p: &Popup, i: usize, lang: &str) {
             ins.push_str("]]");
         } else {
             back = 0;
+        }
+    } else if kind == &"extrait" {
+        if let Some((_, _, body)) = snippets(lang).iter().find(|s| s.0 == word) {
+            let ls = line_start(c.text, x);
+            let ind = indent_of(&c.text[ls..x]).to_string();
+            let body = body.replace('\n', &format!("\n{ind}"));
+            let cur = body.find("$0").unwrap_or(body.len());
+            let body = body.replace("$0", "");
+            let pos = x + cur;
+            c.set(x, y, &body, (pos, pos));
+            return;
         }
     } else if kind == &"balise" && html_like(lang) && c.text[..x].ends_with('<') {
         ins = if VOID.contains(&word.as_str()) { format!("{word}>") } else { format!("{word}></{word}>") };
@@ -751,6 +913,404 @@ fn try_emmet(c: &mut Ctx, unit: &str) -> bool {
     true
 }
 
+
+// ---------- curseurs multiples ----------
+
+enum MultiOp {
+    Insert(String),
+    Back,
+    Del,
+    Left,
+    Right,
+}
+
+fn prev_char(s: &str, b: usize) -> usize {
+    s[..b].chars().next_back().map(|c| b - c.len_utf8()).unwrap_or(0)
+}
+fn next_char(s: &str, b: usize) -> usize {
+    s[b..].chars().next().map(|c| b + c.len_utf8()).unwrap_or(b)
+}
+
+/// Applique la même modification au curseur principal et à tous les autres.
+fn multi_apply(c: &mut Ctx, multi: &mut Vec<(usize, usize)>, op: &MultiOp) {
+    let mut ranges: Vec<(usize, usize, bool)> = multi.iter().map(|&(a, b)| (a.min(b), a.max(b), false)).collect();
+    ranges.push((c.a.min(c.b), c.a.max(c.b), true));
+    ranges.sort_by_key(|r| r.0);
+    ranges.dedup_by_key(|r| r.0);
+    let text = c.text.clone();
+    let mut out = String::with_capacity(text.len() + 64);
+    let mut last = 0;
+    let mut news: Vec<(usize, bool)> = vec![];
+    for (a, b, main) in ranges {
+        if a < last {
+            continue;
+        }
+        match op {
+            MultiOp::Left | MultiOp::Right => {
+                out.push_str(&text[last..a.max(last)]);
+                last = a.max(last);
+                let pos = if a != b {
+                    if matches!(op, MultiOp::Left) { a } else { b }
+                } else if matches!(op, MultiOp::Left) {
+                    prev_char(&text, a)
+                } else {
+                    next_char(&text, a)
+                };
+                news.push((pos, main));
+                continue;
+            }
+            _ => {}
+        }
+        let (mut x, mut y) = (a, b);
+        if a == b {
+            match op {
+                MultiOp::Back => x = prev_char(&text, a).max(last),
+                MultiOp::Del => y = next_char(&text, b),
+                _ => {}
+            }
+        }
+        out.push_str(&text[last..x]);
+        if let MultiOp::Insert(t) = op {
+            if t == "\n" {
+                let ls = text[..x].rfind('\n').map(|i| i + 1).unwrap_or(0);
+                out.push('\n');
+                out.push_str(indent_of(&text[ls..]));
+            } else {
+                out.push_str(t);
+            }
+        }
+        news.push((out.len(), main));
+        last = y;
+    }
+    if !matches!(op, MultiOp::Left | MultiOp::Right) {
+        out.push_str(&text[last..]);
+        *c.text = out;
+        c.changed = true;
+    }
+    multi.clear();
+    for (pos, main) in news {
+        if main {
+            c.a = pos;
+            c.b = pos;
+        } else {
+            multi.push((pos, pos));
+        }
+    }
+}
+
+fn word_at(text: &str, b: usize) -> (usize, usize) {
+    let s = text[..b].char_indices().rev().take_while(|(_, c)| is_word(*c)).last().map(|(i, _)| i).unwrap_or(b);
+    let e = text[b..].char_indices().take_while(|(_, c)| is_word(*c)).last().map(|(i, c)| b + i + c.len_utf8()).unwrap_or(b);
+    (s, e)
+}
+
+/// Ctrl+D : la première fois, sélectionne le mot ; ensuite ajoute l'occurrence suivante.
+fn select_next(c: &mut Ctx, multi: &mut Vec<(usize, usize)>) {
+    if c.a == c.b {
+        let (s, e) = word_at(c.text, c.a);
+        if s < e {
+            c.a = s;
+            c.b = e;
+        }
+        return;
+    }
+    let needle = c.text[c.a..c.b].to_string();
+    let after = multi.iter().map(|r| r.1).chain([c.b]).max().unwrap_or(c.b);
+    let found = c.text[after..].find(&needle).map(|i| after + i).or_else(|| c.text.find(&needle));
+    if let Some(i) = found {
+        let r = (i, i + needle.len());
+        if r != (c.a, c.b) && !multi.contains(&r) {
+            multi.push((c.a, c.b));
+            c.a = r.0;
+            c.b = r.1;
+        }
+    }
+}
+
+fn select_all_occurrences(c: &mut Ctx, multi: &mut Vec<(usize, usize)>) {
+    if c.a == c.b {
+        let (s, e) = word_at(c.text, c.a);
+        if s >= e {
+            return;
+        }
+        c.a = s;
+        c.b = e;
+    }
+    let needle = c.text[c.a..c.b].to_string();
+    multi.clear();
+    let main = (c.a, c.b);
+    for (i, _) in c.text.match_indices(&needle).take(2000) {
+        if (i, i + needle.len()) != main {
+            multi.push((i, i + needle.len()));
+        }
+    }
+}
+
+fn duplicate(c: &mut Ctx, down: bool) {
+    let (s, e) = line_span(c.text, c.a, c.b);
+    let block = c.text[s..e].to_string();
+    let off = block.len() + 1;
+    if down {
+        let (a, b) = (c.a + off, c.b + off);
+        c.set(e, e, &format!("\n{block}"), (a, b));
+    } else {
+        let (a, b) = (c.a, c.b);
+        c.set(s, s, &format!("{block}\n"), (a, b));
+    }
+}
+
+// ---------- structure du fichier ----------
+
+#[derive(Clone)]
+pub struct Symbol {
+    pub line: usize,
+    pub depth: usize,
+    pub name: String,
+    pub kind: &'static str,
+}
+
+/// Fonctions, classes, titres… pour le panneau « structure » et Ctrl+Maj+O.
+pub fn symbols(text: &str, lang: &str) -> Vec<Symbol> {
+    use std::sync::OnceLock;
+    static RES: OnceLock<HashMap<&'static str, Vec<(regex::Regex, &'static str)>>> = OnceLock::new();
+    let res = RES.get_or_init(|| {
+        let r = |p: &str| regex::Regex::new(p).unwrap();
+        let mut m: HashMap<&'static str, Vec<(regex::Regex, &'static str)>> = HashMap::new();
+        m.insert("rs", vec![(r(r"^\s*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?(?:unsafe\s+)?fn\s+(\w+)"), "fn"), (r(r"^\s*(?:pub(?:\([^)]*\))?\s+)?(?:struct|enum|trait|union)\s+(\w+)"), "type"), (r(r"^\s*impl(?:<[^>]*>)?\s+([^{]+?)\s*\{"), "impl"), (r(r"^\s*(?:pub\s+)?mod\s+(\w+)"), "mod")]);
+        m.insert("py", vec![(r(r"^\s*(?:async\s+)?def\s+(\w+)"), "fn"), (r(r"^\s*class\s+(\w+)"), "type")]);
+        let js = vec![
+            (r(r"^\s*(?:export\s+)?(?:default\s+)?(?:async\s+)?function\*?\s+(\w+)"), "fn"),
+            (r(r"^\s*(?:export\s+)?(?:default\s+)?class\s+(\w+)"), "type"),
+            (r(r"^\s*(?:export\s+)?(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s*)?(?:\([^)]*\)|\w+)\s*=>"), "fn"),
+            (r(r"^\s*(?:export\s+)?(?:interface|type|enum)\s+(\w+)"), "type"),
+            (r(r"^\s+(?:async\s+|static\s+|get\s+|set\s+)*(\w+)\s*\([^)]*\)\s*\{\s*$"), "méthode"),
+        ];
+        for l in ["js", "ts", "jsx", "tsx", "mjs", "vue", "svelte"] {
+            m.insert(l, js.clone());
+        }
+        let c = vec![(r(r"^\s*(?:[\w:<>,\*&\[\]]+\s+)+\*?(\w+)\s*\([^;]*\)\s*(?:const\s*)?\{?\s*$"), "fn"), (r(r"^\s*(?:struct|class|enum|union)\s+(\w+)"), "type")];
+        for l in ["c", "h", "cpp", "hpp", "cc", "cs", "java", "glsl", "hlsl", "frag", "vert", "osl"] {
+            m.insert(l, c.clone());
+        }
+        m.insert("lua", vec![(r(r"^\s*(?:local\s+)?function\s+([\w.:]+)"), "fn")]);
+        m.insert("gd", vec![(r(r"^\s*(?:static\s+)?func\s+(\w+)"), "fn"), (r(r"^\s*class(?:_name)?\s+(\w+)"), "type"), (r(r"^\s*signal\s+(\w+)"), "signal")]);
+        m.insert("sh", vec![(r(r"^\s*(?:function\s+)?(\w+)\s*\(\)\s*\{"), "fn")]);
+        m.insert("go", vec![(r(r"^func\s+(?:\([^)]*\)\s*)?(\w+)"), "fn"), (r(r"^type\s+(\w+)"), "type")]);
+        m.insert("css", vec![(r(r"^\s*([^{}@/][^{}]*?)\s*\{"), "règle"), (r(r"^\s*(@media[^{]*)\{"), "media")]);
+        m
+    });
+    let mut out = vec![];
+    if lang == "md" {
+        let mut code = false;
+        for (i, l) in text.lines().enumerate() {
+            if l.trim_start().starts_with("```") {
+                code = !code;
+            }
+            if code {
+                continue;
+            }
+            let n = l.chars().take_while(|c| *c == '#').count();
+            if n > 0 && n <= 6 && l[n..].starts_with(' ') {
+                out.push(Symbol { line: i, depth: n - 1, name: l[n..].trim().to_string(), kind: "titre" });
+            }
+        }
+        return out;
+    }
+    if matches!(lang, "html" | "htm" | "xml" | "svg") {
+        let re = regex::Regex::new(r#"<(h[1-6]|section|header|footer|nav|main|article|script|style)\b[^>]*?(?:id="([^"]+)")?[^>]*>"#).unwrap();
+        for (i, l) in text.lines().enumerate() {
+            if let Some(c) = re.captures(l) {
+                let name = c.get(2).map(|m| format!("{} #{}", &c[1], m.as_str())).unwrap_or_else(|| c[1].to_string());
+                out.push(Symbol { line: i, depth: (l.len() - l.trim_start().len()) / 2, name, kind: "balise" });
+            }
+        }
+        return out;
+    }
+    if matches!(lang, "json" | "yaml" | "yml" | "toml" | "ini" | "cfg") {
+        for (i, l) in text.lines().enumerate() {
+            let ind = l.len() - l.trim_start().len();
+            let t = l.trim();
+            if ind <= 2 {
+                if let Some(k) = t.strip_prefix('"').and_then(|r| r.split('"').next()).filter(|_| lang == "json" && t.contains(':')) {
+                    out.push(Symbol { line: i, depth: ind / 2, name: k.to_string(), kind: "clé" });
+                } else if (lang == "yaml" || lang == "yml") && t.ends_with(':') && !t.starts_with('#') && !t.starts_with('-') {
+                    out.push(Symbol { line: i, depth: ind / 2, name: t.trim_end_matches(':').to_string(), kind: "clé" });
+                } else if t.starts_with('[') && t.ends_with(']') {
+                    out.push(Symbol { line: i, depth: 0, name: t.to_string(), kind: "section" });
+                }
+            }
+        }
+        return out;
+    }
+    let Some(list) = res.get(lang) else { return out };
+    const KW: [&str; 9] = ["if", "for", "while", "switch", "catch", "return", "else", "do", "sizeof"];
+    for (i, l) in text.lines().enumerate().take(50_000) {
+        for (re, kind) in list {
+            if let Some(c) = re.captures(l) {
+                let name = c[1].trim().to_string();
+                if KW.contains(&name.as_str()) {
+                    continue;
+                }
+                let ind = l.len() - l.trim_start().len();
+                out.push(Symbol { line: i, depth: ind / 4, name, kind });
+                break;
+            }
+        }
+    }
+    out
+}
+
+// ---------- vérification à l'enregistrement ----------
+
+/// Vérifie la syntaxe avec l'outil du langage s'il est installé (Python, Node, Bash, Lua) ou en interne (JSON).
+pub fn check(path: &std::path::Path, lang: &str, text: &str) -> Vec<Diag> {
+    if lang == "json" {
+        return match serde_json::from_str::<serde_json::Value>(text) {
+            Ok(_) => vec![],
+            Err(e) => vec![Diag { line: e.line().saturating_sub(1), msg: e.to_string() }],
+        };
+    }
+    let py = if cfg!(windows) { "python" } else { "python3" };
+    let (prog, args): (&str, Vec<String>) = match lang {
+        "py" => (py, vec!["-c".into(), "import ast,sys\nsrc=open(sys.argv[1],encoding='utf-8').read()\ntry:\n ast.parse(src)\nexcept SyntaxError as e:\n print(f'{e.lineno}: {e.msg}')".into(), path.display().to_string()]),
+        "js" | "mjs" | "cjs" => ("node", vec!["--check".into(), path.display().to_string()]),
+        "sh" | "bash" => ("bash", vec!["-n".into(), path.display().to_string()]),
+        "lua" => ("luac", vec!["-p".into(), path.display().to_string()]),
+        _ => return vec![],
+    };
+    let mut cmd = std::process::Command::new(prog);
+    cmd.args(&args).stdin(std::process::Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000);
+    }
+    let Ok(out) = cmd.output() else { return vec![] };
+    let all = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    let mut diags = vec![];
+    let re_py = regex::Regex::new(r"^(\d+): (.+)$").unwrap();
+    let re_line = regex::Regex::new(r"(?:line |:)(\d+)(?::\d+)?[:)]?\s*(.*)").unwrap();
+    let lines: Vec<&str> = all.lines().collect();
+    for (k, l) in lines.iter().enumerate() {
+        if lang == "py" {
+            if let Some(c) = re_py.captures(l) {
+                diags.push(Diag { line: c[1].parse::<usize>().unwrap_or(1).saturating_sub(1), msg: c[2].to_string() });
+            }
+        } else if l.contains(&*path.file_name().unwrap_or_default().to_string_lossy()) || lang == "sh" {
+            if let Some(c) = re_line.captures(l) {
+                let mut msg = c[2].trim().to_string();
+                // node : le message est quelques lignes plus bas
+                if msg.is_empty() || lang.starts_with('j') || lang == "mjs" {
+                    if let Some(m) = lines[k..].iter().find(|x| x.contains("Error")) {
+                        msg = m.trim().to_string();
+                    }
+                }
+                diags.push(Diag { line: c[1].parse::<usize>().unwrap_or(1).saturating_sub(1), msg });
+            }
+        }
+        if diags.len() > 20 {
+            break;
+        }
+    }
+    diags.dedup_by_key(|d| d.line);
+    diags
+}
+
+// ---------- formatage ----------
+
+/// Formate tout le fichier avec l'outil habituel du langage (s'il est installé).
+pub fn format(text: &str, lang: &str, file_name: &str) -> Result<String, String> {
+    if lang == "json" {
+        let v: serde_json::Value = serde_json::from_str(text).map_err(|e| format!("JSON invalide : {e}"))?;
+        return serde_json::to_string_pretty(&v).map(|s| s + "\n").map_err(|e| e.to_string());
+    }
+    let tries: Vec<(&str, Vec<String>)> = match lang {
+        "rs" => vec![("rustfmt", vec!["--edition".into(), "2021".into(), "--emit".into(), "stdout".into()])],
+        "py" => vec![("ruff", vec!["format".into(), "-".into()]), ("black", vec!["-q".into(), "-".into()])],
+        "js" | "ts" | "jsx" | "tsx" | "mjs" | "css" | "scss" | "less" | "html" | "htm" | "vue" | "svelte" | "md" | "yaml" | "yml" | "graphql" => vec![("prettier", vec!["--stdin-filepath".into(), file_name.into()])],
+        "c" | "h" | "cpp" | "hpp" | "cc" | "cs" | "java" | "glsl" | "hlsl" | "frag" | "vert" => vec![("clang-format", vec![format!("--assume-filename={file_name}")])],
+        "go" => vec![("gofmt", vec![])],
+        "lua" => vec![("stylua", vec!["-".into()])],
+        "gd" => vec![("gdformat", vec!["-".into()])],
+        "sh" | "bash" => vec![("shfmt", vec![])],
+        _ => vec![],
+    };
+    if tries.is_empty() {
+        return Err("Pas de formateur connu pour ce langage.".into());
+    }
+    let mut missing = vec![];
+    for (prog, args) in &tries {
+        let exe = if cfg!(windows) && *prog == "prettier" { "prettier.cmd" } else { prog };
+        let mut cmd = std::process::Command::new(exe);
+        cmd.args(args).stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(0x0800_0000);
+        }
+        let Ok(mut child) = cmd.spawn() else {
+            missing.push(*prog);
+            continue;
+        };
+        if let Some(mut si) = child.stdin.take() {
+            use std::io::Write;
+            let t = text.to_string();
+            std::thread::spawn(move || {
+                let _ = si.write_all(t.as_bytes());
+            });
+        }
+        let out = child.wait_with_output().map_err(|e| e.to_string())?;
+        if out.status.success() && !out.stdout.is_empty() {
+            return Ok(String::from_utf8_lossy(&out.stdout).into_owned());
+        }
+        return Err(format!("{prog} : {}", String::from_utf8_lossy(&out.stderr).lines().next().unwrap_or("erreur")));
+    }
+    Err(format!("Installe {} pour formater ce langage.", missing.join(" ou ")))
+}
+
+// ---------- extraits (snippets) ----------
+
+/// (déclencheur, description, texte) ; « $0 » marque la place du curseur.
+fn snippets(lang: &str) -> &'static [(&'static str, &'static str, &'static str)] {
+    match lang {
+        "py" => &[
+            ("def", "fonction", "def $0():\n    pass"),
+            ("class", "classe", "class $0:\n    def __init__(self):\n        pass"),
+            ("for", "boucle", "for i in range($0):\n    "),
+            ("ifmain", "point d'entrée", "if __name__ == \"__main__\":\n    $0"),
+            ("with", "fichier", "with open($0) as f:\n    "),
+            ("try", "try / except", "try:\n    $0\nexcept Exception as e:\n    print(e)"),
+            ("bpyop", "opérateur Blender", "import bpy\n\nclass OBJECT_OT_$0(bpy.types.Operator):\n    bl_idname = \"object.mon_operateur\"\n    bl_label = \"Mon opérateur\"\n\n    def execute(self, context):\n        return {'FINISHED'}\n\ndef register():\n    bpy.utils.register_class(OBJECT_OT_)\n"),
+        ],
+        "rs" => &[
+            ("fn", "fonction", "fn $0() {\n    \n}"),
+            ("pfn", "fonction publique", "pub fn $0() {\n    \n}"),
+            ("struct", "structure", "#[derive(Debug, Clone)]\nstruct $0 {\n    \n}"),
+            ("impl", "implémentation", "impl $0 {\n    \n}"),
+            ("for", "boucle", "for $0 in  {\n    \n}"),
+            ("match", "match", "match $0 {\n    _ => {}\n}"),
+            ("test", "test", "#[test]\nfn $0() {\n    \n}"),
+        ],
+        "js" | "ts" | "jsx" | "tsx" | "mjs" | "vue" | "svelte" => &[
+            ("fn", "fonction", "function $0() {\n  \n}"),
+            ("afn", "fonction fléchée", "const $0 = () => {\n  \n};"),
+            ("for", "boucle", "for (let i = 0; i < $0; i++) {\n  \n}"),
+            ("forof", "for…of", "for (const item of $0) {\n  \n}"),
+            ("if", "si", "if ($0) {\n  \n}"),
+            ("class", "classe", "class $0 {\n  constructor() {\n    \n  }\n}"),
+            ("log", "console.log", "console.log($0);"),
+            ("fetch", "requête", "const res = await fetch($0);\nconst data = await res.json();"),
+        ],
+        "c" | "cpp" | "h" | "hpp" | "cs" | "java" => &[("for", "boucle", "for (int i = 0; i < $0; i++) {\n    \n}"), ("if", "si", "if ($0) {\n    \n}"), ("main", "main", "int main() {\n    $0\n    return 0;\n}")],
+        "glsl" | "frag" | "vert" | "hlsl" => &[("main", "main", "void main() {\n    $0\n}"), ("frag", "fragment shader", "#version 330 core\nin vec2 uv;\nout vec4 color;\nuniform float time;\n\nvoid main() {\n    color = vec4(uv, 0.5 + 0.5 * sin(time), 1.0);$0\n}")],
+        "lua" => &[("fn", "fonction", "local function $0()\n  \nend"), ("for", "boucle", "for i = 1, $0 do\n  \nend")],
+        "gd" => &[("func", "fonction", "func $0() -> void:\n\tpass"), ("ready", "_ready", "func _ready() -> void:\n\t$0")],
+        "md" => &[("table", "tableau", "| $0 |  |\n|---|---|\n|  |  |"), ("todo", "case à cocher", "- [ ] $0"), ("code", "bloc de code", "```\n$0\n```")],
+        "css" | "scss" => &[("flex", "flex centré", "display: flex;\nalign-items: center;\njustify-content: center;$0"), ("grid", "grille", "display: grid;\ngrid-template-columns: repeat(3, 1fr);\ngap: 16px;$0"), ("media", "media query", "@media (max-width: 768px) {\n  $0\n}")],
+        _ => &[],
+    }
+}
+
 // ---------- recherche ----------
 
 fn find_all(text: &str, f: &Find) -> Vec<(usize, usize)> {
@@ -889,15 +1449,115 @@ fn set_sel(ctx: &egui::Context, id: Id, text: &str, (a, b): (usize, usize)) {
 
 // ---------- après le TextEdit : suggestions, surlignage ----------
 
-pub fn after(ui: &mut egui::Ui, ed: &mut Editor, text: &str, lang: &str, out: &egui::text_edit::TextEditOutput, notes: &[String], typed_now: bool) {
+pub struct View {
+    pub gutter: bool,
+    pub font_size: f32,
+    pub bg: egui::layers::ShapeIdx,
+}
+
+pub fn after(ui: &mut egui::Ui, ed: &mut Editor, text: &str, lang: &str, out: &egui::text_edit::TextEditOutput, notes: &[String], typed_now: bool, view: View) {
     let p = theme::pal();
     let origin = out.galley_pos;
+    // ---------- gouttière, ligne courante, guides d'indentation, erreurs ----------
+    {
+        let clip = ui.clip_rect();
+        let focused = out.response.has_focus();
+        let cur_b = out.cursor_range.map(|r| byte_of(text, r.primary.index.0)).unwrap_or(0);
+        let cur_line = text[..cur_b.min(text.len())].matches('\n').count();
+        let cw = ui.fonts_mut(|f| f.glyph_width(&egui::FontId::monospace(view.font_size), ' ')).max(1.0);
+        let unit = indent_unit(text, lang);
+        let unit_cols = if unit == "\t" { 4 } else { unit.len() };
+        let lines: Vec<&str> = text.split('\n').collect();
+        let mut bg = vec![];
+        let mut fg = vec![];
+        let mut line = 0usize;
+        let mut first_row = true;
+        let font = egui::FontId::monospace((view.font_size - 1.0).max(8.0));
+        let diag_lines: HashMap<usize, &str> = ed.diags.iter().map(|d| (d.line, d.msg.as_str())).collect();
+        let mut hover_msg = None;
+        for row in &out.galley.rows {
+            let r = row.rect().translate(origin.to_vec2());
+            if r.bottom() >= clip.top() - 40.0 && r.top() <= clip.bottom() + 40.0 {
+                if line == cur_line && (focused || ed.multi.is_empty()) {
+                    bg.push(egui::Shape::rect_filled(egui::Rect::from_x_y_ranges(clip.x_range(), r.y_range()), 0.0, p.line.gamma_multiply(if focused { 0.45 } else { 0.2 })));
+                }
+                if first_row {
+                    // Guides d'indentation (lignes vides : on garde l'indentation de la ligne d'avant)
+                    let l = lines.get(line).copied().unwrap_or("");
+                    let cols = if l.trim().is_empty() {
+                        lines[..line.min(lines.len())].iter().rev().find(|x| !x.trim().is_empty()).map(|x| leading_cols(x)).unwrap_or(0)
+                    } else {
+                        leading_cols(l)
+                    };
+                    let mut k = unit_cols;
+                    while k < cols && unit_cols > 0 {
+                        let x = origin.x + (k - unit_cols) as f32 * cw + 1.0;
+                        bg.push(egui::Shape::line_segment([egui::pos2(x, r.top()), egui::pos2(x, r.bottom())], egui::Stroke::new(1.0, p.line.gamma_multiply(0.8))));
+                        k += unit_cols;
+                    }
+                    if view.gutter {
+                        let col = if line == cur_line { p.text } else { p.muted.gamma_multiply(0.75) };
+                        fg.push((egui::pos2(origin.x - 18.0, r.center().y), (line + 1).to_string(), col));
+                    }
+                    if let Some(msg) = diag_lines.get(&line) {
+                        // Erreur : point rouge dans la gouttière et soulignement
+                        fg.push((egui::pos2(origin.x - 5.0, r.center().y), "●".into(), p.missing));
+                        bg.push(egui::Shape::rect_filled(egui::Rect::from_x_y_ranges(clip.x_range(), r.y_range()), 0.0, p.missing.gamma_multiply(0.10)));
+                        let y = r.bottom() - 1.0;
+                        let mut pts = vec![];
+                        let mut x = r.left();
+                        let mut up = true;
+                        while x < r.right().max(r.left() + 40.0) {
+                            pts.push(egui::pos2(x, if up { y - 1.5 } else { y + 0.5 }));
+                            x += 3.0;
+                            up = !up;
+                        }
+                        ui.painter().add(egui::Shape::line(pts, egui::Stroke::new(1.0, p.missing)));
+                        if ui.rect_contains_pointer(egui::Rect::from_x_y_ranges(clip.left()..=clip.right(), r.y_range())) {
+                            hover_msg = Some(msg.to_string());
+                        }
+                    }
+                }
+            }
+            if row.ends_with_newline {
+                line += 1;
+                first_row = true;
+            } else {
+                first_row = false;
+            }
+        }
+        ui.painter().set(view.bg, egui::Shape::Vec(bg));
+        let painter = ui.painter();
+        for (pos, t, col) in fg {
+            painter.text(pos, egui::Align2::RIGHT_CENTER, t, font.clone(), col);
+        }
+        if let Some(m) = hover_msg {
+            egui::Tooltip::always_open(ui.ctx().clone(), ui.layer_id(), Id::unique("diag-tip"), egui::PopupAnchor::Pointer).show(|ui| {
+                ui.label(RichText::new(m).color(p.missing));
+            });
+        }
+    }
     let rect_of = |a: usize, b: usize| -> egui::Rect {
         let r1 = out.galley.pos_from_cursor(CCursor::new(char_of(text, a)));
         let r2 = out.galley.pos_from_cursor(CCursor::new(char_of(text, b)));
         egui::Rect::from_min_max(r1.min, egui::pos2(r2.max.x.max(r1.min.x + 2.0), r1.max.y.max(r2.max.y))).translate(origin.to_vec2())
     };
 
+    // Curseurs supplémentaires
+    if !ed.multi.is_empty() {
+        let painter = ui.painter_at(out.text_clip_rect);
+        for &(a, b) in &ed.multi {
+            let (a, b) = (a.min(text.len()), b.min(text.len()));
+            if a != b {
+                painter.rect_filled(rect_of(a, b), 0.0, p.accent.gamma_multiply(0.3));
+            }
+            let r = rect_of(b, b);
+            painter.line_segment([r.left_top(), r.left_bottom()], egui::Stroke::new(2.0, p.accent));
+        }
+        if out.response.clicked() {
+            ed.multi.clear();
+        }
+    }
     // Occurrences de la recherche
     if let Some(f) = &ed.find {
         let painter = ui.painter_at(out.text_clip_rect);
@@ -942,7 +1602,7 @@ pub fn after(ui: &mut egui::Ui, ed: &mut Editor, text: &str, lang: &str, out: &e
     }
     if typed_now || ed.force_popup {
         let force = std::mem::take(&mut ed.force_popup);
-        ed.popup = suggest(text, ci, lang, notes, force);
+        ed.popup = suggest(text, ci, lang, notes, &ed.project, force);
     }
     let Some(pp) = &ed.popup else { return };
     let pos = rect_of(byte_of(text, pp.cursor), byte_of(text, pp.cursor)).left_bottom() + egui::vec2(0.0, 2.0);
@@ -1016,7 +1676,7 @@ fn matching_bracket(text: &str, b: usize) -> Option<(usize, usize)> {
     check(b).or_else(|| b.checked_sub(1).and_then(check))
 }
 
-fn suggest(text: &str, ci: usize, lang: &str, notes: &[String], force: bool) -> Option<Popup> {
+fn suggest(text: &str, ci: usize, lang: &str, notes: &[String], project: &[String], force: bool) -> Option<Popup> {
     let b = byte_of(text, ci);
     let ls = line_start(text, b);
     let line = &text[ls..b];
@@ -1048,6 +1708,11 @@ fn suggest(text: &str, ci: usize, lang: &str, notes: &[String], force: bool) -> 
     let mut items: Vec<(String, &'static str, i32)> = vec![];
     let in_tag = html_like(lang) && text[..start].ends_with('<');
     let kw_kind = if in_tag || matches!(lang, "html" | "htm") { "balise" } else { "mot-clé" };
+    for (trig, _, _) in snippets(lang) {
+        if trig.starts_with(&pl) && seen.insert(format!("snip:{trig}")) {
+            items.push((trig.to_string(), "extrait", 100));
+        }
+    }
     for k in keywords(lang) {
         if k.to_lowercase().starts_with(&pl) && *k != prefix && seen.insert(k.to_string()) {
             items.push((k.to_string(), kw_kind, 0));
@@ -1088,9 +1753,14 @@ fn suggest(text: &str, ci: usize, lang: &str, notes: &[String], force: bool) -> 
             items.push((w.to_string(), "fichier", n));
         }
     }
-    items.sort_by(|a, b| a.0.len().cmp(&b.0.len()).then(b.2.cmp(&a.2)));
-    items.sort_by_key(|i| !i.0.starts_with(prefix));
-    items.truncate(8);
+    for w in project.iter().filter(|w| w.to_lowercase().starts_with(&pl) && w.as_str() != prefix).take(20) {
+        if seen.insert(w.clone()) {
+            items.push((w.clone(), "projet", 0));
+        }
+    }
+    items.sort_by(|a, b| (a.1 != "extrait").cmp(&(b.1 != "extrait")).then(a.0.len().cmp(&b.0.len())).then(b.2.cmp(&a.2)));
+    items.sort_by_key(|i| !i.0.starts_with(prefix) && i.1 != "extrait");
+    items.truncate(10);
     if items.is_empty() {
         return None;
     }
@@ -1141,5 +1811,91 @@ mod tests {
         });
         assert_eq!(s, "<ul>\n  <li></li>\n  <li></li>\n</ul>");
         assert_eq!(last_open_tag("<div><p>a</p><span>").as_deref(), Some("span"));
+
+        // Curseurs multiples : Ctrl+D deux fois puis frappe
+        let mut s = "let a = 1;\nlet b = a + a;".to_string();
+        let mut multi = vec![];
+        let mut c = Ctx { text: &mut s, a: 4, b: 4, changed: false };
+        select_next(&mut c, &mut multi); // sélectionne « a »
+        assert_eq!((c.a, c.b), (4, 5));
+        select_next(&mut c, &mut multi);
+        select_next(&mut c, &mut multi);
+        assert_eq!(multi.len(), 2);
+        multi_apply(&mut c, &mut multi, &MultiOp::Insert("x".into()));
+        assert_eq!(c.text.as_str(), "let x = 1;\nlet b = x + x;");
+        multi_apply(&mut c, &mut multi, &MultiOp::Back);
+        assert_eq!(c.text.as_str(), "let  = 1;\nlet b =  + ;");
+        // Structure
+        let syms = symbols("fn main() {}\npub struct A;\nimpl A {\n    pub fn new() -> Self { A }\n}", "rs");
+        assert_eq!(syms.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(), vec!["main", "A", "A", "new"]);
+        let syms = symbols("class Foo:\n    def bar(self):\n        pass", "py");
+        assert_eq!(syms.len(), 2);
+        assert_eq!(syms[1].depth, 1);
+        // Formatage JSON interne
+        assert_eq!(format("{\"a\":1}", "json", "x.json").unwrap(), "{\n  \"a\": 1\n}\n");
+    }
+}
+
+
+fn leading_cols(l: &str) -> usize {
+    let mut n = 0;
+    for c in l.chars() {
+        match c {
+            ' ' => n += 1,
+            '\t' => n += 4,
+            _ => break,
+        }
+    }
+    n
+}
+
+/// Barre « aller à la ligne » (Ctrl+G) ou « aller au symbole » (@nom, Ctrl+Maj+O).
+pub fn goto_bar(ui: &mut egui::Ui, ed: &mut Editor, text: &str, lang: &str) {
+    let p = theme::pal();
+    let Some(q) = &mut ed.goto else { return };
+    let mut close = false;
+    let mut jump = None;
+    egui::Frame::new().fill(p.panel).stroke(egui::Stroke::new(1.0, p.line)).inner_margin(egui::Margin::symmetric(12, 6)).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        let syms = q.starts_with('@');
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(if syms { "symbole" } else { "ligne" }).color(p.muted).size(11.5));
+            let r = ui.add(egui::TextEdit::singleline(q).hint_text("numéro de ligne, ou @ pour un symbole").desired_width(260.0));
+            r.request_focus();
+            let total = text.lines().count();
+            ui.label(RichText::new(format!("{total} lignes")).color(p.muted).size(11.0));
+            if ui.input(|i| i.key_pressed(Key::Escape)) {
+                close = true;
+            }
+            let enter = ui.input(|i| i.key_pressed(Key::Enter));
+            if !syms && enter {
+                if let Ok(n) = q.trim().parse::<usize>() {
+                    jump = Some(n.saturating_sub(1));
+                }
+            }
+        });
+        if syms {
+            let f = crate::chat::fold(q.trim_start_matches('@'));
+            let list: Vec<Symbol> = symbols(text, lang).into_iter().filter(|s| crate::chat::fold(&s.name).contains(&f)).take(12).collect();
+            for (k, s) in list.iter().enumerate() {
+                let t = RichText::new(format!("{}{}  {}", "  ".repeat(s.depth), s.name, s.kind)).color(if k == 0 { p.accent } else { p.text }).size(12.0);
+                if ui.add(egui::Button::new(t).frame(false)).clicked() {
+                    jump = Some(s.line);
+                }
+            }
+            if ui.input(|i| i.key_pressed(Key::Enter)) {
+                jump = list.first().map(|s| s.line).or(jump);
+            }
+            if list.is_empty() {
+                ui.label(RichText::new("aucun symbole").color(p.muted).size(11.0));
+            }
+        }
+    });
+    if let Some(l) = jump {
+        ed.jump = Some(l);
+        close = true;
+    }
+    if close {
+        ed.goto = None;
     }
 }
