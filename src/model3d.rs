@@ -719,6 +719,8 @@ pub struct Prepared {
     colors: Vec<[f32; 3]>,
     edges: Vec<u8>,
     pub floor: f32,
+    /// UV par coin de triangle (vide si le maillage n'en a pas)
+    pub uv: Vec<[[f32; 2]; 3]>,
 }
 
 impl Prepared {
@@ -734,7 +736,7 @@ impl Prepared {
         let floor = pos.iter().map(|v| v[1]).fold(f32::MAX, f32::min);
         let lin = |c: u8| (c as f32 / 255.0).powf(2.2);
         let colors = colors.iter().map(|c| [lin(c.r()), lin(c.g()), lin(c.b())]).collect();
-        Self { pos, nrm, tris, colors, edges, floor }
+        Self { pos, nrm, tris, colors, edges, floor, uv: vec![] }
     }
     pub fn tri_count(&self) -> usize {
         self.tris.len()
@@ -758,7 +760,7 @@ impl Prepared {
         let floor = pos.iter().map(|v| v[1]).fold(f32::MAX, f32::min);
         let lin = |c: u8| (c as f32 / 255.0).powf(2.2);
         let colors = m.colors.iter().map(|c| [lin(c.r()), lin(c.g()), lin(c.b())]).collect();
-        Self { pos, nrm, tris: m.tris, colors, edges: m.edges, floor }
+        Self { pos, nrm, tris: m.tris, colors, edges: m.edges, floor, uv: vec![] }
     }
 }
 
@@ -781,6 +783,8 @@ pub struct Look {
     pub wire_only: bool,
     /// Matériau en nodes (remplace le matériau prédéfini).
     pub nodes: Option<std::sync::Arc<crate::nodes::Program>>,
+    /// Damier sur les UV (vérifier l'étirement et la densité)
+    pub uv_checker: bool,
 }
 
 impl Default for Look {
@@ -799,13 +803,14 @@ impl Default for Look {
             wire_color: [0.02, 0.02, 0.02],
             wire_only: false,
             nodes: None,
+            uv_checker: false,
         }
     }
 }
 
 impl Look {
     /// Clé de comparaison : l'image n'est recalculée que si elle change.
-    fn key(&self) -> (Material, bool, usize, [u32; 4], Light, bool, bool, [u32; 4], bool, usize) {
+    fn key(&self) -> (Material, bool, usize, [u32; 4], Light, bool, bool, [u32; 4], bool, usize, bool) {
         (
             self.material,
             self.smooth,
@@ -817,6 +822,7 @@ impl Look {
             [self.wire.to_bits(), self.wire_color[0].to_bits(), self.wire_color[1].to_bits(), self.wire_color[2].to_bits()],
             self.wire_only,
             self.nodes.as_ref().map(|n| std::sync::Arc::as_ptr(n) as usize).unwrap_or(0),
+            self.uv_checker,
         )
     }
 }
@@ -825,6 +831,8 @@ pub struct Frame {
     pub w: usize,
     pub h: usize,
     pub rgba: Vec<u8>,
+    /// Triangle visible à chaque pixel (u32::MAX : fond)
+    pub ids: Vec<u32>,
 }
 
 fn rot_y(d: V3, a: f32) -> V3 {
@@ -844,6 +852,74 @@ fn tone(c: [f32; 3], exposure: f32) -> [u8; 3] {
 }
 
 /// Rendu en parallèle (une bande d'image par cœur).
+/// Damier UV (8 × 8 cases, lettres de couleur par quart) pour voir l'étirement.
+fn checker(uv: [f32; 2], tint: Option<[f32; 3]>) -> [f32; 3] {
+    let (u, v) = (uv[0] * 8.0, uv[1] * 8.0);
+    let cell = (u.floor() as i64 + v.floor() as i64).rem_euclid(2) == 0;
+    // Teinte selon le quart de la texture : on voit les îlots retournés ou mal placés
+    let q = [(uv[0].rem_euclid(1.0) * 2.0) as usize % 2, (uv[1].rem_euclid(1.0) * 2.0) as usize % 2];
+    let base: [f32; 3] = [[0.85, 0.35, 0.3], [0.3, 0.6, 0.85], [0.35, 0.75, 0.4], [0.9, 0.75, 0.3]][q[0] + q[1] * 2];
+    let fine = ((u * 4.0).fract() < 0.06) || ((v * 4.0).fract() < 0.06);
+    let k = if cell { 0.9 } else { 0.35 };
+    let mut c = [base[0] * k, base[1] * k, base[2] * k];
+    if fine {
+        c = [c[0] * 0.8, c[1] * 0.8, c[2] * 0.8];
+    }
+    if let Some(t) = tint {
+        c = [c[0] * 0.75 + t[0] * 0.25, c[1] * 0.75 + t[1] * 0.25, c[2] * 0.75 + t[2] * 0.25];
+    }
+    let l = |x: f32| x.powf(2.2);
+    [l(c[0]), l(c[1]), l(c[2])]
+}
+
+/// Triangle sous un point de l'écran (même projection que le rendu). Retourne
+/// (triangle, coordonnées barycentriques).
+pub fn pick(m: &Prepared, cam: &Camera, w: f32, h: f32, px: f32, py: f32) -> Option<(usize, [f32; 3])> {
+    let focal = w.min(h) * 1.2;
+    let ortho_scale = focal / cam.dist;
+    let (cx, cy) = (w / 2.0, h / 2.0);
+    let proj = |v: V3| -> Option<[f32; 3]> {
+        let c = cam.view(v);
+        if cam.ortho {
+            Some([cx + c[0] * ortho_scale, cy - c[1] * ortho_scale, c[2]])
+        } else if c[2] < -0.02 {
+            Some([cx + c[0] / -c[2] * focal, cy - c[1] / -c[2] * focal, c[2]])
+        } else {
+            None
+        }
+    };
+    let screen: Vec<Option<[f32; 3]>> = m.pos.iter().map(|v| proj(*v)).collect();
+    let mut best: Option<(usize, [f32; 3], f32)> = None;
+    for (ti, t) in m.tris.iter().enumerate() {
+        let (Some(a), Some(b), Some(c)) = (screen[t[0] as usize], screen[t[1] as usize], screen[t[2] as usize]) else { continue };
+        let d = (b[1] - c[1]) * (a[0] - c[0]) + (c[0] - b[0]) * (a[1] - c[1]);
+        if d.abs() < 1e-9 {
+            continue;
+        }
+        let w0 = ((b[1] - c[1]) * (px - c[0]) + (c[0] - b[0]) * (py - c[1])) / d;
+        let w1 = ((c[1] - a[1]) * (px - c[0]) + (a[0] - c[0]) * (py - c[1])) / d;
+        let w2 = 1.0 - w0 - w1;
+        if w0 < 0.0 || w1 < 0.0 || w2 < 0.0 {
+            continue;
+        }
+        let z = a[2] * w0 + b[2] * w1 + c[2] * w2;
+        if best.as_ref().is_none_or(|bb| z > bb.2) {
+            best = Some((ti, [w0, w1, w2], z));
+        }
+    }
+    best.map(|(t, b, _)| (t, b))
+}
+
+/// Position d'un sommet dans l'espace d'affichage.
+impl Prepared {
+    pub fn vertex(&self, i: usize) -> V3 {
+        self.pos[i]
+    }
+    pub fn triangle(&self, t: usize) -> [u32; 3] {
+        self.tris[t]
+    }
+}
+
 pub fn render(m: &Prepared, cam: &Camera, look: &Look, w: usize, h: usize) -> Frame {
     use rayon::prelude::*;
     let focal = w.min(h) as f32 * 1.2;
@@ -871,7 +947,7 @@ pub fn render(m: &Prepared, cam: &Camera, look: &Look, w: usize, h: usize) -> Fr
 
     let band = 16usize;
     let mut rgba = vec![0u8; w * h * 4];
-    rgba.par_chunks_mut(w * 4 * band).enumerate().for_each(|(bi, chunk)| {
+    let ids: Vec<Vec<u32>> = rgba.par_chunks_mut(w * 4 * band).enumerate().map(|(bi, chunk)| {
         let y0 = bi * band;
         let rows = chunk.len() / (w * 4);
         let n = w * rows;
@@ -964,11 +1040,17 @@ pub fn render(m: &Prepared, cam: &Camera, look: &Look, w: usize, h: usize) -> Fr
                 [lin(nv[0]) / exposure, lin(nv[1]) / exposure, lin(nv[2]) / exposure]
             } else {
                 let (mut albedo, mut rough, mut metal, mut emit) = (if look.material == Material::Color { m.colors[ti as usize] } else { albedo0 }, rough, metal, [0.0f32; 3]);
+                let tuv = m.uv.get(ti as usize).map(|u| [u[0][0] * w0 + u[1][0] * w1 + u[2][0] * w2, u[0][1] * w0 + u[1][1] * w1 + u[2][1] * w2]);
+                if look.uv_checker {
+                    if let Some(uv) = tuv {
+                        albedo = checker(uv, if look.material == Material::Color { Some(m.colors[ti as usize]) } else { None });
+                    }
+                }
                 if let Some(prog) = &look.nodes {
                     let pos = [pa[0] * w0 + pb[0] * w1 + pc[0] * w2, pa[1] * w0 + pb[1] * w1 + pc[1] * w2, pa[2] * w0 + pb[2] * w1 + pc[2] * w2];
                     let vc = m.colors[ti as usize];
                     let g = |x: f32| x.max(0.0).powf(1.0 / 2.2);
-                    let c = crate::nodes::Ctx { uv: [pos[0] + 0.5, 0.5 - pos[1]], pos, nrm, view: v, vcol: [g(vc[0]), g(vc[1]), g(vc[2]), 1.0], res: [w as f32, h as f32] };
+                    let c = crate::nodes::Ctx { uv: tuv.map(|u| [u[0], 1.0 - u[1]]).unwrap_or([pos[0] + 0.5, 0.5 - pos[1]]), pos, nrm, view: v, vcol: [g(vc[0]), g(vc[1]), g(vc[2]), 1.0], res: [w as f32, h as f32] };
                     let (col, r, mt, em) = NODE_REGS.with(|regs| prog.material(&c, &mut regs.borrow_mut()));
                     let l = |x: f32| x.clamp(0.0, 1.0).powf(2.2);
                     albedo = [l(col[0]), l(col[1]), l(col[2])];
@@ -1047,8 +1129,9 @@ pub fn render(m: &Prepared, cam: &Camera, look: &Look, w: usize, h: usize) -> Fr
             let _ = col;
             chunk[o..o + 3].copy_from_slice(&rgb);
         }
-    });
-    Frame { w, h, rgba }
+        tri
+    }).collect();
+    Frame { w, h, rgba, ids: ids.concat() }
 }
 
 thread_local! {
@@ -1123,6 +1206,11 @@ pub struct Viewer {
     stack: Vec<crate::modifiers::Modifier>,
     stack_loaded: bool,
     show_mods: bool,
+    /// Mode édition : IDs de matériau, coutures, UV
+    pub edit: Option<crate::uvedit::Edit>,
+    edit_seen: u64,
+    /// Triangle visible par pixel de la dernière image (pour cacher les coutures masquées)
+    ids: Option<(usize, usize, Vec<u32>)>,
     /// Calcul en cours : (clé, résultat)
     job: Option<(u64, Receiver<Prepared>)>,
     turntable: bool,
@@ -1158,6 +1246,9 @@ impl Viewer {
             stack: vec![],
             stack_loaded: false,
             show_mods: false,
+            edit: None,
+            edit_seen: 0,
+            ids: None,
             job: None,
             turntable: false,
             z_up: None,
@@ -1281,7 +1372,16 @@ impl Viewer {
             z_up.hash(&mut h);
             h.finish()
         };
-        if let Some((k, rx)) = &self.job {
+        if let Some(e) = &mut self.edit {
+            if e.version != self.edit_seen {
+                let (mesh, uvs) = e.display(theme::pal().accent);
+                let mut prep = Prepared::from_mesh(mesh);
+                prep.uv = uvs;
+                self.edit_seen = e.version;
+                self.prepared = Some((z_up, 0xED17_0000_0000 + e.version, prep));
+                self.last = None;
+            }
+        } else if let Some((k, rx)) = &self.job {
             if let Ok(p) = rx.try_recv() {
                 self.prepared = Some((z_up, *k, p));
                 self.last = None;
@@ -1292,7 +1392,7 @@ impl Viewer {
         }
         let current = self.prepared.as_ref().map(|p| p.1);
         let pending = self.job.as_ref().map(|j| j.0);
-        if current != Some(key) && pending != Some(key) && self.job.is_none() {
+        if self.edit.is_none() && current != Some(key) && pending != Some(key) && self.job.is_none() {
             let (tx, rx) = channel();
             let (m, stack, ctx) = (model.clone(), self.stack.clone(), ui.ctx().clone());
             std::thread::spawn(move || {
@@ -1476,7 +1576,25 @@ impl Viewer {
             ui.toggle_value(&mut self.turntable, "tourner").on_hover_text("Rotation automatique (platine)");
             let n_mods = self.stack.iter().filter(|m| m.on).count();
             let label = if n_mods > 0 { format!("modificateurs ({n_mods})") } else { "modificateurs".into() };
-            ui.toggle_value(&mut self.show_mods, label).on_hover_text("Pile de modificateurs, comme dans Blender et 3ds Max");
+            if ui.toggle_value(&mut self.show_mods, label).on_hover_text("Pile de modificateurs, comme dans Blender et 3ds Max").changed() && self.show_mods {
+                self.edit = None;
+                self.prepared = None;
+            }
+            let mut editing = self.edit.is_some();
+            if ui.toggle_value(&mut editing, "édition").on_hover_text("IDs de matériau, coutures et UV (sur le modèle d'origine)").changed() {
+                if editing {
+                    let mesh = crate::modifiers::Mesh::from_model(model, z_up);
+                    let s = model.size();
+                    let longest = s[0].max(s[1]).max(s[2]).max(1e-9);
+                    let file = std::path::Path::new(&self.root).join(".app/meshdata").join(self.mods_file().file_name().unwrap_or_default());
+                    self.edit = Some(crate::uvedit::Edit::open(&mesh, file, longest));
+                    self.edit_seen = 0;
+                    self.show_mods = false;
+                } else {
+                    self.edit = None;
+                    self.prepared = None;
+                }
+            }
             if self.job.is_some() {
                 ui.spinner();
             }
@@ -1512,6 +1630,17 @@ impl Viewer {
             self.turntable_gif();
         }
 
+        if let Some(e) = &mut self.edit {
+            let avail = ui.available_rect_before_wrap();
+            let pr = egui::Rect::from_min_max(egui::pos2(avail.right() - 440.0, avail.top()), avail.max);
+            let ui = &mut ui.new_child(egui::UiBuilder::new().max_rect(pr));
+            egui::Frame::new().fill(p.panel).stroke(Stroke::new(1.0, p.line)).inner_margin(8).show(ui, |ui| {
+                ui.set_min_size(pr.size() - egui::vec2(16.0, 16.0));
+                egui::ScrollArea::vertical().id_salt("edit-panel").show(ui, |ui| {
+                    e.panel(ui);
+                });
+            });
+        }
         if self.show_mods {
             let avail = ui.available_rect_before_wrap();
             let pr = egui::Rect::from_min_max(egui::pos2(avail.right() - 280.0, avail.top()), avail.max);
@@ -1550,12 +1679,20 @@ impl Viewer {
             let stem = self.path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "modele".into());
             let suffix = if self.stack.iter().any(|m| m.on) { "-modifié" } else { "-export" };
             let out = self.path.with_file_name(format!("{stem}{suffix}.{fmt}"));
-            self.capture_msg = Some(match crate::modifiers::export(&mesh, model, z_up, &out) {
+            let s = model.size();
+            let longest = s[0].max(s[1]).max(s[2]).max(1e-9);
+            let c = [(model.min[0] + model.max[0]) / 2.0, (model.min[1] + model.max[1]) / 2.0, (model.min[2] + model.max[2]) / 2.0];
+            let world = move |p: V3| -> V3 {
+                let o = if z_up { [p[0], -p[2], p[1]] } else { p };
+                [o[0] * longest + c[0], o[1] * longest + c[1], o[2] * longest + c[2]]
+            };
+            let with_edit = self.edit.as_ref().filter(|_| fmt == "obj" || fmt == "glb");
+            self.capture_msg = Some(match with_edit.map(|e| if fmt == "obj" { crate::uvedit::export_obj(e, &world, &out) } else { crate::uvedit::export_glb(e, &world, &out) }).unwrap_or_else(|| crate::modifiers::export(&mesh, model, z_up, &out)) {
                 Ok(()) => format!("exporté : {}", out.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()),
                 Err(e) => format!("export impossible : {e}"),
             });
         }
-        let avail = ui.available_size() - if self.show_mods { egui::vec2(288.0, 0.0) } else { egui::Vec2::ZERO };
+        let avail = ui.available_size() - if self.edit.is_some() { egui::vec2(448.0, 0.0) } else if self.show_mods { egui::vec2(288.0, 0.0) } else { egui::Vec2::ZERO };
         let (rect, resp) = ui.allocate_exact_size(avail.max(egui::vec2(50.0, 50.0)), Sense::click_and_drag());
         let painter = ui.painter_at(rect);
         painter.rect_filled(rect, 0.0, p.panel);
@@ -1563,6 +1700,16 @@ impl Viewer {
         // ---------- navigation façon Blender ----------
         let (mods, lkey, hkey) = ui.input(|i| (i.modifiers, i.key_down(Key::L), i.key_down(Key::H)));
         let dragging = resp.dragged_by(egui::PointerButton::Middle) || resp.dragged_by(egui::PointerButton::Primary) || resp.dragged_by(egui::PointerButton::Secondary);
+        if resp.clicked() {
+            if let (Some(e), Some((_, _, prep)), Some(pt)) = (&mut self.edit, &self.prepared, resp.interact_pointer_pos()) {
+                if let Some((tri, bary)) = pick(prep, &self.cam, rect.width(), rect.height(), pt.x - rect.left(), pt.y - rect.top()) {
+                    e.click(prep, tri, bary, mods.shift, mods.command);
+                } else if !mods.shift {
+                    e.sel.clear();
+                    e.version += 1;
+                }
+            }
+        }
         if dragging {
             let d = resp.drag_delta();
             let right = resp.dragged_by(egui::PointerButton::Secondary);
@@ -1621,12 +1768,22 @@ impl Viewer {
         let heavy = shown_tris > 600_000;
         let scale = if interacting { if heavy { 0.4 } else { 0.6 } } else { ppp.min(2.0) };
         let size = [(rect.width() * scale).max(16.0) as usize, (rect.height() * scale).max(16.0) as usize];
-        let look_key = format!("{:?}", self.look.key());
+        let mut look = self.look.clone();
+        if let Some(e) = &self.edit {
+            look.material = Material::Color;
+            look.nodes = None;
+            look.uv_checker = e.checker && e.data.has_uv();
+            if look.wire == 0.0 {
+                look.wire = 0.35;
+            }
+        }
+        let look_key = format!("{:?}", look.key());
         let key = (self.cam, size, z_up, self.prepared.as_ref().map(|p| p.1).unwrap_or(0), look_key);
         if self.last.as_ref() != Some(&key) || self.tex.is_none() {
             let prep = &self.prepared.as_ref().unwrap().2;
-            let frame = render(prep, &self.cam, &self.look, size[0], size[1]);
+            let frame = render(prep, &self.cam, &look, size[0], size[1]);
             let img = egui::ColorImage::from_rgba_unmultiplied([frame.w, frame.h], &frame.rgba);
+            self.ids = Some((frame.w, frame.h, frame.ids));
             match &mut self.tex {
                 Some(t) => t.set(img, egui::TextureOptions::LINEAR),
                 None => self.tex = Some(ui.ctx().load_texture("model3d", img, egui::TextureOptions::LINEAR)),
@@ -1663,6 +1820,48 @@ impl Viewer {
         }
         if let Some(t) = &self.tex {
             painter.image(t.id(), rect, egui::Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+        }
+        // Coutures (mode édition), en rouge par-dessus le modèle
+        if let (Some(e), Some((_, _, prep))) = (&self.edit, &self.prepared) {
+            let focal = rect.height().min(rect.width()) * 1.2;
+            let ortho_scale = focal / self.cam.dist;
+            let c = rect.center();
+            let project = |v: V3| -> Option<Pos2> {
+                let q = self.cam.view(v);
+                if self.cam.ortho {
+                    Some(pos2(c.x + q[0] * ortho_scale, c.y - q[1] * ortho_scale))
+                } else {
+                    (q[2] < -0.05).then(|| pos2(c.x + q[0] / -q[2] * focal, c.y - q[1] / -q[2] * focal))
+                }
+            };
+            let red = Color32::from_rgb(235, 60, 50);
+            // Visible si un pixel le long de l'arête montre une des deux faces qui la bordent
+            let visible = |a: Pos2, b: Pos2, faces: &[u32]| -> bool {
+                let Some((w, h, ids)) = &self.ids else { return true };
+                let (sx, sy) = (*w as f32 / rect.width(), *h as f32 / rect.height());
+                [0.25f32, 0.5, 0.75].iter().any(|t| {
+                    let q = a + (b - a) * *t;
+                    let (x, y) = (((q.x - rect.left()) * sx) as i64, ((q.y - rect.top()) * sy) as i64);
+                    (-1..=1).any(|dy| {
+                        (-1..=1).any(|dx| {
+                            let (xx, yy) = (x + dx, y + dy);
+                            if xx < 0 || yy < 0 || xx >= *w as i64 || yy >= *h as i64 {
+                                return false;
+                            }
+                            let id = ids[yy as usize * w + xx as usize];
+                            e.owner.get(id as usize).is_some_and(|f| faces.contains(f))
+                        })
+                    })
+                })
+            };
+            for &(a, b) in e.data.seams.iter().take(40_000) {
+                if let (Some(pa), Some(pb)) = (project(prep.vertex(a as usize)), project(prep.vertex(b as usize))) {
+                    let faces = e.topo.edge_faces.get(&(a, b)).map(|v| v.as_slice()).unwrap_or(&[]);
+                    if visible(pa, pb, faces) {
+                        painter.line_segment([pa, pb], Stroke::new(2.0, red));
+                    }
+                }
+            }
         }
 
         // Repère des axes (en bas à gauche)

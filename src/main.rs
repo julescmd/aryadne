@@ -2,6 +2,7 @@
 
 mod cloud;
 mod convert;
+mod uvedit;
 mod cloud_ui;
 mod lsp;
 mod ai;

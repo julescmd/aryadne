@@ -6,7 +6,7 @@ Le fil entre tes idées. Notes, code, références et moodboards dans un dossier
 
 100 % Rust ([egui](https://github.com/emilk/egui)). Un seul exécutable portable pour Windows et Linux : **aucune installation, aucun droit admin**. Look éditeur de code (JetBrains Mono, angles droits), mode clair par défaut, mode sombre en un clic.
 
-## Fonctionnalités (v0.16)
+## Fonctionnalités (v0.17)
 
 **3D**
 - Visionneuse intégrée pour OBJ, FBX (binaire), glTF / GLB et STL. Rendu par pixel avec profondeur (comme les pixols de ZBrush) : pas de trous ni de mouchetures, calculé sur tous les cœurs, et recalculé seulement quand la vue change.
@@ -15,6 +15,13 @@ Le fil entre tes idées. Notes, code, références et moodboards dans un dossier
 - Fil de fer par-dessus le modèle (opacité, noir / blanc / accent, ou fil de fer seul), sans les diagonales des quads.
 - **Subdivision Catmull-Clark** comme Blender (sur les vrais quads et n-gones, sans diagonales), mode « simple », et « affichage optimal » qui ne montre que la cage d'origine.
 - **33 modificateurs** façon 3ds Max / Blender, empilés et non destructifs : miroir multi-axes avec coupe, réseau (décalage, rotation, échelle par copie), subdivision, décimer, souder, trianguler, arêtes vives, fil de fer, exploser, vis, construire, couper, épaissir, lisser (avec conservation du volume), bruit fractal, torsion, courbure, effilement, projeter (sphère, cylindre, cube), étirer, cisaillement, warp, bosse, onde, ondulation, gonfler, aléatoire, voxeliser, renflement, fondre, froisser, inverser les normales, transformation. Chaque déformation a une influence, une zone limitée le long d'un axe avec fondu, et l'inversion. Recherche, dupliquer, réordonner.
+- **Mode édition 3D** (bouton « édition ») :
+  - sélection de faces au clic (Maj : ajouter, Ctrl : retirer), tout / rien / inverser / agrandir / îlot ;
+  - IDs de matériau : couleurs, noms, assigner à la sélection, choisir les faces d'un ID ;
+  - coutures : à la main (clic sur une arête), sur les arêtes vives, « intelligentes » (îlots presque plats, comme Smart UV Project), contour de la sélection ;
+  - UV : dépliage LSCM, rangement optimisé (plusieurs ordres, rotations, largeurs), marge et taille de texture, même densité pour tous les îlots, densité imposée en px/unité, damier sur le modèle, vue UV 2D (choisir, déplacer, tourner, miroir, échelle) ;
+  - tout est gardé à côté du modèle, et l'export OBJ (vt, usemtl, .mtl) et GLB (UV, un matériau par ID) l'inclut.
+- Les matériaux en nodes utilisent les vraies UV quand le modèle en a.
 - **Export 3D** en OBJ (quads gardés), GLB (glTF), STL et PLY, avec ou sans modificateurs.
 - **Matériaux plus simples** : « affichage › nouveau matériau » crée un matériau en nodes, l'applique et l'ouvre à côté du modèle.
 - **Éditeur de nodes** revu : sélection multiple et en rectangle, clic droit, menu d'ajout par catégories avec survol et recherche, miniature sous chaque node, lien lâché dans le vide = node déjà relié, couper un lien (Ctrl+clic), muet (M), réduire (H), renommer (F2), dupliquer, copier-coller, annuler / rétablir, cadrer (F), aimantation (Ctrl), images glissées = nodes texture.
@@ -161,6 +168,9 @@ Le fil entre tes idées. Notes, code, références et moodboards dans un dossier
 **Résumé IA**
 - Bouton « résumer » sur n'importe quel fichier texte ou de code. Le résumé peut être copié ou enregistré en note (liée au fichier source).
 - Fonctionne avec toute API compatible OpenAI. Par défaut : [Ollama](https://ollama.com) en local (gratuit, privé).
+- **Explorateur en grille** avec miniatures (3D, images, vidéos), fil d'Ariane et taille réglable, ou en liste.
+- **Bande d'images** sous les vidéos (façon Syncsketch) : toutes les images, clic pour y aller, dessins et boucle repérés.
+- **Convertir et compresser** (clic droit sur un fichier ou un dossier) : images en JPG, PNG, WebP, TGA, TIFF, BMP avec qualité et taille, aperçu et poids avant de lancer ; vidéos en MP4, WebM, MOV ProRes, GIF ; sons en MP3, Ogg, AAC, FLAC, WAV.
 - **Transfert par internet** via ton propre stockage S3 (Cloudflare R2, B2, S3, MinIO) : les fichiers sont effacés du bucket dès qu'ils sont reçus. Option de synchro complète du coffre, avec gestion des conflits et garde-fou contre les suppressions massives. Aucune clé ni adresse dans le code : tout se règle dans réglages › coffre en ligne.
 - **Éditeur de code** : repli des blocs (flèches dans la gouttière, Ctrl+Maj+[ ]), vue côte à côte (Ctrl+\\), client LSP qui utilise les serveurs installés (rust-analyzer, pyright, pylsp, typescript-language-server, clangd, gopls, lua-language-server, bash-language-server) pour la complétion, les erreurs en direct, la doc au survol et F12.
 - **Tous les fournisseurs d'IA** : Claude, ChatGPT, DeepSeek, Gemini, Mistral, Grok, Groq, OpenRouter, en plus d'Ollama et LM Studio en local. Colle une clé dans réglages › ia et ses modèles apparaissent dans le menu du chat.
