@@ -2,6 +2,7 @@
 
 mod cloud;
 mod dock;
+mod retopo;
 mod convert;
 mod uvedit;
 mod zoomview;

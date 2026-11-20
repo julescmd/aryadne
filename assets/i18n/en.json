@@ -781,5 +781,21 @@
  "ancrer à droite": "dock right",
  "ancrer en bas": "dock bottom",
  "fenêtre flottante": "floating window",
- "réinitialiser la disposition": "reset layout"
+ "réinitialiser la disposition": "reset layout",
+ "retopo": "retopo",
+ "Dessine des guides sur le modèle (glisser) : les boucles de quads suivront tes traits. Maj ou clic droit : tourner la vue.": "Draw guides on the model (drag): quad loops will follow your strokes. Shift or right-click: orbit the view.",
+ "guide(s)": "guide(s)",
+ "annuler le dernier": "undo last",
+ "effacer les guides": "clear guides",
+ "faces visées": "target faces",
+ "portée des guides": "guide reach",
+ "lissage du flux": "flow smoothing",
+ "100 % quads": "100% quads",
+ "calcul du flux…": "computing flow…",
+ "▶ lancer la retopologie": "▶ run retopology",
+ "afficher": "show",
+ "exporter en OBJ": "export as OBJ",
+ "matériaux": "materials",
+ "coutures": "seams",
+ "UV": "UV"
 }

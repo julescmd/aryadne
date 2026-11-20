@@ -115,6 +115,9 @@ pub struct EditData {
     pub texture_px: u32,
     #[serde(default = "margin_default")]
     pub margin_px: f32,
+    /// Guides de retopologie (traits dessinés sur la surface, espace d'affichage)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub guides: Vec<Vec<V3>>,
 }
 
 fn tex_default() -> u32 {
@@ -126,7 +129,7 @@ fn margin_default() -> f32 {
 
 impl EditData {
     pub fn fresh(t: &Topo) -> EditData {
-        EditData { polys: t.polys.len(), face_mat: vec![0; t.polys.len()], slots: vec![Slot { name: "matériau 1".into(), color: PALETTE[0] }], seams: BTreeSet::new(), uv: vec![], chart: vec![], texture_px: 2048, margin_px: 8.0 }
+        EditData { polys: t.polys.len(), face_mat: vec![0; t.polys.len()], slots: vec![Slot { name: "matériau 1".into(), color: PALETTE[0] }], seams: BTreeSet::new(), uv: vec![], chart: vec![], texture_px: 2048, margin_px: 8.0, guides: vec![] }
     }
 
     pub fn fits(&self, t: &Topo) -> bool {
@@ -1526,6 +1529,13 @@ use std::path::PathBuf;
 pub enum Tool {
     Faces,
     Seams,
+    Guides,
+}
+
+/// Retopologie qui tourne en arrière-plan
+pub struct RetopoJob {
+    pub progress: std::sync::Arc<std::sync::Mutex<f32>>,
+    pub rx: std::sync::mpsc::Receiver<crate::retopo::Result>,
 }
 
 pub struct Edit {
@@ -1550,6 +1560,14 @@ pub struct Edit {
     uv_drag: bool,
     pub checker: bool,
     pub auto: AutoOptions,
+    pub retopo_opt: crate::retopo::Options,
+    pub retopo: Option<std::sync::Arc<crate::retopo::Result>>,
+    pub retopo_job: Option<RetopoJob>,
+    /// Demande à la vue d'exporter le résultat (elle connaît la transformation vers le monde)
+    pub retopo_export: bool,
+    pub retopo_show: bool,
+    /// Trait de guide en cours
+    pub guide_now: Vec<V3>,
 }
 
 impl Edit {
@@ -1558,7 +1576,7 @@ impl Edit {
         let data = std::fs::read_to_string(&file).ok().and_then(|t| serde_json::from_str::<EditData>(&t).ok()).filter(|d| d.fits(&topo)).unwrap_or_else(|| EditData::fresh(&topo));
         let n = topo.polys.len();
         let checker = data.has_uv();
-        Edit { topo, data, sel: BTreeSet::new(), tool: Tool::Faces, tab: 0, version: 1, seam_angle: 45.0, smart_angle: 66.0, min_faces: (n / 400).clamp(4, 300), optimize: true, rotate: true, density_target: 1024.0, file, scale, message: None, owner: vec![], uv_view: Rect::NOTHING, uv_drag: false, checker, auto: AutoOptions::default() }
+        Edit { topo, data, sel: BTreeSet::new(), tool: Tool::Faces, tab: 0, version: 1, seam_angle: 45.0, smart_angle: 66.0, min_faces: (n / 400).clamp(4, 300), optimize: true, rotate: true, density_target: 1024.0, file, scale, message: None, owner: vec![], uv_view: Rect::NOTHING, uv_drag: false, checker, auto: AutoOptions::default(), retopo_opt: crate::retopo::Options { faces: (n * 2).clamp(200, 8000) / 100 * 100, ..Default::default() }, retopo: None, retopo_job: None, retopo_export: false, retopo_show: true, guide_now: vec![] }
     }
 
     pub fn save(&self) {
@@ -1596,6 +1614,7 @@ impl Edit {
     pub fn click(&mut self, prep: &crate::model3d::Prepared, tri: usize, bary: [f32; 3], shift: bool, ctrl: bool) {
         let Some(&f) = self.owner.get(tri) else { return };
         match self.tool {
+            Tool::Guides => {}
             Tool::Faces => {
                 if ctrl {
                     self.sel.remove(&f);
@@ -1666,10 +1685,14 @@ impl Edit {
         let p = crate::theme::pal();
         let v0 = self.version;
         ui.horizontal(|ui| {
-            for (k, l) in ["matériaux", "coutures", "UV"].iter().enumerate() {
-                if ui.selectable_label(self.tab == k as u8, *l).clicked() {
+            for (k, l) in ["matériaux", "coutures", "UV", "retopo"].iter().enumerate() {
+                if ui.selectable_label(self.tab == k as u8, crate::i18n::t(l)).clicked() {
                     self.tab = k as u8;
-                    self.tool = if k == 1 { Tool::Seams } else { Tool::Faces };
+                    self.tool = match k {
+                        1 => Tool::Seams,
+                        3 => Tool::Guides,
+                        _ => Tool::Faces,
+                    };
                 }
             }
         });
@@ -1678,7 +1701,8 @@ impl Edit {
         match self.tab {
             0 => self.tab_materials(ui),
             1 => self.tab_seams(ui),
-            _ => self.tab_uv(ui),
+            2 => self.tab_uv(ui),
+            _ => self.tab_retopo(ui),
         }
         if let Some(m) = &self.message {
             ui.label(RichText::new(m).color(p.muted).size(10.5));
@@ -1873,6 +1897,100 @@ impl Edit {
         let n = self.data.chart.iter().max().map(|m| m + 1).unwrap_or(0);
         self.message = Some(format!("{n} îlots, remplissage {:.0} %, {:.1} s", fill_rate(&self.data) * 100.0, t0.elapsed().as_secs_f32()));
         self.changed();
+    }
+
+    /// Ajoute un point au guide en cours (glisser sur le modèle).
+    pub fn guide_point(&mut self, prep: &crate::model3d::Prepared, tri: usize, bary: [f32; 3]) {
+        let t = prep.triangle(tri);
+        let p: Vec<V3> = t.iter().map(|&i| prep.vertex(i as usize)).collect();
+        let hit = [0, 1, 2].map(|k| p[0][k] * bary[0] + p[1][k] * bary[1] + p[2][k] * bary[2]);
+        if self.guide_now.last().is_none_or(|l| ((l[0] - hit[0]).powi(2) + (l[1] - hit[1]).powi(2) + (l[2] - hit[2]).powi(2)).sqrt() > 0.004) {
+            self.guide_now.push(hit);
+        }
+    }
+
+    pub fn guide_end(&mut self) {
+        let g = std::mem::take(&mut self.guide_now);
+        if g.len() >= 2 {
+            self.data.guides.push(g);
+            self.changed();
+        }
+    }
+
+    pub fn retopo_poll(&mut self) -> bool {
+        let Some(j) = &self.retopo_job else { return false };
+        if let Ok(r) = j.rx.try_recv() {
+            self.message = Some(format!("retopo : {} faces, {} quads, {} sommets", r.faces.len(), r.quads(), r.pos.len()));
+            self.retopo = Some(std::sync::Arc::new(r));
+            self.retopo_job = None;
+            self.retopo_show = true;
+            return true;
+        }
+        false
+    }
+
+    fn tab_retopo(&mut self, ui: &mut egui::Ui) {
+        let p = crate::theme::pal();
+        ui.label(RichText::new(crate::i18n::t("Dessine des guides sur le modèle (glisser) : les boucles de quads suivront tes traits. Maj ou clic droit : tourner la vue.")).color(p.muted).size(11.0));
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(format!("{} {}", self.data.guides.len(), crate::i18n::t("guide(s)"))).strong());
+            if ui.small_button(crate::i18n::t("annuler le dernier")).clicked() && self.data.guides.pop().is_some() {
+                self.changed();
+            }
+            if ui.small_button(crate::i18n::t("effacer les guides")).clicked() {
+                self.data.guides.clear();
+                self.changed();
+            }
+        });
+        ui.separator();
+        ui.horizontal(|ui| {
+            ui.label(crate::i18n::t("faces visées"));
+            ui.add(egui::DragValue::new(&mut self.retopo_opt.faces).range(50..=60_000).speed(20.0));
+        });
+        ui.add(egui::Slider::new(&mut self.retopo_opt.guide_radius, 0.5..=4.0).text(crate::i18n::t("portée des guides")));
+        ui.add(egui::Slider::new(&mut self.retopo_opt.iterations, 40..=400).text(crate::i18n::t("lissage du flux")));
+        ui.checkbox(&mut self.retopo_opt.pure_quads, crate::i18n::t("100 % quads"));
+        ui.add_space(6.0);
+        if let Some(j) = &self.retopo_job {
+            let f = j.progress.lock().map(|g| *g).unwrap_or(0.0);
+            ui.add(egui::ProgressBar::new(f).text(crate::i18n::t("calcul du flux…")));
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
+        } else if ui.button(RichText::new(crate::i18n::t("▶ lancer la retopologie")).strong()).clicked() {
+            let pos = self.topo.pos.clone();
+            let mut tris = vec![];
+            for f in &self.topo.polys {
+                for k in 1..f.len().saturating_sub(1) {
+                    tris.push([f[0], f[k], f[k + 1]]);
+                }
+            }
+            let guides = self.data.guides.clone();
+            let opt = self.retopo_opt.clone();
+            let progress = std::sync::Arc::new(std::sync::Mutex::new(0.0f32));
+            let pr = progress.clone();
+            let (tx, rx) = std::sync::mpsc::channel();
+            let ctx = ui.ctx().clone();
+            std::thread::spawn(move || {
+                let r = crate::retopo::remesh(&pos, &tris, &guides, &opt, &|f| {
+                    if let Ok(mut g) = pr.lock() {
+                        *g = f;
+                    }
+                });
+                let _ = tx.send(r);
+                ctx.request_repaint();
+            });
+            self.retopo_job = Some(RetopoJob { progress, rx });
+        }
+        if let Some(r) = &self.retopo {
+            ui.add_space(6.0);
+            ui.label(RichText::new(format!("{} faces · {} quads · {} sommets", r.faces.len(), r.quads(), r.pos.len())).color(p.muted).size(11.0));
+            ui.horizontal(|ui| {
+                ui.checkbox(&mut self.retopo_show, crate::i18n::t("afficher"));
+                if ui.button(crate::i18n::t("exporter en OBJ")).clicked() {
+                    self.retopo_export = true;
+                }
+            });
+        }
     }
 
     fn tab_uv(&mut self, ui: &mut egui::Ui) {

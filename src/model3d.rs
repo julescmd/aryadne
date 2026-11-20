@@ -1669,6 +1669,31 @@ impl Viewer {
                 let _ = std::fs::write(f, serde_json::to_string(&self.stack).unwrap_or_default());
             }
         }
+        if let Some(e) = &mut self.edit {
+            e.retopo_poll();
+        }
+        if let (Some(e), Some(model)) = (&mut self.edit, Some(&*model)) {
+            if std::mem::take(&mut e.retopo_export) {
+                if let Some(r) = &e.retopo {
+                    let s = model.size();
+                    let longest = s[0].max(s[1]).max(s[2]).max(1e-9);
+                    let c = [(model.min[0] + model.max[0]) / 2.0, (model.min[1] + model.max[1]) / 2.0, (model.min[2] + model.max[2]) / 2.0];
+                    let world = move |p: V3| -> V3 {
+                        let o = if z_up { [p[0], -p[2], p[1]] } else { p };
+                        [o[0] * longest + c[0], o[1] * longest + c[1], o[2] * longest + c[2]]
+                    };
+                    let stem = self.path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "modele".into());
+                    let out = self.path.with_file_name(format!("{stem}-retopo.obj"));
+                    self.capture_msg = Some(match crate::retopo::export_obj(r, &world, &out) {
+                        Ok(()) => {
+                            self.open_request = Some(out.clone());
+                            format!("retopo exportée : {}", out.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default())
+                        }
+                        Err(e) => format!("export impossible : {e}"),
+                    });
+                }
+            }
+        }
         if let Some(fmt) = export.take() {
             let s = model.size();
             let longest = s[0].max(s[1]).max(s[2]).max(1e-9);
@@ -1703,7 +1728,20 @@ impl Viewer {
 
         // ---------- navigation façon Blender ----------
         let (mods, lkey, hkey) = ui.input(|i| (i.modifiers, i.key_down(Key::L), i.key_down(Key::H)));
-        let dragging = resp.dragged_by(egui::PointerButton::Middle) || resp.dragged_by(egui::PointerButton::Primary) || resp.dragged_by(egui::PointerButton::Secondary);
+        let guiding = self.edit.as_ref().is_some_and(|e| e.tool == crate::uvedit::Tool::Guides) && !mods.shift;
+        if guiding && resp.dragged_by(egui::PointerButton::Primary) {
+            if let (Some(e), Some((_, _, prep)), Some(pt)) = (&mut self.edit, &self.prepared, resp.interact_pointer_pos()) {
+                if let Some((tri, bary)) = pick(prep, &self.cam, rect.width(), rect.height(), pt.x - rect.left(), pt.y - rect.top()) {
+                    e.guide_point(prep, tri, bary);
+                }
+            }
+        }
+        if guiding && resp.drag_stopped() {
+            if let Some(e) = &mut self.edit {
+                e.guide_end();
+            }
+        }
+        let dragging = resp.dragged_by(egui::PointerButton::Middle) || (!guiding && resp.dragged_by(egui::PointerButton::Primary)) || resp.dragged_by(egui::PointerButton::Secondary);
         if resp.clicked() {
             if let (Some(e), Some((_, _, prep)), Some(pt)) = (&mut self.edit, &self.prepared, resp.interact_pointer_pos()) {
                 if let Some((tri, bary)) = pick(prep, &self.cam, rect.width(), rect.height(), pt.x - rect.left(), pt.y - rect.top()) {
@@ -1863,6 +1901,42 @@ impl Viewer {
                     let faces = e.topo.edge_faces.get(&(a, b)).map(|v| v.as_slice()).unwrap_or(&[]);
                     if visible(pa, pb, faces) {
                         painter.line_segment([pa, pb], Stroke::new(2.0, red));
+                    }
+                }
+            }
+            // Guides de retopologie
+            let guide_col = Color32::from_rgb(255, 170, 30);
+            let facing = |a: V3, n: V3| -> bool {
+                let ca = self.cam.view(a);
+                let cn = sub(self.cam.view([a[0] + n[0], a[1] + n[1], a[2] + n[2]]), ca);
+                if self.cam.ortho { cn[2] > 0.0 } else { dot(cn, [-ca[0], -ca[1], -ca[2]]) > 0.0 }
+            };
+            for g in e.data.guides.iter().chain(std::iter::once(&e.guide_now)) {
+                let pts: Vec<Pos2> = g.iter().filter_map(|v| project(*v)).collect();
+                if pts.len() >= 2 {
+                    painter.add(egui::Shape::line(pts.clone(), Stroke::new(3.0, guide_col)));
+                    painter.circle_filled(pts[0], 3.5, guide_col);
+                }
+            }
+            // Résultat de la retopologie, en fil de fer (faces tournées vers la caméra)
+            if let Some(r) = e.retopo.as_ref().filter(|_| e.retopo_show) {
+                let blue = Color32::from_rgb(70, 160, 255);
+                let mut drawn = std::collections::HashSet::new();
+                for f in r.faces.iter().take(60_000) {
+                    let c = f.iter().fold([0.0f32; 3], |a, &i| [a[0] + r.pos[i as usize][0], a[1] + r.pos[i as usize][1], a[2] + r.pos[i as usize][2]]);
+                    let c = [c[0] / f.len() as f32, c[1] / f.len() as f32, c[2] / f.len() as f32];
+                    let n = cross(sub(r.pos[f[1] as usize], r.pos[f[0] as usize]), sub(r.pos[f[f.len() - 1] as usize], r.pos[f[0] as usize]));
+                    if !facing(c, n) {
+                        continue;
+                    }
+                    for k in 0..f.len() {
+                        let (a, b) = (f[k], f[(k + 1) % f.len()]);
+                        if !drawn.insert((a.min(b), a.max(b))) {
+                            continue;
+                        }
+                        if let (Some(pa), Some(pb)) = (project(r.pos[a as usize]), project(r.pos[b as usize])) {
+                            painter.line_segment([pa, pb], Stroke::new(1.2, blue));
+                        }
                     }
                 }
             }
