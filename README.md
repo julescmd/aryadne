@@ -21,7 +21,15 @@ Le fil entre tes idées. Notes, code, références et moodboards dans un dossier
   - coutures : à la main (clic sur une arête), sur les arêtes vives, « intelligentes » (îlots presque plats, comme Smart UV Project), contour de la sélection ;
   - **auto avancé** : coupe minimale pour que chaque îlot se déplie à plat (un cylindre = une seule couture droite, un tore = quelques îlots), coutures placées dans les plis, les creux et le dessous, découpe là où ça s'étire, fusion des îlots voisins, îlots redressés sur leurs arêtes, rangement « skyline » ; curseur « moins d'îlots / moins d'étirement » ;
   - UV : dépliage LSCM, rangement optimisé (plusieurs ordres, rotations, largeurs), marge et taille de texture, même densité pour tous les îlots, densité imposée en px/unité, damier sur le modèle, vue UV 2D (choisir, déplacer, tourner, miroir, échelle) ;
-  - **retopologie guidée** : dessine des traits sur le modèle et les boucles de quads les suivent (champ de directions multirésolution façon Instant Meshes), nombre de faces visé, portée des guides, option 100 % quads, aperçu en fil de fer bleu, export OBJ ;
+  - **retopologie automatique en quads purs** (onglet « retopo »), dans l'esprit de Quad Remesher :
+    - le flux suit les courbures principales (anneaux autour des membres, lignes le long des plis), par un champ de croix globalement optimal ;
+    - les pôles sont placés un à un sur la grille comme dans Mixed-Integer Quadrangulation : un tore sort sans aucun pôle, une sphère avec les 8 du cube, un personnage avec ceux des articulations ;
+    - les quads rétrécissent là où les boucles se resserrent au lieu de se tordre (taille adaptative) ;
+    - arêtes vives et bords ouverts repris par une boucle nette, coins gardés ;
+    - symétrie X / Y / Z avec une boucle sur le plan ;
+    - guides dessinés sur le modèle pour imposer la direction des boucles ;
+    - sculpts de plusieurs millions de triangles simplifiés avant le calcul ; résultat 100 % quads, fermé, sans sommet de valence 2 ;
+    - aperçu en fil de fer bleu, nombre de pôles affiché, export OBJ ;
   - tout est gardé à côté du modèle, et l'export OBJ (vt, usemtl, .mtl), FBX (quads, UV, matériaux) et GLB (UV, un matériau par ID) l'inclut.
 - Les matériaux en nodes utilisent les vraies UV quand le modèle en a.
 - **Export 3D** en OBJ (quads gardés), FBX binaire (vérifié dans Blender), GLB (glTF), STL et PLY, avec ou sans modificateurs.
@@ -247,7 +255,7 @@ src/
   transfer.rs  export zip et transfert réseau
   model3d.rs   visionneuse 3D (OBJ, glTF, STL)
   uvedit.rs    mode édition : matériaux, coutures, UV
-  retopo.rs    retopologie guidée en quads
+  retopo.rs    retopologie automatique en quads (champ de croix, grille entière, extraction)
   fbxwrite.rs  export FBX binaire
   dock.rs      panneaux ancrables et flottants
   i18n.rs      traductions (assets/i18n)

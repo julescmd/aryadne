@@ -1101,8 +1101,40 @@ fn place_cones(g: &mut Graph, f: &[[u32; 3]], geo: &[[f64; 2]], u: &mut [[f64; 2
         }
         round += 1;
     }
+    // Une boucle fermée (bord, plan de symétrie, arête vive circulaire) doit revenir sur la même
+    // ligne de grille. Sinon on déplace une singularité d'une case en diagonale (sa parité ne
+    // change pas) jusqu'à ce que le tour se referme.
+    let mut moved = 0;
     for c in curves.iter_mut() {
-        c.ok = curve_closes(g, c);
+        for _ in 0..6 {
+            let Some(m) = curve_mismatch(g, c) else { break };
+            if m == 0 {
+                break;
+            }
+            let on_curve: HashSet<u32> = c.links.iter().chain(c.extra.iter()).map(|l| l.2).collect();
+            let mut done = false;
+            'search: for p in paths.iter().filter(|p| p.face != u32::MAX && p.cols.iter().any(|col| on_curve.contains(&col.0))) {
+                for b in [[1, 1], [1, -1], [-1, 1], [-1, -1]] {
+                    let saved: Vec<(u32, [i32; 2])> = p.cols.iter().map(|col| (col.0, g.d[col.0 as usize])).collect();
+                    push_path(g, f, &p.steps, b);
+                    if curve_mismatch(g, c).is_some_and(|m2| m2.abs() < m.abs()) {
+                        done = true;
+                        moved += 1;
+                        break 'search;
+                    }
+                    for (e, d) in saved {
+                        g.d[e as usize] = d;
+                    }
+                }
+            }
+            if !done {
+                break;
+            }
+        }
+        c.ok = curve_mismatch(g, c) == Some(0);
+    }
+    if debug && moved > 0 {
+        eprintln!("  singularités déplacées pour refermer les boucles : {moved}");
     }
     if debug {
         eprintln!("  lignes qui ne se referment pas : {}", curves.iter().filter(|c| !c.ok).count());
@@ -2535,7 +2567,31 @@ fn curve_frames(g: &Graph, c: &Curve) -> Vec<(u8, f64, i32)> {
         .collect()
 }
 
+/// Décalage (en lignes de grille) d'une boucle fermée après un tour ; None si même le repère
+/// ne revient pas à l'identique.
+fn curve_mismatch(g: &Graph, c: &Curve) -> Option<i32> {
+    let mut rot = vec![0u8; c.verts.len()];
+    let mut tr = vec![[0i32; 2]; c.verts.len()];
+    for &(a, b, e) in &c.links {
+        let (k, d) = g.dir(e, c.verts[a as usize]);
+        let r = trot(rot[a as usize], d);
+        rot[b as usize] = (rot[a as usize] + k) & 3;
+        tr[b as usize] = [tr[a as usize][0] + r[0], tr[a as usize][1] + r[1]];
+    }
+    let mut m = 0;
+    for &(a, b, e) in &c.extra {
+        let (k, d) = g.dir(e, c.verts[a as usize]);
+        if (rot[a as usize] + k) & 3 != rot[b as usize] {
+            return None;
+        }
+        let r = trot(rot[a as usize], d);
+        m += tr[a as usize][c.c0 as usize] + r[c.c0 as usize] - tr[b as usize][c.c0 as usize];
+    }
+    Some(m)
+}
+
 /// Une boucle fermée doit revenir sur la même ligne de grille après un tour.
+#[allow(dead_code)]
 fn curve_closes(g: &Graph, c: &Curve) -> bool {
     let mut rot = vec![0u8; c.verts.len()];
     let mut tr = vec![[0i32; 2]; c.verts.len()];
@@ -3076,6 +3132,16 @@ mod tests {
     #[test]
     fn symetrie() {
         let (p, t) = sphere(3);
+        if let Ok(path) = std::env::var("DUMPTEST") {
+            use std::io::Write;
+            let mut w = std::fs::File::create(path).unwrap();
+            for x in &p {
+                writeln!(w, "v {} {} {}", x[0], x[1], x[2]).unwrap();
+            }
+            for x in &t {
+                writeln!(w, "f {} {} {}", x[0] + 1, x[1] + 1, x[2] + 1).unwrap();
+            }
+        }
         let r = remesh(&p, &t, &[], &Options { faces: 600, symmetry: 1, ..Default::default() }, &|_| {});
         assert_eq!(r.quads(), r.faces.len());
         // Chaque sommet a son image dans le miroir
@@ -3089,6 +3155,11 @@ mod tests {
             for k in 0..f.len() {
                 let (a, b) = (f[k], f[(k + 1) % f.len()]);
                 *ec.entry((a.min(b), a.max(b))).or_insert(0) += 1;
+            }
+        }
+        for (&(a, b), &c) in &ec {
+            if c != 2 {
+                eprintln!("arête {a}-{b} : {c} face(s) ; {:?} {:?}", r.pos[a as usize], r.pos[b as usize]);
             }
         }
         assert!(ec.values().all(|&c| c == 2));
