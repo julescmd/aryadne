@@ -871,6 +871,30 @@ mod tests {
     use super::*;
 
     #[test]
+    fn bake_des_textures() {
+        // Cube déplié automatiquement, deux IDs, un matériau « métal peint usé » sur le second
+        let t = cube();
+        let n = t.polys.len();
+        let mut e = Edit { topo: t, ..Edit::open(&crate::modifiers::Mesh { pos: vec![], tris: vec![], colors: vec![], edges: vec![] }, std::env::temp_dir().join("aryadne-bake-test.json"), 1.0) };
+        e.data = EditData::fresh(&e.topo);
+        e.auto_now(true);
+        assert!(e.data.has_uv());
+        e.data.slots.push(Slot { name: "usé".into(), color: [200, 30, 30], material: String::new() });
+        e.data.face_mat = (0..n).map(|f| (f % 2) as u16).collect();
+        e.bake_size = 128;
+        let prog = crate::nodes::Program::compile(&crate::nodes::material_preset("métal peint usé").unwrap(), "", 64).ok().unwrap();
+        let dir = std::env::temp_dir().join("aryadne-bake");
+        let files = e.bake(&[None, Some(std::sync::Arc::new(prog))], &dir, "cube").unwrap();
+        assert!(files.len() >= 5);
+        let col = image::open(&files[0]).unwrap().to_rgb8();
+        // Les UV couvrent une bonne partie de la texture, et les deux IDs donnent des couleurs différentes
+        let distinct: std::collections::HashSet<[u8; 3]> = col.pixels().map(|p| p.0).collect();
+        assert!(distinct.len() > 2, "{} couleurs", distinct.len());
+        let nrm = image::open(files.iter().find(|f| f.to_string_lossy().contains("normale")).unwrap()).unwrap().to_rgb8();
+        assert!(nrm.pixels().any(|p| p.0[0] > 200) && nrm.pixels().any(|p| p.0[1] > 200));
+    }
+
+    #[test]
     fn polygone_creux_sans_triangle_retourne() {
         // Flèche : le coin 3 rentre dans le polygone
         let pos: Vec<V3> = vec![[0., 0., 0.], [2., 0., 0.], [2., 2., 0.], [1.6, 0.4, 0.], [0., 2., 0.]];
@@ -1651,6 +1675,9 @@ pub struct Edit {
     pub mat_request: Option<usize>,
     /// ID de matériau de chaque triangle affiché
     pub tri_mat: Vec<u16>,
+    /// Demande de bake des textures (traitée par la vue 3D, qui connaît les matériaux)
+    pub bake_request: bool,
+    pub bake_size: u32,
 }
 
 impl Edit {
@@ -1659,7 +1686,7 @@ impl Edit {
         let data = std::fs::read_to_string(&file).ok().and_then(|t| serde_json::from_str::<EditData>(&t).ok()).filter(|d| d.fits(&topo)).unwrap_or_else(|| EditData::fresh(&topo));
         let n = topo.polys.len();
         let checker = data.has_uv();
-        Edit { topo, data, sel: BTreeSet::new(), tool: Tool::Faces, tab: 0, version: 1, seam_angle: 45.0, smart_angle: 66.0, min_faces: (n / 400).clamp(4, 300), optimize: true, rotate: true, density_target: 1024.0, file, scale, message: None, owner: vec![], uv_view: Rect::NOTHING, uv_drag: false, checker, auto: AutoOptions::default(), retopo_opt: crate::retopo::Options { faces: (n * 2).clamp(200, 8000) / 100 * 100, ..Default::default() }, retopo: None, retopo_job: None, retopo_export: false, retopo_show: true, guide_now: vec![], mat_request: None, tri_mat: vec![] }
+        Edit { topo, data, sel: BTreeSet::new(), tool: Tool::Faces, tab: 0, version: 1, seam_angle: 45.0, smart_angle: 66.0, min_faces: (n / 400).clamp(4, 300), optimize: true, rotate: true, density_target: 1024.0, file, scale, message: None, owner: vec![], uv_view: Rect::NOTHING, uv_drag: false, checker, auto: AutoOptions::default(), retopo_opt: crate::retopo::Options { faces: (n * 2).clamp(200, 8000) / 100 * 100, ..Default::default() }, retopo: None, retopo_job: None, retopo_export: false, retopo_show: true, guide_now: vec![], mat_request: None, tri_mat: vec![], bake_request: false, bake_size: 1024 }
     }
 
     pub fn save(&self) {
@@ -2123,8 +2150,150 @@ impl Edit {
         }
     }
 
+    /// Écrit les textures du modèle à partir de ses UV : couleur, rugosité, métal, émission
+    /// (matériaux en nodes de chaque ID, ou couleur de l'ID), normale et courbure.
+    /// Les texels sont calculés en parallèle ; le bord des îlots est étendu pour éviter les coutures visibles.
+    pub fn bake(&self, progs: &[Option<std::sync::Arc<crate::nodes::Program>>], dir: &std::path::Path, stem: &str) -> Result<Vec<PathBuf>, String> {
+        use rayon::prelude::*;
+        if !self.data.has_uv() || self.data.uv.len() != self.topo.polys.len() {
+            return Err("déplie d'abord les UV (onglet UV › auto)".into());
+        }
+        let n = self.bake_size.clamp(64, 4096) as usize;
+        let pos = &self.topo.pos;
+        // Normales lisses et courbure par sommet
+        let mut all_tris: Vec<[u32; 3]> = vec![];
+        let mut rec: Vec<(usize, [usize; 3])> = vec![];
+        for (f, p) in self.topo.polys.iter().enumerate() {
+            for tr in poly_tris(pos, p) {
+                all_tris.push([p[tr[0]], p[tr[1]], p[tr[2]]]);
+                rec.push((f, tr));
+            }
+        }
+        let mut nrm = vec![[0.0f32; 3]; pos.len()];
+        for t in &all_tris {
+            let (a, b, c) = (pos[t[0] as usize], pos[t[1] as usize], pos[t[2] as usize]);
+            let (u, v) = ([b[0] - a[0], b[1] - a[1], b[2] - a[2]], [c[0] - a[0], c[1] - a[1], c[2] - a[2]]);
+            let fnm = [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]];
+            for &i in t {
+                for k in 0..3 {
+                    nrm[i as usize][k] += fnm[k];
+                }
+            }
+        }
+        for x in nrm.iter_mut() {
+            let l = (x[0] * x[0] + x[1] * x[1] + x[2] * x[2]).sqrt().max(1e-12);
+            *x = [x[0] / l, x[1] / l, x[2] / l];
+        }
+        let curv = crate::model3d::vertex_curvature(pos, &nrm, &all_tris);
+        // Quel triangle couvre chaque texel (coordonnées barycentriques)
+        let mut cover: Vec<Option<(u32, [f32; 3])>> = vec![None; n * n];
+        for (ti, (f, tr)) in rec.iter().enumerate() {
+            let uv = &self.data.uv[*f];
+            let p: [[f32; 2]; 3] = [0, 1, 2].map(|k| [uv[tr[k]][0] * n as f32, (1.0 - uv[tr[k]][1]) * n as f32]);
+            let d = (p[1][1] - p[2][1]) * (p[0][0] - p[2][0]) + (p[2][0] - p[1][0]) * (p[0][1] - p[2][1]);
+            if d.abs() < 1e-12 {
+                continue;
+            }
+            let (x0, x1) = (p.iter().map(|q| q[0]).fold(f32::MAX, f32::min).floor().max(0.0) as usize, (p.iter().map(|q| q[0]).fold(f32::MIN, f32::max).ceil() as usize).min(n - 1));
+            let (y0, y1) = (p.iter().map(|q| q[1]).fold(f32::MAX, f32::min).floor().max(0.0) as usize, (p.iter().map(|q| q[1]).fold(f32::MIN, f32::max).ceil() as usize).min(n - 1));
+            for y in y0..=y1 {
+                for x in x0..=x1 {
+                    let (px, py) = (x as f32 + 0.5, y as f32 + 0.5);
+                    let w0 = ((p[1][1] - p[2][1]) * (px - p[2][0]) + (p[2][0] - p[1][0]) * (py - p[2][1])) / d;
+                    let w1 = ((p[2][1] - p[0][1]) * (px - p[2][0]) + (p[0][0] - p[2][0]) * (py - p[2][1])) / d;
+                    let w2 = 1.0 - w0 - w1;
+                    if w0 >= -0.02 && w1 >= -0.02 && w2 >= -0.02 {
+                        cover[y * n + x] = Some((ti as u32, [w0, w1, w2]));
+                    }
+                }
+            }
+        }
+        let data = &self.data;
+        // Évaluation des matériaux, texel par texel
+        let texels: Vec<Option<[[f32; 3]; 5]>> = cover
+            .par_iter()
+            .enumerate()
+            .map_init(Vec::new, |regs, (i, c)| {
+                let (ti, w) = (*c)?;
+                let t = all_tris[ti as usize];
+                let mix3 = |a: V3, b: V3, c: V3| [a[0] * w[0] + b[0] * w[1] + c[0] * w[2], a[1] * w[0] + b[1] * w[1] + c[1] * w[2], a[2] * w[0] + b[2] * w[1] + c[2] * w[2]];
+                let p = mix3(pos[t[0] as usize], pos[t[1] as usize], pos[t[2] as usize]);
+                let nn = mix3(nrm[t[0] as usize], nrm[t[1] as usize], nrm[t[2] as usize]);
+                let l = (nn[0] * nn[0] + nn[1] * nn[1] + nn[2] * nn[2]).sqrt().max(1e-12);
+                let nn = [nn[0] / l, nn[1] / l, nn[2] / l];
+                let cv = curv[t[0] as usize] * w[0] + curv[t[1] as usize] * w[1] + curv[t[2] as usize] * w[2];
+                let slot = data.face_mat.get(rec[ti as usize].0).copied().unwrap_or(0) as usize;
+                let (col, rough, metal, emit) = match progs.get(slot).and_then(|p| p.as_ref()) {
+                    Some(prog) => {
+                        let ctx = crate::nodes::Ctx { uv: [(i % n) as f32 / n as f32, (i / n) as f32 / n as f32], pos: p, nrm: nn, view: nn, vcol: [1.0; 4], res: [n as f32, n as f32], curv: cv };
+                        let sf = prog.material(&ctx, regs);
+                        ([sf.color[0], sf.color[1], sf.color[2]], sf.rough, sf.metal, [sf.emit[0], sf.emit[1], sf.emit[2]])
+                    }
+                    None => {
+                        let c = data.slots.get(slot).map(|s| s.color).unwrap_or(PALETTE[0]);
+                        ([c[0] as f32 / 255.0, c[1] as f32 / 255.0, c[2] as f32 / 255.0], 0.5, 0.0, [0.0; 3])
+                    }
+                };
+                let k = (0.5 + cv).clamp(0.0, 1.0);
+                Some([col, [rough, metal, k], emit, [nn[0] * 0.5 + 0.5, nn[1] * 0.5 + 0.5, nn[2] * 0.5 + 0.5], p])
+            })
+            .collect();
+        // Extension des bords : chaque texel vide prend la valeur d'un voisin rempli (8 passes)
+        let mut tex = texels;
+        for _ in 0..8 {
+            let old = tex.clone();
+            tex.par_iter_mut().enumerate().for_each(|(i, t)| {
+                if t.is_some() {
+                    return;
+                }
+                let (x, y) = ((i % n) as i64, (i / n) as i64);
+                for (dx, dy) in [(1i64, 0i64), (-1, 0), (0, 1), (0, -1), (1, 1), (-1, -1), (1, -1), (-1, 1)] {
+                    let (xx, yy) = (x + dx, y + dy);
+                    if xx >= 0 && yy >= 0 && xx < n as i64 && yy < n as i64 {
+                        if let Some(v) = old[yy as usize * n + xx as usize] {
+                            *t = Some(v);
+                            return;
+                        }
+                    }
+                }
+            });
+        }
+        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+        let q = |x: f32| (x.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
+        let any_emit = tex.iter().flatten().any(|t| t[2].iter().any(|x| *x > 0.003));
+        let mut out = vec![];
+        let maps: [(&str, Box<dyn Fn(&[[f32; 3]; 5]) -> [u8; 3] + Sync>, [u8; 3], bool); 6] = [
+            ("couleur", Box::new(move |t| [q(t[0][0]), q(t[0][1]), q(t[0][2])]), [128, 128, 128], true),
+            ("rugosite", Box::new(move |t| [q(t[1][0]); 3]), [128; 3], true),
+            ("metal", Box::new(move |t| [q(t[1][1]); 3]), [0; 3], true),
+            ("emission", Box::new(move |t| [q(t[2][0]), q(t[2][1]), q(t[2][2])]), [0; 3], any_emit),
+            ("normale", Box::new(move |t| [q(t[3][0]), q(t[3][1]), q(t[3][2])]), [128, 128, 255], true),
+            ("courbure", Box::new(move |t| [q(t[1][2]); 3]), [128; 3], true),
+        ];
+        for (name, f, empty, wanted) in maps.iter() {
+            if !*wanted {
+                continue;
+            }
+            let bytes: Vec<u8> = tex.iter().flat_map(|t| t.as_ref().map(|t| f(t)).unwrap_or(*empty)).collect();
+            let path = dir.join(format!("{stem}_{name}.png"));
+            image::RgbImage::from_raw(n as u32, n as u32, bytes).ok_or("image invalide")?.save(&path).map_err(|e| e.to_string())?;
+            out.push(path);
+        }
+        Ok(out)
+    }
+
     fn tab_uv(&mut self, ui: &mut egui::Ui) {
         let p = crate::theme::pal();
+        ui.horizontal(|ui| {
+            if ui.add_enabled(self.data.has_uv(), egui::Button::new(crate::i18n::t("baker les textures"))).on_hover_text(crate::i18n::t("Écrit couleur, rugosité, métal, normale et courbure dans le dossier textures/, à partir des UV et des matériaux de chaque ID")).clicked() {
+                self.bake_request = true;
+            }
+            egui::ComboBox::from_id_salt("bake-size").selected_text(format!("{} px", self.bake_size)).width(80.0).show_ui(ui, |ui| {
+                for s in [512u32, 1024, 2048, 4096] {
+                    ui.selectable_value(&mut self.bake_size, s, format!("{s} px"));
+                }
+            });
+        });
         ui.horizontal_wrapped(|ui| {
             if ui.button(crate::i18n::t("auto (coutures + UV)")).on_hover_text(crate::i18n::t("Coutures automatiques avancées, dépliage, îlots redressés et rangés")).clicked() {
                 self.auto_now(true);

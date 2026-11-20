@@ -72,6 +72,7 @@ pub const DEFS: &[Def] = &[
     Def { op: "coords", label: "Coordonnées", cat: "entrée", inputs: &[], outputs: &[("u", Sock::Float), ("v", Sock::Float), ("uv", Sock::Color)], params: &[], mat: true, comp: true },
     Def { op: "geometry", label: "Géométrie", cat: "entrée", inputs: &[], outputs: &[("normale", Sock::Color), ("position", Sock::Color), ("hauteur", Sock::Float), ("pente", Sock::Float)], params: &[], mat: true, comp: false },
     Def { op: "texture", label: "Texture image", cat: "entrée", inputs: &[("échelle", Sock::Float, f(1.0))], outputs: &[("couleur", Sock::Color), ("alpha", Sock::Float)], params: &[ParamDef::File("fichier"), ParamDef::Choice("projection", &["triplanaire", "dessus (XZ)", "face (XY)", "côté (YZ)", "sphérique"])], mat: true, comp: true },
+    Def { op: "curvature", label: "Courbure", cat: "entrée", inputs: &[("intensité", Sock::Float, f(1.0))], outputs: &[("arêtes", Sock::Float), ("creux", Sock::Float), ("brute", Sock::Float)], params: &[], mat: true, comp: false },
     Def { op: "fresnel", label: "Fresnel", cat: "entrée", inputs: &[("puissance", Sock::Float, f(3.0))], outputs: &[("fresnel", Sock::Float)], params: &[], mat: true, comp: false },
     Def { op: "vcolor", label: "Couleur du fichier", cat: "entrée", inputs: &[], outputs: &[("couleur", Sock::Color)], params: &[], mat: true, comp: false },
     // Motifs
@@ -407,6 +408,38 @@ pub fn material_preset(name: &str) -> Option<Graph> {
             set(&mut g, out, 1, f(0.25));
             set(&mut g, out, 2, f(1.0));
         }
+        // Matériaux « intelligents » : ils lisent la forme du modèle (arêtes, creux)
+        "métal peint usé" => {
+            let cv = g.add("curvature", [0.0, 60.0]);
+            set(&mut g, cv, 0, f(2.5));
+            let mx = g.add("mix", [240.0, 20.0]);
+            set(&mut g, mx, 1, [0.12, 0.35, 0.3, 1.0]);
+            set(&mut g, mx, 2, [0.75, 0.72, 0.68, 1.0]);
+            g.connect(cv, 0, mx, 0);
+            let dirt = g.add("mix", [470.0, 20.0]);
+            set(&mut g, dirt, 2, [0.05, 0.04, 0.03, 1.0]);
+            g.connect(cv, 1, dirt, 0);
+            g.connect(mx, 0, dirt, 1);
+            g.connect(dirt, 0, out, 0);
+            g.connect(cv, 0, out, 2);
+            set(&mut g, out, 1, f(0.4));
+        }
+        "pierre aux creux sombres" => {
+            let cv = g.add("curvature", [0.0, 60.0]);
+            set(&mut g, cv, 0, f(3.0));
+            let no = g.add("noise", [0.0, 240.0]);
+            set(&mut g, no, 0, f(9.0));
+            let base = g.add("mix", [240.0, 160.0]);
+            set(&mut g, base, 1, [0.42, 0.4, 0.37, 1.0]);
+            set(&mut g, base, 2, [0.62, 0.6, 0.55, 1.0]);
+            g.connect(no, 0, base, 0);
+            let dirt = g.add("mix", [470.0, 60.0]);
+            set(&mut g, dirt, 2, [0.1, 0.09, 0.07, 1.0]);
+            g.connect(cv, 1, dirt, 0);
+            g.connect(base, 0, dirt, 1);
+            g.connect(dirt, 0, out, 0);
+            set(&mut g, out, 1, f(0.85));
+        }
         "verre" => {
             set(&mut g, out, 0, [0.95, 0.98, 1.0, 1.0]);
             set(&mut g, out, 1, f(0.03));
@@ -457,7 +490,7 @@ pub fn material_preset(name: &str) -> Option<Graph> {
     Some(g)
 }
 
-pub const MATERIAL_PRESETS: [&str; 13] = ["bois", "pierre", "métal rouillé", "toon", "céramique", "or", "verre", "verre dépoli", "eau", "toon 3 bandes", "peinture de voiture", "plastique", "néon"];
+pub const MATERIAL_PRESETS: [&str; 15] = ["métal peint usé", "pierre aux creux sombres", "bois", "pierre", "métal rouillé", "toon", "céramique", "or", "verre", "verre dépoli", "eau", "toon 3 bandes", "peinture de voiture", "plastique", "néon"];
 
 pub const DEFAULT_SHADER: &str = "// r g b a : couleur A · ar ag ab : A · br bg bb : B · f : entrée F\n// x y : coordonnées 0..1 · nx ny nz / px py pz : normale et position (matériau)\n// fonctions : sin cos abs min max clamp mix step smoothstep pow sqrt fract floor noise fbm rand…\nk = smoothstep(0.3, 0.7, fbm(x * 6, y * 6, 0))\nr = mix(ar, br, k)\ng = mix(ag, bg, k)\nb = mix(ab, bb, k)\n";
 
@@ -914,6 +947,8 @@ pub struct Ctx {
     pub view: [f32; 3],
     pub vcol: V,
     pub res: [f32; 2],
+    /// Courbure de la surface en ce point (arêtes > 0, creux < 0)
+    pub curv: f32,
 }
 
 /// Graphe compilé : nodes dans l'ordre d'exécution, entrées résolues.
@@ -922,6 +957,8 @@ pub struct Program {
     steps: Vec<Step>,
     regs: usize,
     pub kind: GraphKind,
+    /// Vrai si un node lit la courbure : le rendu ne la calcule que dans ce cas
+    pub uses_curvature: bool,
 }
 
 #[derive(Clone)]
@@ -1039,7 +1076,8 @@ impl Program {
             steps.push(Step { op: d.op, ins, base: regs, nout: d.outputs.len(), params: n.params.clone(), shader, image });
             regs += d.outputs.len().max(4);
         }
-        Ok(Program { steps, regs, kind: g.kind })
+        let uses_curvature = steps.iter().any(|s| s.op == "curvature");
+        Ok(Program { steps, regs, kind: g.kind, uses_curvature })
     }
 
     /// Matériau : couleur (sRGB), rugosité, métal, émission.
@@ -1275,6 +1313,11 @@ fn pixel(s: &Step, i: &[V], c: &Ctx) -> [V; 4] {
         "geometry" => {
             let n = c.nrm;
             [[n[0] * 0.5 + 0.5, n[1] * 0.5 + 0.5, n[2] * 0.5 + 0.5, 1.0], [c.pos[0] + 0.5, c.pos[1] + 0.5, c.pos[2] + 0.5, 1.0], one(c.pos[1] + 0.5), one(1.0 - n[1].abs())]
+        }
+        "curvature" => {
+            // Sur un modèle ramené à une taille de 1 : une arête nette donne quelques dixièmes
+            let k = c.curv * i[0][0];
+            [one(k.clamp(0.0, 1.0)), one((-k).clamp(0.0, 1.0)), one((0.5 + 0.5 * k).clamp(0.0, 1.0)), z]
         }
         "fresnel" => {
             let d = (c.nrm[0] * c.view[0] + c.nrm[1] * c.view[1] + c.nrm[2] * c.view[2]).abs();

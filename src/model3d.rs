@@ -711,6 +711,43 @@ fn vertex_normals(pos: &[V3], tris: &[[u32; 3]]) -> Vec<V3> {
     n.into_iter().map(norm).collect()
 }
 
+/// Courbure moyenne par sommet (positive sur les arêtes saillantes, négative dans les creux),
+/// lue sur la variation des normales le long des arêtes puis légèrement lissée. Une seule
+/// passe sur les triangles : négligeable même sur un sculpt lourd.
+pub(crate) fn vertex_curvature(pos: &[V3], nrm: &[V3], tris: &[[u32; 3]]) -> Vec<f32> {
+    let mut acc = vec![0.0f32; pos.len()];
+    let mut cnt = vec![0.0f32; pos.len()];
+    for t in tris {
+        for k in 0..3 {
+            let (a, b) = (t[k] as usize, t[(k + 1) % 3] as usize);
+            let e = sub(pos[b], pos[a]);
+            let l2 = dot(e, e);
+            if l2 < 1e-16 {
+                continue;
+            }
+            let c = dot(sub(nrm[b], nrm[a]), e) / l2.sqrt();
+            acc[a] += c;
+            acc[b] += c;
+            cnt[a] += 1.0;
+            cnt[b] += 1.0;
+        }
+    }
+    let mut cur: Vec<f32> = acc.iter().zip(&cnt).map(|(a, c)| if *c > 0.0 { a / c } else { 0.0 }).collect();
+    for _ in 0..2 {
+        let mut sum = cur.clone();
+        let mut n = vec![1.0f32; pos.len()];
+        for t in tris {
+            for k in 0..3 {
+                let (a, b) = (t[k] as usize, t[(k + 1) % 3] as usize);
+                sum[a] += cur[b];
+                n[a] += 1.0;
+            }
+        }
+        cur = sum.iter().zip(&n).map(|(s, c)| s / c).collect();
+    }
+    cur
+}
+
 /// Données prêtes pour le rendu (modèle centré, mis à l'échelle, normales).
 pub struct Prepared {
     pos: Vec<V3>,
@@ -723,6 +760,8 @@ pub struct Prepared {
     pub uv: Vec<[[f32; 2]; 3]>,
     /// ID de matériau par triangle (vide : un seul matériau)
     pub mat: Vec<u16>,
+    /// Courbure par sommet, calculée à la demande (node « courbure »)
+    curv: std::sync::OnceLock<Vec<f32>>,
 }
 
 impl Prepared {
@@ -738,7 +777,7 @@ impl Prepared {
         let floor = pos.iter().map(|v| v[1]).fold(f32::MAX, f32::min);
         let lin = |c: u8| (c as f32 / 255.0).powf(2.2);
         let colors = colors.iter().map(|c| [lin(c.r()), lin(c.g()), lin(c.b())]).collect();
-        Self { pos, nrm, tris, colors, edges, floor, uv: vec![], mat: vec![] }
+        Self { pos, nrm, tris, colors, edges, floor, uv: vec![], mat: vec![], curv: std::sync::OnceLock::new() }
     }
     pub fn tri_count(&self) -> usize {
         self.tris.len()
@@ -762,7 +801,7 @@ impl Prepared {
         let floor = pos.iter().map(|v| v[1]).fold(f32::MAX, f32::min);
         let lin = |c: u8| (c as f32 / 255.0).powf(2.2);
         let colors = m.colors.iter().map(|c| [lin(c.r()), lin(c.g()), lin(c.b())]).collect();
-        Self { pos, nrm, tris: m.tris, colors, edges: m.edges, floor, uv: vec![], mat: vec![] }
+        Self { pos, nrm, tris: m.tris, colors, edges: m.edges, floor, uv: vec![], mat: vec![], curv: std::sync::OnceLock::new() }
     }
 }
 
@@ -1061,7 +1100,14 @@ pub fn render(m: &Prepared, cam: &Camera, look: &Look, w: usize, h: usize) -> Fr
                     let pos = [pa[0] * w0 + pb[0] * w1 + pc[0] * w2, pa[1] * w0 + pb[1] * w1 + pc[1] * w2, pa[2] * w0 + pb[2] * w1 + pc[2] * w2];
                     let vc = m.colors[ti as usize];
                     let g = |x: f32| x.max(0.0).powf(1.0 / 2.2);
-                    let c = crate::nodes::Ctx { uv: tuv.map(|u| [u[0], 1.0 - u[1]]).unwrap_or([pos[0] + 0.5, 0.5 - pos[1]]), pos, nrm, view: v, vcol: [g(vc[0]), g(vc[1]), g(vc[2]), 1.0], res: [w as f32, h as f32] };
+                    // Courbure : calculée une fois par maillage, seulement si un matériau la lit
+                    let curv = if prog.uses_curvature {
+                        let cv = m.curv.get_or_init(|| vertex_curvature(&m.pos, &m.nrm, &m.tris));
+                        cv[t[0] as usize] * w0 + cv[t[1] as usize] * w1 + cv[t[2] as usize] * w2
+                    } else {
+                        0.0
+                    };
+                    let c = crate::nodes::Ctx { curv, uv: tuv.map(|u| [u[0], 1.0 - u[1]]).unwrap_or([pos[0] + 0.5, 0.5 - pos[1]]), pos, nrm, view: v, vcol: [g(vc[0]), g(vc[1]), g(vc[2]), 1.0], res: [w as f32, h as f32] };
                     let sf = NODE_REGS.with(|regs| prog.material(&c, &mut regs.borrow_mut()));
                     let (col, r, mt, em) = (sf.color, sf.rough, sf.metal, sf.emit);
                     surf = (sf.transmission, sf.ior, sf.coat, sf.toon, sf.spec);
@@ -1494,6 +1540,16 @@ impl Viewer {
                 if let Some(s) = e.data.slots.get(k).filter(|s| !s.material.is_empty()) {
                     self.open_request = Some(std::path::PathBuf::from(&s.material));
                 }
+            }
+            if std::mem::take(&mut e.bake_request) {
+                let progs: Vec<Option<std::sync::Arc<crate::nodes::Program>>> = self.slot_progs.iter().map(|p| p.as_ref().map(|x| x.2.clone())).collect();
+                let dir = std::path::Path::new(&self.root).join("textures");
+                let stem = self.path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "modele".into());
+                let t0 = std::time::Instant::now();
+                e.message = Some(match e.bake(&progs, &dir, &stem) {
+                    Ok(files) => format!("{} textures écrites dans textures/ ({} px, {:.1} s)", files.len(), e.bake_size, t0.elapsed().as_secs_f32()),
+                    Err(err) => format!("bake impossible : {err}"),
+                });
             }
             self.slot_progs.resize(e.data.slots.len(), None);
             for (k, s) in e.data.slots.iter().enumerate() {
@@ -2435,5 +2491,20 @@ mod apercu_materiaux {
         }
         // Le néon éclaire, le toon et le verre ne sont pas noirs
         assert!(means["néon"] > 0.3 && means["verre"] > 0.05 && means["toon 3 bandes"] > 0.05);
+    }
+}
+
+#[cfg(test)]
+mod apercu_smart {
+    #[test]
+    fn metal_use_sur_un_modele() {
+        let Ok(path) = std::env::var("SMART_MODEL") else { return };
+        let m = super::preview_model(std::path::Path::new(&path)).unwrap();
+        for (k, name) in ["métal peint usé", "pierre aux creux sombres"].iter().enumerate() {
+            let prog = crate::nodes::Program::compile(&crate::nodes::material_preset(name).unwrap(), "", 64).ok().unwrap();
+            let img = super::render_material_view(&m, std::sync::Arc::new(prog), 420, 0.7, 0.45, 2.2, 0);
+            let bytes: Vec<u8> = img.px.iter().flat_map(|c| [(c[0] * 255.0) as u8, (c[1] * 255.0) as u8, (c[2] * 255.0) as u8, 255]).collect();
+            image::RgbaImage::from_raw(420, 420, bytes).unwrap().save(format!("/tmp/smart{k}.png")).unwrap();
+        }
     }
 }

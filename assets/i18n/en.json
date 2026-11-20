@@ -835,5 +835,13 @@
  "＋ nodes": "＋ nodes",
  "ouvrir le matériau en nodes de cet ID": "open this ID's node material",
  "créer un matériau en nodes pour cet ID et l'ouvrir": "create a node material for this ID and open it",
- "retirer le matériau en nodes": "remove the node material"
+ "retirer le matériau en nodes": "remove the node material",
+ "Courbure": "Curvature",
+ "arêtes": "edges",
+ "creux": "cavities",
+ "brute": "raw",
+ "métal peint usé": "worn painted metal",
+ "pierre aux creux sombres": "stone with dark cavities",
+ "baker les textures": "bake textures",
+ "Écrit couleur, rugosité, métal, normale et courbure dans le dossier textures/, à partir des UV et des matériaux de chaque ID": "Writes color, roughness, metal, normal and curvature into the textures/ folder, from the UVs and each ID's material"
 }
