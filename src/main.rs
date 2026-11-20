@@ -3,6 +3,7 @@
 mod cloud;
 mod convert;
 mod uvedit;
+mod zoomview;
 mod cloud_ui;
 mod lsp;
 mod ai;
@@ -1264,37 +1265,48 @@ impl App {
                 }
                 Content::Image => {
                     let slot = self.images.get(&rel, images::Size::Full);
-                    egui::ScrollArea::both().auto_shrink(false).show(ui, |ui| {
-                        egui::Frame::new().inner_margin(24).show(ui, |ui| match slot {
-                            images::Slot::Ready(l) => {
-                                let size = l.tex.size_vec2();
-                                // Les miniatures .blend sont petites : on les agrandit.
-                                let max_up = if rel.to_lowercase().ends_with(".blend") { 512.0 / size.x.max(1.0) } else { 1.0 };
-                                let scale = (ui.available_width() / size.x).min(max_up.max(1.0)).max(0.05);
-                                ui.add(egui::Image::new(&l.tex).fit_to_exact_size(size * scale));
-                                ui.add_space(8.0);
-                                ui.horizontal(|ui| {
-                                    ui.label(RichText::new(format!("{} × {} px", l.dims[0], l.dims[1])).color(p.muted).size(11.5));
-                                    for c in &l.palette {
-                                        let (r, resp) = ui.allocate_exact_size(egui::vec2(22.0, 16.0), egui::Sense::click());
-                                        ui.painter().rect_filled(r, 0.0, *c);
-                                        if resp.on_hover_text(format!("{} · clic pour copier", images::hex(*c))).clicked() {
-                                            ui.ctx().copy_text(images::hex(*c));
-                                        }
+                    match slot {
+                        images::Slot::Ready(l) => {
+                            let size = l.tex.size_vec2();
+                            let zid = egui::Id::unique(("img-zoom", &rel));
+                            let mut z: zoomview::Zoom = ui.data(|d| d.get_temp(zid).unwrap_or_default());
+                            let avail = ui.available_size() - egui::vec2(0.0, 30.0);
+                            let (area, resp) = ui.allocate_exact_size(avail.max(egui::vec2(60.0, 60.0)), egui::Sense::click_and_drag());
+                            z.interact(ui, &resp, area.shrink(12.0), size, true);
+                            let painter = ui.painter_at(area);
+                            painter.rect_filled(area, 0.0, p.panel);
+                            let ir = z.image_rect(area.shrink(12.0), size);
+                            // Très agrandie : on voit les pixels nets
+                            let opts = if z.scale.is_some_and(|s| s >= 3.0) { egui::TextureOptions::NEAREST } else { egui::TextureOptions::LINEAR };
+                            let _ = opts;
+                            painter.image(l.tex.id(), ir, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), egui::Color32::WHITE);
+                            if resp.hovered() {
+                                ui.ctx().set_cursor_icon(if resp.dragged() { egui::CursorIcon::Grabbing } else { egui::CursorIcon::Grab });
+                            }
+                            z.badge(ui, area, size);
+                            ui.data_mut(|d| d.insert_temp(zid, z));
+                            ui.horizontal(|ui| {
+                                ui.add_space(12.0);
+                                ui.label(RichText::new(format!("{} × {} px · molette : zoom · glisser : déplacer · double-clic : 100 % / ajuster", l.dims[0], l.dims[1])).color(p.muted).size(11.0));
+                                for c in &l.palette {
+                                    let (r, resp) = ui.allocate_exact_size(egui::vec2(22.0, 16.0), egui::Sense::click());
+                                    ui.painter().rect_filled(r, 0.0, *c);
+                                    if resp.on_hover_text(format!("{} · clic pour copier", images::hex(*c))).clicked() {
+                                        ui.ctx().copy_text(images::hex(*c));
                                     }
-                                });
-                            }
-                            images::Slot::Loading => {
-                                ui.horizontal(|ui| {
-                                    ui.spinner();
-                                    ui.label(RichText::new("chargement…").color(p.muted));
-                                });
-                            }
-                            images::Slot::Failed(e) => {
-                                ui.label(RichText::new(e).color(p.missing));
-                            }
-                        });
-                    });
+                                }
+                            });
+                        }
+                        images::Slot::Loading => {
+                            ui.horizontal(|ui| {
+                                ui.spinner();
+                                ui.label(RichText::new("chargement…").color(p.muted));
+                            });
+                        }
+                        images::Slot::Failed(e) => {
+                            ui.label(RichText::new(e).color(p.missing));
+                        }
+                    }
                 }
                 Content::Text(text) if doc.preview => {
                     let mut goto = None;

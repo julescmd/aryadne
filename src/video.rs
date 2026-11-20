@@ -136,6 +136,7 @@ pub struct Viewer {
     strip_tex: HashMap<usize, TextureHandle>,
     strip_lru: VecDeque<usize>,
     strip_follow: bool,
+    pub zoom: crate::zoomview::Zoom,
 }
 
 impl Viewer {
@@ -184,6 +185,7 @@ impl Viewer {
             strip_tex: HashMap::new(),
             strip_lru: VecDeque::new(),
             strip_follow: true,
+            zoom: Default::default(),
         };
         if v.info.is_ok() {
             v.start_extract(ctx.clone());
@@ -540,10 +542,10 @@ impl Viewer {
         let painter = ui.painter_at(rect);
         painter.rect_filled(rect, 0.0, Color32::from_gray(18));
         let aspect = info.width.max(1) as f32 / info.height.max(1) as f32;
-        let img_rect = {
-            let w = rect.width().min(rect.height() * aspect);
-            Rect::from_center_size(rect.center(), vec2(w, w / aspect))
-        };
+        let vsize = vec2(info.width.max(1) as f32, info.height.max(1) as f32);
+        self.zoom.interact(ui, &resp, rect, vsize, !self.draw);
+        let img_rect = self.zoom.image_rect(rect, vsize);
+        let _ = aspect;
         let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
         // Pelures : les plus éloignées sont les plus pâles.
         let mut ghosts: Vec<(usize, Color32)> = vec![];
@@ -669,9 +671,19 @@ impl Viewer {
             self.clock = None;
         }
 
+        self.zoom.badge(ui, rect, vsize);
         // Clavier
         if resp.hovered() || resp.has_focus() {
-            let (left, right, space) = ui.input(|i| (i.key_pressed(Key::ArrowLeft), i.key_pressed(Key::ArrowRight), i.key_pressed(Key::Space)));
+            // Maj + ← / → : image dessinée précédente / suivante
+            let (sl, sr) = ui.input(|i| (i.modifiers.shift && i.key_pressed(Key::ArrowLeft), i.modifiers.shift && i.key_pressed(Key::ArrowRight)));
+            if sl || sr {
+                let next = if sr { self.lines.keys().find(|k| **k > held).copied() } else { self.lines.keys().rev().find(|k| **k < held).copied() };
+                if let Some(k) = next {
+                    self.cur = k;
+                    self.playing = false;
+                }
+            }
+            let (left, right, space) = ui.input(|i| (i.key_pressed(Key::ArrowLeft) && !i.modifiers.shift, i.key_pressed(Key::ArrowRight) && !i.modifiers.shift, i.key_pressed(Key::Space)));
             if ui.input(|i| i.key_pressed(Key::I)) {
                 self.loop_in = Some(self.cur);
             }
@@ -692,28 +704,91 @@ impl Viewer {
             }
         }
 
-        // Ligne de temps (avec repères des images dessinées)
+        // Ligne de temps : repères des images dessinées (aimantées), crochets de boucle à glisser
         let (tl, tresp) = ui.allocate_exact_size(vec2(ui.available_width(), 30.0), Sense::click_and_drag());
-        let pt = ui.painter_at(tl);
+        let pt = ui.painter_at(tl.expand(4.0));
         pt.rect_filled(tl, 0.0, p.panel);
         let n = frames.max(1) as f32;
+        let x_of = |k: f32| tl.left() + (k + 0.5) / n * tl.width();
+        let frame_at = |x: f32| (((x - tl.left()) / tl.width()) * n).clamp(0.0, n - 1.0) as usize;
+        // Graduations : une par seconde
+        let fps = self.preview_fps.max(1.0);
+        let mut sec = 0.0;
+        while sec * fps < n {
+            let x = x_of(sec * fps);
+            pt.line_segment([pos2(x, tl.bottom() - 6.0), pos2(x, tl.bottom())], Stroke::new(1.0, p.line));
+            sec += 1.0;
+        }
         for &k in self.lines.keys() {
-            let x = tl.left() + (k as f32 + 0.5) / n * tl.width();
-            pt.line_segment([pos2(x, tl.top()), pos2(x, tl.top() + 8.0)], Stroke::new(2.0, p.accent));
+            let x = x_of(k as f32);
+            pt.line_segment([pos2(x, tl.top()), pos2(x, tl.top() + 10.0)], Stroke::new(2.0, p.accent));
         }
-        if self.loop_in.is_some() || self.loop_out.is_some() {
-            let a = self.loop_in.unwrap_or(0) as f32;
-            let b = self.loop_out.unwrap_or(frames.saturating_sub(1)) as f32;
-            let r = Rect::from_x_y_ranges(tl.left() + a / n * tl.width()..=tl.left() + (b + 1.0) / n * tl.width(), tl.y_range());
+        let last = frames.saturating_sub(1);
+        let (a, b) = (self.loop_in.unwrap_or(0), self.loop_out.unwrap_or(last));
+        let has_loop = self.loop_in.is_some() || self.loop_out.is_some();
+        if has_loop {
+            let r = Rect::from_x_y_ranges(x_of(a as f32) - 0.5 / n * tl.width()..=x_of(b as f32) + 0.5 / n * tl.width(), tl.y_range());
             pt.rect_filled(r, 0.0, p.accent.gamma_multiply(0.15));
-            pt.rect_stroke(r, 0.0, Stroke::new(1.0, p.accent.gamma_multiply(0.6)), egui::StrokeKind::Inside);
         }
-        let x = tl.left() + (held as f32 + 0.5) / n * tl.width();
+        // Crochets : toujours visibles, glisser pour régler, clic droit pour enlever la boucle
+        let mut bracket_drag = false;
+        for (is_in, k) in [(true, a), (false, b)] {
+            let x = if is_in { x_of(k as f32) - 0.5 / n * tl.width() } else { x_of(k as f32) + 0.5 / n * tl.width() };
+            let hit = Rect::from_center_size(pos2(x, tl.center().y), vec2(12.0, tl.height()));
+            let id = ui.make_persistent_id(("bracket", is_in, &self.path));
+            let r = ui.interact(hit, id, Sense::click_and_drag()).on_hover_text(if is_in { "début de la boucle ( [ ) · glisser · clic droit : enlever" } else { "fin de la boucle ( ] ) · glisser · clic droit : enlever" });
+            let col = if has_loop || r.hovered() || r.dragged() { p.accent } else { p.muted.gamma_multiply(0.6) };
+            let dir = if is_in { 1.0 } else { -1.0 };
+            pt.line_segment([pos2(x, tl.top()), pos2(x, tl.bottom())], Stroke::new(2.0, col));
+            pt.line_segment([pos2(x, tl.top()), pos2(x + 6.0 * dir, tl.top())], Stroke::new(2.0, col));
+            pt.line_segment([pos2(x, tl.bottom()), pos2(x + 6.0 * dir, tl.bottom())], Stroke::new(2.0, col));
+            if r.hovered() || r.dragged() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+            }
+            if r.dragged() {
+                bracket_drag = true;
+                if let Some(pp) = r.interact_pointer_pos() {
+                    let mut f = frame_at(pp.x);
+                    // Aimant : images dessinées (Alt pour désactiver)
+                    if !ui.input(|i| i.modifiers.alt) {
+                        if let Some(&k) = self.lines.keys().min_by_key(|k| ((x_of(**k as f32) - pp.x).abs() * 100.0) as i64) {
+                            if (x_of(k as f32) - pp.x).abs() < 7.0 {
+                                f = k;
+                            }
+                        }
+                    }
+                    if is_in {
+                        self.loop_in = Some(f.min(self.loop_out.unwrap_or(last)));
+                    } else {
+                        self.loop_out = Some(f.max(self.loop_in.unwrap_or(0)));
+                    }
+                }
+            }
+            if r.secondary_clicked() {
+                self.loop_in = None;
+                self.loop_out = None;
+            }
+        }
+        let x = x_of(held as f32);
         pt.rect_filled(Rect::from_center_size(pos2(x, tl.center().y), vec2(3.0, tl.height())), 0.0, p.accent);
-        if tresp.dragged() || tresp.clicked() {
+        if !bracket_drag && (tresp.dragged() || tresp.clicked()) {
             if let Some(pp) = tresp.interact_pointer_pos() {
-                self.cur = (((pp.x - tl.left()) / tl.width()) * n).clamp(0.0, n - 1.0) as usize;
+                let mut f = frame_at(pp.x);
+                if !ui.input(|i| i.modifiers.alt) {
+                    if let Some(&k) = self.lines.keys().min_by_key(|k| ((x_of(**k as f32) - pp.x).abs() * 100.0) as i64) {
+                        if (x_of(k as f32) - pp.x).abs() < 7.0 {
+                            f = k;
+                        }
+                    }
+                }
+                self.cur = f;
                 self.playing = false;
+            }
+        }
+        if tresp.hovered() {
+            if let Some(hp) = tresp.hover_pos() {
+                let f = frame_at(hp.x);
+                pt.text(pos2(hp.x, tl.top() - 2.0), egui::Align2::CENTER_BOTTOM, format!("{}", f + 1), egui::FontId::monospace(10.0), p.muted);
             }
         }
         self.filmstrip(ui, frames, held, info.width as f32 / info.height.max(1) as f32);

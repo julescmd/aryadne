@@ -465,8 +465,8 @@ fn planar(pos3: &[V3], t: &Topo, faces: &[usize]) -> Vec<V2> {
     pos3.iter().map(|p| [dot(*p, ex), dot(*p, ey)]).collect()
 }
 
-/// Déplie tout le modèle selon les coutures. Remplit `uv` et `chart`.
-pub fn unwrap(t: &Topo, d: &mut EditData) {
+/// Déplie chaque îlot (sans les ranger). Remplit `uv` et `chart`.
+pub fn unwrap_charts(t: &Topo, d: &mut EditData) {
     d.chart = charts(t, &d.seams);
     let nc = d.chart.iter().copied().max().map(|m| m as usize + 1).unwrap_or(0);
     let mut by_chart: Vec<Vec<usize>> = vec![vec![]; nc];
@@ -491,6 +491,12 @@ pub fn unwrap(t: &Topo, d: &mut EditData) {
         }
     }
     d.uv = uv;
+}
+
+/// Déplie tout le modèle selon les coutures, puis range les îlots.
+#[allow(dead_code)]
+pub fn unwrap(t: &Topo, d: &mut EditData) {
+    unwrap_charts(t, d);
     pack(t, d, &PackOptions::default());
 }
 
@@ -614,7 +620,7 @@ pub fn pack(t: &Topo, d: &mut EditData, o: &PackOptions) {
     let margin_rel = d.margin_px / d.texture_px.max(1) as f32;
     // Essais : (ordre, rotation de 90° des îlots hauts, largeur relative)
     let orders: &[u8] = if o.optimize { &[0, 1, 2] } else { &[0] };
-    let flips: &[bool] = if o.optimize && o.rotate { &[false, true] } else { &[false] };
+    let flips: &[bool] = if o.optimize { &[false, true] } else { &[false] };
     let widths: &[f32] = if o.optimize { &[0.8, 0.9, 1.0, 1.1, 1.25, 1.4] } else { &[1.0] };
     let mut best: Option<(f32, Vec<(V2, bool)>, f32)> = None; // (côté, positions, échelle)
     for &ord in orders {
@@ -654,6 +660,11 @@ pub fn pack(t: &Topo, d: &mut EditData, o: &PackOptions) {
                 if best.as_ref().is_none_or(|b| side < b.0) {
                     best = Some((side, pos, 1.0 / side));
                 }
+                // Skyline (bas-gauche) : remplit les creux laissés par les étagères
+                let (spos, sside) = skyline(&sizes, shelf_w, m, true);
+                if best.as_ref().is_none_or(|b| sside < b.0) {
+                    best = Some((sside, spos, 1.0 / sside));
+                }
             }
         }
     }
@@ -673,6 +684,84 @@ pub fn pack(t: &Topo, d: &mut EditData, o: &PackOptions) {
             }
         }
     }
+}
+
+/// Rangement « skyline » : chaque îlot va là où il finit le plus bas (puis le plus à gauche),
+/// tourné de 90° si ça tient mieux. Retourne (positions, côté du carré).
+fn skyline(sizes: &[(usize, V2, bool)], width: f32, m: f32, rotate: bool) -> (Vec<(V2, bool)>, f32) {
+    let n = sizes.iter().map(|s| s.0).max().map(|x| x + 1).unwrap_or(0);
+    let mut pos = vec![([0.0f32; 2], false); n];
+    // Segments (x, largeur, hauteur)
+    let mut sky: Vec<(f32, f32, f32)> = vec![(0.0, width, 0.0)];
+    let mut top = 0.0f32;
+    let mut right = 0.0f32;
+    let fit = |sky: &[(f32, f32, f32)], i: usize, w: f32| -> Option<f32> {
+        let x0 = sky[i].0;
+        if x0 + w > width + 1e-6 {
+            return None;
+        }
+        let mut y = 0.0f32;
+        let mut cover = 0.0;
+        let mut j = i;
+        while cover < w - 1e-9 && j < sky.len() {
+            y = y.max(sky[j].2);
+            cover += sky[j].1 - if j == i { 0.0 } else { 0.0 };
+            j += 1;
+        }
+        (cover >= w - 1e-6).then_some(y)
+    };
+    for (id, sz, fl) in sizes {
+        let mut best: Option<(f32, f32, usize, V2, bool)> = None; // (y+h, x, i, taille, retourné)
+        let orients: Vec<(V2, bool)> = if rotate { vec![(*sz, *fl), ([sz[1], sz[0]], !*fl)] } else { vec![(*sz, *fl)] };
+        for (dim, f2) in orients {
+            let (w, h) = (dim[0] + m, dim[1] + m);
+            for i in 0..sky.len() {
+                if let Some(y) = fit(&sky, i, w) {
+                    let cand = (y + h, sky[i].0, i, dim, f2);
+                    if best.as_ref().is_none_or(|b| cand.0 < b.0 - 1e-9 || ((cand.0 - b.0).abs() < 1e-9 && cand.1 < b.1)) {
+                        best = Some(cand);
+                    }
+                }
+            }
+        }
+        let Some((yh, x, _, dim, f2)) = best else { continue };
+        let (w, h) = (dim[0] + m, dim[1] + m);
+        let y = yh - h;
+        pos[*id] = ([x + m * 0.5, y + m * 0.5], f2);
+        top = top.max(yh);
+        right = right.max(x + w);
+        // Mise à jour de la ligne d'horizon
+        let mut next: Vec<(f32, f32, f32)> = vec![];
+        for seg in &sky {
+            let (sx, sw, sh) = *seg;
+            let (a, b) = (sx, sx + sw);
+            if b <= x + 1e-9 || a >= x + w - 1e-9 {
+                next.push(*seg);
+            } else {
+                if a < x {
+                    next.push((a, x - a, sh));
+                }
+                if b > x + w {
+                    next.push((x + w, b - x - w, sh));
+                }
+            }
+        }
+        next.push((x, w, yh));
+        next.sort_by(|p, q| p.0.partial_cmp(&q.0).unwrap_or(std::cmp::Ordering::Equal));
+        // Fusion des segments de même hauteur
+        let mut merged: Vec<(f32, f32, f32)> = vec![];
+        for seg in next {
+            if let Some(last) = merged.last_mut() {
+                if (last.2 - seg.2).abs() < 1e-9 && (last.0 + last.1 - seg.0).abs() < 1e-6 {
+                    last.1 += seg.1;
+                    continue;
+                }
+            }
+            merged.push(seg);
+        }
+        sky = merged;
+    }
+    (pos, top.max(right))
 }
 
 /// Impose une densité (pixels par unité réelle) : tous les îlots à la même échelle,
@@ -788,8 +877,13 @@ mod vrai {
         let t0 = std::time::Instant::now();
         let t = Topo::new(&mesh.pos, &mesh.tris, &mesh.edges);
         let mut d = EditData::fresh(&t);
-        d.seams = smart_seams(&t, 66.0, 4);
-        unwrap(&t, &mut d);
+        if std::env::var("ARYADNE_UV_SMART").is_ok() {
+            d.seams = smart_seams(&t, 66.0, 4);
+            unwrap(&t, &mut d);
+        } else {
+            let md: f32 = std::env::var("ARYADNE_UV_DIST").ok().and_then(|v| v.parse().ok()).unwrap_or(0.12);
+            auto_unwrap(&t, &mut d, &AutoOptions { max_distortion: md, ..AutoOptions::default() }, &PackOptions::default());
+        }
         let nc = d.chart.iter().max().unwrap() + 1;
         // Distorsion : écart d'aire relative par face
         let mut worst = 0.0f32;
@@ -805,6 +899,622 @@ mod vrai {
         println!("{} polys, {} îlots, remplissage {:.2}, pire étirement d'aire ×{:.2}, {:?}", t.polys.len(), nc, total2, worst, t0.elapsed());
         assert!(d.uv.iter().flatten().all(|p| p[0].is_finite()));
     }
+}
+
+
+// ---------- coutures et UV automatiques avancés ----------
+//
+// 1. Îlots de départ : arêtes très vives (et frontières de matériaux).
+// 2. Chaque îlot devient un disque avec une coupe minimale (arbre / co-arbre) : un cylindre
+//    reçoit une seule couture, un tore deux, au lieu d'être découpé en bandes.
+//    Les coupes passent de préférence par les arêtes vives, concaves et tournées vers le bas.
+// 3. Dépliage LSCM, mesure de la distorsion ; un îlot trop étiré est coupé en deux
+//    (croissance depuis deux faces éloignées, frontière le long des plis), et on recommence.
+// 4. Les îlots voisins sont fusionnés quand le résultat reste peu déformé.
+
+#[derive(Clone, Copy)]
+pub struct AutoOptions {
+    /// Angle au-delà duquel une arête est toujours une couture
+    pub hard_angle: f32,
+    /// Distorsion tolérée (0,05 : très peu ; 0,4 : beaucoup)
+    pub max_distortion: f32,
+    /// Séparer les matériaux
+    pub split_materials: bool,
+    /// Préférer les coutures cachées (dessous, creux)
+    pub hide_seams: bool,
+}
+
+impl Default for AutoOptions {
+    fn default() -> Self {
+        AutoOptions { hard_angle: 75.0, max_distortion: 0.2, split_materials: true, hide_seams: true }
+    }
+}
+
+/// Coût de couper une arête (bas = bon endroit pour une couture).
+fn cut_cost(t: &Topo, e: (u32, u32), o: &AutoOptions) -> f32 {
+    let l = len(sub(t.pos[e.0 as usize], t.pos[e.1 as usize])).max(1e-9);
+    let Some(fs) = t.edge_faces.get(&e) else { return l };
+    if fs.len() != 2 {
+        return l * 0.1;
+    }
+    let (n0, n1) = (t.normal(fs[0] as usize), t.normal(fs[1] as usize));
+    let ang = dot(n0, n1).clamp(-1.0, 1.0).acos(); // radians
+    let mut f = 1.0 / (1.0 + 6.0 * (ang / std::f32::consts::FRAC_PI_2).powi(2));
+    // Pli concave (creux) : couture moins visible
+    let c0 = t.center(fs[0] as usize);
+    let c1 = t.center(fs[1] as usize);
+    let concave = dot(n0, sub(c1, c0)) > 0.0;
+    if concave && ang > 0.05 {
+        f *= 0.6;
+    }
+    if o.hide_seams {
+        let ny = (n0[1] + n1[1]) * 0.5;
+        if ny < -0.2 {
+            f *= 0.75; // dessous de l'objet
+        }
+    }
+    l * f
+}
+
+/// Arêtes intérieures (non coupées) d'un ensemble de faces.
+fn interior_edges(t: &Topo, faces: &[usize], seams: &BTreeSet<(u32, u32)>, inset: &std::collections::HashSet<usize>) -> Vec<((u32, u32), usize, usize)> {
+    let mut out = vec![];
+    let mut seen = std::collections::HashSet::new();
+    for &f in faces {
+        let p = &t.polys[f];
+        for i in 0..p.len() {
+            let e = key(p[i], p[(i + 1) % p.len()]);
+            if seams.contains(&e) || !seen.insert(e) {
+                continue;
+            }
+            if let Some(fs) = t.edge_faces.get(&e) {
+                if fs.len() == 2 && inset.contains(&(fs[0] as usize)) && inset.contains(&(fs[1] as usize)) {
+                    out.push((e, fs[0] as usize, fs[1] as usize));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Coupe minimale qui rend un îlot homéomorphe à un disque : arbre des plus courts chemins
+/// (depuis le bord, au coût de couture), puis co-arbre dans le dual ; chaque arête restante
+/// donne une coupe = cette arête + les deux chemins de l'arbre jusqu'au bord. Les coupes sont
+/// donc courtes et droites (une seule couture rectiligne pour un cylindre).
+fn disk_cut(t: &Topo, faces: &[usize], seams: &BTreeSet<(u32, u32)>, o: &AutoOptions) -> Vec<(u32, u32)> {
+    let inset: std::collections::HashSet<usize> = faces.iter().copied().collect();
+    let inner = interior_edges(t, faces, seams, &inset);
+    // Bord de l'îlot
+    let mut boundary_v: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    let mut has_boundary = false;
+    for &f in faces {
+        let p = &t.polys[f];
+        for i in 0..p.len() {
+            let e = key(p[i], p[(i + 1) % p.len()]);
+            let inside = t.edge_faces.get(&e).map(|fs| fs.iter().filter(|g| inset.contains(&(**g as usize))).count()).unwrap_or(0);
+            if seams.contains(&e) || inside < 2 {
+                boundary_v.insert(e.0);
+                boundary_v.insert(e.1);
+                has_boundary = true;
+            }
+        }
+    }
+    let mut adj: HashMap<u32, Vec<(u32, f32, (u32, u32))>> = HashMap::new();
+    for (e, _, _) in &inner {
+        let c = cut_cost(t, *e, o);
+        adj.entry(e.0).or_default().push((e.1, c, *e));
+        adj.entry(e.1).or_default().push((e.0, c, *e));
+    }
+    if !has_boundary {
+        // Sphère : une fente au plus bas coût ; tore fermé : la racine est un sommet
+        let Some(&root) = adj.keys().min() else { return vec![] };
+        boundary_v.insert(root);
+    }
+    // Arbre des plus courts chemins (Dijkstra multi-source depuis le bord)
+    #[derive(PartialEq)]
+    struct N(f32, u32);
+    impl Eq for N {}
+    impl PartialOrd for N {
+        fn partial_cmp(&self, o: &Self) -> Option<std::cmp::Ordering> {
+            Some(self.cmp(o))
+        }
+    }
+    impl Ord for N {
+        fn cmp(&self, o: &Self) -> std::cmp::Ordering {
+            o.0.partial_cmp(&self.0).unwrap_or(std::cmp::Ordering::Equal)
+        }
+    }
+    let mut dist: HashMap<u32, f32> = HashMap::new();
+    let mut parent: HashMap<u32, (u32, (u32, u32))> = HashMap::new();
+    let mut heap = std::collections::BinaryHeap::new();
+    for &v in &boundary_v {
+        dist.insert(v, 0.0);
+        heap.push(N(0.0, v));
+    }
+    while let Some(N(d, v)) = heap.pop() {
+        if d > *dist.get(&v).unwrap_or(&f32::MAX) {
+            continue;
+        }
+        for (w, c, e) in adj.get(&v).cloned().unwrap_or_default() {
+            if boundary_v.contains(&w) {
+                continue;
+            }
+            let nd = d + c;
+            if nd < *dist.get(&w).unwrap_or(&f32::MAX) {
+                dist.insert(w, nd);
+                parent.insert(w, (v, e));
+                heap.push(N(nd, w));
+            }
+        }
+    }
+    let tree: std::collections::HashSet<(u32, u32)> = parent.values().map(|p| p.1).collect();
+    // Co-arbre : arbre couvrant des faces par les arêtes hors de l'arbre primal
+    let idx: HashMap<usize, usize> = faces.iter().enumerate().map(|(i, f)| (*f, i)).collect();
+    let mut uf: Vec<usize> = (0..faces.len()).collect();
+    fn find(p: &mut [usize], mut x: usize) -> usize {
+        while p[x] != x {
+            p[x] = p[p[x]];
+            x = p[x];
+        }
+        x
+    }
+    let mut left: Vec<(u32, u32)> = vec![];
+    let mut cand: Vec<&((u32, u32), usize, usize)> = inner.iter().filter(|(e, _, _)| !tree.contains(e)).collect();
+    // Le co-arbre garde d'abord les arêtes coûteuses à couper
+    cand.sort_by(|a, b| cut_cost(t, b.0, o).partial_cmp(&cut_cost(t, a.0, o)).unwrap_or(std::cmp::Ordering::Equal));
+    for (e, a, b) in cand {
+        let (ra, rb) = (find(&mut uf, idx[a]), find(&mut uf, idx[b]));
+        if ra != rb {
+            uf[ra] = rb;
+        } else {
+            left.push(*e);
+        }
+    }
+    // Boucles de bord (pour reconnaître une coupe qui relie deux bords différents)
+    let mut loop_of: HashMap<u32, u32> = HashMap::new();
+    {
+        let bv: Vec<u32> = boundary_v.iter().copied().collect();
+        let bidx: HashMap<u32, usize> = bv.iter().enumerate().map(|(i, v)| (*v, i)).collect();
+        let mut lp: Vec<usize> = (0..bv.len()).collect();
+        for &f in faces {
+            let p = &t.polys[f];
+            for i in 0..p.len() {
+                let e = key(p[i], p[(i + 1) % p.len()]);
+                let inside = t.edge_faces.get(&e).map(|fs| fs.iter().filter(|g| inset.contains(&(**g as usize))).count()).unwrap_or(0);
+                if (seams.contains(&e) || inside < 2) && bidx.contains_key(&e.0) && bidx.contains_key(&e.1) {
+                    let (a, b) = (find(&mut lp, bidx[&e.0]), find(&mut lp, bidx[&e.1]));
+                    lp[a] = b;
+                }
+            }
+        }
+        for (i, v) in bv.iter().enumerate() {
+            loop_of.insert(*v, find(&mut lp, i) as u32);
+        }
+    }
+    let root_of = |mut v: u32, out: &mut Vec<(u32, u32)>| -> u32 {
+        let mut guard = 0;
+        while let Some((u, pe)) = parent.get(&v) {
+            out.push(*pe);
+            v = *u;
+            guard += 1;
+            if guard > 1_000_000 {
+                break;
+            }
+        }
+        v
+    };
+    // Coupes : arête restante + chemins jusqu'au bord
+    let mut cut: std::collections::HashSet<(u32, u32)> = std::collections::HashSet::new();
+    for e in left {
+        let (mut pa, mut pb) = (vec![], vec![]);
+        let ra = root_of(e.0, &mut pa);
+        let rb = root_of(e.1, &mut pb);
+        let (la, lb) = (loop_of.get(&ra).copied(), loop_of.get(&rb).copied());
+        if has_boundary && la.is_some() && lb.is_some() && la != lb {
+            // Deux bords différents : le plus court chemin de l'un à l'autre (coupe droite)
+            let src: Vec<u32> = loop_of.iter().filter(|(_, l)| Some(**l) == la).map(|(v, _)| *v).collect();
+            let mut dist2: HashMap<u32, f32> = HashMap::new();
+            let mut par2: HashMap<u32, (u32, (u32, u32))> = HashMap::new();
+            let mut heap2 = std::collections::BinaryHeap::new();
+            for v in src {
+                dist2.insert(v, 0.0);
+                heap2.push(N(0.0, v));
+            }
+            let mut hit = None;
+            while let Some(N(d, v)) = heap2.pop() {
+                if d > *dist2.get(&v).unwrap_or(&f32::MAX) {
+                    continue;
+                }
+                if loop_of.get(&v).copied() == lb {
+                    hit = Some(v);
+                    break;
+                }
+                for (w, c, ed) in adj.get(&v).cloned().unwrap_or_default() {
+                    if loop_of.get(&w).is_some_and(|l| Some(*l) == la) {
+                        continue;
+                    }
+                    let nd = d + c;
+                    if nd < *dist2.get(&w).unwrap_or(&f32::MAX) {
+                        dist2.insert(w, nd);
+                        par2.insert(w, (v, ed));
+                        heap2.push(N(nd, w));
+                    }
+                }
+            }
+            if let Some(mut v) = hit {
+                while let Some((u, ed)) = par2.get(&v) {
+                    cut.insert(*ed);
+                    v = *u;
+                }
+                continue;
+            }
+        }
+        cut.insert(e);
+        cut.extend(pa);
+        cut.extend(pb);
+    }
+    let mut out: Vec<(u32, u32)> = cut.into_iter().collect();
+    if !has_boundary && out.is_empty() {
+        out = cheapest_path_cut(t, faces, seams, o);
+    }
+    out
+}
+
+/// Fente entre deux sommets éloignés, au coût de couture minimal (Dijkstra).
+fn cheapest_path_cut(t: &Topo, faces: &[usize], seams: &BTreeSet<(u32, u32)>, o: &AutoOptions) -> Vec<(u32, u32)> {
+    let inset: std::collections::HashSet<usize> = faces.iter().copied().collect();
+    let edges = interior_edges(t, faces, seams, &inset);
+    let mut adj: HashMap<u32, Vec<(u32, f32, (u32, u32))>> = HashMap::new();
+    for (e, _, _) in &edges {
+        let c = cut_cost(t, *e, o);
+        adj.entry(e.0).or_default().push((e.1, c, *e));
+        adj.entry(e.1).or_default().push((e.0, c, *e));
+    }
+    let verts: Vec<u32> = adj.keys().copied().collect();
+    if verts.len() < 2 {
+        return vec![];
+    }
+    let c: V3 = mul(verts.iter().fold([0.0; 3], |s, v| add(s, t.pos[*v as usize])), 1.0 / verts.len() as f32);
+    let a = *verts.iter().max_by(|x, y| len(sub(t.pos[**x as usize], c)).partial_cmp(&len(sub(t.pos[**y as usize], c))).unwrap()).unwrap();
+    let b = *verts.iter().max_by(|x, y| len(sub(t.pos[**x as usize], t.pos[a as usize])).partial_cmp(&len(sub(t.pos[**y as usize], t.pos[a as usize]))).unwrap()).unwrap();
+    // Dijkstra
+    let mut dist: HashMap<u32, f32> = HashMap::new();
+    let mut prev: HashMap<u32, (u32, (u32, u32))> = HashMap::new();
+    let mut heap = std::collections::BinaryHeap::new();
+    #[derive(PartialEq)]
+    struct N(f32, u32);
+    impl Eq for N {}
+    impl PartialOrd for N {
+        fn partial_cmp(&self, o: &Self) -> Option<std::cmp::Ordering> {
+            Some(self.cmp(o))
+        }
+    }
+    impl Ord for N {
+        fn cmp(&self, o: &Self) -> std::cmp::Ordering {
+            o.0.partial_cmp(&self.0).unwrap_or(std::cmp::Ordering::Equal)
+        }
+    }
+    dist.insert(a, 0.0);
+    heap.push(N(0.0, a));
+    while let Some(N(d, v)) = heap.pop() {
+        if v == b {
+            break;
+        }
+        if d > *dist.get(&v).unwrap_or(&f32::MAX) {
+            continue;
+        }
+        for (w, c, e) in adj.get(&v).cloned().unwrap_or_default() {
+            let nd = d + c;
+            if nd < *dist.get(&w).unwrap_or(&f32::MAX) {
+                dist.insert(w, nd);
+                prev.insert(w, (v, e));
+                heap.push(N(nd, w));
+            }
+        }
+    }
+    let mut out = vec![];
+    let mut v = b;
+    while let Some((u, e)) = prev.get(&v) {
+        out.push(*e);
+        v = *u;
+        if v == a {
+            break;
+        }
+    }
+    out
+}
+
+/// Distorsion d'un îlot déplié : écart moyen à la conformité et à l'aire, faces retournées.
+fn chart_distortion(t: &Topo, faces: &[usize], uv: &HashMap<(usize, usize), V2>) -> f32 {
+    let mut a3 = 0.0f32;
+    let mut a2 = 0.0f32;
+    let mut tri: Vec<(f32, f32, f32, f32)> = vec![]; // (aire 3D, σ1, σ2, det signe)
+    for &f in faces {
+        let p = &t.polys[f];
+        for k in 1..p.len() - 1 {
+            let (x0, x1, x2) = (t.pos[p[0] as usize], t.pos[p[k] as usize], t.pos[p[k + 1] as usize]);
+            let (Some(u0), Some(u1), Some(u2)) = (uv.get(&(f, 0)), uv.get(&(f, k)), uv.get(&(f, k + 1))) else { continue };
+            let e1 = sub(x1, x0);
+            let e2 = sub(x2, x0);
+            let n = cross(e1, e2);
+            let area = len(n) * 0.5;
+            if area < 1e-14 {
+                continue;
+            }
+            let ex = norm(e1);
+            let ey = norm(cross(norm(n), ex));
+            // X = [[e1.x, e2.x], [e1.y, e2.y]] en local, U = [[du1, du2], [dv1, dv2]]
+            let (a, b, c, d) = (dot(e1, ex), dot(e2, ex), dot(e1, ey), dot(e2, ey));
+            let det_x = a * d - b * c;
+            if det_x.abs() < 1e-14 {
+                continue;
+            }
+            let (p1, p2, q1, q2) = (u1[0] - u0[0], u2[0] - u0[0], u1[1] - u0[1], u2[1] - u0[1]);
+            // J = U X^-1
+            let inv = [d / det_x, -b / det_x, -c / det_x, a / det_x];
+            let j = [p1 * inv[0] + p2 * inv[2], p1 * inv[1] + p2 * inv[3], q1 * inv[0] + q2 * inv[2], q1 * inv[1] + q2 * inv[3]];
+            let det_j = j[0] * j[3] - j[1] * j[2];
+            let fro = j.iter().map(|x| x * x).sum::<f32>();
+            let disc = (fro * fro - 4.0 * det_j * det_j).max(0.0).sqrt();
+            let s1 = ((fro + disc) * 0.5).max(0.0).sqrt();
+            let s2 = ((fro - disc) * 0.5).max(0.0).sqrt();
+            a3 += area;
+            a2 += det_j.abs() * area;
+            tri.push((area, s1, s2, det_j.signum()));
+        }
+    }
+    if a3 <= 0.0 || tri.is_empty() {
+        return 0.0;
+    }
+    let scale = (a2 / a3).sqrt().max(1e-12);
+    let mut conf = 0.0;
+    let mut area_err = 0.0;
+    let mut flipped = 0.0;
+    for (area, s1, s2, sign) in &tri {
+        let w = area / a3;
+        conf += w * (s1 / s2.max(1e-9) - 1.0).min(10.0);
+        let r = s1 * s2 / (scale * scale);
+        area_err += w * (r.max(1e-6).ln().abs()).min(4.0);
+        if *sign < 0.0 {
+            flipped += w;
+        }
+    }
+    conf + 0.5 * area_err + 10.0 * flipped
+}
+
+/// Déplie un îlot (avec ses fentes) et donne sa distorsion.
+fn try_chart(t: &Topo, faces: &[usize], seams: &BTreeSet<(u32, u32)>) -> (f32, HashMap<(usize, usize), V2>) {
+    let (corners, cvert) = chart_vertices(t, faces, seams);
+    let u = lscm(t, faces, &corners, &cvert);
+    let map: HashMap<(usize, usize), V2> = corners.iter().enumerate().map(|(k, c)| (*c, u[cvert[k]])).collect();
+    (chart_distortion(t, faces, &map), map)
+}
+
+/// Coupe un îlot en deux : deux faces éloignées, croissance par distance pondérée par les plis.
+fn split_chart(t: &Topo, faces: &[usize], seams: &BTreeSet<(u32, u32)>) -> Vec<(u32, u32)> {
+    let inset: std::collections::HashSet<usize> = faces.iter().copied().collect();
+    let c = mul(faces.iter().fold([0.0; 3], |s, f| add(s, t.center(*f))), 1.0 / faces.len() as f32);
+    let far = |from: V3| *faces.iter().max_by(|a, b| len(sub(t.center(**a), from)).partial_cmp(&len(sub(t.center(**b), from))).unwrap()).unwrap();
+    let sa = far(c);
+    let sb = far(t.center(sa));
+    if sa == sb {
+        return vec![];
+    }
+    let mut owner: HashMap<usize, (u8, f32)> = HashMap::new();
+    let mut heap = std::collections::BinaryHeap::new();
+    #[derive(PartialEq)]
+    struct N(f32, usize, u8);
+    impl Eq for N {}
+    impl PartialOrd for N {
+        fn partial_cmp(&self, o: &Self) -> Option<std::cmp::Ordering> {
+            Some(self.cmp(o))
+        }
+    }
+    impl Ord for N {
+        fn cmp(&self, o: &Self) -> std::cmp::Ordering {
+            o.0.partial_cmp(&self.0).unwrap_or(std::cmp::Ordering::Equal)
+        }
+    }
+    heap.push(N(0.0, sa, 0));
+    heap.push(N(0.0, sb, 1));
+    while let Some(N(d, f, g)) = heap.pop() {
+        if owner.contains_key(&f) {
+            continue;
+        }
+        owner.insert(f, (g, d));
+        let p = &t.polys[f];
+        let nf = t.normal(f);
+        for i in 0..p.len() {
+            let e = key(p[i], p[(i + 1) % p.len()]);
+            if seams.contains(&e) {
+                continue;
+            }
+            if let Some(fs) = t.edge_faces.get(&e) {
+                for &h in fs {
+                    let h = h as usize;
+                    if h != f && inset.contains(&h) && !owner.contains_key(&h) {
+                        let bend = 1.0 - dot(nf, t.normal(h));
+                        let w = len(sub(t.center(h), t.center(f))) * (1.0 + 8.0 * bend);
+                        heap.push(N(d + w, h, g));
+                    }
+                }
+            }
+        }
+    }
+    let mut out = vec![];
+    for (e, fs) in &t.edge_faces {
+        if fs.len() == 2 {
+            let (a, b) = (fs[0] as usize, fs[1] as usize);
+            if let (Some(x), Some(y)) = (owner.get(&a), owner.get(&b)) {
+                if x.0 != y.0 && !seams.contains(e) {
+                    out.push(*e);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Coutures automatiques avancées. `progress` reçoit des messages d'étape.
+pub fn auto_seams(t: &Topo, d: &EditData, o: &AutoOptions) -> BTreeSet<(u32, u32)> {
+    // 1. Départ : arêtes très vives et frontières de matériaux
+    let mut seams: BTreeSet<(u32, u32)> = seams_by_angle(t, o.hard_angle);
+    if o.split_materials && d.face_mat.len() == t.polys.len() {
+        for (e, fs) in &t.edge_faces {
+            if fs.len() == 2 && d.face_mat[fs[0] as usize] != d.face_mat[fs[1] as usize] {
+                seams.insert(*e);
+            }
+        }
+    }
+    // 2-3. Disque + distorsion, îlot par îlot (avec une pile de travail)
+    let ch = charts(t, &seams);
+    let nc = ch.iter().copied().max().map(|m| m as usize + 1).unwrap_or(0);
+    let mut work: Vec<(Vec<usize>, u8)> = vec![vec![]; nc].into_iter().map(|v| (v, 0u8)).collect();
+    for (f, &c) in ch.iter().enumerate() {
+        work[c as usize].0.push(f);
+    }
+    let mut done: Vec<Vec<usize>> = vec![];
+    while let Some((faces, depth)) = work.pop() {
+        if faces.is_empty() {
+            continue;
+        }
+        for e in disk_cut(t, &faces, &seams, o) {
+            seams.insert(e);
+        }
+        if faces.len() < 3 || depth >= 10 {
+            done.push(faces);
+            continue;
+        }
+        let (dist, _) = try_chart(t, &faces, &seams);
+        if dist <= o.max_distortion {
+            done.push(faces);
+            continue;
+        }
+        let cut = split_chart(t, &faces, &seams);
+        if cut.is_empty() {
+            done.push(faces);
+            continue;
+        }
+        for e in cut {
+            seams.insert(e);
+        }
+        // Les deux moitiés (ou plus) repartent dans la pile
+        let inset: std::collections::HashSet<usize> = faces.iter().copied().collect();
+        let sub_ch = charts(t, &seams);
+        let mut groups: HashMap<u32, Vec<usize>> = HashMap::new();
+        for &f in &faces {
+            groups.entry(sub_ch[f]).or_default().push(f);
+        }
+        let _ = inset;
+        for (_, g) in groups {
+            work.push((g, depth + 1));
+        }
+    }
+    // 4. Fusion des îlots voisins quand le résultat reste peu déformé
+    for _round in 0..2 {
+        let ch = charts(t, &seams);
+        let nc = ch.iter().copied().max().map(|m| m as usize + 1).unwrap_or(0);
+        if nc < 2 || nc > 400 {
+            break;
+        }
+        let mut shared: HashMap<(u32, u32), (f32, Vec<(u32, u32)>)> = HashMap::new();
+        for (e, fs) in &t.edge_faces {
+            if fs.len() == 2 && seams.contains(e) {
+                let (a, b) = (ch[fs[0] as usize], ch[fs[1] as usize]);
+                if a != b {
+                    // Pas de fusion à travers une arête très vive ni entre matériaux
+                    if t.dihedral(*e).is_some_and(|x| x > o.hard_angle) {
+                        continue;
+                    }
+                    if o.split_materials && d.face_mat.len() == t.polys.len() && d.face_mat[fs[0] as usize] != d.face_mat[fs[1] as usize] {
+                        continue;
+                    }
+                    let k = key(a, b);
+                    let ent = shared.entry(k).or_insert((0.0, vec![]));
+                    ent.0 += len(sub(t.pos[e.0 as usize], t.pos[e.1 as usize]));
+                    ent.1.push(*e);
+                }
+            }
+        }
+        let mut pairs: Vec<((u32, u32), (f32, Vec<(u32, u32)>))> = shared.into_iter().collect();
+        pairs.sort_by(|a, b| b.1 .0.partial_cmp(&a.1 .0).unwrap_or(std::cmp::Ordering::Equal));
+        let mut merged_any = false;
+        let mut used = std::collections::HashSet::new();
+        for ((a, b), (_, edges)) in pairs.into_iter().take(120) {
+            if used.contains(&a) || used.contains(&b) {
+                continue;
+            }
+            let faces: Vec<usize> = (0..t.polys.len()).filter(|f| ch[*f] == a || ch[*f] == b).collect();
+            let mut trial = seams.clone();
+            for e in &edges {
+                trial.remove(e);
+            }
+            for e in disk_cut(t, &faces, &trial, o) {
+                trial.insert(e);
+            }
+            let (dist, _) = try_chart(t, &faces, &trial);
+            if dist <= o.max_distortion * 0.85 {
+                seams = trial;
+                used.insert(a);
+                used.insert(b);
+                merged_any = true;
+            }
+        }
+        if !merged_any {
+            break;
+        }
+    }
+    seams
+}
+
+/// Oriente chaque îlot sur ses arêtes dominantes (les quads deviennent droits),
+/// sinon sur la boîte la plus petite.
+fn orient_charts(d: &mut EditData) {
+    let groups = chart_faces(d);
+    for faces in &groups {
+        let mut hist = [0.0f32; 90];
+        let mut total = 0.0;
+        for &f in faces {
+            let p = &d.uv[f];
+            for i in 0..p.len() {
+                let (a, b) = (p[i], p[(i + 1) % p.len()]);
+                let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+                let l = (dx * dx + dy * dy).sqrt();
+                if l < 1e-12 {
+                    continue;
+                }
+                let ang = dy.atan2(dx).to_degrees().rem_euclid(90.0);
+                hist[(ang as usize).min(89)] += l;
+                total += l;
+            }
+        }
+        if total <= 0.0 {
+            continue;
+        }
+        // Lissage circulaire
+        let smooth: Vec<f32> = (0..90).map(|i| hist[(i + 89) % 90] * 0.5 + hist[i] + hist[(i + 1) % 90] * 0.5).collect();
+        let (peak, val) = smooth.iter().enumerate().fold((0, 0.0f32), |a, (i, v)| if *v > a.1 { (i, *v) } else { a });
+        let strong = val > 2.5 * (total * 2.0 / 90.0);
+        if !strong {
+            continue; // le pack choisira la boîte minimale
+        }
+        let a = -(peak as f32 + 0.5).to_radians();
+        let (s, c) = a.sin_cos();
+        for &f in faces {
+            for q in &mut d.uv[f] {
+                *q = [q[0] * c - q[1] * s, q[0] * s + q[1] * c];
+            }
+        }
+    }
+}
+
+/// Dépliage complet automatique : coutures avancées, LSCM, orientation, rangement.
+#[allow(dead_code)]
+pub fn auto_unwrap(t: &Topo, d: &mut EditData, o: &AutoOptions, pack_opt: &PackOptions) {
+    d.seams = auto_seams(t, d, o);
+    unwrap_charts(t, d);
+    orient_charts(d);
+    pack(t, d, &PackOptions { rotate: false, ..*pack_opt });
 }
 
 // ---------- état d'édition et interface ----------
@@ -839,6 +1549,7 @@ pub struct Edit {
     uv_view: Rect,
     uv_drag: bool,
     pub checker: bool,
+    pub auto: AutoOptions,
 }
 
 impl Edit {
@@ -847,7 +1558,7 @@ impl Edit {
         let data = std::fs::read_to_string(&file).ok().and_then(|t| serde_json::from_str::<EditData>(&t).ok()).filter(|d| d.fits(&topo)).unwrap_or_else(|| EditData::fresh(&topo));
         let n = topo.polys.len();
         let checker = data.has_uv();
-        Edit { topo, data, sel: BTreeSet::new(), tool: Tool::Faces, tab: 0, version: 1, seam_angle: 45.0, smart_angle: 66.0, min_faces: (n / 400).clamp(4, 300), optimize: true, rotate: true, density_target: 1024.0, file, scale, message: None, owner: vec![], uv_view: Rect::NOTHING, uv_drag: false, checker }
+        Edit { topo, data, sel: BTreeSet::new(), tool: Tool::Faces, tab: 0, version: 1, seam_angle: 45.0, smart_angle: 66.0, min_faces: (n / 400).clamp(4, 300), optimize: true, rotate: true, density_target: 1024.0, file, scale, message: None, owner: vec![], uv_view: Rect::NOTHING, uv_drag: false, checker, auto: AutoOptions::default() }
     }
 
     pub fn save(&self) {
@@ -1073,7 +1784,13 @@ impl Edit {
         let p = crate::theme::pal();
         ui.label(RichText::new("clic sur une arête : poser / enlever une couture · Ctrl+clic : enlever").color(p.muted).size(10.0));
         ui.add_space(4.0);
-        ui.label(RichText::new("automatique").size(11.0).strong());
+        ui.label(RichText::new("automatique avancé").size(11.0).strong());
+        self.auto_options(ui);
+        if ui.button("coutures automatiques").on_hover_text("Coupe minimale pour que chaque îlot se déplie à plat (un cylindre = une couture droite), coutures dans les plis et les creux, découpe là où ça s'étire trop, puis fusion des îlots voisins").clicked() {
+            self.auto_now(false);
+        }
+        ui.add_space(6.0);
+        ui.label(RichText::new("autres méthodes").size(11.0).strong());
         ui.horizontal(|ui| {
             ui.add(egui::Slider::new(&mut self.smart_angle, 15.0..=89.0).text("angle"));
         });
@@ -1119,9 +1836,38 @@ impl Edit {
         }
     }
 
+    fn auto_options(&mut self, ui: &mut egui::Ui) {
+        let p = crate::theme::pal();
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("moins d'îlots").size(10.5).color(p.muted));
+            let mut v = 0.6 - self.auto.max_distortion;
+            if ui.add(egui::Slider::new(&mut v, 0.0..=0.55).show_value(false)).changed() {
+                self.auto.max_distortion = 0.6 - v;
+            }
+            ui.label(RichText::new("moins d'étirement").size(10.5).color(p.muted));
+        });
+        ui.add(egui::Slider::new(&mut self.auto.hard_angle, 30.0..=150.0).text("coupe toujours au-delà de (°)"));
+        ui.checkbox(&mut self.auto.split_materials, "séparer les matériaux");
+        ui.checkbox(&mut self.auto.hide_seams, "cacher les coutures (creux, dessous)");
+    }
+
+    fn auto_now(&mut self, then_unwrap: bool) {
+        let t0 = std::time::Instant::now();
+        self.data.seams = auto_seams(&self.topo, &self.data, &self.auto);
+        if then_unwrap {
+            self.unwrap_now();
+            self.message = Some(format!("{} ({:.1} s en tout)", self.message.clone().unwrap_or_default(), t0.elapsed().as_secs_f32()));
+        } else {
+            let n = charts(&self.topo, &self.data.seams).iter().max().map(|m| m + 1).unwrap_or(0);
+            self.message = Some(format!("{} coutures, {n} îlots, {:.1} s", self.data.seams.len(), t0.elapsed().as_secs_f32()));
+            self.changed();
+        }
+    }
+
     fn unwrap_now(&mut self) {
         let t0 = std::time::Instant::now();
-        unwrap(&self.topo, &mut self.data);
+        unwrap_charts(&self.topo, &mut self.data);
+        orient_charts(&mut self.data);
         pack(&self.topo, &mut self.data, &PackOptions { optimize: self.optimize, rotate: self.rotate, fixed_scale: None });
         self.checker = true;
         let n = self.data.chart.iter().max().map(|m| m + 1).unwrap_or(0);
@@ -1132,10 +1878,10 @@ impl Edit {
     fn tab_uv(&mut self, ui: &mut egui::Ui) {
         let p = crate::theme::pal();
         ui.horizontal_wrapped(|ui| {
-            if ui.button(if self.data.seams.is_empty() { "déplier (coutures auto)" } else { "déplier" }).clicked() {
-                if self.data.seams.is_empty() {
-                    self.data.seams = smart_seams(&self.topo, self.smart_angle, self.min_faces);
-                }
+            if ui.button("auto (coutures + UV)").on_hover_text("Coutures automatiques avancées, dépliage, îlots redressés et rangés").clicked() {
+                self.auto_now(true);
+            }
+            if ui.add_enabled(!self.data.seams.is_empty(), egui::Button::new("déplier mes coutures")).clicked() {
                 self.unwrap_now();
             }
             if self.data.has_uv() && ui.button("ranger").on_hover_text("packing : même densité, rotation, rangement serré").clicked() {
@@ -1147,6 +1893,7 @@ impl Edit {
                 self.version += 1;
             }
         });
+        egui::CollapsingHeader::new(RichText::new("réglages de l'auto").size(11.0)).show(ui, |ui| self.auto_options(ui));
         ui.horizontal(|ui| {
             ui.checkbox(&mut self.optimize, "rangement optimisé").on_hover_text("essaie plusieurs ordres, rotations et largeurs et garde le plus serré");
             ui.checkbox(&mut self.rotate, "rotation");
@@ -1520,5 +2267,88 @@ mod export_tests {
         let back = crate::model3d::load(&dir.join("o.obj")).unwrap();
         assert_eq!(back.total_tris, 12);
         let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+#[cfg(test)]
+mod auto_tests {
+    use super::*;
+
+    fn grid_topo(pos: Vec<V3>, quads: Vec<[u32; 4]>) -> Topo {
+        let mut tris = vec![];
+        let mut edges = vec![];
+        for q in quads {
+            for k in 1..3 {
+                tris.push([q[0], q[k], q[k + 1]]);
+                edges.push(crate::model3d::fan_mask(k, 4));
+            }
+        }
+        Topo::new(&pos, &tris, &edges)
+    }
+
+    /// Cylindre ouvert (n segments × m anneaux) ou tore.
+    fn cylinder(n: u32, m: u32) -> Topo {
+        let mut pos = vec![];
+        for j in 0..=m {
+            for i in 0..n {
+                let a = i as f32 / n as f32 * std::f32::consts::TAU;
+                pos.push([a.cos() * 0.3, j as f32 / m as f32, a.sin() * 0.3]);
+            }
+        }
+        let mut quads = vec![];
+        for j in 0..m {
+            for i in 0..n {
+                let (a, b) = (j * n + i, j * n + (i + 1) % n);
+                quads.push([a, b, b + n, a + n]);
+            }
+        }
+        grid_topo(pos, quads)
+    }
+
+    fn torus(n: u32, m: u32) -> Topo {
+        let mut pos = vec![];
+        for j in 0..m {
+            let b = j as f32 / m as f32 * std::f32::consts::TAU;
+            for i in 0..n {
+                let a = i as f32 / n as f32 * std::f32::consts::TAU;
+                let r = 1.0 + 0.3 * b.cos();
+                pos.push([a.cos() * r, 0.3 * b.sin(), a.sin() * r]);
+            }
+        }
+        let mut quads = vec![];
+        for j in 0..m {
+            for i in 0..n {
+                let (a, b) = (j * n + i, j * n + (i + 1) % n);
+                let (c, d) = (((j + 1) % m) * n + (i + 1) % n, ((j + 1) % m) * n + i);
+                quads.push([a, b, c, d]);
+            }
+        }
+        grid_topo(pos, quads)
+    }
+
+    #[test]
+    fn cylindre_une_couture() {
+        let t = cylinder(24, 6);
+        let mut d = EditData::fresh(&t);
+        auto_unwrap(&t, &mut d, &AutoOptions::default(), &PackOptions::default());
+        let n = d.chart.iter().max().unwrap() + 1;
+        assert_eq!(n, 1, "un seul îlot");
+        assert_eq!(d.seams.len(), 6, "une seule couture verticale");
+        // Les quads restent droits : bords alignés sur les axes
+        let u = &d.uv[0];
+        let (dx, dy) = (u[1][0] - u[0][0], u[1][1] - u[0][1]);
+        let ang = dy.atan2(dx).to_degrees().rem_euclid(90.0);
+        assert!(ang < 3.0 || ang > 87.0, "orientation {ang}");
+    }
+
+    #[test]
+    fn tore_peu_d_ilots() {
+        let t = torus(32, 12);
+        let mut d = EditData::fresh(&t);
+        let o = AutoOptions { max_distortion: 0.5, ..AutoOptions::default() };
+        auto_unwrap(&t, &mut d, &o, &PackOptions::default());
+        let n = d.chart.iter().max().unwrap() + 1;
+        assert!(n <= 2, "tore : {n} îlots");
+        assert!(d.uv.iter().flatten().all(|p| p[0].is_finite() && p[0] >= -1e-3 && p[0] <= 1.001));
     }
 }

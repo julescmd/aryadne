@@ -6,7 +6,7 @@ Le fil entre tes idées. Notes, code, références et moodboards dans un dossier
 
 100 % Rust ([egui](https://github.com/emilk/egui)). Un seul exécutable portable pour Windows et Linux : **aucune installation, aucun droit admin**. Look éditeur de code (JetBrains Mono, angles droits), mode clair par défaut, mode sombre en un clic.
 
-## Fonctionnalités (v0.17)
+## Fonctionnalités (v0.18)
 
 **3D**
 - Visionneuse intégrée pour OBJ, FBX (binaire), glTF / GLB et STL. Rendu par pixel avec profondeur (comme les pixols de ZBrush) : pas de trous ni de mouchetures, calculé sur tous les cœurs, et recalculé seulement quand la vue change.
@@ -19,6 +19,7 @@ Le fil entre tes idées. Notes, code, références et moodboards dans un dossier
   - sélection de faces au clic (Maj : ajouter, Ctrl : retirer), tout / rien / inverser / agrandir / îlot ;
   - IDs de matériau : couleurs, noms, assigner à la sélection, choisir les faces d'un ID ;
   - coutures : à la main (clic sur une arête), sur les arêtes vives, « intelligentes » (îlots presque plats, comme Smart UV Project), contour de la sélection ;
+  - **auto avancé** : coupe minimale pour que chaque îlot se déplie à plat (un cylindre = une seule couture droite, un tore = quelques îlots), coutures placées dans les plis, les creux et le dessous, découpe là où ça s'étire, fusion des îlots voisins, îlots redressés sur leurs arêtes, rangement « skyline » ; curseur « moins d'îlots / moins d'étirement » ;
   - UV : dépliage LSCM, rangement optimisé (plusieurs ordres, rotations, largeurs), marge et taille de texture, même densité pour tous les îlots, densité imposée en px/unité, damier sur le modèle, vue UV 2D (choisir, déplacer, tourner, miroir, échelle) ;
   - tout est gardé à côté du modèle, et l'export OBJ (vt, usemtl, .mtl) et GLB (UV, un matériau par ID) l'inclut.
 - Les matériaux en nodes utilisent les vraies UV quand le modèle en a.
@@ -169,6 +170,8 @@ Le fil entre tes idées. Notes, code, références et moodboards dans un dossier
 - Bouton « résumer » sur n'importe quel fichier texte ou de code. Le résumé peut être copié ou enregistré en note (liée au fichier source).
 - Fonctionne avec toute API compatible OpenAI. Par défaut : [Ollama](https://ollama.com) en local (gratuit, privé).
 - **Explorateur en grille** avec miniatures (3D, images, vidéos), fil d'Ariane et taille réglable, ou en liste.
+- **Zoom** sur les images et les vidéos : molette vers le curseur, glisser pour déplacer, double-clic pour 100 % / ajuster, F pour ajuster.
+- **Timeline** : crochets de boucle à glisser (clic droit pour enlever), aimant sur les images dessinées (Alt pour l'enlever), Maj+← / → pour sauter d'une image dessinée à l'autre, graduations par seconde.
 - **Bande d'images** sous les vidéos (façon Syncsketch) : toutes les images, clic pour y aller, dessins et boucle repérés.
 - **Convertir et compresser** (clic droit sur un fichier ou un dossier) : images en JPG, PNG, WebP, TGA, TIFF, BMP avec qualité et taille, aperçu et poids avant de lancer ; vidéos en MP4, WebM, MOV ProRes, GIF ; sons en MP3, Ogg, AAC, FLAC, WAV.
 - **Transfert par internet** via ton propre stockage S3 (Cloudflare R2, B2, S3, MinIO) : les fichiers sont effacés du bucket dès qu'ils sont reçus. Option de synchro complète du coffre, avec gestion des conflits et garde-fou contre les suppressions massives. Aucune clé ni adresse dans le code : tout se règle dans réglages › coffre en ligne.
