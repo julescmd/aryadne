@@ -338,11 +338,12 @@ impl Viewer {
             }
             ui.separator();
             ui.label("en");
-            for n in [1usize, 2, 4, 8] {
+            for n in [1usize, 2, 3, 4] {
                 if ui.selectable_label(self.on == n, format!("{n}s")).on_hover_text(format!("chaque image tenue {n} fois (animation « en {n} »)")).clicked() {
                     self.on = n;
                 }
             }
+            ui.add(egui::DragValue::new(&mut self.on).range(1..=240).speed(0.1).suffix("s")).on_hover_text("n'importe quelle valeur : glisse ou double-clique pour taper");
             ui.separator();
             if ui.small_button("[").on_hover_text("début de la boucle ici (I)").clicked() {
                 self.loop_in = Some(self.cur);
@@ -621,11 +622,12 @@ impl Viewer {
                 ui.label("cadence");
                 ui.add(egui::DragValue::new(&mut ex.fps).range(1.0..=120.0).speed(0.2).suffix(" i/s"));
                 ui.label("en");
-                for n in [1usize, 2, 4, 8] {
+                for n in [1usize, 2, 3, 4] {
                     if ui.selectable_label(ex.every == n, format!("{n}s")).clicked() {
                         ex.every = n;
                     }
                 }
+                ui.add(egui::DragValue::new(&mut ex.every).range(1..=240).speed(0.1).suffix("s"));
                 ui.label("hauteur");
                 for (h, l) in [(0u32, "originale"), (1080, "1080"), (720, "720")] {
                     if ui.selectable_label(ex.height == h, l).clicked() {

@@ -1112,6 +1112,8 @@ pub struct Viewer {
     pub hdr_files: Vec<(String, std::path::PathBuf)>,
     /// Matériaux en nodes du coffre (nom, chemin), et celui qui est appliqué.
     pub mat_files: Vec<(String, std::path::PathBuf)>,
+    /// Matériau à ouvrir dans l'éditeur de nodes (à côté du modèle)
+    pub open_request: Option<std::path::PathBuf>,
     pub root: String,
     mat_active: Option<(std::path::PathBuf, Option<std::time::SystemTime>)>,
     mat_error: Option<String>,
@@ -1147,6 +1149,7 @@ impl Viewer {
             look: Look::default(),
             hdr_files: vec![],
             mat_files: vec![],
+            open_request: None,
             root: String::new(),
             mat_active: None,
             mat_error: None,
@@ -1331,6 +1334,7 @@ impl Viewer {
         let ctx = ui.ctx().clone();
         let mut pick_hdr: Option<std::path::PathBuf> = None;
         let mut do_capture = false;
+        let mut export: Option<&'static str> = None;
         let mut do_gif = false;
 
         // ---------- barre d'outils : trois menus et quelques boutons ----------
@@ -1346,16 +1350,40 @@ impl Viewer {
                         self.look.nodes = None;
                     }
                 }
-                if !self.mat_files.is_empty() {
-                    ui.label(egui::RichText::new("matériaux en nodes").color(p.muted).size(11.0));
-                    for (name, path) in self.mat_files.clone() {
-                        let on = self.mat_active.as_ref().is_some_and(|m| m.0 == path);
+                ui.label(egui::RichText::new("matériaux en nodes").color(p.muted).size(11.0));
+                for (name, path) in self.mat_files.clone() {
+                    let on = self.mat_active.as_ref().is_some_and(|m| m.0 == path);
+                    ui.horizontal(|ui| {
                         if ui.radio(on, name).clicked() {
-                            self.mat_active = Some((path, None));
+                            self.mat_active = Some((path.clone(), None));
                         }
+                        if ui.small_button("éditer").on_hover_text("ouvrir les nodes à côté du modèle").clicked() {
+                            self.mat_active = Some((path.clone(), None));
+                            self.open_request = Some(path.clone());
+                            ui.close();
+                        }
+                    });
+                }
+                if ui.button("＋ nouveau matériau…").on_hover_text("crée un matériau en nodes, l'applique et l'ouvre à côté").clicked() && !self.root.is_empty() {
+                    let dir = std::path::Path::new(&self.root).join("nodes");
+                    let _ = std::fs::create_dir_all(&dir);
+                    let stem = self.path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "Matériau".into());
+                    let mut path = dir.join(format!("{stem}.mat.json"));
+                    let mut n = 2;
+                    while path.exists() {
+                        path = dir.join(format!("{stem} {n}.mat.json"));
+                        n += 1;
                     }
-                } else {
-                    ui.label(egui::RichText::new("crée un « matériau en nodes » (menu du coffre) pour le voir ici").color(p.muted).size(10.5));
+                    match crate::nodes::Graph::new_material().save(&path) {
+                        Ok(()) => {
+                            let name = path.file_name().map(|s| s.to_string_lossy().trim_end_matches(".mat.json").to_string()).unwrap_or_default();
+                            self.mat_files.push((name, path.clone()));
+                            self.mat_active = Some((path.clone(), None));
+                            self.open_request = Some(path);
+                        }
+                        Err(e) => self.mat_error = Some(e),
+                    }
+                    ui.close();
                 }
                 if let Some(e) = &self.mat_error {
                     ui.label(egui::RichText::new(e).color(p.missing).size(10.5));
@@ -1461,6 +1489,14 @@ impl Viewer {
                 }
                 ui.label(egui::RichText::new("enregistré à côté du modèle").color(p.muted).size(10.5));
             });
+            egui::containers::menu::MenuButton::new("exporter ▾").ui(ui, |ui| {
+                for (f, help) in [("obj", "OBJ : quads et n-gones gardés"), ("glb", "glTF binaire : Blender, Unity, Unreal, web"), ("stl", "STL binaire : impression 3D"), ("ply", "PLY : scans, MeshLab")] {
+                    if ui.button(format!("{} ", f.to_uppercase())).on_hover_text(help).clicked() {
+                        export = Some(f);
+                    }
+                }
+                ui.label(egui::RichText::new("avec les modificateurs actifs, à côté du modèle").color(p.muted).size(10.5));
+            });
             let s = model.size();
             let shown = if shown_tris != model.total_tris { format!(" · affiché : {}", fmt_n(shown_tris)) } else { String::new() };
             let text = format!("{} triangles{shown} · {} sommets · {:.2} × {:.2} × {:.2}", fmt_n(model.total_tris), fmt_n(model.total_vertices), s[0], s[1], s[2]);
@@ -1480,7 +1516,6 @@ impl Viewer {
             let avail = ui.available_rect_before_wrap();
             let pr = egui::Rect::from_min_max(egui::pos2(avail.right() - 280.0, avail.top()), avail.max);
             let mut changed = false;
-            let mut export = false;
             {
                 let ui = &mut ui.new_child(egui::UiBuilder::new().max_rect(pr));
                 egui::Frame::new().fill(p.panel).stroke(Stroke::new(1.0, p.line)).inner_margin(8).show(ui, |ui| {
@@ -1488,9 +1523,14 @@ impl Viewer {
                     egui::ScrollArea::vertical().id_salt("mods").show(ui, |ui| {
                         changed = crate::modifiers::panel(ui, &mut self.stack);
                         ui.add_space(8.0);
-                        if !self.stack.is_empty() && ui.button("exporter le résultat en OBJ").on_hover_text("Enregistre le maillage modifié à côté du fichier").clicked() {
-                            export = true;
-                        }
+                        ui.horizontal(|ui| {
+                            ui.label(egui::RichText::new("exporter le résultat :").size(11.0));
+                            for f in crate::modifiers::EXPORT_FORMATS {
+                                if ui.small_button(*f).clicked() {
+                                    export = Some(*f);
+                                }
+                            }
+                        });
                     });
                 });
             }
@@ -1499,20 +1539,21 @@ impl Viewer {
                 let _ = std::fs::create_dir_all(f.parent().unwrap());
                 let _ = std::fs::write(f, serde_json::to_string(&self.stack).unwrap_or_default());
             }
-            if export {
-                let s = model.size();
-                let longest = s[0].max(s[1]).max(s[2]).max(1e-9);
-                let c = [(model.min[0] + model.max[0]) / 2.0, (model.min[1] + model.max[1]) / 2.0, (model.min[2] + model.max[2]) / 2.0];
-                let o = [-c[0] / longest, -c[1] / longest, -c[2] / longest];
-                let origin = if z_up { [o[0], o[2], -o[1]] } else { o };
-                let mesh = crate::modifiers::apply(&self.stack, crate::modifiers::Mesh::from_model(model, z_up), origin);
-                let stem = self.path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "modele".into());
-                let out = self.path.with_file_name(format!("{stem}-modifié.obj"));
-                self.capture_msg = Some(match crate::modifiers::export_obj(&mesh, model, z_up, &out) {
-                    Ok(()) => format!("exporté : {}", out.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()),
-                    Err(e) => format!("export impossible : {e}"),
-                });
-            }
+        }
+        if let Some(fmt) = export.take() {
+            let s = model.size();
+            let longest = s[0].max(s[1]).max(s[2]).max(1e-9);
+            let c = [(model.min[0] + model.max[0]) / 2.0, (model.min[1] + model.max[1]) / 2.0, (model.min[2] + model.max[2]) / 2.0];
+            let o = [-c[0] / longest, -c[1] / longest, -c[2] / longest];
+            let origin = if z_up { [o[0], o[2], -o[1]] } else { o };
+            let mesh = crate::modifiers::apply(&self.stack, crate::modifiers::Mesh::from_model(model, z_up), origin);
+            let stem = self.path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "modele".into());
+            let suffix = if self.stack.iter().any(|m| m.on) { "-modifié" } else { "-export" };
+            let out = self.path.with_file_name(format!("{stem}{suffix}.{fmt}"));
+            self.capture_msg = Some(match crate::modifiers::export(&mesh, model, z_up, &out) {
+                Ok(()) => format!("exporté : {}", out.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()),
+                Err(e) => format!("export impossible : {e}"),
+            });
         }
         let avail = ui.available_size() - if self.show_mods { egui::vec2(288.0, 0.0) } else { egui::Vec2::ZERO };
         let (rect, resp) = ui.allocate_exact_size(avail.max(egui::vec2(50.0, 50.0)), Sense::click_and_drag());
@@ -1739,7 +1780,7 @@ mod look_tests {
 
 /// Retrouve les polygones d'origine (quads, n-gones) à partir des triangles et de leurs
 /// arêtes visibles. Les sommets confondus sont soudés pour éviter les fentes aux coutures UV.
-fn rebuild_polygons(pos: &[V3], tris: &[[u32; 3]], edges: &[u8]) -> (Vec<V3>, Vec<Vec<u32>>, Vec<usize>) {
+pub(crate) fn rebuild_polygons(pos: &[V3], tris: &[[u32; 3]], edges: &[u8]) -> (Vec<V3>, Vec<Vec<u32>>, Vec<usize>) {
     // Soudure des positions identiques
     let mut weld: HashMap<[u32; 3], u32> = HashMap::with_capacity(pos.len());
     let mut remap = vec![0u32; pos.len()];

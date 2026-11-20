@@ -1037,23 +1037,139 @@ fn weld(mut m: Mesh, dist: f32) -> Mesh {
     m
 }
 
-/// Écrit le maillage en OBJ (dans les unités et l'orientation du fichier d'origine).
-pub fn export_obj(m: &Mesh, model: &Model, z_up: bool, path: &std::path::Path) -> Result<(), String> {
-    use std::io::Write;
+pub const EXPORT_FORMATS: &[&str] = &["obj", "glb", "stl", "ply"];
+
+/// Positions dans les unités et l'orientation du fichier d'origine.
+fn world(m: &Mesh, model: &Model, z_up: bool) -> Vec<V3> {
     let s = model.size();
     let longest = s[0].max(s[1]).max(s[2]).max(1e-9);
     let c = [(model.min[0] + model.max[0]) / 2.0, (model.min[1] + model.max[1]) / 2.0, (model.min[2] + model.max[2]) / 2.0];
-    let f = std::fs::File::create(path).map_err(|e| e.to_string())?;
+    m.pos
+        .iter()
+        .map(|p| {
+            let o = if z_up { [p[0], -p[2], p[1]] } else { *p };
+            [o[0] * longest + c[0], o[1] * longest + c[1], o[2] * longest + c[2]]
+        })
+        .collect()
+}
+
+/// Exporte selon l'extension : obj, glb, stl, ply.
+pub fn export(m: &Mesh, model: &Model, z_up: bool, path: &std::path::Path) -> Result<(), String> {
+    use std::io::Write;
+    let ext = path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+    let pos = world(m, model, z_up);
+    let io = |e: std::io::Error| e.to_string();
+    let f = std::fs::File::create(path).map_err(io)?;
     let mut w = std::io::BufWriter::new(f);
-    writeln!(w, "# exporté par Aryadne (modificateurs appliqués)").map_err(|e| e.to_string())?;
-    for p in &m.pos {
-        let o = if z_up { [p[0], -p[2], p[1]] } else { *p };
-        writeln!(w, "v {} {} {}", o[0] * longest + c[0], o[1] * longest + c[1], o[2] * longest + c[2]).map_err(|e| e.to_string())?;
+    match ext.as_str() {
+        "obj" | "ply" => {
+            // Quads et n-gones retrouvés (les diagonales de triangulation disparaissent)
+            let (wp, polys, _) = crate::model3d::rebuild_polygons(&pos, &m.tris, &m.edges);
+            if ext == "obj" {
+                writeln!(w, "# exporté par Aryadne").map_err(io)?;
+                for p in &wp {
+                    writeln!(w, "v {} {} {}", p[0], p[1], p[2]).map_err(io)?;
+                }
+                for f in &polys {
+                    let idx: Vec<String> = f.iter().map(|i| (i + 1).to_string()).collect();
+                    writeln!(w, "f {}", idx.join(" ")).map_err(io)?;
+                }
+            } else {
+                writeln!(w, "ply\nformat ascii 1.0\ncomment exporté par Aryadne\nelement vertex {}\nproperty float x\nproperty float y\nproperty float z\nelement face {}\nproperty list uchar int vertex_indices\nend_header", wp.len(), polys.len()).map_err(io)?;
+                for p in &wp {
+                    writeln!(w, "{} {} {}", p[0], p[1], p[2]).map_err(io)?;
+                }
+                for f in &polys {
+                    let idx: Vec<String> = f.iter().map(|i| i.to_string()).collect();
+                    writeln!(w, "{} {}", f.len(), idx.join(" ")).map_err(io)?;
+                }
+            }
+        }
+        "stl" => {
+            let mut head = [0u8; 80];
+            head[..20].copy_from_slice(b"exporte par Aryadne ");
+            w.write_all(&head).map_err(io)?;
+            w.write_all(&(m.tris.len() as u32).to_le_bytes()).map_err(io)?;
+            for t in &m.tris {
+                let (a, b, c) = (pos[t[0] as usize], pos[t[1] as usize], pos[t[2] as usize]);
+                let n = norm(cross(sub(b, a), sub(c, a)));
+                for v in [n, a, b, c] {
+                    for k in 0..3 {
+                        w.write_all(&v[k].to_le_bytes()).map_err(io)?;
+                    }
+                }
+                w.write_all(&[0, 0]).map_err(io)?;
+            }
+        }
+        "glb" => {
+            // glTF 2.0 binaire : positions, normales lisses, indices
+            let nrm = normals(&pos, &m.tris);
+            let mut bin: Vec<u8> = vec![];
+            for p in &pos {
+                for k in 0..3 {
+                    bin.extend(p[k].to_le_bytes());
+                }
+            }
+            let nrm_off = bin.len();
+            for n in &nrm {
+                for k in 0..3 {
+                    bin.extend(n[k].to_le_bytes());
+                }
+            }
+            let idx_off = bin.len();
+            for t in &m.tris {
+                for &i in t {
+                    bin.extend(i.to_le_bytes());
+                }
+            }
+            while bin.len() % 4 != 0 {
+                bin.push(0);
+            }
+            let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
+            for p in &pos {
+                for k in 0..3 {
+                    lo[k] = lo[k].min(p[k]);
+                    hi[k] = hi[k].max(p[k]);
+                }
+            }
+            let nv = pos.len();
+            let name = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+            let json = serde_json::json!({
+                "asset": { "version": "2.0", "generator": "Aryadne" },
+                "scene": 0,
+                "scenes": [ { "nodes": [0] } ],
+                "nodes": [ { "mesh": 0, "name": name } ],
+                "meshes": [ { "name": name, "primitives": [ { "attributes": { "POSITION": 0, "NORMAL": 1 }, "indices": 2, "mode": 4 } ] } ],
+                "buffers": [ { "byteLength": bin.len() } ],
+                "bufferViews": [
+                    { "buffer": 0, "byteOffset": 0, "byteLength": nrm_off, "target": 34962 },
+                    { "buffer": 0, "byteOffset": nrm_off, "byteLength": idx_off - nrm_off, "target": 34962 },
+                    { "buffer": 0, "byteOffset": idx_off, "byteLength": m.tris.len() * 12, "target": 34963 }
+                ],
+                "accessors": [
+                    { "bufferView": 0, "componentType": 5126, "count": nv, "type": "VEC3", "min": lo, "max": hi },
+                    { "bufferView": 1, "componentType": 5126, "count": nv, "type": "VEC3" },
+                    { "bufferView": 2, "componentType": 5125, "count": m.tris.len() * 3, "type": "SCALAR" }
+                ]
+            });
+            let mut js = serde_json::to_vec(&json).map_err(|e| e.to_string())?;
+            while js.len() % 4 != 0 {
+                js.push(b' ');
+            }
+            let total = 12 + 8 + js.len() + 8 + bin.len();
+            w.write_all(b"glTF").map_err(io)?;
+            w.write_all(&2u32.to_le_bytes()).map_err(io)?;
+            w.write_all(&(total as u32).to_le_bytes()).map_err(io)?;
+            w.write_all(&(js.len() as u32).to_le_bytes()).map_err(io)?;
+            w.write_all(b"JSON").map_err(io)?;
+            w.write_all(&js).map_err(io)?;
+            w.write_all(&(bin.len() as u32).to_le_bytes()).map_err(io)?;
+            w.write_all(b"BIN\0").map_err(io)?;
+            w.write_all(&bin).map_err(io)?;
+        }
+        other => return Err(format!("format « {other} » non pris en charge")),
     }
-    for t in &m.tris {
-        writeln!(w, "f {} {} {}", t[0] + 1, t[1] + 1, t[2] + 1).map_err(|e| e.to_string())?;
-    }
-    Ok(())
+    w.flush().map_err(io)
 }
 
 // ---------- panneau ----------
@@ -1422,6 +1538,29 @@ fn params(ui: &mut egui::Ui, k: &mut Kind) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exports_relus() {
+        let dir = std::env::temp_dir().join(format!("aryadne-exp-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("cube.obj");
+        std::fs::write(&src, "v 0 0 0\nv 1 0 0\nv 1 1 0\nv 0 1 0\nv 0 0 1\nv 1 0 1\nv 1 1 1\nv 0 1 1\nf 1 4 3 2\nf 5 6 7 8\nf 1 2 6 5\nf 2 3 7 6\nf 3 4 8 7\nf 4 1 5 8\n").unwrap();
+        let model = crate::model3d::load(&src).unwrap();
+        let mesh = Mesh::from_model(&model, false);
+        for f in EXPORT_FORMATS {
+            let out = dir.join(format!("x.{f}"));
+            export(&mesh, &model, false, &out).unwrap();
+            if *f != "ply" {
+                let back = crate::model3d::load(&out).unwrap_or_else(|e| panic!("{f} : {e}"));
+                assert_eq!(back.total_tris, 12, "{f}");
+                let s = back.size();
+                assert!((s[0] - 1.0).abs() < 1e-4, "{f} {s:?}");
+            }
+        }
+        let obj = std::fs::read_to_string(dir.join("x.obj")).unwrap();
+        assert_eq!(obj.lines().filter(|l| l.starts_with("f ")).count(), 6, "quads gardés");
+        let _ = std::fs::remove_dir_all(dir);
+    }
 
     #[test]
     fn pile() {

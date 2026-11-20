@@ -130,6 +130,22 @@ pub struct Node {
     pub values: Vec<V>,
     #[serde(default)]
     pub params: BTreeMap<String, Param>,
+    /// Muet : laisse passer sa première entrée (M)
+    #[serde(default)]
+    pub muted: bool,
+    /// Réduit : juste l'en-tête (H)
+    #[serde(default)]
+    pub collapsed: bool,
+    /// Miniature du résultat sous le node
+    #[serde(default = "yes")]
+    pub preview: bool,
+    /// Nom choisi par l'utilisateur (sinon celui du type)
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub label: String,
+}
+
+fn yes() -> bool {
+    true
 }
 
 #[derive(Clone, Serialize, Deserialize, PartialEq)]
@@ -172,7 +188,8 @@ impl Graph {
                 }
             }
         }
-        self.nodes.push(Node { id, op: op.into(), pos, values: d.inputs.iter().map(|i| i.2).collect(), params });
+        let preview = !matches!(op, "mat_out" | "comp_out");
+        self.nodes.push(Node { id, op: op.into(), pos, values: d.inputs.iter().map(|i| i.2).collect(), params, muted: false, collapsed: false, preview, label: String::new() });
         id
     }
 
@@ -197,6 +214,42 @@ impl Graph {
             }
         }
         false
+    }
+
+    /// Graphe réellement calculé : les nodes muets laissent passer leur première entrée.
+    pub fn effective(&self) -> std::borrow::Cow<'_, Graph> {
+        if !self.nodes.iter().any(|n| n.muted) {
+            return std::borrow::Cow::Borrowed(self);
+        }
+        let mut g = self.clone();
+        for n in self.nodes.iter().filter(|n| n.muted) {
+            let src = g.links.iter().find(|l| l.to == n.id && l.inp == 0).map(|l| (l.from, l.out));
+            let outs: Vec<Link> = g.links.iter().filter(|l| l.from == n.id).cloned().collect();
+            g.links.retain(|l| l.from != n.id);
+            if let Some((f, o)) = src {
+                for l in outs {
+                    g.links.push(Link { from: f, out: o, to: l.to, inp: l.inp });
+                }
+            }
+        }
+        std::borrow::Cow::Owned(g)
+    }
+
+    /// Copie du graphe où la sortie montre la sortie `out` du node `id` (aperçus).
+    pub fn probe(&self, id: u32, out: usize) -> Option<Graph> {
+        let out_op = if self.kind == GraphKind::Material { "mat_out" } else { "comp_out" };
+        let target = self.nodes.iter().find(|n| n.op == out_op)?.id;
+        let mut g = self.effective().into_owned();
+        g.links.retain(|l| !(l.to == target && l.inp == 0));
+        g.links.push(Link { from: id, out, to: target, inp: 0 });
+        if self.kind == GraphKind::Material {
+            // Aperçu neutre : pas de métal, pas d'émission
+            g.links.retain(|l| l.to != target || l.inp == 0);
+            if let Some(n) = g.nodes.iter_mut().find(|n| n.id == target) {
+                n.values = vec![[0.8, 0.8, 0.8, 1.0], [0.6; 4], [0.0; 4], [0.0, 0.0, 0.0, 1.0]];
+            }
+        }
+        Some(g)
     }
 
     pub fn remove(&mut self, id: u32) {
@@ -1260,40 +1313,164 @@ fn pixel(s: &Step, i: &[V], c: &Ctx) -> [V; 4] {
 
 // ---------- éditeur ----------
 
+const NW: f32 = 190.0;
+const ROW: f32 = 22.0;
+const HEAD: f32 = 24.0;
+const THUMB: f32 = 96.0;
+const CATS: [&str; 7] = ["entrée", "motif", "couleur", "math", "filtre", "shader", "sortie"];
+
+struct AddMenu {
+    /// Position écran du menu et position dans le graphe du futur node
+    at: Pos2,
+    graph_at: [f32; 2],
+    query: String,
+    cat: usize,
+    sel: usize,
+    /// Lien en attente : la sortie qu'on glissait quand on a lâché dans le vide
+    link: Option<(u32, usize)>,
+}
+
 pub struct Editor {
     pub path: PathBuf,
     root: String,
     pub graph: Graph,
     scene: Rect,
     drag_link: Option<(u32, usize)>,
-    selected: Option<u32>,
+    selected: std::collections::BTreeSet<u32>,
     dirty: Option<std::time::Instant>,
     program: Result<Program, (u32, String)>,
     preview: Option<egui::TextureHandle>,
     preview_key: u64,
     preview_rx: Option<std::sync::mpsc::Receiver<(u64, Img)>>,
     sphere: Option<std::sync::Arc<crate::model3d::Prepared>>,
-    add_at: Option<Pos2>,
-    add_query: String,
+    add: Option<AddMenu>,
     pub message: Option<String>,
     version: u64,
     /// Demande à l'IA d'écrire le code d'un node shader : (node, description)
     pub ai_request: Option<(u32, String)>,
     pub ai_rx: Option<std::sync::mpsc::Receiver<(u32, Result<String, String>)>>,
     ai_prompt: HashMap<u32, String>,
+    box_start: Option<Pos2>,
+    undo: Vec<Graph>,
+    redo: Vec<Graph>,
+    last: Graph,
+    clipboard: Option<(Vec<Node>, Vec<Link>)>,
+    thumbs: HashMap<u32, (u64, egui::TextureHandle)>,
+    thumb_rx: Option<std::sync::mpsc::Receiver<(u64, u32, Img)>>,
+    thumb_version: u64,
+    rename: Option<(u32, String)>,
+    frame_sel: bool,
+}
+
+enum Act {
+    Move(egui::Vec2),
+    MoveEnd,
+    Connect(u32, usize, u32, usize),
+    Unlink(u32, usize),
+    RemoveLink(usize),
+    Changed,
+    Click(u32, bool),
+    Clear,
+    BoxSelect(Rect, bool),
+    OpenAdd(Pos2, Option<(u32, usize)>),
+    Node(u32, NodeOp),
+}
+
+#[derive(Clone, Copy)]
+enum NodeOp {
+    Duplicate,
+    Delete,
+    Mute,
+    Collapse,
+    Preview,
+    Disconnect,
+    Rename,
+}
+
+fn to_texture(ctx: &egui::Context, name: &str, img: &Img) -> egui::ColorImage {
+    let _ = (ctx, name);
+    let q = |x: f32| (x.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
+    let bytes: Vec<u8> = img.px.iter().flat_map(|c| [q(c[0]), q(c[1]), q(c[2]), q(c[3])]).collect();
+    egui::ColorImage::from_rgba_unmultiplied([img.w, img.h], &bytes)
 }
 
 impl Editor {
     pub fn open(path: PathBuf, root: &str) -> Result<Editor, String> {
         let graph = Graph::load(&path)?;
-        let program = Program::compile(&graph, root, 1024);
-        Ok(Editor { path, root: root.to_string(), graph, scene: Rect::ZERO, drag_link: None, selected: None, dirty: None, program, preview: None, preview_key: u64::MAX, preview_rx: None, sphere: None, add_at: None, add_query: String::new(), message: None, version: 1, ai_request: None, ai_rx: None, ai_prompt: HashMap::new() })
+        let program = Program::compile(&graph.effective(), root, 1024);
+        Ok(Editor {
+            path,
+            root: root.to_string(),
+            last: graph.clone(),
+            graph,
+            scene: Rect::ZERO,
+            drag_link: None,
+            selected: Default::default(),
+            dirty: None,
+            program,
+            preview: None,
+            preview_key: u64::MAX,
+            preview_rx: None,
+            sphere: None,
+            add: None,
+            message: None,
+            version: 1,
+            ai_request: None,
+            ai_rx: None,
+            ai_prompt: HashMap::new(),
+            box_start: None,
+            undo: vec![],
+            redo: vec![],
+            clipboard: None,
+            thumbs: HashMap::new(),
+            thumb_rx: None,
+            thumb_version: 0,
+            rename: None,
+            frame_sel: false,
+        })
     }
 
     fn changed(&mut self) {
         self.dirty = Some(std::time::Instant::now());
-        self.program = Program::compile(&self.graph, &self.root, 1024);
+        self.program = Program::compile(&self.graph.effective(), &self.root, 1024);
         self.version += 1;
+        self.commit();
+    }
+
+    /// Point d'annulation si le graphe a changé depuis le dernier.
+    fn commit(&mut self) {
+        let a = serde_json::to_string(&self.graph).unwrap_or_default();
+        let b = serde_json::to_string(&self.last).unwrap_or_default();
+        if a != b {
+            self.undo.push(std::mem::replace(&mut self.last, self.graph.clone()));
+            if self.undo.len() > 200 {
+                self.undo.remove(0);
+            }
+            self.redo.clear();
+        }
+    }
+
+    fn restore(&mut self, g: Graph) {
+        self.graph = g;
+        self.last = self.graph.clone();
+        self.selected.retain(|id| self.graph.nodes.iter().any(|n| n.id == *id));
+        self.dirty = Some(std::time::Instant::now());
+        self.program = Program::compile(&self.graph.effective(), &self.root, 1024);
+        self.version += 1;
+    }
+
+    fn undo(&mut self) {
+        if let Some(g) = self.undo.pop() {
+            self.redo.push(self.graph.clone());
+            self.restore(g);
+        }
+    }
+
+    fn redo(&mut self) {
+        if let Some(g) = self.redo.pop() {
+            self.undo.push(self.graph.clone());
+            self.restore(g);
+        }
     }
 
     pub fn save_if_due(&mut self, force: bool) {
@@ -1305,6 +1482,124 @@ impl Editor {
                 self.dirty = None;
             }
         }
+    }
+
+    fn is_output(&self, id: u32) -> bool {
+        self.graph.nodes.iter().find(|n| n.id == id).is_some_and(|n| n.op == "mat_out" || n.op == "comp_out")
+    }
+
+    /// Copie les nodes choisis (avec les liens entre eux) décalés de `offset`.
+    fn duplicate(&mut self, ids: &[u32], offset: [f32; 2]) -> Vec<u32> {
+        let nodes: Vec<Node> = self.graph.nodes.iter().filter(|n| ids.contains(&n.id) && n.op != "mat_out" && n.op != "comp_out").cloned().collect();
+        let links: Vec<Link> = self.graph.links.iter().filter(|l| ids.contains(&l.from) && ids.contains(&l.to)).cloned().collect();
+        self.paste(nodes, links, offset)
+    }
+
+    fn paste(&mut self, nodes: Vec<Node>, links: Vec<Link>, offset: [f32; 2]) -> Vec<u32> {
+        let mut map = HashMap::new();
+        for n in &nodes {
+            if def(&n.op).is_none() {
+                continue;
+            }
+            let id = self.graph.add(&n.op, [n.pos[0] + offset[0], n.pos[1] + offset[1]]);
+            if let Some(m) = self.graph.nodes.iter_mut().find(|m| m.id == id) {
+                m.values = n.values.clone();
+                m.params = n.params.clone();
+                m.muted = n.muted;
+                m.collapsed = n.collapsed;
+                m.preview = n.preview;
+                m.label = n.label.clone();
+            }
+            map.insert(n.id, id);
+        }
+        for l in links {
+            if let (Some(&a), Some(&b)) = (map.get(&l.from), map.get(&l.to)) {
+                self.graph.connect(a, l.out, b, l.inp);
+            }
+        }
+        map.values().copied().collect()
+    }
+
+    /// Hauteur d'un node selon son type et son état.
+    fn node_size(n: &Node, d: &Def) -> f32 {
+        if n.collapsed {
+            return HEAD;
+        }
+        let rows = d.outputs.len() + d.inputs.len() + d.params.iter().map(|pp| if matches!(pp, ParamDef::Text(_)) { 9 } else { 1 }).sum::<usize>();
+        let thumb = if n.preview && !d.outputs.is_empty() { THUMB + 8.0 } else { 0.0 };
+        HEAD + rows as f32 * ROW + 8.0 + thumb
+    }
+
+    fn bbox(&self, only: Option<&std::collections::BTreeSet<u32>>) -> Rect {
+        let mut bb = Rect::NOTHING;
+        for n in &self.graph.nodes {
+            if only.is_some_and(|s| !s.contains(&n.id)) {
+                continue;
+            }
+            let h = def(&n.op).map(|d| Self::node_size(n, d)).unwrap_or(100.0);
+            bb = bb.union(Rect::from_min_size(pos2(n.pos[0], n.pos[1]), vec2(NW, h)));
+        }
+        bb
+    }
+
+    /// Calcule les miniatures en arrière-plan quand le graphe change.
+    fn thumbs_tick(&mut self, ctx: &egui::Context) {
+        if let Some(rx) = &self.thumb_rx {
+            loop {
+                match rx.try_recv() {
+                    Ok((v, id, img)) => {
+                        let ci = to_texture(ctx, "thumb", &img);
+                        match self.thumbs.get_mut(&id) {
+                            Some((ver, t)) => {
+                                t.set(ci, egui::TextureOptions::LINEAR);
+                                *ver = v;
+                            }
+                            None => {
+                                let t = ctx.load_texture(format!("node-thumb-{id}"), ci, egui::TextureOptions::LINEAR);
+                                self.thumbs.insert(id, (v, t));
+                            }
+                        }
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {
+                        ctx.request_repaint_after(std::time::Duration::from_millis(80));
+                        break;
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        self.thumb_rx = None;
+                        break;
+                    }
+                }
+            }
+        }
+        if self.thumb_rx.is_some() || self.thumb_version == self.version {
+            return;
+        }
+        self.thumb_version = self.version;
+        let ids: Vec<(u32, usize)> = self.graph.nodes.iter().filter(|n| n.preview && !n.collapsed && def(&n.op).is_some_and(|d| !d.outputs.is_empty())).map(|n| (n.id, 0)).collect();
+        if ids.is_empty() {
+            return;
+        }
+        let g = self.graph.clone();
+        let root = self.root.clone();
+        let version = self.version;
+        let sphere = if g.kind == GraphKind::Material { Some(self.sphere.get_or_insert_with(|| std::sync::Arc::new(crate::model3d::preview_sphere())).clone()) } else { None };
+        let (tx, rx) = std::sync::mpsc::channel();
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            for (id, out) in ids {
+                let Some(pg) = g.probe(id, out) else { continue };
+                let Ok(prog) = Program::compile(&pg, &root, 256) else { continue };
+                let img = match &sphere {
+                    Some(s) => crate::model3d::render_material_preview(s, std::sync::Arc::new(prog), 96),
+                    None => prog.composite(Some([144, 96])),
+                };
+                if tx.send((version, id, img)).is_err() {
+                    return;
+                }
+                ctx.request_repaint();
+            }
+        });
+        self.thumb_rx = Some(rx);
     }
 
     pub fn show(&mut self, ui: &mut egui::Ui) {
@@ -1331,13 +1626,14 @@ impl Editor {
         if self.dirty.is_some() {
             ctx.request_repaint_after(std::time::Duration::from_millis(300));
         }
+        self.thumbs_tick(&ctx);
         let kind = self.graph.kind;
         // Barre
-        let mut add: Option<&'static str> = None;
+        let mut add_now: Option<&'static str> = None;
         let mut preset: Option<&'static str> = None;
         ui.horizontal(|ui| {
             egui::containers::menu::MenuButton::new("＋ ajouter ▾").ui(ui, |ui| {
-                for cat in ["entrée", "motif", "couleur", "math", "filtre", "shader", "sortie"] {
+                for cat in CATS {
                     let items: Vec<&Def> = DEFS.iter().filter(|d| d.cat == cat && if kind == GraphKind::Material { d.mat } else { d.comp }).collect();
                     if items.is_empty() {
                         continue;
@@ -1345,7 +1641,7 @@ impl Editor {
                     ui.menu_button(cat, |ui| {
                         for d in items {
                             if ui.button(d.label).clicked() {
-                                add = Some(d.op);
+                                add_now = Some(d.op);
                             }
                         }
                     });
@@ -1360,13 +1656,28 @@ impl Editor {
                     }
                 });
             }
-            ui.label(RichText::new("Maj+A : ajouter · glisser une sortie sur une entrée · Suppr : effacer · molette : zoom").color(p.muted).size(11.0));
+            if ui.add_enabled(!self.undo.is_empty(), egui::Button::new("↶")).on_hover_text("annuler (Ctrl+Z)").clicked() {
+                self.undo();
+            }
+            if ui.add_enabled(!self.redo.is_empty(), egui::Button::new("↷")).on_hover_text("rétablir (Ctrl+Maj+Z)").clicked() {
+                self.redo();
+            }
+            egui::containers::menu::MenuButton::new("aide ▾").ui(ui, |ui| {
+                ui.label(RichText::new("Maj+A ou clic droit : ajouter\nglisser dans le vide : sélection en rectangle (Maj : ajouter)\nclic molette ou clic droit glissé : se déplacer · molette : zoom\nglisser une sortie dans le vide : ajouter un node déjà relié\nCtrl+clic sur un lien : le couper\nA : tout · Alt+A : rien · X / Suppr : effacer\nMaj+D : dupliquer · Ctrl+C / Ctrl+V : copier, coller\nM : muet · H : réduire · P : miniature · F2 : renommer\nF : cadrer la sélection · Origine : tout cadrer\nCtrl+Z / Ctrl+Maj+Z : annuler, rétablir\nGlisser des images depuis l'ordinateur : nodes texture").size(11.0));
+            });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if kind == GraphKind::Compositor && ui.button("exporter PNG").clicked() {
                     self.export();
                 }
                 if ui.button("recadrer").clicked() {
                     self.scene = Rect::ZERO;
+                }
+                let all_on = self.graph.nodes.iter().filter(|n| n.op != "mat_out" && n.op != "comp_out").all(|n| n.preview);
+                if ui.selectable_label(all_on, "miniatures").on_hover_text("aperçu sous chaque node").clicked() {
+                    for n in self.graph.nodes.iter_mut().filter(|n| n.op != "mat_out" && n.op != "comp_out") {
+                        n.preview = !all_on;
+                    }
+                    self.changed();
                 }
                 if let Some(m) = &self.message {
                     ui.label(RichText::new(m).color(p.muted).size(11.0));
@@ -1383,23 +1694,17 @@ impl Editor {
         }
         // Aperçu à gauche, graphe à droite
         let avail = ui.available_rect_before_wrap();
-        let pw = (avail.width() * 0.32).clamp(220.0, 460.0);
+        let pw = (avail.width() * 0.3).clamp(200.0, 440.0);
         let prev_rect = Rect::from_min_size(avail.min, vec2(pw, pw.min(avail.height())));
         let graph_rect = Rect::from_min_max(pos2(avail.min.x + pw + 8.0, avail.min.y), avail.max);
         self.preview_ui(ui, prev_rect, &ctx);
         ui.painter().rect_filled(graph_rect, 0.0, p.panel);
         let mut child = ui.new_child(egui::UiBuilder::new().max_rect(graph_rect));
-        let shift_a = ctx.input(|i| i.modifiers.shift && i.key_pressed(egui::Key::A)) && child.rect_contains_pointer(graph_rect);
-        if shift_a {
-            self.add_at = ctx.pointer_latest_pos();
-            self.add_query.clear();
-        }
-        // Premier affichage (ou « recadrer ») : on cadre tous les nodes.
-        if self.scene == Rect::ZERO || !self.scene.is_finite() {
-            let mut bb = Rect::NOTHING;
-            for n in &self.graph.nodes {
-                bb = bb.union(Rect::from_min_size(pos2(n.pos[0], n.pos[1]), vec2(190.0, 220.0)));
-            }
+        let over_graph = ctx.pointer_latest_pos().is_some_and(|pt| graph_rect.contains(pt));
+        // Cadrage : tout (premier affichage, « recadrer », Origine) ou la sélection (F)
+        let frame_all = self.scene == Rect::ZERO || !self.scene.is_finite();
+        if frame_all || std::mem::take(&mut self.frame_sel) {
+            let mut bb = if frame_all || self.selected.is_empty() { self.bbox(None) } else { self.bbox(Some(&self.selected)) };
             if !bb.is_finite() {
                 bb = Rect::from_min_size(Pos2::ZERO, vec2(600.0, 400.0));
             }
@@ -1411,22 +1716,18 @@ impl Editor {
             } else {
                 h = w / aspect;
             }
-            // Pas de zoom au-delà de 1:1
             if w < graph_rect.width() {
                 w = graph_rect.width();
                 h = graph_rect.height();
             }
             self.scene = Rect::from_center_size(bb.center(), vec2(w, h));
         }
-        let scene_before = self.scene;
         let mut scene = self.scene;
         let mut actions: Vec<Act> = vec![];
-        egui::Scene::new().zoom_range(0.25..=2.0).drag_pan_buttons(egui::DragPanButtons::PRIMARY | egui::DragPanButtons::MIDDLE).show(&mut child, &mut scene, |ui| {
+        egui::Scene::new().zoom_range(0.2..=2.5).drag_pan_buttons(egui::DragPanButtons::MIDDLE | egui::DragPanButtons::SECONDARY).show(&mut child, &mut scene, |ui| {
             self.draw_graph(ui, &mut actions);
         });
         self.scene = scene;
-        let _ = scene_before;
-        // Ajout au centre ou au curseur
         let sc = self.scene;
         let to_graph = move |pt: Pos2| -> [f32; 2] {
             if !sc.is_finite() || sc.width() <= 0.0 {
@@ -1435,58 +1736,134 @@ impl Editor {
             let k = sc.width() / graph_rect.width();
             [sc.min.x + (pt.x - graph_rect.min.x) * k, sc.min.y + (pt.y - graph_rect.min.y) * k]
         };
-        if let Some(op) = add {
+        let typing = ctx.egui_wants_keyboard_input();
+        // Raccourcis (souris sur le graphe)
+        if over_graph && !typing && self.add.is_none() {
+            let (shift, cmd, alt) = ctx.input(|i| (i.modifiers.shift, i.modifiers.command, i.modifiers.alt));
+            let key = |k: egui::Key| ctx.input(|i| i.key_pressed(k));
+            if shift && key(egui::Key::A) {
+                if let Some(pt) = ctx.pointer_latest_pos() {
+                    self.open_add(pt, to_graph(pt), None);
+                }
+            } else if alt && key(egui::Key::A) {
+                self.selected.clear();
+            } else if !cmd && key(egui::Key::A) {
+                self.selected = self.graph.nodes.iter().map(|n| n.id).collect();
+            }
+            if key(egui::Key::Delete) || key(egui::Key::X) && !cmd {
+                for id in self.selected.clone() {
+                    if !self.is_output(id) {
+                        self.graph.remove(id);
+                    }
+                }
+                self.selected.clear();
+                self.changed();
+            }
+            if (shift && key(egui::Key::D)) || (cmd && key(egui::Key::D)) {
+                let ids: Vec<u32> = self.selected.iter().copied().collect();
+                let new = self.duplicate(&ids, [30.0, 30.0]);
+                self.selected = new.into_iter().collect();
+                self.changed();
+            }
+            if cmd && key(egui::Key::C) {
+                let ids: Vec<u32> = self.selected.iter().copied().collect();
+                let nodes: Vec<Node> = self.graph.nodes.iter().filter(|n| ids.contains(&n.id) && n.op != "mat_out" && n.op != "comp_out").cloned().collect();
+                let links: Vec<Link> = self.graph.links.iter().filter(|l| ids.contains(&l.from) && ids.contains(&l.to)).cloned().collect();
+                self.message = Some(format!("{} node(s) copié(s)", nodes.len()));
+                self.clipboard = Some((nodes, links));
+            }
+            if cmd && key(egui::Key::V) {
+                if let Some((nodes, links)) = self.clipboard.clone() {
+                    let at = ctx.pointer_latest_pos().map(to_graph).unwrap_or([0.0, 0.0]);
+                    let min = nodes.iter().fold([f32::MAX; 2], |m, n| [m[0].min(n.pos[0]), m[1].min(n.pos[1])]);
+                    let new = self.paste(nodes, links, [at[0] - min[0], at[1] - min[1]]);
+                    self.selected = new.into_iter().collect();
+                    self.changed();
+                }
+            }
+            if cmd && key(egui::Key::Z) {
+                if shift {
+                    self.redo();
+                } else {
+                    self.undo();
+                }
+            }
+            if cmd && key(egui::Key::Y) {
+                self.redo();
+            }
+            for (k, op) in [(egui::Key::M, NodeOp::Mute), (egui::Key::H, NodeOp::Collapse), (egui::Key::P, NodeOp::Preview)] {
+                if !cmd && !shift && key(k) {
+                    for id in self.selected.clone() {
+                        actions.push(Act::Node(id, op));
+                    }
+                }
+            }
+            if key(egui::Key::F2) {
+                if let Some(&id) = self.selected.iter().next() {
+                    actions.push(Act::Node(id, NodeOp::Rename));
+                }
+            }
+            if !cmd && key(egui::Key::F) {
+                self.frame_sel = true;
+            }
+            if key(egui::Key::Home) {
+                self.scene = Rect::ZERO;
+            }
+        }
+        // Images glissées depuis l'ordinateur : un node texture / image par fichier
+        let dropped: Vec<PathBuf> = ctx.input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).collect());
+        if !dropped.is_empty() && over_graph {
+            let mut at = ctx.pointer_latest_pos().map(to_graph).unwrap_or([0.0, 0.0]);
+            let op = if kind == GraphKind::Material { "texture" } else { "image" };
+            let mut added = vec![];
+            for f in dropped {
+                let ext = f.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+                if !["png", "jpg", "jpeg", "webp", "tga", "tif", "tiff", "bmp", "exr", "hdr", "gif"].contains(&ext.as_str()) {
+                    self.message = Some(format!("{} : seules les images vont dans un graphe", f.display()));
+                    continue;
+                }
+                let rel = crate::vault::inside(&self.root, &f).map(Ok).unwrap_or_else(|| crate::vault::link_external(&self.root, &f));
+                match rel {
+                    Ok(rel) => {
+                        let id = self.graph.add(op, at);
+                        if let Some(n) = self.graph.nodes.iter_mut().find(|n| n.id == id) {
+                            n.params.insert("fichier".into(), Param::S(rel));
+                        }
+                        added.push(id);
+                        at[1] += 220.0;
+                    }
+                    Err(e) => self.message = Some(e),
+                }
+            }
+            if !added.is_empty() {
+                self.selected = added.into_iter().collect();
+                self.changed();
+            }
+        }
+        if let Some(op) = add_now {
             let at = to_graph(graph_rect.center());
             let id = self.graph.add(op, at);
-            self.selected = Some(id);
+            self.selected = [id].into_iter().collect();
             self.changed();
-        }
-        if let Some(at) = self.add_at {
-            let mut close = false;
-            let mut chosen = None;
-            let area = egui::Area::new(egui::Id::unique("node-add")).order(egui::Order::Foreground).fixed_pos(at).show(&ctx, |ui| {
-                egui::Frame::new().fill(p.bg).stroke(Stroke::new(1.0, p.text)).inner_margin(8).show(ui, |ui| {
-                    ui.set_width(220.0);
-                    let r = ui.add(egui::TextEdit::singleline(&mut self.add_query).hint_text("ajouter un node…"));
-                    r.request_focus();
-                    let q = crate::chat::fold(&self.add_query);
-                    let list: Vec<&Def> = DEFS.iter().filter(|d| (if kind == GraphKind::Material { d.mat } else { d.comp }) && crate::chat::fold(d.label).contains(&q)).take(12).collect();
-                    for (k, d) in list.iter().enumerate() {
-                        let t = RichText::new(format!("{}  ", d.label)).color(if k == 0 { p.accent } else { p.text });
-                        if ui.add(egui::Button::new(t).frame(false)).clicked() {
-                            chosen = Some(d.op);
-                        }
-                    }
-                    if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                        chosen = list.first().map(|d| d.op);
-                    }
-                    if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-                        close = true;
-                    }
-                });
-            });
-            if let Some(op) = chosen {
-                let g = to_graph(at);
-                let id = self.graph.add(op, g);
-                self.selected = Some(id);
-                self.changed();
-                close = true;
-            }
-            if close || (ctx.input(|i| i.pointer.any_click()) && chosen.is_none() && !ctx.pointer_latest_pos().is_some_and(|pt| area.response.rect.contains(pt))) {
-                self.add_at = None;
-            }
         }
         // Actions du graphe
         let mut changed = false;
+        let mut moved = false;
         for a in actions {
             match a {
-                Act::Move(id, d) => {
-                    if let Some(n) = self.graph.nodes.iter_mut().find(|n| n.id == id) {
+                Act::Move(d) => {
+                    let snap = ctx.input(|i| i.modifiers.command);
+                    for n in self.graph.nodes.iter_mut().filter(|n| self.selected.contains(&n.id)) {
                         n.pos[0] += d.x;
                         n.pos[1] += d.y;
-                        self.dirty = Some(std::time::Instant::now());
+                        if snap {
+                            n.pos[0] = (n.pos[0] / 20.0).round() * 20.0;
+                            n.pos[1] = (n.pos[1] / 20.0).round() * 20.0;
+                        }
                     }
+                    self.dirty = Some(std::time::Instant::now());
                 }
+                Act::MoveEnd => moved = true,
                 Act::Connect(a, o, b, i) => {
                     self.graph.connect(a, o, b, i);
                     changed = true;
@@ -1495,88 +1872,329 @@ impl Editor {
                     self.graph.links.retain(|l| !(l.to == b && l.inp == i));
                     changed = true;
                 }
-                Act::Changed => changed = true,
-                Act::Select(id) => self.selected = id,
-            }
-        }
-        if let Some(sel) = self.selected {
-            let typing = ctx.egui_wants_keyboard_input();
-            if !typing && ctx.input(|i| i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::X)) {
-                let keep = self.graph.nodes.iter().find(|n| n.id == sel).is_some_and(|n| n.op == "mat_out" || n.op == "comp_out");
-                if !keep {
-                    self.graph.remove(sel);
-                    self.selected = None;
-                    changed = true;
-                }
-            }
-            if !typing && ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::D)) {
-                if let Some(n) = self.graph.nodes.iter().find(|n| n.id == sel).cloned() {
-                    let id = self.graph.add(&n.op, [n.pos[0] + 30.0, n.pos[1] + 30.0]);
-                    if let Some(m) = self.graph.nodes.iter_mut().find(|m| m.id == id) {
-                        m.values = n.values.clone();
-                        m.params = n.params.clone();
+                Act::RemoveLink(k) => {
+                    if k < self.graph.links.len() {
+                        self.graph.links.remove(k);
+                        changed = true;
                     }
-                    self.selected = Some(id);
+                }
+                Act::Changed => changed = true,
+                Act::Click(id, add) => {
+                    if add {
+                        if !self.selected.remove(&id) {
+                            self.selected.insert(id);
+                        }
+                    } else if !self.selected.contains(&id) {
+                        self.selected = [id].into_iter().collect();
+                    }
+                }
+                Act::Clear => self.selected.clear(),
+                Act::BoxSelect(r, add) => {
+                    if !add {
+                        self.selected.clear();
+                    }
+                    for n in &self.graph.nodes {
+                        let h = def(&n.op).map(|d| Self::node_size(n, d)).unwrap_or(100.0);
+                        if r.intersects(Rect::from_min_size(pos2(n.pos[0], n.pos[1]), vec2(NW, h))) {
+                            self.selected.insert(n.id);
+                        }
+                    }
+                }
+                Act::OpenAdd(gp, link) => {
+                    // gp : position dans le graphe ; le menu s'ouvre sous la souris
+                    let screen = ctx.pointer_latest_pos().unwrap_or(graph_rect.center());
+                    self.open_add(screen, [gp.x, gp.y], link);
+                }
+                Act::Node(id, op) => {
+                    match op {
+                        NodeOp::Duplicate => {
+                            let new = self.duplicate(&[id], [30.0, 30.0]);
+                            self.selected = new.into_iter().collect();
+                        }
+                        NodeOp::Delete => {
+                            if !self.is_output(id) {
+                                self.graph.remove(id);
+                                self.selected.remove(&id);
+                            }
+                        }
+                        NodeOp::Disconnect => self.graph.links.retain(|l| l.from != id && l.to != id),
+                        NodeOp::Rename => {
+                            let cur = self.graph.nodes.iter().find(|n| n.id == id).map(|n| n.label.clone()).unwrap_or_default();
+                            self.rename = Some((id, cur));
+                        }
+                        _ => {
+                            if let Some(n) = self.graph.nodes.iter_mut().find(|n| n.id == id) {
+                                match op {
+                                    NodeOp::Mute => {
+                                        if n.op != "mat_out" && n.op != "comp_out" {
+                                            n.muted = !n.muted;
+                                        }
+                                    }
+                                    NodeOp::Collapse => n.collapsed = !n.collapsed,
+                                    NodeOp::Preview => n.preview = !n.preview,
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
                     changed = true;
                 }
             }
         }
         if changed {
             self.changed();
+        } else if moved {
+            self.commit();
         }
+        self.add_menu_ui(&ctx);
         ui.allocate_rect(avail, Sense::hover());
+    }
+
+    fn open_add(&mut self, screen: Pos2, graph_at: [f32; 2], link: Option<(u32, usize)>) {
+        self.add = Some(AddMenu { at: screen, graph_at, query: String::new(), cat: 0, sel: 0, link });
+    }
+
+    /// Menu d'ajout façon Blender : catégories à gauche (survol), nodes à droite, recherche.
+    fn add_menu_ui(&mut self, ctx: &egui::Context) {
+        let p = theme::pal();
+        let kind = self.graph.kind;
+        let Some(m) = &mut self.add else { return };
+        let mut chosen: Option<&'static str> = None;
+        let mut close = false;
+        let usable = |d: &&Def| if kind == GraphKind::Material { d.mat } else { d.comp };
+        // Avec un lien en attente : seulement les nodes qui ont une entrée
+        let need_input = m.link.is_some();
+        let area = egui::Area::new(egui::Id::unique("node-add")).order(egui::Order::Foreground).fixed_pos(m.at).show(ctx, |ui| {
+            egui::Frame::new().fill(p.bg).stroke(Stroke::new(1.0, p.text)).inner_margin(6).show(ui, |ui| {
+                let r = ui.add(egui::TextEdit::singleline(&mut m.query).hint_text("chercher un node…").desired_width(360.0));
+                r.request_focus();
+                let q = crate::chat::fold(&m.query);
+                if q.is_empty() {
+                    ui.horizontal_top(|ui| {
+                        // Catégories
+                        ui.vertical(|ui| {
+                            ui.set_width(110.0);
+                            for (ci, cat) in CATS.iter().enumerate() {
+                                let n = DEFS.iter().filter(usable).filter(|d| d.cat == *cat && (!need_input || !d.inputs.is_empty())).count();
+                                if n == 0 {
+                                    continue;
+                                }
+                                let active = m.cat == ci;
+                                let r = ui.add(egui::Button::new(RichText::new(format!("{cat}  ›")).color(if active { p.on_accent } else { p.text })).fill(if active { p.accent } else { Color32::TRANSPARENT }).stroke(Stroke::NONE).min_size(vec2(110.0, 22.0)));
+                                if r.hovered() || r.clicked() {
+                                    if m.cat != ci {
+                                        m.sel = 0;
+                                    }
+                                    m.cat = ci;
+                                }
+                            }
+                        });
+                        ui.separator();
+                        ui.vertical(|ui| {
+                            ui.set_width(220.0);
+                            let items: Vec<&Def> = DEFS.iter().filter(usable).filter(|d| d.cat == CATS[m.cat] && (!need_input || !d.inputs.is_empty())).collect();
+                            for (k, d) in items.iter().enumerate() {
+                                let hi = k == m.sel;
+                                let r = ui.add(egui::Button::new(RichText::new(d.label).color(if hi { p.accent } else { p.text })).fill(if hi { p.line.gamma_multiply(0.6) } else { Color32::TRANSPARENT }).stroke(Stroke::NONE).min_size(vec2(220.0, 22.0)));
+                                if r.hovered() {
+                                    m.sel = k;
+                                }
+                                if r.clicked() {
+                                    chosen = Some(d.op);
+                                }
+                            }
+                            let n = items.len();
+                            if ui.input(|i| i.key_pressed(egui::Key::ArrowDown)) && n > 0 {
+                                m.sel = (m.sel + 1) % n;
+                            }
+                            if ui.input(|i| i.key_pressed(egui::Key::ArrowUp)) && n > 0 {
+                                m.sel = (m.sel + n - 1) % n;
+                            }
+                            if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                                chosen = items.get(m.sel).map(|d| d.op);
+                            }
+                        });
+                    });
+                    if ui.input(|i| i.key_pressed(egui::Key::ArrowRight)) {
+                        m.cat = (m.cat + 1) % CATS.len();
+                        m.sel = 0;
+                    }
+                    if ui.input(|i| i.key_pressed(egui::Key::ArrowLeft)) {
+                        m.cat = (m.cat + CATS.len() - 1) % CATS.len();
+                        m.sel = 0;
+                    }
+                } else {
+                    let list: Vec<&Def> = DEFS.iter().filter(usable).filter(|d| (!need_input || !d.inputs.is_empty()) && (crate::chat::fold(d.label).contains(&q) || crate::chat::fold(d.cat).contains(&q) || d.op.contains(&q))).take(16).collect();
+                    if m.sel >= list.len() {
+                        m.sel = 0;
+                    }
+                    for (k, d) in list.iter().enumerate() {
+                        let hi = k == m.sel;
+                        let r = ui.add(egui::Button::new(RichText::new(format!("{}   {}", d.label, d.cat)).color(if hi { p.accent } else { p.text })).fill(if hi { p.line.gamma_multiply(0.6) } else { Color32::TRANSPARENT }).stroke(Stroke::NONE).min_size(vec2(360.0, 22.0)));
+                        if r.hovered() {
+                            m.sel = k;
+                        }
+                        if r.clicked() {
+                            chosen = Some(d.op);
+                        }
+                    }
+                    if list.is_empty() {
+                        ui.label(RichText::new("aucun node").color(p.muted));
+                    }
+                    let n = list.len();
+                    if ui.input(|i| i.key_pressed(egui::Key::ArrowDown)) && n > 0 {
+                        m.sel = (m.sel + 1) % n;
+                    }
+                    if ui.input(|i| i.key_pressed(egui::Key::ArrowUp)) && n > 0 {
+                        m.sel = (m.sel + n - 1) % n;
+                    }
+                    if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                        chosen = list.get(m.sel).map(|d| d.op);
+                    }
+                }
+                if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                    close = true;
+                }
+            });
+        });
+        let (graph_at, link) = (m.graph_at, m.link);
+        let outside = ctx.input(|i| i.pointer.any_pressed()) && !ctx.pointer_latest_pos().is_some_and(|pt| area.response.rect.contains(pt));
+        if let Some(op) = chosen {
+            let id = self.graph.add(op, graph_at);
+            if let Some((from, out)) = link {
+                self.graph.connect(from, out, id, 0);
+            }
+            self.selected = [id].into_iter().collect();
+            self.add = None;
+            self.changed();
+        } else if close || outside {
+            self.add = None;
+        }
     }
 
     fn draw_graph(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Act>) {
         let p = theme::pal();
         let painter = ui.painter().clone();
-        const NW: f32 = 190.0;
-        const ROW: f32 = 22.0;
-        const HEAD: f32 = 24.0;
         let err_node = self.program.as_ref().err().map(|e| e.0);
-        // Positions des prises
-        let mut out_pos: HashMap<(u32, usize), Pos2> = HashMap::new();
-        let mut in_pos: HashMap<(u32, usize), Pos2> = HashMap::new();
-        let layout: Vec<(u32, Rect, &'static Def, f32)> = self
-            .graph
-            .nodes
-            .iter()
-            .filter_map(|n| {
-                let d = def(&n.op)?;
-                let rows = d.outputs.len() + d.inputs.len() + d.params.iter().map(|pp| if matches!(pp, ParamDef::Text(_)) { 9 } else { 1 }).sum::<usize>();
-                let h = HEAD + rows as f32 * ROW + 8.0;
-                let r = Rect::from_min_size(pos2(n.pos[0], n.pos[1]), vec2(NW, h));
-                Some((n.id, r, d, h))
-            })
-            .collect();
-        for (id, r, d, _) in &layout {
-            for k in 0..d.outputs.len() {
-                out_pos.insert((*id, k), pos2(r.right(), r.top() + HEAD + (k as f32 + 0.5) * ROW));
-            }
-            for k in 0..d.inputs.len() {
-                in_pos.insert((*id, k), pos2(r.left(), r.top() + HEAD + (d.outputs.len() + k) as f32 * ROW + ROW * 0.5));
+        // Le graphe est dans un calque zoomé : on ramène le pointeur dans ses coordonnées.
+        let from_global = ui.ctx().layer_transform_from_global(ui.layer_id());
+        let pointer = ui.input(|i| i.pointer.latest_pos()).map(|pt| from_global.map(|t| t * pt).unwrap_or(pt));
+        let (shift, cmd) = ui.input(|i| (i.modifiers.shift, i.modifiers.command));
+        // Fond : clic = rien, glisser = rectangle, clic droit = menu
+        let bg_rect = Rect::from_center_size(Pos2::ZERO, vec2(1e7, 1e7));
+        let bg = ui.interact(bg_rect, ui.scope_id().with("node-bg"), Sense::click_and_drag());
+        // Grille de points
+        let clip = ui.clip_rect();
+        let step = 40.0;
+        if clip.width() / step < 220.0 {
+            let mut x = (clip.left() / step).floor() * step;
+            while x < clip.right() {
+                let mut y = (clip.top() / step).floor() * step;
+                while y < clip.bottom() {
+                    painter.circle_filled(pos2(x, y), 1.2, p.line);
+                    y += step;
+                }
+                x += step;
             }
         }
-        // Liens
-        let wire = |a: Pos2, b: Pos2, col: Color32| {
+        if bg.drag_started_by(egui::PointerButton::Primary) {
+            self.box_start = pointer;
+        }
+        if let (Some(a), Some(b)) = (self.box_start, pointer) {
+            let r = Rect::from_two_pos(a, b);
+            painter.rect_filled(r, 0.0, p.accent.gamma_multiply(0.08));
+            painter.rect_stroke(r, 0.0, Stroke::new(1.0, p.accent), egui::StrokeKind::Inside);
+            if ui.input(|i| i.pointer.button_released(egui::PointerButton::Primary)) {
+                actions.push(Act::BoxSelect(r, shift));
+                self.box_start = None;
+            }
+        }
+        if bg.clicked() && !shift {
+            actions.push(Act::Clear);
+        }
+        bg.context_menu(|ui| {
+            if ui.button("ajouter un node…   Maj+A").clicked() {
+                if let Some(pt) = pointer {
+                    actions.push(Act::OpenAdd(pt, None));
+                }
+                ui.close();
+            }
+            if ui.add_enabled(self.clipboard.is_some(), egui::Button::new("coller   Ctrl+V")).clicked() {
+                if let (Some((nodes, links)), Some(pt)) = (self.clipboard.clone(), pointer) {
+                    let min = nodes.iter().fold([f32::MAX; 2], |m, n| [m[0].min(n.pos[0]), m[1].min(n.pos[1])]);
+                    let new = self.paste(nodes, links, [pt.x - min[0], pt.y - min[1]]);
+                    self.selected = new.into_iter().collect();
+                    actions.push(Act::Changed);
+                }
+                ui.close();
+            }
+            if ui.button("tout sélectionner   A").clicked() {
+                self.selected = self.graph.nodes.iter().map(|n| n.id).collect();
+                ui.close();
+            }
+            if ui.button("tout cadrer   Origine").clicked() {
+                self.scene = Rect::ZERO;
+                ui.close();
+            }
+        });
+        // Mise en page
+        let mut out_pos: HashMap<(u32, usize), Pos2> = HashMap::new();
+        let mut in_pos: HashMap<(u32, usize), Pos2> = HashMap::new();
+        let layout: Vec<(u32, Rect, &'static Def)> = self.graph.nodes.iter().filter_map(|n| def(&n.op).map(|d| (n.id, Rect::from_min_size(pos2(n.pos[0], n.pos[1]), vec2(NW, Self::node_size(n, d))), d))).collect();
+        let collapsed: std::collections::HashSet<u32> = self.graph.nodes.iter().filter(|n| n.collapsed).map(|n| n.id).collect();
+        for (id, r, d) in &layout {
+            let c = collapsed.contains(id);
+            for k in 0..d.outputs.len() {
+                out_pos.insert((*id, k), if c { pos2(r.right(), r.center().y) } else { pos2(r.right(), r.top() + HEAD + (k as f32 + 0.5) * ROW) });
+            }
+            for k in 0..d.inputs.len() {
+                in_pos.insert((*id, k), if c { pos2(r.left(), r.center().y) } else { pos2(r.left(), r.top() + HEAD + (d.outputs.len() + k) as f32 * ROW + ROW * 0.5) });
+            }
+        }
+        let sock_of = |id: u32, out: usize| -> Sock { layout.iter().find(|x| x.0 == id).and_then(|x| x.2.outputs.get(out)).map(|o| o.1).unwrap_or(Sock::Float) };
+        // Liens (survol : surlignés ; Ctrl+clic ou clic droit : coupés)
+        let bez = |a: Pos2, b: Pos2| -> [Pos2; 4] {
             let dx = ((b.x - a.x).abs() * 0.5).max(40.0);
-            let pts = [a, a + vec2(dx, 0.0), b - vec2(dx, 0.0), b];
-            painter.add(egui::epaint::CubicBezierShape::from_points_stroke(pts, false, Color32::TRANSPARENT, Stroke::new(2.0, col)));
+            [a, a + vec2(dx, 0.0), b - vec2(dx, 0.0), b]
         };
-        for l in &self.graph.links {
+        let near = |pts: &[Pos2; 4], pt: Pos2| -> bool {
+            (0..=24).any(|i| {
+                let t = i as f32 / 24.0;
+                let u = 1.0 - t;
+                let q = pts[0].to_vec2() * (u * u * u) + pts[1].to_vec2() * (3.0 * u * u * t) + pts[2].to_vec2() * (3.0 * u * t * t) + pts[3].to_vec2() * (t * t * t);
+                q.to_pos2().distance(pt) < 6.0
+            })
+        };
+        let mut hovered_link = None;
+        for (k, l) in self.graph.links.iter().enumerate() {
             if let (Some(a), Some(b)) = (out_pos.get(&(l.from, l.out)), in_pos.get(&(l.to, l.inp))) {
-                wire(*a, *b, p.muted);
+                let pts = bez(*a, *b);
+                let hov = self.drag_link.is_none() && hovered_link.is_none() && pointer.is_some_and(|pt| near(&pts, pt));
+                if hov {
+                    hovered_link = Some(k);
+                }
+                let muted = self.graph.nodes.iter().any(|n| (n.id == l.from || n.id == l.to) && n.muted);
+                let col = if hov { p.accent } else if muted { p.muted.gamma_multiply(0.5) } else { sock_color(sock_of(l.from, l.out)).gamma_multiply(0.85) };
+                painter.add(egui::epaint::CubicBezierShape::from_points_stroke(pts, false, Color32::TRANSPARENT, Stroke::new(if hov { 3.0 } else { 2.0 }, col)));
+            }
+        }
+        if let Some(k) = hovered_link {
+            let (clicked, rclick) = ui.input(|i| (i.pointer.button_clicked(egui::PointerButton::Primary), i.pointer.button_clicked(egui::PointerButton::Secondary)));
+            if (clicked && cmd) || rclick {
+                actions.push(Act::RemoveLink(k));
+            }
+            if ui.input(|i| i.key_pressed(egui::Key::Delete)) {
+                actions.push(Act::RemoveLink(k));
             }
         }
         // Nodes
         let mut hovered_in: Option<(u32, usize)> = None;
-        // Le graphe est dans un calque zoomé : on ramène le pointeur dans ses coordonnées.
-        let from_global = ui.ctx().layer_transform_from_global(ui.layer_id());
-        let pointer = ui.input(|i| i.pointer.latest_pos()).map(|pt| from_global.map(|t| t * pt).unwrap_or(pt));
         let ids: Vec<u32> = self.graph.nodes.iter().map(|n| n.id).collect();
-        for (id, r, d, _) in &layout {
+        let mut rename_done = None;
+        for (id, r, d) in &layout {
             let ni = ids.iter().position(|x| x == id).unwrap();
-            let selected = self.selected == Some(*id);
+            let selected = self.selected.contains(id);
+            let (muted, is_collapsed, preview_on) = (self.graph.nodes[ni].muted, self.graph.nodes[ni].collapsed, self.graph.nodes[ni].preview);
             let cat_col = match d.cat {
                 "sortie" => p.accent,
                 "entrée" => Color32::from_rgb(70, 130, 200),
@@ -1586,48 +2204,117 @@ impl Editor {
                 "shader" => Color32::from_rgb(210, 70, 110),
                 _ => Color32::from_rgb(120, 120, 130),
             };
+            let cat_col = if muted { Color32::from_gray(130) } else { cat_col };
+            let hover_node = pointer.is_some_and(|pt| r.contains(pt));
             painter.rect_filled(r.translate(vec2(3.0, 3.0)), 0.0, Color32::from_black_alpha(30));
-            painter.rect_filled(*r, 0.0, p.bg);
+            painter.rect_filled(*r, 0.0, if muted { p.panel } else { p.bg });
             let head = Rect::from_min_size(r.min, vec2(r.width(), HEAD));
             painter.rect_filled(head, 0.0, cat_col.gamma_multiply(0.85));
-            painter.text(head.left_center() + vec2(8.0, 0.0), egui::Align2::LEFT_CENTER, d.label, egui::FontId::monospace(12.0), Color32::WHITE);
-            let border = if err_node == Some(*id) { Stroke::new(2.0, p.missing) } else if selected { Stroke::new(2.0, p.accent) } else { Stroke::new(1.0, p.line) };
+            // Flèche réduire, titre, miniature
+            let arrow = Rect::from_min_size(head.min, vec2(20.0, HEAD));
+            let ar = ui.interact(arrow, ui.scope_id().with(("node-arrow", *id)), Sense::click());
+            painter.text(arrow.center(), egui::Align2::CENTER_CENTER, if is_collapsed { "▸" } else { "▾" }, egui::FontId::monospace(11.0), Color32::WHITE);
+            if ar.clicked() {
+                actions.push(Act::Node(*id, NodeOp::Collapse));
+            }
+            let has_out = !d.outputs.is_empty();
+            let eye = Rect::from_min_size(pos2(head.right() - 22.0, head.top()), vec2(22.0, HEAD));
+            if has_out && d.cat != "sortie" {
+                let er = ui.interact(eye, ui.scope_id().with(("node-eye", *id)), Sense::click()).on_hover_text("miniature (P)");
+                painter.text(eye.center(), egui::Align2::CENTER_CENTER, if preview_on { "◉" } else { "○" }, egui::FontId::monospace(11.0), Color32::WHITE);
+                if er.clicked() {
+                    actions.push(Act::Node(*id, NodeOp::Preview));
+                }
+            }
+            let title_rect = Rect::from_min_max(pos2(arrow.right(), head.top()), pos2(eye.left(), head.bottom()));
+            let label = &self.graph.nodes[ni].label;
+            let title = if label.is_empty() { d.label.to_string() } else { label.clone() };
+            let title = if muted { format!("{title} (muet)") } else { title };
+            match &mut self.rename {
+                Some((rid, text)) if rid == id => {
+                    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(title_rect.shrink(2.0)));
+                    let te = child.add(egui::TextEdit::singleline(text).desired_width(title_rect.width() - 6.0).font(egui::FontId::monospace(11.0)));
+                    te.request_focus();
+                    if te.lost_focus() || child.input(|i| i.key_pressed(egui::Key::Enter)) {
+                        rename_done = Some((*id, text.clone()));
+                    }
+                }
+                _ => {
+                    painter.with_clip_rect(title_rect).text(title_rect.left_center(), egui::Align2::LEFT_CENTER, title, egui::FontId::monospace(12.0), Color32::WHITE);
+                }
+            }
+            let border = if err_node == Some(*id) {
+                Stroke::new(2.0, p.missing)
+            } else if selected {
+                Stroke::new(2.0, p.accent)
+            } else if hover_node {
+                Stroke::new(1.5, p.muted)
+            } else {
+                Stroke::new(1.0, p.line)
+            };
             painter.rect_stroke(*r, 0.0, border, egui::StrokeKind::Outside);
-            let hr = ui.interact(head, ui.scope_id().with(("node-head", *id)), Sense::click_and_drag());
-            if hr.dragged() {
-                actions.push(Act::Move(*id, hr.drag_delta()));
+            let hr = ui.interact(title_rect, ui.scope_id().with(("node-head", *id)), Sense::click_and_drag());
+            if hr.drag_started_by(egui::PointerButton::Primary) || hr.clicked() {
+                actions.push(Act::Click(*id, shift));
             }
-            if hr.clicked() || hr.drag_started() {
-                actions.push(Act::Select(Some(*id)));
+            if hr.dragged_by(egui::PointerButton::Primary) {
+                actions.push(Act::Move(hr.drag_delta()));
             }
-            // Sorties
+            if hr.drag_stopped() {
+                actions.push(Act::MoveEnd);
+            }
+            if hr.double_clicked() {
+                actions.push(Act::Node(*id, NodeOp::Rename));
+            }
+            hr.context_menu(|ui| {
+                for (label, op) in [
+                    ("renommer   F2", NodeOp::Rename),
+                    ("dupliquer   Maj+D", NodeOp::Duplicate),
+                    (if muted { "réactiver   M" } else { "rendre muet   M" }, NodeOp::Mute),
+                    (if is_collapsed { "déplier   H" } else { "réduire   H" }, NodeOp::Collapse),
+                    (if preview_on { "cacher la miniature   P" } else { "montrer la miniature   P" }, NodeOp::Preview),
+                    ("déconnecter", NodeOp::Disconnect),
+                    ("supprimer   X", NodeOp::Delete),
+                ] {
+                    if ui.button(label).clicked() {
+                        actions.push(Act::Node(*id, op));
+                        ui.close();
+                    }
+                }
+            });
+            // Prises (toujours, même réduit)
             for (k, (name, sock)) in d.outputs.iter().enumerate() {
-                let y = r.top() + HEAD + (k as f32 + 0.5) * ROW;
-                painter.text(pos2(r.right() - 12.0, y), egui::Align2::RIGHT_CENTER, *name, egui::FontId::monospace(11.0), p.text);
-                let sp = pos2(r.right(), y);
-                painter.circle(sp, 5.0, sock_color(*sock), Stroke::new(1.0, p.bg));
-                let sr = ui.interact(Rect::from_center_size(sp, vec2(14.0, 14.0)), ui.scope_id().with(("out", *id, k)), Sense::drag());
+                let sp = out_pos[&(*id, k)];
+                if !is_collapsed {
+                    painter.text(pos2(r.right() - 12.0, sp.y), egui::Align2::RIGHT_CENTER, *name, egui::FontId::monospace(11.0), p.text);
+                }
+                let hov = pointer.is_some_and(|pt| sp.distance(pt) < 9.0);
+                painter.circle(sp, if hov { 6.5 } else { 5.0 }, sock_color(*sock), Stroke::new(1.0, p.bg));
+                let sr = ui.interact(Rect::from_center_size(sp, vec2(16.0, 16.0)), ui.scope_id().with(("out", *id, k)), Sense::drag());
                 if sr.drag_started() {
                     self.drag_link = Some((*id, k));
                 }
             }
-            // Entrées (avec valeur si non reliée)
             let node = &mut self.graph.nodes[ni];
             for (k, (name, sock, _)) in d.inputs.iter().enumerate() {
-                let y = r.top() + HEAD + (d.outputs.len() + k) as f32 * ROW + ROW * 0.5;
-                let sp = pos2(r.left(), y);
-                painter.circle(sp, 5.0, sock_color(*sock), Stroke::new(1.0, p.bg));
+                let sp = in_pos[&(*id, k)];
                 let linked = self.graph.links.iter().any(|l| l.to == *id && l.inp == k);
-                let sr = ui.interact(Rect::from_center_size(sp, vec2(14.0, 14.0)), ui.scope_id().with(("in", *id, k)), Sense::drag());
-                if pointer.is_some_and(|pt| sp.distance(pt) < 10.0) {
+                let hov = pointer.is_some_and(|pt| sp.distance(pt) < 10.0 || (is_collapsed && r.contains(pt)));
+                if hov && hovered_in.is_none() && (!is_collapsed || !linked) {
                     hovered_in = Some((*id, k));
                 }
+                painter.circle(sp, if hov && self.drag_link.is_some() { 6.5 } else { 5.0 }, sock_color(*sock), Stroke::new(1.0, p.bg));
+                let sr = ui.interact(Rect::from_center_size(sp, vec2(16.0, 16.0)), ui.scope_id().with(("in", *id, k)), Sense::drag());
                 if sr.drag_started() && linked {
                     if let Some(l) = self.graph.links.iter().find(|l| l.to == *id && l.inp == k) {
                         self.drag_link = Some((l.from, l.out));
                     }
                     actions.push(Act::Unlink(*id, k));
                 }
+                if is_collapsed {
+                    continue;
+                }
+                let y = sp.y;
                 let row = Rect::from_min_size(pos2(r.left() + 10.0, y - ROW * 0.5 + 1.0), vec2(NW - 20.0, ROW - 2.0));
                 if linked {
                     painter.text(row.left_center(), egui::Align2::LEFT_CENTER, *name, egui::FontId::monospace(11.0), p.text);
@@ -1642,7 +2329,6 @@ impl Editor {
                     let resp = match sock {
                         Sock::Float => child.add(egui::DragValue::new(&mut v[0]).speed(0.01).max_decimals(3)),
                         Sock::Color => {
-                            // Valeurs sRGB (comme un sélecteur de couleur habituel)
                             let q = |x: f32| (x.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
                             let mut c = Color32::from_rgba_unmultiplied(q(v[0]), q(v[1]), q(v[2]), q(v[3]));
                             let r = egui::color_picker::color_edit_button_srgba(&mut child, &mut c, egui::color_picker::Alpha::OnlyBlend);
@@ -1661,6 +2347,9 @@ impl Editor {
                         actions.push(Act::Changed);
                     }
                 }
+            }
+            if is_collapsed {
+                continue;
             }
             // Réglages
             let mut y = r.top() + HEAD + (d.outputs.len() + d.inputs.len()) as f32 * ROW;
@@ -1702,7 +2391,6 @@ impl Editor {
                             *code = c;
                             actions.push(Act::Changed);
                         }
-                        // Décrire l'effet et laisser l'IA écrire le code
                         let prompt = self.ai_prompt.entry(*id).or_default();
                         let busy = self.ai_rx.is_some();
                         child.horizontal(|ui| {
@@ -1718,7 +2406,7 @@ impl Editor {
                     }
                     (ParamDef::File(_), Param::S(rel)) => {
                         let label = if rel.is_empty() { "choisir une image…".to_string() } else { rel.rsplit('/').next().unwrap_or(rel).to_string() };
-                        if child.button(RichText::new(label).size(11.0)).clicked() {
+                        if child.button(RichText::new(label).size(11.0)).on_hover_text("ou glisse une image dans le graphe").clicked() {
                             if let Some(f) = rfd::FileDialog::new().add_filter("images", &["png", "jpg", "jpeg", "webp", "tga", "tif", "tiff", "bmp", "exr", "hdr"]).pick_file() {
                                 let root = self.root.clone();
                                 let r = crate::vault::inside(&root, &f).map(Ok).unwrap_or_else(|| crate::vault::link_external(&root, &f));
@@ -1731,7 +2419,6 @@ impl Editor {
                         }
                     }
                     (pd, slot) => {
-                        // Réglage d'un ancien format : on remet la valeur par défaut
                         *slot = match pd {
                             ParamDef::Float(_, _, _, v) => Param::F(*v),
                             ParamDef::Choice(_, c) => Param::S(c[0].to_string()),
@@ -1741,15 +2428,47 @@ impl Editor {
                 }
                 y += h;
             }
+            // Miniature
+            if preview_on && has_out {
+                let tr = Rect::from_min_size(pos2(r.left() + 8.0, r.bottom() - THUMB - 6.0), vec2(NW - 16.0, THUMB));
+                painter.rect_filled(tr, 0.0, Color32::from_gray(40));
+                match self.thumbs.get(id) {
+                    Some((_, t)) => {
+                        let s = t.size_vec2();
+                        let k = (tr.width() / s.x).min(tr.height() / s.y);
+                        let ir = Rect::from_center_size(tr.center(), s * k);
+                        painter.image(t.id(), ir, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+                    }
+                    None => {
+                        painter.text(tr.center(), egui::Align2::CENTER_CENTER, "…", egui::FontId::monospace(11.0), p.muted);
+                    }
+                }
+            }
+        }
+        if let Some((id, text)) = rename_done {
+            if let Some(n) = self.graph.nodes.iter_mut().find(|n| n.id == id) {
+                n.label = text.trim().to_string();
+            }
+            self.rename = None;
+            actions.push(Act::Changed);
         }
         // Lien en cours
         if let Some((from, out)) = self.drag_link {
             if let (Some(a), Some(pt)) = (out_pos.get(&(from, out)), pointer) {
-                wire(*a, pt, p.accent);
+                let col = sock_color(sock_of(from, out));
+                painter.add(egui::epaint::CubicBezierShape::from_points_stroke(bez(*a, pt), false, Color32::TRANSPARENT, Stroke::new(2.5, col)));
             }
             if ui.input(|i| i.pointer.any_released()) {
-                if let Some((to, inp)) = hovered_in {
-                    actions.push(Act::Connect(from, out, to, inp));
+                match hovered_in {
+                    Some((to, inp)) => actions.push(Act::Connect(from, out, to, inp)),
+                    // Lâché dans le vide : on propose un node déjà relié
+                    None => {
+                        if let Some(pt) = pointer {
+                            if !layout.iter().any(|(_, r, _)| r.contains(pt)) {
+                                actions.push(Act::OpenAdd(pt, Some((from, out))));
+                            }
+                        }
+                    }
                 }
                 self.drag_link = None;
             }
@@ -1820,7 +2539,7 @@ impl Editor {
 
     fn export(&mut self) {
         let prog = match &self.program {
-            Ok(_) => Program::compile(&self.graph, &self.root, 16384),
+            Ok(_) => Program::compile(&self.graph.effective(), &self.root, 16384),
             Err(e) => Err(e.clone()),
         };
         match prog {
@@ -1844,13 +2563,6 @@ impl Editor {
     }
 }
 
-enum Act {
-    Move(u32, egui::Vec2),
-    Connect(u32, usize, u32, usize),
-    Unlink(u32, usize),
-    Changed,
-    Select(Option<u32>),
-}
 
 fn sock_color(s: Sock) -> Color32 {
     match s {

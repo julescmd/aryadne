@@ -1037,6 +1037,7 @@ impl App {
     fn editor_inner(&mut self, ui: &mut egui::Ui, run_now: &mut bool) {
         let p = theme::pal();
         let mut lsp_goto: Option<(PathBuf, usize)> = None;
+        let mut open_material: Option<PathBuf> = None;
         self.feed_project_words();
         egui::CentralPanel::default().frame(egui::Frame::new().fill(p.bg)).show(ui, |ui| {
             if self.docs.is_empty() {
@@ -1254,6 +1255,9 @@ impl App {
                 }
                 Content::Model(viewer) => {
                     egui::Frame::new().inner_margin(egui::Margin::symmetric(16, 10)).show(ui, |ui| viewer.show(ui));
+                    if let Some(path) = viewer.open_request.take() {
+                        open_material = Some(path);
+                    }
                 }
                 Content::Image => {
                     let slot = self.images.get(&rel, images::Size::Full);
@@ -1382,6 +1386,16 @@ impl App {
                 }
             }
         });
+        // Matériau édité à côté du modèle (vue côte à côte)
+        if let Some(path) = open_material {
+            if let Some(rel) = vault::inside(&self.root(), &path) {
+                let model = self.active;
+                self.refresh();
+                self.open(rel.clone());
+                self.split = Some(rel);
+                self.active = model;
+            }
+        }
         if let Some((path, line)) = lsp_goto {
             match vault::inside(&self.root(), &path) {
                 Some(rel) => {
@@ -3224,6 +3238,10 @@ impl App {
         }
         if !dropped.is_empty() {
             let paths: Vec<PathBuf> = dropped.iter().map(|f| f.path().to_path_buf()).collect();
+            // Un graphe de nodes ouvert garde les images glissées (nodes texture)
+            if self.view() == View::Files && self.current().is_some_and(|d| matches!(d.content, Content::Nodes(_))) {
+                return;
+            }
             // Dans le chat (ou sur le panneau de l'assistant) : les fichiers deviennent des pièces jointes.
             let over_assistant = self.assistant_open && ctx.input(|i| i.pointer.hover_pos()).is_some_and(|pos| pos.x > ctx.content_rect().right() - 360.0);
             if self.view() == View::Chat || over_assistant {

@@ -6,7 +6,7 @@ Le fil entre tes idées. Notes, code, références et moodboards dans un dossier
 
 100 % Rust ([egui](https://github.com/emilk/egui)). Un seul exécutable portable pour Windows et Linux : **aucune installation, aucun droit admin**. Look éditeur de code (JetBrains Mono, angles droits), mode clair par défaut, mode sombre en un clic.
 
-## Fonctionnalités (v0.15)
+## Fonctionnalités (v0.16)
 
 **3D**
 - Visionneuse intégrée pour OBJ, FBX (binaire), glTF / GLB et STL. Rendu par pixel avec profondeur (comme les pixols de ZBrush) : pas de trous ni de mouchetures, calculé sur tous les cœurs, et recalculé seulement quand la vue change.
@@ -14,7 +14,10 @@ Le fil entre tes idées. Notes, code, références et moodboards dans un dossier
 - Matériaux argile, gris, blanc, chrome, normales ou couleurs du fichier ; ombrage lisse.
 - Fil de fer par-dessus le modèle (opacité, noir / blanc / accent, ou fil de fer seul), sans les diagonales des quads.
 - **Subdivision Catmull-Clark** comme Blender (sur les vrais quads et n-gones, sans diagonales), mode « simple », et « affichage optimal » qui ne montre que la cage d'origine.
-- **Modificateurs** façon 3ds Max / Blender, empilés et non destructifs : miroir, réseau (array), subdivision, décimer, lisser, déplacement (bruit), torsion, courbure, effilement, sphériser, épaissir, onde, transformation. Réordonnables, activables, calculés en arrière-plan, gardés par fichier, et exportables en OBJ.
+- **33 modificateurs** façon 3ds Max / Blender, empilés et non destructifs : miroir multi-axes avec coupe, réseau (décalage, rotation, échelle par copie), subdivision, décimer, souder, trianguler, arêtes vives, fil de fer, exploser, vis, construire, couper, épaissir, lisser (avec conservation du volume), bruit fractal, torsion, courbure, effilement, projeter (sphère, cylindre, cube), étirer, cisaillement, warp, bosse, onde, ondulation, gonfler, aléatoire, voxeliser, renflement, fondre, froisser, inverser les normales, transformation. Chaque déformation a une influence, une zone limitée le long d'un axe avec fondu, et l'inversion. Recherche, dupliquer, réordonner.
+- **Export 3D** en OBJ (quads gardés), GLB (glTF), STL et PLY, avec ou sans modificateurs.
+- **Matériaux plus simples** : « affichage › nouveau matériau » crée un matériau en nodes, l'applique et l'ouvre à côté du modèle.
+- **Éditeur de nodes** revu : sélection multiple et en rectangle, clic droit, menu d'ajout par catégories avec survol et recherche, miniature sous chaque node, lien lâché dans le vide = node déjà relié, couper un lien (Ctrl+clic), muet (M), réduire (H), renommer (F2), dupliquer, copier-coller, annuler / rétablir, cadrer (F), aimantation (Ctrl), images glissées = nodes texture.
 - Rotation automatique (platine), capture PNG 2400 px et turntable en GIF animé.
 - Menus « affichage », « éclairage » et « vue » pour garder la barre propre.
 - Navigation façon Blender : glisser pour tourner, Maj ou clic droit pour déplacer, Ctrl ou molette pour zoomer, 1 / 3 / 7 pour les vues (Maj : opposée), 5 pour l'orthographique, Origine ou « . » pour cadrer. Repère des axes.
