@@ -66,6 +66,26 @@ pub struct Line {
     pub pts: Vec<[f32; 2]>,
     pub color: [u8; 4],
     pub width: f32,
+    /// Épaisseur relative de chaque point (0-1) : traits effilés. Vide = constante.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub widths: Vec<f32>,
+}
+
+impl Line {
+    fn w_at(&self, i: usize) -> f32 {
+        self.widths.get(i).copied().unwrap_or(1.0)
+    }
+}
+
+/// Outils de dessin
+#[derive(Clone, Copy, PartialEq)]
+pub enum Tool {
+    Brush,
+    Eraser,
+    Segment,
+    Rect,
+    Ellipse,
+    Arrow,
 }
 
 #[derive(Default)]
@@ -126,6 +146,15 @@ pub struct Viewer {
     pub draw: bool,
     pub pen: Color32,
     pub pen_width: f32,
+    pub tool: Tool,
+    /// Stabilisateur (0 : aucun, 0,9 : très lissé)
+    pub stabilizer: f32,
+    /// Effilement des bouts du trait (0 : aucun)
+    pub taper: f32,
+    pub opacity: f32,
+    redo: Vec<(usize, Line)>,
+    shape_start: Option<[f32; 2]>,
+    smooth_pt: Option<[f32; 2]>,
     pub lines: BTreeMap<usize, Vec<Line>>,
     current: Vec<[f32; 2]>,
     notes_path: PathBuf,
@@ -176,6 +205,13 @@ impl Viewer {
             draw: false,
             pen: Color32::from_rgb(0xff, 0x4f, 0x1f),
             pen_width: 3.0,
+            tool: Tool::Brush,
+            stabilizer: 0.5,
+            taper: 0.6,
+            opacity: 1.0,
+            redo: vec![],
+            shape_start: None,
+            smooth_pt: None,
             lines,
             current: vec![],
             notes_path,
@@ -499,8 +535,26 @@ impl Viewer {
             });
             ui.checkbox(&mut self.draw, crate::i18n::t("dessiner"));
             if self.draw {
+                for (t, icon, tip) in [(Tool::Brush, "✎", "pinceau (B)"), (Tool::Eraser, "⌫", "gomme (E)"), (Tool::Segment, "╱", "ligne"), (Tool::Rect, "▭", "rectangle"), (Tool::Ellipse, "◯", "ellipse"), (Tool::Arrow, "➚", "flèche")] {
+                    if ui.selectable_label(self.tool == t, icon).on_hover_text(crate::i18n::t(tip)).clicked() {
+                        self.tool = t;
+                    }
+                }
                 ui.color_edit_button_srgba(&mut self.pen);
-                ui.add(egui::Slider::new(&mut self.pen_width, 1.0..=20.0).show_value(false));
+                for c in [[230u8, 57, 70], [255, 183, 3], [42, 157, 143], [69, 123, 157], [255, 255, 255], [20, 20, 20]] {
+                    let (r, resp) = ui.allocate_exact_size(vec2(14.0, 14.0), Sense::click());
+                    ui.painter().rect_filled(r, 2.0, Color32::from_rgb(c[0], c[1], c[2]));
+                    ui.painter().rect_stroke(r, 2.0, Stroke::new(1.0, Color32::from_gray(120)), egui::StrokeKind::Inside);
+                    if resp.clicked() {
+                        self.pen = Color32::from_rgb(c[0], c[1], c[2]);
+                    }
+                }
+                egui::containers::menu::MenuButton::new(crate::i18n::t("trait ▾")).ui(ui, |ui| {
+                    ui.add(egui::Slider::new(&mut self.pen_width, 0.5..=40.0).logarithmic(true).text(crate::i18n::t("épaisseur")));
+                    ui.add(egui::Slider::new(&mut self.opacity, 0.05..=1.0).text(crate::i18n::t("opacité")));
+                    ui.add(egui::Slider::new(&mut self.stabilizer, 0.0..=0.95).text(crate::i18n::t("stabilisateur")));
+                    ui.add(egui::Slider::new(&mut self.taper, 0.0..=1.0).text(crate::i18n::t("effilé")));
+                });
                 if ui.small_button(crate::i18n::t("effacer l'image")).clicked() {
                     self.lines.remove(&self.held(self.cur));
                     self.save_lines();
@@ -618,14 +672,7 @@ impl Viewer {
         let to_screen = |q: [f32; 2]| pos2(img_rect.left() + q[0] * img_rect.width(), img_rect.top() + q[1] * img_rect.height());
         let draw_lines = |lines: &[Line], alpha: f32| {
             for l in lines {
-                let c = Color32::from_rgba_unmultiplied(l.color[0], l.color[1], l.color[2], (l.color[3] as f32 * alpha) as u8);
-                let pts: Vec<Pos2> = l.pts.iter().map(|q| to_screen(*q)).collect();
-                let w = l.width * img_rect.height() / 720.0;
-                if pts.len() == 1 {
-                    painter.circle_filled(pts[0], w / 2.0, c);
-                } else {
-                    painter.add(Shape::line(pts, Stroke::new(w, c)));
-                }
+                draw_line(&painter, l, &to_screen, img_rect.height() / 720.0, alpha);
             }
         };
         if self.onion && self.onion_drawings {
@@ -640,28 +687,104 @@ impl Viewer {
         }
         if self.draw {
             let to_norm = |s: Pos2| [((s.x - img_rect.left()) / img_rect.width()).clamp(0.0, 1.0), ((s.y - img_rect.top()) / img_rect.height()).clamp(0.0, 1.0)];
-            if resp.drag_started_by(egui::PointerButton::Primary) {
-                self.playing = false;
-                self.current.clear();
-            }
-            if resp.dragged_by(egui::PointerButton::Primary) {
-                if let Some(pt) = resp.interact_pointer_pos() {
-                    self.current.push(to_norm(pt));
+            let aspect_k = img_rect.width() / img_rect.height().max(1.0);
+            let space = ui.input(|i| i.key_down(Key::Space));
+            if !ui.ctx().egui_wants_keyboard_input() && resp.hovered() {
+                if ui.input(|i| i.key_pressed(Key::B)) {
+                    self.tool = Tool::Brush;
+                }
+                if ui.input(|i| i.key_pressed(Key::E)) {
+                    self.tool = Tool::Eraser;
                 }
             }
-            if !self.current.is_empty() {
-                let pts: Vec<Pos2> = self.current.iter().map(|q| to_screen(*q)).collect();
-                painter.add(Shape::line(pts, Stroke::new(self.pen_width * img_rect.height() / 720.0, self.pen)));
+            let drawing = !space && resp.dragged_by(egui::PointerButton::Primary);
+            if resp.drag_started_by(egui::PointerButton::Primary) && !space {
+                self.playing = false;
+                self.current.clear();
+                self.smooth_pt = None;
+                self.shape_start = resp.interact_pointer_pos().map(to_norm);
             }
-            if resp.drag_stopped() && !self.current.is_empty() {
-                let c = self.pen;
-                let line = Line { pts: std::mem::take(&mut self.current), color: [c.r(), c.g(), c.b(), c.a()], width: self.pen_width };
+            let eraser_r = (self.pen_width * 2.0).max(8.0);
+            if drawing {
+                if let Some(pt) = resp.interact_pointer_pos() {
+                    let q = to_norm(pt);
+                    match self.tool {
+                        Tool::Brush => {
+                            // Stabilisateur : le trait suit la souris avec du retard (« lazy mouse »)
+                            let sp = match self.smooth_pt {
+                                Some(prev) => [prev[0] + (q[0] - prev[0]) * (1.0 - self.stabilizer), prev[1] + (q[1] - prev[1]) * (1.0 - self.stabilizer)],
+                                None => q,
+                            };
+                            self.smooth_pt = Some(sp);
+                            if self.current.last().is_none_or(|l| ((l[0] - sp[0]) * aspect_k).hypot(l[1] - sp[1]) > 0.0015) {
+                                self.current.push(sp);
+                            }
+                        }
+                        Tool::Eraser => {
+                            if let Some(ls) = self.lines.get_mut(&held) {
+                                let before = ls.len();
+                                let r = eraser_r / img_rect.height();
+                                ls.retain(|l| !l.pts.iter().any(|p| ((p[0] - q[0]) * aspect_k).hypot(p[1] - q[1]) < r));
+                                if ls.len() != before {
+                                    self.save_lines();
+                                }
+                            }
+                            painter.circle_stroke(pt, eraser_r, Stroke::new(1.0, Color32::WHITE));
+                        }
+                        _ => {
+                            if let Some(a) = self.shape_start {
+                                self.current = shape_points(self.tool, a, q);
+                            }
+                        }
+                    }
+                }
+            }
+            let c = Color32::from_rgba_unmultiplied(self.pen.r(), self.pen.g(), self.pen.b(), (self.pen.a() as f32 * self.opacity) as u8);
+            if !self.current.is_empty() {
+                let preview = Line { pts: self.current.clone(), color: [c.r(), c.g(), c.b(), c.a()], width: self.pen_width, widths: if self.tool == Tool::Brush { taper_widths(&self.current, self.taper) } else { vec![] } };
+                draw_line(&painter, &preview, &to_screen, img_rect.height() / 720.0, 1.0);
+            }
+            if resp.drag_stopped() && !self.current.is_empty() && self.tool != Tool::Eraser {
+                let pts = std::mem::take(&mut self.current);
+                let widths = if self.tool == Tool::Brush { taper_widths(&pts, self.taper) } else { vec![] };
+                let arrow = self.tool == Tool::Arrow;
+                let line = Line { pts, color: [c.r(), c.g(), c.b(), c.a()], width: self.pen_width, widths };
                 self.lines.entry(held).or_default().push(line);
+                if arrow {
+                    // Pointe de flèche
+                    if let (Some(a), Some(b)) = (self.shape_start, self.lines[&held].last().and_then(|l| l.pts.last().copied())) {
+                        let (dx, dy) = ((b[0] - a[0]) * aspect_k, b[1] - a[1]);
+                        let l = dx.hypot(dy).max(1e-6);
+                        let s = (0.03f32).min(l * 0.4);
+                        for sgn in [-1.0f32, 1.0] {
+                            let ang = dy.atan2(dx) + std::f32::consts::PI + sgn * 0.45;
+                            let tip = [b[0] + ang.cos() * s / aspect_k, b[1] + ang.sin() * s];
+                            self.lines.entry(held).or_default().push(Line { pts: vec![b, tip], color: [c.r(), c.g(), c.b(), c.a()], width: self.pen_width, widths: vec![] });
+                        }
+                    }
+                }
+                self.redo.clear();
                 self.save_lines();
             }
-            if ui.input_mut(|i| i.consume_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, Key::Z))) {
-                if let Some(ls) = self.lines.get_mut(&held) {
-                    ls.pop();
+            if resp.hovered() && self.tool == Tool::Eraser && !drawing {
+                if let Some(pt) = resp.hover_pos() {
+                    painter.circle_stroke(pt, eraser_r, Stroke::new(1.0, Color32::from_white_alpha(180)));
+                }
+            }
+            let (undo, redo) = ui.input_mut(|i| {
+                let r = i.consume_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, Key::Z));
+                let u = i.consume_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, Key::Z));
+                (u, r)
+            });
+            if undo {
+                if let Some(l) = self.lines.get_mut(&held).and_then(|ls| ls.pop()) {
+                    self.redo.push((held, l));
+                }
+                self.save_lines();
+            }
+            if redo {
+                if let Some((f, l)) = self.redo.pop() {
+                    self.lines.entry(f).or_default().push(l);
                 }
                 self.save_lines();
             }
@@ -968,13 +1091,72 @@ pub fn poster(path: &Path) -> Result<image::DynamicImage, String> {
 }
 
 /// Dessine des traits (coordonnées 0..1) dans une image.
+/// Trait à épaisseur variable (segments + ronds aux jointures).
+fn draw_line(painter: &egui::Painter, l: &Line, to_screen: &dyn Fn([f32; 2]) -> Pos2, k: f32, alpha: f32) {
+    let c = Color32::from_rgba_unmultiplied(l.color[0], l.color[1], l.color[2], (l.color[3] as f32 * alpha) as u8);
+    let pts: Vec<Pos2> = l.pts.iter().map(|q| to_screen(*q)).collect();
+    let w = l.width * k;
+    if pts.len() == 1 {
+        painter.circle_filled(pts[0], w / 2.0, c);
+    } else if l.widths.is_empty() {
+        painter.add(Shape::line(pts, Stroke::new(w, c)));
+    } else {
+        for i in 0..pts.len() - 1 {
+            let ww = w * (l.w_at(i) + l.w_at(i + 1)) * 0.5;
+            painter.line_segment([pts[i], pts[i + 1]], Stroke::new(ww.max(0.3), c));
+            if ww > 2.0 {
+                painter.circle_filled(pts[i + 1], ww * 0.5, c);
+            }
+        }
+    }
+}
+
+/// Épaisseur relative : effilée au début et à la fin, plus fine quand le geste est rapide.
+fn taper_widths(pts: &[[f32; 2]], taper: f32) -> Vec<f32> {
+    let n = pts.len();
+    if n < 3 || taper <= 0.0 {
+        return vec![];
+    }
+    let mut acc = vec![0.0f32; n];
+    for i in 1..n {
+        acc[i] = acc[i - 1] + (pts[i][0] - pts[i - 1][0]).hypot(pts[i][1] - pts[i - 1][1]);
+    }
+    let total = acc[n - 1].max(1e-6);
+    let ramp = (total * 0.25).min(0.04).max(1e-6);
+    (0..n)
+        .map(|i| {
+            let a = (acc[i] / ramp).min(1.0);
+            let b = ((total - acc[i]) / ramp).min(1.0);
+            let speed = if i > 0 { (pts[i][0] - pts[i - 1][0]).hypot(pts[i][1] - pts[i - 1][1]) } else { 0.0 };
+            let sp = 1.0 - (speed * 40.0).min(0.35) * taper;
+            (1.0 - taper + taper * a.min(b).powf(0.7)) * sp
+        })
+        .collect()
+}
+
+/// Points d'une forme entre deux coins (espace normalisé de l'image).
+fn shape_points(tool: Tool, a: [f32; 2], b: [f32; 2]) -> Vec<[f32; 2]> {
+    match tool {
+        Tool::Rect => vec![a, [b[0], a[1]], b, [a[0], b[1]], a],
+        Tool::Ellipse => {
+            let (cx, cy, rx, ry) = ((a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0, (b[0] - a[0]).abs() / 2.0, (b[1] - a[1]).abs() / 2.0);
+            (0..=64).map(|k| {
+                let t = k as f32 / 64.0 * std::f32::consts::TAU;
+                [cx + rx * t.cos(), cy + ry * t.sin()]
+            }).collect()
+        }
+        _ => vec![a, b],
+    }
+}
+
 pub fn burn(img: &mut image::RgbaImage, lines: &[Line]) {
     let (w, h) = (img.width() as f32, img.height() as f32);
     for l in lines {
-        let r = (l.width * h / 720.0 / 2.0).max(0.5);
+        let r0 = (l.width * h / 720.0 / 2.0).max(0.5);
         let pts: Vec<(f32, f32)> = l.pts.iter().map(|q| (q[0] * w, q[1] * h)).collect();
-        let segs: Vec<((f32, f32), (f32, f32))> = if pts.len() == 1 { vec![(pts[0], pts[0])] } else { pts.windows(2).map(|s| (s[0], s[1])).collect() };
-        for (a, b) in segs {
+        let segs: Vec<(usize, (f32, f32), (f32, f32))> = if pts.len() == 1 { vec![(0, pts[0], pts[0])] } else { pts.windows(2).enumerate().map(|(i, s)| (i, s[0], s[1])).collect() };
+        for (i, a, b) in segs {
+            let r = (r0 * (l.w_at(i) + l.w_at(i + 1)) * 0.5).max(0.5);
             let len = ((b.0 - a.0).powi(2) + (b.1 - a.1).powi(2)).sqrt();
             let steps = (len / (r * 0.5).max(0.5)).ceil().max(1.0) as usize;
             for s in 0..=steps {
@@ -1003,7 +1185,7 @@ mod tests {
     fn video_ffmpeg() {
         assert!(is_video("rendu/Plan_01.MP4") && !is_video("a.png"));
         let mut img = image::RgbaImage::from_pixel(100, 100, image::Rgba([0, 0, 0, 255]));
-        burn(&mut img, &[Line { pts: vec![[0.1, 0.5], [0.9, 0.5]], color: [255, 0, 0, 255], width: 20.0 }]);
+        burn(&mut img, &[Line { pts: vec![[0.1, 0.5], [0.9, 0.5]], color: [255, 0, 0, 255], width: 20.0, widths: vec![] }]);
         assert_eq!(img.get_pixel(50, 50).0, [255, 0, 0, 255]);
         assert_eq!(img.get_pixel(50, 10).0, [0, 0, 0, 255]);
 
@@ -1028,7 +1210,7 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
         assert_eq!(v.extract.lock().unwrap().frames, 48);
-        v.lines.insert(0, vec![Line { pts: vec![[0.2, 0.2], [0.8, 0.8]], color: [255, 0, 0, 255], width: 30.0 }]);
+        v.lines.insert(0, vec![Line { pts: vec![[0.2, 0.2], [0.8, 0.8]], color: [255, 0, 0, 255], width: 30.0, widths: vec![] }]);
         v.export = Some(Export { fps: 24.0, every: 2, format: "png", height: 0, with_drawings: true, job: None });
         v.start_export(ctx, info);
         let job = v.export.as_ref().unwrap().job.clone().unwrap();

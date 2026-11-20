@@ -766,5 +766,14 @@
  "vers max": "to max",
  "vers min": "to min",
  "échelle": "scale",
- "émission": "emission"
+ "émission": "emission",
+ "pinceau (B)": "brush (B)",
+ "gomme (E)": "eraser (E)",
+ "ligne": "line",
+ "rectangle": "rectangle",
+ "ellipse": "ellipse",
+ "flèche": "arrow",
+ "trait ▾": "stroke ▾",
+ "stabilisateur": "stabilizer",
+ "effilé": "taper"
 }
