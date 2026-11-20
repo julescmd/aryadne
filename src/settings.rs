@@ -12,6 +12,7 @@ pub struct Prefs {
     pub editor_size: f32,
     pub wrap_code: bool,
     pub line_numbers: bool,
+    pub minimap: bool,
     pub autosave_ms: u64,
     /// « link », « move », « copy » ou « ask »
     pub import_mode: String,
@@ -37,6 +38,7 @@ impl Default for Prefs {
             editor_size: 13.0,
             wrap_code: false,
             line_numbers: true,
+            minimap: true,
             autosave_ms: 500,
             import_mode: "link".into(),
             notes_dir: "notes".into(),
@@ -106,7 +108,7 @@ const ACCENTS: [(&str, [u8; 3]); 8] = [
 impl App {
     pub(super) fn open_settings_tab(&mut self, ctx: &egui::Context, tab: Tab) {
         let ai = self.ai.clone().unwrap_or_default();
-        self.local.refresh(&ai.url, ctx);
+        self.local.refresh(if ollama::is_local(&ai.url) { &ai.url } else { ai::PROVIDERS[0].url }, ctx);
         self.dialog = Some(Dialog::Settings(SettingsState { tab, ai }));
     }
 
@@ -237,6 +239,7 @@ impl App {
         ui.label(caps("éditeur"));
         ui.add(egui::Slider::new(&mut self.prefs.editor_size, 10.0..=22.0).step_by(1.0).text("taille du texte"));
         ui.checkbox(&mut self.prefs.line_numbers, "numéros de ligne (fichiers de code)");
+        ui.checkbox(&mut self.prefs.minimap, "mini-carte à droite (fichiers de code)");
         ui.checkbox(&mut self.prefs.wrap_code, "retour à la ligne dans le code");
         ui.add_space(10.0);
         ui.label(caps("sauvegarde automatique"));
@@ -335,45 +338,85 @@ impl App {
 
     fn tab_ai(&mut self, ui: &mut egui::Ui, s: &mut ai::Settings, ctx: &egui::Context) {
         let p = theme::pal();
-        let before = (s.url.clone(), s.model.clone(), s.key.clone());
-        ui.label(caps("résumé et chat ia"));
-        ui.label(RichText::new("Toute API compatible OpenAI. Par défaut : Ollama en local, gratuit et privé.").color(p.muted).size(11.5));
+        let before = (s.url.clone(), s.model.clone(), s.key.clone(), s.keys.clone());
+        ui.label(caps("fournisseurs d'ia"));
+        ui.label(RichText::new("Colle une clé API pour brancher un service. Ses modèles apparaissent ensuite dans le menu du chat. Les clés restent sur cet ordinateur (dossier de config d'Aryadne).").color(p.muted).size(11.5));
         ui.add_space(8.0);
-        ui.horizontal(|ui| {
-            if ui.button("ollama").clicked() {
-                s.url = "http://localhost:11434/v1".into();
-            }
-            if ui.button("lm studio").clicked() {
-                s.url = "http://localhost:1234/v1".into();
-            }
-            if ui.button("openai").clicked() {
-                s.url = "https://api.openai.com/v1".into();
+        let active = s.provider_id();
+        egui::Grid::new("ai-providers").num_columns(4).spacing([10.0, 8.0]).show(ui, |ui| {
+            for pr in ai::PROVIDERS {
+                let on = active == pr.id;
+                ui.label(RichText::new(pr.name).strong().color(if on { p.accent } else { p.text }));
+                if pr.key_page.is_empty() {
+                    ui.label(RichText::new("local, gratuit, sans clé").color(p.muted).size(11.0));
+                    ui.label("");
+                } else {
+                    let key = s.keys.entry(pr.id.to_string()).or_default();
+                    let r = ui.add(egui::TextEdit::singleline(key).password(true).hint_text("clé api").desired_width(180.0));
+                    if r.lost_focus() && !key.trim().is_empty() {
+                        ai::fetch_models(pr.id, key.clone(), ctx.clone());
+                    }
+                    ui.hyperlink_to(RichText::new("clé ↗").size(11.0), pr.key_page).on_hover_text(pr.key_page);
+                }
+                let has_key = pr.key_page.is_empty() || s.keys.get(pr.id).is_some_and(|k| !k.trim().is_empty());
+                ui.horizontal(|ui| {
+                    if has_key {
+                        if let Some(e) = ai::models_error(pr.id).filter(|_| !pr.key_page.is_empty()) {
+                            ui.label(RichText::new(format!("✗ {e}")).color(p.missing).size(11.0));
+                        } else if !pr.key_page.is_empty() {
+                            ui.label(RichText::new(format!("✓ {} modèles", ai::models_of(pr.id).len())).color(p.muted).size(11.0));
+                            if ui.small_button("↻").on_hover_text("relire la liste des modèles").clicked() {
+                                ai::fetch_models(pr.id, s.keys.get(pr.id).cloned().unwrap_or_default(), ctx.clone());
+                            }
+                        }
+                        if !on && ui.small_button("utiliser").clicked() {
+                            let m = if pr.id == "ollama" { self.local.snapshot().models.first().cloned().unwrap_or_else(|| "llama3.2".into()) } else { ai::models_of(pr.id).first().cloned().unwrap_or_default() };
+                            s.use_model(pr.id, &m);
+                        }
+                    }
+                });
+                ui.end_row();
             }
         });
-        ui.add_space(6.0);
+        ui.add_space(12.0);
+        ui.label(caps("modèle actif"));
         egui::Grid::new("ai-grid").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
-            ui.label("adresse");
-            ui.add(egui::TextEdit::singleline(&mut s.url).desired_width(380.0));
-            ui.end_row();
             ui.label("modèle");
-            ui.add(egui::TextEdit::singleline(&mut s.model).hint_text("llama3.2, qwen2.5, gpt-4o-mini…").desired_width(380.0));
+            ui.add(egui::TextEdit::singleline(&mut s.model).desired_width(380.0));
             ui.end_row();
-            ui.label("clé api");
-            ui.add(egui::TextEdit::singleline(&mut s.key).password(true).hint_text("vide pour Ollama / LM Studio").desired_width(380.0));
+            ui.label("adresse");
+            ui.add(egui::TextEdit::singleline(&mut s.url).desired_width(380.0)).on_hover_text("Toute API compatible OpenAI. Change-la pour un serveur personnalisé.");
             ui.end_row();
+            if active == "custom" {
+                ui.label("clé api");
+                ui.add(egui::TextEdit::singleline(&mut s.key).password(true).desired_width(380.0));
+                ui.end_row();
+            }
         });
-        if (s.url.clone(), s.model.clone(), s.key.clone()) != before {
+        // La clé active suit celle du fournisseur
+        if let Some(pr) = ai::provider_for_url(&s.url) {
+            s.key = s.keys.get(pr.id).cloned().unwrap_or_default();
+        }
+        if (s.url.clone(), s.model.clone(), s.key.clone(), s.keys.clone()) != before {
             s.save();
             self.ai = Some(s.clone());
         }
-        if ollama::is_local(&s.url) {
-            ui.add_space(14.0);
-            ui.separator();
-            ui.add_space(4.0);
-            if ollama_panel(ui, &self.local, s, ctx) {
-                s.save();
-                self.ai = Some(s.clone());
+        ui.add_space(14.0);
+        ui.separator();
+        ui.add_space(4.0);
+        // Gestion des modèles locaux : toujours sur l'adresse d'Ollama
+        let mut local = s.clone();
+        if active != "ollama" {
+            local.url = ai::PROVIDERS[0].url.to_string();
+            local.model.clear();
+        }
+        if ollama_panel(ui, &self.local, &mut local, ctx) {
+            if active == "ollama" || !local.model.is_empty() {
+                s.use_model("ollama", &local.model);
+                s.url = local.url.clone();
             }
+            s.save();
+            self.ai = Some(s.clone());
         }
     }
 

@@ -1450,6 +1450,7 @@ fn set_sel(ctx: &egui::Context, id: Id, text: &str, (a, b): (usize, usize)) {
 // ---------- après le TextEdit : suggestions, surlignage ----------
 
 pub struct View {
+    pub minimap: bool,
     pub gutter: bool,
     pub font_size: f32,
     pub bg: egui::layers::ShapeIdx,
@@ -1527,6 +1528,42 @@ pub fn after(ui: &mut egui::Ui, ed: &mut Editor, text: &str, lang: &str, out: &e
             }
         }
         ui.painter().set(view.bg, egui::Shape::Vec(bg));
+        // Mini-carte à droite : tout le fichier en miniature, clic pour y aller
+        let total = lines.len();
+        if view.minimap && total > 40 {
+            let w = 64.0;
+            let mm = egui::Rect::from_min_max(egui::pos2(clip.right() - w - 6.0, clip.top() + 4.0), egui::pos2(clip.right() - 6.0, clip.bottom() - 4.0));
+            let lh = (mm.height() / total as f32).min(3.0);
+            let painter = ui.painter();
+            painter.rect_filled(mm, 0.0, p.bg.gamma_multiply(0.92));
+            painter.vline(mm.left(), mm.y_range(), egui::Stroke::new(1.0, p.line));
+            let gh = out.galley.size().y.max(1.0);
+            let (v0, v1) = (((clip.top() - origin.y) / gh).clamp(0.0, 1.0), ((clip.bottom() - origin.y) / gh).clamp(0.0, 1.0));
+            let used = lh * total as f32;
+            painter.rect_filled(egui::Rect::from_x_y_ranges(mm.x_range(), mm.top() + v0 * used..=mm.top() + v1 * used), 0.0, p.line.gamma_multiply(0.7));
+            let mut shapes = vec![];
+            for (k, l) in lines.iter().enumerate().take(30_000) {
+                let t = l.trim_start();
+                if t.is_empty() {
+                    continue;
+                }
+                let ind = leading_cols(l) as f32 * 0.5;
+                let len = (t.chars().count() as f32 * 0.5).min(w - 8.0 - ind);
+                let y = mm.top() + k as f32 * lh;
+                let col = if diag_lines.contains_key(&k) { p.missing } else if k == cur_line { p.accent } else { p.muted.gamma_multiply(0.5) };
+                shapes.push(egui::Shape::rect_filled(egui::Rect::from_min_size(egui::pos2(mm.left() + 4.0 + ind, y), egui::vec2(len.max(1.0), (lh * 0.7).max(1.0))), 0.0, col));
+            }
+            painter.extend(shapes);
+            let r = ui.interact(mm, Id::unique(("minimap", text.len() / 1_000_000)), egui::Sense::click_and_drag());
+            if r.clicked() || r.dragged() {
+                if let Some(pt) = r.interact_pointer_pos() {
+                    let line = (((pt.y - mm.top()) / lh) as usize).min(total.saturating_sub(1));
+                    let b = text.split_inclusive('\n').take(line).map(|l| l.len()).sum::<usize>().min(text.len());
+                    let rr = out.galley.pos_from_cursor(CCursor::new(char_of(text, b))).translate(origin.to_vec2());
+                    ui.scroll_to_rect(rr, Some(egui::Align::Center));
+                }
+            }
+        }
         let painter = ui.painter();
         for (pos, t, col) in fg {
             painter.text(pos, egui::Align2::RIGHT_CENTER, t, font.clone(), col);

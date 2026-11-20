@@ -6,14 +6,14 @@ Le fil entre tes idées. Notes, code, références et moodboards dans un dossier
 
 100 % Rust ([egui](https://github.com/emilk/egui)). Un seul exécutable portable pour Windows et Linux : **aucune installation, aucun droit admin**. Look éditeur de code (JetBrains Mono, angles droits), mode clair par défaut, mode sombre en un clic.
 
-## Fonctionnalités (v0.13)
+## Fonctionnalités (v0.14)
 
 **3D**
 - Visionneuse intégrée pour OBJ, FBX (binaire), glTF / GLB et STL. Rendu par pixel avec profondeur (comme les pixols de ZBrush) : pas de trous ni de mouchetures, calculé sur tous les cœurs, et recalculé seulement quand la vue change.
 - Éclairage façon Substance : environnements HDRI (studio, studio doux, extérieur, coucher de soleil, nuit, neutre) ou tes propres fichiers .hdr / .exr (ceux du coffre sont listés), rotation (H + glisser), intensité, exposition, HDRI en fond net ou flou, plus une lumière directionnelle réglable (L + glisser, couleur, intensité).
 - Matériaux argile, gris, blanc, chrome, normales ou couleurs du fichier ; ombrage lisse.
 - Fil de fer par-dessus le modèle (opacité, noir / blanc / accent, ou fil de fer seul), sans les diagonales des quads.
-- Subdivisions (lissage de Loop, jusqu'à 2,5 millions de triangles).
+- **Modificateurs** façon 3ds Max / Blender, empilés et non destructifs : miroir, réseau (array), subdivision, décimer, lisser, déplacement (bruit), torsion, courbure, effilement, sphériser, épaissir, onde, transformation. Réordonnables, activables, calculés en arrière-plan, gardés par fichier, et exportables en OBJ.
 - Rotation automatique (platine), capture PNG 2400 px et turntable en GIF animé.
 - Menus « affichage », « éclairage » et « vue » pour garder la barre propre.
 - Navigation façon Blender : glisser pour tourner, Maj ou clic droit pour déplacer, Ctrl ou molette pour zoomer, 1 / 3 / 7 pour les vues (Maj : opposée), 5 pour l'orthographique, Origine ou « . » pour cadrer. Repère des axes.
@@ -157,6 +157,9 @@ Le fil entre tes idées. Notes, code, références et moodboards dans un dossier
 **Résumé IA**
 - Bouton « résumer » sur n'importe quel fichier texte ou de code. Le résumé peut être copié ou enregistré en note (liée au fichier source).
 - Fonctionne avec toute API compatible OpenAI. Par défaut : [Ollama](https://ollama.com) en local (gratuit, privé).
+- **Tous les fournisseurs d'IA** : Claude, ChatGPT, DeepSeek, Gemini, Mistral, Grok, Groq, OpenRouter, en plus d'Ollama et LM Studio en local. Colle une clé dans réglages › ia et ses modèles apparaissent dans le menu du chat.
+- **L'assistant lit tes fichiers** : il reçoit le contenu des notes (et des fichiers nommés dans la question), peut demander à en lire d'autres, et peut proposer un fichier modifié (note, board, code) que tu appliques en un clic. L'ancienne version reste dans l'historique.
+- **Réponses locales plus rapides** : réflexion désactivée par défaut (bouton « réflexion »), modèle gardé en mémoire 30 min, avertissement quand un modèle est trop gros pour ta mémoire.
 - **IA locale en un clic, sans admin** : bouton « ia » en haut à droite, puis « installer ollama ». Aryadne télécharge Ollama depuis ses releases GitHub, l'installe dans le dossier utilisateur (`%LOCALAPPDATA%\aryadne\ollama` ou `~/.local/share/aryadne/ollama`), le démarre, et télécharge le modèle choisi. Ollama est lancé automatiquement au besoin et arrêté à la fermeture d'Aryadne. Un Ollama déjà installé ailleurs est détecté et réutilisé.
 - Modèles conseillés : `llama3.2` (3B, ~2 Go), `qwen2.5:7b` (meilleur, ~4,7 Go), `qwen2.5:0.5b` (très léger).
 

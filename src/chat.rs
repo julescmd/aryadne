@@ -15,20 +15,53 @@ const MAX_FILE: u64 = 400_000;
 const CHUNK: usize = 1400;
 const TOP: usize = 6;
 
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Role {
     User,
     Assistant,
 }
 
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct Msg {
     pub role: Role,
     pub text: String,
+    #[serde(default)]
     pub sources: Vec<String>,
+    #[serde(default)]
     pub error: Option<String>,
     /// Noms des pièces jointes envoyées avec ce message.
+    #[serde(default)]
     pub attached: Vec<String>,
+}
+
+/// Conversation enregistrée dans .app/chats/ du coffre.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct Saved {
+    pub title: String,
+    pub msgs: Vec<Msg>,
+}
+
+pub fn chats_dir(root: &str) -> std::path::PathBuf {
+    std::path::Path::new(root).join(".app/chats")
+}
+
+/// (id, titre, date de modification), les plus récentes d'abord.
+pub fn list_saved(root: &str) -> Vec<(String, String, std::time::SystemTime)> {
+    let mut v: Vec<(String, String, std::time::SystemTime)> = std::fs::read_dir(chats_dir(root))
+        .map(|rd| {
+            rd.flatten()
+                .filter_map(|f| {
+                    let name = f.file_name().to_string_lossy().to_string();
+                    let id = name.strip_suffix(".json")?.to_string();
+                    let t = f.metadata().ok()?.modified().ok()?;
+                    let s: Saved = serde_json::from_str(&std::fs::read_to_string(f.path()).ok()?).ok()?;
+                    Some((id, s.title, t))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    v.sort_by(|a, b| b.2.cmp(&a.2));
+    v
 }
 
 /// Pièce jointe : image (envoyée au modèle s'il voit les images) ou texte.
@@ -125,6 +158,10 @@ fn is_text_path(p: &std::path::Path) -> bool {
 
 #[derive(Default)]
 pub struct Live {
+    /// Heure de la question (pour afficher le temps d'attente)
+    pub asked: Option<std::time::Instant>,
+    /// Réflexion du modèle (affichée à part, pas dans la réponse)
+    pub thinking: String,
     /// Mis à vrai par « arrêter » : la génération s'interrompt.
     pub stop: Arc<AtomicBool>,
     pub text: String,
@@ -146,9 +183,63 @@ pub struct Chat {
     pub attachments: Vec<Attachment>,
     /// Vitesse de la dernière réponse (jetons par seconde, approximatif)
     pub last_speed: Option<f32>,
+    /// Conversation enregistrée (id du fichier) et nombre de messages déjà enregistrés
+    pub id: Option<String>,
+    pub title: String,
+    pub saved_len: usize,
+}
+
+impl Live {
+    /// Texte d'attente : étape, secondes écoulées, et fin de la réflexion en cours.
+    pub fn status_line(&self) -> Option<String> {
+        if self.status.is_empty() {
+            return None;
+        }
+        let secs = self.asked.map(|t| t.elapsed().as_secs()).unwrap_or(0);
+        let mut s = format!("{} {secs} s", self.status);
+        if !self.thinking.is_empty() {
+            let tail: String = self.thinking.chars().rev().take(140).collect::<Vec<_>>().into_iter().rev().collect();
+            s.push_str(&format!("\n… {}", tail.replace('\n', " ").trim()));
+        }
+        Some(s)
+    }
 }
 
 impl Chat {
+    /// Enregistre la conversation quand un nouveau message est arrivé.
+    pub fn autosave(&mut self, root: &str) {
+        if self.busy() || self.msgs.is_empty() || self.msgs.len() == self.saved_len {
+            return;
+        }
+        let id = self.id.get_or_insert_with(|| std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis().to_string()).unwrap_or_default()).clone();
+        if self.title.is_empty() {
+            self.title = self.msgs.iter().find(|m| m.role == Role::User).map(|m| m.text.chars().take(60).collect()).unwrap_or_default();
+        }
+        let dir = chats_dir(root);
+        let _ = std::fs::create_dir_all(&dir);
+        let s = Saved { title: self.title.clone(), msgs: self.msgs.clone() };
+        if let Ok(t) = serde_json::to_string(&s) {
+            let _ = std::fs::write(dir.join(format!("{id}.json")), t);
+        }
+        self.saved_len = self.msgs.len();
+    }
+
+    pub fn load_saved(&mut self, root: &str, id: &str) {
+        if let Some(s) = std::fs::read_to_string(chats_dir(root).join(format!("{id}.json"))).ok().and_then(|t| serde_json::from_str::<Saved>(&t).ok()) {
+            self.msgs = s.msgs;
+            self.title = s.title;
+            self.id = Some(id.to_string());
+            self.saved_len = self.msgs.len();
+        }
+    }
+
+    pub fn new_conversation(&mut self) {
+        self.msgs.clear();
+        self.id = None;
+        self.title.clear();
+        self.saved_len = 0;
+    }
+
     pub fn busy(&self) -> bool {
         self.live.is_some()
     }
@@ -182,7 +273,7 @@ impl Chat {
         self.msgs.push(Msg { role: Role::User, text: q.clone(), sources: vec![], error: None, attached });
         let history: Vec<Msg> = self.msgs.iter().rev().skip(1).take(8).rev().cloned().collect();
         let stop = Arc::new(AtomicBool::new(false));
-        let live = Arc::new(Mutex::new(Live { status: "recherche dans le coffre…".into(), stop: stop.clone(), ..Default::default() }));
+        let live = Arc::new(Mutex::new(Live { status: "recherche dans le coffre…".into(), stop: stop.clone(), asked: Some(std::time::Instant::now()), ..Default::default() }));
         self.live = Some(live.clone());
         std::thread::spawn(move || {
             let set = |f: &dyn Fn(&mut Live)| {
@@ -197,26 +288,75 @@ impl Chat {
                 hits.iter().filter(|h| seen.insert(h.rel.clone())).map(|h| h.rel.clone()).collect()
             };
             let src = sources.clone();
+            let local_model = crate::ollama::is_local(&settings.url);
             set(&move |l: &mut Live| {
                 l.sources = src.clone();
-                l.status = "réflexion…".into();
+                l.status = if local_model { "le modèle se charge et lit la demande…".into() } else { "réflexion…".into() };
             });
             let ready = if crate::ollama::is_local(&settings.url) { local.ensure_running(&settings.url) } else { Ok(()) };
+            let docs = context_docs(&root, &entries, &q, &hits, open_file.as_ref());
             let result = ready.and_then(|_| {
-                let messages = build_messages(&entries, &hits, open_file.as_ref(), &history, &q, &attachments);
-                stream(&settings, messages, &stop, &|delta: &str| {
-                    let d = delta.to_string();
+                let mut messages = build_messages(&entries, &hits, open_file.as_ref(), &history, &q, &attachments, &docs);
+                let full = std::sync::Arc::new(Mutex::new(String::new()));
+                // Jusqu'à 3 tours : l'IA peut demander à lire des fichiers (« LIRE: chemin »)
+                for round in 0..3 {
+                    if let Ok(mut f) = full.lock() {
+                        f.clear();
+                    }
+                    let on_think = |t: &str| {
+                        let t = t.to_string();
+                        set(&move |l: &mut Live| {
+                            l.thinking.push_str(&t);
+                            l.status = "réfléchit…".into();
+                            l.started.get_or_insert_with(std::time::Instant::now);
+                        });
+                    };
+                    let fl = full.clone();
+                    let on_delta = |delta: &str| {
+                        if let Ok(mut f) = fl.lock() {
+                            f.push_str(delta);
+                        }
+                        let d = delta.to_string();
+                        set(&move |l: &mut Live| {
+                            l.text.push_str(&d);
+                            l.status.clear();
+                            l.started.get_or_insert_with(std::time::Instant::now);
+                            l.chunks += 1;
+                        });
+                    };
+                    if local_model {
+                        stream_ollama(&settings, messages.clone(), &stop, &on_think, &on_delta)?;
+                    } else {
+                        stream(&settings, messages.clone(), &stop, &on_delta)?;
+                    }
+                    let answer = full.lock().map(|f| f.clone()).unwrap_or_default();
+                    let wanted: Vec<String> = answer.lines().filter_map(|l| l.trim().strip_prefix("LIRE:").or_else(|| l.trim().strip_prefix("LIRE :")).map(|p| p.trim().trim_matches('`').to_string())).filter(|p| !p.is_empty()).take(4).collect();
+                    if wanted.is_empty() || round == 2 || stop.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    let mut provided = String::new();
+                    for w in &wanted {
+                        let rel = entries.iter().find(|e| !e.is_dir && (e.rel == *w || e.rel.ends_with(&format!("/{w}")) || crate::vault::stem(&e.rel) == *w)).map(|e| e.rel.clone());
+                        match rel.and_then(|r| crate::vault::read(&root, &r).ok().map(|t| (r, t))) {
+                            Some((r, t)) => provided.push_str(&format!("\n--- {r} ---\n{}\n", t.chars().take(12_000).collect::<String>())),
+                            None => provided.push_str(&format!("\n--- {w} : introuvable ---\n")),
+                        }
+                    }
+                    let names = wanted.join(", ");
                     set(&move |l: &mut Live| {
-                        l.text.push_str(&d);
-                        l.status.clear();
-                        l.started.get_or_insert_with(std::time::Instant::now);
-                        l.chunks += 1;
+                        l.text.clear();
+                        l.status = format!("lit {names}…");
                     });
-                })
+                    messages.push(json!({ "role": "assistant", "content": answer }));
+                    messages.push(json!({ "role": "user", "content": format!("Voici le contenu demandé :{provided}\nRéponds maintenant à ma question.") }));
+                }
+                Ok(())
             });
             set(&move |l: &mut Live| {
                 if let Err(e) = &result {
                     l.error = Some(e.clone());
+                } else if l.text.trim().is_empty() && !l.stop.load(Ordering::Relaxed) {
+                    l.error = Some("Le modèle n'a rien répondu. Réessaie, ou choisis un modèle plus petit.".into());
                 }
                 l.done = true;
             });
@@ -346,8 +486,45 @@ pub fn search(root: &str, entries: &[Entry], query: &str) -> Vec<Hit> {
     hits
 }
 
-fn build_messages(entries: &[Entry], hits: &[Hit], open: Option<&(String, String)>, history: &[Msg], q: &str, attachments: &[Attachment]) -> Vec<Value> {
-    let files: Vec<&str> = entries.iter().filter(|e| !e.is_dir).map(|e| e.rel.as_str()).take(400).collect();
+/// Contenu des fichiers utiles à la question : ceux qu'elle nomme, puis les notes (toutes si
+/// le coffre est petit, sinon le début des plus récentes). Environ 24 000 caractères au plus.
+fn context_docs(root: &str, entries: &[Entry], q: &str, hits: &[Hit], open: Option<&(String, String)>) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = vec![];
+    let mut budget: usize = 24_000;
+    let qf = fold(q);
+    let skip: HashSet<String> = hits.iter().map(|h| h.rel.clone()).chain(open.map(|o| o.0.clone())).collect();
+    let push = |rel: &str, text: String, out: &mut Vec<(String, String)>, budget: &mut usize| {
+        if *budget < 200 || out.iter().any(|(r, _)| r == rel) || skip.contains(rel) {
+            return;
+        }
+        let t: String = text.chars().take((*budget).min(8000)).collect();
+        *budget = budget.saturating_sub(t.len());
+        out.push((rel.to_string(), t));
+    };
+    // 1. Fichiers nommés dans la question
+    for e in entries.iter().filter(|e| !e.is_dir) {
+        let stem = fold(&crate::vault::stem(&e.rel));
+        if stem.chars().count() >= 3 && qf.contains(&stem) {
+            if let Ok(t) = crate::vault::read(root, &e.rel) {
+                push(&e.rel, t, &mut out, &mut budget);
+            }
+        }
+    }
+    // 2. Les notes : toutes si elles tiennent, sinon le début des plus récentes
+    let mut notes: Vec<&Entry> = entries.iter().filter(|e| !e.is_dir && crate::vault::is_md(&e.rel) && !e.rel.starts_with("modèles/") && !e.rel.starts_with(".app")).collect();
+    notes.sort_by(|a, b| b.modified.cmp(&a.modified));
+    let texts: Vec<(String, String)> = notes.iter().take(80).filter_map(|e| crate::vault::read(root, &e.rel).ok().map(|t| (e.rel.clone(), t))).collect();
+    let total: usize = texts.iter().map(|t| t.1.len()).sum();
+    for (rel, t) in texts {
+        let t = if total <= budget { t } else { t.chars().take(500).collect() };
+        push(&rel, t, &mut out, &mut budget);
+    }
+    out
+}
+
+fn build_messages(entries: &[Entry], hits: &[Hit], open: Option<&(String, String)>, history: &[Msg], q: &str, attachments: &[Attachment], docs: &[(String, String)]) -> Vec<Value> {
+    // Liste courte : un long contexte ralentit beaucoup les modèles locaux.
+    let files: Vec<&str> = entries.iter().filter(|e| !e.is_dir && !e.rel.starts_with('@')).map(|e| e.rel.as_str()).take(120).collect();
     let mut sys = String::from(
         "Tu es l'assistant intégré à Aryadne, le logiciel de notes de l'utilisateur. Tu as accès à son coffre (un dossier de notes, de code et d'images).\n\
          Règles :\n\
@@ -357,12 +534,20 @@ fn build_messages(entries: &[Entry], hits: &[Hit], open: Option<&(String, String
          - Ne cite que des fichiers présents dans la liste ci-dessous.\n\
          - Quand tu proposes du code, donne-le complet dans un bloc ```langage, prêt à être inséré tel quel. Si une sélection est fournie, ta réponse porte d'abord sur elle.\n\
          - Si la demande est ambiguë ou qu'il te manque une information importante, pose d'abord UNE question courte au lieu de deviner. Tu peux proposer des réponses toutes faites sur une ligne qui commence par « ?> », séparées par « | », par ex. :\n?> Un résumé court | Un plan détaillé | Les deux\n\
-         - Les pièces jointes (fichiers, dossiers, images) envoyées par l'utilisateur font partie de sa question.\n\n",
+         - Les pièces jointes (fichiers, dossiers, images) envoyées par l'utilisateur font partie de sa question.\n\
+         - Si tu as besoin du contenu complet d'un fichier qui n'est pas fourni ci-dessous, réponds SEULEMENT par une ou plusieurs lignes « LIRE: chemin/du/fichier ». Le contenu te sera envoyé, puis tu répondras.\n\
+         - Tu peux modifier un fichier (note, board .board.json, code…) : donne son contenu COMPLET dans un bloc dont la première ligne est ```fichier:chemin/du/fichier (puis le contenu, puis ```). L'utilisateur pourra l'appliquer en un clic. Pour un board, garde le même format JSON et change seulement ce qui est demandé (par exemple les champs x et y des éléments).\n\n",
     );
     sys.push_str(&format!("Fichiers du coffre ({}) :\n{}\n", files.len(), files.join("\n")));
     if let Some((rel, text)) = open {
         let t: String = text.chars().take(6000).collect();
         sys.push_str(&format!("\nFichier actuellement ouvert : {rel}\n---\n{t}\n---\n"));
+    }
+    if !docs.is_empty() {
+        sys.push_str("\nContenu de fichiers du coffre :\n");
+        for (rel, t) in docs {
+            sys.push_str(&format!("\n--- {rel} ---\n{t}\n"));
+        }
     }
     if !hits.is_empty() {
         sys.push_str("\nExtraits pertinents :\n");
@@ -403,7 +588,7 @@ pub fn split_choices(text: &str) -> (String, Vec<String>) {
     let mut kept = vec![];
     for l in text.lines() {
         if let Some(rest) = l.trim_start().strip_prefix("?>") {
-            choices.extend(rest.split('|').map(|c| c.trim().to_string()).filter(|c| !c.is_empty()));
+            choices.extend(rest.split('|').map(|c| c.trim().trim_matches(|ch| ch == '`' || ch == '*' || ch == '"').trim().to_string()).filter(|c| !c.is_empty()));
         } else {
             kept.push(l);
         }
@@ -411,17 +596,80 @@ pub fn split_choices(text: &str) -> (String, Vec<String>) {
     (kept.join("\n"), choices)
 }
 
+/// Ollama en local : on passe par son interface à lui (/api/chat). Elle permet de couper la
+/// « réflexion » des modèles comme Qwen 3.x (beaucoup plus rapide), de voir cette réflexion
+/// en direct si on la garde, et de garder le modèle chargé en mémoire 30 minutes.
+fn stream_ollama(s: &crate::ai::Settings, messages: Vec<Value>, stop: &AtomicBool, on_think: &dyn Fn(&str), on_delta: &dyn Fn(&str)) -> Result<(), String> {
+    let host = crate::ollama::host(&s.url);
+    // Format OpenAI → format Ollama (images à part, en base64 sans préfixe)
+    let msgs: Vec<Value> = messages
+        .into_iter()
+        .map(|m| {
+            let role = m["role"].clone();
+            match m["content"].as_array() {
+                Some(parts) => {
+                    let text: Vec<&str> = parts.iter().filter_map(|p| p["text"].as_str()).collect();
+                    let images: Vec<String> = parts.iter().filter_map(|p| p["image_url"]["url"].as_str()).map(|u| u.split_once(',').map(|x| x.1).unwrap_or(u).to_string()).collect();
+                    json!({ "role": role, "content": text.join("\n"), "images": images })
+                }
+                None => json!({ "role": role, "content": m["content"] }),
+            }
+        })
+        .collect();
+    let mut body = json!({ "model": s.model, "messages": msgs, "stream": true, "keep_alive": "30m", "options": { "temperature": 0.3 } });
+    body["think"] = json!(s.think);
+    let send = |body: &Value| crate::ollama::agent(1800).post(&format!("{host}/api/chat")).send_json(body);
+    let mut resp = match send(&body) {
+        Ok(r) => r,
+        // Modèle sans « réflexion » : on réessaie sans le paramètre
+        Err(ureq::Error::StatusCode(400)) => {
+            body.as_object_mut().map(|o| o.remove("think"));
+            send(&body).map_err(|e| e.to_string())?
+        }
+        Err(ureq::Error::StatusCode(404)) => return Err(format!("Modèle « {} » introuvable. Télécharge-le dans les réglages ia.", s.model)),
+        Err(e) => return Err(format!("Ollama : {e}")),
+    };
+    let reader = std::io::BufReader::new(resp.body_mut().with_config().limit(u64::MAX).reader());
+    for line in reader.lines() {
+        if stop.load(Ordering::Relaxed) {
+            break;
+        }
+        let line = line.map_err(|e| e.to_string())?;
+        let Ok(v) = serde_json::from_str::<Value>(&line) else { continue };
+        if let Some(err) = v["error"].as_str() {
+            return Err(err.to_string());
+        }
+        if let Some(t) = v["message"]["thinking"].as_str().filter(|t| !t.is_empty()) {
+            on_think(t);
+        }
+        if let Some(d) = v["message"]["content"].as_str().filter(|d| !d.is_empty()) {
+            on_delta(d);
+        }
+        if v["done"].as_bool() == Some(true) {
+            break;
+        }
+    }
+    Ok(())
+}
+
 /// Requête en streaming (Server-Sent Events) vers une API compatible OpenAI.
 fn stream(s: &crate::ai::Settings, messages: Vec<Value>, stop: &AtomicBool, on_delta: &dyn Fn(&str)) -> Result<(), String> {
     let url = format!("{}/chat/completions", s.url.trim_end_matches('/'));
-    let mut req = crate::ollama::agent(600).post(&url);
-    if !s.key.trim().is_empty() {
-        req = req.header("Authorization", format!("Bearer {}", s.key.trim()));
+    let req = crate::ai::auth(crate::ollama::agent(600).post(&url), s.provider_id(), &s.key);
+    let mut body = json!({ "model": s.model, "messages": messages, "stream": true });
+    // Les modèles « raisonnement » d'OpenAI refusent une température personnalisée
+    let m = s.model.to_lowercase();
+    if !(m.starts_with("o1") || m.starts_with("o3") || m.starts_with("o4") || m.starts_with("gpt-5")) {
+        body["temperature"] = json!(0.3);
     }
-    let body = json!({ "model": s.model, "messages": messages, "stream": true, "temperature": 0.3 });
+    if s.provider_id() == "anthropic" {
+        body["max_tokens"] = json!(8192);
+    }
     let mut resp = req.send_json(&body).map_err(|e| match e {
         ureq::Error::StatusCode(404) => format!("Modèle « {} » introuvable. Télécharge-le dans les réglages ia.", s.model),
-        ureq::Error::StatusCode(401) => "Clé API refusée.".into(),
+        ureq::Error::StatusCode(401) | ureq::Error::StatusCode(403) => "Clé API refusée. Vérifie-la dans réglages › ia.".into(),
+        ureq::Error::StatusCode(402) => "Crédit épuisé chez ce fournisseur.".into(),
+        ureq::Error::StatusCode(429) => "Trop de requêtes (ou quota atteint). Réessaie dans un moment.".into(),
         ureq::Error::Io(_) | ureq::Error::ConnectionFailed | ureq::Error::HostNotFound => format!("Impossible de joindre {url}."),
         other => other.to_string(),
     })?;
@@ -452,6 +700,15 @@ mod tests {
     use super::*;
 
     #[test]
+    fn blocs_fichier() {
+        let t = "Voici :\n```fichier:boards/a.board.json\n{\"x\": 1}\n```\nfin\n```rust\nfn a(){}\n```";
+        let b = file_blocks(t);
+        assert_eq!(b, vec![("boards/a.board.json".to_string(), "{\"x\": 1}\n".to_string())]);
+        let (_, c) = split_choices("ok\n?> `notes/a.md` | **Les deux**");
+        assert_eq!(c, vec!["notes/a.md".to_string(), "Les deux".to_string()]);
+    }
+
+    #[test]
     fn recherche() {
         let dir = std::env::temp_dir().join("aryadne-chat-test");
         let _ = std::fs::remove_dir_all(&dir);
@@ -465,4 +722,30 @@ mod tests {
         assert!(hits.iter().all(|h| h.rel != "notes/Recette.md"));
         assert_eq!(fold("Équipe Forêt"), "equipe foret");
     }
+}
+
+
+/// Blocs ```fichier:chemin proposés par l'IA : (chemin, nouveau contenu).
+pub fn file_blocks(text: &str) -> Vec<(String, String)> {
+    let mut out = vec![];
+    let mut cur: Option<(String, String)> = None;
+    for line in text.lines() {
+        let t = line.trim_start();
+        if let Some(rest) = t.strip_prefix("```") {
+            match cur.take() {
+                Some((p, c)) => out.push((p, c)),
+                None => {
+                    if let Some(p) = rest.trim().strip_prefix("fichier:").or_else(|| rest.trim().strip_prefix("file:")) {
+                        cur = Some((p.trim().to_string(), String::new()));
+                    }
+                }
+            }
+            continue;
+        }
+        if let Some((_, c)) = &mut cur {
+            c.push_str(line);
+            c.push('\n');
+        }
+    }
+    out
 }

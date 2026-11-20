@@ -13,6 +13,7 @@ mod fbx;
 mod ffmpeg;
 mod images;
 mod live;
+mod modifiers;
 mod nodes;
 mod model3d;
 mod office;
@@ -208,6 +209,7 @@ struct App {
     tags: Option<(Instant, Vec<(String, usize)>)>,
     stats: Option<extras::Stats>,
     want_format: bool,
+    want_blender: bool,
     want_term: bool,
     terminal: Option<extras::Terminal>,
     proj_words: HashMap<String, (Instant, std::sync::Arc<Vec<String>>)>,
@@ -241,7 +243,7 @@ impl App {
         prefs.apply(ctx);
         let mut app = Self { view: Some(View::Files), ai: Some(ai::Settings::load()), prefs, ..Default::default() };
         app.ctx = Some(ctx.clone());
-        app.local.refresh(&app.ai.clone().unwrap_or_default().url, ctx);
+        { let u = app.ai.clone().unwrap_or_default().url; app.local.refresh(if ollama::is_local(&u) { &u } else { ai::PROVIDERS[0].url }, ctx); }
         app.github_token = load_config("github_token").unwrap_or_default();
         // Vérifie les mises à jour au plus toutes les 6 h (pas en mode dev).
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
@@ -908,6 +910,12 @@ impl App {
         if run_now {
             self.run_current();
         }
+        if std::mem::take(&mut self.want_blender) {
+            match extras::find_blender() {
+                Some(b) => self.run_with(b.display().to_string(), vec!["--background".into(), "--python".into()]),
+                None => self.error = Some("Blender introuvable. Ajoute-le au PATH, ou installe-le à l'emplacement habituel.".into()),
+            }
+        }
         if std::mem::take(&mut self.want_format) {
             self.format_current();
         }
@@ -1015,12 +1023,15 @@ impl App {
                                 _ => {}
                             }
                         }
+                        if rel.to_lowercase().ends_with(".py") && ui.button("▶ Blender").on_hover_text("Lance le script dans Blender en arrière-plan (blender --background --python)").clicked() {
+                            self.want_blender = true;
+                        }
                         if extras::runner_for(&rel).is_some() && ui.button("▶ exécuter").on_hover_text("Lance le script et affiche sa sortie (F5)").clicked() {
                             *run_now = true;
                         }
                         if matches!(self.docs[i].content, Content::Text(_)) && ui.button("historique").on_hover_text("Versions précédentes de ce fichier").clicked() {
                             self.flush_all();
-                            self.history_dlg = Some(extras::HistoryDlg { versions: extras::history_list(&root, &rel), rel: rel.clone(), sel: 0 });
+                            self.history_dlg = Some(extras::HistoryDlg { versions: extras::history_list(&root, &rel), rel: rel.clone(), sel: 0, diff: true });
                         }
                         if live::is_previewable(&rel) && ui.button("aperçu live").on_hover_text("Ouvre la page dans ton navigateur ; elle se recharge à chaque enregistrement").clicked() {
                             self.flush_all();
@@ -1107,6 +1118,21 @@ impl App {
                 }
                 Content::Nodes(ed) => {
                     egui::Frame::new().inner_margin(egui::Margin::symmetric(12, 8)).show(ui, |ui| ed.show(ui));
+                    if let Some((id, desc)) = ed.ai_request.take() {
+                        let settings = self.ai.clone().unwrap_or_else(ai::Settings::load);
+                        let local = self.local.clone();
+                        let ctx = ui.ctx().clone();
+                        let (tx, rx) = std::sync::mpsc::channel();
+                        let mat = ed.graph.kind == nodes::GraphKind::Material;
+                        std::thread::spawn(move || {
+                            let ready = if ollama::is_local(&settings.url) { local.ensure_running(&settings.url) } else { Ok(()) };
+                            let user = format!("Effet voulu ({}) : {desc}", if mat { "matériau 3D" } else { "image" });
+                            let r = ready.and_then(|_| ai::complete(&settings, nodes::SHADER_AI_PROMPT, &user)).map(|t| nodes::clean_ai_code(&t)).and_then(|code| nodes::Shader::compile(&code).map(|_| code).map_err(|e| format!("Le code de l'IA ne marche pas : {e}")));
+                            let _ = tx.send((id, r));
+                            ctx.request_repaint();
+                        });
+                        ed.ai_rx = Some(rx);
+                    }
                 }
                 Content::Model(viewer) => {
                     egui::Frame::new().inner_margin(egui::Margin::symmetric(16, 10)).show(ui, |ui| viewer.show(ui));
@@ -1191,7 +1217,7 @@ impl App {
                     let gutter = if numbers { (digits * fs * 0.62 + 26.0) as i8 } else if wrap { 40 } else { 12 };
                     let scroll = if wrap { egui::ScrollArea::vertical() } else { egui::ScrollArea::both() };
                     scroll.id_salt(("scroll", &rel)).auto_shrink(false).show(ui, |ui| {
-                        egui::Frame::new().inner_margin(egui::Margin { left: gutter, right: 24, top: 16, bottom: 120 }).show(ui, |ui| {
+                        egui::Frame::new().inner_margin(egui::Margin { left: gutter, right: if !is_md && self.prefs.minimap && text.lines().count() > 40 { 84 } else { 24 }, top: 16, bottom: 120 }).show(ui, |ui| {
                             let bg = ui.painter().add(egui::Shape::Noop);
                             let edit = egui::TextEdit::multiline(text)
                                 .id(id)
@@ -1203,7 +1229,7 @@ impl App {
                                 .layouter(&mut layouter);
                             let out = edit.show(ui);
                             changed |= out.response.changed();
-                            code::after(ui, ed, text, &lang, &out, &notes, typed_now && out.response.changed(), code::View { gutter: numbers, font_size: fs, bg });
+                            code::after(ui, ed, text, &lang, &out, &notes, typed_now && out.response.changed(), code::View { minimap: !is_md && self.prefs.minimap, gutter: numbers, font_size: fs, bg });
                         });
                     });
                     if changed {
@@ -2032,6 +2058,7 @@ impl App {
         let context = self.assistant_context(&ctxt);
         let mut send = false;
         let mut goto = None;
+        let mut apply_file: Option<(String, String)> = None;
         let mut insert: Option<String> = None;
         let mut bar_out: Option<extras::ChatBarOut> = None;
         egui::Panel::right("assistant")
@@ -2099,6 +2126,11 @@ impl App {
                             reply = extras::choice_buttons(ui, &choices);
                         }
                         if !user {
+                            if let Some(f) = extras::file_buttons(ui, &m.text, &|r| paths.contains(r)) {
+                                apply_file = Some(f);
+                            }
+                        }
+                        if !user {
                             for (k, block) in code_blocks(&m.text).into_iter().enumerate() {
                                 ui.horizontal(|ui| {
                                     ui.label(RichText::new(format!("bloc {}", k + 1)).color(p.muted).size(11.0));
@@ -2114,7 +2146,8 @@ impl App {
                     }
                     if let Some(live) = &self.assistant.live {
                         if let Ok(l) = live.lock() {
-                            let status = (!l.status.is_empty()).then_some(l.status.as_str());
+                            let status_s = l.status_line();
+                            let status = status_s.as_deref();
                             msg_block(ui, false, &l.text, &[], l.error.as_deref(), status, &existing, &paths, &mut goto);
                         }
                     }
@@ -2149,16 +2182,22 @@ impl App {
         if let Some(n) = goto {
             self.actions.push(Action::OpenLink(n));
         }
+        if let Some((rel, content)) = apply_file {
+            self.apply_ai_file(rel, content);
+        }
     }
 
     fn chat_view(&mut self, ui: &mut egui::Ui) {
         let p = theme::pal();
         self.chat.poll();
+        let root = self.root();
+        self.chat.autosave(&root);
         let mut bar_out: Option<extras::ChatBarOut> = None;
         let existing: HashSet<String> = self.md.keys().cloned().collect();
         let paths: HashSet<String> = self.entries.iter().map(|e| e.rel.clone()).collect();
         let mut send = false;
         let mut save = false;
+        let mut apply_file: Option<(String, String)> = None;
 
         egui::Panel::bottom("chat-input")
             .frame(egui::Frame::new().fill(p.panel).stroke(egui::Stroke::new(1.0, p.line)).inner_margin(12))
@@ -2171,8 +2210,36 @@ impl App {
                     };
                     ui.add_enabled(open_name.is_some(), egui::Checkbox::new(&mut self.chat.include_open, RichText::new(label).size(11.5)));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.button("nouvelle conversation").clicked() && !self.chat.busy() {
-                            self.chat.msgs.clear();
+                        if ui.button("nouvelle").clicked() && !self.chat.busy() {
+                            self.chat.new_conversation();
+                        }
+                        // Conversations enregistrées
+                        let root = self.root();
+                        egui::containers::menu::MenuButton::new("conversations ▾").ui(ui, |ui| {
+                            ui.set_min_width(320.0);
+                            let list = chat::list_saved(&root);
+                            if list.is_empty() {
+                                ui.label(RichText::new("aucune pour l'instant : elles s'enregistrent toutes seules").color(p.muted).size(11.0));
+                            }
+                            for (id, title, _) in list.iter().take(40) {
+                                ui.horizontal(|ui| {
+                                    let cur = self.chat.id.as_deref() == Some(id.as_str());
+                                    if ui.selectable_label(cur, if title.is_empty() { "(sans titre)" } else { title.as_str() }).clicked() && !self.chat.busy() {
+                                        self.chat.load_saved(&root, id);
+                                    }
+                                    if ui.small_button("×").on_hover_text("supprimer").clicked() {
+                                        let _ = std::fs::remove_file(chat::chats_dir(&root).join(format!("{id}.json")));
+                                        if cur {
+                                            self.chat.new_conversation();
+                                        }
+                                    }
+                                });
+                            }
+                        });
+                        if !self.chat.msgs.is_empty() {
+                            if ui.add(egui::TextEdit::singleline(&mut self.chat.title).hint_text("titre").desired_width(160.0)).changed() {
+                                self.chat.saved_len = 0;
+                            }
                         }
                         if ui.add_enabled(!self.chat.msgs.is_empty(), egui::Button::new("enregistrer en note")).clicked() {
                             save = true;
@@ -2245,10 +2312,16 @@ impl App {
                                 send = true;
                             }
                         }
+                        if m.role == chat::Role::Assistant {
+                            if let Some(f) = extras::file_buttons(ui, &m.text, &|r| paths.contains(r)) {
+                                apply_file = Some(f);
+                            }
+                        }
                     }
                     if let Some(live) = &self.chat.live {
                         if let Ok(l) = live.lock() {
-                            let status = (!l.status.is_empty()).then_some(l.status.as_str());
+                            let status_s = l.status_line();
+                            let status = status_s.as_deref();
                             msg_block(ui, false, &l.text, &l.sources, l.error.as_deref(), status, &existing, &paths, &mut goto);
                         }
                     }
@@ -2287,6 +2360,9 @@ impl App {
                 self.refresh();
                 self.actions.push(Action::Open(rel));
             }
+        }
+        if let Some((rel, content)) = apply_file {
+            self.apply_ai_file(rel, content);
         }
     }
 

@@ -136,7 +136,7 @@ impl App {
             Cmd::History => {
                 if let Some(rel) = self.current().map(|d| d.rel.clone()) {
                     self.flush_all();
-                    self.history_dlg = Some(HistoryDlg { versions: history_list(&self.root(), &rel), rel, sel: 0 });
+                    self.history_dlg = Some(HistoryDlg { versions: history_list(&self.root(), &rel), rel, sel: 0, diff: true });
                 }
             }
             Cmd::LivePreview => {
@@ -356,9 +356,26 @@ impl App {
                         let text = d.versions.get(d.sel).and_then(|(_, f)| std::fs::read_to_string(f).ok()).unwrap_or_default();
                         let current = self.docs.iter().find(|x| x.rel == d.rel).and_then(|x| if let Content::Text(t) = &x.content { Some(t.clone()) } else { None }).unwrap_or_default();
                         let (added, removed) = line_diff(&current, &text);
-                        ui.label(RichText::new(format!("par rapport à maintenant : +{added} / −{removed} lignes")).color(p.muted).size(11.0));
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new(format!("par rapport à maintenant : +{added} / −{removed} lignes")).color(p.muted).size(11.0));
+                            ui.checkbox(&mut d.diff, "voir les différences");
+                        });
                         egui::ScrollArea::both().id_salt("hist-view").max_height(400.0).show(ui, |ui| {
-                            ui.add(egui::Label::new(RichText::new(&text).monospace().size(12.0)).wrap_mode(egui::TextWrapMode::Extend));
+                            if d.diff {
+                                // − : dans cette version seulement ; + : ajouté depuis
+                                for (k, l) in diff_lines(&text, &current) {
+                                    let (prefix, col, bg) = match k {
+                                        -1 => ("− ", p.missing, p.missing.gamma_multiply(0.12)),
+                                        1 => ("+ ", egui::Color32::from_rgb(0x22, 0xa0, 0x55), egui::Color32::from_rgba_unmultiplied(0x22, 0xa0, 0x55, 30)),
+                                        _ => ("  ", p.muted, egui::Color32::TRANSPARENT),
+                                    };
+                                    egui::Frame::new().fill(bg).show(ui, |ui| {
+                                        ui.add(egui::Label::new(RichText::new(format!("{prefix}{l}")).monospace().size(12.0).color(col)).wrap_mode(egui::TextWrapMode::Extend));
+                                    });
+                                }
+                            } else {
+                                ui.add(egui::Label::new(RichText::new(&text).monospace().size(12.0)).wrap_mode(egui::TextWrapMode::Extend));
+                            }
                         });
                         if ui.button("restaurer cette version").clicked() {
                             restore = Some(text);
@@ -675,6 +692,48 @@ pub struct HistoryDlg {
     pub rel: String,
     pub versions: Vec<(String, PathBuf)>,
     pub sel: usize,
+    pub diff: bool,
+}
+
+/// Différence ligne par ligne (plus longue sous-séquence commune) : -1 retiré, 0 identique, 1 ajouté.
+pub fn diff_lines<'a>(old: &'a str, new: &'a str) -> Vec<(i8, &'a str)> {
+    let a: Vec<&str> = old.lines().collect();
+    let b: Vec<&str> = new.lines().collect();
+    // Préfixe et suffixe communs d'abord (rapide)
+    let pre = a.iter().zip(&b).take_while(|(x, y)| x == y).count();
+    let suf = a[pre..].iter().rev().zip(b[pre..].iter().rev()).take_while(|(x, y)| x == y).count();
+    let (am, bm) = (&a[pre..a.len() - suf], &b[pre..b.len() - suf]);
+    let mut out: Vec<(i8, &str)> = a[..pre].iter().map(|l| (0, *l)).collect();
+    if am.len() * bm.len() > 4_000_000 {
+        out.extend(am.iter().map(|l| (-1, *l)));
+        out.extend(bm.iter().map(|l| (1, *l)));
+    } else {
+        let (n, m) = (am.len(), bm.len());
+        let mut t = vec![0u32; (n + 1) * (m + 1)];
+        for i in (0..n).rev() {
+            for j in (0..m).rev() {
+                t[i * (m + 1) + j] = if am[i] == bm[j] { t[(i + 1) * (m + 1) + j + 1] + 1 } else { t[(i + 1) * (m + 1) + j].max(t[i * (m + 1) + j + 1]) };
+            }
+        }
+        let (mut i, mut j) = (0, 0);
+        while i < n && j < m {
+            if am[i] == bm[j] {
+                out.push((0, am[i]));
+                i += 1;
+                j += 1;
+            } else if t[(i + 1) * (m + 1) + j] >= t[i * (m + 1) + j + 1] {
+                out.push((-1, am[i]));
+                i += 1;
+            } else {
+                out.push((1, bm[j]));
+                j += 1;
+            }
+        }
+        out.extend(am[i..].iter().map(|l| (-1, *l)));
+        out.extend(bm[j..].iter().map(|l| (1, *l)));
+    }
+    out.extend(a[a.len() - suf..].iter().map(|l| (0, *l)));
+    out
 }
 
 pub struct Timer {
@@ -970,6 +1029,7 @@ mod tests {
         assert_eq!(h.len(), 1, "deux enregistrements rapprochés = une seule version");
         assert_eq!(std::fs::read_to_string(&h[0].1).unwrap(), "v2");
         assert_eq!(line_diff("a\nb\nc", "a\nc\nd\ne"), (2, 1));
+        assert_eq!(diff_lines("a\nb\nc", "a\nc\nd"), vec![(0, "a"), (-1, "b"), (0, "c"), (1, "d")]);
         let z = make_backup(&root, &dir.join("_sauv")).unwrap();
         assert!(z.exists());
         let _ = std::fs::remove_dir_all(&dir);
@@ -981,8 +1041,9 @@ mod tests {
 /// Ce que la barre demande à l'application.
 #[derive(Default)]
 pub struct ChatBarOut {
-    pub model: Option<String>,
+    pub model: Option<(String, String)>,
     pub manage_models: bool,
+    pub think: Option<bool>,
 }
 
 /// Pièces jointes (avec ×), « joindre ▾ », choix du modèle et bouton d'arrêt.
@@ -1038,35 +1099,87 @@ pub fn chat_bar(ui: &mut egui::Ui, chat: &mut chat::Chat, local: &ollama::Local,
                     chat.stop();
                 }
             }
-            // Choix du modèle
+            // Choix du modèle (avec avertissement si le modèle dépasse la mémoire)
             let st = local.snapshot();
-            if ollama::is_local(&settings.url) && !st.models.is_empty() {
-                egui::ComboBox::from_id_salt(ui.next_auto_id()).selected_text(RichText::new(&settings.model).size(11.0)).width(170.0).show_ui(ui, |ui| {
-                    for m in &st.models {
-                        if ui.selectable_label(*m == settings.model || m.trim_end_matches(":latest") == settings.model, m).clicked() {
-                            out.model = Some(m.clone());
-                        }
+            if ollama::is_local(&settings.url) {
+                let mut think = settings.think;
+                if ui.toggle_value(&mut think, "réflexion").on_hover_text("Les modèles comme Qwen 3.x réfléchissent avant de répondre : plus juste, mais bien plus lent. Désactivé = réponse directe.").changed() {
+                    out.think = Some(think);
+                }
+                let size_gb = st.sizes.iter().find(|(m, _)| m.trim_end_matches(":latest") == settings.model.trim_end_matches(":latest")).map(|(_, b)| *b as f32 / 1e9);
+                if let (Some(gb), Some(ram)) = (size_gb, ollama::total_ram_gb()) {
+                    if gb * 1.2 > ram * 0.7 {
+                        ui.label(RichText::new("⚠ lent").color(p.missing).size(10.5)).on_hover_text(format!("Ce modèle fait {gb:.0} Go pour {ram:.0} Go de mémoire : il tournera très lentement. Un modèle de 4 à 8 milliards de paramètres (3 à 6 Go) répond beaucoup plus vite."));
                     }
-                    ui.separator();
-                    if ui.button("gérer les modèles…").clicked() {
-                        out.manage_models = true;
-                    }
-                });
-            } else {
-                if ui.add(egui::Button::new(RichText::new(format!("modèle : {}", settings.model)).color(p.muted).size(11.0)).frame(false)).on_hover_text("changer de modèle").clicked() {
-                    out.manage_models = true;
                 }
             }
+            let pid = settings.provider_id();
+            let label = match ai::provider(pid) {
+                Some(pr) if pid != "ollama" => format!("{} · {}", pr.name.split(' ').next().unwrap_or(pr.name), settings.model),
+                _ => settings.model.clone(),
+            };
+            egui::containers::menu::MenuButton::new(RichText::new(format!("{label} ▾")).size(11.0)).ui(ui, |ui| {
+                ui.set_min_width(260.0);
+                egui::ScrollArea::vertical().max_height(420.0).show(ui, |ui| {
+                    for pr in settings.connected() {
+                        let models: Vec<String> = if pr.id == "ollama" { st.models.clone() } else if pr.id == "lmstudio" { continue } else { ai::models_of(pr.id) };
+                        if models.is_empty() {
+                            continue;
+                        }
+                        ui.label(RichText::new(pr.name).color(p.muted).size(10.5));
+                        for m in models {
+                            let cur = pid == pr.id && (m == settings.model || m.trim_end_matches(":latest") == settings.model);
+                            if ui.selectable_label(cur, format!("  {m}")).clicked() {
+                                out.model = Some((pr.id.to_string(), m.clone()));
+                                ui.close();
+                            }
+                        }
+                        ui.add_space(4.0);
+                    }
+                });
+                ui.separator();
+                if ui.button("ajouter Claude, ChatGPT, DeepSeek…").clicked() {
+                    out.manage_models = true;
+                    ui.close();
+                }
+            });
         });
     });
     out
 }
 
 impl App {
+    /// Écrit un fichier proposé par l'IA (en gardant l'ancienne version dans l'historique).
+    pub(super) fn apply_ai_file(&mut self, rel: String, content: String) {
+        let root = self.root();
+        let rel = rel.trim().trim_start_matches("./").trim_start_matches('/').to_string();
+        if let Ok(old) = vault::read(&root, &rel) {
+            snapshot(&root, &rel, &old);
+        }
+        if let Some(parent) = vault::safe(&root, &rel).ok().and_then(|p| p.parent().map(|p| p.to_path_buf())) {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        match vault::write(&root, &rel, &content) {
+            Ok(()) => {
+                self.docs.retain(|d| d.rel != rel);
+                self.active = if self.docs.is_empty() { None } else { Some(self.active.unwrap_or(0).min(self.docs.len() - 1)) };
+                self.refresh();
+                self.open(rel);
+            }
+            Err(e) => self.error = Some(e),
+        }
+    }
+
     pub(super) fn apply_chat_bar(&mut self, out: ChatBarOut, ctx: &egui::Context) {
-        if let Some(m) = out.model {
+        if let Some((pid, m)) = out.model {
             let mut s = self.ai.clone().unwrap_or_else(ai::Settings::load);
-            s.model = m.trim_end_matches(":latest").to_string();
+            s.use_model(&pid, &m);
+            s.save();
+            self.ai = Some(s);
+        }
+        if let Some(t) = out.think {
+            let mut s = self.ai.clone().unwrap_or_else(ai::Settings::load);
+            s.think = t;
             s.save();
             self.ai = Some(s);
         }
@@ -1082,6 +1195,22 @@ impl App {
 }
 
 /// Boutons de réponse rapide quand l'IA pose une question (« ?> a | b »).
+/// Fichiers proposés par l'IA (blocs ```fichier:chemin) : bouton pour les appliquer.
+pub fn file_buttons(ui: &mut egui::Ui, text: &str, exists: &dyn Fn(&str) -> bool) -> Option<(String, String)> {
+    let p = theme::pal();
+    let mut picked = None;
+    for (path, content) in chat::file_blocks(text) {
+        ui.horizontal_wrapped(|ui| {
+            let verb = if exists(&path) { "remplacer" } else { "créer" };
+            ui.label(RichText::new(format!("▤ {path}")).color(p.muted).size(11.0));
+            if ui.add(egui::Button::new(RichText::new(format!("{verb} le fichier")).color(p.on_accent)).fill(p.accent).stroke(egui::Stroke::NONE)).on_hover_text("L'ancienne version reste dans l'historique du fichier").clicked() {
+                picked = Some((path.clone(), content.clone()));
+            }
+        });
+    }
+    picked
+}
+
 pub fn choice_buttons(ui: &mut egui::Ui, choices: &[String]) -> Option<String> {
     let p = theme::pal();
     let mut picked = None;
@@ -1220,11 +1349,17 @@ impl App {
 
     pub(super) fn run_current(&mut self) {
         let Some(rel) = self.current().map(|d| d.rel.clone()) else { return };
-        self.flush_all();
         let Some((prog, args)) = runner_for(&rel) else {
             self.error = Some("Pas de façon connue d'exécuter ce type de fichier.".into());
             return;
         };
+        self.run_with(prog, args);
+    }
+
+    /// Lance le fichier ouvert avec `prog args… fichier`.
+    pub(super) fn run_with(&mut self, prog: String, args: Vec<String>) {
+        let Some(rel) = self.current().map(|d| d.rel.clone()) else { return };
+        self.flush_all();
         let Ok(path) = vault::safe(&self.root(), &rel) else { return };
         let out = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
         let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -1651,4 +1786,57 @@ impl Terminal {
             Err(e) => self.push(&format!("impossible de lancer : {e}\n")),
         }
     }
+}
+
+
+/// Cherche Blender : PATH, puis les emplacements d'installation habituels.
+pub fn find_blender() -> Option<PathBuf> {
+    let exe = if cfg!(windows) { "blender.exe" } else { "blender" };
+    if let Some(paths) = std::env::var_os("PATH") {
+        for d in std::env::split_paths(&paths) {
+            let p = d.join(exe);
+            if p.is_file() {
+                return Some(p);
+            }
+        }
+    }
+    let mut roots: Vec<PathBuf> = vec![];
+    if cfg!(windows) {
+        roots.push(PathBuf::from(r"C:\Program Files\Blender Foundation"));
+        if let Some(l) = dirs::data_local_dir() {
+            roots.push(l.join("Programs").join("Blender Foundation"));
+        }
+        if let Some(h) = dirs::home_dir() {
+            roots.push(h.join("scoop").join("apps").join("blender").join("current"));
+        }
+    } else {
+        for p in ["/snap/bin/blender", "/usr/bin/blender", "/usr/local/bin/blender", "/var/lib/flatpak/exports/bin/org.blender.Blender"] {
+            if std::path::Path::new(p).exists() {
+                return Some(PathBuf::from(p));
+            }
+        }
+        if let Some(h) = dirs::home_dir() {
+            roots.push(h.clone());
+            roots.push(h.join("Applications"));
+            roots.push(h.join(".local/share/flatpak/exports/bin"));
+        }
+        roots.push(PathBuf::from("/opt"));
+    }
+    // Dossiers « blender* » (versions portables), le plus récent d'abord
+    let mut found: Vec<PathBuf> = vec![];
+    for r in roots {
+        if r.join(exe).is_file() {
+            found.push(r.join(exe));
+        }
+        if let Ok(rd) = std::fs::read_dir(&r) {
+            for f in rd.flatten() {
+                let n = f.file_name().to_string_lossy().to_lowercase();
+                if n.starts_with("blender") && f.path().join(exe).is_file() {
+                    found.push(f.path().join(exe));
+                }
+            }
+        }
+    }
+    found.sort();
+    found.pop()
 }

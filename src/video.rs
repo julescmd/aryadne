@@ -119,6 +119,10 @@ pub struct Viewer {
     pub guide_center: bool,
     pub guide_safe: bool,
     pub guide_ratio: f32,
+    /// Plage de boucle (images) et lecture aller-retour
+    pub loop_in: Option<usize>,
+    pub loop_out: Option<usize>,
+    pub pingpong: bool,
     pub draw: bool,
     pub pen: Color32,
     pub pen_width: f32,
@@ -159,6 +163,9 @@ impl Viewer {
             guide_center: false,
             guide_safe: false,
             guide_ratio: 0.0,
+            loop_in: None,
+            loop_out: None,
+            pingpong: false,
             draw: false,
             pen: Color32::from_rgb(0xff, 0x4f, 0x1f),
             pen_width: 3.0,
@@ -286,7 +293,19 @@ impl Viewer {
         if self.playing && frames > 0 {
             let (start, from) = *self.clock.get_or_insert((Instant::now(), self.cur));
             let step = (start.elapsed().as_secs_f32() * self.play_fps * (self.preview_fps / info.fps)) as usize;
-            self.cur = (from + step) % frames.max(1);
+            // Plage de boucle (ou toute la vidéo), aller-retour si demandé
+            let a = self.loop_in.unwrap_or(0).min(frames - 1);
+            let b = self.loop_out.unwrap_or(frames - 1).clamp(a, frames - 1);
+            let len = b - a + 1;
+            let from_off = from.clamp(a, b) - a;
+            let t = from_off + step;
+            self.cur = if self.pingpong && len > 1 {
+                let period = 2 * (len - 1);
+                let k = t % period;
+                a + if k < len { k } else { period - k }
+            } else {
+                a + t % len
+            };
             ctx.request_repaint();
         }
 
@@ -323,6 +342,22 @@ impl Viewer {
                 if ui.selectable_label(self.on == n, format!("{n}s")).on_hover_text(format!("chaque image tenue {n} fois (animation « en {n} »)")).clicked() {
                     self.on = n;
                 }
+            }
+            ui.separator();
+            if ui.small_button("[").on_hover_text("début de la boucle ici (I)").clicked() {
+                self.loop_in = Some(self.cur);
+                self.clock = None;
+            }
+            if ui.small_button("]").on_hover_text("fin de la boucle ici (O)").clicked() {
+                self.loop_out = Some(self.cur);
+                self.clock = None;
+            }
+            if (self.loop_in.is_some() || self.loop_out.is_some()) && ui.small_button("×").on_hover_text("retirer la boucle").clicked() {
+                self.loop_in = None;
+                self.loop_out = None;
+            }
+            if ui.toggle_value(&mut self.pingpong, "⇄").on_hover_text("aller-retour (ping-pong)").changed() {
+                self.clock = None;
             }
             ui.separator();
             ui.checkbox(&mut self.onion, "pelures");
@@ -523,6 +558,12 @@ impl Viewer {
         // Clavier
         if resp.hovered() || resp.has_focus() {
             let (left, right, space) = ui.input(|i| (i.key_pressed(Key::ArrowLeft), i.key_pressed(Key::ArrowRight), i.key_pressed(Key::Space)));
+            if ui.input(|i| i.key_pressed(Key::I)) {
+                self.loop_in = Some(self.cur);
+            }
+            if ui.input(|i| i.key_pressed(Key::O)) {
+                self.loop_out = Some(self.cur);
+            }
             if left {
                 self.cur = self.cur.saturating_sub(self.on);
                 self.playing = false;
@@ -545,6 +586,13 @@ impl Viewer {
         for &k in self.lines.keys() {
             let x = tl.left() + (k as f32 + 0.5) / n * tl.width();
             pt.line_segment([pos2(x, tl.top()), pos2(x, tl.top() + 8.0)], Stroke::new(2.0, p.accent));
+        }
+        if self.loop_in.is_some() || self.loop_out.is_some() {
+            let a = self.loop_in.unwrap_or(0) as f32;
+            let b = self.loop_out.unwrap_or(frames.saturating_sub(1)) as f32;
+            let r = Rect::from_x_y_ranges(tl.left() + a / n * tl.width()..=tl.left() + (b + 1.0) / n * tl.width(), tl.y_range());
+            pt.rect_filled(r, 0.0, p.accent.gamma_multiply(0.15));
+            pt.rect_stroke(r, 0.0, Stroke::new(1.0, p.accent.gamma_multiply(0.6)), egui::StrokeKind::Inside);
         }
         let x = tl.left() + (held as f32 + 0.5) / n * tl.width();
         pt.rect_filled(Rect::from_center_size(pos2(x, tl.center().y), vec2(3.0, tl.height())), 0.0, p.accent);

@@ -71,6 +71,7 @@ pub const DEFS: &[Def] = &[
     Def { op: "value", label: "Valeur", cat: "entrée", inputs: &[("valeur", Sock::Float, f(0.5))], outputs: &[("valeur", Sock::Float)], params: &[], mat: true, comp: true },
     Def { op: "coords", label: "Coordonnées", cat: "entrée", inputs: &[], outputs: &[("u", Sock::Float), ("v", Sock::Float), ("uv", Sock::Color)], params: &[], mat: true, comp: true },
     Def { op: "geometry", label: "Géométrie", cat: "entrée", inputs: &[], outputs: &[("normale", Sock::Color), ("position", Sock::Color), ("hauteur", Sock::Float), ("pente", Sock::Float)], params: &[], mat: true, comp: false },
+    Def { op: "texture", label: "Texture image", cat: "entrée", inputs: &[("échelle", Sock::Float, f(1.0))], outputs: &[("couleur", Sock::Color), ("alpha", Sock::Float)], params: &[ParamDef::File("fichier"), ParamDef::Choice("projection", &["triplanaire", "dessus (XZ)", "face (XY)", "côté (YZ)", "sphérique"])], mat: true, comp: true },
     Def { op: "fresnel", label: "Fresnel", cat: "entrée", inputs: &[("puissance", Sock::Float, f(3.0))], outputs: &[("fresnel", Sock::Float)], params: &[], mat: true, comp: false },
     Def { op: "vcolor", label: "Couleur du fichier", cat: "entrée", inputs: &[], outputs: &[("couleur", Sock::Color)], params: &[], mat: true, comp: false },
     // Motifs
@@ -881,7 +882,7 @@ impl Program {
                 })
                 .collect();
             let shader = if n.op == "shader" { Some(Shader::compile(pstr(&n.params, "code")).map_err(|e| (id, e))?) } else { None };
-            let image = if n.op == "image" {
+            let image = if n.op == "image" || n.op == "texture" {
                 let rel = pstr(&n.params, "fichier");
                 if rel.is_empty() {
                     None
@@ -1099,6 +1100,40 @@ fn pixel(s: &Step, i: &[V], c: &Ctx) -> [V; 4] {
             [one((1.0 - d).powf(i[0][0].max(0.1))), z, z, z]
         }
         "vcolor" => [c.vcol, z, z, z],
+        "texture" => match &s.image {
+            Some(img) => {
+                let sc = i[0][0].max(1e-4);
+                let w = |u: f32, v: f32| img.sample(u.rem_euclid(1.0), v.rem_euclid(1.0));
+                let p = if c.pos == [0.0; 3] { [c.uv[0] - 0.5, 0.5 - c.uv[1], 0.0] } else { c.pos };
+                let col = match pstr(&s.params, "projection") {
+                    "dessus (XZ)" => w(p[0] * sc + 0.5, p[2] * sc + 0.5),
+                    "face (XY)" => w(p[0] * sc + 0.5, 0.5 - p[1] * sc),
+                    "côté (YZ)" => w(p[2] * sc + 0.5, 0.5 - p[1] * sc),
+                    "sphérique" => {
+                        let l = (p[0] * p[0] + p[1] * p[1] + p[2] * p[2]).sqrt().max(1e-6);
+                        w((p[0].atan2(p[2]) / std::f32::consts::TAU + 0.5) * sc, (p[1] / l).acos() / std::f32::consts::PI * sc)
+                    }
+                    _ => {
+                        if c.pos == [0.0; 3] {
+                            w(c.uv[0] * sc, c.uv[1] * sc)
+                        } else {
+                            // Triplanaire : trois projections mélangées selon la normale
+                            let n = c.nrm;
+                            let (ax, ay, az) = (n[0].abs().powi(4), n[1].abs().powi(4), n[2].abs().powi(4));
+                            let t = (ax + ay + az).max(1e-6);
+                            let (a, b, d) = (w(p[2] * sc + 0.5, 0.5 - p[1] * sc), w(p[0] * sc + 0.5, p[2] * sc + 0.5), w(p[0] * sc + 0.5, 0.5 - p[1] * sc));
+                            let mut o = [0.0; 4];
+                            for k in 0..4 {
+                                o[k] = (a[k] * ax + b[k] * ay + d[k] * az) / t;
+                            }
+                            o
+                        }
+                    }
+                };
+                [col, one(col[3]), z, z]
+            }
+            None => [[0.5, 0.5, 0.5, 1.0], one(1.0), z, z],
+        },
         "noise" => {
             let sc = i[0][0];
             let (x, y, zz) = (p3[0] * sc, p3[1] * sc, p3[2] * sc);
@@ -1242,13 +1277,17 @@ pub struct Editor {
     add_query: String,
     pub message: Option<String>,
     version: u64,
+    /// Demande à l'IA d'écrire le code d'un node shader : (node, description)
+    pub ai_request: Option<(u32, String)>,
+    pub ai_rx: Option<std::sync::mpsc::Receiver<(u32, Result<String, String>)>>,
+    ai_prompt: HashMap<u32, String>,
 }
 
 impl Editor {
     pub fn open(path: PathBuf, root: &str) -> Result<Editor, String> {
         let graph = Graph::load(&path)?;
         let program = Program::compile(&graph, root, 1024);
-        Ok(Editor { path, root: root.to_string(), graph, scene: Rect::ZERO, drag_link: None, selected: None, dirty: None, program, preview: None, preview_key: u64::MAX, preview_rx: None, sphere: None, add_at: None, add_query: String::new(), message: None, version: 1 })
+        Ok(Editor { path, root: root.to_string(), graph, scene: Rect::ZERO, drag_link: None, selected: None, dirty: None, program, preview: None, preview_key: u64::MAX, preview_rx: None, sphere: None, add_at: None, add_query: String::new(), message: None, version: 1, ai_request: None, ai_rx: None, ai_prompt: HashMap::new() })
     }
 
     fn changed(&mut self) {
@@ -1272,6 +1311,23 @@ impl Editor {
         let p = theme::pal();
         let ctx = ui.ctx().clone();
         self.save_if_due(false);
+        if let Some(rx) = &self.ai_rx {
+            if let Ok((id, r)) = rx.try_recv() {
+                match r {
+                    Ok(code) => {
+                        if let Some(n) = self.graph.nodes.iter_mut().find(|n| n.id == id) {
+                            n.params.insert("code".into(), Param::S(code));
+                        }
+                        self.changed();
+                        self.message = Some("shader écrit par l'IA".into());
+                    }
+                    Err(e) => self.message = Some(e),
+                }
+                self.ai_rx = None;
+            } else {
+                ctx.request_repaint_after(std::time::Duration::from_millis(200));
+            }
+        }
         if self.dirty.is_some() {
             ctx.request_repaint_after(std::time::Duration::from_millis(300));
         }
@@ -1487,7 +1543,7 @@ impl Editor {
             .iter()
             .filter_map(|n| {
                 let d = def(&n.op)?;
-                let rows = d.outputs.len() + d.inputs.len() + d.params.iter().map(|pp| if matches!(pp, ParamDef::Text(_)) { 8 } else { 1 }).sum::<usize>();
+                let rows = d.outputs.len() + d.inputs.len() + d.params.iter().map(|pp| if matches!(pp, ParamDef::Text(_)) { 9 } else { 1 }).sum::<usize>();
                 let h = HEAD + rows as f32 * ROW + 8.0;
                 let r = Rect::from_min_size(pos2(n.pos[0], n.pos[1]), vec2(NW, h));
                 Some((n.id, r, d, h))
@@ -1610,7 +1666,7 @@ impl Editor {
             let mut y = r.top() + HEAD + (d.outputs.len() + d.inputs.len()) as f32 * ROW;
             for pd in d.params {
                 let (h, name) = match pd {
-                    ParamDef::Text(n) => (8.0 * ROW, *n),
+                    ParamDef::Text(n) => (9.0 * ROW, *n),
                     ParamDef::Choice(n, _) | ParamDef::Float(n, ..) | ParamDef::File(n) => (ROW, *n),
                 };
                 let row = Rect::from_min_size(pos2(r.left() + 8.0, y + 1.0), vec2(NW - 16.0, h - 2.0));
@@ -1646,6 +1702,15 @@ impl Editor {
                             *code = c;
                             actions.push(Act::Changed);
                         }
+                        // Décrire l'effet et laisser l'IA écrire le code
+                        let prompt = self.ai_prompt.entry(*id).or_default();
+                        let busy = self.ai_rx.is_some();
+                        child.horizontal(|ui| {
+                            ui.add(egui::TextEdit::singleline(prompt).hint_text("décris l'effet…").desired_width(NW - 64.0).font(egui::FontId::monospace(10.5)));
+                            if ui.add_enabled(!busy && !prompt.trim().is_empty(), egui::Button::new(RichText::new(if busy { "…" } else { "IA" }).size(10.5))).on_hover_text("L'IA écrit le shader").clicked() {
+                                self.ai_request = Some((*id, prompt.trim().to_string()));
+                            }
+                        });
                         let te = egui::TextEdit::multiline(code).code_editor().desired_width(NW - 18.0).desired_rows(7).font(egui::FontId::monospace(10.5));
                         if child.add(te).changed() {
                             actions.push(Act::Changed);
@@ -1845,4 +1910,15 @@ mod tests {
         let back: Graph = serde_json::from_str(&t).unwrap();
         assert_eq!(back.nodes.len(), m.nodes.len());
     }
+}
+
+
+/// Consigne donnée à l'IA pour écrire un shader dans le langage d'Aryadne.
+pub const SHADER_AI_PROMPT: &str = "Tu écris du code pour le node « shader perso » d'Aryadne. Langage : une instruction par ligne, « nom = expression ». Variables en entrée : ar ag ab aa (couleur A), br bg bb ba (couleur B), f (nombre F), x y (coordonnées 0..1), nx ny nz (normale, matériau 3D), px py pz (position, matériau 3D, environ -0.5..0.5), w h (taille de l'image), pi. Sorties : r g b a (couleur, valeurs 0..1) et f. Opérateurs : + - * / % ^ < > et parenthèses. Fonctions : sin cos tan abs floor ceil fract sqrt exp log sign pow(a,b) min max mod step(seuil,x) atan2 rand(x,y) len(x,y) clamp(x,a,b) mix(a,b,t) smoothstep(a,b,x) noise(x,y,z) fbm(x,y,z) if(cond,a,b). Pas de boucles, pas de vecteurs, pas de commentaires obligatoires. Réponds UNIQUEMENT avec le code, sans ``` ni explication.";
+
+/// Nettoie la réponse de l'IA (blocs ```, texte autour).
+pub fn clean_ai_code(t: &str) -> String {
+    let mut lines: Vec<&str> = t.lines().filter(|l| !l.trim_start().starts_with("```")).collect();
+    lines.retain(|l| l.trim().is_empty() || l.contains('=') || l.trim_start().starts_with("//"));
+    lines.join("\n").trim().to_string() + "\n"
 }

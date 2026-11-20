@@ -81,67 +81,20 @@ impl Model {
         sub(self.max, self.min)
     }
 
-    /// Simplification par grille : tous les sommets d'une même case fusionnent.
-    /// On resserre la grille jusqu'à passer sous `target` triangles.
+    /// Simplification par grille (voir `simplify_arrays`).
     fn simplify(&mut self, target: usize) {
         if self.tris.len() <= target {
             return;
         }
-        let size = self.size();
-        let longest = size[0].max(size[1]).max(size[2]).max(1e-9);
-        let mut cells = 600.0_f32;
-        loop {
-            let cell = longest / cells;
-            let key = |v: &V3| -> (i32, i32, i32) {
-                (((v[0] - self.min[0]) / cell) as i32, ((v[1] - self.min[1]) / cell) as i32, ((v[2] - self.min[2]) / cell) as i32)
-            };
-            let mut ids: HashMap<(i32, i32, i32), u32> = HashMap::new();
-            let mut sums: Vec<([f64; 3], u32)> = vec![];
-            let remap: Vec<u32> = self
-                .positions
-                .iter()
-                .map(|v| {
-                    let k = key(v);
-                    let id = *ids.entry(k).or_insert_with(|| {
-                        sums.push(([0.0; 3], 0));
-                        (sums.len() - 1) as u32
-                    });
-                    let s = &mut sums[id as usize];
-                    s.0[0] += v[0] as f64;
-                    s.0[1] += v[1] as f64;
-                    s.0[2] += v[2] as f64;
-                    s.1 += 1;
-                    id
-                })
-                .collect();
-            let mut seen = std::collections::HashSet::new();
-            let mut tris = vec![];
-            let mut colors = vec![];
-            for (t, c) in self.tris.iter().zip(&self.colors) {
-                let n = [remap[t[0] as usize], remap[t[1] as usize], remap[t[2] as usize]];
-                if n[0] == n[1] || n[1] == n[2] || n[0] == n[2] {
-                    continue;
-                }
-                let mut sorted = n;
-                sorted.sort_unstable();
-                if seen.insert(sorted) {
-                    tris.push(n);
-                    colors.push(*c);
-                }
-            }
-            if tris.len() <= target || cells < 20.0 {
-                self.positions = sums.iter().map(|(s, n)| [(s[0] / *n as f64) as f32, (s[1] / *n as f64) as f32, (s[2] / *n as f64) as f32]).collect();
-                self.edges = vec![7; tris.len()];
-                self.tris = tris;
-                self.colors = colors;
-                return;
-            }
-            cells *= (target as f32 / tris.len() as f32).sqrt().clamp(0.4, 0.92);
-        }
+        let (p, t, c) = simplify_arrays(&self.positions, &self.tris, &self.colors, target);
+        self.edges = vec![7; t.len()];
+        self.positions = p;
+        self.tris = t;
+        self.colors = c;
     }
 
     /// Sommets centrés, mis à l'échelle (taille 1) et remis en Y vers le haut.
-    fn normalized(&self, z_up: bool) -> Vec<V3> {
+    pub fn normalized(&self, z_up: bool) -> Vec<V3> {
         let s = self.size();
         let scale = 1.0 / s[0].max(s[1]).max(s[2]).max(1e-9);
         let c = [(self.min[0] + self.max[0]) / 2.0, (self.min[1] + self.max[1]) / 2.0, (self.min[2] + self.max[2]) / 2.0];
@@ -152,6 +105,65 @@ impl Model {
                 if z_up { [v[0], v[2], -v[1]] } else { v }
             })
             .collect()
+    }
+}
+
+/// Simplification par grille : tous les sommets d'une même case fusionnent.
+/// On resserre la grille jusqu'à passer sous `target` triangles.
+pub fn simplify_arrays(positions: &[V3], tris_in: &[[u32; 3]], colors_in: &[Color32], target: usize) -> (Vec<V3>, Vec<[u32; 3]>, Vec<Color32>) {
+    if tris_in.len() <= target {
+        return (positions.to_vec(), tris_in.to_vec(), colors_in.to_vec());
+    }
+    let mut min = [f32::MAX; 3];
+    let mut max = [f32::MIN; 3];
+    for v in positions {
+        for k in 0..3 {
+            min[k] = min[k].min(v[k]);
+            max[k] = max[k].max(v[k]);
+        }
+    }
+    let longest = (max[0] - min[0]).max(max[1] - min[1]).max(max[2] - min[2]).max(1e-9);
+    let mut cells = 600.0_f32;
+    loop {
+        let cell = longest / cells;
+        let key = |v: &V3| -> (i32, i32, i32) { (((v[0] - min[0]) / cell) as i32, ((v[1] - min[1]) / cell) as i32, ((v[2] - min[2]) / cell) as i32) };
+        let mut ids: HashMap<(i32, i32, i32), u32> = HashMap::new();
+        let mut sums: Vec<([f64; 3], u32)> = vec![];
+        let remap: Vec<u32> = positions
+            .iter()
+            .map(|v| {
+                let id = *ids.entry(key(v)).or_insert_with(|| {
+                    sums.push(([0.0; 3], 0));
+                    (sums.len() - 1) as u32
+                });
+                let s = &mut sums[id as usize];
+                s.0[0] += v[0] as f64;
+                s.0[1] += v[1] as f64;
+                s.0[2] += v[2] as f64;
+                s.1 += 1;
+                id
+            })
+            .collect();
+        let mut seen = std::collections::HashSet::new();
+        let mut tris = vec![];
+        let mut colors = vec![];
+        for (t, c) in tris_in.iter().zip(colors_in) {
+            let n = [remap[t[0] as usize], remap[t[1] as usize], remap[t[2] as usize]];
+            if n[0] == n[1] || n[1] == n[2] || n[0] == n[2] {
+                continue;
+            }
+            let mut sorted = n;
+            sorted.sort_unstable();
+            if seen.insert(sorted) {
+                tris.push(n);
+                colors.push(*c);
+            }
+        }
+        if tris.len() <= target || cells < 6.0 {
+            let pos = sums.iter().map(|(s, n)| [(s[0] / *n as f64) as f32, (s[1] / *n as f64) as f32, (s[2] / *n as f64) as f32]).collect();
+            return (pos, tris, colors);
+        }
+        cells *= (target as f32 / tris.len() as f32).sqrt().clamp(0.4, 0.92);
     }
 }
 
@@ -819,6 +831,27 @@ impl Prepared {
     pub fn tri_count(&self) -> usize {
         self.tris.len()
     }
+
+    /// Depuis un maillage modifié : recentré et remis à l'échelle pour tenir dans la vue.
+    pub fn from_mesh(m: crate::modifiers::Mesh) -> Self {
+        let mut lo = [f32::MAX; 3];
+        let mut hi = [f32::MIN; 3];
+        for p in &m.pos {
+            for k in 0..3 {
+                lo[k] = lo[k].min(p[k]);
+                hi[k] = hi[k].max(p[k]);
+            }
+        }
+        let longest = (hi[0] - lo[0]).max(hi[1] - lo[1]).max(hi[2] - lo[2]).max(1e-9);
+        let k = if longest > 1.0 { 1.0 / longest } else { 1.0 };
+        let c = [(lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0, (lo[2] + hi[2]) / 2.0];
+        let pos: Vec<V3> = m.pos.iter().map(|p| [(p[0] - c[0]) * k, (p[1] - c[1]) * k, (p[2] - c[2]) * k]).collect();
+        let nrm = vertex_normals(&pos, &m.tris);
+        let floor = pos.iter().map(|v| v[1]).fold(f32::MAX, f32::min);
+        let lin = |c: u8| (c as f32 / 255.0).powf(2.2);
+        let colors = m.colors.iter().map(|c| [lin(c.r()), lin(c.g()), lin(c.b())]).collect();
+        Self { pos, nrm, tris: m.tris, colors, edges: m.edges, floor }
+    }
 }
 
 pub const MAX_SUBDIV_TRIS: usize = 2_500_000;
@@ -1158,7 +1191,7 @@ pub fn thumbnail(model: &Model, w: u32, h: u32, _bg: [u8; 4]) -> image::RgbaImag
 
 pub enum State {
     Loading(Receiver<Result<Model, String>>),
-    Ready(Box<Model>),
+    Ready(std::sync::Arc<Model>),
     Failed(String),
 }
 
@@ -1176,12 +1209,17 @@ pub struct Viewer {
     mat_error: Option<String>,
     env_loading: Option<Receiver<Result<Env, String>>>,
     env_error: Option<String>,
-    subdiv: u8,
+    /// Pile de modificateurs (enregistrée dans .app/modifiers/ du coffre)
+    stack: Vec<crate::modifiers::Modifier>,
+    stack_loaded: bool,
+    show_mods: bool,
+    /// Calcul en cours : (clé, résultat)
+    job: Option<(u64, Receiver<Prepared>)>,
     turntable: bool,
     pub z_up: Option<bool>,
-    prepared: Option<(bool, u8, Prepared)>,
+    prepared: Option<(bool, u64, Prepared)>,
     tex: Option<egui::TextureHandle>,
-    last: Option<(Camera, [usize; 2], bool, u8, String)>,
+    last: Option<(Camera, [usize; 2], bool, u64, String)>,
     capture_msg: Option<String>,
 }
 
@@ -1206,7 +1244,10 @@ impl Viewer {
             mat_error: None,
             env_loading: None,
             env_error: None,
-            subdiv: 0,
+            stack: vec![],
+            stack_loaded: false,
+            show_mods: false,
+            job: None,
             turntable: false,
             z_up: None,
             prepared: None,
@@ -1245,6 +1286,13 @@ impl Viewer {
         });
     }
 
+    fn mods_file(&self) -> std::path::PathBuf {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        self.path.hash(&mut h);
+        std::path::Path::new(&self.root).join(".app/modifiers").join(format!("{:016x}.json", h.finish()))
+    }
+
     /// Tour complet du modèle en GIF animé (48 images, 520 px).
     fn turntable_gif(&mut self) {
         let Some((_, _, prep)) = &self.prepared else { return };
@@ -1276,7 +1324,7 @@ impl Viewer {
         if let State::Loading(rx) = &self.state {
             if let Ok(r) = rx.try_recv() {
                 self.state = match r {
-                    Ok(m) => State::Ready(Box::new(m)),
+                    Ok(m) => State::Ready(std::sync::Arc::new(m)),
                     Err(e) => State::Failed(e),
                 };
             }
@@ -1306,12 +1354,54 @@ impl Viewer {
                 ui.label(egui::RichText::new(e).color(p.missing));
                 return;
             }
-            State::Ready(m) => m,
+            State::Ready(m) => m.clone(),
         };
+        let model = &model;
         let z_up = *self.z_up.get_or_insert(model.z_up);
-        if self.prepared.as_ref().is_none_or(|(z, l, _)| *z != z_up || *l != self.subdiv) {
-            self.prepared = Some((z_up, self.subdiv, Prepared::new(model, z_up, self.subdiv)));
-            self.last = None;
+        // Pile de modificateurs : chargée une fois, recalculée en arrière-plan quand elle change
+        if !self.stack_loaded && !self.root.is_empty() {
+            self.stack = std::fs::read_to_string(self.mods_file()).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
+            self.stack_loaded = true;
+        }
+        let key = {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            serde_json::to_string(&self.stack.iter().filter(|m| m.on).map(|m| m.kind).collect::<Vec<_>>()).unwrap_or_default().hash(&mut h);
+            z_up.hash(&mut h);
+            h.finish()
+        };
+        if let Some((k, rx)) = &self.job {
+            if let Ok(p) = rx.try_recv() {
+                self.prepared = Some((z_up, *k, p));
+                self.last = None;
+                self.job = None;
+            } else {
+                ui.ctx().request_repaint_after(std::time::Duration::from_millis(50));
+            }
+        }
+        let current = self.prepared.as_ref().map(|p| p.1);
+        let pending = self.job.as_ref().map(|j| j.0);
+        if current != Some(key) && pending != Some(key) && self.job.is_none() {
+            let (tx, rx) = channel();
+            let (m, stack, ctx) = (model.clone(), self.stack.clone(), ui.ctx().clone());
+            std::thread::spawn(move || {
+                let s = m.size();
+                let longest = s[0].max(s[1]).max(s[2]).max(1e-9);
+                let c = [(m.min[0] + m.max[0]) / 2.0, (m.min[1] + m.max[1]) / 2.0, (m.min[2] + m.max[2]) / 2.0];
+                let o = [-c[0] / longest, -c[1] / longest, -c[2] / longest];
+                let origin = if z_up { [o[0], o[2], -o[1]] } else { o };
+                let mesh = crate::modifiers::apply(&stack, crate::modifiers::Mesh::from_model(&m, z_up), origin);
+                let _ = tx.send(Prepared::from_mesh(mesh));
+                ctx.request_repaint();
+            });
+            self.job = Some((key, rx));
+        }
+        if self.prepared.is_none() {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label("préparation du modèle…");
+            });
+            return;
         }
         // Matériau en nodes : rechargé quand le fichier change (édité dans un autre onglet)
         if let Some((path, seen)) = &self.mat_active {
@@ -1330,7 +1420,6 @@ impl Viewer {
             ui.ctx().request_repaint_after(std::time::Duration::from_millis(700));
         }
         let shown_tris = self.prepared.as_ref().map(|p| p.2.tri_count()).unwrap_or(0);
-        let max_level = (0..=4u8).take_while(|l| model.tris.len() * 4usize.pow(*l as u32) <= MAX_SUBDIV_TRIS).last().unwrap_or(0);
         let ctx = ui.ctx().clone();
         let mut pick_hdr: Option<std::path::PathBuf> = None;
         let mut do_capture = false;
@@ -1365,14 +1454,7 @@ impl Viewer {
                 }
                 ui.separator();
                 ui.checkbox(&mut self.look.smooth, "ombrage lisse");
-                ui.horizontal(|ui| {
-                    ui.label("subdivisions");
-                    let top = max_level.max(self.subdiv);
-                    ui.add_enabled(top > 0, egui::Slider::new(&mut self.subdiv, 0..=top));
-                });
-                if max_level == 0 && self.subdiv == 0 {
-                    ui.label(egui::RichText::new("modèle déjà trop dense pour subdiviser").color(p.muted).size(10.5));
-                }
+                ui.label(egui::RichText::new("subdivision, miroir, torsion… : bouton « modificateurs »").color(p.muted).size(10.5));
                 ui.separator();
                 ui.label(egui::RichText::new("fil de fer").color(p.muted).size(11.0));
                 ui.add(egui::Slider::new(&mut self.look.wire, 0.0..=1.0).text("opacité"));
@@ -1456,6 +1538,12 @@ impl Viewer {
                 }
             });
             ui.toggle_value(&mut self.turntable, "tourner").on_hover_text("Rotation automatique (platine)");
+            let n_mods = self.stack.iter().filter(|m| m.on).count();
+            let label = if n_mods > 0 { format!("modificateurs ({n_mods})") } else { "modificateurs".into() };
+            ui.toggle_value(&mut self.show_mods, label).on_hover_text("Pile de modificateurs, comme dans Blender et 3ds Max");
+            if self.job.is_some() {
+                ui.spinner();
+            }
             egui::containers::menu::MenuButton::new("capture ▾").ui(ui, |ui| {
                 if ui.button("image PNG (2400 px)").clicked() {
                     do_capture = true;
@@ -1480,7 +1568,46 @@ impl Viewer {
             self.turntable_gif();
         }
 
-        let (rect, resp) = ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
+        if self.show_mods {
+            let avail = ui.available_rect_before_wrap();
+            let pr = egui::Rect::from_min_max(egui::pos2(avail.right() - 280.0, avail.top()), avail.max);
+            let mut changed = false;
+            let mut export = false;
+            {
+                let ui = &mut ui.new_child(egui::UiBuilder::new().max_rect(pr));
+                egui::Frame::new().fill(p.panel).stroke(Stroke::new(1.0, p.line)).inner_margin(8).show(ui, |ui| {
+                    ui.set_min_size(pr.size() - egui::vec2(16.0, 16.0));
+                    egui::ScrollArea::vertical().id_salt("mods").show(ui, |ui| {
+                        changed = crate::modifiers::panel(ui, &mut self.stack);
+                        ui.add_space(8.0);
+                        if !self.stack.is_empty() && ui.button("exporter le résultat en OBJ").on_hover_text("Enregistre le maillage modifié à côté du fichier").clicked() {
+                            export = true;
+                        }
+                    });
+                });
+            }
+            if changed && !self.root.is_empty() {
+                let f = self.mods_file();
+                let _ = std::fs::create_dir_all(f.parent().unwrap());
+                let _ = std::fs::write(f, serde_json::to_string(&self.stack).unwrap_or_default());
+            }
+            if export {
+                let s = model.size();
+                let longest = s[0].max(s[1]).max(s[2]).max(1e-9);
+                let c = [(model.min[0] + model.max[0]) / 2.0, (model.min[1] + model.max[1]) / 2.0, (model.min[2] + model.max[2]) / 2.0];
+                let o = [-c[0] / longest, -c[1] / longest, -c[2] / longest];
+                let origin = if z_up { [o[0], o[2], -o[1]] } else { o };
+                let mesh = crate::modifiers::apply(&self.stack, crate::modifiers::Mesh::from_model(model, z_up), origin);
+                let stem = self.path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "modele".into());
+                let out = self.path.with_file_name(format!("{stem}-modifié.obj"));
+                self.capture_msg = Some(match crate::modifiers::export_obj(&mesh, model, z_up, &out) {
+                    Ok(()) => format!("exporté : {}", out.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()),
+                    Err(e) => format!("export impossible : {e}"),
+                });
+            }
+        }
+        let avail = ui.available_size() - if self.show_mods { egui::vec2(288.0, 0.0) } else { egui::Vec2::ZERO };
+        let (rect, resp) = ui.allocate_exact_size(avail.max(egui::vec2(50.0, 50.0)), Sense::click_and_drag());
         let painter = ui.painter_at(rect);
         painter.rect_filled(rect, 0.0, p.panel);
 
@@ -1546,7 +1673,7 @@ impl Viewer {
         let scale = if interacting { if heavy { 0.4 } else { 0.6 } } else { ppp.min(2.0) };
         let size = [(rect.width() * scale).max(16.0) as usize, (rect.height() * scale).max(16.0) as usize];
         let look_key = format!("{:?}", self.look.key());
-        let key = (self.cam, size, z_up, self.subdiv, look_key);
+        let key = (self.cam, size, z_up, self.prepared.as_ref().map(|p| p.1).unwrap_or(0), look_key);
         if self.last.as_ref() != Some(&key) || self.tex.is_none() {
             let prep = &self.prepared.as_ref().unwrap().2;
             let frame = render(prep, &self.cam, &self.look, size[0], size[1]);
