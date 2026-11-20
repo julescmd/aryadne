@@ -858,14 +858,14 @@ mod tests {
         for f in &r.faces { for &i in f { deg[i as usize] += 1; } }
         for d in deg { *val.entry(d).or_insert(0) += 1; }
         eprintln!("tailles {hist:?} valences {val:?}");
-        export_obj(&r, &|p| p, std::path::Path::new("/tmp/retopo_sphere.obj")).unwrap();
+        export_obj(&r, &|p| p, &std::env::temp_dir().join("retopo_sphere.obj")).unwrap();
         assert!(r.faces.len() > 300 && r.faces.len() < 1000, "{} faces", r.faces.len());
         assert!(quads as f32 / r.faces.len() as f32 > 0.7, "{quads} quads sur {}", r.faces.len());
         let pq = remesh(&p, &t, &[], &Options { faces: 600, iterations: 80, guide_radius: 1.2, pure_quads: true }, &|_| {});
         eprintln!("100 % quads : {} faces", pq.faces.len());
         assert_eq!(pq.quads(), pq.faces.len());
         assert!(pq.faces.len() > 300 && pq.faces.len() < 1000);
-        export_obj(&pq, &|p| p, std::path::Path::new("/tmp/retopo_pq.obj")).unwrap();
+        export_obj(&pq, &|p| p, &std::env::temp_dir().join("retopo_pq.obj")).unwrap();
         // Tous les sommets restent sur la sphère
         assert!(r.pos.iter().all(|p| (len(*p) - 1.0).abs() < 0.08));
     }
