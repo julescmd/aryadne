@@ -136,40 +136,53 @@ impl Modifier {
 }
 
 /// (catégorie, nom, aide)
+/// Catégories du menu d'ajout, dans l'ordre.
+pub const CATS: [&str; 7] = ["édition", "générer", "déformer", "organique", "topologie", "normales", "effets"];
+
+/// Ce que le panneau demande au-delà de la pile elle-même.
+#[derive(Clone, Copy, PartialEq)]
+pub enum Request {
+    /// Appliquer les modificateurs jusqu'à celui-ci (inclus) au maillage
+    ApplyUpTo(usize),
+    ApplyAll,
+    /// Revenir au maillage du fichier
+    Restore,
+}
+
 pub const ALL: &[(&str, &str, &str)] = &[
     ("générer", "Miroir", "symétrie sur un ou plusieurs axes, avec coupe"),
     ("générer", "Réseau (array)", "copies avec décalage, rotation et échelle par copie"),
     ("générer", "Subdivision", "lisse et densifie (Catmull-Clark, comme Blender)"),
-    ("générer", "Décimer", "réduit le nombre de triangles"),
+    ("topologie", "Décimer", "réduit le nombre de triangles"),
     ("déformer", "Lisser", "adoucit les formes (avec conservation du volume)"),
-    ("déformer", "Déplacement (bruit)", "relief procédural fractal"),
+    ("organique", "Déplacement (bruit)", "relief procédural fractal"),
     ("déformer", "Torsion (twist)", "tord autour d'un axe"),
     ("déformer", "Courbure (bend)", "plie le long d'un axe"),
     ("déformer", "Effilement (taper)", "rétrécit vers un bout"),
     ("déformer", "Projeter (cast)", "tend vers une sphère, un cylindre ou un cube"),
     ("générer", "Épaissir (solidify)", "donne une épaisseur, avec bords fermés"),
-    ("déformer", "Onde", "vagues linéaires ou circulaires"),
-    ("déformer", "Transformation", "échelle, rotation, décalage"),
-    ("générer", "Souder (weld)", "fusionne les sommets proches"),
-    ("générer", "Trianguler", "montre tous les triangles"),
+    ("organique", "Onde", "vagues linéaires ou circulaires"),
+    ("édition", "Transformation", "échelle, rotation, décalage"),
+    ("topologie", "Souder (weld)", "fusionne les sommets proches"),
+    ("topologie", "Trianguler", "montre tous les triangles"),
     ("normales", "Arêtes vives (edge split)", "facettes nettes au-delà d'un angle"),
     ("générer", "Fil de fer (wireframe)", "transforme les arêtes en tubes"),
-    ("générer", "Exploser", "écarte les faces le long de leurs normales"),
+    ("effets", "Exploser", "écarte les faces le long de leurs normales"),
     ("déformer", "Gonfler", "pousse le long des normales"),
-    ("déformer", "Aléatoire", "secoue les sommets"),
-    ("déformer", "Voxeliser", "aligne les sommets sur une grille (effet pixel)"),
+    ("organique", "Aléatoire", "secoue les sommets"),
+    ("effets", "Voxeliser", "aligne les sommets sur une grille (effet pixel)"),
     ("déformer", "Étirer (stretch)", "allonge en gardant le volume"),
     ("déformer", "Cisaillement (shear)", "penche le long d'un axe"),
     ("déformer", "Déformer vers (warp)", "tire une zone d'un point à un autre"),
     ("déformer", "Bosse (bulge)", "gonfle autour d'un point"),
-    ("déformer", "Ondulation (ripple)", "ronds dans l'eau autour du centre"),
+    ("organique", "Ondulation (ripple)", "ronds dans l'eau autour du centre"),
     ("générer", "Vis (screw)", "copies en spirale autour d'un axe"),
-    ("générer", "Construire (build)", "ne garde qu'une partie des faces"),
-    ("générer", "Couper (slice)", "supprime ce qui dépasse d'un plan"),
+    ("effets", "Construire (build)", "ne garde qu'une partie des faces"),
+    ("édition", "Couper (slice)", "supprime ce qui dépasse d'un plan"),
     ("normales", "Inverser les normales", "retourne toutes les faces"),
     ("déformer", "Gonflement axial (lattice)", "renfle ou pince le milieu"),
-    ("déformer", "Fondre (melt)", "affaisse vers le sol"),
-    ("déformer", "Froisser (crumple)", "plis aléatoires"),
+    ("organique", "Fondre (melt)", "affaisse vers le sol"),
+    ("organique", "Froisser (crumple)", "plis aléatoires"),
 ];
 
 impl Kind {
@@ -270,6 +283,45 @@ pub struct Mesh {
 }
 
 impl Mesh {
+    /// Enregistre le maillage tel quel (pour garder ce qui a été appliqué d'une session à l'autre).
+    pub fn save(&self, path: &std::path::Path) -> Result<(), String> {
+        let mut b: Vec<u8> = Vec::with_capacity(16 + self.pos.len() * 12 + self.tris.len() * 13 + self.colors.len() * 4);
+        b.extend(b"ARYM");
+        for n in [self.pos.len(), self.tris.len(), self.colors.len(), self.edges.len()] {
+            b.extend((n as u32).to_le_bytes());
+        }
+        self.pos.iter().flatten().for_each(|x| b.extend(x.to_le_bytes()));
+        self.tris.iter().flatten().for_each(|x| b.extend(x.to_le_bytes()));
+        self.colors.iter().for_each(|c| b.extend(c.to_array()));
+        b.extend(&self.edges);
+        if let Some(d) = path.parent() {
+            std::fs::create_dir_all(d).map_err(|e| e.to_string())?;
+        }
+        std::fs::write(path, b).map_err(|e| e.to_string())
+    }
+
+    pub fn load(path: &std::path::Path) -> Option<Mesh> {
+        let b = std::fs::read(path).ok()?;
+        if b.len() < 20 || &b[..4] != b"ARYM" {
+            return None;
+        }
+        let n = |k: usize| u32::from_le_bytes(b[4 + k * 4..8 + k * 4].try_into().unwrap()) as usize;
+        let (np, nt, nc, ne) = (n(0), n(1), n(2), n(3));
+        if b.len() != 20 + np * 12 + nt * 12 + nc * 4 + ne {
+            return None;
+        }
+        let f = |o: usize| f32::from_le_bytes(b[o..o + 4].try_into().unwrap());
+        let u = |o: usize| u32::from_le_bytes(b[o..o + 4].try_into().unwrap());
+        let (o1, o2, o3) = (20 + np * 12, 20 + np * 12 + nt * 12, 20 + np * 12 + nt * 12 + nc * 4);
+        let pos = (0..np).map(|i| [f(20 + i * 12), f(24 + i * 12), f(28 + i * 12)]).collect();
+        let tris: Vec<[u32; 3]> = (0..nt).map(|i| [u(o1 + i * 12), u(o1 + i * 12 + 4), u(o1 + i * 12 + 8)]).collect();
+        if tris.iter().flatten().any(|&i| i as usize >= np) {
+            return None;
+        }
+        let colors = (0..nc).map(|i| Color32::from_rgba_premultiplied(b[o2 + i * 4], b[o2 + i * 4 + 1], b[o2 + i * 4 + 2], b[o2 + i * 4 + 3])).collect();
+        Some(Mesh { pos, tris, colors, edges: b[o3..].to_vec() })
+    }
+
     pub fn from_model(m: &Model, z_up: bool) -> Mesh {
         Mesh { pos: m.normalized(z_up), tris: m.tris.clone(), colors: m.colors.clone(), edges: m.edges.clone() }
     }
@@ -1186,7 +1238,7 @@ pub fn export(m: &Mesh, model: &Model, z_up: bool, path: &std::path::Path) -> Re
 // ---------- panneau ----------
 
 /// Panneau de la pile. Renvoie vrai si la pile a changé.
-pub fn panel(ui: &mut egui::Ui, stack: &mut Vec<Modifier>) -> bool {
+pub fn panel(ui: &mut egui::Ui, stack: &mut Vec<Modifier>, applied: bool, request: &mut Option<Request>) -> bool {
     let p = crate::theme::pal();
     let mut changed = false;
     ui.spacing_mut().slider_width = 90.0;
@@ -1213,6 +1265,15 @@ pub fn panel(ui: &mut egui::Ui, stack: &mut Vec<Modifier>) -> bool {
                     stack.clear();
                     changed = true;
                 }
+                ui.separator();
+                if ui.add_enabled(stack.iter().any(|m| m.on), egui::Button::new(crate::i18n::t("tout appliquer"))).on_hover_text(crate::i18n::t("Le résultat devient le maillage de base et la pile se vide")).clicked() {
+                    *request = Some(Request::ApplyAll);
+                    ui.close();
+                }
+                if ui.add_enabled(applied, egui::Button::new(crate::i18n::t("revenir au maillage du fichier"))).on_hover_text(crate::i18n::t("Oublie ce qui a été appliqué")).clicked() {
+                    *request = Some(Request::Restore);
+                    ui.close();
+                }
             });
             egui::containers::menu::MenuButton::new(crate::i18n::t("＋ ajouter ▾")).ui(ui, |ui| {
                 ui.set_min_width(300.0);
@@ -1221,24 +1282,44 @@ pub fn panel(ui: &mut egui::Ui, stack: &mut Vec<Modifier>) -> bool {
                 ui.add(egui::TextEdit::singleline(&mut q).hint_text(crate::i18n::t("chercher…")).desired_width(280.0)).request_focus();
                 let qf = crate::chat::fold(&q);
                 let mut pick = None;
-                egui::ScrollArea::vertical().max_height(440.0).show(ui, |ui| {
-                    for cat in ["générer", "déformer", "normales"] {
-                        let items: Vec<(usize, &(&str, &str, &str))> = ALL.iter().enumerate().filter(|(_, x)| x.0 == cat && (qf.is_empty() || crate::chat::fold(x.1).contains(&qf) || crate::chat::fold(x.2).contains(&qf))).collect();
-                        if items.is_empty() {
-                            continue;
-                        }
-                        ui.label(RichText::new(crate::i18n::t(cat).to_uppercase()).size(10.0).color(p.muted).family(crate::theme::bold()));
-                        for (i, (_, name, help)) in items {
-                            let r = ui.add(egui::Button::new(RichText::new(crate::i18n::t(name))).frame(false).min_size(egui::vec2(280.0, 0.0)));
-                            if r.on_hover_text(crate::i18n::t(help)).clicked() {
-                                pick = Some(i);
+                if qf.is_empty() {
+                    // Sans recherche : une catégorie par sous-menu, comme pour les nodes
+                    for cat in CATS {
+                        let count = ALL.iter().filter(|x| x.0 == cat).count();
+                        ui.menu_button(format!("{}   {count}", crate::i18n::t(cat)), |ui| {
+                            ui.set_min_width(240.0);
+                            for (i, (_, name, help)) in ALL.iter().enumerate().filter(|(_, x)| x.0 == cat) {
+                                if ui.button(crate::i18n::t(name)).on_hover_text(crate::i18n::t(help)).clicked() {
+                                    pick = Some(i);
+                                }
                             }
-                        }
-                        ui.add_space(4.0);
+                        });
                     }
-                });
+                } else {
+                    egui::ScrollArea::vertical().max_height(440.0).show(ui, |ui| {
+                        let mut any = false;
+                        for cat in CATS {
+                            let items: Vec<(usize, &(&str, &str, &str))> = ALL.iter().enumerate().filter(|(_, x)| x.0 == cat && (crate::chat::fold(&crate::i18n::t(x.1)).contains(&qf) || crate::chat::fold(x.1).contains(&qf) || crate::chat::fold(x.2).contains(&qf) || crate::chat::fold(cat).contains(&qf))).collect();
+                            if items.is_empty() {
+                                continue;
+                            }
+                            any = true;
+                            ui.label(RichText::new(crate::i18n::t(cat).to_uppercase()).size(10.0).color(p.muted).family(crate::theme::bold()));
+                            for (i, (_, name, help)) in items {
+                                let r = ui.add(egui::Button::new(RichText::new(crate::i18n::t(name))).frame(false).min_size(egui::vec2(280.0, 0.0)));
+                                if r.on_hover_text(crate::i18n::t(help)).clicked() {
+                                    pick = Some(i);
+                                }
+                            }
+                            ui.add_space(4.0);
+                        }
+                        if !any {
+                            ui.label(RichText::new(crate::i18n::t("aucun modificateur trouvé")).color(p.muted).size(11.0));
+                        }
+                    });
+                }
                 if ui.input(|i| i.key_pressed(egui::Key::Enter)) && pick.is_none() {
-                    pick = ALL.iter().position(|x| qf.is_empty() || crate::chat::fold(x.1).contains(&qf));
+                    pick = if qf.is_empty() { None } else { ALL.iter().position(|x| crate::chat::fold(x.1).contains(&qf) || crate::chat::fold(&crate::i18n::t(x.1)).contains(&qf)) };
                 }
                 if let Some(i) = pick {
                     stack.push(Modifier::new(Kind::new(i)));
@@ -1273,6 +1354,9 @@ pub fn panel(ui: &mut egui::Ui, stack: &mut Vec<Modifier>) -> bool {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.small_button("×").on_hover_text(crate::i18n::t("supprimer")).clicked() {
                         action = Some((i, 0));
+                    }
+                    if md.on && ui.small_button("✔").on_hover_text(crate::i18n::t("Appliquer : le résultat devient le maillage de base (avec les modificateurs au-dessus)")).clicked() {
+                        *request = Some(Request::ApplyUpTo(i));
                     }
                     if ui.small_button("⧉").on_hover_text(crate::i18n::t("dupliquer")).clicked() {
                         action = Some((i, 2));
@@ -1571,6 +1655,21 @@ mod tests {
         let obj = std::fs::read_to_string(dir.join("x.obj")).unwrap();
         assert_eq!(obj.lines().filter(|l| l.starts_with("f ")).count(), 6, "quads gardés");
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn categories_et_maillage_applique() {
+        // Chaque modificateur est rangé dans une catégorie du menu
+        assert!(ALL.iter().all(|x| CATS.contains(&x.0)));
+        assert!(CATS.iter().all(|c| ALL.iter().any(|x| x.0 == *c)));
+        // Le maillage appliqué se relit à l'identique
+        let m = Mesh { pos: vec![[0.0, 0.5, 1.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], tris: vec![[0, 1, 2]], colors: vec![Color32::from_rgb(10, 20, 30)], edges: vec![7] };
+        let f = std::env::temp_dir().join("aryadne-applique.mesh");
+        m.save(&f).unwrap();
+        let b = Mesh::load(&f).unwrap();
+        assert_eq!((b.pos, b.tris, b.colors, b.edges), (m.pos, m.tris, m.colors, m.edges));
+        std::fs::write(&f, b"ARYMxxxx").unwrap();
+        assert!(Mesh::load(&f).is_none());
     }
 
     #[test]

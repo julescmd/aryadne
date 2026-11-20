@@ -63,7 +63,7 @@ const MATH: &[&str] = &["ajouter", "soustraire", "multiplier", "diviser", "puiss
 
 pub const DEFS: &[Def] = &[
     // Sorties
-    Def { op: "mat_out", label: "Sortie matériau", cat: "sortie", inputs: &[("couleur", Sock::Color, [0.8, 0.5, 0.4, 1.0]), ("rugosité", Sock::Float, f(0.5)), ("métal", Sock::Float, f(0.0)), ("émission", Sock::Color, BLACK), ("transmission", Sock::Float, f(0.0)), ("indice de réfraction", Sock::Float, f(1.45)), ("vernis", Sock::Float, f(0.0)), ("bandes toon", Sock::Float, f(0.0)), ("reflets", Sock::Float, f(1.0))], outputs: &[], params: &[], mat: true, comp: false },
+    Def { op: "mat_out", label: "Sortie matériau", cat: "sortie", inputs: &[("couleur", Sock::Color, [0.8, 0.5, 0.4, 1.0]), ("rugosité", Sock::Float, f(0.5)), ("métal", Sock::Float, f(0.0)), ("émission", Sock::Color, BLACK), ("transmission", Sock::Float, f(0.0)), ("indice de réfraction", Sock::Float, f(1.45)), ("vernis", Sock::Float, f(0.0)), ("bandes toon", Sock::Float, f(0.0)), ("reflets", Sock::Float, f(1.0)), ("force d'émission", Sock::Float, f(1.0)), ("occlusion", Sock::Float, f(1.0)), ("relief", Sock::Float, f(0.5)), ("force du relief", Sock::Float, f(1.0)), ("velours", Sock::Float, f(0.0)), ("sous-surface", Sock::Float, f(0.0)), ("teinte sous-surface", Sock::Color, [0.9, 0.3, 0.2, 1.0])], outputs: &[], params: &[], mat: true, comp: false },
     Def { op: "comp_out", label: "Sortie", cat: "sortie", inputs: &[("image", Sock::Color, GRAY)], outputs: &[], params: &[], mat: false, comp: true },
     // Entrées
     Def { op: "image", label: "Image", cat: "entrée", inputs: &[], outputs: &[("image", Sock::Color), ("alpha", Sock::Float)], params: &[ParamDef::File("fichier")], mat: false, comp: true },
@@ -123,6 +123,41 @@ pub const DEFS: &[Def] = &[
     Def { op: "dirblur", label: "Flou directionnel", cat: "filtre", inputs: &[("image", Sock::Color, GRAY)], outputs: &[("image", Sock::Color)], params: &[ParamDef::Float("angle", -180.0, 180.0, 0.0), ParamDef::Float("longueur (px)", 0.0, 200.0, 20.0)], mat: false, comp: true },
     Def { op: "radialblur", label: "Flou radial (zoom)", cat: "filtre", inputs: &[("image", Sock::Color, GRAY)], outputs: &[("image", Sock::Color)], params: &[ParamDef::Float("force", 0.0, 0.5, 0.08)], mat: false, comp: true },
     Def { op: "lens", label: "Distorsion d'objectif", cat: "filtre", inputs: &[("image", Sock::Color, GRAY)], outputs: &[("image", Sock::Color)], params: &[ParamDef::Float("distorsion", -1.0, 1.0, 0.15)], mat: false, comp: true },
+    // Motifs supplémentaires
+    Def { op: "ridged", label: "Bruit crêté", cat: "motif", inputs: &[("échelle", Sock::Float, f(4.0)), ("détail", Sock::Float, f(5.0)), ("netteté", Sock::Float, f(2.0))], outputs: &[("valeur", Sock::Float)], params: &[], mat: true, comp: true },
+    Def { op: "cracks", label: "Fissures", cat: "motif", inputs: &[("échelle", Sock::Float, f(6.0)), ("largeur", Sock::Float, f(0.05)), ("distorsion", Sock::Float, f(0.3))], outputs: &[("fissures", Sock::Float), ("cellules", Sock::Float)], params: &[], mat: true, comp: true },
+    Def { op: "tiles", label: "Carrelage", cat: "motif", inputs: &[("échelle", Sock::Float, f(6.0)), ("joint", Sock::Float, f(0.05)), ("biseau", Sock::Float, f(0.1)), ("variation", Sock::Float, f(0.3))], outputs: &[("teinte", Sock::Float), ("joint", Sock::Float), ("hauteur", Sock::Float)], params: &[], mat: true, comp: true },
+    Def { op: "weave", label: "Tissage", cat: "motif", inputs: &[("échelle", Sock::Float, f(20.0))], outputs: &[("hauteur", Sock::Float), ("sens", Sock::Float)], params: &[], mat: true, comp: true },
+    Def { op: "shape", label: "Masque de forme", cat: "motif", inputs: &[("centre x", Sock::Float, f(0.5)), ("centre y", Sock::Float, f(0.5)), ("largeur", Sock::Float, f(0.5)), ("hauteur", Sock::Float, f(0.5)), ("douceur", Sock::Float, f(0.05))], outputs: &[("masque", Sock::Float)], params: &[ParamDef::Choice("forme", &["ellipse", "rectangle", "losange"])], mat: true, comp: true },
+    // Usure : masques à la manière des générateurs de Substance
+    Def { op: "edgewear", label: "Usure des arêtes", cat: "usure", inputs: &[("intensité", Sock::Float, f(1.0)), ("quantité", Sock::Float, f(0.5)), ("contraste", Sock::Float, f(0.6)), ("échelle du bruit", Sock::Float, f(14.0))], outputs: &[("masque", Sock::Float)], params: &[], mat: true, comp: false },
+    Def { op: "cavdirt", label: "Saleté des creux", cat: "usure", inputs: &[("intensité", Sock::Float, f(1.0)), ("quantité", Sock::Float, f(0.5)), ("contraste", Sock::Float, f(0.5)), ("échelle du bruit", Sock::Float, f(8.0))], outputs: &[("masque", Sock::Float)], params: &[], mat: true, comp: false },
+    Def { op: "dust", label: "Poussière (dessus)", cat: "usure", inputs: &[("quantité", Sock::Float, f(0.5)), ("contraste", Sock::Float, f(0.5)), ("échelle du bruit", Sock::Float, f(8.0))], outputs: &[("masque", Sock::Float)], params: &[], mat: true, comp: false },
+    Def { op: "drips", label: "Coulures", cat: "usure", inputs: &[("échelle", Sock::Float, f(10.0)), ("longueur", Sock::Float, f(0.5)), ("quantité", Sock::Float, f(0.5))], outputs: &[("masque", Sock::Float)], params: &[], mat: true, comp: false },
+    Def { op: "scratches", label: "Rayures d'usure", cat: "usure", inputs: &[("échelle", Sock::Float, f(6.0)), ("quantité", Sock::Float, f(0.5)), ("finesse", Sock::Float, f(0.5))], outputs: &[("masque", Sock::Float)], params: &[], mat: true, comp: true },
+    Def { op: "grunge", label: "Saleté (grunge)", cat: "usure", inputs: &[("échelle", Sock::Float, f(3.0)), ("contraste", Sock::Float, f(0.5)), ("distorsion", Sock::Float, f(1.0))], outputs: &[("masque", Sock::Float)], params: &[], mat: true, comp: true },
+    // Couleur et étalonnage
+    Def { op: "gamma", label: "Gamma", cat: "couleur", inputs: &[("couleur", Sock::Color, GRAY), ("gamma", Sock::Float, f(1.0))], outputs: &[("couleur", Sock::Color)], params: &[], mat: true, comp: true },
+    Def { op: "tint", label: "Teinter (bichromie)", cat: "couleur", inputs: &[("couleur", Sock::Color, GRAY), ("ombres", Sock::Color, [0.1, 0.1, 0.25, 1.0]), ("lumières", Sock::Color, [1.0, 0.9, 0.7, 1.0]), ("force", Sock::Float, f(1.0))], outputs: &[("couleur", Sock::Color)], params: &[], mat: true, comp: true },
+    Def { op: "vibrance", label: "Vibrance", cat: "couleur", inputs: &[("couleur", Sock::Color, GRAY), ("vibrance", Sock::Float, f(0.5))], outputs: &[("couleur", Sock::Color)], params: &[], mat: true, comp: true },
+    Def { op: "colorbalance", label: "Balance des couleurs", cat: "couleur", inputs: &[("couleur", Sock::Color, GRAY), ("ombres (lift)", Sock::Color, GRAY), ("tons moyens (gamma)", Sock::Color, GRAY), ("lumières (gain)", Sock::Color, GRAY)], outputs: &[("couleur", Sock::Color)], params: &[], mat: true, comp: true },
+    Def { op: "splittone", label: "Virage partiel", cat: "couleur", inputs: &[("couleur", Sock::Color, GRAY), ("teinte des ombres", Sock::Color, [0.2, 0.4, 0.6, 1.0]), ("teinte des lumières", Sock::Color, [1.0, 0.7, 0.4, 1.0]), ("force", Sock::Float, f(0.3))], outputs: &[("couleur", Sock::Color)], params: &[], mat: true, comp: true },
+    Def { op: "tonemap", label: "Rendu des tons (tone mapping)", cat: "couleur", inputs: &[("couleur", Sock::Color, GRAY), ("EV", Sock::Float, f(0.0))], outputs: &[("couleur", Sock::Color)], params: &[ParamDef::Choice("courbe", &["ACES", "filmique", "Reinhard"])], mat: true, comp: true },
+    Def { op: "chromakey", label: "Incrustation (fond vert)", cat: "couleur", inputs: &[("image", Sock::Color, GRAY), ("couleur clé", Sock::Color, [0.1, 0.8, 0.2, 1.0]), ("tolérance", Sock::Float, f(0.25)), ("douceur", Sock::Float, f(0.1))], outputs: &[("image", Sock::Color), ("masque", Sock::Float)], params: &[], mat: false, comp: true },
+    Def { op: "alphaover", label: "Superposer (alpha)", cat: "couleur", inputs: &[("dessous", Sock::Color, GRAY), ("dessus", Sock::Color, W), ("opacité", Sock::Float, f(1.0))], outputs: &[("image", Sock::Color)], params: &[], mat: true, comp: true },
+    Def { op: "setalpha", label: "Définir l'alpha", cat: "couleur", inputs: &[("image", Sock::Color, GRAY), ("alpha", Sock::Float, f(1.0))], outputs: &[("image", Sock::Color)], params: &[], mat: false, comp: true },
+    Def { op: "mixf", label: "Mélange de valeurs", cat: "math", inputs: &[("facteur", Sock::Float, f(0.5)), ("A", Sock::Float, f(0.0)), ("B", Sock::Float, f(1.0))], outputs: &[("valeur", Sock::Float)], params: &[], mat: true, comp: true },
+    // Effets d'image
+    Def { op: "halftone", label: "Trame (halftone)", cat: "filtre", inputs: &[("image", Sock::Color, GRAY), ("taille (px)", Sock::Float, f(6.0)), ("angle", Sock::Float, f(45.0))], outputs: &[("image", Sock::Color)], params: &[], mat: false, comp: true },
+    Def { op: "scanlines", label: "Lignes de balayage", cat: "filtre", inputs: &[("image", Sock::Color, GRAY), ("force", Sock::Float, f(0.3)), ("nombre", Sock::Float, f(240.0))], outputs: &[("image", Sock::Color)], params: &[], mat: false, comp: true },
+    Def { op: "letterbox", label: "Bandes cinéma", cat: "filtre", inputs: &[("image", Sock::Color, GRAY), ("format", Sock::Float, f(2.39))], outputs: &[("image", Sock::Color)], params: &[], mat: false, comp: true },
+    Def { op: "transform", label: "Transformer", cat: "filtre", inputs: &[("image", Sock::Color, GRAY)], outputs: &[("image", Sock::Color)], params: &[ParamDef::Float("x", -1.0, 1.0, 0.0), ParamDef::Float("y", -1.0, 1.0, 0.0), ParamDef::Float("rotation", -180.0, 180.0, 0.0), ParamDef::Float("échelle", 0.1, 4.0, 1.0)], mat: false, comp: true },
+    Def { op: "flip", label: "Retourner", cat: "filtre", inputs: &[("image", Sock::Color, GRAY)], outputs: &[("image", Sock::Color)], params: &[ParamDef::Choice("sens", &["horizontal", "vertical", "les deux"])], mat: false, comp: true },
+    Def { op: "displace", label: "Déformer par une image", cat: "filtre", inputs: &[("image", Sock::Color, GRAY), ("carte", Sock::Color, GRAY)], outputs: &[("image", Sock::Color)], params: &[ParamDef::Float("force (px)", 0.0, 200.0, 20.0)], mat: false, comp: true },
+    Def { op: "maskblur", label: "Flou masqué (tilt-shift)", cat: "filtre", inputs: &[("image", Sock::Color, GRAY), ("masque", Sock::Float, f(1.0))], outputs: &[("image", Sock::Color)], params: &[ParamDef::Float("rayon", 0.0, 100.0, 12.0)], mat: false, comp: true },
+    Def { op: "sunbeams", label: "Rayons de lumière", cat: "filtre", inputs: &[("image", Sock::Color, GRAY)], outputs: &[("image", Sock::Color)], params: &[ParamDef::Float("seuil", 0.0, 1.0, 0.7), ParamDef::Float("longueur", 0.0, 1.0, 0.4), ParamDef::Float("force", 0.0, 3.0, 1.0), ParamDef::Float("centre x", 0.0, 1.0, 0.5), ParamDef::Float("centre y", 0.0, 1.0, 0.3)], mat: false, comp: true },
+    Def { op: "emboss", label: "Gaufrage", cat: "filtre", inputs: &[("image", Sock::Color, GRAY)], outputs: &[("image", Sock::Color)], params: &[ParamDef::Float("force", 0.0, 4.0, 1.0), ParamDef::Float("angle", -180.0, 180.0, 135.0)], mat: false, comp: true },
+    Def { op: "glitch", label: "Glitch", cat: "filtre", inputs: &[("image", Sock::Color, GRAY)], outputs: &[("image", Sock::Color)], params: &[ParamDef::Float("force", 0.0, 1.0, 0.3), ParamDef::Float("blocs", 2.0, 80.0, 24.0), ParamDef::Float("graine", 0.0, 100.0, 1.0)], mat: false, comp: true },
 ];
 
 pub fn def(op: &str) -> Option<&'static Def> {
@@ -440,6 +475,88 @@ pub fn material_preset(name: &str) -> Option<Graph> {
             g.connect(dirt, 0, out, 0);
             set(&mut g, out, 1, f(0.85));
         }
+        "carrelage en relief" => {
+            let t = g.add("tiles", [0.0, 80.0]);
+            let col = g.add("mix", [260.0, 40.0]);
+            set(&mut g, col, 1, [0.75, 0.72, 0.66, 1.0]);
+            set(&mut g, col, 2, [0.9, 0.88, 0.84, 1.0]);
+            g.connect(t, 0, col, 0);
+            let grout = g.add("mix", [470.0, 40.0]);
+            set(&mut g, grout, 2, [0.25, 0.24, 0.22, 1.0]);
+            g.connect(t, 1, grout, 0);
+            g.connect(col, 0, grout, 1);
+            g.connect(grout, 0, out, 0);
+            let r = g.add("mixf", [470.0, 260.0]);
+            set(&mut g, r, 1, f(0.12));
+            set(&mut g, r, 2, f(0.9));
+            g.connect(t, 1, r, 0);
+            g.connect(r, 0, out, 1);
+            g.connect(t, 2, out, 11);
+            set(&mut g, out, 12, f(1.5));
+        }
+        "béton fissuré" => {
+            let gr = g.add("grunge", [0.0, 40.0]);
+            set(&mut g, gr, 0, f(4.0));
+            set(&mut g, gr, 1, f(0.2));
+            let col = g.add("mix", [260.0, 40.0]);
+            set(&mut g, col, 1, [0.45, 0.45, 0.44, 1.0]);
+            set(&mut g, col, 2, [0.66, 0.65, 0.62, 1.0]);
+            g.connect(gr, 0, col, 0);
+            let cr = g.add("cracks", [0.0, 260.0]);
+            set(&mut g, cr, 0, f(5.0));
+            set(&mut g, cr, 1, f(0.04));
+            let dark = g.add("mix", [470.0, 40.0]);
+            set(&mut g, dark, 2, [0.08, 0.08, 0.08, 1.0]);
+            g.connect(cr, 0, dark, 0);
+            g.connect(col, 0, dark, 1);
+            g.connect(dark, 0, out, 0);
+            let inv = g.add("math", [260.0, 300.0]);
+            set(&mut g, inv, 0, f(1.0));
+            g.nodes.iter_mut().find(|n| n.id == inv).unwrap().params.insert("opération".into(), Param::S("soustraire".into()));
+            g.connect(cr, 0, inv, 1);
+            g.connect(inv, 0, out, 11);
+            set(&mut g, out, 12, f(2.0));
+            set(&mut g, out, 1, f(0.9));
+        }
+        "métal brossé rayé" => {
+            let sc = g.add("scratches", [0.0, 80.0]);
+            set(&mut g, sc, 0, f(3.0));
+            set(&mut g, sc, 1, f(0.5));
+            let r = g.add("mixf", [260.0, 80.0]);
+            set(&mut g, r, 1, f(0.22));
+            set(&mut g, r, 2, f(0.6));
+            g.connect(sc, 0, r, 0);
+            g.connect(r, 0, out, 1);
+            g.connect(sc, 0, out, 11);
+            set(&mut g, out, 12, f(-0.25));
+            set(&mut g, out, 0, [0.78, 0.79, 0.8, 1.0]);
+            set(&mut g, out, 2, f(1.0));
+        }
+        "velours" => {
+            set(&mut g, out, 0, [0.35, 0.04, 0.1, 1.0]);
+            set(&mut g, out, 1, f(0.95));
+            set(&mut g, out, 8, f(0.2));
+            set(&mut g, out, 13, f(1.0));
+        }
+        "cire" => {
+            set(&mut g, out, 0, [0.92, 0.82, 0.62, 1.0]);
+            set(&mut g, out, 1, f(0.35));
+            set(&mut g, out, 14, f(1.0));
+            set(&mut g, out, 15, [1.0, 0.45, 0.2, 1.0]);
+        }
+        "tissu tissé" => {
+            let w = g.add("weave", [0.0, 80.0]);
+            set(&mut g, w, 0, f(26.0));
+            let col = g.add("mix", [260.0, 40.0]);
+            set(&mut g, col, 1, [0.1, 0.16, 0.3, 1.0]);
+            set(&mut g, col, 2, [0.25, 0.36, 0.6, 1.0]);
+            g.connect(w, 0, col, 0);
+            g.connect(col, 0, out, 0);
+            g.connect(w, 0, out, 11);
+            set(&mut g, out, 12, f(1.2));
+            set(&mut g, out, 1, f(0.85));
+            set(&mut g, out, 13, f(0.5));
+        }
         "verre" => {
             set(&mut g, out, 0, [0.95, 0.98, 1.0, 1.0]);
             set(&mut g, out, 1, f(0.03));
@@ -490,7 +607,7 @@ pub fn material_preset(name: &str) -> Option<Graph> {
     Some(g)
 }
 
-pub const MATERIAL_PRESETS: [&str; 15] = ["métal peint usé", "pierre aux creux sombres", "bois", "pierre", "métal rouillé", "toon", "céramique", "or", "verre", "verre dépoli", "eau", "toon 3 bandes", "peinture de voiture", "plastique", "néon"];
+pub const MATERIAL_PRESETS: [&str; 21] = ["carrelage en relief", "béton fissuré", "métal brossé rayé", "velours", "cire", "tissu tissé", "métal peint usé", "pierre aux creux sombres", "bois", "pierre", "métal rouillé", "toon", "céramique", "or", "verre", "verre dépoli", "eau", "toon 3 bandes", "peinture de voiture", "plastique", "néon"];
 
 pub const DEFAULT_SHADER: &str = "// r g b a : couleur A · ar ag ab : A · br bg bb : B · f : entrée F\n// x y : coordonnées 0..1 · nx ny nz / px py pz : normale et position (matériau)\n// fonctions : sin cos abs min max clamp mix step smoothstep pow sqrt fract floor noise fbm rand…\nk = smoothstep(0.3, 0.7, fbm(x * 6, y * 6, 0))\nr = mix(ar, br, k)\ng = mix(ag, bg, k)\nb = mix(ab, bb, k)\n";
 
@@ -846,6 +963,50 @@ fn voronoi(x: f32, y: f32, z: f32) -> (f32, V) {
     (best.0.min(1.0), [hash3(cx, cy, cz + 5), hash3(cx + 3, cy, cz), hash3(cx, cy + 9, cz), 1.0])
 }
 
+/// Distances aux deux germes les plus proches (pour les fissures et les joints).
+fn voronoi_f12(x: f32, y: f32, z: f32) -> (f32, f32) {
+    let (xi, yi, zi) = (x.floor() as i32, y.floor() as i32, z.floor() as i32);
+    let (mut a, mut b) = (f32::MAX, f32::MAX);
+    for dz in -1..=1 {
+        for dy in -1..=1 {
+            for dx in -1..=1 {
+                let (cx, cy, cz) = (xi + dx, yi + dy, zi + dz);
+                let px = cx as f32 + hash3(cx, cy, cz);
+                let py = cy as f32 + hash3(cx + 17, cy, cz);
+                let pz = cz as f32 + hash3(cx, cy + 31, cz);
+                let d = ((px - x).powi(2) + (py - y).powi(2) + (pz - z).powi(2)).sqrt();
+                if d < a {
+                    b = a;
+                    a = d;
+                } else if d < b {
+                    b = d;
+                }
+            }
+        }
+    }
+    (a, b)
+}
+
+/// Deux coordonnées à plat pour les motifs 2D : les UV d'une image, ou le plan qui fait face à la normale.
+fn flat(c: &Ctx, p: [f32; 3]) -> (f32, f32) {
+    let n = [c.nrm[0].abs(), c.nrm[1].abs(), c.nrm[2].abs()];
+    if c.pos == [0.0; 3] || n == [0.0; 3] {
+        (p[0], p[1])
+    } else if n[1] >= n[0] && n[1] >= n[2] {
+        (p[0], p[2])
+    } else if n[0] >= n[2] {
+        (p[2], p[1])
+    } else {
+        (p[0], p[1])
+    }
+}
+
+/// Masque à partir d'une valeur, d'une quantité et d'un contraste (0 : fondu large, 1 : bord net).
+fn mask(v: f32, contrast: f32) -> f32 {
+    let w = (1.0 - contrast.clamp(0.0, 1.0)) * 0.5 + 0.01;
+    smoothstep(0.5 - w, 0.5 + w, v)
+}
+
 // ---------- couleur ----------
 
 fn rgb2hsv(c: V) -> [f32; 3] {
@@ -937,6 +1098,16 @@ pub struct Surf {
     pub toon: f32,
     /// Force des reflets
     pub spec: f32,
+    /// Occlusion : assombrit la lumière ambiante (1 : aucune)
+    pub ao: f32,
+    /// Hauteur pour le relief, et sa force
+    pub bump: f32,
+    pub bump_k: f32,
+    /// Reflet doux en bordure (tissu, velours)
+    pub sheen: f32,
+    /// Lumière qui traverse la matière (peau, cire) et sa teinte
+    pub sss: f32,
+    pub sss_color: V,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -959,6 +1130,8 @@ pub struct Program {
     pub kind: GraphKind,
     /// Vrai si un node lit la courbure : le rendu ne la calcule que dans ce cas
     pub uses_curvature: bool,
+    /// Vrai si l'entrée « relief » de la sortie est branchée : le rendu évalue alors la pente
+    pub uses_bump: bool,
 }
 
 #[derive(Clone)]
@@ -1076,8 +1249,9 @@ impl Program {
             steps.push(Step { op: d.op, ins, base: regs, nout: d.outputs.len(), params: n.params.clone(), shader, image });
             regs += d.outputs.len().max(4);
         }
-        let uses_curvature = steps.iter().any(|s| s.op == "curvature");
-        Ok(Program { steps, regs, kind: g.kind, uses_curvature })
+        let uses_curvature = steps.iter().any(|s| matches!(s.op, "curvature" | "edgewear" | "cavdirt"));
+        let uses_bump = steps.iter().any(|s| s.op == "mat_out" && matches!(s.ins.get(11), Some(Src::Reg(_))));
+        Ok(Program { steps, regs, kind: g.kind, uses_curvature, uses_bump })
     }
 
     /// Matériau : couleur (sRGB), rugosité, métal, émission.
@@ -1090,14 +1264,15 @@ impl Program {
             }).collect();
             if s.op == "mat_out" {
                 let x = |k: usize, d: f32| ins.get(k).map(|v| v[0]).unwrap_or(d);
-                return Surf { color: ins[0], rough: ins[1][0].clamp(0.02, 1.0), metal: ins[2][0].clamp(0.0, 1.0), emit: ins[3], transmission: x(4, 0.0).clamp(0.0, 1.0), ior: x(5, 1.45).clamp(1.0, 3.0), coat: x(6, 0.0).clamp(0.0, 1.0), toon: x(7, 0.0).clamp(0.0, 16.0), spec: x(8, 1.0).clamp(0.0, 2.0) };
+                let ek = x(9, 1.0).max(0.0);
+                return Surf { ao: x(10, 1.0).clamp(0.0, 1.0), bump: x(11, 0.5), bump_k: x(12, 1.0), sheen: x(13, 0.0).clamp(0.0, 1.0), sss: x(14, 0.0).clamp(0.0, 1.0), sss_color: ins.get(15).copied().unwrap_or([0.9, 0.3, 0.2, 1.0]), color: ins[0], rough: ins[1][0].clamp(0.02, 1.0), metal: ins[2][0].clamp(0.0, 1.0), emit: [ins[3][0] * ek, ins[3][1] * ek, ins[3][2] * ek, ins[3][3]], transmission: x(4, 0.0).clamp(0.0, 1.0), ior: x(5, 1.45).clamp(1.0, 3.0), coat: x(6, 0.0).clamp(0.0, 1.0), toon: x(7, 0.0).clamp(0.0, 16.0), spec: x(8, 1.0).clamp(0.0, 2.0) };
             }
             let o = pixel(s, &ins, c);
             for (k, v) in o.iter().enumerate().take(s.nout.min(4)) {
                 regs[s.base + k] = *v;
             }
         }
-        Surf { color: [0.8, 0.5, 0.4, 1.0], rough: 0.5, metal: 0.0, emit: [0.0; 4], transmission: 0.0, ior: 1.45, coat: 0.0, toon: 0.0, spec: 1.0 }
+        Surf { color: [0.8, 0.5, 0.4, 1.0], rough: 0.5, metal: 0.0, emit: [0.0; 4], transmission: 0.0, ior: 1.45, coat: 0.0, toon: 0.0, spec: 1.0, ao: 1.0, bump: 0.5, bump_k: 0.0, sheen: 0.0, sss: 0.0, sss_color: [0.9, 0.3, 0.2, 1.0] }
     }
 
     /// Compositing : calcule l'image de sortie à la taille donnée (ou celle de la première image).
@@ -1207,6 +1382,74 @@ impl Program {
                     }).collect();
                     if s.op == "edges" { vec![out.clone(), out] } else { vec![out] }
                 }
+                "transform" | "flip" | "displace" | "emboss" | "glitch" | "sunbeams" => {
+                    let src = get(&s.ins[0]);
+                    let map = if s.op == "displace" { get(&s.ins[1]) } else { vec![] };
+                    let img = Img { w, h, px: src };
+                    let (tx, ty, rot, scale) = (pnum(&s.params, "x", 0.0), pnum(&s.params, "y", 0.0), pnum(&s.params, "rotation", 0.0).to_radians(), pnum(&s.params, "échelle", 1.0).max(0.01));
+                    let sens = pstr(&s.params, "sens");
+                    let force = pnum(&s.params, if s.op == "displace" { "force (px)" } else { "force" }, 1.0);
+                    let ang = pnum(&s.params, "angle", 135.0).to_radians();
+                    let (blocks, seed) = (pnum(&s.params, "blocs", 24.0).max(1.0), pnum(&s.params, "graine", 1.0) as i32);
+                    let (th, len, cx, cy) = (pnum(&s.params, "seuil", 0.7), pnum(&s.params, "longueur", 0.4), pnum(&s.params, "centre x", 0.5), pnum(&s.params, "centre y", 0.3));
+                    let aspect = w as f32 / h as f32;
+                    let out: Vec<V> = (0..n).into_par_iter().map(|i| {
+                        let (u, v) = (((i % w) as f32 + 0.5) / w as f32, ((i / w) as f32 + 0.5) / h as f32);
+                        match s.op {
+                            "transform" => {
+                                let (dx, dy) = ((u - 0.5 - tx) * aspect, v - 0.5 - ty);
+                                let (rx, ry) = ((dx * rot.cos() + dy * rot.sin()) / scale, (-dx * rot.sin() + dy * rot.cos()) / scale);
+                                let (su, sv) = (rx / aspect + 0.5, ry + 0.5);
+                                if (0.0..=1.0).contains(&su) && (0.0..=1.0).contains(&sv) { img.sample(su, sv) } else { [0.0; 4] }
+                            }
+                            "flip" => img.sample(if sens != "vertical" { 1.0 - u } else { u }, if sens == "vertical" || sens == "les deux" { 1.0 - v } else { v }),
+                            "displace" => {
+                                let m = map[i];
+                                img.sample(u + (m[0] - 0.5) * 2.0 * force / w as f32, v + (m[1] - 0.5) * 2.0 * force / h as f32)
+                            }
+                            "emboss" => {
+                                let (ox, oy) = (ang.cos() / w as f32, ang.sin() / h as f32);
+                                let d = (lum(img.sample(u + ox, v + oy)) - lum(img.sample(u - ox, v - oy))) * force;
+                                let g = (0.5 + d).clamp(0.0, 1.0);
+                                [g, g, g, img.px[i][3]]
+                            }
+                            "glitch" => {
+                                let row = (v * blocks) as i32;
+                                let on = hash3(row, seed, 1) < force * 0.6;
+                                let shift = if on { (hash3(row, seed, 2) - 0.5) * force * 0.3 } else { 0.0 };
+                                let split = force * 0.01 * (1.0 + 4.0 * on as u8 as f32);
+                                let c = img.sample(u + shift, v);
+                                [img.sample(u + shift + split, v)[0], c[1], img.sample(u + shift - split, v)[2], c[3]]
+                            }
+                            _ => {
+                                // Rayons : on remonte vers le centre en accumulant ce qui dépasse le seuil
+                                let taps = 32;
+                                let mut acc = [0.0f32; 3];
+                                for t in 0..taps {
+                                    let f = t as f32 / taps as f32 * len;
+                                    let c = img.sample(u + (cx - u) * f, v + (cy - v) * f);
+                                    let k = ((lum(c) - th) / (1.0 - th).max(0.01)).clamp(0.0, 1.0) * (1.0 - t as f32 / taps as f32);
+                                    for ch in 0..3 {
+                                        acc[ch] += c[ch] * k;
+                                    }
+                                }
+                                let c = img.px[i];
+                                let k = force * 2.0 / taps as f32;
+                                [c[0] + acc[0] * k, c[1] + acc[1] * k, c[2] + acc[2] * k, c[3]]
+                            }
+                        }
+                    }).collect();
+                    vec![out]
+                }
+                "maskblur" => {
+                    let src = get(&s.ins[0]);
+                    let m = get(&s.ins[1]);
+                    let b = blur(&src, w, h, pnum(&s.params, "rayon", 12.0) * w as f32 / 1000.0);
+                    vec![src.iter().zip(&b).zip(&m).map(|((a, b), m)| {
+                        let k = m[0].clamp(0.0, 1.0);
+                        [a[0] + (b[0] - a[0]) * k, a[1] + (b[1] - a[1]) * k, a[2] + (b[2] - a[2]) * k, a[3]]
+                    }).collect()]
+                }
                 "image" => match &s.image {
                     Some(img) => {
                         let px: Vec<V> = if img.w == w && img.h == h { img.px.clone() } else { (0..n).into_par_iter().map(|i| img.sample(((i % w) as f32 + 0.5) / w as f32, ((i / w) as f32 + 0.5) / h as f32)).collect() };
@@ -1308,6 +1551,207 @@ fn pixel(s: &Step, i: &[V], c: &Ctx) -> [V; 4] {
     let one = |x: f32| [x, x, x, 1.0];
     let p3 = if c.pos == [0.0; 3] { [c.uv[0], c.uv[1], 0.0] } else { c.pos };
     match s.op {
+        "ridged" => {
+            let (sc, oct, sharp) = (i[0][0], (i[1][0] as usize).clamp(1, 8), i[2][0].max(0.1));
+            let (mut sum, mut amp, mut freq, mut norm) = (0.0f32, 1.0f32, 1.0f32, 0.0f32);
+            for o in 0..oct {
+                let n = noise3(p3[0] * sc * freq + o as f32 * 7.3, p3[1] * sc * freq, p3[2] * sc * freq);
+                sum += (1.0 - (2.0 * n - 1.0).abs()).powf(sharp) * amp;
+                norm += amp;
+                amp *= 0.5;
+                freq *= 2.0;
+            }
+            [one(sum / norm), z, z, z]
+        }
+        "cracks" => {
+            let sc = i[0][0];
+            let d = i[2][0];
+            let q = [p3[0] * sc, p3[1] * sc, p3[2] * sc];
+            let w = [(fbm(q[0], q[1], q[2], 3, 0.5) - 0.5) * d, (fbm(q[0] + 5.2, q[1] + 1.3, q[2], 3, 0.5) - 0.5) * d, (fbm(q[0], q[1] + 9.1, q[2] + 2.7, 3, 0.5) - 0.5) * d];
+            let (a, b) = voronoi_f12(q[0] + w[0], q[1] + w[1], q[2] + w[2]);
+            let e = b - a;
+            let wd = i[1][0].max(1e-4);
+            [one(1.0 - smoothstep(wd * 0.5, wd, e)), one(a.min(1.0)), z, z]
+        }
+        "tiles" => {
+            let sc = i[0][0];
+            let (u, v) = flat(c, p3);
+            let (x, y) = (u * sc, v * sc);
+            let (ix, iy) = (x.floor(), y.floor());
+            let (fx, fy) = (x - ix, y - iy);
+            let edge = fx.min(1.0 - fx).min(fy.min(1.0 - fy));
+            let j = i[1][0].max(0.0) * 0.5;
+            let joint = 1.0 - smoothstep(j, j + 0.01, edge);
+            let bevel = i[2][0].max(1e-4);
+            let hgt = smoothstep(j, j + bevel, edge);
+            let var = hash3(ix as i32, iy as i32, 11);
+            [one(0.5 + (var - 0.5) * i[3][0]), one(joint), one(hgt), z]
+        }
+        "weave" => {
+            let sc = i[0][0];
+            let (u, v) = flat(c, p3);
+            let (x, y) = (u * sc, v * sc);
+            let even = ((x.floor() + y.floor()) as i64) & 1 == 0;
+            let (a, b) = (((x - x.floor()) * std::f32::consts::PI).sin(), ((y - y.floor()) * std::f32::consts::PI).sin());
+            let h = if even { b * (0.55 + 0.45 * a) } else { a * (0.55 + 0.45 * b) };
+            [one(h), one(even as u8 as f32), z, z]
+        }
+        "shape" => {
+            let (dx, dy) = ((c.uv[0] - i[0][0]) / (i[2][0].abs() * 0.5).max(1e-4), (c.uv[1] - i[1][0]) / (i[3][0].abs() * 0.5).max(1e-4));
+            let d = match pstr(&s.params, "forme") {
+                "rectangle" => dx.abs().max(dy.abs()),
+                "losange" => dx.abs() + dy.abs(),
+                _ => (dx * dx + dy * dy).sqrt(),
+            };
+            let soft = i[4][0].max(1e-4) * 2.0;
+            [one(1.0 - smoothstep(1.0 - soft, 1.0, d)), z, z, z]
+        }
+        "edgewear" | "cavdirt" => {
+            let sign = if s.op == "edgewear" { 1.0 } else { -1.0 };
+            let k = (c.curv * sign * i[0][0] * 3.0).clamp(-1.0, 1.5);
+            let sc = i[3][0];
+            let n = fbm(p3[0] * sc, p3[1] * sc, p3[2] * sc, 4, 0.55);
+            // La courbure décide où, le bruit casse le bord, la quantité déplace le seuil
+            let v = k + (n - 0.5) * 0.8 + (i[1][0] - 0.5);
+            [one(mask(v, i[2][0])), z, z, z]
+        }
+        "dust" => {
+            let sc = i[2][0];
+            let n = fbm(p3[0] * sc, p3[1] * sc, p3[2] * sc, 4, 0.5);
+            let v = c.nrm[1] * 0.5 + (n - 0.5) * 0.6 + i[0][0] - 0.25;
+            [one(mask(v, i[1][0])), z, z, z]
+        }
+        "drips" => {
+            // Traînées verticales : plus fortes sur les parois, elles s'effacent vers le bas
+            let sc = i[0][0];
+            let col = (p3[0] * sc + p3[2] * sc * 0.73).floor();
+            let fx = p3[0] * sc + p3[2] * sc * 0.73 - col;
+            let top = hash3(col as i32, 3, 9) - 0.5;
+            let len = i[1][0].max(0.01) * (0.4 + hash3(col as i32, 8, 1));
+            let along = ((top - p3[1]) / len).clamp(0.0, 1.0);
+            let width = (1.0 - (fx - 0.5).abs() * 2.0).max(0.0).powf(1.5);
+            let on = (hash3(col as i32, 5, 2) < i[2][0]) as u8 as f32;
+            let wall = 1.0 - c.nrm[1].abs();
+            let v = if p3[1] < top { (1.0 - along) * width * on * wall } else { 0.0 };
+            [one(v.clamp(0.0, 1.0)), z, z, z]
+        }
+        "scratches" => {
+            let (u, v) = flat(c, p3);
+            let (sc, amount, fine) = (i[0][0], i[1][0], i[2][0].clamp(0.0, 1.0));
+            let mut m = 0.0f32;
+            for l in 0..5 {
+                let ang = hash3(l, 4, 7) * std::f32::consts::PI;
+                let (ca, sa) = (ang.cos(), ang.sin());
+                let (x, y) = ((u * ca - v * sa) * sc * 0.25 + l as f32 * 3.1, (u * sa + v * ca) * sc * 6.0);
+                let (ix, iy) = (x.floor() as i32, y.floor() as i32);
+                if hash3(ix, iy, l) < amount * 0.6 {
+                    let fy = y - y.floor();
+                    let center = 0.2 + 0.6 * hash3(ix, iy, l + 20);
+                    let wd = 0.03 + 0.12 * (1.0 - fine);
+                    let fxx = x - x.floor();
+                    let ends = smoothstep(0.0, 0.15, fxx) * (1.0 - smoothstep(0.85, 1.0, fxx));
+                    m = m.max((1.0 - ((fy - center).abs() / wd)).clamp(0.0, 1.0) * ends * (0.4 + 0.6 * hash3(ix, iy, l + 40)));
+                }
+            }
+            [one(m), z, z, z]
+        }
+        "grunge" => {
+            let sc = i[0][0];
+            let q = [p3[0] * sc, p3[1] * sc, p3[2] * sc];
+            let d = i[2][0];
+            let w = [fbm(q[0], q[1], q[2], 4, 0.5) * d, fbm(q[0] + 5.2, q[1] + 1.3, q[2] + 8.1, 4, 0.5) * d, fbm(q[0] + 2.4, q[1] + 7.9, q[2], 4, 0.5) * d];
+            let a = fbm(q[0] + w[0] * 2.0, q[1] + w[1] * 2.0, q[2] + w[2] * 2.0, 5, 0.6);
+            let b = fbm(q[0] * 3.7 + 11.0, q[1] * 3.7, q[2] * 3.7, 3, 0.5);
+            [one(mask(a * 0.75 + b * 0.25, i[1][0])), z, z, z]
+        }
+        "gamma" => {
+            let g = 1.0 / i[1][0].max(0.01);
+            [[i[0][0].max(0.0).powf(g), i[0][1].max(0.0).powf(g), i[0][2].max(0.0).powf(g), i[0][3]], z, z, z]
+        }
+        "tint" => {
+            let l = lum(i[0]).clamp(0.0, 1.0);
+            let k = i[3][0];
+            let f = |ch: usize| i[0][ch] + ((i[1][ch] + (i[2][ch] - i[1][ch]) * l) - i[0][ch]) * k;
+            [[f(0), f(1), f(2), i[0][3]], z, z, z]
+        }
+        "vibrance" => {
+            let h = rgb2hsv(i[0]);
+            let o = hsv2rgb(h[0], (h[1] * (1.0 + i[1][0] * (1.0 - h[1]) * 2.0)).clamp(0.0, 1.0), h[2]);
+            [[o[0], o[1], o[2], i[0][3]], z, z, z]
+        }
+        "colorbalance" => {
+            let f = |ch: usize| {
+                let x = i[0][ch].max(0.0);
+                let lifted = x + (i[1][ch] * 2.0 - 1.0) * 0.5 * (1.0 - x);
+                (lifted * i[3][ch] * 2.0).max(0.0).powf(1.0 / (i[2][ch] * 2.0).max(0.05))
+            };
+            [[f(0), f(1), f(2), i[0][3]], z, z, z]
+        }
+        "splittone" => {
+            let l = lum(i[0]).clamp(0.0, 1.0);
+            let k = i[3][0];
+            let f = |ch: usize| {
+                let sh = i[0][ch] * (1.0 + (i[1][ch] - lum(i[1])) * 2.0);
+                let hi = i[0][ch] * (1.0 + (i[2][ch] - lum(i[2])) * 2.0);
+                i[0][ch] + ((sh + (hi - sh) * l) - i[0][ch]) * k
+            };
+            [[f(0), f(1), f(2), i[0][3]], z, z, z]
+        }
+        "tonemap" => {
+            let e = 2f32.powf(i[1][0]);
+            let curve = pstr(&s.params, "courbe");
+            let f = |x: f32| {
+                let x = (x * e).max(0.0);
+                match curve {
+                    "Reinhard" => x / (1.0 + x),
+                    "filmique" => {
+                        let h = |x: f32| ((x * (0.15 * x + 0.05) + 0.004) / (x * (0.15 * x + 0.5) + 0.06)) - 0.0667;
+                        h(x * 2.0) / h(11.2)
+                    }
+                    _ => ((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14)).clamp(0.0, 1.0),
+                }
+            };
+            [[f(i[0][0]), f(i[0][1]), f(i[0][2]), i[0][3]], z, z, z]
+        }
+        "chromakey" => {
+            // Distance dans le plan des couleurs (sans la luminosité), puis retrait du reflet vert
+            let cbcr = |c: V| (-0.169 * c[0] - 0.331 * c[1] + 0.5 * c[2], 0.5 * c[0] - 0.419 * c[1] - 0.081 * c[2]);
+            let ((a1, b1), (a2, b2)) = (cbcr(i[0]), cbcr(i[1]));
+            let d = ((a1 - a2).powi(2) + (b1 - b2).powi(2)).sqrt();
+            let keep = smoothstep(i[2][0], i[2][0] + i[3][0].max(1e-4), d);
+            let mut o = i[0];
+            let kmax = if i[1][1] >= i[1][0] && i[1][1] >= i[1][2] { 1 } else if i[1][2] >= i[1][0] { 2 } else { 0 };
+            let others = (0..3).filter(|&k| k != kmax).map(|k| o[k]).fold(0.0f32, f32::max);
+            o[kmax] = o[kmax].min(others + (o[kmax] - others) * keep);
+            o[3] = i[0][3] * keep;
+            [o, one(keep), z, z]
+        }
+        "alphaover" => {
+            let a = (i[1][3] * i[2][0]).clamp(0.0, 1.0);
+            [[i[0][0] + (i[1][0] - i[0][0]) * a, i[0][1] + (i[1][1] - i[0][1]) * a, i[0][2] + (i[1][2] - i[0][2]) * a, (i[0][3] + a * (1.0 - i[0][3])).min(1.0)], z, z, z]
+        }
+        "setalpha" => [[i[0][0], i[0][1], i[0][2], i[1][0].clamp(0.0, 1.0)], z, z, z],
+        "mixf" => [one(i[1][0] + (i[2][0] - i[1][0]) * i[0][0]), z, z, z],
+        "halftone" => {
+            let size = i[1][0].max(2.0);
+            let ang = i[2][0].to_radians();
+            let (x, y) = (c.uv[0] * c.res[0], c.uv[1] * c.res[1]);
+            let (rx, ry) = ((x * ang.cos() - y * ang.sin()) / size, (x * ang.sin() + y * ang.cos()) / size);
+            let (fx, fy) = (rx - rx.floor() - 0.5, ry - ry.floor() - 0.5);
+            let r = (1.0 - lum(i[0]).clamp(0.0, 1.0)).sqrt() * 0.71;
+            let v = smoothstep(r - 0.06, r + 0.06, (fx * fx + fy * fy).sqrt());
+            [[v, v, v, i[0][3]], z, z, z]
+        }
+        "scanlines" => {
+            let k = 1.0 - i[1][0] * (0.5 + 0.5 * (c.uv[1] * i[2][0] * std::f32::consts::TAU).cos());
+            [[i[0][0] * k, i[0][1] * k, i[0][2] * k, i[0][3]], z, z, z]
+        }
+        "letterbox" => {
+            let aspect = c.res[0] / c.res[1].max(1.0);
+            let band = ((1.0 - aspect / i[1][0].max(0.1)) * 0.5).max(0.0);
+            let k = (c.uv[1] >= band && c.uv[1] <= 1.0 - band) as u8 as f32;
+            [[i[0][0] * k, i[0][1] * k, i[0][2] * k, i[0][3]], z, z, z]
+        }
         "color" | "value" => [i[0], z, z, z],
         "coords" => [one(c.uv[0]), one(c.uv[1]), [c.uv[0], c.uv[1], 0.0, 1.0], z],
         "geometry" => {
@@ -1582,7 +2026,7 @@ const NW: f32 = 190.0;
 const ROW: f32 = 22.0;
 const HEAD: f32 = 24.0;
 const THUMB: f32 = 96.0;
-const CATS: [&str; 7] = ["entrée", "motif", "couleur", "math", "filtre", "shader", "sortie"];
+const CATS: [&str; 8] = ["entrée", "motif", "usure", "couleur", "math", "filtre", "shader", "sortie"];
 
 struct AddMenu {
     /// Position écran du menu et position dans le graphe du futur node

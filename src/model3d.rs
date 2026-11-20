@@ -1089,6 +1089,9 @@ pub fn render(m: &Prepared, cam: &Camera, look: &Look, w: usize, h: usize) -> Fr
                 let (mut albedo, mut rough, mut metal, mut emit) = (if look.material == Material::Color { m.colors[ti as usize] } else { albedo0 }, rough, metal, [0.0f32; 3]);
                 // (transmission, indice, vernis, bandes toon, reflets)
                 let mut surf = (0.0f32, 1.45f32, 0.0f32, 0.0f32, 1.0f32);
+                // (occlusion, velours, sous-surface, teinte sous-surface)
+                let mut extra = (1.0f32, 0.0f32, 0.0f32, [0.0f32; 3]);
+                let mut nrm = nrm;
                 let tuv = m.uv.get(ti as usize).map(|u| [u[0][0] * w0 + u[1][0] * w1 + u[2][0] * w2, u[0][1] * w0 + u[1][1] * w1 + u[2][1] * w2]);
                 if look.uv_checker {
                     if let Some(uv) = tuv {
@@ -1112,6 +1115,20 @@ pub fn render(m: &Prepared, cam: &Camera, look: &Look, w: usize, h: usize) -> Fr
                     let (col, r, mt, em) = (sf.color, sf.rough, sf.metal, sf.emit);
                     surf = (sf.transmission, sf.ior, sf.coat, sf.toon, sf.spec);
                     let l = |x: f32| x.clamp(0.0, 1.0).powf(2.2);
+                    extra = (sf.ao, sf.sheen, sf.sss, [l(sf.sss_color[0]), l(sf.sss_color[1]), l(sf.sss_color[2])]);
+                    if prog.uses_bump && sf.bump_k != 0.0 {
+                        // Relief : la pente de la hauteur, mesurée sur deux petits pas le long de la surface, penche la normale
+                        let t1 = norm(cross(nrm, if nrm[1].abs() < 0.9 { [0.0, 1.0, 0.0] } else { [1.0, 0.0, 0.0] }));
+                        let t2 = cross(nrm, t1);
+                        let eps = 0.003;
+                        let height = |t: V3| {
+                            let c2 = crate::nodes::Ctx { pos: [pos[0] + t[0] * eps, pos[1] + t[1] * eps, pos[2] + t[2] * eps], ..c };
+                            NODE_REGS.with(|regs| prog.material(&c2, &mut regs.borrow_mut())).bump
+                        };
+                        let (d1, d2) = (height(t1) - sf.bump, height(t2) - sf.bump);
+                        let k = sf.bump_k * 0.02 / eps;
+                        nrm = norm([nrm[0] - (t1[0] * d1 + t2[0] * d2) * k, nrm[1] - (t1[1] * d1 + t2[1] * d2) * k, nrm[2] - (t1[2] * d1 + t2[2] * d2) * k]);
+                    }
                     albedo = [l(col[0]), l(col[1]), l(col[2])];
                     rough = r;
                     metal = mt;
@@ -1121,7 +1138,10 @@ pub fn render(m: &Prepared, cam: &Camera, look: &Look, w: usize, h: usize) -> Fr
                 let ndv = dot(nrm, v).clamp(0.0, 1.0);
                 let ne = rot_y(nrm, -look.env_rot);
                 let s = look.env_strength;
+                let (ao, sheen, sss, sss_col) = extra;
                 let irr = env.irradiance(ne);
+                let irr = [irr[0] * ao, irr[1] * ao, irr[2] * ao];
+                let wrap = ((dot(nrm, ld) + 0.6) / 1.6).max(0.0);
                 let r = sub([2.0 * dot(nrm, v) * nrm[0], 2.0 * dot(nrm, v) * nrm[1], 2.0 * dot(nrm, v) * nrm[2]], v);
                 let refl = env.reflect(rot_y(r, -look.env_rot), rough);
                 let f0 = if look.nodes.is_some() || slot_prog.is_some() {
@@ -1169,7 +1189,9 @@ pub fn render(m: &Prepared, cam: &Camera, look: &Look, w: usize, h: usize) -> Fr
                     let f = f0[ch] + (1.0 - f0[ch]) * fres * (1.0 - rough).powf(2.0);
                     let diff = albedo[ch] * (irr[ch] * s + lc[ch] * li * ndl) * (1.0 - metal);
                     let diff = diff * (1.0 - transmission) + through[ch] * s * albedo[ch] * transmission * (1.0 - metal);
-                    let spec = (refl[ch] * s + lc[ch] * li * spec_l * 0.25) * f * spec_k;
+                    let diff = diff + sss_col[ch] * albedo[ch] * lc[ch] * li * (wrap - ndl).max(0.0) * sss * (1.0 - metal);
+                    let spec = (refl[ch] * s * (0.5 + 0.5 * ao) + lc[ch] * li * spec_l * 0.25) * f * spec_k;
+                    let diff = diff + sheen * fres.sqrt() * (irr[ch] * s + lc[ch] * li * ndl) * (0.5 + 0.5 * albedo[ch]) * 0.6;
                     let clear = coat * (coat_refl[ch] * s + lc[ch] * li * spec_l * 0.25) * (0.04 + 0.96 * fres);
                     out[ch] = diff * (1.0 - f) + spec + clear + emit[ch];
                 }
@@ -1306,6 +1328,12 @@ pub struct Viewer {
     /// Pile de modificateurs (enregistrée dans .app/modifiers/ du coffre)
     stack: Vec<crate::modifiers::Modifier>,
     stack_loaded: bool,
+    /// Maillage de base après « appliquer » (remplace celui du fichier, gardé dans .app/modifiers/)
+    applied: Option<std::sync::Arc<crate::modifiers::Mesh>>,
+    applied_ver: u64,
+    /// Fenêtre d'export : format choisi et chemin de sortie
+    export_dlg: Option<(&'static str, String)>,
+    export_dir: Option<std::path::PathBuf>,
     show_mods: bool,
     /// Mode édition : IDs de matériau, coutures, UV
     pub edit: Option<crate::uvedit::Edit>,
@@ -1348,6 +1376,10 @@ impl Viewer {
             env_error: None,
             stack: vec![],
             stack_loaded: false,
+            applied: None,
+            applied_ver: 0,
+            export_dlg: None,
+            export_dir: None,
             show_mods: false,
             edit: None,
             edit_seen: 0,
@@ -1466,6 +1498,7 @@ impl Viewer {
         // Pile de modificateurs : chargée une fois, recalculée en arrière-plan quand elle change
         if !self.stack_loaded && !self.root.is_empty() {
             self.stack = std::fs::read_to_string(self.mods_file()).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
+            self.applied = crate::modifiers::Mesh::load(&self.mods_file().with_extension("mesh")).map(std::sync::Arc::new);
             self.stack_loaded = true;
         }
         let key = {
@@ -1473,6 +1506,7 @@ impl Viewer {
             let mut h = std::collections::hash_map::DefaultHasher::new();
             serde_json::to_string(&self.stack.iter().filter(|m| m.on).map(|m| m.kind).collect::<Vec<_>>()).unwrap_or_default().hash(&mut h);
             z_up.hash(&mut h);
+            self.applied_ver.hash(&mut h);
             h.finish()
         };
         if let Some(e) = &mut self.edit {
@@ -1499,13 +1533,15 @@ impl Viewer {
         if self.edit.is_none() && current != Some(key) && pending != Some(key) && self.job.is_none() {
             let (tx, rx) = channel();
             let (m, stack, ctx) = (model.clone(), self.stack.clone(), ui.ctx().clone());
+            let applied = self.applied.clone();
             std::thread::spawn(move || {
                 let s = m.size();
                 let longest = s[0].max(s[1]).max(s[2]).max(1e-9);
                 let c = [(m.min[0] + m.max[0]) / 2.0, (m.min[1] + m.max[1]) / 2.0, (m.min[2] + m.max[2]) / 2.0];
                 let o = [-c[0] / longest, -c[1] / longest, -c[2] / longest];
                 let origin = if z_up { [o[0], o[2], -o[1]] } else { o };
-                let mesh = crate::modifiers::apply(&stack, crate::modifiers::Mesh::from_model(&m, z_up), origin);
+                let base = applied.map(|a| (*a).clone()).unwrap_or_else(|| crate::modifiers::Mesh::from_model(&m, z_up));
+                let mesh = crate::modifiers::apply(&stack, base, origin);
                 let _ = tx.send(Prepared::from_mesh(mesh));
                 ctx.request_repaint();
             });
@@ -1601,7 +1637,9 @@ impl Viewer {
         let ctx = ui.ctx().clone();
         let mut pick_hdr: Option<std::path::PathBuf> = None;
         let mut do_capture = false;
-        let mut export: Option<&'static str> = None;
+        let mut export: Option<(&'static str, std::path::PathBuf)> = None;
+        let mut ask_export: Option<&'static str> = None;
+        let mut mod_request: Option<crate::modifiers::Request> = None;
         let mut do_gif = false;
 
         // ---------- barre d'outils : trois menus et quelques boutons ----------
@@ -1748,9 +1786,9 @@ impl Viewer {
                 self.prepared = None;
             }
             let mut editing = self.edit.is_some();
-            if ui.toggle_value(&mut editing, crate::i18n::t("édition")).on_hover_text(crate::i18n::t("IDs de matériau, coutures et UV (sur le modèle d'origine)")).changed() {
+            if ui.toggle_value(&mut editing, crate::i18n::t("édition")).on_hover_text(crate::i18n::t("IDs de matériau, coutures et UV (sur le maillage de base, modificateurs appliqués compris)")).changed() {
                 if editing {
-                    let mesh = crate::modifiers::Mesh::from_model(model, z_up);
+                    let mesh = self.applied.as_ref().map(|a| (**a).clone()).unwrap_or_else(|| crate::modifiers::Mesh::from_model(model, z_up));
                     let s = model.size();
                     let longest = s[0].max(s[1]).max(s[2]).max(1e-9);
                     let file = std::path::Path::new(&self.root).join(".app/meshdata").join(self.mods_file().file_name().unwrap_or_default());
@@ -1774,14 +1812,9 @@ impl Viewer {
                 }
                 ui.label(egui::RichText::new(crate::i18n::t("enregistré à côté du modèle")).color(p.muted).size(10.5));
             });
-            egui::containers::menu::MenuButton::new(crate::i18n::t("exporter ▾")).ui(ui, |ui| {
-                for (f, help) in [("obj", "OBJ : quads et n-gones gardés"), ("fbx", "FBX : Maya, 3ds Max, Blender, Unity, Unreal (quads, UV, matériaux)"), ("glb", "glTF binaire : Blender, Unity, Unreal, web"), ("stl", "STL binaire : impression 3D"), ("ply", "PLY : scans, MeshLab")] {
-                    if ui.button(format!("{} ", f.to_uppercase())).on_hover_text(help).clicked() {
-                        export = Some(f);
-                    }
-                }
-                ui.label(egui::RichText::new(crate::i18n::t("avec les modificateurs actifs, à côté du modèle")).color(p.muted).size(10.5));
-            });
+            if ui.button(crate::i18n::t("exporter…")).on_hover_text(crate::i18n::t("Choisir le format et l'endroit où enregistrer")).clicked() {
+                ask_export = Some("obj");
+            }
             let s = model.size();
             let shown = if shown_tris != model.total_tris { format!(" · affiché : {}", fmt_n(shown_tris)) } else { String::new() };
             let text = format!("{} triangles{shown} · {} sommets · {:.2} × {:.2} × {:.2}", fmt_n(model.total_tris), fmt_n(model.total_vertices), s[0], s[1], s[2]);
@@ -1817,13 +1850,13 @@ impl Viewer {
                 egui::Frame::new().fill(p.panel).stroke(Stroke::new(1.0, p.line)).inner_margin(8).show(ui, |ui| {
                     ui.set_min_size(pr.size() - egui::vec2(16.0, 16.0));
                     egui::ScrollArea::vertical().id_salt("mods").show(ui, |ui| {
-                        changed = crate::modifiers::panel(ui, &mut self.stack);
+                        changed = crate::modifiers::panel(ui, &mut self.stack, self.applied.is_some(), &mut mod_request);
                         ui.add_space(8.0);
                         ui.horizontal(|ui| {
                             ui.label(egui::RichText::new(crate::i18n::t("exporter le résultat :")).size(11.0));
                             for f in crate::modifiers::EXPORT_FORMATS {
                                 if ui.small_button(*f).clicked() {
-                                    export = Some(*f);
+                                    ask_export = Some(*f);
                                 }
                             }
                         });
@@ -1861,16 +1894,133 @@ impl Viewer {
                 }
             }
         }
-        if let Some(fmt) = export.take() {
+        // Appliquer des modificateurs : leur résultat devient le maillage de base
+        if let Some(req) = mod_request.take() {
+            let file = self.mods_file().with_extension("mesh");
+            match req {
+                crate::modifiers::Request::Restore => {
+                    let _ = std::fs::remove_file(&file);
+                    self.applied = None;
+                    self.capture_msg = Some(crate::i18n::t("maillage du fichier rétabli"));
+                }
+                _ => {
+                    let upto = match req {
+                        crate::modifiers::Request::ApplyUpTo(i) => (i + 1).min(self.stack.len()),
+                        _ => self.stack.len(),
+                    };
+                    let s = model.size();
+                    let longest = s[0].max(s[1]).max(s[2]).max(1e-9);
+                    let c = [(model.min[0] + model.max[0]) / 2.0, (model.min[1] + model.max[1]) / 2.0, (model.min[2] + model.max[2]) / 2.0];
+                    let o = [-c[0] / longest, -c[1] / longest, -c[2] / longest];
+                    let origin = if z_up { [o[0], o[2], -o[1]] } else { o };
+                    let base = self.applied.as_ref().map(|a| (**a).clone()).unwrap_or_else(|| crate::modifiers::Mesh::from_model(model, z_up));
+                    let mesh = crate::modifiers::apply(&self.stack[..upto], base, origin);
+                    let n = self.stack[..upto].iter().filter(|m| m.on).count();
+                    self.capture_msg = Some(match mesh.save(&file) {
+                        Ok(()) => {
+                            // Les modificateurs appliqués quittent la pile ; ceux qui étaient désactivés restent
+                            let mut k = 0;
+                            self.stack.retain(|m| {
+                                k += 1;
+                                k > upto || !m.on
+                            });
+                            self.applied = Some(std::sync::Arc::new(mesh));
+                            format!("{n} {}", crate::i18n::t("modificateur(s) appliqué(s)"))
+                        }
+                        Err(e) => format!("{} : {e}", crate::i18n::t("application impossible")),
+                    });
+                }
+            }
+            self.applied_ver += 1;
+            self.edit = None;
+            self.prepared = None;
+            self.job = None;
+            let f = self.mods_file();
+            let _ = std::fs::create_dir_all(f.parent().unwrap());
+            let _ = std::fs::write(f, serde_json::to_string(&self.stack).unwrap_or_default());
+            ui.ctx().request_repaint();
+        }
+        // Fenêtre d'export : la liste des formats, puis l'endroit où enregistrer
+        if let Some(fmt) = ask_export.take() {
+            let stem = self.path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "modele".into());
+            let suffix = if self.stack.iter().any(|m| m.on) || self.applied.is_some() { "-modifié" } else { "-export" };
+            let dir = self.export_dir.clone().or_else(|| self.path.parent().map(|p| p.to_path_buf())).unwrap_or_default();
+            self.export_dlg = Some((fmt, dir.join(format!("{stem}{suffix}.{fmt}")).to_string_lossy().to_string()));
+        }
+        if let Some((fmt, path)) = &mut self.export_dlg {
+            let mut close = false;
+            let mut go = false;
+            egui::Window::new(crate::i18n::t("exporter le modèle")).collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]).show(ui.ctx(), |ui| {
+                ui.set_min_width(460.0);
+                ui.label(egui::RichText::new(crate::i18n::t("FORMAT")).size(10.5).color(p.muted).family(theme::bold()));
+                for (f, help) in [("obj", "OBJ : quads et n-gones gardés"), ("fbx", "FBX : Maya, 3ds Max, Blender, Unity, Unreal (quads, UV, matériaux)"), ("glb", "glTF binaire : Blender, Unity, Unreal, web"), ("stl", "STL binaire : impression 3D"), ("ply", "PLY : scans, MeshLab")] {
+                    ui.horizontal(|ui| {
+                        if ui.radio(*fmt == f, egui::RichText::new(f.to_uppercase()).family(theme::bold())).clicked() && *fmt != f {
+                            // Le chemin suit le format choisi
+                            let mut pb = std::path::PathBuf::from(path.as_str());
+                            pb.set_extension(f);
+                            *path = pb.to_string_lossy().to_string();
+                            *fmt = f;
+                        }
+                        ui.label(egui::RichText::new(crate::i18n::t(help)).color(p.muted).size(11.0));
+                    });
+                }
+                ui.add_space(6.0);
+                ui.label(egui::RichText::new(crate::i18n::t("EMPLACEMENT")).size(10.5).color(p.muted).family(theme::bold()));
+                ui.horizontal(|ui| {
+                    ui.add(egui::TextEdit::singleline(path).desired_width(350.0));
+                    if ui.button(crate::i18n::t("parcourir…")).clicked() {
+                        let cur = std::path::PathBuf::from(path.as_str());
+                        let mut d = rfd::FileDialog::new().add_filter(fmt.to_uppercase(), &[*fmt]);
+                        if let Some(dir) = cur.parent().filter(|d| d.is_dir()) {
+                            d = d.set_directory(dir);
+                        }
+                        if let Some(name) = cur.file_name() {
+                            d = d.set_file_name(name.to_string_lossy());
+                        }
+                        if let Some(mut picked) = d.save_file() {
+                            if picked.extension().is_none() {
+                                picked.set_extension(*fmt);
+                            }
+                            *path = picked.to_string_lossy().to_string();
+                        }
+                    }
+                });
+                ui.label(egui::RichText::new(crate::i18n::t("Les modificateurs actifs sont inclus dans le fichier.")).color(p.muted).size(10.5));
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    if ui.add(egui::Button::new(egui::RichText::new(crate::i18n::t("exporter")).color(p.on_accent)).fill(p.accent)).clicked() && !path.trim().is_empty() {
+                        go = true;
+                    }
+                    if ui.button(crate::i18n::t("annuler")).clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                        close = true;
+                    }
+                });
+            });
+            if go {
+                let mut out = std::path::PathBuf::from(path.trim());
+                if out.extension().map(|e| e.to_string_lossy().to_lowercase()) != Some(fmt.to_string()) {
+                    out.set_extension(*fmt);
+                }
+                export = Some((*fmt, out));
+                close = true;
+            }
+            if close {
+                self.export_dlg = None;
+            }
+        }
+        if let Some((fmt, out)) = export.take() {
+            if let Some(d) = out.parent() {
+                let _ = std::fs::create_dir_all(d);
+                self.export_dir = Some(d.to_path_buf());
+            }
             let s = model.size();
             let longest = s[0].max(s[1]).max(s[2]).max(1e-9);
             let c = [(model.min[0] + model.max[0]) / 2.0, (model.min[1] + model.max[1]) / 2.0, (model.min[2] + model.max[2]) / 2.0];
             let o = [-c[0] / longest, -c[1] / longest, -c[2] / longest];
             let origin = if z_up { [o[0], o[2], -o[1]] } else { o };
-            let mesh = crate::modifiers::apply(&self.stack, crate::modifiers::Mesh::from_model(model, z_up), origin);
-            let stem = self.path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "modele".into());
-            let suffix = if self.stack.iter().any(|m| m.on) { "-modifié" } else { "-export" };
-            let out = self.path.with_file_name(format!("{stem}{suffix}.{fmt}"));
+            let base = self.applied.as_ref().map(|a| (**a).clone()).unwrap_or_else(|| crate::modifiers::Mesh::from_model(model, z_up));
+            let mesh = crate::modifiers::apply(&self.stack, base, origin);
             let s = model.size();
             let longest = s[0].max(s[1]).max(s[2]).max(1e-9);
             let c = [(model.min[0] + model.max[0]) / 2.0, (model.min[1] + model.max[1]) / 2.0, (model.min[2] + model.max[2]) / 2.0];
@@ -1884,7 +2034,7 @@ impl Viewer {
                 "fbx" => crate::fbxwrite::export(e, &world, &out),
                 _ => crate::uvedit::export_glb(e, &world, &out),
             }).unwrap_or_else(|| crate::modifiers::export(&mesh, model, z_up, &out)) {
-                Ok(()) => format!("exporté : {}", out.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()),
+                Ok(()) => format!("exporté : {}", out.to_string_lossy()),
                 Err(e) => format!("export impossible : {e}"),
             });
         }
