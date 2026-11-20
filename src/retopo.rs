@@ -49,15 +49,16 @@ pub struct Options {
     pub guide_radius: f32,
     /// 100 % quads : extraction à double taille puis subdivision de chaque face en quads
     pub pure_quads: bool,
-    /// Supprimer les dislocations du champ de positions (beaucoup moins de pôles)
-    pub consistent: bool,
+    /// Taille des quads adaptée au flux (0 : tous de la même taille ; 1 : ils rétrécissent là où
+    /// les lignes se resserrent, au lieu de se tordre)
+    pub adaptive: f32,
     /// Force d'alignement du flux sur les courbures principales (0 : aucun)
     pub curvature: f32,
 }
 
 impl Default for Options {
     fn default() -> Self {
-        Options { faces: 1500, iterations: 160, guide_radius: 1.2, pure_quads: true, consistent: true, curvature: 1.0 }
+        Options { faces: 1500, iterations: 160, guide_radius: 1.2, pure_quads: true, adaptive: 1.0, curvature: 1.0 }
     }
 }
 
@@ -67,8 +68,6 @@ pub struct Stats {
     pub dense: usize,
     /// Singularités du champ d'orientation (pôles inévitables)
     pub field_sing: usize,
-    /// Dislocations du champ de positions avant correction
-    pub defects: usize,
     pub unfixed: usize,
     pub flips: usize,
 }
@@ -116,6 +115,148 @@ fn weld(pos: &[V3], tris: &[[u32; 3]]) -> (Vec<V3>, Vec<[u32; 3]>) {
     }
     let tris = tris.iter().map(|t| [remap[t[0] as usize], remap[t[1] as usize], remap[t[2] as usize]]).filter(|t| t[0] != t[1] && t[1] != t[2] && t[0] != t[2]).collect();
     (out, tris)
+}
+
+/// Simplifie un maillage trop fin (sculpt de plusieurs millions de triangles) : les arêtes
+/// plus courtes que `min_len` sont contractées en leur milieu, sans créer d'arête non
+/// variété ni retourner de triangle. Le calcul qui suit ne dépend alors plus de la taille
+/// du modèle d'origine, seulement du nombre de quads demandé.
+fn decimate(mut pos: Vec<V3>, mut tris: Vec<[u32; 3]>, min_len: f32) -> (Vec<V3>, Vec<[u32; 3]>) {
+    let nv = pos.len();
+    let mut vf: Vec<Vec<u32>> = vec![vec![]; nv];
+    for (fi, t) in tris.iter().enumerate() {
+        for &v in t {
+            vf[v as usize].push(fi as u32);
+        }
+    }
+    let mut alive = vec![true; tris.len()];
+    // Sommets de bord
+    let mut count: HashMap<(u32, u32), u8> = HashMap::new();
+    for t in &tris {
+        for k in 0..3 {
+            let (a, b) = (t[k], t[(k + 1) % 3]);
+            *count.entry((a.min(b), a.max(b))).or_insert(0) += 1;
+        }
+    }
+    let mut border = vec![false; nv];
+    for (&(a, b), &c) in &count {
+        if c != 2 {
+            border[a as usize] = true;
+            border[b as usize] = true;
+        }
+    }
+    drop(count);
+    let fnormal = |pos: &[V3], t: [u32; 3]| cross(sub(pos[t[1] as usize], pos[t[0] as usize]), sub(pos[t[2] as usize], pos[t[0] as usize]));
+    for _ in 0..24 {
+        let mut cand: Vec<(f32, u32, u32)> = vec![];
+        for (fi, t) in tris.iter().enumerate() {
+            if !alive[fi] {
+                continue;
+            }
+            for k in 0..3 {
+                let (a, b) = (t[k], t[(k + 1) % 3]);
+                if a < b {
+                    let l = len(sub(pos[a as usize], pos[b as usize]));
+                    if l < min_len {
+                        cand.push((l, a, b));
+                    }
+                }
+            }
+        }
+        if cand.is_empty() {
+            break;
+        }
+        cand.sort_by(|x, y| x.0.total_cmp(&y.0));
+        let mut locked = vec![false; nv];
+        let mut done = 0;
+        for (_, a, b) in cand {
+            let (a, b) = (a as usize, b as usize);
+            if locked[a] || locked[b] {
+                continue;
+            }
+            let ring = |v: usize| -> Vec<u32> {
+                let mut r: Vec<u32> = vf[v].iter().filter(|&&f| alive[f as usize]).flat_map(|&f| tris[f as usize]).filter(|&x| x as usize != v).collect();
+                r.sort_unstable();
+                r.dedup();
+                r
+            };
+            let (ra, rb) = (ring(a), ring(b));
+            let shared: Vec<u32> = vf[a].iter().copied().filter(|&f| alive[f as usize] && tris[f as usize].contains(&(b as u32))).collect();
+            let common = ra.iter().filter(|x| rb.binary_search(x).is_ok()).count();
+            if shared.is_empty() || shared.len() > 2 || common != shared.len() {
+                continue;
+            }
+            if (border[a] || border[b]) && shared.len() != 1 {
+                continue;
+            }
+            let m = mul(add(pos[a], pos[b]), 0.5);
+            // Aucun triangle restant ne doit se retourner ni s'aplatir
+            let mut ok = true;
+            for (v, other) in [(a, b), (b, a)] {
+                for &f in &vf[v] {
+                    let t = tris[f as usize];
+                    if !alive[f as usize] || t.contains(&(other as u32)) {
+                        continue;
+                    }
+                    let n0 = fnormal(&pos, t);
+                    let old = pos[v];
+                    pos[v] = m;
+                    let n1 = fnormal(&pos, t);
+                    pos[v] = old;
+                    if dot(n0, n1) <= 0.2 * len(n0) * len(n1) || len(n1) < 1e-12 {
+                        ok = false;
+                    }
+                }
+            }
+            if !ok {
+                continue;
+            }
+            pos[a] = m;
+            for &f in &shared {
+                alive[f as usize] = false;
+            }
+            let moved: Vec<u32> = vf[b].iter().copied().filter(|&f| alive[f as usize]).collect();
+            for f in moved {
+                for x in tris[f as usize].iter_mut() {
+                    if *x as usize == b {
+                        *x = a as u32;
+                    }
+                }
+                vf[a].push(f);
+            }
+            vf[b].clear();
+            vf[a].retain(|&f| alive[f as usize]);
+            border[a] = border[a] || border[b];
+            locked[a] = true;
+            for x in ra.into_iter().chain(rb) {
+                locked[x as usize] = true;
+            }
+            done += 1;
+        }
+        if done == 0 {
+            break;
+        }
+    }
+    let mut remap = vec![u32::MAX; nv];
+    let mut out_pos = vec![];
+    let mut out = vec![];
+    for (fi, t) in tris.iter().enumerate() {
+        if !alive[fi] {
+            continue;
+        }
+        let mut nt = [0u32; 3];
+        for k in 0..3 {
+            let v = t[k] as usize;
+            if remap[v] == u32::MAX {
+                remap[v] = out_pos.len() as u32;
+                out_pos.push(pos[v]);
+            }
+            nt[k] = remap[v];
+        }
+        out.push(nt);
+    }
+    tris.clear();
+    (out_pos, out)
 }
 
 /// Coupe les arêtes plus longues que `max_len` (découpe conforme 1 → 2, 3 ou 4 triangles).
@@ -185,45 +326,6 @@ fn compat_orient(q0: V3, n0: V3, q1: V3, n1: V3) -> (V3, V3) {
     }
     let s = dot(a[best.0], b[best.1]).signum();
     (a[best.0], mul(b[best.1], s))
-}
-
-fn middle_point(p0: V3, n0: V3, p1: V3, n1: V3) -> V3 {
-    let (n0p0, n0p1, n1p0, n1p1, n0n1) = (dot(n0, p0), dot(n0, p1), dot(n1, p0), dot(n1, p1), dot(n0, n1));
-    let denom = 1.0 / (1.0 - n0n1 * n0n1 + 1e-4);
-    let l0 = 2.0 * (n0p1 - n0p0 - n0n1 * (n1p0 - n1p1)) * denom;
-    let l1 = 2.0 * (n1p0 - n1p1 - n0n1 * (n0p1 - n0p0)) * denom;
-    sub(mul(add(p0, p1), 0.5), mul(add(mul(n0, l0), mul(n1, l1)), 0.25))
-}
-
-fn floor4(o: V3, q: V3, t: V3, target: V3, h: f32) -> V3 {
-    let d = sub(target, o);
-    add(o, add(mul(q, (dot(q, d) / h).floor() * h), mul(t, (dot(t, d) / h).floor() * h)))
-}
-
-fn round4(o: V3, q: V3, n: V3, p: V3, h: f32) -> V3 {
-    let t = cross(n, q);
-    let d = sub(p, o);
-    add(o, add(mul(q, (dot(q, d) / h).round() * h), mul(t, (dot(t, d) / h).round() * h)))
-}
-
-#[allow(clippy::too_many_arguments)]
-fn compat_pos(p0: V3, n0: V3, q0: V3, o0: V3, p1: V3, n1: V3, q1: V3, o1: V3, h: f32) -> (V3, V3) {
-    let (t0, t1) = (cross(n0, q0), cross(n1, q1));
-    let m = middle_point(p0, n0, p1, n1);
-    let a = floor4(o0, q0, t0, m, h);
-    let b = floor4(o1, q1, t1, m, h);
-    let mut best = (a, b, f32::MAX);
-    for i in 0..4 {
-        let at = add(a, mul(add(mul(q0, (i & 1) as f32), mul(t0, ((i & 2) >> 1) as f32)), h));
-        for j in 0..4 {
-            let bt = add(b, mul(add(mul(q1, (j & 1) as f32), mul(t1, ((j & 2) >> 1) as f32)), h));
-            let c = dot(sub(at, bt), sub(at, bt));
-            if c < best.2 {
-                best = (at, bt, c);
-            }
-        }
-    }
-    (best.0, best.1)
 }
 
 struct Uf(Vec<u32>);
@@ -359,171 +461,6 @@ impl Graph {
     }
 }
 
-/// Entiers (k, d) de chaque arête à partir des champs d'orientation et de positions.
-fn integers(g: &mut Graph, v: &[V3], n: &[V3], q: &[V3], o: &[V3], h: f32) {
-    for e in 0..g.ends.len() {
-        let (i, j) = (g.ends[e].0 as usize, g.ends[e].1 as usize);
-        // k : rotation de q_j autour de n_j qui colle le mieux à q_i
-        let tj = cross(n[j], q[j]);
-        let cands = [q[j], tj, mul(q[j], -1.0), mul(tj, -1.0)];
-        let k = (0..4).max_by(|&a, &b| dot(q[i], cands[a]).total_cmp(&dot(q[i], cands[b]))).unwrap() as u8;
-        let (ti, tjj) = compat_pos_int(v[i], n[i], q[i], o[i], v[j], n[j], q[j], o[j], h);
-        let r = trot(k, tjj);
-        g.k[e] = k;
-        g.d[e] = [ti[0] - r[0], ti[1] - r[1]];
-    }
-}
-
-/// Comme `compat_pos`, mais renvoie les coordonnées entières des deux points de grille retenus.
-#[allow(clippy::too_many_arguments)]
-fn compat_pos_int(p0: V3, n0: V3, q0: V3, o0: V3, p1: V3, n1: V3, q1: V3, o1: V3, h: f32) -> ([i32; 2], [i32; 2]) {
-    let (t0, t1) = (cross(n0, q0), cross(n1, q1));
-    let m = middle_point(p0, n0, p1, n1);
-    let (d0, d1) = (sub(m, o0), sub(m, o1));
-    let f0 = [(dot(q0, d0) / h).floor() as i32, (dot(t0, d0) / h).floor() as i32];
-    let f1 = [(dot(q1, d1) / h).floor() as i32, (dot(t1, d1) / h).floor() as i32];
-    let mut best = (f0, f1, f32::MAX);
-    for i in 0..4 {
-        let a = [f0[0] + (i & 1), f0[1] + ((i & 2) >> 1)];
-        let pa = add(o0, add(mul(q0, a[0] as f32 * h), mul(t0, a[1] as f32 * h)));
-        for j in 0..4 {
-            let b = [f1[0] + (j & 1), f1[1] + ((j & 2) >> 1)];
-            let pb = add(o1, add(mul(q1, b[0] as f32 * h), mul(t1, b[1] as f32 * h)));
-            let c = dot(sub(pa, pb), sub(pa, pb));
-            if c < best.2 {
-                best = (a, b, c);
-            }
-        }
-    }
-    (best.0, best.1)
-}
-
-/// Fait disparaître les dislocations. Renvoie (singularités d'orientation, dislocations trouvées, restantes).
-/// Trois passes, du plus propre au plus brutal :
-/// 1. deux dislocations opposées proches s'annulent (aucun effet de bord) ;
-/// 2. une dislocation rejoint une autre même sans l'annuler tout à fait ;
-/// 3. ce qui reste tombe dans la singularité d'orientation ou le bord le plus proche.
-fn fix_defects(g: &mut Graph, f: &[[u32; 3]]) -> (usize, usize, usize) {
-    let nf = f.len();
-    let mut sing = vec![false; nf];
-    let mut defect = vec![false; nf];
-    for fi in 0..nf {
-        let (ks, c, _) = g.closure(&f[fi], fi);
-        sing[fi] = ks != 0;
-        defect[fi] = ks == 0 && c != [0, 0];
-    }
-    let n_sing = sing.iter().filter(|x| **x).count();
-    let n_def = defect.iter().filter(|x| **x).count();
-    let mut stamp = vec![0u32; nf];
-    let mut parent: Vec<(u32, u8)> = vec![(u32::MAX, 0); nf];
-    let mut tick = 0u32;
-    let l1 = |c: [i32; 2]| c[0].abs() + c[1].abs();
-    for phase in 0..3 {
-        let mut radius = 4usize;
-        loop {
-            let list: Vec<usize> = (0..nf).filter(|&i| defect[i]).collect();
-            if list.is_empty() || radius > 4 * nf || (phase < 2 && radius > 96) {
-                break;
-            }
-            for &start in &list {
-                if !defect[start] {
-                    continue;
-                }
-                tick += 1;
-                stamp[start] = tick;
-                let mut queue = std::collections::VecDeque::new();
-                queue.push_back((start as u32, 0usize));
-                // Candidats : (face d'arrivée, emplacement de sortie si c'est un bord)
-                let mut cands: Vec<(u32, Option<u8>)> = vec![];
-                while let Some((x, depth)) = queue.pop_front() {
-                    if depth > radius || cands.len() >= 6 {
-                        break;
-                    }
-                    for s in 0..3 {
-                        let e = g.fe[x as usize][s] as usize;
-                        let y = if g.nm[e] {
-                            u32::MAX
-                        } else if g.ef[e][0] == x {
-                            g.ef[e][1]
-                        } else {
-                            g.ef[e][0]
-                        };
-                        if y == u32::MAX {
-                            if phase == 2 {
-                                cands.push((x, Some(s as u8)));
-                            }
-                            continue;
-                        }
-                        if stamp[y as usize] == tick {
-                            continue;
-                        }
-                        stamp[y as usize] = tick;
-                        parent[y as usize] = (x, s as u8);
-                        if sing[y as usize] {
-                            if phase == 2 {
-                                cands.push((y, None));
-                            }
-                        } else if defect[y as usize] {
-                            cands.push((y, None));
-                        } else {
-                            queue.push_back((y, depth + 1));
-                        }
-                    }
-                }
-                let before = l1(g.closure(&f[start], start).1);
-                for (end, exit) in cands {
-                    // Chemin start → end
-                    let mut path = vec![];
-                    let mut cur = end;
-                    while cur as usize != start {
-                        let (p, s) = parent[cur as usize];
-                        path.push((p, s));
-                        cur = p;
-                    }
-                    path.reverse();
-                    let saved: Vec<(u32, [i32; 2])> = path.iter().map(|&(x, s)| g.fe[x as usize][s as usize]).chain(exit.map(|s| g.fe[end as usize][s as usize])).map(|e| (e, g.d[e as usize])).collect();
-                    let end_before = if sing[end as usize] || exit.is_some() { 0 } else { l1(g.closure(&f[end as usize], end as usize).1) };
-                    for &(x, s) in &path {
-                        g.push(&f[x as usize], x as usize, s as usize);
-                    }
-                    if let Some(s) = exit {
-                        g.push(&f[end as usize], end as usize, s as usize);
-                    }
-                    let end_after = if sing[end as usize] || exit.is_some() { 0 } else { l1(g.closure(&f[end as usize], end as usize).1) };
-                    let ok = match phase {
-                        0 => end_after == 0,
-                        1 => end_after < before + end_before,
-                        _ => true,
-                    };
-                    if ok {
-                        defect[start] = false;
-                        if !sing[end as usize] {
-                            defect[end as usize] = end_after != 0;
-                        }
-                        break;
-                    }
-                    for (e, d) in saved {
-                        g.d[e as usize] = d;
-                    }
-                }
-            }
-            radius *= 2;
-        }
-    }
-    (n_sing, n_def, defect.iter().filter(|x| **x).count())
-}
-
-fn energy(g: &Graph, geo: &[[f64; 2]], u: &[[f64; 2]]) -> f64 {
-    let mut en = 0.0;
-    for e in 0..g.ends.len() {
-        let (i, j) = (g.ends[e].0 as usize, g.ends[e].1 as usize);
-        let t = trotf(g.k[e], u[j]);
-        let r = [t[0] - u[i][0] - (geo[e][0] - g.d[e][0] as f64), t[1] - u[i][1] - (geo[e][1] - g.d[e][1] as f64)];
-        en += r[0] * r[0] + r[1] * r[1];
-    }
-    en
-}
-
 /// Une singularité tombe sur un point de grille (sommet du maillage final) si sa fermeture
 /// est « paire » ; sinon elle est au milieu d'une case et donnerait un triangle ou un pentagone.
 fn odd(ks: u8, c: [i32; 2]) -> bool {
@@ -644,7 +581,8 @@ fn solve_ext(g: &Graph, geo: &[[f64; 2]], u: &mut [[f64; 2]], paths: &[&ConePath
     adjoint(&r, &mut su, &mut sl);
     let (mut pu, mut pl) = (su.clone(), sl.clone());
     let mut gamma = dot2(&su, &su) + dot2(&sl, &sl);
-    let stop = c2 * tol + 1e-24;
+    let _ = c2;
+    let stop = ne as f64 * tol;
     let mut q = vec![[0.0f64; 2]; ne];
     let mut it = 0;
     while it < max_iter && gamma > stop {
@@ -684,7 +622,7 @@ fn solve_ext(g: &Graph, geo: &[[f64; 2]], u: &mut [[f64; 2]], paths: &[&ConePath
 }
 
 fn solve_u(g: &Graph, geo: &[[f64; 2]], u: &mut [[f64; 2]], max_iter: usize) -> usize {
-    solve_ext(g, geo, u, &[], &mut [], max_iter, 1e-10)
+    solve_ext(g, geo, u, &[], &mut [], max_iter, 1e-11)
 }
 
 /// Degrés de liberté entiers de la grille : un chemin par singularité (arbre couvrant du
@@ -902,16 +840,33 @@ fn push_path(g: &mut Graph, f: &[[u32; 3]], steps: &[(u32, u8)], b: [i32; 2]) {
 /// Aire orientée de chaque triangle dans la carte (en cases), rapportée à son aire réelle :
 /// ≤ 0 = triangle replié, proche de 1 = sans déformation.
 fn param_area_ratio(g: &Graph, f: &[[u32; 3]], u: &[[f64; 2]], geo_area: &[f64], fi: usize) -> f64 {
+    param_area_ratio_real(g, f, u, geo_area, fi, None)
+}
+
+/// Variante où les entiers reçoivent un complément réel `extra` (singularités encore libres).
+fn param_area_ratio_real(g: &Graph, f: &[[u32; 3]], u: &[[f64; 2]], geo_area: &[f64], fi: usize, extra: Option<&[[f64; 2]]>) -> f64 {
     let t = &f[fi];
     let es = g.fe[fi];
-    let (k1, d1) = g.dir(es[0], t[0]);
-    let (k2, d2) = g.dir(es[1], t[1]);
+    let dirf = |e: u32, from: u32| -> (u8, [f64; 2]) {
+        let (k, d) = (g.k[e as usize], g.d[e as usize]);
+        let x = extra.map(|x| x[e as usize]).unwrap_or([0.0; 2]);
+        let d = [d[0] as f64 + x[0], d[1] as f64 + x[1]];
+        if g.ends[e as usize].0 == from {
+            (k, d)
+        } else {
+            let kr = (4 - k) & 3;
+            let r = trotf(kr, d);
+            (kr, [-r[0], -r[1]])
+        }
+    };
+    let (k1, d1) = dirf(es[0], t[0]);
+    let (k2, d2) = dirf(es[1], t[1]);
     let (ua, ub, uc) = (u[t[0] as usize], u[t[1] as usize], u[t[2] as usize]);
     let tb = trotf(k1, ub);
-    let pb = [d1[0] as f64 + tb[0] - ua[0], d1[1] as f64 + tb[1] - ua[1]];
+    let pb = [d1[0] + tb[0] - ua[0], d1[1] + tb[1] - ua[1]];
     let tc = trotf(k2, uc);
-    let inner = trotf(k1, [d2[0] as f64 + tc[0], d2[1] as f64 + tc[1]]);
-    let pc = [d1[0] as f64 + inner[0] - ua[0], d1[1] as f64 + inner[1] - ua[1]];
+    let inner = trotf(k1, [d2[0] + tc[0], d2[1] + tc[1]]);
+    let pc = [d1[0] + inner[0] - ua[0], d1[1] + inner[1] - ua[1]];
     0.5 * (pb[0] * pc[1] - pb[1] * pc[0]) / geo_area[fi].max(1e-12)
 }
 
@@ -935,6 +890,58 @@ fn stiffen(g: &mut Graph, f: &[[u32; 3]], geo: &[[f64; 2]], u: &mut [[f64; 2]], 
                         hist[b] += 1;
                     }
                 }
+                if std::env::var("WHERE").is_ok() {
+                    let mut near = [0usize; 6];
+                    for fi in 0..nf {
+                        if !sing[fi] && param_area_ratio(g, f, u, geo_area, fi) < 0.0 {
+                            // distance (en faces) à la singularité la plus proche
+                            let mut seen: HashSet<u32> = HashSet::new();
+                            let mut front = vec![fi as u32];
+                            seen.insert(fi as u32);
+                            let mut dist = 5;
+                            'o: for d in 0..5 {
+                                let mut next = vec![];
+                                for &x in &front {
+                                    if sing[x as usize] {
+                                        dist = d;
+                                        break 'o;
+                                    }
+                                    for &e in &g.fe[x as usize] {
+                                        for &y in &g.ef[e as usize] {
+                                            if y != u32::MAX && seen.insert(y) {
+                                                next.push(y);
+                                            }
+                                        }
+                                    }
+                                }
+                                front = next;
+                            }
+                            near[dist] += 1;
+                        }
+                    }
+                    eprintln!("  replis à 0,1,2,3,4 faces d'une singularité, ou plus loin : {near:?}");
+                    let mut cells: HashMap<[i32; 2], (usize, u32)> = HashMap::new();
+                    for fi in 0..nf {
+                        if !sing[fi] && param_area_ratio(g, f, u, geo_area, fi) < 0.0 {
+                            let a = f[fi][0];
+                            let e = cells.entry([(a / 2000) as i32, 0]).or_insert((0, a));
+                            e.0 += 1;
+                        }
+                    }
+                    let mut l: Vec<_> = cells.into_values().collect();
+                    l.sort();
+                    l.reverse();
+                    eprintln!("  sommets témoins : {:?}", l.iter().take(12).collect::<Vec<_>>());
+                }
+                if let Ok(path) = std::env::var("DUMP") {
+                    use std::io::Write;
+                    let mut w = std::fs::File::create(path).unwrap();
+                    for fi in 0..nf {
+                        if !sing[fi] && param_area_ratio(g, f, u, geo_area, fi) < 0.0 {
+                            writeln!(w, "{}", fi).unwrap();
+                        }
+                    }
+                }
                 eprintln!("  rapport d'aire : <0 {} | <0,15 {} | <0,5 {} | <0,8 {} | <1,25 {} | <2 {} | <4 {} | plus {}", hist[0], hist[1], hist[2], hist[3], hist[4], hist[5], hist[6], hist[7]);
             }
         }
@@ -955,7 +962,7 @@ fn stiffen(g: &mut Graph, f: &[[u32; 3]], geo: &[[f64; 2]], u: &mut [[f64; 2]], 
         for e in touched {
             g.w[e as usize] = (g.w[e as usize] * 1.6).min(40.0);
         }
-        solve_ext(g, geo, u, &[], &mut [], 1500, 1e-8);
+        solve_ext(g, geo, u, &[], &mut [], 1500, 1e-9);
     }
     left
 }
@@ -993,7 +1000,7 @@ fn place_cones(g: &mut Graph, f: &[[u32; 3]], geo: &[[f64; 2]], u: &mut [[f64; 2
         }
         let refs: Vec<&ConePath> = act.iter().map(|&i| &paths[i]).collect();
         let mut l: Vec<[f64; 2]> = act.iter().map(|&i| lam[i]).collect();
-        let tol: f64 = std::env::var("TOL").ok().and_then(|x| x.parse().ok()).unwrap_or(1e-7);
+        let tol: f64 = std::env::var("TOL").ok().and_then(|x| x.parse().ok()).unwrap_or(1e-9);
         let it = solve_ext(g, geo, u, &refs, &mut l, 3000, tol);
         for (k, &i) in act.iter().enumerate() {
             lam[i] = l[k];
@@ -1015,10 +1022,21 @@ fn place_cones(g: &mut Graph, f: &[[u32; 3]], geo: &[[f64; 2]], u: &mut [[f64; 2
             })
             .collect();
         cand.sort_by(|a, b| a.0.total_cmp(&b.0));
+        if std::env::var("NOROUND").is_ok() {
+            break;
+        }
         let tau = cand[0].0.max(0.2);
         let take = cand.iter().take_while(|c| c.0 <= tau).count().max((cand.len() + 2) / 3).max(1);
         if debug {
-            eprintln!("  lot {round} : {} libres, {it} itérations, {take} arrondies (écart max {:.2})", act.len(), cand[take - 1].0);
+            let mut extra = vec![[0.0f64; 2]; g.ends.len()];
+            for &i in &act {
+                for &(e, dx, dy) in &paths[i].cols {
+                    extra[e as usize][0] += dx[0] as f64 * lam[i][0] + dy[0] as f64 * lam[i][1];
+                    extra[e as usize][1] += dx[1] as f64 * lam[i][0] + dy[1] as f64 * lam[i][1];
+                }
+            }
+            let flips = (0..f.len()).filter(|&fi| g.closure(&f[fi], fi).0 == 0 && param_area_ratio_real(g, f, u, geo_area, fi, Some(&extra)) < 0.0).count();
+            eprintln!("  lot {round} : {} libres, {it} itérations, {take} arrondies (écart max {:.2}), {flips} triangles repliés", act.len(), cand[take - 1].0);
         }
         for &(_, i, b) in cand.iter().take(take) {
             if b != [0, 0] {
@@ -1036,14 +1054,22 @@ fn place_cones(g: &mut Graph, f: &[[u32; 3]], geo: &[[f64; 2]], u: &mut [[f64; 2
 
 /// Longueur de chaque arête en pas de grille, dans la carte de son premier sommet
 /// (moyenne des repères des deux extrémités).
-fn edge_geometry(g: &Graph, v: &[V3], n: &[V3], q: &[V3], h: f32) -> Vec<[f64; 2]> {
+fn edge_geometry(g: &Graph, v: &[V3], n: &[V3], q: &[V3], h: f32, phi: &[f32]) -> Vec<[f64; 2]> {
     (0..g.ends.len())
         .map(|e| {
             let (i, j) = (g.ends[e].0 as usize, g.ends[e].1 as usize);
             let d = sub(v[j], v[i]);
-            let gi = [dot(d, q[i]) as f64, dot(d, cross(n[i], q[i])) as f64];
-            let gj = trotf(g.k[e], [dot(d, q[j]) as f64, dot(d, cross(n[j], q[j])) as f64]);
-            [(gi[0] + gj[0]) * 0.5 / h as f64, (gi[1] + gj[1]) * 0.5 / h as f64]
+            let l = len(d) as f64;
+            // Projection sur le plan tangent, remise à la vraie longueur de l'arête : sans ça les
+            // zones très courbées (plis, creux) sont mesurées trop courtes et la grille s'y replie.
+            let unit = |a: [f64; 2]| {
+                let m = (a[0] * a[0] + a[1] * a[1]).sqrt();
+                if m > 1e-12 { [a[0] / m * l, a[1] / m * l] } else { [0.0, 0.0] }
+            };
+            let gi = unit([dot(d, q[i]) as f64, dot(d, cross(n[i], q[i])) as f64]);
+            let gj = trotf(g.k[e], unit([dot(d, q[j]) as f64, dot(d, cross(n[j], q[j])) as f64]));
+            let hh = (h * ((phi[i] + phi[j]) * 0.5).exp()) as f64;
+            [(gi[0] + gj[0]) * 0.5 / hh, (gi[1] + gj[1]) * 0.5 / hh]
         })
         .collect()
 }
@@ -1075,9 +1101,12 @@ pub fn remesh(pos: &[V3], tris: &[[u32; 3]], guides: &[Vec<V3>], opt: &Options, 
     };
     let (pos, tris) = weld(pos, tris);
     let area: f32 = tris.iter().map(|t| len(cross(sub(pos[t[1] as usize], pos[t[0] as usize]), sub(pos[t[2] as usize], pos[t[0] as usize]))) * 0.5).sum();
-    let double = opt.pure_quads && std::env::var("X2").is_ok();
-    let target = if double { (opt.faces / 4).max(4) } else { opt.faces.max(4) };
+    let target = opt.faces.max(4);
     let h = (area / target as f32).sqrt().max(1e-6);
+    // Surface d'origine, gardée pour la projection finale
+    let (orig_v, orig_f) = (pos.clone(), tris.clone());
+    let (pos, tris) = decimate(pos, tris, h / 6.5);
+    lap("simplification");
     let (v, f) = refine(pos, tris, h / 3.0);
     let n_v = v.len();
     stats.dense = n_v;
@@ -1129,9 +1158,19 @@ pub fn remesh(pos: &[V3], tris: &[[u32; 3]], guides: &[Vec<V3>], opt: &Options, 
     }
 
     // Hiérarchie de maillages grossiers (convergence rapide, comme Instant Meshes)
+    if let Ok(path) = std::env::var("DUMPMESH") {
+        use std::io::Write;
+        let mut w = std::io::BufWriter::new(std::fs::File::create(path).unwrap());
+        for p in &v {
+            writeln!(w, "v {} {} {}", p[0], p[1], p[2]).unwrap();
+        }
+        for t in &f {
+            writeln!(w, "f {} {} {}", t[0] + 1, t[1] + 1, t[2] + 1).unwrap();
+        }
+    }
     lap("préparation");
     let (cdir, cani) = if opt.curvature > 0.0 { curvature(&v, &nrm, &adj, h) } else { (vec![[0.0; 3]; n_v], vec![0.0; n_v]) };
-    let s0: f32 = std::env::var("S0").ok().and_then(|x| x.parse().ok()).unwrap_or(0.3);
+    let s0: f32 = std::env::var("S0").ok().and_then(|x| x.parse().ok()).unwrap_or(0.6);
     let cw: Vec<f32> = cani.iter().map(|s| s * s / (s * s + s0 * s0)).collect();
     for i in 0..n_v {
         if !fixed[i] && cw[i] > 0.05 {
@@ -1206,7 +1245,7 @@ pub fn remesh(pos: &[V3], tris: &[[u32; 3]], guides: &[Vec<V3>], opt: &Options, 
     lap("orientation (lissage local)");
     if opt.curvature > 0.0 {
         // Optimum global : lisse à l'échelle de `ell` quads, collé aux courbures marquées et aux guides
-        let ell: f32 = std::env::var("ELL").ok().and_then(|x| x.parse().ok()).unwrap_or(1.5);
+        let ell: f32 = std::env::var("ELL").ok().and_then(|x| x.parse().ok()).unwrap_or(2.0);
         let eps_k: f32 = std::env::var("EPSK").ok().and_then(|x| x.parse().ok()).unwrap_or(0.01);
         let lam = 0.87 * (mean_edge / (h * ell)).powi(2) * opt.curvature;
         let mut w: Vec<f32> = levels[0].a.iter().map(|a| a * lam).collect();
@@ -1219,149 +1258,72 @@ pub fn remesh(pos: &[V3], tris: &[[u32; 3]], guides: &[Vec<V3>], opt: &Options, 
         }
         q = linear_field(&v, &nrm, &adj, &q, &tg, &w, lam * eps_k);
     }
-
-    lap("orientation (optimum global)");
-    // Champ de positions, même principe
-    let mut o_l: Vec<Vec<V3>> = vec![v.clone()];
-    let mut q_coarse = vec![q.clone()];
-    for l in 1..levels.len() {
-        // Orientation des niveaux grossiers = celle du premier enfant (déjà lissée au plus fin)
-        let mut qq = vec![[0.0f32; 3]; levels[l].v.len()];
-        let mut set = vec![false; levels[l].v.len()];
-        for (i, &pa) in levels[l - 1].parent.iter().enumerate() {
-            if !set[pa as usize] {
-                set[pa as usize] = true;
-                qq[pa as usize] = norm(tangent(q_coarse[l - 1][i], levels[l].n[pa as usize]));
-            }
-        }
-        q_coarse.push(qq);
-        o_l.push(levels[l].v.clone());
-    }
-    let mut cur = o_l[top].clone();
-    for l in (0..levels.len()).rev() {
-        if l < top {
-            let par = &levels[l].parent;
-            let mut next = levels[l].v.clone();
-            for i in 0..next.len() {
-                let po = cur[par[i] as usize];
-                let (vi, ni) = (levels[l].v[i], levels[l].n[i]);
-                next[i] = sub(po, mul(ni, dot(ni, sub(po, vi))));
-            }
-            cur = next;
-        }
-        let it = if l == top { iters * 2 } else { iters / 2 };
-        smooth_pos(&levels[l], &q_coarse[l], &mut cur, h, it);
-        step += 1.0;
-        progress((step / total_steps).min(0.95));
-    }
-    let o = cur;
-
-    // Entiers par arête, puis suppression des dislocations
-    let mut g = Graph::new(&f);
-    integers(&mut g, &v, &nrm, &q, &o, h);
-    lap("champ de positions");
-    let report = |g: &Graph, label: &str| {
+    {
+        let dip: f32 = std::env::var("DIP").ok().and_then(|x| x.parse().ok()).unwrap_or(1.5);
+        let before = singular_faces(&f, &nrm, &q).len();
+        let removed = if dip > 0.0 { cancel_dipoles(&v, &nrm, &adj, &f, &mut q, h * dip, &fixed) } else { 0 };
         if debug {
-            let mut hist = [0usize; 4];
-            for d in &g.d {
-                hist[(d[0].abs().max(d[1].abs()) as usize).min(3)] += 1;
+            eprintln!("singularités du champ : {before}, dont {removed} annulées par paires");
+            for (fi, k) in singular_faces(&f, &nrm, &q) {
+                let c = v[f[fi as usize][0] as usize];
+                eprintln!("  sing {k} en ({:.2}, {:.2}, {:.2})", c[0], c[1], c[2]);
             }
-            let bad = (0..f.len()).filter(|&fi| { let (ks, c, _) = g.closure(&f[fi], fi); ks == 0 && c != [0, 0] }).count();
-            eprintln!("{label} : |d|inf {hist:?}  dislocations {bad}  replis {}", count_flips(g, &f));
         }
-    };
-    report(&g, "avant");
-    // u : coordonnées de grille de chaque sommet dans sa carte
-    let mut u: Vec<[f64; 2]> = (0..n_v)
-        .map(|i| {
-            let d = sub(v[i], o[i]);
-            [(dot(d, q[i]) / h) as f64, (dot(d, cross(nrm[i], q[i])) / h) as f64]
+    }
+
+    if let Ok(path) = std::env::var("DUMPFIELD") {
+        use std::io::Write;
+        let mut w = std::io::BufWriter::new(std::fs::File::create(path).unwrap());
+        for i in 0..n_v {
+            writeln!(w, "{} {} {} {} {} {} {} {} {} {}", v[i][0], v[i][1], v[i][2], q[i][0], q[i][1], q[i][2], nrm[i][0], nrm[i][1], nrm[i][2], levels[0].a[i]).unwrap();
+        }
+    }
+    lap("orientation (optimum global)");
+    // Transitions entre repères voisins : seule donnée entière de départ. Tous les décalages
+    // de grille partent de zéro ; ce sont les singularités et les anses qui les fixeront.
+    let mut g = Graph::new(&f);
+    for e in 0..g.ends.len() {
+        g.k[e] = matching(&nrm, &q, g.ends[e].0 as usize, g.ends[e].1 as usize);
+    }
+    // Les trois arêtes d'un triangle singulier comptent beaucoup plus : sinon les moindres
+    // carrés « déchirent » ce triangle pour loger la singularité ailleurs dans la grille.
+    let stiff: f64 = std::env::var("STIFF").ok().and_then(|x| x.parse().ok()).unwrap_or(30.0);
+    for fi in 0..f.len() {
+        if g.closure(&f[fi], fi).0 != 0 {
+            stats.field_sing += 1;
+            for &e in &g.fe[fi] {
+                g.w[e as usize] = stiff.sqrt();
+            }
+        }
+    }
+    let phi = scale_field(&g, &f, &v, &nrm, &q, opt.adaptive);
+    lap("échelle locale");
+    let geo = edge_geometry(&g, &v, &nrm, &q, h, &phi);
+    let geo_area: Vec<f64> = f
+        .iter()
+        .map(|t| {
+            let s = (phi[t[0] as usize] + phi[t[1] as usize] + phi[t[2] as usize]) / 3.0;
+            (len(cross(sub(v[t[1] as usize], v[t[0] as usize]), sub(v[t[2] as usize], v[t[0] as usize]))) * 0.5 / (h * h * (2.0 * s).exp())) as f64
         })
         .collect();
-    if opt.consistent {
-        let (ns, nd, left) = fix_defects(&mut g, &f);
-        stats.field_sing = ns;
-        stats.defects = nd;
-        stats.unfixed = left;
-        report(&g, "après transport");
-        // Les trois arêtes d'un triangle singulier comptent beaucoup plus : sinon les moindres
-        // carrés « déchirent » ce triangle pour loger la singularité ailleurs dans la grille.
-        let stiff: f64 = std::env::var("STIFF").ok().and_then(|x| x.parse().ok()).unwrap_or(30.0);
-        for fi in 0..f.len() {
-            if g.closure(&f[fi], fi).0 != 0 {
-                for &e in &g.fe[fi] {
-                    g.w[e as usize] = stiff.sqrt();
-                }
-            }
-        }
-        let geo = edge_geometry(&g, &v, &nrm, &q, h);
-        let it = solve_u(&g, &geo, &mut u, 3000);
-        regauge(&mut g, &mut u);
-        if debug {
-            eprintln!("gradient conjugué : {it} itérations");
-        }
-        report(&g, "après relaxation");
-        lap("dislocations");
-        if opt.pure_quads && !double {
-            let geo_area: Vec<f64> = f.iter().map(|t| (len(cross(sub(v[t[1] as usize], v[t[0] as usize]), sub(v[t[2] as usize], v[t[0] as usize]))) * 0.5 / (h * h)) as f64).collect();
-            let left = place_cones(&mut g, &f, &geo, &mut u, &geo_area, debug);
-            if debug {
-                eprintln!("singularités restées au milieu d'une case : {left}");
-            }
-            report(&g, "après parité");
-            lap("singularités sur la grille");
-        }
-        if debug {
-            // Résidu par arête, et replis : distance au triangle singulier le plus proche
-            let mut hist = [0usize; 6];
-            for e in 0..g.ends.len() {
-                let (i, j) = (g.ends[e].0 as usize, g.ends[e].1 as usize);
-                let t = trotf(g.k[e], u[j]);
-                let r = [t[0] - u[i][0] - (geo[e][0] - g.d[e][0] as f64), t[1] - u[i][1] - (geo[e][1] - g.d[e][1] as f64)];
-                let m = (r[0] * r[0] + r[1] * r[1]).sqrt();
-                hist[((m * 10.0) as usize).min(5)] += 1;
-            }
-            let mut energy = 0.0;
-            for e in 0..g.ends.len() {
-                let (i, j) = (g.ends[e].0 as usize, g.ends[e].1 as usize);
-                let t = trotf(g.k[e], u[j]);
-                let r = [t[0] - u[i][0] - (geo[e][0] - g.d[e][0] as f64), t[1] - u[i][1] - (geo[e][1] - g.d[e][1] as f64)];
-                energy += r[0] * r[0] + r[1] * r[1];
-            }
-            eprintln!("résidus (pas de 0,1) : {hist:?} énergie {energy:.2}");
-            let sing: Vec<usize> = (0..f.len()).filter(|&fi| g.closure(&f[fi], fi).0 != 0).collect();
-            for (fi, t) in f.iter().enumerate() {
-                let es = g.fe[fi];
-                let (k1, d1) = g.dir(es[0], t[0]);
-                let (_, d2) = g.dir(es[1], t[1]);
-                let r = trot(k1, d2);
-                let b = [d1[0] + r[0], d1[1] + r[1]];
-                if d1[0] * b[1] - d1[1] * b[0] < 0 {
-                    let c = v[t[0] as usize];
-                    let near = sing.iter().map(|&s| len(sub(v[f[s][0] as usize], c)) / h).fold(f32::MAX, f32::min);
-                    let (ks, cc, _) = g.closure(t, fi);
-                    eprintln!("  repli face {fi} : d1 {d1:?} d2' {b:?} ks {ks} C {cc:?} ; singularité la plus proche à {near:.2} h");
-                }
-            }
-            for &s in &sing {
-                let (ks, cc, _) = g.closure(&f[s], s);
-                eprintln!("  singularité face {s} ks {ks} C {cc:?}");
-            }
-        }
-    } else {
-        for fi in 0..f.len() {
-            let (ks, c, _) = g.closure(&f[fi], fi);
-            if ks != 0 {
-                stats.field_sing += 1;
-            } else if c != [0, 0] {
-                stats.defects += 1;
-            }
-        }
-        stats.unfixed = stats.defects;
-    }
+    let mut u = vec![[0.0f64; 2]; n_v];
+    stats.unfixed = place_cones(&mut g, &f, &geo, &mut u, &geo_area, debug);
+    lap("singularités sur la grille");
     stats.flips = count_flips(&g, &f);
+    if debug {
+        let mut hist = [0usize; 4];
+        for d in &g.d {
+            hist[(d[0].abs().max(d[1].abs()) as usize).min(3)] += 1;
+        }
+        eprintln!("|d|inf {hist:?} ; replis {} ; singularités hors grille {}", stats.flips, stats.unfixed);
+    }
     // Point de grille de chaque sommet
-    let o: Vec<V3> = (0..n_v).map(|i| sub(v[i], add(mul(q[i], u[i][0] as f32 * h), mul(cross(nrm[i], q[i]), u[i][1] as f32 * h)))).collect();
+    let o: Vec<V3> = (0..n_v)
+        .map(|i| {
+            let hi = h * phi[i].exp();
+            sub(v[i], add(mul(q[i], u[i][0] as f32 * hi), mul(cross(nrm[i], q[i]), u[i][1] as f32 * hi)))
+        })
+        .collect();
     progress(0.96);
 
     // Extraction : les sommets d'un même point de grille fusionnent, d = ±1 donne une arête
@@ -1447,12 +1409,11 @@ pub fn remesh(pos: &[V3], tris: &[[u32; 3]], guides: &[Vec<V3>], opt: &Options, 
         }
         eprintln!("faces par taille {hist:?} ; degrés {deg:?} ; arêtes {} ; euler V-E+F = {}", edges.len(), out_pos.len() as i64 - edges.len() as i64 + faces.len() as i64);
     }
-    let faces = if opt.pure_quads && !double { cleanup_quads(&mut out_pos, faces) } else { faces };
+    let faces = cleanup_quads(&mut out_pos, faces);
     let all_quads = faces.iter().all(|f| f.len() == 4);
     if debug {
         eprintln!("après nettoyage : {} faces dont {} quads", faces.len(), faces.iter().filter(|f| f.len() == 4).count());
     }
-    let faces = if opt.pure_quads { faces } else { quadify(&out_pos, faces) };
     // Ne garder que les sommets utilisés
     let mut remap = vec![u32::MAX; out_pos.len()];
     let mut pos2 = vec![];
@@ -1472,10 +1433,10 @@ pub fn remesh(pos: &[V3], tris: &[[u32; 3]], guides: &[Vec<V3>], opt: &Options, 
         .collect();
     lap("extraction");
     let mut res = Result { pos: pos2, faces, stats };
-    relax(&mut res, &v, &f, 3);
-    if opt.pure_quads && (double || !all_quads) {
+    relax(&mut res, &orig_v, &orig_f, 3);
+    if opt.pure_quads && !all_quads {
         res = split_quads(&res);
-        relax(&mut res, &v, &f, 2);
+        relax(&mut res, &orig_v, &orig_f, 2);
     }
     lap("lissage final");
     progress(1.0);
@@ -1690,6 +1651,263 @@ fn linear_field(v: &[V3], n: &[V3], adj: &[Vec<u32>], base: &[V3], target: &[V3]
         .collect()
 }
 
+/// Échelle locale (logarithme de la taille des cases) qui rend le champ de croix intégrable.
+/// Un repère e^{-φ}·R(θ) est le gradient d'une carte si et seulement si ∇φ = (∂θ/∂y, −∂θ/∂x)
+/// (équations de Cauchy-Riemann) : là où les lignes du flux se resserrent, les quads doivent
+/// rétrécir. Sans cette échelle, les moindres carrés écrasent ou replient la grille.
+fn scale_field(g: &Graph, f: &[[u32; 3]], v: &[V3], n: &[V3], q: &[V3], strength: f32) -> Vec<f32> {
+    let nv = v.len();
+    if strength <= 0.0 {
+        return vec![0.0; nv];
+    }
+    let ne = g.ends.len();
+    let mut skip = vec![false; ne];
+    for fi in 0..f.len() {
+        if g.closure(&f[fi], fi).0 != 0 {
+            for &e in &g.fe[fi] {
+                skip[e as usize] = true;
+            }
+        }
+    }
+    // Rotation du champ le long de chaque arête (de i vers j), et arête dans les deux repères
+    let mut rho = vec![0.0f32; ne];
+    let mut ei = vec![[0.0f32; 2]; ne];
+    let mut ej = vec![[0.0f32; 2]; ne];
+    for e in 0..ne {
+        let (i, j) = (g.ends[e].0 as usize, g.ends[e].1 as usize);
+        let (ax, c) = (cross(n[j], n[i]), dot(n[j], n[i]));
+        let mut x = if c > -0.99 { norm(add(add(mul(q[j], c), cross(ax, q[j])), mul(ax, dot(ax, q[j]) / (1.0 + c)))) } else { q[j] };
+        for _ in 0..g.k[e] {
+            x = cross(n[i], x);
+        }
+        let ti = cross(n[i], q[i]);
+        rho[e] = dot(x, ti).atan2(dot(x, q[i]));
+        let d = sub(v[j], v[i]);
+        let l = len(d);
+        let unit = |a: [f32; 2]| {
+            let m = (a[0] * a[0] + a[1] * a[1]).sqrt();
+            if m > 1e-12 { [a[0] / m * l, a[1] / m * l] } else { [0.0, 0.0] }
+        };
+        ei[e] = unit([dot(d, q[i]), dot(d, ti)]);
+        ej[e] = unit([dot(d, q[j]), dot(d, cross(n[j], q[j]))]);
+    }
+    // Gradient de θ par sommet (moindres carrés sur son anneau), tourné d'un quart de tour
+    let mut m = vec![[0.0f32; 3]; nv];
+    let mut b = vec![[0.0f32; 2]; nv];
+    for e in 0..ne {
+        if skip[e] {
+            continue;
+        }
+        let (i, j) = (g.ends[e].0 as usize, g.ends[e].1 as usize);
+        let a = ei[e];
+        m[i][0] += a[0] * a[0];
+        m[i][1] += a[0] * a[1];
+        m[i][2] += a[1] * a[1];
+        b[i][0] += a[0] * rho[e];
+        b[i][1] += a[1] * rho[e];
+        // Vu depuis j : arête −e_j, rotation −ρ (le produit est le même)
+        let a = ej[e];
+        m[j][0] += a[0] * a[0];
+        m[j][1] += a[0] * a[1];
+        m[j][2] += a[1] * a[1];
+        b[j][0] += a[0] * rho[e];
+        b[j][1] += a[1] * rho[e];
+    }
+    let grad: Vec<[f32; 2]> = (0..nv)
+        .map(|i| {
+            let det = m[i][0] * m[i][2] - m[i][1] * m[i][1];
+            if det.abs() < 1e-20 {
+                return [0.0, 0.0];
+            }
+            let gx = (b[i][0] * m[i][2] - b[i][1] * m[i][1]) / det;
+            let gy = (m[i][0] * b[i][1] - m[i][1] * b[i][0]) / det;
+            [gy, -gx]
+        })
+        .collect();
+    let sign: f32 = std::env::var("PHISIGN").ok().and_then(|x| x.parse().ok()).unwrap_or(1.0);
+    let c: Vec<f64> = (0..ne)
+        .map(|e| {
+            if skip[e] {
+                return 0.0;
+            }
+            let (i, j) = (g.ends[e].0 as usize, g.ends[e].1 as usize);
+            (sign * 0.5 * (grad[i][0] * ei[e][0] + grad[i][1] * ei[e][1] + grad[j][0] * ej[e][0] + grad[j][1] * ej[e][1])) as f64
+        })
+        .collect();
+    // Poisson : min Σ (φ_j − φ_i − c)² + μ Σ φ²
+    let mu = 1e-4f64;
+    let mut deg = vec![mu; nv];
+    let mut rhs = vec![0.0f64; nv];
+    for e in 0..ne {
+        if skip[e] {
+            continue;
+        }
+        let (i, j) = (g.ends[e].0 as usize, g.ends[e].1 as usize);
+        deg[i] += 1.0;
+        deg[j] += 1.0;
+        rhs[i] -= c[e];
+        rhs[j] += c[e];
+    }
+    let apply = |x: &[f64], out: &mut [f64]| {
+        for i in 0..nv {
+            out[i] = mu * x[i];
+        }
+        for e in 0..ne {
+            if skip[e] {
+                continue;
+            }
+            let (i, j) = (g.ends[e].0 as usize, g.ends[e].1 as usize);
+            let d = x[i] - x[j];
+            out[i] += d;
+            out[j] -= d;
+        }
+    };
+    let dotv = |a: &[f64], b: &[f64]| -> f64 { a.iter().zip(b).map(|(x, y)| x * y).sum() };
+    let mut x = vec![0.0f64; nv];
+    let mut r = rhs.clone();
+    let mut z: Vec<f64> = r.iter().zip(&deg).map(|(a, d)| a / d).collect();
+    let mut p = z.clone();
+    let mut rz = dotv(&r, &z);
+    let stop = dotv(&rhs, &rhs) * 1e-12 + 1e-30;
+    let mut ap = vec![0.0f64; nv];
+    for _ in 0..3000 {
+        if dotv(&r, &r) < stop {
+            break;
+        }
+        apply(&p, &mut ap);
+        let alpha = rz / dotv(&p, &ap).max(1e-300);
+        for i in 0..nv {
+            x[i] += alpha * p[i];
+            r[i] -= alpha * ap[i];
+            z[i] = r[i] / deg[i];
+        }
+        let rz2 = dotv(&r, &z);
+        let beta = rz2 / rz;
+        rz = rz2;
+        for i in 0..nv {
+            p[i] = z[i] + beta * p[i];
+        }
+    }
+    // Force, bornes (cases de 2 fois plus petites à 2 fois plus grandes), puis recentrage pour
+    // garder le nombre de faces demandé
+    let mut area = vec![0.0f32; nv];
+    for t in f {
+        let a = len(cross(sub(v[t[1] as usize], v[t[0] as usize]), sub(v[t[2] as usize], v[t[0] as usize]))) / 6.0;
+        for &i in t {
+            area[i as usize] += a;
+        }
+    }
+    let lim = 0.7f32;
+    let mut phi: Vec<f32> = x.iter().map(|&p| (p as f32 * strength).clamp(-lim, lim)).collect();
+    for _ in 0..3 {
+        let (mut num, mut den) = (0.0f64, 0.0f64);
+        for i in 0..nv {
+            num += (area[i] * (-2.0 * phi[i]).exp()) as f64;
+            den += area[i] as f64;
+        }
+        let shift = 0.5 * (num / den.max(1e-30)).ln() as f32;
+        for p in phi.iter_mut() {
+            *p = (*p + shift).clamp(-lim, lim);
+        }
+    }
+    phi
+}
+
+/// Rotation (0 à 3 quarts de tour) qui aligne le repère de j sur celui de i.
+fn matching(n: &[V3], q: &[V3], i: usize, j: usize) -> u8 {
+    let (ax, c) = (cross(n[j], n[i]), dot(n[j], n[i]));
+    let qj = if c > -0.99 { norm(add(add(mul(q[j], c), cross(ax, q[j])), mul(ax, dot(ax, q[j]) / (1.0 + c)))) } else { q[j] };
+    let tj = cross(n[i], qj);
+    let cands = [qj, tj, mul(qj, -1.0), mul(tj, -1.0)];
+    (0..4).max_by(|&a, &b| dot(q[i], cands[a]).total_cmp(&dot(q[i], cands[b]))).unwrap() as u8
+}
+
+/// Indice de singularité de chaque triangle (0 : régulier, 1 ou 3 : quart de tour dans un sens ou l'autre).
+fn singular_faces(f: &[[u32; 3]], n: &[V3], q: &[V3]) -> Vec<(u32, u8)> {
+    let mut out = vec![];
+    for (fi, t) in f.iter().enumerate() {
+        let (a, b, c) = (t[0] as usize, t[1] as usize, t[2] as usize);
+        let k = (matching(n, q, a, b) + matching(n, q, b, c) + matching(n, q, c, a)) & 3;
+        if k != 0 {
+            out.push((fi as u32, k));
+        }
+    }
+    out
+}
+
+/// Annule les paires de singularités opposées trop proches (« dipôles ») : dans un voisinage
+/// de la paire, le champ est relissé en gardant fixe ce qui l'entoure. Une paire 3-5 collée
+/// n'apporte rien au flux et finit en amas de pôles ; on préfère une zone régulière.
+fn cancel_dipoles(v: &[V3], n: &[V3], adj: &[Vec<u32>], f: &[[u32; 3]], q: &mut [V3], radius: f32, pinned: &[bool]) -> usize {
+    let mut removed = 0;
+    for _ in 0..3 {
+        let sing = singular_faces(f, n, q);
+        if sing.len() < 2 {
+            break;
+        }
+        let center = |fi: u32| { let t = f[fi as usize]; mul(add(add(v[t[0] as usize], v[t[1] as usize]), v[t[2] as usize]), 1.0 / 3.0) };
+        // Paires opposées les plus proches d'abord
+        let mut pairs: Vec<(f32, usize, usize)> = vec![];
+        for a in 0..sing.len() {
+            for b in a + 1..sing.len() {
+                if (sing[a].1 + sing[b].1) & 3 == 0 {
+                    let d = len(sub(center(sing[a].0), center(sing[b].0)));
+                    if d < radius {
+                        pairs.push((d, a, b));
+                    }
+                }
+            }
+        }
+        if pairs.is_empty() {
+            break;
+        }
+        pairs.sort_by(|x, y| x.0.total_cmp(&y.0));
+        let mut used = vec![false; sing.len()];
+        let mut region = vec![false; v.len()];
+        let mut any = false;
+        for (d, a, b) in pairs {
+            if used[a] || used[b] {
+                continue;
+            }
+            used[a] = true;
+            used[b] = true;
+            let mid = mul(add(center(sing[a].0), center(sing[b].0)), 0.5);
+            let r = d * 0.5 + radius * 0.6;
+            // Sommets à moins de r du milieu, par propagation depuis les deux triangles
+            let mut stack: Vec<u32> = f[sing[a].0 as usize].iter().chain(f[sing[b].0 as usize].iter()).copied().collect();
+            while let Some(x) = stack.pop() {
+                if region[x as usize] || pinned[x as usize] || len(sub(v[x as usize], mid)) > r {
+                    continue;
+                }
+                region[x as usize] = true;
+                stack.extend(adj[x as usize].iter().copied());
+            }
+            any = true;
+        }
+        if !any {
+            break;
+        }
+        let list: Vec<usize> = (0..v.len()).filter(|&i| region[i]).collect();
+        for _ in 0..120 {
+            for &i in &list {
+                let ni = n[i];
+                let mut qi = q[i];
+                let mut ws = 0.0;
+                for &j in &adj[i] {
+                    let (a, b) = compat_orient(qi, ni, q[j as usize], n[j as usize]);
+                    qi = add(mul(a, ws), b);
+                    ws += 1.0;
+                    qi = norm(tangent(qi, ni));
+                }
+                q[i] = qi;
+            }
+        }
+        let after = singular_faces(f, n, q).len();
+        removed += sing.len().saturating_sub(after);
+    }
+    removed
+}
+
 /// Directions principales de courbure et anisotropie |κ1 − κ2|·h (sans unité) par sommet.
 /// Tenseur de Taubin par anneau, lissé à l'échelle d'un quad pour ignorer le bruit du sculpt.
 fn curvature(v: &[V3], n: &[V3], adj: &[Vec<u32>], h: f32) -> (Vec<V3>, Vec<f32>) {
@@ -1731,7 +1949,7 @@ fn curvature(v: &[V3], n: &[V3], adj: &[Vec<u32>], h: f32) -> (Vec<V3>, Vec<f32>
         t[i] = acc;
     }
     let mean_edge = (total / count.max(1) as f64) as f32;
-    let ps: f32 = std::env::var("PS").ok().and_then(|x| x.parse().ok()).unwrap_or(1.0);
+    let ps: f32 = std::env::var("PS").ok().and_then(|x| x.parse().ok()).unwrap_or(2.0);
     let passes = (((h / mean_edge.max(1e-9)).powi(2) * ps).ceil() as usize).clamp(2, 400);
     for _ in 0..passes {
         let old = t.clone();
@@ -1765,27 +1983,6 @@ fn curvature(v: &[V3], n: &[V3], adj: &[Vec<u32>], h: f32) -> (Vec<V3>, Vec<f32>
         ani[i] = 8.0 * (((m11 - m22) * 0.5).powi(2) + m12 * m12).sqrt() * h;
     }
     (dir, ani)
-}
-
-fn smooth_pos(l: &Level, q: &[V3], o: &mut [V3], h: f32, iters: usize) {
-    let order = visit_order(l.v.len());
-    for _ in 0..iters {
-        for &i in &order {
-            let i = i as usize;
-            let (vi, ni, qi) = (l.v[i], l.n[i], q[i]);
-            let mut sum = o[i];
-            let mut ws = 0.0;
-            for &j in &l.adj[i] {
-                let j = j as usize;
-                let (a, b) = compat_pos(vi, ni, qi, sum, l.v[j], l.n[j], q[j], o[j], h);
-                sum = add(mul(a, ws), b);
-                ws += 1.0;
-                sum = mul(sum, 1.0 / ws);
-            }
-            sum = sub(sum, mul(ni, dot(ni, sub(sum, vi))));
-            o[i] = round4(sum, qi, ni, vi, h);
-        }
-    }
 }
 
 /// Ordre cyclique (sens trigonométrique) des voisins de chaque point de grille, lu sur la
@@ -2191,68 +2388,6 @@ fn split_quads(r: &Result) -> Result {
     Result { pos, faces, stats: r.stats.clone() }
 }
 
-/// Fusionne les paires de triangles qui partagent leur plus longue arête (diagonale d'un quad).
-fn quadify(pos: &[V3], faces: Vec<Vec<u32>>) -> Vec<Vec<u32>> {
-    let elen = |a: u32, b: u32| len(sub(pos[a as usize], pos[b as usize]));
-    let mut by_edge: HashMap<(u32, u32), Vec<usize>> = HashMap::new();
-    for (fi, f) in faces.iter().enumerate() {
-        if f.len() == 3 {
-            for k in 0..3 {
-                let (a, b) = (f[k], f[(k + 1) % 3]);
-                by_edge.entry((a.min(b), a.max(b))).or_default().push(fi);
-            }
-        }
-    }
-    let longest = |f: &Vec<u32>| -> (u32, u32) {
-        let mut best = (0.0, (0, 0));
-        for k in 0..3 {
-            let (a, b) = (f[k], f[(k + 1) % 3]);
-            let l = elen(a, b);
-            if l > best.0 {
-                best = (l, (a.min(b), a.max(b)));
-            }
-        }
-        best.1
-    };
-    // Candidats triés par longueur d'arête décroissante (les vraies diagonales d'abord)
-    let mut cands: Vec<((u32, u32), usize, usize)> = by_edge
-        .iter()
-        .filter(|(_, v)| v.len() == 2)
-        .filter(|(e, v)| longest(&faces[v[0]]) == **e || longest(&faces[v[1]]) == **e)
-        .map(|(e, v)| (*e, v[0], v[1]))
-        .collect();
-    cands.sort_by(|a, b| elen(b.0 .0, b.0 .1).total_cmp(&elen(a.0 .0, a.0 .1)));
-    let mut gone = vec![false; faces.len()];
-    let mut out = vec![];
-    for ((a, b), f1, f2) in cands {
-        if gone[f1] || gone[f2] {
-            continue;
-        }
-        let t1 = &faces[f1];
-        let c = *faces[f2].iter().find(|&&x| x != a && x != b).unwrap();
-        // Insérer c entre a et b dans t1, en respectant le sens de t1
-        let k = (0..3).find(|&k| {
-            let (x, y) = (t1[k], t1[(k + 1) % 3]);
-            (x == a && y == b) || (x == b && y == a)
-        });
-        let Some(k) = k else { continue };
-        let q = vec![t1[k], c, t1[(k + 1) % 3], t1[(k + 2) % 3]];
-        // Quad convexe seulement (angles intérieurs < 165°)
-        let convex = (0..4).all(|i| {
-            let (p0, p1, p2) = (pos[q[(i + 3) % 4] as usize], pos[q[i] as usize], pos[q[(i + 1) % 4] as usize]);
-            dot(norm(sub(p0, p1)), norm(sub(p2, p1))) > -0.966
-        });
-        if !convex {
-            continue;
-        }
-        gone[f1] = true;
-        gone[f2] = true;
-        out.push(q);
-    }
-    out.extend(faces.into_iter().enumerate().filter(|(i, _)| !gone[*i]).map(|(_, f)| f));
-    out
-}
-
 /// Lissage léger puis reprojection sur la surface d'origine (sommet dense le plus proche).
 fn relax(r: &mut Result, v: &[V3], f: &[[u32; 3]], iters: usize) {
     let n = r.pos.len();
@@ -2369,7 +2504,10 @@ pub fn export_obj(r: &Result, world: &dyn Fn(V3) -> V3, path: &std::path::Path) 
 pub fn bench_option(opt: &mut Options, name: &str, val: Option<&str>, i: &mut usize) {
     match name {
         "--tri" => opt.pure_quads = false,
-        "--noint" => opt.consistent = false,
+        "--adapt" => {
+            opt.adaptive = val.and_then(|v| v.parse().ok()).unwrap_or(opt.adaptive);
+            *i += 1;
+        }
         "--curv" => {
             opt.curvature = val.and_then(|v| v.parse().ok()).unwrap_or(opt.curvature);
             *i += 1;
