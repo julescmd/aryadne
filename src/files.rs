@@ -102,12 +102,7 @@ impl App {
                 self.files.reveal(&d);
             }
         }
-        egui::Panel::left("explorer")
-            .resizable(true)
-            .default_size(260.0)
-            .min_size(180.0)
-            .frame(egui::Frame::new().fill(p.panel).stroke(egui::Stroke::new(1.0, p.line)).inner_margin(egui::Margin::symmetric(0, 8)))
-            .show(ui, |ui| {
+        crate::dock::show(ui, "explorer", &crate::i18n::t("fichiers"), crate::dock::Side::Left, 260.0, 180.0, egui::Frame::new().fill(p.panel).stroke(egui::Stroke::new(1.0, p.line)).inner_margin(egui::Margin::symmetric(0, 8)), |ui| {
                 // En-tête : titre, « + » (créer / importer) et « ⋯ » (affichage)
                 ui.horizontal(|ui| {
                     ui.add_space(12.0);

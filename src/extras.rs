@@ -1589,7 +1589,7 @@ impl App {
         let Some(t) = &mut self.terminal else { return };
         let mut close = false;
         let bg = egui::Color32::from_gray(20);
-        egui::Panel::bottom("terminal").resizable(true).default_size(220.0).min_size(90.0).frame(egui::Frame::new().fill(bg).inner_margin(8)).show(ui, |ui| {
+        crate::dock::show(ui, "terminal", "terminal", crate::dock::Side::Bottom, 420.0, 200.0, egui::Frame::new().fill(bg).inner_margin(8), |ui| {
             ui.horizontal(|ui| {
                 ui.label(RichText::new(format!("terminal · {}", t.cwd.display())).color(egui::Color32::from_gray(160)).size(11.0));
                 if t.busy() {

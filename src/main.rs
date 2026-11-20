@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod cloud;
+mod dock;
 mod convert;
 mod uvedit;
 mod zoomview;
@@ -1429,12 +1430,7 @@ impl App {
 
     fn side_panel(&mut self, ui: &mut egui::Ui) {
         let p = theme::pal();
-        egui::Panel::right("side")
-            .resizable(true)
-            .default_size(290.0)
-            .min_size(200.0)
-            .frame(egui::Frame::new().fill(p.panel).stroke(egui::Stroke::new(1.0, p.line)).inner_margin(12))
-            .show(ui, |ui| {
+        crate::dock::show(ui, "side", &crate::i18n::t("structure"), crate::dock::Side::Right, 290.0, 200.0, egui::Frame::new().fill(p.panel).stroke(egui::Stroke::new(1.0, p.line)).inner_margin(12), |ui| {
                 egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
                     let is_md = self.current().is_some_and(|d| vault::is_md(&d.rel));
                     // Structure : fonctions, classes, titres… (clic = aller à la ligne)
@@ -2248,12 +2244,7 @@ impl App {
         let mut apply_file: Option<(String, String)> = None;
         let mut insert: Option<String> = None;
         let mut bar_out: Option<extras::ChatBarOut> = None;
-        egui::Panel::right("assistant")
-            .resizable(true)
-            .default_size(340.0)
-            .min_size(240.0)
-            .frame(egui::Frame::new().fill(p.panel).stroke(egui::Stroke::new(1.0, p.line)).inner_margin(12))
-            .show(ui, |ui| {
+        crate::dock::show(ui, "assistant", &crate::i18n::t("assistant"), crate::dock::Side::Right, 340.0, 240.0, egui::Frame::new().fill(p.panel).stroke(egui::Stroke::new(1.0, p.line)).inner_margin(12), |ui| {
                 ui.horizontal(|ui| {
                     ui.label(caps(&crate::i18n::t("assistant")));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {

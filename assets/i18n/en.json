@@ -775,5 +775,11 @@
  "flèche": "arrow",
  "trait ▾": "stroke ▾",
  "stabilisateur": "stabilizer",
- "effilé": "taper"
+ "effilé": "taper",
+ "glisser pour déplacer": "drag to move",
+ "ancrer à gauche": "dock left",
+ "ancrer à droite": "dock right",
+ "ancrer en bas": "dock bottom",
+ "fenêtre flottante": "floating window",
+ "réinitialiser la disposition": "reset layout"
 }
