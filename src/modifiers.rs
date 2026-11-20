@@ -2,7 +2,7 @@
 //! le maillage du précédent, sans toucher au fichier d'origine. On peut les activer,
 //! les réordonner, les régler, puis exporter le résultat en OBJ.
 
-use crate::model3d::{fan_mask, subdivide, Model};
+use crate::model3d::{fan_mask, Model};
 use eframe::egui::{self, Color32, RichText};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -13,7 +13,13 @@ type V3 = [f32; 3];
 pub enum Kind {
     Mirror { axis: u8, merge: bool },
     Array { count: u32, axis: u8, offset: f32 },
-    Subdivision { levels: u8 },
+    Subdivision {
+        levels: u8,
+        #[serde(default)]
+        optimal: bool,
+        #[serde(default)]
+        simple: bool,
+    },
     Decimate { ratio: f32 },
     Smooth { iterations: u32, factor: f32 },
     Displace { strength: f32, scale: f32, seed: f32 },
@@ -37,7 +43,7 @@ pub struct Modifier {
 pub const ALL: [(&str, &str); 13] = [
     ("Miroir", "symétrie autour de l'origine de l'objet"),
     ("Réseau (array)", "copies alignées"),
-    ("Subdivision", "lisse et densifie (Loop)"),
+    ("Subdivision", "lisse et densifie (Catmull-Clark, comme Blender)"),
     ("Décimer", "réduit le nombre de triangles"),
     ("Lisser", "adoucit les formes"),
     ("Déplacement (bruit)", "relief procédural"),
@@ -55,7 +61,7 @@ impl Kind {
         match i {
             0 => Kind::Mirror { axis: 0, merge: true },
             1 => Kind::Array { count: 3, axis: 0, offset: 1.1 },
-            2 => Kind::Subdivision { levels: 1 },
+            2 => Kind::Subdivision { levels: 2, optimal: true, simple: false },
             3 => Kind::Decimate { ratio: 0.5 },
             4 => Kind::Smooth { iterations: 3, factor: 0.5 },
             5 => Kind::Displace { strength: 0.05, scale: 4.0, seed: 0.0 },
@@ -230,12 +236,13 @@ fn apply_one(k: Kind, mut m: Mesh, origin: V3) -> Mesh {
                 }
             }
         }
-        Kind::Subdivision { levels } => {
-            for _ in 0..levels.min(4) {
-                if m.tris.len() * 4 > crate::model3d::MAX_SUBDIV_TRIS {
-                    break;
-                }
-                let (p, t, c, e) = subdivide(&m.pos, &m.tris, &m.colors, &m.edges);
+        Kind::Subdivision { levels, optimal, simple } => {
+            if simple {
+                // « Simple » : densifie sans lisser (comme Blender)
+                let (p, t, c, e) = crate::model3d::split_flat(&m.pos, &m.tris, &m.colors, &m.edges, levels.min(5), optimal);
+                m = Mesh { pos: p, tris: t, colors: c, edges: e };
+            } else {
+                let (p, t, c, e) = crate::model3d::catmull_clark(&m.pos, &m.tris, &m.colors, &m.edges, levels.min(5), optimal);
                 m = Mesh { pos: p, tris: t, colors: c, edges: e };
             }
         }
@@ -502,8 +509,13 @@ fn params(ui: &mut egui::Ui, k: &mut Kind) -> bool {
             c |= axis_ui(ui, axis);
             s!(ui, offset, -3.0..=3.0, "écart (× taille)");
         }
-        Kind::Subdivision { levels } => {
-            c |= ui.add(egui::Slider::new(levels, 0..=4).text("niveaux")).changed();
+        Kind::Subdivision { levels, optimal, simple } => {
+            c |= ui.add(egui::Slider::new(levels, 0..=5).text("niveaux")).changed();
+            ui.horizontal(|ui| {
+                c |= ui.selectable_value(simple, false, "Catmull-Clark").changed();
+                c |= ui.selectable_value(simple, true, "simple").changed();
+            });
+            c |= ui.checkbox(optimal, "affichage optimal").on_hover_text("Le fil de fer montre seulement les arêtes de la cage d'origine").changed();
         }
         Kind::Decimate { ratio } => {
             s!(ui, ratio, 0.01..=1.0, "proportion gardée");
@@ -575,9 +587,9 @@ mod tests {
         let m = apply(&[mk(Kind::Solidify { thickness: 0.1 })], Mesh::from_model(&plane, false), [0.0; 3]);
         assert_eq!(m.tris.len(), 2 + 2 + 8);
         // Désactivé = sans effet ; sous-division ×4 ; décimer réduit
-        let off = Modifier { kind: Kind::Subdivision { levels: 2 }, on: false, open: false };
+        let off = Modifier { kind: Kind::Subdivision { levels: 2, optimal: false, simple: false }, on: false, open: false };
         assert_eq!(apply(&[off], base.clone(), [0.0; 3]).tris.len(), 12);
-        let m = apply(&[mk(Kind::Subdivision { levels: 2 }), mk(Kind::Decimate { ratio: 0.5 })], base.clone(), [0.0; 3]);
+        let m = apply(&[mk(Kind::Subdivision { levels: 2, optimal: false, simple: false }), mk(Kind::Decimate { ratio: 0.5 })], base.clone(), [0.0; 3]);
         assert!(m.tris.len() < 192 && m.tris.len() > 20, "{}", m.tris.len());
         // Toutes les déformations gardent un maillage valide
         for i in 0..ALL.len() {

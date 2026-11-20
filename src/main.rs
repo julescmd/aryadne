@@ -1,5 +1,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod cloud;
+mod cloud_ui;
+mod lsp;
 mod ai;
 mod blend;
 mod board;
@@ -204,6 +207,18 @@ struct App {
     url_dlg: Option<String>,
     url_rx: Option<Receiver<Result<String, String>>>,
     backup_rx: Option<Receiver<Result<PathBuf, String>>>,
+    cloud: cloud::Sync,
+    cloud_cfg: Option<cloud::Config>,
+    cloud_next: Option<Instant>,
+    cloud_seen: Option<Instant>,
+    relay: cloud::Sync,
+    /// Fichier affiché à droite en vue côte à côte.
+    split: Option<String>,
+    in_split: bool,
+    split_swap: bool,
+    relay_asked: bool,
+    relay_done_seen: Option<Instant>,
+    relay_list: std::sync::Arc<std::sync::Mutex<Option<Result<Vec<cloud::Package>, String>>>>,
     timer: Option<extras::Timer>,
     tasks: extras::TasksState,
     tags: Option<(Instant, Vec<(String, usize)>)>,
@@ -332,9 +347,18 @@ impl App {
             live::bump();
             if r.is_ok() {
                 extras::snapshot(&root, &rel, &t);
+                // Avec un serveur LSP, c'est lui qui donne les erreurs
+                let has_lsp = match self.docs.get_mut(i).and_then(|d| d.code.lsp.as_mut()) {
+                    Some(l) => {
+                        l.sync(&t);
+                        l.saved();
+                        true
+                    }
+                    None => false,
+                };
                 // Vérification de la syntaxe en arrière-plan
                 let lang = ext(&rel);
-                if matches!(lang.as_str(), "py" | "js" | "mjs" | "cjs" | "json" | "sh" | "bash" | "lua") {
+                if !has_lsp && matches!(lang.as_str(), "py" | "js" | "mjs" | "cjs" | "json" | "sh" | "bash" | "lua") {
                     if let (Ok(path), Some(doc)) = (vault::safe(&root, &rel), self.docs.get_mut(i)) {
                         let (tx, rx) = std::sync::mpsc::channel();
                         let ctx = self.ctx.clone();
@@ -624,6 +648,9 @@ impl App {
         if pressed(Modifiers::COMMAND, Key::J) {
             self.daily_note();
         }
+        if pressed(Modifiers::COMMAND, Key::Backslash) {
+            self.toggle_split();
+        }
         if pressed(Modifiers::COMMAND, Key::N) {
             self.new_note();
         }
@@ -736,6 +763,7 @@ impl App {
                         for (label, c) in [
                             ("statistiques du coffre", extras::Cmd::Stats),
                             ("sauvegarder maintenant (zip)", extras::Cmd::Backup),
+                            ("synchroniser avec le cloud", extras::Cmd::Sync),
                             ("ouvrir le dossier", extras::Cmd::OpenVaultFolder),
                             ("changer de coffre…", extras::Cmd::ChangeVault),
                         ] {
@@ -840,6 +868,18 @@ impl App {
                             ui.label(RichText::new(lang).color(p.muted).size(11.5));
                             ui.label(RichText::new(format!("{} lignes · {} mots", t.lines().count(), t.split_whitespace().count())).color(p.muted).size(11.5));
                             ui.label(RichText::new(if d.dirty_since.is_some() { "● modifié" } else { "sauvé" }).color(p.muted).size(11.5));
+                            match &d.code.lsp {
+                                Some(l) => {
+                                    let dead = l.server.dead.lock().ok().and_then(|x| x.clone());
+                                    let (t, c) = if dead.is_some() { (format!("lsp : {} arrêté", l.server.name), p.missing) } else { (format!("lsp : {}", l.server.name), p.muted) };
+                                    ui.label(RichText::new(t).color(c).size(11.5)).on_hover_text("Complétion intelligente, erreurs en direct, survol, F12 : définition");
+                                }
+                                None => {
+                                    if let Some(sv) = lsp::suggested(&ext(&d.rel)) {
+                                        ui.label(RichText::new("sans lsp").color(p.muted.gamma_multiply(0.7)).size(11.5)).on_hover_text(format!("Installe « {sv} » pour la complétion intelligente, les erreurs en direct et F12 (définition). Aryadne le détecte tout seul."));
+                                    }
+                                }
+                            }
                         }
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -848,6 +888,7 @@ impl App {
                             self.dialog = Some(Dialog::Update);
                         }
                         ui.label(RichText::new("^P ouvrir · ^⇧P commandes").color(p.muted).size(11.0));
+                        self.cloud_widget(ui);
                         if self.backup_rx.is_some() {
                             ui.add(egui::Spinner::new().size(10.0));
                             ui.label(RichText::new("sauvegarde…").color(p.muted).size(11.0));
@@ -864,6 +905,25 @@ impl App {
 
     fn tabs(&mut self, ui: &mut egui::Ui) {
         let p = theme::pal();
+        if self.in_split {
+            // Volet de droite : juste le nom, échanger, fermer
+            let name = self.current().map(|d| vault::display_rel(&d.rel)).unwrap_or_default();
+            egui::Frame::new().fill(p.panel).inner_margin(egui::Margin::symmetric(10, 6)).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(format!("◧ {name}")).family(theme::bold()));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.small_button("×").on_hover_text("fermer la vue côte à côte").clicked() {
+                            self.split = None;
+                        }
+                        if ui.small_button("⇄").on_hover_text("échanger les deux côtés").clicked() {
+                            self.split_swap = true;
+                        }
+                    });
+                });
+            });
+            return;
+        }
         egui::Frame::new().fill(p.panel).show(ui, |ui| {
             ui.set_width(ui.available_width());
             egui::ScrollArea::horizontal().id_salt("tabs").show(ui, |ui| {
@@ -903,7 +963,57 @@ impl App {
         });
     }
 
+    /// Ouvre ou ferme la vue côte à côte : le fichier actif passe à droite,
+    /// et l'onglet précédent revient à gauche.
+    pub(crate) fn toggle_split(&mut self) {
+        if self.split.take().is_some() {
+            return;
+        }
+        let Some(i) = self.active else { return };
+        if self.docs.len() < 2 {
+            self.toast = Some(("ouvre un deuxième fichier pour la vue côte à côte".into(), Instant::now()));
+            return;
+        }
+        self.split = Some(self.docs[i].rel.clone());
+        self.active = Some(if i == 0 { 1 } else { i - 1 });
+    }
+
+    fn split_pane(&mut self, ui: &mut egui::Ui) {
+        let Some(sp) = self.split.clone() else { return };
+        let Some(j) = self.docs.iter().position(|d| d.rel == sp) else {
+            self.split = None;
+            return;
+        };
+        if Some(j) == self.active {
+            // Même fichier des deux côtés : on montre l'onglet voisin à gauche
+            if self.docs.len() < 2 {
+                self.split = None;
+                return;
+            }
+            self.active = Some(if j == 0 { 1 } else { j - 1 });
+        }
+        let p = theme::pal();
+        let total = ui.available_width();
+        let w = total / 2.0;
+        egui::Panel::right("split-pane").resizable(true).default_size(w).min_size(240.0).max_size((total - 260.0).max(260.0)).frame(egui::Frame::new().fill(p.bg).stroke(egui::Stroke::new(1.0, p.line))).show(ui, |ui| {
+            let keep = self.active;
+            self.active = Some(j);
+            self.in_split = true;
+            let mut rn = false;
+            self.editor_inner(ui, &mut rn);
+            self.in_split = false;
+            self.active = keep;
+        });
+        if std::mem::take(&mut self.split_swap) {
+            if let Some(a) = self.active {
+                self.split = Some(self.docs[a].rel.clone());
+                self.active = Some(j);
+            }
+        }
+    }
+
     fn editor(&mut self, ui: &mut egui::Ui) {
+        self.split_pane(ui);
         let mut run_now = ui.input(|i| i.key_pressed(Key::F5)) && self.current().is_some_and(|d| extras::runner_for(&d.rel).is_some());
         self.run_panel(ui);
         self.editor_inner(ui, &mut run_now);
@@ -926,6 +1036,7 @@ impl App {
 
     fn editor_inner(&mut self, ui: &mut egui::Ui, run_now: &mut bool) {
         let p = theme::pal();
+        let mut lsp_goto: Option<(PathBuf, usize)> = None;
         self.feed_project_words();
         egui::CentralPanel::default().frame(egui::Frame::new().fill(p.bg)).show(ui, |ui| {
             if self.docs.is_empty() {
@@ -991,13 +1102,13 @@ impl App {
                             let mut act = 0;
                             egui::containers::menu::MenuButton::new("code ▾").ui(ui, |ui| {
                                 ui.set_min_width(260.0);
-                                for (k, l) in [(1, "formater le fichier   Alt+Maj+F"), (2, "aller à la ligne   Ctrl+G"), (3, "aller au symbole   Ctrl+Maj+O"), (4, "retour à la ligne   Alt+Z"), (5, "terminal   Ctrl+`"), (6, "vérifier maintenant")] {
+                                for (k, l) in [(1, "formater le fichier   Alt+Maj+F"), (2, "aller à la ligne   Ctrl+G"), (3, "aller au symbole   Ctrl+Maj+O"), (4, "retour à la ligne   Alt+Z"), (5, "terminal   Ctrl+`"), (6, "vérifier maintenant"), (7, "tout replier"), (8, "tout déplier"), (9, "vue côte à côte")] {
                                     if ui.button(l).clicked() {
                                         act = k;
                                     }
                                 }
                                 ui.separator();
-                                ui.label(RichText::new("Ctrl+D : occurrence suivante (plusieurs curseurs)\nCtrl+Maj+L : toutes les occurrences\nCtrl+L : sélectionner la ligne\nAlt+↑↓ : déplacer · Alt+Maj+↑↓ : dupliquer\nCtrl+/ : commenter · Ctrl+] [ : indenter\nCtrl+Entrée : ligne en dessous\nCtrl+Espace : suggestions · Tab : extrait").color(p.muted).size(10.5));
+                                ui.label(RichText::new("Ctrl+D : occurrence suivante (plusieurs curseurs)\nCtrl+Maj+L : toutes les occurrences\nCtrl+L : sélectionner la ligne\nAlt+↑↓ : déplacer · Alt+Maj+↑↓ : dupliquer\nCtrl+/ : commenter · Ctrl+] [ : indenter\nCtrl+Entrée : ligne en dessous\nCtrl+Espace : suggestions · Tab : extrait\nCtrl+Maj+[ ] : replier, déplier\nF12 : aller à la définition (LSP)").color(p.muted).size(10.5));
                             });
                             match act {
                                 1 => self.want_format = true,
@@ -1008,6 +1119,13 @@ impl App {
                                     self.docs[i].code.wrap = Some(!w);
                                 }
                                 5 => self.want_term = true,
+                                7 | 8 => {
+                                    if let Content::Text(t) = &self.docs[i].content {
+                                        let t = t.clone();
+                                        code::fold_all(&mut self.docs[i].code, &t, act == 7);
+                                    }
+                                }
+                                9 => self.toggle_split(),
                                 6 => {
                                     if let Content::Text(t) = &self.docs[i].content {
                                         let lang = ext(&rel);
@@ -1192,9 +1310,32 @@ impl App {
                     let ed = &mut doc.code;
                     let wrap = ed.wrap.unwrap_or(is_md || lang.is_empty() || lang == "txt" || self.prefs.wrap_code);
                     let numbers = !is_md && self.prefs.line_numbers;
+                    // Serveur LSP (si installé) : erreurs en direct, définitions, complétion
+                    if !ed.lsp_tried && !is_md {
+                        ed.lsp_tried = true;
+                        if let Ok(path) = vault::safe(&root, &rel) {
+                            ed.lsp = lsp::Doc::open(&root, &path, text, ui.ctx());
+                        }
+                    }
+                    if let Some(l) = &mut ed.lsp {
+                        if let Some(line) = l.poll() {
+                            ed.jump = Some(line);
+                        }
+                        if let Some(d) = l.new_diags() {
+                            ed.diags = d.into_iter().map(|(line, msg)| code::Diag { line, msg }).collect();
+                        }
+                        if let Some(g) = l.goto.take() {
+                            lsp_goto = Some(g);
+                        }
+                        if !l.waits.is_empty() {
+                            ui.ctx().request_repaint_after(Duration::from_millis(60));
+                        }
+                    }
+                    let folds = ed.folds.clone();
                     let mut layouter = |ui: &egui::Ui, buf: &dyn egui::TextBuffer, width: f32| {
                         let mut job = egui_extras::syntax_highlighting::highlight(ui.ctx(), ui.style(), &theme, buf.as_str(), &lang);
                         job.wrap.max_width = if wrap { width } else { f32::INFINITY };
+                        code::apply_folds(&mut job, &code::hidden_bytes(buf.as_str(), &folds));
                         ui.painter().layout_job(job)
                     };
                     let mut changed = code::find_bar(ui, ed, text, id);
@@ -1234,10 +1375,24 @@ impl App {
                     });
                     if changed {
                         doc.dirty_since = Some(Instant::now());
+                        if let Some(l) = &mut doc.code.lsp {
+                            l.sync(text);
+                        }
                     }
                 }
             }
         });
+        if let Some((path, line)) = lsp_goto {
+            match vault::inside(&self.root(), &path) {
+                Some(rel) => {
+                    self.open(rel);
+                    if let Some(a) = self.active {
+                        self.docs[a].code.jump = Some(line);
+                    }
+                }
+                None => self.toast = Some((format!("définition hors du coffre : {}:{}", path.display(), line + 1), Instant::now())),
+            }
+        }
     }
 
     fn side_panel(&mut self, ui: &mut egui::Ui) {
@@ -2497,6 +2652,7 @@ impl App {
                         });
                     }
                 }
+                self.relay_receive_ui(ui, ctx);
             } else {
                 ui.label(caps(&format!("fichiers · {} · {}", self.send_files.len(), transfer::human(transfer::total_size(&self.root(), &self.send_files)))));
                 egui::ScrollArea::vertical().max_height(120.0).show(ui, |ui| {
@@ -2564,6 +2720,7 @@ impl App {
                     let job = transfer::send(self.root(), self.send_files.clone(), self.send_addr.trim().to_string(), self.send_code.clone(), ctx.clone());
                     self.jobs.push(job);
                 }
+                self.relay_send_ui(ui, ctx);
             }
             // Progression des envois et exports en cours
             for j in &self.jobs {
@@ -3175,9 +3332,13 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.shortcuts(&ctx);
+        self.cloud_tick();
 
         // Sauvegarde auto 500 ms après la dernière frappe, et à la fermeture.
         let closing = ctx.input(|i| i.viewport().close_requested());
+        if closing {
+            lsp::shutdown_all();
+        }
         let mut waiting = false;
         for i in 0..self.docs.len() {
             if let Some(t) = self.docs[i].dirty_since {
@@ -3249,7 +3410,7 @@ impl eframe::App for App {
                     // Le panneau de droite (liens, résumé) sert aux textes ; la 3D, les vidéos
                     // et les documents gardent toute la largeur.
                     let text = self.current().is_none_or(|d| matches!(d.content, Content::Text(_)));
-                    if !self.compact && !self.assistant_open && text {
+                    if !self.compact && !self.assistant_open && text && self.split.is_none() {
                         self.side_panel(ui);
                     }
                     self.editor(ui);

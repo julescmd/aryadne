@@ -6,13 +6,14 @@ Le fil entre tes idées. Notes, code, références et moodboards dans un dossier
 
 100 % Rust ([egui](https://github.com/emilk/egui)). Un seul exécutable portable pour Windows et Linux : **aucune installation, aucun droit admin**. Look éditeur de code (JetBrains Mono, angles droits), mode clair par défaut, mode sombre en un clic.
 
-## Fonctionnalités (v0.14)
+## Fonctionnalités (v0.15)
 
 **3D**
 - Visionneuse intégrée pour OBJ, FBX (binaire), glTF / GLB et STL. Rendu par pixel avec profondeur (comme les pixols de ZBrush) : pas de trous ni de mouchetures, calculé sur tous les cœurs, et recalculé seulement quand la vue change.
 - Éclairage façon Substance : environnements HDRI (studio, studio doux, extérieur, coucher de soleil, nuit, neutre) ou tes propres fichiers .hdr / .exr (ceux du coffre sont listés), rotation (H + glisser), intensité, exposition, HDRI en fond net ou flou, plus une lumière directionnelle réglable (L + glisser, couleur, intensité).
 - Matériaux argile, gris, blanc, chrome, normales ou couleurs du fichier ; ombrage lisse.
 - Fil de fer par-dessus le modèle (opacité, noir / blanc / accent, ou fil de fer seul), sans les diagonales des quads.
+- **Subdivision Catmull-Clark** comme Blender (sur les vrais quads et n-gones, sans diagonales), mode « simple », et « affichage optimal » qui ne montre que la cage d'origine.
 - **Modificateurs** façon 3ds Max / Blender, empilés et non destructifs : miroir, réseau (array), subdivision, décimer, lisser, déplacement (bruit), torsion, courbure, effilement, sphériser, épaissir, onde, transformation. Réordonnables, activables, calculés en arrière-plan, gardés par fichier, et exportables en OBJ.
 - Rotation automatique (platine), capture PNG 2400 px et turntable en GIF animé.
 - Menus « affichage », « éclairage » et « vue » pour garder la barre propre.
@@ -157,6 +158,8 @@ Le fil entre tes idées. Notes, code, références et moodboards dans un dossier
 **Résumé IA**
 - Bouton « résumer » sur n'importe quel fichier texte ou de code. Le résumé peut être copié ou enregistré en note (liée au fichier source).
 - Fonctionne avec toute API compatible OpenAI. Par défaut : [Ollama](https://ollama.com) en local (gratuit, privé).
+- **Transfert par internet** via ton propre stockage S3 (Cloudflare R2, B2, S3, MinIO) : les fichiers sont effacés du bucket dès qu'ils sont reçus. Option de synchro complète du coffre, avec gestion des conflits et garde-fou contre les suppressions massives. Aucune clé ni adresse dans le code : tout se règle dans réglages › coffre en ligne.
+- **Éditeur de code** : repli des blocs (flèches dans la gouttière, Ctrl+Maj+[ ]), vue côte à côte (Ctrl+\\), client LSP qui utilise les serveurs installés (rust-analyzer, pyright, pylsp, typescript-language-server, clangd, gopls, lua-language-server, bash-language-server) pour la complétion, les erreurs en direct, la doc au survol et F12.
 - **Tous les fournisseurs d'IA** : Claude, ChatGPT, DeepSeek, Gemini, Mistral, Grok, Groq, OpenRouter, en plus d'Ollama et LM Studio en local. Colle une clé dans réglages › ia et ses modèles apparaissent dans le menu du chat.
 - **L'assistant lit tes fichiers** : il reçoit le contenu des notes (et des fichiers nommés dans la question), peut demander à en lire d'autres, et peut proposer un fichier modifié (note, board, code) que tu appliques en un clic. L'ancienne version reste dans l'historique.
 - **Réponses locales plus rapides** : réflexion désactivée par défaut (bouton « réflexion »), modèle gardé en mémoire 30 min, avertissement quand un modèle est trop gros pour ta mémoire.

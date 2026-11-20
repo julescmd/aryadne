@@ -35,6 +35,11 @@ pub struct Editor {
     pub wrap: Option<bool>,
     /// Mots des autres fichiers du même langage (suggestions)
     pub project: std::sync::Arc<Vec<String>>,
+    /// Lignes de début des blocs repliés.
+    pub folds: std::collections::BTreeSet<usize>,
+    /// Client LSP (complétion, erreurs, définition) si un serveur est installé.
+    pub lsp: Option<crate::lsp::Doc>,
+    pub lsp_tried: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -467,6 +472,24 @@ pub fn before(ui: &egui::Ui, ed: &mut Editor, text: &mut String, lang: &str, id:
                                 let pos = le + ins.len();
                                 c.set(le, le, &ins, (pos, pos));
                             }
+                            eat[k] = true;
+                        }
+                        // F12 : aller à la définition (serveur LSP)
+                        Key::F12 => {
+                            if let Some(l) = &mut ed.lsp {
+                                l.ask_definition(c.text, c.b);
+                            }
+                            eat[k] = true;
+                        }
+                        // Ctrl+Maj+[ / ] : replier, déplier le bloc
+                        Key::OpenBracket if cmd && m.shift => {
+                            let l = c.text[..c.b].matches('\n').count();
+                            fold_at_line(ed, c.text, l, true);
+                            eat[k] = true;
+                        }
+                        Key::CloseBracket if cmd && m.shift => {
+                            let l = c.text[..c.b].matches('\n').count();
+                            fold_at_line(ed, c.text, l, false);
                             eat[k] = true;
                         }
                         // Ctrl+] / Ctrl+[ : indenter, désindenter
@@ -1476,9 +1499,44 @@ pub fn after(ui: &mut egui::Ui, ed: &mut Editor, text: &str, lang: &str, out: &e
         let font = egui::FontId::monospace((view.font_size - 1.0).max(8.0));
         let diag_lines: HashMap<usize, &str> = ed.diags.iter().map(|d| (d.line, d.msg.as_str())).collect();
         let mut hover_msg = None;
+        let ranges = fold_ranges(text);
+        let fold_at: HashMap<usize, usize> = ranges.iter().map(|&(a, b)| (a, b)).collect();
+        // Le curseur ne doit pas rester dans un bloc replié
+        ed.folds.retain(|f| fold_at.get(f).is_none_or(|&e| !(cur_line > *f && cur_line <= e)) && fold_at.contains_key(f));
+        let gutter_hover = ui.input(|i| i.pointer.hover_pos()).is_some_and(|p| p.x < origin.x && p.x > clip.left() - 80.0);
+        let mut toggle = None;
+        let mut fold_fg: Vec<(egui::Pos2, String, egui::Color32)> = vec![];
         for row in &out.galley.rows {
             let r = row.rect().translate(origin.to_vec2());
-            if r.bottom() >= clip.top() - 40.0 && r.top() <= clip.bottom() + 40.0 {
+            let hidden_row = r.height() < 2.0;
+            if !hidden_row && r.bottom() >= clip.top() - 40.0 && r.top() <= clip.bottom() + 40.0 {
+                if first_row {
+                    if let Some(&end) = fold_at.get(&line) {
+                        let folded = ed.folds.contains(&line);
+                        if folded || gutter_hover {
+                            let c = egui::pos2(origin.x - 8.0, r.center().y);
+                            let hit = egui::Rect::from_center_size(c, egui::vec2(12.0, r.height().max(10.0)));
+                            let resp = ui.interact(hit, Id::unique(("fold", line)), egui::Sense::click());
+                            let col = if resp.hovered() { p.accent } else { p.muted };
+                            fold_fg.push((c, if folded { "▸".into() } else { "▾".into() }, col));
+                            if resp.clicked() {
+                                toggle = Some(line);
+                            }
+                        }
+                        if folded {
+                            // « ⋯ » après la ligne repliée
+                            let x = r.right() + 8.0;
+                            let n = end - line;
+                            let label = if n == 1 { "⋯ 1 ligne".to_string() } else { format!("⋯ {n} lignes") };
+                            let pill = egui::Rect::from_min_size(egui::pos2(x, r.top() + 1.0), egui::vec2(cw * 0.95 * label.chars().count() as f32 + 12.0, r.height() - 2.0));
+                            fold_fg.push((pill.center(), label, p.muted));
+                            bg.push(egui::Shape::rect_filled(pill, 2.0, p.line.gamma_multiply(0.6)));
+                            if ui.interact(pill, Id::unique(("fold-pill", line)), egui::Sense::click()).clicked() {
+                                toggle = Some(line);
+                            }
+                        }
+                    }
+                }
                 if line == cur_line && (focused || ed.multi.is_empty()) {
                     bg.push(egui::Shape::rect_filled(egui::Rect::from_x_y_ranges(clip.x_range(), r.y_range()), 0.0, p.line.gamma_multiply(if focused { 0.45 } else { 0.2 })));
                 }
@@ -1568,6 +1626,15 @@ pub fn after(ui: &mut egui::Ui, ed: &mut Editor, text: &str, lang: &str, out: &e
         for (pos, t, col) in fg {
             painter.text(pos, egui::Align2::RIGHT_CENTER, t, font.clone(), col);
         }
+        for (pos, t, col) in fold_fg {
+            painter.text(pos, egui::Align2::CENTER_CENTER, t, font.clone(), col);
+        }
+        if let Some(l) = toggle {
+            if !ed.folds.remove(&l) {
+                ed.folds.insert(l);
+            }
+            ui.ctx().request_repaint();
+        }
         if let Some(m) = hover_msg {
             egui::Tooltip::always_open(ui.ctx().clone(), ui.layer_id(), Id::unique("diag-tip"), egui::PopupAnchor::Pointer).show(|ui| {
                 ui.label(RichText::new(m).color(p.missing));
@@ -1623,6 +1690,41 @@ pub fn after(ui: &mut egui::Ui, ed: &mut Editor, text: &str, lang: &str, out: &e
         }
     }
 
+    // Survol : documentation du serveur LSP sous la souris
+    if let Some(l) = &mut ed.lsp {
+        let hp = ui.input(|i| i.pointer.hover_pos()).filter(|p| out.text_clip_rect.contains(*p) && ui.input(|i| i.pointer.velocity().length() < 50.0));
+        match hp {
+            Some(pt) => {
+                let cc = out.galley.cursor_from_pos(pt - origin);
+                let b = byte_of(text, cc.index.0.min(text.chars().count()));
+                let on_word = text[b..].chars().next().is_some_and(is_word);
+                if !on_word {
+                    l.hover_at = None;
+                } else if l.hover_at.is_none_or(|(x, _)| x != b) {
+                    l.hover_at = Some((b, std::time::Instant::now()));
+                    l.hover = None;
+                    l.hover_asked = None;
+                    ui.ctx().request_repaint_after(std::time::Duration::from_millis(550));
+                } else if let Some((x, t)) = l.hover_at {
+                    if t.elapsed() > std::time::Duration::from_millis(500) && l.hover_asked != Some(x) {
+                        l.hover_asked = Some(x);
+                        l.ask_hover(text, x);
+                    }
+                }
+                if let (Some((x, _)), Some((y, msg))) = (l.hover_at, &l.hover) {
+                    if x == *y {
+                        let msg = msg.clone();
+                        egui::Tooltip::always_open(ui.ctx().clone(), ui.layer_id(), Id::unique("lsp-hover"), egui::PopupAnchor::Pointer).show(|ui| {
+                            ui.set_max_width(520.0);
+                            ui.label(RichText::new(msg).monospace().size(11.5));
+                        });
+                    }
+                }
+            }
+            None => l.hover_at = None,
+        }
+    }
+
     // Suggestions
     let Some(ci) = cursor else {
         ed.popup = None;
@@ -1637,9 +1739,38 @@ pub fn after(ui: &mut egui::Ui, ed: &mut Editor, text: &str, lang: &str, out: &e
             ed.popup = None;
         }
     }
+    let cb = byte_of(text, ci);
     if typed_now || ed.force_popup {
-        let force = std::mem::take(&mut ed.force_popup);
+        let force = ed.force_popup;
+        ed.force_popup = false;
         ed.popup = suggest(text, ci, lang, notes, &ed.project, force);
+        // Le serveur LSP propose aussi ses suggestions (méthodes, champs, imports…)
+        if let Some(l) = &mut ed.lsp {
+            let prev = text[..cb].chars().last();
+            if force || prev.is_some_and(|c| is_word(c) || matches!(c, '.' | ':' | '>')) {
+                l.ask_completion(text, cb);
+            }
+        }
+    }
+    if let Some(l) = &mut ed.lsp {
+        if let Some((at, list)) = l.completion.take() {
+            if at == cb {
+                let ls = line_start(text, cb);
+                let start = text[ls..cb].char_indices().rev().take_while(|(_, c)| is_word(*c)).last().map(|(i, _)| ls + i).unwrap_or(cb);
+                let pre = text[start..cb].to_lowercase();
+                let mut items: Vec<(String, &'static str)> = list.into_iter().filter(|w| pre.is_empty() || w.to_lowercase().starts_with(&pre)).filter(|w| w.to_lowercase() != pre).take(12).map(|w| (w, "lsp")).collect();
+                if let Some(old) = &ed.popup {
+                    for it in &old.items {
+                        if items.len() < 14 && !items.iter().any(|x| x.0 == it.0) {
+                            items.push(it.clone());
+                        }
+                    }
+                }
+                if !items.is_empty() {
+                    ed.popup = Some(Popup { items, sel: 0, start: char_of(text, start), cursor: ci });
+                }
+            }
+        }
     }
     let Some(pp) = &ed.popup else { return };
     let pos = rect_of(byte_of(text, pp.cursor), byte_of(text, pp.cursor)).left_bottom() + egui::vec2(0.0, 2.0);
@@ -1935,4 +2066,117 @@ pub fn goto_bar(ui: &mut egui::Ui, ed: &mut Editor, text: &str, lang: &str) {
     if close {
         ed.goto = None;
     }
+}
+
+
+// ---------- repli de code ----------
+
+/// Replie (ou déplie) le bloc qui contient la ligne `line`.
+pub fn fold_at_line(ed: &mut Editor, text: &str, line: usize, fold: bool) {
+    let r = fold_ranges(text);
+    let best = r.iter().filter(|(a, b)| *a <= line && line <= *b).max_by_key(|(a, _)| *a).map(|(a, _)| *a);
+    if let Some(a) = best {
+        if fold {
+            ed.folds.insert(a);
+        } else {
+            ed.folds.remove(&a);
+        }
+    }
+}
+
+/// Replie tous les blocs de premier niveau (ou déplie tout).
+pub fn fold_all(ed: &mut Editor, text: &str, fold: bool) {
+    ed.folds.clear();
+    if fold {
+        let mut last_end = None;
+        for (a, b) in fold_ranges(text) {
+            if last_end.is_some_and(|e| a <= e) {
+                continue;
+            }
+            ed.folds.insert(a);
+            last_end = Some(b);
+        }
+    }
+}
+
+/// Blocs repliables : (ligne de début, dernière ligne cachée), selon l'indentation.
+/// Une ligne ouvre un bloc si la suivante (non vide) est plus indentée.
+pub fn fold_ranges(text: &str) -> Vec<(usize, usize)> {
+    let lines: Vec<&str> = text.split('\n').collect();
+    let ind: Vec<Option<usize>> = lines.iter().map(|l| if l.trim().is_empty() { None } else { Some(leading_cols(l)) }).collect();
+    let mut out = vec![];
+    for i in 0..lines.len() {
+        let Some(base) = ind[i] else { continue };
+        let Some(j) = (i + 1..lines.len()).find(|&j| ind[j].is_some()) else { continue };
+        if ind[j].unwrap() <= base {
+            continue;
+        }
+        let mut end = j;
+        for k in j..lines.len() {
+            match ind[k] {
+                Some(c) if c <= base => break,
+                Some(_) => end = k,
+                None => {}
+            }
+        }
+        if end > i {
+            out.push((i, end));
+        }
+    }
+    out
+}
+
+/// Plages d'octets cachées par les replis actifs.
+pub fn hidden_bytes(text: &str, folds: &std::collections::BTreeSet<usize>) -> Vec<std::ops::Range<usize>> {
+    if folds.is_empty() {
+        return vec![];
+    }
+    let starts: Vec<usize> = std::iter::once(0).chain(text.match_indices('\n').map(|(i, _)| i + 1)).collect();
+    let line_end = |l: usize| starts.get(l + 1).copied().unwrap_or(text.len());
+    let mut out: Vec<std::ops::Range<usize>> = vec![];
+    for (s, e) in fold_ranges(text) {
+        if !folds.contains(&s) {
+            continue;
+        }
+        let r = starts[s + 1]..line_end(e);
+        // Replis imbriqués : on garde le plus grand
+        if out.last().is_some_and(|l| l.end >= r.end && l.start <= r.start) {
+            continue;
+        }
+        out.push(r);
+    }
+    out
+}
+
+/// Rend minuscules et invisibles les lignes repliées (le texte reste intact).
+pub fn apply_folds(job: &mut egui::text::LayoutJob, hidden: &[std::ops::Range<usize>]) {
+    if hidden.is_empty() {
+        return;
+    }
+    let mut sections = Vec::with_capacity(job.sections.len() + hidden.len() * 2);
+    for sec in job.sections.drain(..) {
+        let (s0, s1) = (sec.byte_range.start.0, sec.byte_range.end.0);
+        let mut cuts = vec![s0, s1];
+        for h in hidden {
+            for b in [h.start, h.end] {
+                if b > s0 && b < s1 {
+                    cuts.push(b);
+                }
+            }
+        }
+        cuts.sort_unstable();
+        cuts.dedup();
+        for w in cuts.windows(2) {
+            let mut part = sec.clone();
+            part.byte_range = egui::text::ByteIndex(w[0])..egui::text::ByteIndex(w[1]);
+            part.leading_space = if w[0] == s0 { sec.leading_space } else { 0.0 };
+            if hidden.iter().any(|h| w[0] >= h.start && w[1] <= h.end) {
+                part.format.font_id.size = 0.01;
+                part.format.color = egui::Color32::TRANSPARENT;
+                part.format.background = egui::Color32::TRANSPARENT;
+            }
+            sections.push(part);
+        }
+    }
+    job.sections = sections;
 }

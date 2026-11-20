@@ -711,94 +711,6 @@ fn vertex_normals(pos: &[V3], tris: &[[u32; 3]]) -> Vec<V3> {
     n.into_iter().map(norm).collect()
 }
 
-/// Subdivision de Loop (lisse) : chaque triangle devient 4.
-pub fn subdivide(pos: &[V3], tris: &[[u32; 3]], colors: &[Color32], edges: &[u8]) -> (Vec<V3>, Vec<[u32; 3]>, Vec<Color32>, Vec<u8>) {
-    let key = |a: u32, b: u32| if a < b { (a, b) } else { (b, a) };
-    // Arête → (sommets opposés)
-    let mut opp: HashMap<(u32, u32), Vec<u32>> = HashMap::with_capacity(tris.len() * 2);
-    for t in tris {
-        for k in 0..3 {
-            opp.entry(key(t[k], t[(k + 1) % 3])).or_default().push(t[(k + 2) % 3]);
-        }
-    }
-    let mut neigh: Vec<Vec<u32>> = vec![vec![]; pos.len()];
-    let mut boundary = vec![false; pos.len()];
-    for (&(a, b), o) in &opp {
-        neigh[a as usize].push(b);
-        neigh[b as usize].push(a);
-        if o.len() == 1 {
-            boundary[a as usize] = true;
-            boundary[b as usize] = true;
-        }
-    }
-    // Nouvelles positions des anciens sommets
-    let mut out: Vec<V3> = pos
-        .iter()
-        .enumerate()
-        .map(|(i, v)| {
-            let ns = &neigh[i];
-            if ns.is_empty() {
-                return *v;
-            }
-            if boundary[i] {
-                let b: Vec<&u32> = ns.iter().filter(|&&j| opp.get(&key(i as u32, j)).is_some_and(|o| o.len() == 1)).collect();
-                if b.len() == 2 {
-                    let (p, q) = (pos[*b[0] as usize], pos[*b[1] as usize]);
-                    return [0.75 * v[0] + 0.125 * (p[0] + q[0]), 0.75 * v[1] + 0.125 * (p[1] + q[1]), 0.75 * v[2] + 0.125 * (p[2] + q[2])];
-                }
-                return *v;
-            }
-            let n = ns.len() as f32;
-            let beta = if ns.len() == 3 { 3.0 / 16.0 } else { 3.0 / (8.0 * n) };
-            let mut s = [0.0; 3];
-            for &j in ns {
-                let q = pos[j as usize];
-                s[0] += q[0];
-                s[1] += q[1];
-                s[2] += q[2];
-            }
-            [v[0] * (1.0 - n * beta) + s[0] * beta, v[1] * (1.0 - n * beta) + s[1] * beta, v[2] * (1.0 - n * beta) + s[2] * beta]
-        })
-        .collect();
-    // Sommets au milieu des arêtes
-    let mut mid: HashMap<(u32, u32), u32> = HashMap::with_capacity(opp.len());
-    for (&(a, b), o) in &opp {
-        let (p, q) = (pos[a as usize], pos[b as usize]);
-        let v = if o.len() == 2 {
-            let (c, d) = (pos[o[0] as usize], pos[o[1] as usize]);
-            [0.375 * (p[0] + q[0]) + 0.125 * (c[0] + d[0]), 0.375 * (p[1] + q[1]) + 0.125 * (c[1] + d[1]), 0.375 * (p[2] + q[2]) + 0.125 * (c[2] + d[2])]
-        } else {
-            [(p[0] + q[0]) * 0.5, (p[1] + q[1]) * 0.5, (p[2] + q[2]) * 0.5]
-        };
-        out.push(v);
-        mid.insert((a, b), (out.len() - 1) as u32);
-    }
-    let mut nt = Vec::with_capacity(tris.len() * 4);
-    let mut nc = Vec::with_capacity(tris.len() * 4);
-    let mut ne = Vec::with_capacity(tris.len() * 4);
-    for ((t, c), &e) in tris.iter().zip(colors).zip(edges) {
-        let m01 = mid[&key(t[0], t[1])];
-        let m12 = mid[&key(t[1], t[2])];
-        let m20 = mid[&key(t[2], t[0])];
-        let (b0, b1, b2) = (e & 1, (e >> 1) & 1, (e >> 2) & 1);
-        // Arêtes d'origine gardées. Une arête interne qui tourne autour d'un sommet n'est
-        // visible que si le côté opposé à ce sommet l'est : un quad subdivisé reste une
-        // grille de quads, sans diagonales.
-        nt.push([t[0], m01, m20]);
-        ne.push(b0 | (b1 << 1) | (b2 << 2));
-        nt.push([m01, t[1], m12]);
-        ne.push(b0 | (b1 << 1) | (b2 << 2));
-        nt.push([m20, m12, t[2]]);
-        ne.push(b0 | (b1 << 1) | (b2 << 2));
-        nt.push([m01, m12, m20]);
-        ne.push(b2 | (b0 << 1) | (b1 << 2));
-        for _ in 0..4 {
-            nc.push(*c);
-        }
-    }
-    (out, nt, nc, ne)
-}
-
 /// Données prêtes pour le rendu (modèle centré, mis à l'échelle, normales).
 pub struct Prepared {
     pos: Vec<V3>,
@@ -815,12 +727,8 @@ impl Prepared {
         let mut tris = model.tris.clone();
         let mut colors = model.colors.clone();
         let mut edges = model.edges.clone();
-        for _ in 0..levels {
-            if tris.len() * 4 > MAX_SUBDIV_TRIS {
-                break;
-            }
-            let r = subdivide(&pos, &tris, &colors, &edges);
-            (pos, tris, colors, edges) = r;
+        if levels > 0 {
+            (pos, tris, colors, edges) = catmull_clark(&pos, &tris, &colors, &edges, levels, false);
         }
         let nrm = vertex_normals(&pos, &tris);
         let floor = pos.iter().map(|v| v[1]).fold(f32::MAX, f32::min);
@@ -1810,6 +1718,10 @@ mod look_tests {
         let m = load_obj(obj.as_bytes()).unwrap();
         assert_eq!(m.edges.iter().map(|e| e.count_ones()).sum::<u32>(), 24, "4 arêtes par quad, pas de diagonale");
         let p = Prepared::new(&m, false, 2);
+        // Affichage optimal : seulement les 12 arêtes du cube, coupées en 4 (×2 faces)
+        let (_, t, _, e) = catmull_clark(&m.positions, &m.tris, &m.colors, &m.edges, 2, true);
+        assert_eq!(t.len(), 6 * 16 * 2);
+        assert_eq!(e.iter().map(|e| e.count_ones()).sum::<u32>(), 12 * 4 * 2);
         assert_eq!(p.tri_count(), 12 * 16);
         // Après 2 niveaux, chaque quad devient 16 quads : 6 * 16 * 4 arêtes vues des deux côtés
         assert_eq!(p.edges.iter().map(|e| e.count_ones()).sum::<u32>(), 6 * 16 * 4);
@@ -1821,6 +1733,258 @@ mod look_tests {
                 let f = render(&p, &Camera::default(), &look, 400, 300);
                 image::RgbaImage::from_raw(400, 300, f.rgba).unwrap().save(format!("/tmp/look{i}.png")).unwrap();
             }
+        }
+    }
+}
+
+/// Retrouve les polygones d'origine (quads, n-gones) à partir des triangles et de leurs
+/// arêtes visibles. Les sommets confondus sont soudés pour éviter les fentes aux coutures UV.
+fn rebuild_polygons(pos: &[V3], tris: &[[u32; 3]], edges: &[u8]) -> (Vec<V3>, Vec<Vec<u32>>, Vec<usize>) {
+    // Soudure des positions identiques
+    let mut weld: HashMap<[u32; 3], u32> = HashMap::with_capacity(pos.len());
+    let mut remap = vec![0u32; pos.len()];
+    let mut wpos: Vec<V3> = Vec::with_capacity(pos.len());
+    for (i, p) in pos.iter().enumerate() {
+        let k = [p[0].to_bits(), p[1].to_bits(), p[2].to_bits()];
+        remap[i] = *weld.entry(k).or_insert_with(|| {
+            wpos.push(*p);
+            (wpos.len() - 1) as u32
+        });
+    }
+    let tris: Vec<[u32; 3]> = tris.iter().map(|t| [remap[t[0] as usize], remap[t[1] as usize], remap[t[2] as usize]]).collect();
+    // Triangles reliés par une arête cachée (diagonale) = même polygone
+    let mut parent: Vec<usize> = (0..tris.len()).collect();
+    fn find(p: &mut [usize], mut x: usize) -> usize {
+        while p[x] != x {
+            p[x] = p[p[x]];
+            x = p[x];
+        }
+        x
+    }
+    let key = |a: u32, b: u32| if a < b { (a, b) } else { (b, a) };
+    let mut hidden: HashMap<(u32, u32), Vec<usize>> = HashMap::new();
+    for (ti, t) in tris.iter().enumerate() {
+        let m = edges.get(ti).copied().unwrap_or(7);
+        for k in 0..3 {
+            if m & (1 << k) == 0 {
+                hidden.entry(key(t[k], t[(k + 1) % 3])).or_default().push(ti);
+            }
+        }
+    }
+    for v in hidden.values() {
+        if v.len() == 2 {
+            let (a, b) = (find(&mut parent, v[0]), find(&mut parent, v[1]));
+            parent[a] = b;
+        }
+    }
+    let mut groups: HashMap<usize, Vec<usize>> = HashMap::new();
+    for ti in 0..tris.len() {
+        let r = find(&mut parent, ti);
+        groups.entry(r).or_default().push(ti);
+    }
+    let mut polys = vec![];
+    let mut first_tri = vec![];
+    let mut keys: Vec<usize> = groups.keys().copied().collect();
+    keys.sort_unstable();
+    for g in keys {
+        let ts = &groups[&g];
+        if ts.len() == 1 {
+            polys.push(tris[ts[0]].to_vec());
+            first_tri.push(ts[0]);
+            continue;
+        }
+        // Contour : arêtes orientées qui n'ont pas leur inverse dans le groupe
+        let mut dir: HashMap<(u32, u32), u32> = HashMap::new();
+        for &ti in ts {
+            let t = tris[ti];
+            for k in 0..3 {
+                *dir.entry((t[k], t[(k + 1) % 3])).or_default() += 1;
+            }
+        }
+        let mut next: HashMap<u32, u32> = HashMap::new();
+        let mut ok = true;
+        for (&(a, b), _) in dir.iter().filter(|((a, b), _)| !dir.contains_key(&(*b, *a))) {
+            if next.insert(a, b).is_some() {
+                ok = false;
+            }
+        }
+        let mut loop_ = vec![];
+        if ok && !next.is_empty() {
+            let start = *next.keys().min().unwrap();
+            let mut v = start;
+            loop {
+                loop_.push(v);
+                match next.get(&v) {
+                    Some(&n) if n == start => break,
+                    Some(&n) if loop_.len() <= next.len() => v = n,
+                    _ => {
+                        ok = false;
+                        break;
+                    }
+                }
+            }
+            ok &= loop_.len() == next.len();
+        }
+        if ok && loop_.len() >= 3 {
+            polys.push(loop_);
+            first_tri.push(ts[0]);
+        } else {
+            for &ti in ts {
+                polys.push(tris[ti].to_vec());
+                first_tri.push(ti);
+            }
+        }
+    }
+    (wpos, polys, first_tri)
+}
+
+/// Subdivision Catmull-Clark (comme Blender), sur les vrais polygones du modèle.
+/// `optimal` : le fil de fer ne montre que les arêtes issues de la cage d'origine
+/// (« Optimal Display » de Blender). Les diagonales de triangulation restent cachées.
+pub fn catmull_clark(pos: &[V3], tris: &[[u32; 3]], colors: &[Color32], edges: &[u8], levels: u8, optimal: bool) -> (Vec<V3>, Vec<[u32; 3]>, Vec<Color32>, Vec<u8>) {
+    subdiv_poly(pos, tris, colors, edges, levels, optimal, true)
+}
+
+/// Subdivision « simple » : même découpage en quads, sans lissage.
+pub fn split_flat(pos: &[V3], tris: &[[u32; 3]], colors: &[Color32], edges: &[u8], levels: u8, optimal: bool) -> (Vec<V3>, Vec<[u32; 3]>, Vec<Color32>, Vec<u8>) {
+    subdiv_poly(pos, tris, colors, edges, levels, optimal, false)
+}
+
+fn subdiv_poly(pos: &[V3], tris: &[[u32; 3]], colors: &[Color32], edges: &[u8], levels: u8, optimal: bool, smooth: bool) -> (Vec<V3>, Vec<[u32; 3]>, Vec<Color32>, Vec<u8>) {
+    if levels == 0 || tris.is_empty() {
+        return (pos.to_vec(), tris.to_vec(), colors.to_vec(), edges.to_vec());
+    }
+    let (mut p, mut faces, first) = rebuild_polygons(pos, tris, edges);
+    let mut fcol: Vec<Color32> = first.iter().map(|&t| colors.get(t).copied().unwrap_or(Color32::WHITE)).collect();
+    // Pour chaque face, l'arête i (v_i → v_i+1) vient-elle de la cage d'origine ?
+    let mut forig: Vec<Vec<bool>> = faces.iter().map(|f| vec![true; f.len()]).collect();
+    let key = |a: u32, b: u32| if a < b { (a, b) } else { (b, a) };
+    let add = |a: V3, b: V3| [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
+    let mul = |a: V3, s: f32| [a[0] * s, a[1] * s, a[2] * s];
+    for _ in 0..levels.min(5) {
+        let quads: usize = faces.iter().map(|f| f.len()).sum();
+        if quads * 2 > MAX_SUBDIV_TRIS {
+            break;
+        }
+        let nv = p.len();
+        // Points de face
+        let fp: Vec<V3> = faces.iter().map(|f| mul(f.iter().fold([0.0; 3], |s, &v| add(s, p[v as usize])), 1.0 / f.len() as f32)).collect();
+        // Arêtes → faces voisines
+        let mut emap: HashMap<(u32, u32), (u32, Vec<usize>)> = HashMap::with_capacity(quads);
+        for (fi, f) in faces.iter().enumerate() {
+            for i in 0..f.len() {
+                let k = key(f[i], f[(i + 1) % f.len()]);
+                let n = emap.len() as u32;
+                emap.entry(k).or_insert((n, vec![])).1.push(fi);
+            }
+        }
+        let ne = emap.len();
+        let mut ep = vec![[0.0f32; 3]; ne];
+        let mut boundary_v = vec![false; nv];
+        let mut v_faces = vec![[0.0f32; 3]; nv];
+        let mut v_nf = vec![0u32; nv];
+        let mut v_mid = vec![[0.0f32; 3]; nv];
+        let mut v_ne = vec![0u32; nv];
+        let mut v_bsum = vec![[0.0f32; 3]; nv];
+        for (&(a, b), (ei, fs)) in &emap {
+            let (pa, pb) = (p[a as usize], p[b as usize]);
+            let mid = mul(add(pa, pb), 0.5);
+            if fs.len() == 2 && smooth {
+                ep[*ei as usize] = mul(add(add(pa, pb), add(fp[fs[0]], fp[fs[1]])), 0.25);
+            } else {
+                ep[*ei as usize] = mid;
+                boundary_v[a as usize] = true;
+                boundary_v[b as usize] = true;
+                v_bsum[a as usize] = add(v_bsum[a as usize], pb);
+                v_bsum[b as usize] = add(v_bsum[b as usize], pa);
+            }
+            for v in [a, b] {
+                v_mid[v as usize] = add(v_mid[v as usize], mid);
+                v_ne[v as usize] += 1;
+            }
+        }
+        for (fi, f) in faces.iter().enumerate() {
+            for &v in f {
+                v_faces[v as usize] = add(v_faces[v as usize], fp[fi]);
+                v_nf[v as usize] += 1;
+            }
+        }
+        let mut np: Vec<V3> = (0..nv)
+            .map(|v| {
+                let pv = p[v];
+                if v_nf[v] == 0 || !smooth {
+                    pv
+                } else if boundary_v[v] {
+                    add(mul(pv, 0.75), mul(v_bsum[v], 0.125))
+                } else {
+                    let n = v_nf[v] as f32;
+                    let f = mul(v_faces[v], 1.0 / n);
+                    let r = mul(v_mid[v], 1.0 / v_ne[v].max(1) as f32);
+                    mul(add(add(f, mul(r, 2.0)), mul(pv, n - 3.0)), 1.0 / n)
+                }
+            })
+            .collect();
+        let e_base = np.len() as u32;
+        np.extend(ep);
+        let f_base = np.len() as u32;
+        np.extend(fp);
+        let mut nfaces = Vec::with_capacity(quads);
+        let mut norig = Vec::with_capacity(quads);
+        let mut ncol = Vec::with_capacity(quads);
+        for (fi, f) in faces.iter().enumerate() {
+            let n = f.len();
+            for i in 0..n {
+                let prev = (i + n - 1) % n;
+                let e_next = e_base + emap[&key(f[i], f[(i + 1) % n])].0;
+                let e_prev = e_base + emap[&key(f[prev], f[i])].0;
+                nfaces.push(vec![f[i], e_next, f_base + fi as u32, e_prev]);
+                norig.push(vec![forig[fi][i], false, false, forig[fi][prev]]);
+                ncol.push(fcol[fi]);
+            }
+        }
+        p = np;
+        faces = nfaces;
+        forig = norig;
+        fcol = ncol;
+    }
+    // Triangulation des quads, diagonale cachée
+    let mut ot = Vec::with_capacity(faces.len() * 2);
+    let mut oc = Vec::with_capacity(faces.len() * 2);
+    let mut oe = Vec::with_capacity(faces.len() * 2);
+    for ((f, o), c) in faces.iter().zip(&forig).zip(&fcol) {
+        let show = |i: usize| -> u8 { (!optimal || o[i]) as u8 };
+        let n = f.len();
+        for k in 1..n - 1 {
+            ot.push([f[0], f[k], f[k + 1]]);
+            oc.push(*c);
+            let mut m = show(k) << 1;
+            if k == 1 {
+                m |= show(0);
+            }
+            if k + 2 == n {
+                m |= show(n - 1) << 2;
+            }
+            oe.push(m);
+        }
+    }
+    (p, ot, oc, oe)
+}
+
+#[cfg(test)]
+mod apercu_cc {
+    use super::*;
+    /// Rendu de contrôle : ARYADNE_CC_OBJ=chemin.obj cargo test apercu
+    #[test]
+    fn apercu() {
+        let Ok(p) = std::env::var("ARYADNE_CC_OBJ") else { return };
+        let m = load(std::path::Path::new(&p)).unwrap();
+        for (i, (lv, opt)) in [(0u8, false), (1, false), (2, true)].iter().enumerate() {
+            let mesh = crate::modifiers::Mesh::from_model(&m, false);
+            let (pos, tris, colors, edges) = catmull_clark(&mesh.pos, &mesh.tris, &mesh.colors, &mesh.edges, *lv, *opt);
+            let prep = Prepared::from_mesh(crate::modifiers::Mesh { pos, tris, colors, edges });
+            let look = Look { material: Material::Gray, wire: 1.0, ..Default::default() };
+            let f = render(&prep, &Camera { yaw: 0.6, pitch: 0.4, dist: 0.55, ..Default::default() }, &look, 700, 500);
+            image::RgbaImage::from_raw(700, 500, f.rgba).unwrap().save(format!("/tmp/cc{i}.png")).unwrap();
         }
     }
 }

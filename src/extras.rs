@@ -39,6 +39,8 @@ pub enum Cmd {
     LivePreview,
     Summarize,
     Backup,
+    Sync,
+    Split,
     OpenVaultFolder,
     ChangeVault,
     MenuEntry,
@@ -84,6 +86,9 @@ impl App {
             ("minuteur : 50 min", "", Cmd::Timer(50)),
             ("minuteur : pause 5 min", "", Cmd::Timer(5)),
             ("sauvegarder le coffre maintenant (zip)", "", Cmd::Backup),
+            ("synchroniser avec le cloud", "", Cmd::Sync),
+            ("vue côte à côte", "Ctrl+\\", Cmd::Split),
+            ("réglages : coffre en ligne", "", Cmd::Settings(Tab::Cloud)),
             ("statistiques du coffre", "", Cmd::Stats),
             ("ouvrir le dossier du coffre", "", Cmd::OpenVaultFolder),
             ("changer de coffre…", "", Cmd::ChangeVault),
@@ -150,6 +155,8 @@ impl App {
             }
             Cmd::Summarize => self.actions.push(Action::Summarize),
             Cmd::Backup => self.start_backup(true),
+            Cmd::Sync => self.start_sync(true),
+            Cmd::Split => self.toggle_split(),
             Cmd::OpenVaultFolder => {
                 let r = settings::open_external(std::path::Path::new(&self.root()));
                 self.report(r);

@@ -85,6 +85,7 @@ pub enum Tab {
     Editor,
     Files,
     Ai,
+    Cloud,
     Updates,
     Shortcuts,
 }
@@ -136,6 +137,7 @@ impl App {
                 (Tab::Editor, "éditeur"),
                 (Tab::Files, "fichiers"),
                 (Tab::Ai, "ia"),
+                (Tab::Cloud, "coffre en ligne"),
                 (Tab::Updates, "mises à jour"),
                 (Tab::Shortcuts, "raccourcis"),
             ] {
@@ -160,6 +162,7 @@ impl App {
                     Tab::Editor => self.tab_editor(ui),
                     Tab::Files => links_changed = self.tab_files(ui),
                     Tab::Ai => self.tab_ai(ui, &mut st.ai, ctx),
+                    Tab::Cloud => self.tab_cloud(ui, ctx),
                     Tab::Updates => goto_update = self.tab_updates(ui),
                     Tab::Shortcuts => tab_shortcuts(ui),
                 }
