@@ -6,7 +6,7 @@ Le fil entre tes idées. Notes, code, références et moodboards dans un dossier
 
 100 % Rust ([egui](https://github.com/emilk/egui)). Un seul exécutable portable pour Windows et Linux : **aucune installation, aucun droit admin**. Look éditeur de code (JetBrains Mono, angles droits), mode clair par défaut, mode sombre en un clic.
 
-## Fonctionnalités (v0.18)
+## Fonctionnalités (v0.19)
 
 **3D**
 - Visionneuse intégrée pour OBJ, FBX (binaire), glTF / GLB et STL. Rendu par pixel avec profondeur (comme les pixols de ZBrush) : pas de trous ni de mouchetures, calculé sur tous les cœurs, et recalculé seulement quand la vue change.
@@ -21,9 +21,10 @@ Le fil entre tes idées. Notes, code, références et moodboards dans un dossier
   - coutures : à la main (clic sur une arête), sur les arêtes vives, « intelligentes » (îlots presque plats, comme Smart UV Project), contour de la sélection ;
   - **auto avancé** : coupe minimale pour que chaque îlot se déplie à plat (un cylindre = une seule couture droite, un tore = quelques îlots), coutures placées dans les plis, les creux et le dessous, découpe là où ça s'étire, fusion des îlots voisins, îlots redressés sur leurs arêtes, rangement « skyline » ; curseur « moins d'îlots / moins d'étirement » ;
   - UV : dépliage LSCM, rangement optimisé (plusieurs ordres, rotations, largeurs), marge et taille de texture, même densité pour tous les îlots, densité imposée en px/unité, damier sur le modèle, vue UV 2D (choisir, déplacer, tourner, miroir, échelle) ;
-  - tout est gardé à côté du modèle, et l'export OBJ (vt, usemtl, .mtl) et GLB (UV, un matériau par ID) l'inclut.
+  - **retopologie guidée** : dessine des traits sur le modèle et les boucles de quads les suivent (champ de directions multirésolution façon Instant Meshes), nombre de faces visé, portée des guides, option 100 % quads, aperçu en fil de fer bleu, export OBJ ;
+  - tout est gardé à côté du modèle, et l'export OBJ (vt, usemtl, .mtl), FBX (quads, UV, matériaux) et GLB (UV, un matériau par ID) l'inclut.
 - Les matériaux en nodes utilisent les vraies UV quand le modèle en a.
-- **Export 3D** en OBJ (quads gardés), GLB (glTF), STL et PLY, avec ou sans modificateurs.
+- **Export 3D** en OBJ (quads gardés), FBX binaire (vérifié dans Blender), GLB (glTF), STL et PLY, avec ou sans modificateurs.
 - **Matériaux plus simples** : « affichage › nouveau matériau » crée un matériau en nodes, l'applique et l'ouvre à côté du modèle.
 - **Éditeur de nodes** revu : sélection multiple et en rectangle, clic droit, menu d'ajout par catégories avec survol et recherche, miniature sous chaque node, lien lâché dans le vide = node déjà relié, couper un lien (Ctrl+clic), muet (M), réduire (H), renommer (F2), dupliquer, copier-coller, annuler / rétablir, cadrer (F), aimantation (Ctrl), images glissées = nodes texture.
 - Rotation automatique (platine), capture PNG 2400 px et turntable en GIF animé.
@@ -38,7 +39,7 @@ Le fil entre tes idées. Notes, code, références et moodboards dans un dossier
 - Lecture image par image (← →, Espace), cadence réglable (12, 24, 30 i/s ou libre).
 - Lecture « en 1s / 2s / 4s / 8s » comme en animation : chaque image tenue N fois.
 - Pelures d'oignon (image précédente en rouge, suivante en vert).
-- Dessin par-dessus, image par image (couleur, épaisseur, Ctrl+Z), repères sur la ligne de temps, gardé dans `.app/annotations/`.
+- Dessin par-dessus, image par image : pinceau stabilisé et effilé (B), gomme (E), ligne, rectangle, ellipse, flèche, palette, opacité, annuler / rétablir (Ctrl+Z / Ctrl+Maj+Z), repères sur la ligne de temps, gardé dans `.app/annotations/`.
 - Export en séquence PNG / JPG (cadence, 1 image sur N, hauteur, dessins incrustés) ou en MP4 retimé (ex. 24 i/s en 2s).
 - Miniatures vidéo dans les refs et les boards.
 - ffmpeg : utilisé s'il est installé, sinon installé par Aryadne en un clic, sans admin.
@@ -62,6 +63,11 @@ Le fil entre tes idées. Notes, code, références et moodboards dans un dossier
 **Export et transfert**
 - Clic droit → « exporter en zip » (fichier ou dossier), ou « exporter avec ses liens » : notes liées, images citées, contenu d'un board.
 - « transfert » : envoie des fichiers à un autre ordinateur du même réseau, sans cloud ni limite de taille (fichiers 3D). L'ordi qui reçoit affiche un code à 4 chiffres ; les fichiers arrivent dans `reçus/`.
+
+**Interface**
+- **Panneaux ancrables** : explorateur, structure, assistant et terminal se déplacent par leur poignée ⠿ vers la gauche, la droite, le bas, ou deviennent des fenêtres flottantes redimensionnables (clic droit sur la poignée : choisir la place ou réinitialiser).
+- **Langue** : français ou anglais (réglages › apparence).
+- Explorateur en liste ou en grille de miniatures (comme Unreal), vue partagée côte à côte (Ctrl+\\).
 
 **Réglages**
 - Thème, couleur d'accent, taille de l'interface, taille du texte de l'éditeur, numéros de ligne, retour à la ligne, délai de sauvegarde, dossier des notes, import (lier / déplacer / copier / demander), dossiers liés, IA, mises à jour, liste des raccourcis.
@@ -98,6 +104,7 @@ Le fil entre tes idées. Notes, code, références et moodboards dans un dossier
 - Éditeur de nodes (glisser une sortie sur une entrée, Maj+A pour ajouter, zoom, déplacement), aperçu en direct à gauche, enregistré en JSON dans le coffre.
 - Matériaux (`.mat.json`) : bruit, Voronoï, damier, dégradés, rayures, Fresnel, géométrie (normale, position, pente), rampes, mélanges (multiplier, écran, incrustation…), teinte/saturation, niveaux, maths… vers couleur, rugosité, métal, émission. Appliqués aux modèles dans la visionneuse 3D (menu affichage), mis à jour en direct.
 - Compositing (`.comp.json`) : images du coffre, flou, netteté, halo, vignette, grain, aberration chromatique, pixeliser, postériser, contours, niveaux, couleurs… Export PNG en pleine résolution.
+- 14 nodes de plus (briques, bois, marbre, hexagones, points, vagues, bruit blanc, courbe, balance des blancs, exposition, bornes, flou directionnel et radial, objectif) et des **cadres** pour grouper les nodes (Ctrl+J).
 - Préréglages de matériaux (bois, pierre, métal rouillé, toon, céramique, or) et exemples de shaders.
 - Node **shader perso** : un petit langage d'expressions (`r = mix(ar, br, fbm(x*6, y*6, 0))`), avec variables, fonctions de bruit et conditions, exécuté pixel par pixel.
 
@@ -239,6 +246,13 @@ src/
   settings.rs  fenêtre de réglages
   transfer.rs  export zip et transfert réseau
   model3d.rs   visionneuse 3D (OBJ, glTF, STL)
+  uvedit.rs    mode édition : matériaux, coutures, UV
+  retopo.rs    retopologie guidée en quads
+  fbxwrite.rs  export FBX binaire
+  dock.rs      panneaux ancrables et flottants
+  i18n.rs      traductions (assets/i18n)
+  convert.rs   convertisseur et compresseur
+  cloud.rs     coffre en ligne (S3 / R2) et relais
   blend.rs     miniatures des fichiers .blend
   search.rs    recherche plein texte
   fbx.rs       lecteur FBX binaire
