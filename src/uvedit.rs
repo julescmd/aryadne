@@ -95,6 +95,9 @@ impl Topo {
 pub struct Slot {
     pub name: String,
     pub color: [u8; 3],
+    /// Matériau en nodes de cet ID (chemin du fichier .mat.json), vide si aucun
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub material: String,
 }
 
 pub const PALETTE: [[u8; 3]; 10] = [[200, 200, 205], [231, 111, 81], [42, 157, 143], [233, 196, 106], [69, 123, 157], [168, 98, 196], [244, 162, 97], [86, 180, 233], [140, 190, 80], [220, 90, 140]];
@@ -129,7 +132,7 @@ fn margin_default() -> f32 {
 
 impl EditData {
     pub fn fresh(t: &Topo) -> EditData {
-        EditData { polys: t.polys.len(), face_mat: vec![0; t.polys.len()], slots: vec![Slot { name: "matériau 1".into(), color: PALETTE[0] }], seams: BTreeSet::new(), uv: vec![], chart: vec![], texture_px: 2048, margin_px: 8.0, guides: vec![] }
+        EditData { polys: t.polys.len(), face_mat: vec![0; t.polys.len()], slots: vec![Slot { name: "matériau 1".into(), color: PALETTE[0], material: String::new() }], seams: BTreeSet::new(), uv: vec![], chart: vec![], texture_px: 2048, margin_px: 8.0, guides: vec![] }
     }
 
     pub fn fits(&self, t: &Topo) -> bool {
@@ -785,6 +788,56 @@ pub fn set_density(t: &Topo, d: &mut EditData, px_per_unit: f32, scale: f32) {
 
 /// Triangles pour l'affichage et l'export : (positions, triangles, polygone de chaque triangle,
 /// masque des arêtes visibles, UV par coin de triangle).
+/// Découpe d'un polygone en triangles (indices dans le polygone). Un éventail depuis un coin
+/// suffit pour un polygone convexe ; pour un polygone creux il retourne des triangles, d'où des
+/// éclats blancs à l'affichage. On essaie donc chaque coin, puis on découpe « par oreilles ».
+fn poly_tris(pos: &[V3], p: &[u32]) -> Vec<[usize; 3]> {
+    let n = p.len();
+    if n < 3 {
+        return vec![];
+    }
+    if n == 3 {
+        return vec![[0, 1, 2]];
+    }
+    let at = |i: usize| pos[p[i] as usize];
+    let sub = |a: V3, b: V3| [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+    let cross = |a: V3, b: V3| [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+    let dot = |a: V3, b: V3| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+    // Normale du polygone (Newell)
+    let mut nrm = [0.0f32; 3];
+    for i in 0..n {
+        let (a, b) = (at(i), at((i + 1) % n));
+        nrm[0] += (a[1] - b[1]) * (a[2] + b[2]);
+        nrm[1] += (a[2] - b[2]) * (a[0] + b[0]);
+        nrm[2] += (a[0] - b[0]) * (a[1] + b[1]);
+    }
+    let good = |i: usize, j: usize, k: usize| dot(cross(sub(at(j), at(i)), sub(at(k), at(i))), nrm) >= -1e-12;
+    for s in 0..n {
+        if (1..n - 1).all(|k| good(s, (s + k) % n, (s + k + 1) % n)) {
+            return (1..n - 1).map(|k| [s, (s + k) % n, (s + k + 1) % n]).collect();
+        }
+    }
+    // Oreilles
+    let mut idx: Vec<usize> = (0..n).collect();
+    let mut out = vec![];
+    let inside = |q: V3, a: V3, b: V3, c: V3| {
+        let s = |x: V3, y: V3| dot(cross(sub(y, x), sub(q, x)), nrm);
+        s(a, b) > 0.0 && s(b, c) > 0.0 && s(c, a) > 0.0
+    };
+    while idx.len() > 3 {
+        let m = idx.len();
+        let ear = (0..m).find(|&e| {
+            let (i, j, k) = (idx[(e + m - 1) % m], idx[e], idx[(e + 1) % m]);
+            good(i, j, k) && !idx.iter().any(|&o| o != i && o != j && o != k && inside(at(o), at(i), at(j), at(k)))
+        });
+        let e = ear.unwrap_or(0);
+        out.push([idx[(e + m - 1) % m], idx[e], idx[(e + 1) % m]]);
+        idx.remove(e);
+    }
+    out.push([idx[0], idx[1], idx[2]]);
+    out
+}
+
 pub fn triangulate(t: &Topo, d: &EditData) -> (Vec<[u32; 3]>, Vec<u32>, Vec<u8>, Vec<[V2; 3]>) {
     let mut tris = vec![];
     let mut owner = vec![];
@@ -792,13 +845,21 @@ pub fn triangulate(t: &Topo, d: &EditData) -> (Vec<[u32; 3]>, Vec<u32>, Vec<u8>,
     let mut uvs = vec![];
     for (f, p) in t.polys.iter().enumerate() {
         let n = p.len();
-        for k in 1..n - 1 {
-            tris.push([p[0], p[k], p[k + 1]]);
+        for tr in poly_tris(&t.pos, p) {
+            tris.push([p[tr[0]], p[tr[1]], p[tr[2]]]);
             owner.push(f as u32);
-            edges.push(crate::model3d::fan_mask(k, n));
+            // Une arête est visible si elle est un côté du polygone
+            let mut mask = 0u8;
+            for k in 0..3 {
+                let (a, b) = (tr[k], tr[(k + 1) % 3]);
+                if (a + 1) % n == b || (b + 1) % n == a {
+                    mask |= 1 << k;
+                }
+            }
+            edges.push(mask);
             if d.has_uv() && d.uv.len() == t.polys.len() {
                 let u = &d.uv[f];
-                uvs.push([u[0], u[k], u[k + 1]]);
+                uvs.push([u[tr[0]], u[tr[1]], u[tr[2]]]);
             }
         }
     }
@@ -808,6 +869,23 @@ pub fn triangulate(t: &Topo, d: &EditData) -> (Vec<[u32; 3]>, Vec<u32>, Vec<u8>,
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn polygone_creux_sans_triangle_retourne() {
+        // Flèche : le coin 3 rentre dans le polygone
+        let pos: Vec<V3> = vec![[0., 0., 0.], [2., 0., 0.], [2., 2., 0.], [1.6, 0.4, 0.], [0., 2., 0.]];
+        let p: Vec<u32> = vec![0, 1, 2, 3, 4];
+        let tr = poly_tris(&pos, &p);
+        assert_eq!(tr.len(), 3);
+        let mut area = 0.0;
+        for t in &tr {
+            let (a, b, c) = (pos[t[0]], pos[t[1]], pos[t[2]]);
+            let z = (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
+            assert!(z >= 0.0, "triangle retourné : {t:?}");
+            area += z / 2.0;
+        }
+        assert!((area - 2.4).abs() < 1e-4, "aire {area}");
+    }
 
     fn cube() -> Topo {
         let pos: Vec<V3> = vec![[0., 0., 0.], [1., 0., 0.], [1., 1., 0.], [0., 1., 0.], [0., 0., 1.], [1., 0., 1.], [1., 1., 1.], [0., 1., 1.]];
@@ -1569,6 +1647,10 @@ pub struct Edit {
     pub retopo_show: bool,
     /// Trait de guide en cours
     pub guide_now: Vec<V3>,
+    /// ID dont on veut créer ou ouvrir le matériau en nodes (traité par la vue 3D)
+    pub mat_request: Option<usize>,
+    /// ID de matériau de chaque triangle affiché
+    pub tri_mat: Vec<u16>,
 }
 
 impl Edit {
@@ -1577,7 +1659,7 @@ impl Edit {
         let data = std::fs::read_to_string(&file).ok().and_then(|t| serde_json::from_str::<EditData>(&t).ok()).filter(|d| d.fits(&topo)).unwrap_or_else(|| EditData::fresh(&topo));
         let n = topo.polys.len();
         let checker = data.has_uv();
-        Edit { topo, data, sel: BTreeSet::new(), tool: Tool::Faces, tab: 0, version: 1, seam_angle: 45.0, smart_angle: 66.0, min_faces: (n / 400).clamp(4, 300), optimize: true, rotate: true, density_target: 1024.0, file, scale, message: None, owner: vec![], uv_view: Rect::NOTHING, uv_drag: false, checker, auto: AutoOptions::default(), retopo_opt: crate::retopo::Options { faces: (n * 2).clamp(200, 8000) / 100 * 100, ..Default::default() }, retopo: None, retopo_job: None, retopo_export: false, retopo_show: true, guide_now: vec![] }
+        Edit { topo, data, sel: BTreeSet::new(), tool: Tool::Faces, tab: 0, version: 1, seam_angle: 45.0, smart_angle: 66.0, min_faces: (n / 400).clamp(4, 300), optimize: true, rotate: true, density_target: 1024.0, file, scale, message: None, owner: vec![], uv_view: Rect::NOTHING, uv_drag: false, checker, auto: AutoOptions::default(), retopo_opt: crate::retopo::Options { faces: (n * 2).clamp(200, 8000) / 100 * 100, ..Default::default() }, retopo: None, retopo_job: None, retopo_export: false, retopo_show: true, guide_now: vec![], mat_request: None, tri_mat: vec![] }
     }
 
     pub fn save(&self) {
@@ -1607,6 +1689,7 @@ impl Edit {
                 }
             })
             .collect();
+        self.tri_mat = owner.iter().map(|&f| self.data.face_mat.get(f as usize).copied().unwrap_or(0)).collect();
         self.owner = owner;
         (crate::modifiers::Mesh { pos: self.topo.pos.clone(), tris, colors, edges }, uvs)
     }
@@ -1745,6 +1828,7 @@ impl Edit {
         let mut select = None;
         let mut remove = None;
         let counts: Vec<usize> = (0..self.data.slots.len()).map(|k| self.data.face_mat.iter().filter(|&&m| m as usize == k).count()).collect();
+        let mut mat_req = None;
         for (k, s) in self.data.slots.iter_mut().enumerate() {
             ui.horizontal(|ui| {
                 let mut c = Color32::from_rgb(s.color[0], s.color[1], s.color[2]);
@@ -1764,10 +1848,21 @@ impl Edit {
                 if ui.small_button(crate::i18n::t("choisir")).on_hover_text(crate::i18n::t("sélectionner ses faces")).clicked() {
                     select = Some(k);
                 }
+                let has = !s.material.is_empty();
+                if ui.small_button(crate::i18n::t(if has { "nodes ✎" } else { "＋ nodes" })).on_hover_text(crate::i18n::t(if has { "ouvrir le matériau en nodes de cet ID" } else { "créer un matériau en nodes pour cet ID et l'ouvrir" })).clicked() {
+                    mat_req = Some(k);
+                }
+                if has && ui.small_button("⌫").on_hover_text(crate::i18n::t("retirer le matériau en nodes")).clicked() {
+                    s.material.clear();
+                    assign = Some(usize::MAX);
+                }
                 if k > 0 && ui.small_button("×").clicked() {
                     remove = Some(k);
                 }
             });
+        }
+        if mat_req.is_some() {
+            self.mat_request = mat_req;
         }
         if let Some(k) = assign {
             if k != usize::MAX {
@@ -1794,7 +1889,7 @@ impl Edit {
         }
         if ui.button(crate::i18n::t("＋ matériau")).clicked() {
             let n = self.data.slots.len();
-            self.data.slots.push(Slot { name: format!("matériau {}", n + 1), color: PALETTE[n % PALETTE.len()] });
+            self.data.slots.push(Slot { name: format!("matériau {}", n + 1), color: PALETTE[n % PALETTE.len()], material: String::new() });
             if !self.sel.is_empty() {
                 for &f in &self.sel {
                     self.data.face_mat[f as usize] = n as u16;
@@ -2350,7 +2445,7 @@ pub fn export_glb(e: &Edit, world: &dyn Fn(V3) -> V3, path: &std::path::Path) ->
         }
         views.push(serde_json::json!({ "buffer": 0, "byteOffset": off, "byteLength": idx.len() * 4, "target": 34963 }));
         accessors.push(serde_json::json!({ "bufferView": views.len() - 1, "componentType": 5125, "count": idx.len(), "type": "SCALAR" }));
-        let s = e.data.slots.get(m).cloned().unwrap_or(Slot { name: "matériau".into(), color: PALETTE[0] });
+        let s = e.data.slots.get(m).cloned().unwrap_or(Slot { name: "matériau".into(), color: PALETTE[0], material: String::new() });
         let lin = |c: u8| (c as f32 / 255.0).powf(2.2);
         materials.push(serde_json::json!({ "name": s.name, "pbrMetallicRoughness": { "baseColorFactor": [lin(s.color[0]), lin(s.color[1]), lin(s.color[2]), 1.0], "metallicFactor": 0.0, "roughnessFactor": 0.6 } }));
         let mut attrs = serde_json::json!({ "POSITION": 0, "NORMAL": 1 });
@@ -2403,7 +2498,7 @@ mod export_tests {
         let mut e = Edit::open(&mesh, dir.join("data.json"), 1.0);
         e.data.seams = seams_by_angle(&e.topo, 45.0);
         e.unwrap_now();
-        e.data.slots.push(Slot { name: "rouge".into(), color: [255, 0, 0] });
+        e.data.slots.push(Slot { name: "rouge".into(), color: [255, 0, 0], material: String::new() });
         e.data.face_mat[0] = 1;
         let id = |p: V3| p;
         export_obj(&e, &id, &dir.join("o.obj")).unwrap();
@@ -2518,7 +2613,7 @@ mod blender_files {
         let mesh = crate::modifiers::Mesh::from_model(&model, false);
         let mut e = Edit::open(&mesh, dir.join("d.json"), 1.0);
         e.auto_now(true);
-        e.data.slots.push(Slot { name: "rouge".into(), color: [220, 40, 40] });
+        e.data.slots.push(Slot { name: "rouge".into(), color: [220, 40, 40], material: String::new() });
         for f in 0..40 {
             e.data.face_mat[f] = 1;
         }

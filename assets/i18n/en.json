@@ -818,5 +818,22 @@
  "sphère": "sphere",
  "revenir à la sphère": "back to the sphere",
  "dépose un modèle 3D ici": "drop a 3D model here",
- "node": "node"
+ "node": "node",
+ "transmission": "transmission",
+ "indice de réfraction": "index of refraction",
+ "vernis": "clearcoat",
+ "bandes toon": "toon bands",
+ "reflets": "specular",
+ "verre": "glass",
+ "verre dépoli": "frosted glass",
+ "eau": "water",
+ "toon 3 bandes": "toon 3 bands",
+ "peinture de voiture": "car paint",
+ "plastique": "plastic",
+ "néon": "neon",
+ "nodes ✎": "nodes ✎",
+ "＋ nodes": "＋ nodes",
+ "ouvrir le matériau en nodes de cet ID": "open this ID's node material",
+ "créer un matériau en nodes pour cet ID et l'ouvrir": "create a node material for this ID and open it",
+ "retirer le matériau en nodes": "remove the node material"
 }

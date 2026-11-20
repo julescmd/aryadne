@@ -721,6 +721,8 @@ pub struct Prepared {
     pub floor: f32,
     /// UV par coin de triangle (vide si le maillage n'en a pas)
     pub uv: Vec<[[f32; 2]; 3]>,
+    /// ID de matériau par triangle (vide : un seul matériau)
+    pub mat: Vec<u16>,
 }
 
 impl Prepared {
@@ -736,7 +738,7 @@ impl Prepared {
         let floor = pos.iter().map(|v| v[1]).fold(f32::MAX, f32::min);
         let lin = |c: u8| (c as f32 / 255.0).powf(2.2);
         let colors = colors.iter().map(|c| [lin(c.r()), lin(c.g()), lin(c.b())]).collect();
-        Self { pos, nrm, tris, colors, edges, floor, uv: vec![] }
+        Self { pos, nrm, tris, colors, edges, floor, uv: vec![], mat: vec![] }
     }
     pub fn tri_count(&self) -> usize {
         self.tris.len()
@@ -760,7 +762,7 @@ impl Prepared {
         let floor = pos.iter().map(|v| v[1]).fold(f32::MAX, f32::min);
         let lin = |c: u8| (c as f32 / 255.0).powf(2.2);
         let colors = m.colors.iter().map(|c| [lin(c.r()), lin(c.g()), lin(c.b())]).collect();
-        Self { pos, nrm, tris: m.tris, colors, edges: m.edges, floor, uv: vec![] }
+        Self { pos, nrm, tris: m.tris, colors, edges: m.edges, floor, uv: vec![], mat: vec![] }
     }
 }
 
@@ -785,6 +787,9 @@ pub struct Look {
     pub nodes: Option<std::sync::Arc<crate::nodes::Program>>,
     /// Damier sur les UV (vérifier l'étirement et la densité)
     pub uv_checker: bool,
+    /// Matériaux en nodes par ID de matériau (mode édition) ; `slot_rev` change quand l'un d'eux change
+    pub slot_nodes: Vec<Option<std::sync::Arc<crate::nodes::Program>>>,
+    pub slot_rev: u64,
 }
 
 impl Default for Look {
@@ -804,13 +809,15 @@ impl Default for Look {
             wire_only: false,
             nodes: None,
             uv_checker: false,
+            slot_nodes: vec![],
+            slot_rev: 0,
         }
     }
 }
 
 impl Look {
     /// Clé de comparaison : l'image n'est recalculée que si elle change.
-    fn key(&self) -> (Material, bool, usize, [u32; 4], Light, bool, bool, [u32; 4], bool, usize, bool) {
+    fn key(&self) -> (Material, bool, usize, [u32; 4], Light, bool, bool, [u32; 4], bool, usize, bool, u64) {
         (
             self.material,
             self.smooth,
@@ -823,6 +830,7 @@ impl Look {
             self.wire_only,
             self.nodes.as_ref().map(|n| std::sync::Arc::as_ptr(n) as usize).unwrap_or(0),
             self.uv_checker,
+            self.slot_rev,
         )
     }
 }
@@ -1040,18 +1048,23 @@ pub fn render(m: &Prepared, cam: &Camera, look: &Look, w: usize, h: usize) -> Fr
                 [lin(nv[0]) / exposure, lin(nv[1]) / exposure, lin(nv[2]) / exposure]
             } else {
                 let (mut albedo, mut rough, mut metal, mut emit) = (if look.material == Material::Color { m.colors[ti as usize] } else { albedo0 }, rough, metal, [0.0f32; 3]);
+                // (transmission, indice, vernis, bandes toon, reflets)
+                let mut surf = (0.0f32, 1.45f32, 0.0f32, 0.0f32, 1.0f32);
                 let tuv = m.uv.get(ti as usize).map(|u| [u[0][0] * w0 + u[1][0] * w1 + u[2][0] * w2, u[0][1] * w0 + u[1][1] * w1 + u[2][1] * w2]);
                 if look.uv_checker {
                     if let Some(uv) = tuv {
                         albedo = checker(uv, if look.material == Material::Color { Some(m.colors[ti as usize]) } else { None });
                     }
                 }
-                if let Some(prog) = &look.nodes {
+                let slot_prog = m.mat.get(ti as usize).and_then(|&k| look.slot_nodes.get(k as usize)).and_then(|p| p.as_ref());
+                if let Some(prog) = slot_prog.or(look.nodes.as_ref()).filter(|_| !look.uv_checker) {
                     let pos = [pa[0] * w0 + pb[0] * w1 + pc[0] * w2, pa[1] * w0 + pb[1] * w1 + pc[1] * w2, pa[2] * w0 + pb[2] * w1 + pc[2] * w2];
                     let vc = m.colors[ti as usize];
                     let g = |x: f32| x.max(0.0).powf(1.0 / 2.2);
                     let c = crate::nodes::Ctx { uv: tuv.map(|u| [u[0], 1.0 - u[1]]).unwrap_or([pos[0] + 0.5, 0.5 - pos[1]]), pos, nrm, view: v, vcol: [g(vc[0]), g(vc[1]), g(vc[2]), 1.0], res: [w as f32, h as f32] };
-                    let (col, r, mt, em) = NODE_REGS.with(|regs| prog.material(&c, &mut regs.borrow_mut()));
+                    let sf = NODE_REGS.with(|regs| prog.material(&c, &mut regs.borrow_mut()));
+                    let (col, r, mt, em) = (sf.color, sf.rough, sf.metal, sf.emit);
+                    surf = (sf.transmission, sf.ior, sf.coat, sf.toon, sf.spec);
                     let l = |x: f32| x.clamp(0.0, 1.0).powf(2.2);
                     albedo = [l(col[0]), l(col[1]), l(col[2])];
                     rough = r;
@@ -1065,7 +1078,7 @@ pub fn render(m: &Prepared, cam: &Camera, look: &Look, w: usize, h: usize) -> Fr
                 let irr = env.irradiance(ne);
                 let r = sub([2.0 * dot(nrm, v) * nrm[0], 2.0 * dot(nrm, v) * nrm[1], 2.0 * dot(nrm, v) * nrm[2]], v);
                 let refl = env.reflect(rot_y(r, -look.env_rot), rough);
-                let f0 = if look.nodes.is_some() {
+                let f0 = if look.nodes.is_some() || slot_prog.is_some() {
                     [0.04 + (albedo[0] - 0.04) * metal, 0.04 + (albedo[1] - 0.04) * metal, 0.04 + (albedo[2] - 0.04) * metal]
                 } else if metal > 0.5 {
                     [0.95, 0.93, 0.88]
@@ -1079,12 +1092,40 @@ pub fn render(m: &Prepared, cam: &Camera, look: &Look, w: usize, h: usize) -> Fr
                 let spec_l = dot(nrm, half).max(0.0).powf(shin) * (shin + 8.0) / 25.0;
                 let li = look.light.intensity;
                 let lc = look.light.color;
+                let (transmission, ior, coat, toon, spec_k) = surf;
+                // Toon : la lumière tombe par paliers, et l'ambiance devient une teinte plate
+                let (ndl, irr, spec_l) = if toon >= 1.0 {
+                    let bands = toon.round();
+                    let q = ((ndl * bands).ceil() / bands).min(1.0);
+                    let amb = (irr[0] + irr[1] + irr[2]) / 3.0;
+                    (q, [amb.min(0.35); 3], if spec_l > 0.6 { 1.0 } else { 0.0 })
+                } else {
+                    (ndl, irr, spec_l)
+                };
+                // Ce qu'on voit à travers : l'environnement dans la direction réfractée
+                let through = if transmission > 0.0 {
+                    let eta = 1.0 / ior;
+                    let cosi = dot(nrm, v).clamp(-1.0, 1.0);
+                    let k = 1.0 - eta * eta * (1.0 - cosi * cosi);
+                    let d = if k < 0.0 {
+                        r
+                    } else {
+                        let a = eta * cosi - k.sqrt();
+                        [-eta * v[0] + a * nrm[0], -eta * v[1] + a * nrm[1], -eta * v[2] + a * nrm[2]]
+                    };
+                    env.reflect(rot_y(d, -look.env_rot), rough)
+                } else {
+                    [0.0; 3]
+                };
+                let coat_refl = if coat > 0.0 { env.reflect(rot_y(r, -look.env_rot), 0.04) } else { [0.0; 3] };
                 let mut out = [0.0f32; 3];
                 for ch in 0..3 {
                     let f = f0[ch] + (1.0 - f0[ch]) * fres * (1.0 - rough).powf(2.0);
                     let diff = albedo[ch] * (irr[ch] * s + lc[ch] * li * ndl) * (1.0 - metal);
-                    let spec = (refl[ch] * s + lc[ch] * li * spec_l * 0.25) * f;
-                    out[ch] = diff * (1.0 - f) + spec + emit[ch];
+                    let diff = diff * (1.0 - transmission) + through[ch] * s * albedo[ch] * transmission * (1.0 - metal);
+                    let spec = (refl[ch] * s + lc[ch] * li * spec_l * 0.25) * f * spec_k;
+                    let clear = coat * (coat_refl[ch] * s + lc[ch] * li * spec_l * 0.25) * (0.04 + 0.96 * fres);
+                    out[ch] = diff * (1.0 - f) + spec + clear + emit[ch];
                 }
                 out
             };
@@ -1206,6 +1247,9 @@ pub struct Viewer {
     pub hdr_files: Vec<(String, std::path::PathBuf)>,
     /// Matériaux en nodes du coffre (nom, chemin), et celui qui est appliqué.
     pub mat_files: Vec<(String, std::path::PathBuf)>,
+    /// Matériaux en nodes des IDs (mode édition) : fichier, date vue, programme
+    slot_progs: Vec<Option<(std::path::PathBuf, Option<std::time::SystemTime>, std::sync::Arc<crate::nodes::Program>)>>,
+    slot_rev: u64,
     /// Matériau à ouvrir dans l'éditeur de nodes (à côté du modèle)
     pub open_request: Option<std::path::PathBuf>,
     pub root: String,
@@ -1248,6 +1292,8 @@ impl Viewer {
             look: Look::default(),
             hdr_files: vec![],
             mat_files: vec![],
+            slot_progs: vec![],
+            slot_rev: 0,
             open_request: None,
             root: String::new(),
             mat_active: None,
@@ -1388,6 +1434,7 @@ impl Viewer {
                 let (mesh, uvs) = e.display(theme::pal().accent);
                 let mut prep = Prepared::from_mesh(mesh);
                 prep.uv = uvs;
+                prep.mat = e.tri_mat.clone();
                 self.edit_seen = e.version;
                 self.prepared = Some((z_up, 0xED17_0000_0000 + e.version, prep));
                 self.last = None;
@@ -1424,6 +1471,48 @@ impl Viewer {
                 ui.label(crate::i18n::t("préparation du modèle…"));
             });
             return;
+        }
+        // Matériaux en nodes des IDs : créés à la demande, rechargés dès que leur fichier change
+        if let Some(e) = &mut self.edit {
+            if let Some(k) = e.mat_request.take() {
+                if e.data.slots.get(k).is_some_and(|s| s.material.is_empty()) && !self.root.is_empty() {
+                    let dir = std::path::Path::new(&self.root).join("nodes");
+                    let _ = std::fs::create_dir_all(&dir);
+                    let stem = self.path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "Matériau".into());
+                    let base = format!("{stem} - {}", e.data.slots[k].name);
+                    let mut path = dir.join(format!("{base}.mat.json"));
+                    let mut n = 2;
+                    while path.exists() {
+                        path = dir.join(format!("{base} {n}.mat.json"));
+                        n += 1;
+                    }
+                    if crate::nodes::Graph::new_material().save(&path).is_ok() {
+                        e.data.slots[k].material = path.to_string_lossy().to_string();
+                        e.save();
+                    }
+                }
+                if let Some(s) = e.data.slots.get(k).filter(|s| !s.material.is_empty()) {
+                    self.open_request = Some(std::path::PathBuf::from(&s.material));
+                }
+            }
+            self.slot_progs.resize(e.data.slots.len(), None);
+            for (k, s) in e.data.slots.iter().enumerate() {
+                if s.material.is_empty() {
+                    if self.slot_progs[k].take().is_some() {
+                        self.slot_rev += 1;
+                    }
+                    continue;
+                }
+                let path = std::path::PathBuf::from(&s.material);
+                let mt = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+                let fresh = self.slot_progs[k].as_ref().is_some_and(|(p, seen, _)| *p == path && *seen == mt);
+                if !fresh {
+                    if let Ok(prog) = crate::nodes::Graph::load(&path).and_then(|g| crate::nodes::Program::compile(&g, &self.root, 1024).map_err(|e| e.1)) {
+                        self.slot_progs[k] = Some((path, mt, std::sync::Arc::new(prog)));
+                        self.slot_rev += 1;
+                    }
+                }
+            }
         }
         // Matériau en nodes : rechargé quand le fichier change (édité dans un autre onglet)
         if let Some((path, seen)) = &self.mat_active {
@@ -1825,6 +1914,8 @@ impl Viewer {
         if let Some(e) = &self.edit {
             look.material = Material::Color;
             look.nodes = None;
+            look.slot_nodes = self.slot_progs.iter().map(|p| p.as_ref().map(|x| x.2.clone())).collect();
+            look.slot_rev = self.slot_rev;
             look.uv_checker = e.checker && e.data.has_uv();
             if look.wire == 0.0 {
                 look.wire = 0.35;
@@ -2320,5 +2411,29 @@ mod apercu_cc {
             let f = render(&prep, &Camera { yaw: 0.6, pitch: 0.4, dist: 0.55, ..Default::default() }, &look, 700, 500);
             image::RgbaImage::from_raw(700, 500, f.rgba).unwrap().save(format!("/tmp/cc{i}.png")).unwrap();
         }
+    }
+}
+
+#[cfg(test)]
+mod apercu_materiaux {
+    /// Rend chaque préréglage sur la sphère : aucun pixel invalide, et le verre laisse voir le fond.
+    #[test]
+    fn prereglages() {
+        let sphere = super::preview_sphere();
+        let mut means = std::collections::HashMap::new();
+        for name in crate::nodes::MATERIAL_PRESETS {
+            let g = crate::nodes::material_preset(name).unwrap();
+            let prog = crate::nodes::Program::compile(&g, "", 64).ok().unwrap();
+            let img = super::render_material_preview(&sphere, std::sync::Arc::new(prog), 96);
+            assert!(img.px.iter().all(|p| p.iter().all(|x| x.is_finite())), "{name}");
+            if let Ok(dir) = std::env::var("DUMP_PRESETS") {
+                let bytes: Vec<u8> = img.px.iter().flat_map(|c| [(c[0] * 255.0) as u8, (c[1] * 255.0) as u8, (c[2] * 255.0) as u8, 255]).collect();
+                image::RgbaImage::from_raw(96, 96, bytes).unwrap().save(format!("{dir}/{name}.png")).unwrap();
+            }
+            let c = img.px[48 * 96 + 48];
+            means.insert(name, (c[0] + c[1] + c[2]) / 3.0);
+        }
+        // Le néon éclaire, le toon et le verre ne sont pas noirs
+        assert!(means["néon"] > 0.3 && means["verre"] > 0.05 && means["toon 3 bandes"] > 0.05);
     }
 }

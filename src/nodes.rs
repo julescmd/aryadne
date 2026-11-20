@@ -63,7 +63,7 @@ const MATH: &[&str] = &["ajouter", "soustraire", "multiplier", "diviser", "puiss
 
 pub const DEFS: &[Def] = &[
     // Sorties
-    Def { op: "mat_out", label: "Sortie matériau", cat: "sortie", inputs: &[("couleur", Sock::Color, [0.8, 0.5, 0.4, 1.0]), ("rugosité", Sock::Float, f(0.5)), ("métal", Sock::Float, f(0.0)), ("émission", Sock::Color, BLACK)], outputs: &[], params: &[], mat: true, comp: false },
+    Def { op: "mat_out", label: "Sortie matériau", cat: "sortie", inputs: &[("couleur", Sock::Color, [0.8, 0.5, 0.4, 1.0]), ("rugosité", Sock::Float, f(0.5)), ("métal", Sock::Float, f(0.0)), ("émission", Sock::Color, BLACK), ("transmission", Sock::Float, f(0.0)), ("indice de réfraction", Sock::Float, f(1.45)), ("vernis", Sock::Float, f(0.0)), ("bandes toon", Sock::Float, f(0.0)), ("reflets", Sock::Float, f(1.0))], outputs: &[], params: &[], mat: true, comp: false },
     Def { op: "comp_out", label: "Sortie", cat: "sortie", inputs: &[("image", Sock::Color, GRAY)], outputs: &[], params: &[], mat: false, comp: true },
     // Entrées
     Def { op: "image", label: "Image", cat: "entrée", inputs: &[], outputs: &[("image", Sock::Color), ("alpha", Sock::Float)], params: &[ParamDef::File("fichier")], mat: false, comp: true },
@@ -407,12 +407,57 @@ pub fn material_preset(name: &str) -> Option<Graph> {
             set(&mut g, out, 1, f(0.25));
             set(&mut g, out, 2, f(1.0));
         }
+        "verre" => {
+            set(&mut g, out, 0, [0.95, 0.98, 1.0, 1.0]);
+            set(&mut g, out, 1, f(0.03));
+            set(&mut g, out, 4, f(1.0));
+            set(&mut g, out, 5, f(1.5));
+        }
+        "verre dépoli" => {
+            set(&mut g, out, 0, [0.9, 0.95, 0.95, 1.0]);
+            set(&mut g, out, 1, f(0.45));
+            set(&mut g, out, 4, f(1.0));
+            set(&mut g, out, 5, f(1.5));
+        }
+        "eau" => {
+            // Teinte plus profonde là où on regarde la surface de face, reflets sur les bords
+            let fr = g.add("fresnel", [0.0, 40.0]);
+            set(&mut g, fr, 0, f(2.0));
+            let rp = g.add("ramp", [230.0, 40.0]);
+            set(&mut g, rp, 1, [0.05, 0.32, 0.42, 1.0]);
+            set(&mut g, rp, 2, [0.55, 0.85, 0.9, 1.0]);
+            g.connect(fr, 0, rp, 0);
+            g.connect(rp, 0, out, 0);
+            set(&mut g, out, 1, f(0.04));
+            set(&mut g, out, 4, f(0.85));
+            set(&mut g, out, 5, f(1.33));
+        }
+        "toon 3 bandes" => {
+            set(&mut g, out, 0, [0.95, 0.45, 0.3, 1.0]);
+            set(&mut g, out, 1, f(0.6));
+            set(&mut g, out, 7, f(3.0));
+            set(&mut g, out, 8, f(0.0));
+        }
+        "peinture de voiture" => {
+            set(&mut g, out, 0, [0.6, 0.05, 0.08, 1.0]);
+            set(&mut g, out, 1, f(0.45));
+            set(&mut g, out, 2, f(0.6));
+            set(&mut g, out, 6, f(1.0));
+        }
+        "plastique" => {
+            set(&mut g, out, 0, [0.1, 0.35, 0.8, 1.0]);
+            set(&mut g, out, 1, f(0.3));
+        }
+        "néon" => {
+            set(&mut g, out, 0, [0.05, 0.05, 0.05, 1.0]);
+            set(&mut g, out, 3, [0.2, 1.0, 0.8, 1.0]);
+        }
         _ => return None,
     }
     Some(g)
 }
 
-pub const MATERIAL_PRESETS: [&str; 6] = ["bois", "pierre", "métal rouillé", "toon", "céramique", "or"];
+pub const MATERIAL_PRESETS: [&str; 13] = ["bois", "pierre", "métal rouillé", "toon", "céramique", "or", "verre", "verre dépoli", "eau", "toon 3 bandes", "peinture de voiture", "plastique", "néon"];
 
 pub const DEFAULT_SHADER: &str = "// r g b a : couleur A · ar ag ab : A · br bg bb : B · f : entrée F\n// x y : coordonnées 0..1 · nx ny nz / px py pz : normale et position (matériau)\n// fonctions : sin cos abs min max clamp mix step smoothstep pow sqrt fract floor noise fbm rand…\nk = smoothstep(0.3, 0.7, fbm(x * 6, y * 6, 0))\nr = mix(ar, br, k)\ng = mix(ag, bg, k)\nb = mix(ab, bb, k)\n";
 
@@ -844,6 +889,23 @@ fn lum(c: V) -> f32 {
 // ---------- évaluation ----------
 
 /// Contexte d'un pixel (image) ou d'un point de surface (matériau).
+/// Ce que la sortie matériau décrit pour un point de la surface.
+pub struct Surf {
+    pub color: V,
+    pub rough: f32,
+    pub metal: f32,
+    pub emit: V,
+    /// 0 : opaque ; 1 : on voit à travers (verre, eau)
+    pub transmission: f32,
+    pub ior: f32,
+    /// Couche de vernis brillant par-dessus
+    pub coat: f32,
+    /// Nombre de bandes d'ombre (0 : ombrage normal)
+    pub toon: f32,
+    /// Force des reflets
+    pub spec: f32,
+}
+
 #[derive(Clone, Copy, Default)]
 pub struct Ctx {
     pub uv: [f32; 2],
@@ -981,7 +1043,7 @@ impl Program {
     }
 
     /// Matériau : couleur (sRGB), rugosité, métal, émission.
-    pub fn material(&self, c: &Ctx, regs: &mut Vec<V>) -> (V, f32, f32, V) {
+    pub fn material(&self, c: &Ctx, regs: &mut Vec<V>) -> Surf {
         regs.resize(self.regs, [0.0; 4]);
         for s in &self.steps {
             let ins: Vec<V> = s.ins.iter().map(|i| match i {
@@ -989,14 +1051,15 @@ impl Program {
                 Src::Const(v) => *v,
             }).collect();
             if s.op == "mat_out" {
-                return (ins[0], ins[1][0].clamp(0.02, 1.0), ins[2][0].clamp(0.0, 1.0), ins[3]);
+                let x = |k: usize, d: f32| ins.get(k).map(|v| v[0]).unwrap_or(d);
+                return Surf { color: ins[0], rough: ins[1][0].clamp(0.02, 1.0), metal: ins[2][0].clamp(0.0, 1.0), emit: ins[3], transmission: x(4, 0.0).clamp(0.0, 1.0), ior: x(5, 1.45).clamp(1.0, 3.0), coat: x(6, 0.0).clamp(0.0, 1.0), toon: x(7, 0.0).clamp(0.0, 16.0), spec: x(8, 1.0).clamp(0.0, 2.0) };
             }
             let o = pixel(s, &ins, c);
             for (k, v) in o.iter().enumerate().take(s.nout.min(4)) {
                 regs[s.base + k] = *v;
             }
         }
-        ([0.8, 0.5, 0.4, 1.0], 0.5, 0.0, [0.0; 4])
+        Surf { color: [0.8, 0.5, 0.4, 1.0], rough: 0.5, metal: 0.0, emit: [0.0; 4], transmission: 0.0, ior: 1.45, coat: 0.0, toon: 0.0, spec: 1.0 }
     }
 
     /// Compositing : calcule l'image de sortie à la taille donnée (ou celle de la première image).
@@ -3109,7 +3172,8 @@ mod tests {
         let m = Graph::new_material();
         let prog = Program::compile(&m, "/tmp", 64).unwrap();
         let mut regs = vec![];
-        let (col, rough, _, _) = prog.material(&Ctx { pos: [0.1, 0.2, 0.3], nrm: [0.0, 1.0, 0.0], ..Default::default() }, &mut regs);
+        let sf = prog.material(&Ctx { pos: [0.1, 0.2, 0.3], nrm: [0.0, 1.0, 0.0], ..Default::default() }, &mut regs);
+        let (col, rough) = (sf.color, sf.rough);
         assert!(col[0] >= 0.0 && rough == 0.5);
         // JSON aller-retour
         let t = serde_json::to_string(&m).unwrap();
