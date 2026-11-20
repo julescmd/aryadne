@@ -1920,7 +1920,7 @@ impl Edit {
     pub fn retopo_poll(&mut self) -> bool {
         let Some(j) = &self.retopo_job else { return false };
         if let Ok(r) = j.rx.try_recv() {
-            self.message = Some(format!("retopo : {} faces, {} quads, {} sommets", r.faces.len(), r.quads(), r.pos.len()));
+            self.message = Some(format!("retopo : {} quads, {} pôles, {} sommets", r.quads(), r.stats.poles, r.pos.len()));
             self.retopo = Some(std::sync::Arc::new(r));
             self.retopo_job = None;
             self.retopo_show = true;
@@ -1948,9 +1948,21 @@ impl Edit {
             ui.label(crate::i18n::t("faces visées"));
             ui.add(egui::DragValue::new(&mut self.retopo_opt.faces).range(50..=60_000).speed(20.0));
         });
+        ui.horizontal(|ui| {
+            let mut on = self.retopo_opt.symmetry != 0;
+            if ui.checkbox(&mut on, crate::i18n::t("symétrie")).on_hover_text(crate::i18n::t("Le maillage est calculé sur une moitié puis recopié en miroir, avec une boucle sur le plan.")).changed() {
+                self.retopo_opt.symmetry = if on { 1 } else { 0 };
+            }
+            if on {
+                for (k, l) in [(1u8, "X"), (2, "Y"), (3, "Z")] {
+                    ui.selectable_value(&mut self.retopo_opt.symmetry, k, l);
+                }
+            }
+        });
+        ui.add(egui::Slider::new(&mut self.retopo_opt.curvature, 0.0..=2.0).text(crate::i18n::t("suivre les courbures"))).on_hover_text(crate::i18n::t("0 : flux le plus régulier possible. Plus haut : les boucles suivent les formes (membres, plis), au prix de quelques pôles en plus."));
+        ui.add(egui::Slider::new(&mut self.retopo_opt.adaptive, 0.0..=1.0).text(crate::i18n::t("taille adaptative"))).on_hover_text(crate::i18n::t("Les quads rétrécissent là où les boucles se resserrent au lieu de se déformer."));
+        ui.add(egui::Slider::new(&mut self.retopo_opt.sharp_angle, 0.0..=90.0).suffix("°").text(crate::i18n::t("arêtes vives"))).on_hover_text(crate::i18n::t("Au-delà de cet angle, une arête devient une boucle nette du maillage (0 : désactivé). Les bords ouverts sont toujours suivis."));
         ui.add(egui::Slider::new(&mut self.retopo_opt.guide_radius, 0.5..=4.0).text(crate::i18n::t("portée des guides")));
-        ui.add(egui::Slider::new(&mut self.retopo_opt.iterations, 40..=400).text(crate::i18n::t("lissage du flux")));
-        ui.checkbox(&mut self.retopo_opt.pure_quads, crate::i18n::t("100 % quads"));
         ui.add_space(6.0);
         if let Some(j) = &self.retopo_job {
             let f = j.progress.lock().map(|g| *g).unwrap_or(0.0);
@@ -1983,7 +1995,7 @@ impl Edit {
         }
         if let Some(r) = &self.retopo {
             ui.add_space(6.0);
-            ui.label(RichText::new(format!("{} faces · {} quads · {} sommets", r.faces.len(), r.quads(), r.pos.len())).color(p.muted).size(11.0));
+            ui.label(RichText::new(format!("{} quads · {} pôles · {} sommets", r.quads(), r.stats.poles, r.pos.len())).color(p.muted).size(11.0));
             ui.horizontal(|ui| {
                 ui.checkbox(&mut self.retopo_show, crate::i18n::t("afficher"));
                 if ui.button(crate::i18n::t("exporter en OBJ")).clicked() {

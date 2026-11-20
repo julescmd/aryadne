@@ -797,5 +797,13 @@
  "exporter en OBJ": "export as OBJ",
  "matériaux": "materials",
  "coutures": "seams",
- "UV": "UV"
+ "UV": "UV",
+ "symétrie": "symmetry",
+ "Le maillage est calculé sur une moitié puis recopié en miroir, avec une boucle sur le plan.": "The mesh is computed on one half then mirrored, with an edge loop on the plane.",
+ "suivre les courbures": "follow curvature",
+ "0 : flux le plus régulier possible. Plus haut : les boucles suivent les formes (membres, plis), au prix de quelques pôles en plus.": "0: most regular flow. Higher: loops follow the forms (limbs, creases), at the cost of a few more poles.",
+ "taille adaptative": "adaptive size",
+ "Les quads rétrécissent là où les boucles se resserrent au lieu de se déformer.": "Quads shrink where loops converge instead of getting distorted.",
+ "arêtes vives": "hard edges",
+ "Au-delà de cet angle, une arête devient une boucle nette du maillage (0 : désactivé). Les bords ouverts sont toujours suivis.": "Above this angle, an edge becomes a crisp loop of the mesh (0: off). Open borders are always followed."
 }

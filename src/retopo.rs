@@ -54,11 +54,15 @@ pub struct Options {
     pub adaptive: f32,
     /// Force d'alignement du flux sur les courbures principales (0 : aucun)
     pub curvature: f32,
+    /// Angle (degrés) à partir duquel une arête est vive et devient une boucle (0 : désactivé)
+    pub sharp_angle: f32,
+    /// Symétrie : 0 aucune, 1 plan X = 0, 2 plan Y = 0, 3 plan Z = 0
+    pub symmetry: u8,
 }
 
 impl Default for Options {
     fn default() -> Self {
-        Options { faces: 1500, iterations: 160, guide_radius: 1.2, pure_quads: true, adaptive: 1.0, curvature: 1.0 }
+        Options { faces: 1500, iterations: 160, guide_radius: 1.2, pure_quads: true, adaptive: 1.0, curvature: 1.0, sharp_angle: 35.0, symmetry: 0 }
     }
 }
 
@@ -70,6 +74,8 @@ pub struct Stats {
     pub field_sing: usize,
     pub unfixed: usize,
     pub flips: usize,
+    /// Sommets intérieurs dont la valence n'est pas 4, dans le résultat
+    pub poles: usize,
 }
 
 pub struct Result {
@@ -121,7 +127,7 @@ fn weld(pos: &[V3], tris: &[[u32; 3]]) -> (Vec<V3>, Vec<[u32; 3]>) {
 /// plus courtes que `min_len` sont contractées en leur milieu, sans créer d'arête non
 /// variété ni retourner de triangle. Le calcul qui suit ne dépend alors plus de la taille
 /// du modèle d'origine, seulement du nombre de quads demandé.
-fn decimate(mut pos: Vec<V3>, mut tris: Vec<[u32; 3]>, min_len: f32) -> (Vec<V3>, Vec<[u32; 3]>) {
+fn decimate(mut pos: Vec<V3>, mut tris: Vec<[u32; 3]>, min_len: f32, sharp: &Features) -> (Vec<V3>, Vec<[u32; 3]>) {
     let nv = pos.len();
     let mut vf: Vec<Vec<u32>> = vec![vec![]; nv];
     for (fi, t) in tris.iter().enumerate() {
@@ -146,6 +152,8 @@ fn decimate(mut pos: Vec<V3>, mut tris: Vec<[u32; 3]>, min_len: f32) -> (Vec<V3>
         }
     }
     drop(count);
+    let mut fset: HashSet<(u32, u32)> = sharp.edges.iter().copied().collect();
+    let mut fdeg = sharp.deg.clone();
     let fnormal = |pos: &[V3], t: [u32; 3]| cross(sub(pos[t[1] as usize], pos[t[0] as usize]), sub(pos[t[2] as usize], pos[t[0] as usize]));
     for _ in 0..24 {
         let mut cand: Vec<(f32, u32, u32)> = vec![];
@@ -189,6 +197,11 @@ fn decimate(mut pos: Vec<V3>, mut tris: Vec<[u32; 3]>, min_len: f32) -> (Vec<V3>
             if (border[a] || border[b]) && shared.len() != 1 {
                 continue;
             }
+            // Arête vive : on ne contracte que le long de la ligne, jamais un coin
+            let on_line = fset.contains(&((a.min(b)) as u32, (a.max(b)) as u32));
+            if (fdeg[a] > 0 || fdeg[b] > 0) && !(on_line && fdeg[a] == 2 && fdeg[b] == 2) {
+                continue;
+            }
             let m = mul(add(pos[a], pos[b]), 0.5);
             // Aucun triangle restant ne doit se retourner ni s'aplatir
             let mut ok = true;
@@ -210,6 +223,15 @@ fn decimate(mut pos: Vec<V3>, mut tris: Vec<[u32; 3]>, min_len: f32) -> (Vec<V3>
             }
             if !ok {
                 continue;
+            }
+            if on_line {
+                fset.remove(&((a.min(b)) as u32, (a.max(b)) as u32));
+                for &x in &rb {
+                    if fset.remove(&(x.min(b as u32), x.max(b as u32))) {
+                        fset.insert((x.min(a as u32), x.max(a as u32)));
+                    }
+                }
+                fdeg[b] = 0;
             }
             pos[a] = m;
             for &f in &shared {
@@ -385,11 +407,13 @@ struct Graph {
     map: HashMap<(u32, u32), u32>,
     /// Racine du poids de chaque arête dans les moindres carrés
     w: Vec<f64>,
+    /// Coordonnées imposées (lignes caractéristiques) : (sommet, composante, valeur)
+    pins: Vec<(u32, u8, f64)>,
 }
 
 impl Graph {
     fn new(f: &[[u32; 3]]) -> Graph {
-        let mut g = Graph { ends: vec![], k: vec![], d: vec![], ef: vec![], nm: vec![], fe: Vec::with_capacity(f.len()), map: HashMap::new(), w: vec![] };
+        let mut g = Graph { ends: vec![], k: vec![], d: vec![], ef: vec![], nm: vec![], fe: Vec::with_capacity(f.len()), map: HashMap::new(), w: vec![], pins: vec![] };
         for (fi, t) in f.iter().enumerate() {
             let mut es = [0u32; 3];
             for s in 0..3 {
@@ -510,52 +534,81 @@ struct ConePath {
 /// (CGLS). Les λ (un vecteur réel par chemin) laissent les singularités glisser librement :
 /// c'est la relaxation continue du problème entier, comme dans Mixed-Integer Quadrangulation.
 fn solve_ext(g: &Graph, geo: &[[f64; 2]], u: &mut [[f64; 2]], paths: &[&ConePath], lam: &mut [[f64; 2]], max_iter: usize, tol: f64) -> usize {
+    use rayon::prelude::*;
+    const CHUNK: usize = 8192;
     let (n, ne, np) = (u.len(), g.ends.len(), paths.len());
-    // Mise à l'échelle des colonnes (préconditionneur de Jacobi) : x = S·y
-    let mut deg = vec![0.0f64; n];
-    for (e, &(i, j)) in g.ends.iter().enumerate() {
-        deg[i as usize] += g.w[e] * g.w[e];
-        deg[j as usize] += g.w[e] * g.w[e];
+    // Arêtes de chaque sommet (pour paralléliser Bᵀ) : (arête, le sommet est-il la première extrémité ?)
+    let mut off = vec![0u32; n + 1];
+    for &(i, j) in &g.ends {
+        off[i as usize + 1] += 1;
+        off[j as usize + 1] += 1;
     }
-    let sc_u: Vec<f64> = deg.iter().map(|d| 1.0 / d.max(1.0).sqrt()).collect();
+    for i in 0..n {
+        off[i + 1] += off[i];
+    }
+    let mut fill = off.clone();
+    let mut inc = vec![(0u32, false); off[n] as usize];
+    for (e, &(i, j)) in g.ends.iter().enumerate() {
+        inc[fill[i as usize] as usize] = (e as u32, true);
+        fill[i as usize] += 1;
+        inc[fill[j as usize] as usize] = (e as u32, false);
+        fill[j as usize] += 1;
+    }
+    // Mise à l'échelle des colonnes (préconditionneur de Jacobi) : x = S·y
+    const PINW: f64 = 10.0;
+    let mut pinned = vec![0.0f64; n];
+    for &(i, _, _) in &g.pins {
+        pinned[i as usize] = PINW * PINW;
+    }
+    let sc_u: Vec<f64> = (0..n).map(|i| 1.0 / (pinned[i] + inc[off[i] as usize..off[i + 1] as usize].iter().map(|&(e, _)| g.w[e as usize] * g.w[e as usize]).sum::<f64>()).max(1.0).sqrt()).collect();
+    let npin = g.pins.len();
+    let fwd_pins = |yu: &[[f64; 2]], out: &mut [f64]| {
+        for (k, &(i, c, _)) in g.pins.iter().enumerate() {
+            out[k] = PINW * yu[i as usize][c as usize] * sc_u[i as usize];
+        }
+    };
+    let adj_pins = |rp: &[f64], ou: &mut [[f64; 2]]| {
+        for (k, &(i, c, _)) in g.pins.iter().enumerate() {
+            ou[i as usize][c as usize] += PINW * rp[k] * sc_u[i as usize];
+        }
+    };
+    let dot1 = |a: &[f64], b: &[f64]| -> f64 { a.iter().zip(b).map(|(x, y)| x * y).sum() };
     let sc_l: Vec<f64> = paths.iter().map(|p| 1.0 / p.cols.iter().map(|c| g.w[c.0 as usize] * g.w[c.0 as usize]).sum::<f64>().max(1.0).sqrt()).collect();
     // B·S·y
     let fwd = |yu: &[[f64; 2]], yl: &[[f64; 2]], out: &mut [[f64; 2]]| {
-        for e in 0..ne {
+        out.par_iter_mut().enumerate().with_min_len(CHUNK).for_each(|(e, o)| {
             let (i, j) = (g.ends[e].0 as usize, g.ends[e].1 as usize);
             let t = trotf(g.k[e], yu[j]);
-            out[e] = [t[0] * sc_u[j] - yu[i][0] * sc_u[i], t[1] * sc_u[j] - yu[i][1] * sc_u[i]];
-        }
+            let w = g.w[e];
+            *o = [(t[0] * sc_u[j] - yu[i][0] * sc_u[i]) * w, (t[1] * sc_u[j] - yu[i][1] * sc_u[i]) * w];
+        });
         for (s, p) in paths.iter().enumerate() {
             let l = [yl[s][0] * sc_l[s], yl[s][1] * sc_l[s]];
             for &(e, dx, dy) in &p.cols {
-                out[e as usize][0] += dx[0] as f64 * l[0] + dy[0] as f64 * l[1];
-                out[e as usize][1] += dx[1] as f64 * l[0] + dy[1] as f64 * l[1];
+                let w = g.w[e as usize];
+                out[e as usize][0] += (dx[0] as f64 * l[0] + dy[0] as f64 * l[1]) * w;
+                out[e as usize][1] += (dx[1] as f64 * l[0] + dy[1] as f64 * l[1]) * w;
             }
-        }
-        for e in 0..ne {
-            out[e][0] *= g.w[e];
-            out[e][1] *= g.w[e];
         }
     };
     // S·Bᵀ·r
     let adjoint = |r: &[[f64; 2]], ou: &mut [[f64; 2]], ol: &mut [[f64; 2]]| {
-        for o in ou.iter_mut() {
-            *o = [0.0; 2];
-        }
-        for e in 0..ne {
-            let (i, j) = (g.ends[e].0 as usize, g.ends[e].1 as usize);
-            let re = [r[e][0] * g.w[e], r[e][1] * g.w[e]];
-            ou[i][0] -= re[0];
-            ou[i][1] -= re[1];
-            let t = trotf((4 - g.k[e]) & 3, re);
-            ou[j][0] += t[0];
-            ou[j][1] += t[1];
-        }
-        for i in 0..n {
-            ou[i][0] *= sc_u[i];
-            ou[i][1] *= sc_u[i];
-        }
+        ou.par_iter_mut().enumerate().with_min_len(CHUNK).for_each(|(i, o)| {
+            let mut acc = [0.0f64; 2];
+            for &(e, first) in &inc[off[i] as usize..off[i + 1] as usize] {
+                let e = e as usize;
+                let re = [r[e][0] * g.w[e], r[e][1] * g.w[e]];
+                if first {
+                    acc[0] -= re[0];
+                    acc[1] -= re[1];
+                } else {
+                    let t = trotf((4 - g.k[e]) & 3, re);
+                    acc[0] += t[0];
+                    acc[1] += t[1];
+                }
+            }
+            *o = [acc[0] * sc_u[i], acc[1] * sc_u[i]];
+        });
         for (s, p) in paths.iter().enumerate() {
             let mut acc = [0.0; 2];
             for &(e, dx, dy) in &p.cols {
@@ -566,47 +619,51 @@ fn solve_ext(g: &Graph, geo: &[[f64; 2]], u: &mut [[f64; 2]], paths: &[&ConePath
             ol[s] = [acc[0] * sc_l[s], acc[1] * sc_l[s]];
         }
     };
-    let dot2 = |a: &[[f64; 2]], b: &[[f64; 2]]| -> f64 { a.iter().zip(b).map(|(x, y)| x[0] * y[0] + x[1] * y[1]).sum() };
+    let dot2 = |a: &[[f64; 2]], b: &[[f64; 2]]| -> f64 { a.par_iter().zip(b.par_iter()).with_min_len(CHUNK).map(|(x, y)| x[0] * y[0] + x[1] * y[1]).sum() };
+    let axpy = |x: &mut [[f64; 2]], a: f64, p: &[[f64; 2]]| {
+        x.par_iter_mut().zip(p.par_iter()).with_min_len(CHUNK).for_each(|(x, p)| {
+            x[0] += a * p[0];
+            x[1] += a * p[1];
+        });
+    };
     let mut yu: Vec<[f64; 2]> = (0..n).map(|i| [u[i][0] / sc_u[i], u[i][1] / sc_u[i]]).collect();
     let mut yl: Vec<[f64; 2]> = (0..np).map(|s| [lam[s][0] / sc_l[s], lam[s][1] / sc_l[s]]).collect();
     let mut r = vec![[0.0f64; 2]; ne];
+    let mut rp = vec![0.0f64; npin];
+    let mut qp = vec![0.0f64; npin];
+    fwd_pins(&yu, &mut rp);
+    for (k, &(_, _, target)) in g.pins.iter().enumerate() {
+        rp[k] = PINW * target - rp[k];
+    }
     fwd(&yu, &yl, &mut r);
-    let mut c2 = 0.0;
     for e in 0..ne {
         let c = [(geo[e][0] - g.d[e][0] as f64) * g.w[e], (geo[e][1] - g.d[e][1] as f64) * g.w[e]];
-        c2 += c[0] * c[0] + c[1] * c[1];
         r[e] = [c[0] - r[e][0], c[1] - r[e][1]];
     }
     let (mut su, mut sl) = (vec![[0.0f64; 2]; n], vec![[0.0f64; 2]; np]);
     adjoint(&r, &mut su, &mut sl);
+    adj_pins(&rp, &mut su);
     let (mut pu, mut pl) = (su.clone(), sl.clone());
     let mut gamma = dot2(&su, &su) + dot2(&sl, &sl);
-    let _ = c2;
     let stop = ne as f64 * tol;
     let mut q = vec![[0.0f64; 2]; ne];
     let mut it = 0;
     while it < max_iter && gamma > stop {
         fwd(&pu, &pl, &mut q);
-        let alpha = gamma / dot2(&q, &q).max(1e-300);
-        for i in 0..n {
-            yu[i][0] += alpha * pu[i][0];
-            yu[i][1] += alpha * pu[i][1];
+        fwd_pins(&pu, &mut qp);
+        let alpha = gamma / (dot2(&q, &q) + dot1(&qp, &qp)).max(1e-300);
+        for k in 0..npin {
+            rp[k] -= alpha * qp[k];
         }
-        for s in 0..np {
-            yl[s][0] += alpha * pl[s][0];
-            yl[s][1] += alpha * pl[s][1];
-        }
-        for e in 0..ne {
-            r[e][0] -= alpha * q[e][0];
-            r[e][1] -= alpha * q[e][1];
-        }
+        axpy(&mut yu, alpha, &pu);
+        axpy(&mut yl, alpha, &pl);
+        axpy(&mut r, -alpha, &q);
         adjoint(&r, &mut su, &mut sl);
+        adj_pins(&rp, &mut su);
         let g2 = dot2(&su, &su) + dot2(&sl, &sl);
         let beta = g2 / gamma;
         gamma = g2;
-        for i in 0..n {
-            pu[i] = [su[i][0] + beta * pu[i][0], su[i][1] + beta * pu[i][1]];
-        }
+        pu.par_iter_mut().zip(su.par_iter()).with_min_len(CHUNK).for_each(|(p, s)| *p = [s[0] + beta * p[0], s[1] + beta * p[1]]);
         for s in 0..np {
             pl[s] = [sl[s][0] + beta * pl[s][0], sl[s][1] + beta * pl[s][1]];
         }
@@ -619,10 +676,6 @@ fn solve_ext(g: &Graph, geo: &[[f64; 2]], u: &mut [[f64; 2]], paths: &[&ConePath
         lam[s] = [yl[s][0] * sc_l[s], yl[s][1] * sc_l[s]];
     }
     it
-}
-
-fn solve_u(g: &Graph, geo: &[[f64; 2]], u: &mut [[f64; 2]], max_iter: usize) -> usize {
-    solve_ext(g, geo, u, &[], &mut [], max_iter, 1e-11)
 }
 
 /// Degrés de liberté entiers de la grille : un chemin par singularité (arbre couvrant du
@@ -988,7 +1041,8 @@ fn nearest_even(ks: u8, c: [f64; 2]) -> [i32; 2] {
 /// Quadrangulation (Bommes et al. 2009) : relaxation continue (singularités libres), puis
 /// arrondi glouton par lots, les plus proches d'un point de grille d'abord, en relaxant
 /// de nouveau entre chaque lot. Renvoie le nombre de singularités restées hors grille.
-fn place_cones(g: &mut Graph, f: &[[u32; 3]], geo: &[[f64; 2]], u: &mut [[f64; 2]], geo_area: &[f64], debug: bool) -> usize {
+#[allow(clippy::too_many_arguments)]
+fn place_cones(g: &mut Graph, f: &[[u32; 3]], geo: &[[f64; 2]], u: &mut [[f64; 2]], geo_area: &[f64], curves: &mut [Curve], debug: bool, progress: &dyn Fn(f32)) -> usize {
     let paths = cone_paths(g, f);
     let mut lam = vec![[0.0f64; 2]; paths.len()];
     let mut free = vec![true; paths.len()];
@@ -998,6 +1052,7 @@ fn place_cones(g: &mut Graph, f: &[[u32; 3]], geo: &[[f64; 2]], u: &mut [[f64; 2
         if act.is_empty() {
             break;
         }
+        progress(0.35 + 0.45 * (1.0 - act.len() as f32 / paths.len().max(1) as f32));
         let refs: Vec<&ConePath> = act.iter().map(|&i| &paths[i]).collect();
         let mut l: Vec<[f64; 2]> = act.iter().map(|&i| lam[i]).collect();
         let tol: f64 = std::env::var("TOL").ok().and_then(|x| x.parse().ok()).unwrap_or(1e-9);
@@ -1036,7 +1091,7 @@ fn place_cones(g: &mut Graph, f: &[[u32; 3]], geo: &[[f64; 2]], u: &mut [[f64; 2
                 }
             }
             let flips = (0..f.len()).filter(|&fi| g.closure(&f[fi], fi).0 == 0 && param_area_ratio_real(g, f, u, geo_area, fi, Some(&extra)) < 0.0).count();
-            eprintln!("  lot {round} : {} libres, {it} itérations, {take} arrondies (écart max {:.2}), {flips} triangles repliés", act.len(), cand[take - 1].0);
+            eprintln!("  lot {round} : {} singularités libres, {it} itérations, {take} arrondies, {flips} triangles repliés", act.len());
         }
         for &(_, i, b) in cand.iter().take(take) {
             if b != [0, 0] {
@@ -1046,8 +1101,42 @@ fn place_cones(g: &mut Graph, f: &[[u32; 3]], geo: &[[f64; 2]], u: &mut [[f64; 2
         }
         round += 1;
     }
-    solve_u(g, geo, u, 3000);
+    for c in curves.iter_mut() {
+        c.ok = curve_closes(g, c);
+    }
+    if debug {
+        eprintln!("  lignes qui ne se referment pas : {}", curves.iter().filter(|c| !c.ok).count());
+    }
+    // Les lignes caractéristiques ensuite (une fois tous les entiers des singularités connus) :
+    // chacune est amenée sur la ligne de grille la plus proche, les mieux placées d'abord.
+    loop {
+        let open: Vec<usize> = (0..curves.len()).filter(|&c| curves[c].fixed.is_none() && curves[c].ok).collect();
+        if open.is_empty() {
+            break;
+        }
+        g.pins = curve_pins(g, curves);
+        solve_ext(g, geo, u, &[], &mut [], 3000, 1e-9);
+        let mut cc: Vec<(f64, usize, i32)> = open
+            .iter()
+            .map(|&c| {
+                let tau = curve_offset(g, &curves[c], u);
+                ((tau - tau.round()).abs(), c, tau.round() as i32)
+            })
+            .collect();
+        cc.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let tau = cc[0].0.max(0.2);
+        let n = cc.iter().take_while(|c| c.0 <= tau).count().max(1);
+        if debug {
+            eprintln!("  lignes : {} libres, {n} fixées (écart max {:.2})", open.len(), cc[n - 1].0);
+        }
+        for &(_, c, t) in cc.iter().take(n) {
+            curves[c].fixed = Some(t);
+        }
+    }
+    g.pins = curve_pins(g, curves);
+    solve_ext(g, geo, u, &[], &mut [], 3000, 1e-9);
     stiffen(g, f, geo, u, geo_area, debug);
+    g.pins.clear();
     regauge(g, u);
     (0..f.len()).filter(|&fi| { let (ks, c, _) = g.closure(&f[fi], fi); odd(ks, c) }).count()
 }
@@ -1100,14 +1189,21 @@ pub fn remesh(pos: &[V3], tris: &[[u32; 3]], guides: &[Vec<V3>], opt: &Options, 
         }
     };
     let (pos, tris) = weld(pos, tris);
-    let area: f32 = tris.iter().map(|t| len(cross(sub(pos[t[1] as usize], pos[t[0] as usize]), sub(pos[t[2] as usize], pos[t[0] as usize]))) * 0.5).sum();
-    let target = opt.faces.max(4);
-    let h = (area / target as f32).sqrt().max(1e-6);
-    // Surface d'origine, gardée pour la projection finale
+    let sym = (1..=3).contains(&opt.symmetry).then(|| opt.symmetry as usize - 1);
+    // Surface complète, gardée pour la projection finale
     let (orig_v, orig_f) = (pos.clone(), tris.clone());
-    let (pos, tris) = decimate(pos, tris, h / 6.5);
+    let (pos, tris) = match sym {
+        Some(ax) => clip_half(&pos, &tris, ax),
+        None => (pos, tris),
+    };
+    let area: f32 = tris.iter().map(|t| len(cross(sub(pos[t[1] as usize], pos[t[0] as usize]), sub(pos[t[2] as usize], pos[t[0] as usize]))) * 0.5).sum();
+    let target = (if sym.is_some() { opt.faces / 2 } else { opt.faces }).max(4);
+    let h = (area / target as f32).sqrt().max(1e-6);
+    let dens: f32 = std::env::var("DENS").ok().and_then(|x| x.parse().ok()).unwrap_or(2.5);
+    let sharp0 = features(&pos, &tris, opt.sharp_angle, 0.0);
+    let (pos, tris) = decimate(pos, tris, h / (dens * 2.15), &sharp0);
     lap("simplification");
-    let (v, f) = refine(pos, tris, h / 3.0);
+    let (v, f) = refine(pos, tris, h / dens);
     let n_v = v.len();
     stats.dense = n_v;
 
@@ -1139,6 +1235,17 @@ pub fn remesh(pos: &[V3], tris: &[[u32; 3]], guides: &[Vec<V3>], opt: &Options, 
         .collect();
     let mut q = q;
     let mut fixed = vec![false; n_v];
+    // Arêtes vives et bords : le champ les longe
+    let ft = features(&v, &f, opt.sharp_angle, 3.0 * h);
+    for i in 0..n_v {
+        if ft.deg[i] == 2 {
+            let t = tangent(ft.tan[i], nrm[i]);
+            if dot(t, t) > 1e-8 {
+                q[i] = norm(t);
+                fixed[i] = true;
+            }
+        }
+    }
     let r = h * opt.guide_radius;
     for g in guides {
         for s in g.windows(2) {
@@ -1239,7 +1346,7 @@ pub fn remesh(pos: &[V3], tris: &[[u32; 3]], guides: &[Vec<V3>], opt: &Options, 
         let it = if l == top { iters * 2 } else { iters / 2 };
         smooth_orient(&levels[l], &mut cur, &fixed_l[l], it, if std::env::var("GSC").is_ok() { opt.curvature } else { 0.0 });
         step += 1.0;
-        progress(step / total_steps);
+        progress(0.05 + 0.2 * step / total_steps);
     }
     let mut q = cur;
     lap("orientation (lissage local)");
@@ -1278,6 +1385,7 @@ pub fn remesh(pos: &[V3], tris: &[[u32; 3]], guides: &[Vec<V3>], opt: &Options, 
             writeln!(w, "{} {} {} {} {} {} {} {} {} {}", v[i][0], v[i][1], v[i][2], q[i][0], q[i][1], q[i][2], nrm[i][0], nrm[i][1], nrm[i][2], levels[0].a[i]).unwrap();
         }
     }
+    progress(0.3);
     lap("orientation (optimum global)");
     // Transitions entre repères voisins : seule donnée entière de départ. Tous les décalages
     // de grille partent de zéro ; ce sont les singularités et les anses qui les fixeront.
@@ -1307,7 +1415,13 @@ pub fn remesh(pos: &[V3], tris: &[[u32; 3]], guides: &[Vec<V3>], opt: &Options, 
         })
         .collect();
     let mut u = vec![[0.0f64; 2]; n_v];
-    stats.unfixed = place_cones(&mut g, &f, &geo, &mut u, &geo_area, debug);
+    let mut curves = build_curves(&g, &ft, &nrm, &q);
+    if debug {
+        eprintln!("lignes caractéristiques : {} ({} arêtes)", curves.len(), ft.edges.len());
+    }
+    progress(0.35);
+    stats.unfixed = place_cones(&mut g, &f, &geo, &mut u, &geo_area, &mut curves, debug, progress);
+    progress(0.92);
     lap("singularités sur la grille");
     stats.flips = count_flips(&g, &f);
     if debug {
@@ -1338,22 +1452,48 @@ pub fn remesh(pos: &[V3], tris: &[[u32; 3]], guides: &[Vec<V3>], opt: &Options, 
         }
     }
     let mut cluster: HashMap<u32, (V3, V3, f32)> = HashMap::new();
+    // Par groupe : somme et nombre des sommets sur une ligne, et coin éventuel
+    let mut fcl: HashMap<u32, (V3, f32, Option<V3>)> = HashMap::new();
     for i in 0..n_v {
         let r = uf.find(i as u32);
         let e = cluster.entry(r).or_insert(([0.0; 3], [0.0; 3], 0.0));
         e.0 = add(e.0, o[i]);
         e.1 = add(e.1, nrm[i]);
         e.2 += 1.0;
+        if ft.deg[i] > 0 {
+            let fe = fcl.entry(r).or_insert(([0.0; 3], 0.0, None));
+            if ft.deg[i] == 2 {
+                fe.0 = add(fe.0, o[i]);
+                fe.1 += 1.0;
+            } else {
+                fe.2 = Some(v[i]);
+            }
+        }
     }
     let mut id: HashMap<u32, u32> = HashMap::new();
     let mut out_pos: Vec<V3> = vec![];
     let mut out_n: Vec<V3> = vec![];
+    // 0 : sommet libre, 1 : sur une ligne caractéristique, 2 : coin (ne bouge pas)
+    let mut out_flag: Vec<u8> = vec![];
     let mut keys: Vec<u32> = cluster.keys().copied().collect();
     keys.sort_unstable();
     for k in keys {
         let (s, n, c) = cluster[&k];
         id.insert(k, out_pos.len() as u32);
-        out_pos.push(mul(s, 1.0 / c));
+        match fcl.get(&k) {
+            Some(&(_, _, Some(corner))) => {
+                out_pos.push(corner);
+                out_flag.push(2);
+            }
+            Some(&(fs, fc, None)) if fc > 0.0 => {
+                out_pos.push(mul(fs, 1.0 / fc));
+                out_flag.push(1);
+            }
+            _ => {
+                out_pos.push(mul(s, 1.0 / c));
+                out_flag.push(0);
+            }
+        }
         out_n.push(norm(n));
     }
     let mut edges: HashSet<(u32, u32)> = HashSet::new();
@@ -1364,7 +1504,7 @@ pub fn remesh(pos: &[V3], tris: &[[u32; 3]], guides: &[Vec<V3>], opt: &Options, 
         }
     }
     let cl: Vec<u32> = (0..n_v).map(|i| id[&uf.find(i as u32)]).collect();
-    let rot = rotations(&f, &cl, out_pos.len(), &edges);
+    let (rot, open) = rotations(&f, &cl, out_pos.len(), &edges);
     if debug {
         eprintln!("groupes {} dont {} sans ordre topologique", out_pos.len(), rot.iter().filter(|r| r.is_none()).count());
         let mut size = vec![0; out_pos.len()];
@@ -1392,7 +1532,7 @@ pub fn remesh(pos: &[V3], tris: &[[u32; 3]], guides: &[Vec<V3>], opt: &Options, 
             }
         }
     }
-    let faces = extract_faces(&out_pos, &out_n, &edges, &rot);
+    let faces = extract_faces(&out_pos, &out_n, &edges, &rot, &open);
     if debug {
         let mut hist = std::collections::BTreeMap::new();
         for f in &faces {
@@ -1415,8 +1555,10 @@ pub fn remesh(pos: &[V3], tris: &[[u32; 3]], guides: &[Vec<V3>], opt: &Options, 
         eprintln!("après nettoyage : {} faces dont {} quads", faces.len(), faces.iter().filter(|f| f.len() == 4).count());
     }
     // Ne garder que les sommets utilisés
+    out_flag.resize(out_pos.len(), 0);
     let mut remap = vec![u32::MAX; out_pos.len()];
     let mut pos2 = vec![];
+    let mut flags: Vec<u8> = vec![];
     let faces: Vec<Vec<u32>> = faces
         .into_iter()
         .map(|f| {
@@ -1425,6 +1567,7 @@ pub fn remesh(pos: &[V3], tris: &[[u32; 3]], guides: &[Vec<V3>], opt: &Options, 
                     if remap[i as usize] == u32::MAX {
                         remap[i as usize] = pos2.len() as u32;
                         pos2.push(out_pos[i as usize]);
+                        flags.push(out_flag[i as usize]);
                     }
                     remap[i as usize]
                 })
@@ -1432,11 +1575,44 @@ pub fn remesh(pos: &[V3], tris: &[[u32; 3]], guides: &[Vec<V3>], opt: &Options, 
         })
         .collect();
     lap("extraction");
+    let segs: Vec<(V3, V3)> = ft.edges.iter().map(|&(a, b)| (v[a as usize], v[b as usize])).collect();
     let mut res = Result { pos: pos2, faces, stats };
-    relax(&mut res, &orig_v, &orig_f, 3);
+    relax(&mut res, &orig_v, &orig_f, 3, &flags, &segs, 0.4 * h);
     if opt.pure_quads && !all_quads {
         res = split_quads(&res);
-        relax(&mut res, &orig_v, &orig_f, 2);
+        flags.resize(res.pos.len(), 0);
+        relax(&mut res, &orig_v, &orig_f, 2, &flags, &segs, 0.4 * h);
+    }
+    if let Some(ax) = sym {
+        mirror(&mut res, ax, h * 0.02);
+        // Un coin de la demi-surface posé sur le plan devient un sommet de valence 2 : on le retire
+        let mut faces = std::mem::take(&mut res.faces);
+        for _ in 0..4 {
+            if !remove_doublets(&mut faces) {
+                break;
+            }
+        }
+        res.faces = faces;
+    }
+    // Pôles : sommets intérieurs dont la valence n'est pas 4
+    {
+        let mut val = vec![0u32; res.pos.len()];
+        let mut ec: HashMap<(u32, u32), u8> = HashMap::new();
+        for f in &res.faces {
+            for k in 0..f.len() {
+                val[f[k] as usize] += 1;
+                let (a, b) = (f[k], f[(k + 1) % f.len()]);
+                *ec.entry((a.min(b), a.max(b))).or_insert(0) += 1;
+            }
+        }
+        let mut border = vec![false; res.pos.len()];
+        for (&(a, b), &c) in &ec {
+            if c == 1 {
+                border[a as usize] = true;
+                border[b as usize] = true;
+            }
+        }
+        res.stats.poles = (0..res.pos.len()).filter(|&i| !border[i] && val[i] != 4 && val[i] != 0).count();
     }
     lap("lissage final");
     progress(1.0);
@@ -1989,7 +2165,7 @@ fn curvature(v: &[V3], n: &[V3], adj: &[Vec<u32>], h: f32) -> (Vec<V3>, Vec<f32>
 /// topologie du maillage dense : autour d'un groupe K, deux sommets extérieurs consécutifs
 /// x → y forment un triangle (a, x, y) avec a dans K. C'est exact même quand la géométrie
 /// est pincée ou repliée, contrairement à un tri par angles.
-fn rotations(f: &[[u32; 3]], cl: &[u32], n: usize, edges: &HashSet<(u32, u32)>) -> Vec<Option<Vec<u32>>> {
+fn rotations(f: &[[u32; 3]], cl: &[u32], n: usize, edges: &HashSet<(u32, u32)>) -> (Vec<Option<Vec<u32>>>, Vec<bool>) {
     let mut arcs: Vec<HashMap<u32, u32>> = vec![HashMap::new(); n];
     let mut bad = vec![false; n];
     for t in f {
@@ -2009,7 +2185,9 @@ fn rotations(f: &[[u32; 3]], cl: &[u32], n: usize, edges: &HashSet<(u32, u32)>) 
         unit[a as usize].push(b);
         unit[b as usize].push(a);
     }
-    (0..n)
+    // Groupe au bord du maillage : ses voisins forment une chaîne ouverte, pas un cycle
+    let open: Vec<bool> = (0..n).map(|k| { let targets: HashSet<u32> = arcs[k].values().copied().collect(); arcs[k].keys().any(|x| !targets.contains(x)) }).collect();
+    let rot = (0..n)
         .map(|k| {
             if bad[k] || unit[k].is_empty() {
                 return None;
@@ -2031,12 +2209,13 @@ fn rotations(f: &[[u32; 3]], cl: &[u32], n: usize, edges: &HashSet<(u32, u32)>) 
             }
             (order.len() == unit[k].len() && order.iter().collect::<HashSet<_>>().len() == order.len()).then_some(order)
         })
-        .collect()
+        .collect();
+    (rot, open)
 }
 
 /// Faces lues en tournant autour de chaque sommet. `rot` : ordre topologique des voisins
 /// quand il est connu, sinon tri par angle dans le plan tangent.
-fn extract_faces(pos: &[V3], nrm: &[V3], edges: &HashSet<(u32, u32)>, rot: &[Option<Vec<u32>>]) -> Vec<Vec<u32>> {
+fn extract_faces(pos: &[V3], nrm: &[V3], edges: &HashSet<(u32, u32)>, rot: &[Option<Vec<u32>>], open: &[bool]) -> Vec<Vec<u32>> {
     let n = pos.len();
     let mut nb: Vec<Vec<u32>> = vec![vec![]; n];
     for &(a, b) in edges {
@@ -2092,7 +2271,15 @@ fn extract_faces(pos: &[V3], nrm: &[V3], edges: &HashSet<(u32, u32)>, rot: &[Opt
                 for k in 0..f.len() {
                     used.insert((f[k], f[(k + 1) % f.len()]));
                 }
-                faces.push(f);
+                // Face « extérieure » : elle passe par l'ouverture d'un groupe de bord. C'est le
+                // contour d'un trou du maillage d'origine, pas une face à créer.
+                let outer = (0..f.len()).any(|i| {
+                    let (prev, cur) = (f[(i + f.len() - 1) % f.len()], f[i]);
+                    open.get(cur as usize).copied().unwrap_or(false) && rot.get(cur as usize).is_some_and(|r| r.is_some()) && nb[cur as usize].first() == Some(&prev)
+                });
+                if !outer {
+                    faces.push(f);
+                }
             }
         }
     }
@@ -2104,6 +2291,283 @@ fn extract_faces(pos: &[V3], nrm: &[V3], edges: &HashSet<(u32, u32)>, rot: &[Opt
         seen.insert(k)
     });
     faces
+}
+
+// ---------------------------------------------------------------------------------------
+// Lignes caractéristiques : arêtes vives, bords, plan de symétrie. Le flux les suit et une
+// ligne de la grille passe exactement dessus, comme les « hard edges » de Quad Remesher.
+// ---------------------------------------------------------------------------------------
+
+struct Features {
+    edges: Vec<(u32, u32)>,
+    /// Nombre d'arêtes caractéristiques par sommet (2 : sur une ligne ; autre : coin)
+    deg: Vec<u8>,
+    tan: Vec<V3>,
+}
+
+fn features(v: &[V3], f: &[[u32; 3]], angle_deg: f32, min_len: f32) -> Features {
+    let mut map: HashMap<(u32, u32), (u8, V3)> = HashMap::new();
+    let cosa = angle_deg.to_radians().cos();
+    let mut edges = vec![];
+    for t in f {
+        let nf = norm(cross(sub(v[t[1] as usize], v[t[0] as usize]), sub(v[t[2] as usize], v[t[0] as usize])));
+        for k in 0..3 {
+            let (a, b) = (t[k], t[(k + 1) % 3]);
+            let e = map.entry((a.min(b), a.max(b))).or_insert((0, nf));
+            e.0 += 1;
+            if e.0 == 2 && angle_deg > 0.0 && dot(e.1, nf) < cosa {
+                edges.push((a.min(b), a.max(b)));
+            }
+        }
+    }
+    let mut border = 0;
+    for (&k, &(c, _)) in &map {
+        if c == 1 {
+            edges.push(k);
+            border += 1;
+        }
+    }
+    edges.sort_unstable();
+    // Les petits bouts isolés (bruit du sculpt) sont ignorés ; les bords sont toujours gardés
+    if min_len > 0.0 && edges.len() > border {
+        let mut uf = Uf((0..v.len() as u32).collect());
+        for &(a, b) in &edges {
+            uf.union(a, b);
+        }
+        let mut total: HashMap<u32, f32> = HashMap::new();
+        for &(a, b) in &edges {
+            *total.entry(uf.find(a)).or_insert(0.0) += len(sub(v[a as usize], v[b as usize]));
+        }
+        edges.retain(|&(a, b)| map[&(a, b)].0 == 1 || total[&uf.find(a)] >= min_len);
+    }
+    let mut deg = vec![0u8; v.len()];
+    let mut ends: Vec<[u32; 2]> = vec![[u32::MAX; 2]; v.len()];
+    for &(a, b) in &edges {
+        for (x, y) in [(a, b), (b, a)] {
+            let d = deg[x as usize] as usize;
+            if d < 2 {
+                ends[x as usize][d] = y;
+            }
+            deg[x as usize] = deg[x as usize].saturating_add(1);
+        }
+    }
+    let tan = (0..v.len()).map(|i| if deg[i] == 2 { norm(sub(v[ends[i][0] as usize], v[ends[i][1] as usize])) } else { [0.0; 3] }).collect();
+    Features { edges, deg, tan }
+}
+
+/// Garde la moitié du maillage du côté positif de l'axe ; la coupe tombe exactement sur le plan.
+fn clip_half(pos: &[V3], tris: &[[u32; 3]], axis: usize) -> (Vec<V3>, Vec<[u32; 3]>) {
+    let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
+    for p in pos {
+        for k in 0..3 {
+            lo[k] = lo[k].min(p[k]);
+            hi[k] = hi[k].max(p[k]);
+        }
+    }
+    let eps = len(sub(hi, lo)) * 1e-5;
+    let mut pos: Vec<V3> = pos.to_vec();
+    for p in pos.iter_mut() {
+        if p[axis].abs() < eps {
+            p[axis] = 0.0;
+        }
+    }
+    let mut cut: HashMap<(u32, u32), u32> = HashMap::new();
+    let mut out = vec![];
+    for t in tris {
+        let ins = [pos[t[0] as usize][axis] >= 0.0, pos[t[1] as usize][axis] >= 0.0, pos[t[2] as usize][axis] >= 0.0];
+        let n_in = ins.iter().filter(|x| **x).count();
+        if n_in == 3 {
+            out.push(*t);
+            continue;
+        }
+        if n_in == 0 {
+            continue;
+        }
+        let mut poly: Vec<u32> = vec![];
+        for k in 0..3 {
+            let (a, b) = (t[k], t[(k + 1) % 3]);
+            if ins[k] {
+                poly.push(a);
+            }
+            if ins[k] != ins[(k + 1) % 3] {
+                let key = (a.min(b), a.max(b));
+                let id = match cut.get(&key) {
+                    Some(&id) => id,
+                    None => {
+                        let (pa, pb) = (pos[a as usize], pos[b as usize]);
+                        let s = pa[axis] / (pa[axis] - pb[axis]);
+                        let mut p = add(pa, mul(sub(pb, pa), s));
+                        p[axis] = 0.0;
+                        pos.push(p);
+                        cut.insert(key, (pos.len() - 1) as u32);
+                        (pos.len() - 1) as u32
+                    }
+                };
+                poly.push(id);
+            }
+        }
+        poly.dedup();
+        for k in 1..poly.len().saturating_sub(1) {
+            if poly[0] != poly[k] && poly[k] != poly[k + 1] && poly[0] != poly[k + 1] {
+                out.push([poly[0], poly[k], poly[k + 1]]);
+            }
+        }
+    }
+    weld(&pos, &out)
+}
+
+/// Recopie la moitié en miroir ; les sommets du plan sont partagés.
+fn mirror(r: &mut Result, axis: usize, tol: f32) {
+    let n = r.pos.len();
+    // Les sommets du bord de la demi-surface proches du plan sont ramenés dessus
+    let mut ec: HashMap<(u32, u32), u8> = HashMap::new();
+    for f in &r.faces {
+        for k in 0..f.len() {
+            let (a, b) = (f[k], f[(k + 1) % f.len()]);
+            *ec.entry((a.min(b), a.max(b))).or_insert(0) += 1;
+        }
+    }
+    let mut border = vec![false; n];
+    for (&(a, b), &c) in &ec {
+        if c == 1 {
+            border[a as usize] = true;
+            border[b as usize] = true;
+        }
+    }
+    let mut map = vec![0u32; n];
+    for i in 0..n {
+        if r.pos[i][axis].abs() < tol || (border[i] && r.pos[i][axis].abs() < tol * 40.0) {
+            r.pos[i][axis] = 0.0;
+            map[i] = i as u32;
+        } else {
+            let mut p = r.pos[i];
+            p[axis] = -p[axis];
+            r.pos.push(p);
+            map[i] = (r.pos.len() - 1) as u32;
+        }
+    }
+    let mirrored: Vec<Vec<u32>> = r.faces.iter().filter(|f| f.iter().any(|&i| map[i as usize] != i)).map(|f| f.iter().rev().map(|&i| map[i as usize]).collect()).collect();
+    r.faces.extend(mirrored);
+}
+
+/// Une ligne caractéristique : chaîne de sommets denses reliés par des arêtes vives ou de bord.
+struct Curve {
+    verts: Vec<u32>,
+    /// (indice dans verts, indice dans verts, arête) dans l'ordre d'un parcours depuis verts[0]
+    links: Vec<(u32, u32, u32)>,
+    /// Composante de u perpendiculaire à la ligne, dans la carte de verts[0]
+    c0: u8,
+    /// Ligne de grille choisie (dans la carte de verts[0]) une fois arrondie
+    fixed: Option<i32>,
+    /// Arêtes de la ligne hors de l'arbre de parcours (boucles fermées)
+    extra: Vec<(u32, u32, u32)>,
+    /// Faux si la boucle ne se referme pas sur la même ligne de grille (elle reste alors libre)
+    ok: bool,
+}
+
+fn build_curves(g: &Graph, ft: &Features, n: &[V3], q: &[V3]) -> Vec<Curve> {
+    let nv = ft.deg.len();
+    let mut adj: Vec<Vec<(u32, u32)>> = vec![vec![]; nv];
+    for &(a, b) in &ft.edges {
+        if ft.deg[a as usize] == 2 && ft.deg[b as usize] == 2 {
+            if let Some(&e) = g.map.get(&(a, b)) {
+                adj[a as usize].push((b, e));
+                adj[b as usize].push((a, e));
+            }
+        }
+    }
+    let mut seen = vec![false; nv];
+    let mut out = vec![];
+    for s in 0..nv {
+        if seen[s] || ft.deg[s] != 2 || adj[s].is_empty() {
+            continue;
+        }
+        let mut verts = vec![s as u32];
+        let mut index: HashMap<u32, u32> = HashMap::new();
+        index.insert(s as u32, 0);
+        seen[s] = true;
+        let mut links = vec![];
+        let mut extra = vec![];
+        let mut used: HashSet<u32> = HashSet::new();
+        let mut k = 0;
+        while k < verts.len() {
+            let a = verts[k];
+            for &(b, e) in &adj[a as usize] {
+                if !seen[b as usize] {
+                    seen[b as usize] = true;
+                    index.insert(b, verts.len() as u32);
+                    verts.push(b);
+                    links.push((k as u32, verts.len() as u32 - 1, e));
+                    used.insert(e);
+                } else if used.insert(e) {
+                    extra.push((k as u32, index[&b], e));
+                }
+            }
+            k += 1;
+        }
+        if verts.len() < 3 {
+            continue;
+        }
+        let t = ft.tan[s];
+        let c0 = if dot(t, q[s]).abs() >= dot(t, cross(n[s], q[s])).abs() { 1 } else { 0 };
+        out.push(Curve { verts, links, c0, fixed: None, extra, ok: true });
+    }
+    out
+}
+
+/// Pour chaque sommet de la ligne : (composante de u, signe, décalage entier) tels que la
+/// coordonnée perpendiculaire dans la carte de la racine vaut signe·u[composante] + décalage.
+fn curve_frames(g: &Graph, c: &Curve) -> Vec<(u8, f64, i32)> {
+    let mut rot = vec![0u8; c.verts.len()];
+    let mut tr = vec![[0i32; 2]; c.verts.len()];
+    for &(a, b, e) in &c.links {
+        let (k, d) = g.dir(e, c.verts[a as usize]);
+        let r = trot(rot[a as usize], d);
+        rot[b as usize] = (rot[a as usize] + k) & 3;
+        tr[b as usize] = [tr[a as usize][0] + r[0], tr[a as usize][1] + r[1]];
+    }
+    (0..c.verts.len())
+        .map(|i| {
+            let (ex, ey) = (trot(rot[i], [1, 0]), trot(rot[i], [0, 1]));
+            let (cx, cy) = (ex[c.c0 as usize], ey[c.c0 as usize]);
+            if cx != 0 { (0, cx as f64, tr[i][c.c0 as usize]) } else { (1, cy as f64, tr[i][c.c0 as usize]) }
+        })
+        .collect()
+}
+
+/// Une boucle fermée doit revenir sur la même ligne de grille après un tour.
+fn curve_closes(g: &Graph, c: &Curve) -> bool {
+    let mut rot = vec![0u8; c.verts.len()];
+    let mut tr = vec![[0i32; 2]; c.verts.len()];
+    for &(a, b, e) in &c.links {
+        let (k, d) = g.dir(e, c.verts[a as usize]);
+        let r = trot(rot[a as usize], d);
+        rot[b as usize] = (rot[a as usize] + k) & 3;
+        tr[b as usize] = [tr[a as usize][0] + r[0], tr[a as usize][1] + r[1]];
+    }
+    c.extra.iter().all(|&(a, b, e)| {
+        let (k, d) = g.dir(e, c.verts[a as usize]);
+        let r = trot(rot[a as usize], d);
+        (rot[a as usize] + k) & 3 == rot[b as usize] && tr[a as usize][c.c0 as usize] + r[c.c0 as usize] == tr[b as usize][c.c0 as usize]
+    })
+}
+
+fn curve_offset(g: &Graph, c: &Curve, u: &[[f64; 2]]) -> f64 {
+    let fr = curve_frames(g, c);
+    fr.iter().zip(&c.verts).map(|(&(k, s, t), &v)| s * u[v as usize][k as usize] + t as f64).sum::<f64>() / fr.len() as f64
+}
+
+/// Contraintes des lignes déjà arrondies : (sommet, composante, valeur).
+fn curve_pins(g: &Graph, curves: &[Curve]) -> Vec<(u32, u8, f64)> {
+    let mut pins = vec![];
+    for c in curves {
+        if let Some(tau) = c.fixed {
+            for (&(k, s, t), &v) in curve_frames(g, c).iter().zip(&c.verts) {
+                pins.push((v, k, s * (tau - t) as f64));
+            }
+        }
+    }
+    pins
 }
 
 // ---------------------------------------------------------------------------------------
@@ -2389,7 +2853,7 @@ fn split_quads(r: &Result) -> Result {
 }
 
 /// Lissage léger puis reprojection sur la surface d'origine (sommet dense le plus proche).
-fn relax(r: &mut Result, v: &[V3], f: &[[u32; 3]], iters: usize) {
+fn relax(r: &mut Result, v: &[V3], f: &[[u32; 3]], iters: usize, flags: &[u8], segs: &[(V3, V3)], snap: f32) {
     let n = r.pos.len();
     let mut nb: Vec<HashSet<u32>> = vec![HashSet::new(); n];
     for face in &r.faces {
@@ -2438,6 +2902,28 @@ fn relax(r: &mut Result, v: &[V3], f: &[[u32; 3]], iters: usize) {
     for _ in 0..iters {
         let old = r.pos.clone();
         for i in 0..n {
+            match flags.get(i).copied().unwrap_or(0) {
+                2 => continue,
+                1 => {
+                    // Reste sur sa ligne : point le plus proche parmi les arêtes caractéristiques
+                    let mut best = (f32::MAX, old[i]);
+                    for &(a, b) in segs {
+                        let ab = sub(b, a);
+                        let t = (dot(sub(old[i], a), ab) / dot(ab, ab).max(1e-20)).clamp(0.0, 1.0);
+                        let p = add(a, mul(ab, t));
+                        let d = dot(sub(p, old[i]), sub(p, old[i]));
+                        if d < best.0 {
+                            best = (d, p);
+                        }
+                    }
+                    // Trop loin de toute ligne : ce sommet n'en fait pas vraiment partie
+                    if best.0.sqrt() <= snap {
+                        r.pos[i] = best.1;
+                        continue;
+                    }
+                }
+                _ => {}
+            }
             if nb[i].len() < 3 {
                 continue;
             }
@@ -2504,6 +2990,14 @@ pub fn export_obj(r: &Result, world: &dyn Fn(V3) -> V3, path: &std::path::Path) 
 pub fn bench_option(opt: &mut Options, name: &str, val: Option<&str>, i: &mut usize) {
     match name {
         "--tri" => opt.pure_quads = false,
+        "--sym" => {
+            opt.symmetry = val.and_then(|v| v.parse().ok()).unwrap_or(0);
+            *i += 1;
+        }
+        "--sharp" => {
+            opt.sharp_angle = val.and_then(|v| v.parse().ok()).unwrap_or(opt.sharp_angle);
+            *i += 1;
+        }
         "--adapt" => {
             opt.adaptive = val.and_then(|v| v.parse().ok()).unwrap_or(opt.adaptive);
             *i += 1;
@@ -2546,6 +3040,58 @@ mod tests {
         assert!(pq.faces.len() > 300 && pq.faces.len() < 1000);
         assert!(pq.pos.iter().all(|p| (len(*p) - 1.0).abs() < 0.08));
         assert_eq!(pq.stats.unfixed, 0);
+        // Une sphère demande au minimum 8 pôles (topologie d'un cube)
+        assert_eq!(pq.stats.poles, 8);
+    }
+
+    fn cube(n: usize) -> (Vec<V3>, Vec<[u32; 3]>) {
+        let pos: Vec<V3> = (0..8).map(|i| [if i & 1 == 0 { -1.0 } else { 1.0 }, if i & 2 == 0 { -1.0 } else { 1.0 }, if i & 4 == 0 { -1.0 } else { 1.0 }]).collect();
+        let quads = [[0, 2, 3, 1], [4, 5, 7, 6], [0, 1, 5, 4], [2, 6, 7, 3], [0, 4, 6, 2], [1, 3, 7, 5]];
+        let tris: Vec<[u32; 3]> = quads.iter().flat_map(|q| [[q[0], q[1], q[2]], [q[0], q[2], q[3]]]).collect();
+        let (mut pos, mut tris) = (pos, tris);
+        for _ in 0..n {
+            let (p, t) = refine_once(pos, tris);
+            pos = p;
+            tris = t;
+        }
+        (pos, tris)
+    }
+
+    #[test]
+    fn cube_aretes_vives() {
+        let (p, t) = cube(4);
+        let r = remesh(&p, &t, &[], &Options { faces: 600, ..Default::default() }, &|_| {});
+        eprintln!("{} faces, {:?}", r.faces.len(), r.stats);
+        assert_eq!(r.quads(), r.faces.len());
+        // Huit coins de valence 3, rien d'autre, et les 8 coins du cube sont des sommets du résultat
+        assert_eq!(r.stats.poles, 8);
+        for c in 0..8 {
+            let corner = [if c & 1 == 0 { -1.0 } else { 1.0 }, if c & 2 == 0 { -1.0 } else { 1.0 }, if c & 4 == 0 { -1.0f32 } else { 1.0 }];
+            assert!(r.pos.iter().any(|p| len(sub(*p, corner)) < 1e-3), "coin {corner:?} perdu");
+        }
+        // Chaque sommet est sur la surface du cube
+        assert!(r.pos.iter().all(|p| (p[0].abs().max(p[1].abs()).max(p[2].abs()) - 1.0).abs() < 0.02));
+    }
+
+    #[test]
+    fn symetrie() {
+        let (p, t) = sphere(3);
+        let r = remesh(&p, &t, &[], &Options { faces: 600, symmetry: 1, ..Default::default() }, &|_| {});
+        assert_eq!(r.quads(), r.faces.len());
+        // Chaque sommet a son image dans le miroir
+        for a in &r.pos {
+            let m = [-a[0], a[1], a[2]];
+            assert!(r.pos.iter().any(|b| len(sub(*b, m)) < 1e-4), "pas de symétrique pour {a:?}");
+        }
+        // Maillage fermé : chaque arête a deux faces
+        let mut ec: HashMap<(u32, u32), u8> = HashMap::new();
+        for f in &r.faces {
+            for k in 0..f.len() {
+                let (a, b) = (f[k], f[(k + 1) % f.len()]);
+                *ec.entry((a.min(b), a.max(b))).or_insert(0) += 1;
+            }
+        }
+        assert!(ec.values().all(|&c| c == 2));
     }
 
     #[test]
