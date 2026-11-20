@@ -811,5 +811,12 @@
  "placement des pôles": "placing poles",
  "construction des quads": "building quads",
  "retopologie annulée": "retopology cancelled",
- "La retopologie a échoué sur ce modèle. Essaie avec moins de faces ou sans les arêtes vives.": "Retopology failed on this model. Try fewer faces or turn hard edges off."
+ "La retopologie a échoué sur ce modèle. Essaie avec moins de faces ou sans les arêtes vives.": "Retopology failed on this model. Try fewer faces or turn hard edges off.",
+ "prévisualiser la node": "preview node",
+ "revenir au matériau complet": "back to full material",
+ "lumière ▾": "light ▾",
+ "sphère": "sphere",
+ "revenir à la sphère": "back to the sphere",
+ "dépose un modèle 3D ici": "drop a 3D model here",
+ "node": "node"
 }

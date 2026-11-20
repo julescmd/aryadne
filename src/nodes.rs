@@ -1521,9 +1521,20 @@ pub struct Editor {
     frame_sel: bool,
     frame_rename: Option<(usize, String)>,
     frame_sel_request: bool,
+    /// Aperçu du matériau : caméra, éclairage, modèle personnalisé
+    pv_yaw: f32,
+    pv_pitch: f32,
+    pv_dist: f32,
+    pv_env: usize,
+    pv_model: Option<(String, std::sync::Arc<crate::model3d::Prepared>)>,
+    pv_key: u64,
+    /// Node dont la sortie remplace le matériau dans l'aperçu (« prévisualiser la node »)
+    solo: Option<u32>,
 }
 
 enum Act {
+    Pan(egui::Vec2),
+    Deselect(u32),
     Move(egui::Vec2),
     MoveEnd,
     Connect(u32, usize, u32, usize),
@@ -1546,6 +1557,7 @@ enum NodeOp {
     Preview,
     Disconnect,
     Rename,
+    Solo,
 }
 
 fn to_texture(ctx: &egui::Context, name: &str, img: &Img) -> egui::ColorImage {
@@ -1589,7 +1601,7 @@ impl Editor {
             rename: None,
             frame_sel: false,
             frame_rename: None,
-            frame_sel_request: false,
+            frame_sel_request: false, pv_yaw: 0.4, pv_pitch: 0.25, pv_dist: 2.0, pv_env: 0, pv_model: None, pv_key: 0, solo: None,
         })
     }
 
@@ -1645,6 +1657,50 @@ impl Editor {
                 self.dirty = None;
             }
         }
+    }
+
+/// Range les nodes en colonnes, de gauche (sources) à droite (sortie) : la sélection s'il y a
+    /// au moins deux nodes choisis, sinon tout le graphe.
+    fn arrange(&mut self) {
+        let ids: Vec<u32> = if self.selected.len() >= 2 { self.selected.iter().copied().collect() } else { self.graph.nodes.iter().map(|n| n.id).collect() };
+        if ids.len() < 2 {
+            return;
+        }
+        let set: std::collections::BTreeSet<u32> = ids.iter().copied().collect();
+        // Colonne = plus long chemin depuis une source
+        let mut col: HashMap<u32, usize> = ids.iter().map(|&i| (i, 0)).collect();
+        for _ in 0..ids.len() {
+            let mut moved = false;
+            for l in &self.graph.links {
+                if set.contains(&l.from) && set.contains(&l.to) && col[&l.to] < col[&l.from] + 1 {
+                    col.insert(l.to, col[&l.from] + 1);
+                    moved = true;
+                }
+            }
+            if !moved {
+                break;
+            }
+        }
+        let (mut x0, mut y0) = (f32::MAX, f32::MAX);
+        for n in self.graph.nodes.iter().filter(|n| set.contains(&n.id)) {
+            x0 = x0.min(n.pos[0]);
+            y0 = y0.min(n.pos[1]);
+        }
+        // Dans chaque colonne : garder l'ordre vertical actuel
+        let ncol = col.values().copied().max().unwrap_or(0) + 1;
+        for c in 0..ncol {
+            let mut members: Vec<(f32, u32)> = self.graph.nodes.iter().filter(|n| set.contains(&n.id) && col[&n.id] == c).map(|n| (n.pos[1], n.id)).collect();
+            members.sort_by(|a, b| a.0.total_cmp(&b.0));
+            let mut y = y0;
+            for (_, id) in members {
+                if let Some(n) = self.graph.nodes.iter_mut().find(|n| n.id == id) {
+                    let h = def(&n.op).map(|d| Self::node_size(n, d)).unwrap_or(120.0);
+                    n.pos = [x0 + c as f32 * 240.0, y];
+                    y += h + 28.0;
+                }
+            }
+        }
+        self.changed();
     }
 
     fn is_output(&self, id: u32) -> bool {
@@ -1750,6 +1806,17 @@ impl Editor {
         let ctx = ctx.clone();
         std::thread::spawn(move || {
             for (id, out) in ids {
+                // Une texture se montre telle quelle, pas plaquée sur une sphère
+                if let Some(n) = g.nodes.iter().find(|n| n.id == id).filter(|n| n.op == "texture" || n.op == "image") {
+                    let file = pstr(&n.params, "fichier");
+                    if let Some(img) = (!file.is_empty()).then(|| load_img(&Path::new(&root).join(file), 160)).flatten() {
+                        if tx.send((version, id, img)).is_err() {
+                            return;
+                        }
+                        ctx.request_repaint();
+                        continue;
+                    }
+                }
                 let Some(pg) = g.probe(id, out) else { continue };
                 let Ok(prog) = Program::compile(&pg, &root, 256) else { continue };
                 let img = match &sphere {
@@ -1886,6 +1953,7 @@ impl Editor {
             self.scene = Rect::from_center_size(bb.center(), vec2(w, h));
         }
         let mut scene = self.scene;
+        let mut pan = egui::Vec2::ZERO;
         let mut actions: Vec<Act> = vec![];
         egui::Scene::new().zoom_range(0.2..=2.5).drag_pan_buttons(egui::DragPanButtons::MIDDLE | egui::DragPanButtons::SECONDARY).show(&mut child, &mut scene, |ui| {
             self.draw_graph(ui, &mut actions);
@@ -1954,6 +2022,9 @@ impl Editor {
             if cmd && key(egui::Key::Y) {
                 self.redo();
             }
+            if !cmd && key(egui::Key::Q) {
+                self.arrange();
+            }
             for (k, op) in [(egui::Key::M, NodeOp::Mute), (egui::Key::H, NodeOp::Collapse), (egui::Key::P, NodeOp::Preview)] {
                 if !cmd && !shift && key(k) {
                     for id in self.selected.clone() {
@@ -2018,6 +2089,7 @@ impl Editor {
         }
         // Actions du graphe
         let mut changed = false;
+        let mut solo_toggle: Option<u32> = None;
         let mut moved = false;
         for a in actions {
             match a {
@@ -2059,6 +2131,10 @@ impl Editor {
                     }
                 }
                 Act::Clear => self.selected.clear(),
+                Act::Deselect(id) => {
+                    self.selected.remove(&id);
+                }
+                Act::Pan(d) => pan += d,
                 Act::BoxSelect(r, add) => {
                     if !add {
                         self.selected.clear();
@@ -2102,6 +2178,7 @@ impl Editor {
                                     }
                                     NodeOp::Collapse => n.collapsed = !n.collapsed,
                                     NodeOp::Preview => n.preview = !n.preview,
+                                    NodeOp::Solo => solo_toggle = Some(id),
                                     _ => {}
                                 }
                             }
@@ -2110,6 +2187,13 @@ impl Editor {
                     changed = true;
                 }
             }
+        }
+        if let Some(id) = solo_toggle {
+            self.solo = if self.solo == Some(id) { None } else { Some(id) };
+            self.pv_key = 0;
+        }
+        if pan != egui::Vec2::ZERO {
+            self.scene = self.scene.translate(-pan);
         }
         if changed {
             self.changed();
@@ -2194,7 +2278,10 @@ impl Editor {
                         m.sel = 0;
                     }
                 } else {
-                    let list: Vec<&Def> = DEFS.iter().filter(usable).filter(|d| (!need_input || !d.inputs.is_empty()) && (crate::chat::fold(d.label).contains(&q) || crate::chat::fold(d.cat).contains(&q) || d.op.contains(&q))).take(16).collect();
+                    // Chaque mot doit se retrouver dans le nom (français ou anglais), la catégorie ou le
+                    // code du node ; les meilleurs d'abord : début de mot, puis milieu, puis lettres dans l'ordre.
+                    let scored = search_defs(&q, kind == GraphKind::Material, need_input);
+                    let list: Vec<&Def> = scored.into_iter().take(16).map(|x| x.1).collect();
                     if m.sel >= list.len() {
                         m.sel = 0;
                     }
@@ -2266,6 +2353,9 @@ impl Editor {
                 }
                 x += step;
             }
+        }
+        if bg.dragged_by(egui::PointerButton::Middle) {
+            actions.push(Act::Pan(bg.drag_delta()));
         }
         if bg.drag_started_by(egui::PointerButton::Primary) {
             self.box_start = pointer;
@@ -2465,6 +2555,8 @@ impl Editor {
             let hover_node = pointer.is_some_and(|pt| r.contains(pt));
             painter.rect_filled(r.translate(vec2(3.0, 3.0)), 0.0, Color32::from_black_alpha(30));
             painter.rect_filled(*r, 0.0, if muted { p.panel } else { p.bg });
+            // Tout le node est cliquable (déclaré avant ses réglages et ses prises, qui gardent la priorité)
+            let body = ui.interact(*r, ui.scope_id().with(("node-body", *id)), Sense::click_and_drag());
             let head = Rect::from_min_size(r.min, vec2(r.width(), HEAD));
             painter.rect_filled(head, 0.0, cat_col.gamma_multiply(0.85));
             // Flèche réduire, titre, miniature
@@ -2510,26 +2602,40 @@ impl Editor {
                 Stroke::new(1.0, p.line)
             };
             painter.rect_stroke(*r, 0.0, border, egui::StrokeKind::Outside);
+            let alt = ui.input(|i| i.modifiers.alt);
             let hr = ui.interact(title_rect, ui.scope_id().with(("node-head", *id)), Sense::click_and_drag());
-            if hr.drag_started_by(egui::PointerButton::Primary) || hr.clicked() {
-                actions.push(Act::Click(*id, shift));
-            }
-            if hr.dragged_by(egui::PointerButton::Primary) {
-                actions.push(Act::Move(hr.drag_delta()));
-            }
-            if hr.drag_stopped() {
-                actions.push(Act::MoveEnd);
+            for resp in [&hr, &body] {
+                if resp.clicked() && alt {
+                    actions.push(Act::Deselect(*id));
+                } else if resp.drag_started_by(egui::PointerButton::Primary) || resp.clicked() {
+                    actions.push(Act::Click(*id, shift));
+                }
+                // Clic droit : sélectionne le node s'il ne l'était pas, puis ouvre le menu
+                if resp.secondary_clicked() {
+                    actions.push(Act::Click(*id, false));
+                }
+                if resp.dragged_by(egui::PointerButton::Primary) {
+                    actions.push(Act::Move(resp.drag_delta()));
+                }
+                if resp.dragged_by(egui::PointerButton::Middle) {
+                    actions.push(Act::Pan(resp.drag_delta()));
+                }
+                if resp.drag_stopped() {
+                    actions.push(Act::MoveEnd);
+                }
             }
             if hr.double_clicked() {
                 actions.push(Act::Node(*id, NodeOp::Rename));
             }
-            hr.context_menu(|ui| {
+            let solo_on = self.solo == Some(*id);
+            let menu = |ui: &mut egui::Ui, actions: &mut Vec<Act>| {
                 for (label, op) in [
                     ("renommer   F2", NodeOp::Rename),
                     ("dupliquer   Maj+D", NodeOp::Duplicate),
                     (if muted { "réactiver   M" } else { "rendre muet   M" }, NodeOp::Mute),
                     (if is_collapsed { "déplier   H" } else { "réduire   H" }, NodeOp::Collapse),
                     (if preview_on { "cacher la miniature   P" } else { "montrer la miniature   P" }, NodeOp::Preview),
+                    (if solo_on { "revenir au matériau complet" } else { "prévisualiser la node" }, NodeOp::Solo),
                     ("déconnecter", NodeOp::Disconnect),
                     ("supprimer   X", NodeOp::Delete),
                 ] {
@@ -2538,7 +2644,9 @@ impl Editor {
                         ui.close();
                     }
                 }
-            });
+            };
+            hr.context_menu(|ui| menu(ui, actions));
+            body.context_menu(|ui| menu(ui, actions));
             // Prises (toujours, même réduit)
             for (k, (name, sock)) in d.outputs.iter().enumerate() {
                 let sp = out_pos[&(*id, k)];
@@ -2751,26 +2859,58 @@ impl Editor {
                 ctx.request_repaint_after(std::time::Duration::from_millis(60));
             }
         }
-        // Relance le calcul si le graphe a changé
-        if self.preview_rx.is_none() && self.preview_key != self.version {
-            if let Ok(prog) = &self.program {
-                let prog = prog.clone();
+        // Glisser dans l'aperçu : tourner le modèle ; molette : zoom ; modèle 3D déposé : il remplace la sphère
+        let is_mat = self.graph.kind == GraphKind::Material;
+        if is_mat {
+            let resp = ui.interact(rect, ui.scope_id().with("mat-preview"), Sense::click_and_drag());
+            if resp.dragged() {
+                let d = resp.drag_delta();
+                self.pv_yaw -= d.x * 0.01;
+                self.pv_pitch = (self.pv_pitch + d.y * 0.01).clamp(-1.5, 1.5);
+                self.pv_key = 0;
+            }
+            if resp.hovered() {
+                let sc = ui.input(|i| i.smooth_scroll_delta.y);
+                if sc != 0.0 {
+                    self.pv_dist = (self.pv_dist * (-sc * 0.002).exp()).clamp(0.8, 8.0);
+                    self.pv_key = 0;
+                }
+                let dropped: Vec<PathBuf> = ctx.input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).collect());
+                for f in dropped {
+                    if let Some(m) = crate::model3d::preview_model(&f) {
+                        self.pv_model = Some((f.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(), std::sync::Arc::new(m)));
+                        self.pv_key = 0;
+                    }
+                }
+            }
+        }
+        // Relance le calcul si le graphe ou la vue ont changé
+        if self.preview_rx.is_none() && (self.preview_key != self.version || self.pv_key == 0) {
+            // « Prévisualiser la node » : sa sortie remplace le matériau complet
+            let solo = self.solo.filter(|id| self.graph.nodes.iter().any(|n| n.id == *id));
+            let solo_prog = solo.and_then(|id| self.graph.probe(id, 0)).and_then(|g| Program::compile(&g, &self.root, 1024).ok());
+            let prog = solo_prog.map(Ok).unwrap_or_else(|| self.program.clone());
+            if let Ok(prog) = prog {
                 let key = self.version;
+                self.pv_key = 1;
                 let (tx, rx) = std::sync::mpsc::channel();
                 let ctx2 = ctx.clone();
                 match prog.kind {
                     GraphKind::Compositor => {
                         std::thread::spawn(move || {
                             let img = prog.composite(None);
-                            // Aperçu réduit pour l'affichage
                             let _ = tx.send((key, img));
                             ctx2.request_repaint();
                         });
                     }
                     GraphKind::Material => {
-                        let sphere = self.sphere.get_or_insert_with(|| std::sync::Arc::new(crate::model3d::preview_sphere())).clone();
+                        let model = match &self.pv_model {
+                            Some((_, m)) => m.clone(),
+                            None => self.sphere.get_or_insert_with(|| std::sync::Arc::new(crate::model3d::preview_sphere())).clone(),
+                        };
+                        let (yaw, pitch, dist, env) = (self.pv_yaw, self.pv_pitch, self.pv_dist, self.pv_env);
                         std::thread::spawn(move || {
-                            let img = crate::model3d::render_material_preview(&sphere, std::sync::Arc::new(prog), 360);
+                            let img = crate::model3d::render_material_view(&model, std::sync::Arc::new(prog), 360, yaw, pitch, dist, env);
                             let _ = tx.send((key, img));
                             ctx2.request_repaint();
                         });
@@ -2791,6 +2931,37 @@ impl Editor {
         }
         if self.preview_rx.is_some() {
             ui.painter().text(rect.left_top() + vec2(8.0, 8.0), egui::Align2::LEFT_TOP, "calcul…", egui::FontId::monospace(11.0), p.muted);
+        }
+        if is_mat {
+            // Barre sous l'aperçu : éclairage, modèle, node isolé
+            let bar = Rect::from_min_size(rect.left_bottom() + vec2(0.0, 4.0), vec2(rect.width(), 24.0));
+            let mut child = ui.new_child(egui::UiBuilder::new().max_rect(bar));
+            child.horizontal(|ui| {
+                egui::containers::menu::MenuButton::new(crate::i18n::t("lumière ▾")).ui(ui, |ui| {
+                    for (k, l) in ["studio", "studio doux", "extérieur", "coucher de soleil", "nuit", "neutre"].iter().enumerate() {
+                        if ui.radio(self.pv_env == k, crate::i18n::t(l)).clicked() {
+                            self.pv_env = k;
+                            self.pv_key = 0;
+                            ui.close();
+                        }
+                    }
+                });
+                if self.pv_model.is_some() {
+                    if ui.small_button(crate::i18n::t("sphère")).on_hover_text(crate::i18n::t("revenir à la sphère")).clicked() {
+                        self.pv_model = None;
+                        self.pv_key = 0;
+                    }
+                } else {
+                    ui.label(RichText::new(crate::i18n::t("dépose un modèle 3D ici")).color(p.muted).size(10.5));
+                }
+                if let Some(id) = self.solo {
+                    let name = self.graph.nodes.iter().find(|n| n.id == id).map(|n| if n.label.is_empty() { def(&n.op).map(|d| crate::i18n::t(d.label)).unwrap_or_default() } else { n.label.clone() }).unwrap_or_default();
+                    if ui.small_button(format!("{} : {name} ×", crate::i18n::t("node"))).on_hover_text(crate::i18n::t("revenir au matériau complet")).clicked() {
+                        self.solo = None;
+                        self.pv_key = 0;
+                    }
+                }
+            });
         }
     }
 
@@ -2821,6 +2992,38 @@ impl Editor {
 }
 
 
+/// Recherche de nodes : chaque mot doit se retrouver dans le nom (français ou anglais), la
+/// catégorie ou le code ; début de mot d'abord, puis milieu, puis lettres dans l'ordre.
+fn search_defs(q: &str, material: bool, need_input: bool) -> Vec<(i32, &'static Def)> {
+    let q = crate::chat::fold(q);
+    let words: Vec<&str> = q.split_whitespace().collect();
+    let mut scored: Vec<(i32, &Def)> = DEFS
+        .iter()
+        .filter(|d| if material { d.mat } else { d.comp })
+        .filter(|d| !need_input || !d.inputs.is_empty())
+        .filter_map(|d| {
+            let hay = crate::chat::fold(&format!("{} {} {} {} {}", d.label, crate::i18n::en(d.label), d.op, d.cat, crate::i18n::en(d.cat)));
+            let mut total = 0;
+            for w in &words {
+                total += if hay.split_whitespace().any(|h| h.starts_with(w)) {
+                    30
+                } else if hay.contains(w) {
+                    20
+                } else {
+                    let mut it = hay.chars();
+                    if w.chars().all(|c| it.any(|h| h == c)) { 5 } else { return None }
+                };
+            }
+            if hay.starts_with(q.trim()) {
+                total += 20;
+            }
+            Some((total, d))
+        })
+        .collect();
+    scored.sort_by(|a, b| b.0.cmp(&a.0));
+    scored
+}
+
 fn sock_color(s: Sock) -> Color32 {
     match s {
         Sock::Float => Color32::from_rgb(160, 160, 165),
@@ -2831,6 +3034,17 @@ fn sock_color(s: Sock) -> Color32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recherche_de_nodes() {
+        let names = |q: &str| -> Vec<String> { search_defs(q, true, false).iter().take(8).map(|x| crate::i18n::en(x.1.label).to_lowercase()).collect() };
+        eprintln!("{:?}", names("color"));
+        eprintln!("{:?}", names("color ra"));
+        assert!(names("color").iter().any(|n| n.contains("ramp")), "color doit trouver la rampe");
+        assert!(names("color ra")[0].contains("ramp"));
+        assert!(!names("  noise ").is_empty());
+        assert!(!names("nois").is_empty() && !names("vrn").is_empty());
+    }
 
     #[test]
     fn tous_les_nodes() {

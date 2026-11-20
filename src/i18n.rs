@@ -30,6 +30,12 @@ pub fn t(s: &str) -> String {
 
 /// Langue du système (pour le premier démarrage).
 #[allow(dead_code)]
+/// Traduction anglaise d'un texte, quelle que soit la langue affichée (pour la recherche).
+pub fn en(s: &str) -> String {
+    EN.get(s).cloned().unwrap_or_else(|| s.to_string())
+}
+
+#[allow(dead_code)]
 pub fn system_default() -> &'static str {
     let l = std::env::var("LANG").or_else(|_| std::env::var("LC_ALL")).unwrap_or_default().to_lowercase();
     if l.starts_with("en") { "en" } else { "fr" }

@@ -1164,10 +1164,21 @@ pub fn preview_sphere() -> Prepared {
 
 /// Rendu de la sphère avec un matériau en nodes (pour l'aperçu de l'éditeur).
 pub fn render_material_preview(sphere: &Prepared, prog: std::sync::Arc<crate::nodes::Program>, size: usize) -> crate::nodes::Img {
-    let look = Look { nodes: Some(prog), show_bg: true, blur_bg: true, env: Env::preset(0), ..Default::default() };
-    let f = render(sphere, &Camera { yaw: 0.4, pitch: 0.25, dist: 2.0, ..Default::default() }, &look, size, size);
+    render_material_view(sphere, prog, size, 0.4, 0.25, 2.0, 0)
+}
+
+/// Aperçu d'un matériau sur un modèle, avec la caméra et l'éclairage choisis.
+pub fn render_material_view(model: &Prepared, prog: std::sync::Arc<crate::nodes::Program>, size: usize, yaw: f32, pitch: f32, dist: f32, env: usize) -> crate::nodes::Img {
+    let look = Look { nodes: Some(prog), show_bg: true, blur_bg: true, env: Env::preset(env), ..Default::default() };
+    let f = render(model, &Camera { yaw, pitch, dist, ..Default::default() }, &look, size, size);
     let px = f.rgba.chunks_exact(4).map(|c| [c[0] as f32 / 255.0, c[1] as f32 / 255.0, c[2] as f32 / 255.0, c[3] as f32 / 255.0]).collect();
     crate::nodes::Img { w: size, h: size, px }
+}
+
+/// Charge un modèle du disque, prêt pour l'aperçu des matériaux.
+pub fn preview_model(path: &Path) -> Option<Prepared> {
+    let m = load(path).ok()?;
+    Some(Prepared::new(&m, m.z_up, 0))
 }
 
 /// Image du modèle pour les miniatures des boards et des refs.
