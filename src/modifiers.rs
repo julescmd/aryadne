@@ -1037,7 +1037,7 @@ fn weld(mut m: Mesh, dist: f32) -> Mesh {
     m
 }
 
-pub const EXPORT_FORMATS: &[&str] = &["obj", "glb", "stl", "ply"];
+pub const EXPORT_FORMATS: &[&str] = &["obj", "fbx", "glb", "stl", "ply"];
 
 /// Positions dans les unités et l'orientation du fichier d'origine.
 fn world(m: &Mesh, model: &Model, z_up: bool) -> Vec<V3> {
@@ -1057,6 +1057,17 @@ fn world(m: &Mesh, model: &Model, z_up: bool) -> Vec<V3> {
 pub fn export(m: &Mesh, model: &Model, z_up: bool, path: &std::path::Path) -> Result<(), String> {
     use std::io::Write;
     let ext = path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+    if ext == "fbx" {
+        let e = crate::uvedit::Edit::open(m, std::path::PathBuf::new(), 1.0);
+        let s = model.size();
+        let longest = s[0].max(s[1]).max(s[2]).max(1e-9);
+        let c = [(model.min[0] + model.max[0]) / 2.0, (model.min[1] + model.max[1]) / 2.0, (model.min[2] + model.max[2]) / 2.0];
+        let w = move |p: V3| -> V3 {
+            let o = if z_up { [p[0], -p[2], p[1]] } else { p };
+            [o[0] * longest + c[0], o[1] * longest + c[1], o[2] * longest + c[2]]
+        };
+        return crate::fbxwrite::export(&e, &w, path);
+    }
     let pos = world(m, model, z_up);
     let io = |e: std::io::Error| e.to_string();
     let f = std::fs::File::create(path).map_err(io)?;

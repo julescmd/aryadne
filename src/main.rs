@@ -5,6 +5,7 @@ mod convert;
 mod uvedit;
 mod zoomview;
 mod i18n;
+mod fbxwrite;
 mod cloud_ui;
 mod lsp;
 mod ai;

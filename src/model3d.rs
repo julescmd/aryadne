@@ -1608,7 +1608,7 @@ impl Viewer {
                 ui.label(egui::RichText::new(crate::i18n::t("enregistré à côté du modèle")).color(p.muted).size(10.5));
             });
             egui::containers::menu::MenuButton::new(crate::i18n::t("exporter ▾")).ui(ui, |ui| {
-                for (f, help) in [("obj", "OBJ : quads et n-gones gardés"), ("glb", "glTF binaire : Blender, Unity, Unreal, web"), ("stl", "STL binaire : impression 3D"), ("ply", "PLY : scans, MeshLab")] {
+                for (f, help) in [("obj", "OBJ : quads et n-gones gardés"), ("fbx", "FBX : Maya, 3ds Max, Blender, Unity, Unreal (quads, UV, matériaux)"), ("glb", "glTF binaire : Blender, Unity, Unreal, web"), ("stl", "STL binaire : impression 3D"), ("ply", "PLY : scans, MeshLab")] {
                     if ui.button(format!("{} ", f.to_uppercase())).on_hover_text(help).clicked() {
                         export = Some(f);
                     }
@@ -1686,8 +1686,12 @@ impl Viewer {
                 let o = if z_up { [p[0], -p[2], p[1]] } else { p };
                 [o[0] * longest + c[0], o[1] * longest + c[1], o[2] * longest + c[2]]
             };
-            let with_edit = self.edit.as_ref().filter(|_| fmt == "obj" || fmt == "glb");
-            self.capture_msg = Some(match with_edit.map(|e| if fmt == "obj" { crate::uvedit::export_obj(e, &world, &out) } else { crate::uvedit::export_glb(e, &world, &out) }).unwrap_or_else(|| crate::modifiers::export(&mesh, model, z_up, &out)) {
+            let with_edit = self.edit.as_ref().filter(|_| fmt == "obj" || fmt == "glb" || fmt == "fbx");
+            self.capture_msg = Some(match with_edit.map(|e| match fmt {
+                "obj" => crate::uvedit::export_obj(e, &world, &out),
+                "fbx" => crate::fbxwrite::export(e, &world, &out),
+                _ => crate::uvedit::export_glb(e, &world, &out),
+            }).unwrap_or_else(|| crate::modifiers::export(&mesh, model, z_up, &out)) {
                 Ok(()) => format!("exporté : {}", out.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()),
                 Err(e) => format!("export impossible : {e}"),
             });

@@ -1851,7 +1851,7 @@ impl Edit {
         ui.checkbox(&mut self.auto.hide_seams, crate::i18n::t("cacher les coutures (creux, dessous)"));
     }
 
-    fn auto_now(&mut self, then_unwrap: bool) {
+    pub(crate) fn auto_now(&mut self, then_unwrap: bool) {
         let t0 = std::time::Instant::now();
         self.data.seams = auto_seams(&self.topo, &self.data, &self.auto);
         if then_unwrap {
@@ -2350,5 +2350,29 @@ mod auto_tests {
         let n = d.chart.iter().max().unwrap() + 1;
         assert!(n <= 2, "tore : {n} îlots");
         assert!(d.uv.iter().flatten().all(|p| p[0].is_finite() && p[0] >= -1e-3 && p[0] <= 1.001));
+    }
+}
+
+#[cfg(test)]
+mod blender_files {
+    use super::*;
+    /// ARYADNE_EXPORT_DIR=… : écrit tore avec UV et IDs (pour vérifier dans Blender)
+    #[test]
+    fn ecrire_pour_blender() {
+        let Ok(dir) = std::env::var("ARYADNE_EXPORT_DIR") else { return };
+        let dir = std::path::PathBuf::from(dir);
+        let model = crate::model3d::load(std::path::Path::new("/home/claude/demo-vault/3d/tore.obj")).unwrap();
+        let mesh = crate::modifiers::Mesh::from_model(&model, false);
+        let mut e = Edit::open(&mesh, dir.join("d.json"), 1.0);
+        e.auto_now(true);
+        e.data.slots.push(Slot { name: "rouge".into(), color: [220, 40, 40] });
+        for f in 0..40 {
+            e.data.face_mat[f] = 1;
+        }
+        let id = |p: V3| p;
+        export_obj(&e, &id, &dir.join("tore.obj")).unwrap();
+        export_glb(&e, &id, &dir.join("tore.glb")).unwrap();
+        #[allow(unused)]
+        if let Ok(()) = crate::fbxwrite::export(&e, &id, &dir.join("tore.fbx")) {}
     }
 }
