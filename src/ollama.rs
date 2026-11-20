@@ -17,6 +17,8 @@ pub struct State {
     pub binary: Option<PathBuf>,
     pub running: bool,
     pub models: Vec<String>,
+    /// Taille de chaque modèle installé (octets).
+    pub sizes: std::collections::HashMap<String, u64>,
     /// Tâche en cours : (message, progression 0..1)
     pub task: Option<(String, Option<f32>)>,
     pub error: Option<String>,
@@ -75,10 +77,22 @@ fn ping(host: &str) -> bool {
     agent(2).get(&format!("{host}/api/version")).call().is_ok()
 }
 
-fn list_models(host: &str) -> Vec<String> {
+fn list_models(host: &str) -> Vec<(String, u64)> {
     let Ok(mut r) = agent(4).get(&format!("{host}/api/tags")).call() else { return vec![] };
     let v: Value = r.body_mut().read_json().unwrap_or_default();
-    v["models"].as_array().map(|a| a.iter().filter_map(|m| m["name"].as_str().map(str::to_string)).collect()).unwrap_or_default()
+    v["models"].as_array().map(|a| a.iter().filter_map(|m| m["name"].as_str().map(|n| (n.to_string(), m["size"].as_u64().unwrap_or(0)))).collect()).unwrap_or_default()
+}
+
+/// Mémoire vive totale (Go), si on sait la lire.
+pub fn total_ram_gb() -> Option<f32> {
+    #[cfg(target_os = "linux")]
+    {
+        let t = std::fs::read_to_string("/proc/meminfo").ok()?;
+        let kb: f32 = t.lines().find(|l| l.starts_with("MemTotal:"))?.split_whitespace().nth(1)?.parse().ok()?;
+        return Some(kb / 1024.0 / 1024.0);
+    }
+    #[allow(unreachable_code)]
+    None
 }
 
 impl Local {
@@ -103,7 +117,8 @@ impl Local {
                 s.checked = true;
                 s.binary = binary;
                 s.running = running;
-                s.models = models;
+                s.sizes = models.iter().cloned().collect();
+                s.models = models.into_iter().map(|m| m.0).collect();
             });
             ctx.request_repaint();
         });
@@ -221,6 +236,18 @@ impl Local {
                 s.task = None;
                 s.error = r.err();
             });
+            me.refresh(&url, &ctx);
+        });
+    }
+
+    /// Supprime un modèle téléchargé (libère l'espace disque).
+    pub fn delete(&self, api_url: &str, model: &str, ctx: &eframe::egui::Context) {
+        let (me, ctx, url, model) = (self.clone(), ctx.clone(), api_url.to_string(), model.to_string());
+        std::thread::spawn(move || {
+            let r = agent(30).delete(&format!("{}/api/delete", host(&url))).force_send_body().send_json(json!({ "model": model }));
+            if let Err(e) = r {
+                me.set(|s| s.error = Some(format!("Suppression impossible : {e}")));
+            }
             me.refresh(&url, &ctx);
         });
     }

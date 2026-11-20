@@ -47,6 +47,10 @@ pub enum Cmd {
     StopTimer,
     Organize,
     Reload,
+    NewMaterial,
+    NewCompositor,
+    Stats,
+    RunFile,
 }
 
 impl App {
@@ -63,6 +67,8 @@ impl App {
             ("nouvelle note", "Ctrl+N", Cmd::NewNote),
             ("note du jour", "Ctrl+J", Cmd::Daily),
             ("nouvelle note depuis un modèle", "", Cmd::FromTemplate),
+            ("nouveau matériau (nodes)", "", Cmd::NewMaterial),
+            ("nouveau compositing (nodes)", "", Cmd::NewCompositor),
             ("importer des fichiers…", "", Cmd::Import),
             ("lier un dossier…", "", Cmd::LinkFolder),
             ("importer une image depuis une URL…", "", Cmd::ImportUrl),
@@ -76,6 +82,7 @@ impl App {
             ("minuteur : 50 min", "", Cmd::Timer(50)),
             ("minuteur : pause 5 min", "", Cmd::Timer(5)),
             ("sauvegarder le coffre maintenant (zip)", "", Cmd::Backup),
+            ("statistiques du coffre", "", Cmd::Stats),
             ("ouvrir le dossier du coffre", "", Cmd::OpenVaultFolder),
             ("changer de coffre…", "", Cmd::ChangeVault),
             ("recharger les fichiers", "", Cmd::Reload),
@@ -94,6 +101,9 @@ impl App {
             v.insert(0, ("fichier : historique des versions", "", Cmd::History));
             v.insert(1, ("fichier : résumer avec l'IA", "", Cmd::Summarize));
             v.insert(2, ("fichier : fermer l'onglet", "Ctrl+W", Cmd::CloseTab));
+            if self.current().is_some_and(|d| runner_for(&d.rel).is_some()) {
+                v.insert(0, ("fichier : exécuter le script", "F5", Cmd::RunFile));
+            }
             if self.current().is_some_and(|d| live::is_previewable(&d.rel)) {
                 v.insert(0, ("fichier : aperçu live dans le navigateur", "", Cmd::LivePreview));
             }
@@ -155,6 +165,29 @@ impl App {
             Cmd::Updates => self.dialog = Some(Dialog::Update),
             Cmd::Timer(min) => self.timer = Some(Timer { start: Instant::now(), minutes: min, label: if min <= 10 { "pause" } else { "focus" } }),
             Cmd::StopTimer => self.timer = None,
+            Cmd::NewMaterial | Cmd::NewCompositor => {
+                let mat = cmd == Cmd::NewMaterial;
+                let dir = if self.entries.iter().any(|e| e.rel == "nodes") { "nodes".to_string() } else {
+                    let _ = vault::create_dir(&self.root(), "nodes");
+                    "nodes".to_string()
+                };
+                let base = if mat { "Matériau" } else { "Compositing" };
+                let ext = if mat { "mat.json" } else { "comp.json" };
+                let mut rel = format!("{dir}/{base}.{ext}");
+                let mut i = 2;
+                while self.entries.iter().any(|e| e.rel == rel) {
+                    rel = format!("{dir}/{base} {i}.{ext}");
+                    i += 1;
+                }
+                let g = if mat { nodes::Graph::new_material() } else { nodes::Graph::new_compositor() };
+                let r = vault::safe(&self.root(), &rel).and_then(|p| g.save(&p));
+                if self.report(r).is_some() {
+                    self.refresh();
+                    self.open(rel);
+                }
+            }
+            Cmd::Stats => self.stats = Some(compute_stats(&self.root(), &self.entries)),
+            Cmd::RunFile => self.run_current(),
             Cmd::Organize => {
                 self.view = Some(View::Brain);
                 self.start_organize(ctx);
@@ -513,7 +546,23 @@ impl App {
                 add |= ui.button("ajouter").clicked();
             });
             ui.add_space(4.0);
-            ui.label(RichText::new("Toutes les cases « - [ ] » de tes notes, regroupées par note. Cocher ici coche dans la note.").color(p.muted).size(11.0));
+            ui.label(RichText::new("Toutes les cases « - [ ] » de tes notes, regroupées par note. Cocher ici coche dans la note. Ajoute « @2026-12-01 » pour une échéance.").color(p.muted).size(11.0));
+            // Échéances à venir, toutes notes confondues
+            let mut dated: Vec<&Task> = self.tasks.items.iter().filter(|t| !t.done && t.due.is_some()).collect();
+            dated.sort_by(|a, b| a.due.cmp(&b.due));
+            if !dated.is_empty() {
+                ui.add_space(8.0);
+                ui.label(caps("échéances"));
+                for t in dated.iter().take(8) {
+                    let d = t.due.clone().unwrap_or_default();
+                    let late = d.as_str() < today().as_str();
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(&d).color(if late { p.missing } else { p.accent }).size(11.5));
+                        ui.label(RichText::new(&t.text).size(12.5));
+                        ui.label(RichText::new(vault::display_rel(&t.rel).trim_end_matches(".md").to_string()).color(p.muted).size(11.0));
+                    });
+                }
+            }
             ui.add_space(10.0);
             let f = crate::chat::fold(&self.tasks.filter);
             egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
@@ -540,6 +589,12 @@ impl App {
                         }
                         let txt = RichText::new(&t.text).size(13.0);
                         ui.label(if t.done { txt.strikethrough().color(p.muted) } else { txt });
+                        if let Some(d) = &t.due {
+                            let late = !t.done && d.as_str() < today().as_str();
+                            let soon = !t.done && d.as_str() == today().as_str();
+                            let col = if late { p.missing } else if soon { p.accent } else { p.muted };
+                            ui.label(RichText::new(if late { format!("en retard · {d}") } else if soon { "aujourd'hui".to_string() } else { d.clone() }).color(col).size(11.0));
+                        }
                     });
                 }
                 if !any {
@@ -638,6 +693,8 @@ pub struct Task {
     pub indent: usize,
     pub text: String,
     pub done: bool,
+    /// Échéance « @AAAA-MM-JJ » écrite dans la tâche
+    pub due: Option<String>,
 }
 
 fn collect_tasks(root: &str, entries: &[Entry], docs: &[Doc]) -> Vec<Task> {
@@ -665,7 +722,11 @@ fn collect_tasks(root: &str, entries: &[Entry], docs: &[Doc]) -> Vec<Task> {
             if body.is_empty() {
                 continue;
             }
-            out.push(Task { rel: e.rel.clone(), line: i, indent, text: body.to_string(), done });
+            let due = body.split_whitespace().find_map(|w| {
+                let d = w.strip_prefix('@')?;
+                (d.len() == 10 && d.as_bytes()[4] == b'-' && d.as_bytes()[7] == b'-' && d.chars().filter(|c| c.is_ascii_digit()).count() == 8).then(|| d.to_string())
+            });
+            out.push(Task { rel: e.rel.clone(), line: i, indent, text: body.to_string(), done, due });
         }
     }
     out
@@ -907,4 +968,387 @@ mod tests {
         assert!(z.exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
+}
+
+// ---------- barre du chat : pièces jointes, modèle, arrêt ----------
+
+/// Ce que la barre demande à l'application.
+#[derive(Default)]
+pub struct ChatBarOut {
+    pub model: Option<String>,
+    pub manage_models: bool,
+}
+
+/// Pièces jointes (avec ×), « joindre ▾ », choix du modèle et bouton d'arrêt.
+pub fn chat_bar(ui: &mut egui::Ui, chat: &mut chat::Chat, local: &ollama::Local, settings: &ai::Settings, open_file: Option<(String, PathBuf)>) -> ChatBarOut {
+    let p = theme::pal();
+    let mut out = ChatBarOut::default();
+    ui.horizontal_wrapped(|ui| {
+        egui::containers::menu::MenuButton::new("＋ joindre ▾").ui(ui, |ui| {
+            ui.set_min_width(220.0);
+            if ui.button("fichiers ou images…").clicked() {
+                if let Some(files) = rfd::FileDialog::new().set_title("Joindre des fichiers").pick_files() {
+                    for f in files {
+                        chat.attachments.extend(chat::Attachment::from_path(&f));
+                    }
+                }
+            }
+            if ui.button("un dossier…").clicked() {
+                if let Some(d) = rfd::FileDialog::new().set_title("Joindre un dossier").pick_folder() {
+                    chat.attachments.extend(chat::Attachment::from_path(&d));
+                }
+            }
+            if let Some((rel, path)) = &open_file {
+                if ui.button(format!("le fichier ouvert ({})", vault::display_rel(rel))).clicked() {
+                    chat.attachments.extend(chat::Attachment::from_path(path));
+                }
+            }
+            if ui.button("l'image du presse-papiers").clicked() {
+                if let Some(img) = arboard::Clipboard::new().ok().and_then(|mut c| c.get_image().ok()) {
+                    if let Some(buf) = image::RgbaImage::from_raw(img.width as u32, img.height as u32, img.bytes.into_owned()) {
+                        chat.attachments.push(chat::Attachment::from_image(image::DynamicImage::ImageRgba8(buf), "presse-papiers.png"));
+                    }
+                }
+            }
+            ui.label(RichText::new("Tu peux aussi glisser des fichiers dans la fenêtre (vue chat).").color(p.muted).size(10.5));
+        });
+        let mut remove = None;
+        for (i, a) in chat.attachments.iter().enumerate() {
+            let icon = if matches!(a, chat::Attachment::Image { .. }) { "▣" } else { "▤" };
+            if ui.add(egui::Button::new(RichText::new(format!("{icon} {}  ×", a.name())).size(11.0)).fill(p.panel)).on_hover_text("retirer").clicked() {
+                remove = Some(i);
+            }
+        }
+        if let Some(i) = remove {
+            chat.attachments.remove(i);
+        }
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if chat.busy() {
+                let b = egui::Button::new(RichText::new("■ arrêter").color(p.on_accent)).fill(p.missing).stroke(egui::Stroke::NONE);
+                if ui.add(b).on_hover_text("Arrêter la réponse").clicked() {
+                    chat.stop();
+                }
+            }
+            // Choix du modèle
+            let st = local.snapshot();
+            if ollama::is_local(&settings.url) && !st.models.is_empty() {
+                egui::ComboBox::from_id_salt(ui.next_auto_id()).selected_text(RichText::new(&settings.model).size(11.0)).width(170.0).show_ui(ui, |ui| {
+                    for m in &st.models {
+                        if ui.selectable_label(*m == settings.model || m.trim_end_matches(":latest") == settings.model, m).clicked() {
+                            out.model = Some(m.clone());
+                        }
+                    }
+                    ui.separator();
+                    if ui.button("gérer les modèles…").clicked() {
+                        out.manage_models = true;
+                    }
+                });
+            } else {
+                if ui.add(egui::Button::new(RichText::new(format!("modèle : {}", settings.model)).color(p.muted).size(11.0)).frame(false)).on_hover_text("changer de modèle").clicked() {
+                    out.manage_models = true;
+                }
+            }
+        });
+    });
+    out
+}
+
+impl App {
+    pub(super) fn apply_chat_bar(&mut self, out: ChatBarOut, ctx: &egui::Context) {
+        if let Some(m) = out.model {
+            let mut s = self.ai.clone().unwrap_or_else(ai::Settings::load);
+            s.model = m.trim_end_matches(":latest").to_string();
+            s.save();
+            self.ai = Some(s);
+        }
+        if out.manage_models {
+            self.open_settings_tab(ctx, settings::Tab::Ai);
+        }
+    }
+
+    pub(super) fn open_file_path(&self) -> Option<(String, PathBuf)> {
+        let d = self.current()?;
+        vault::safe(&self.root(), &d.rel).ok().map(|p| (d.rel.clone(), p))
+    }
+}
+
+/// Boutons de réponse rapide quand l'IA pose une question (« ?> a | b »).
+pub fn choice_buttons(ui: &mut egui::Ui, choices: &[String]) -> Option<String> {
+    let p = theme::pal();
+    let mut picked = None;
+    if choices.is_empty() {
+        return None;
+    }
+    ui.horizontal_wrapped(|ui| {
+        ui.label(RichText::new("répondre :").color(p.muted).size(11.0));
+        for c in choices {
+            if ui.add(egui::Button::new(RichText::new(c).color(p.accent)).stroke(egui::Stroke::new(1.0, p.accent))).clicked() {
+                picked = Some(c.clone());
+            }
+        }
+    });
+    picked
+}
+
+
+// ---------- statistiques du coffre ----------
+
+pub struct Stats {
+    pub files: usize,
+    pub dirs: usize,
+    pub total: u64,
+    pub by_kind: Vec<(String, usize, u64)>,
+    pub biggest: Vec<(String, u64)>,
+    pub words: usize,
+    pub linked: usize,
+}
+
+fn kind_of(rel: &str) -> &'static str {
+    let e = rel.rsplit_once('.').map(|(_, e)| e.to_lowercase()).unwrap_or_default();
+    match e.as_str() {
+        "md" | "txt" => "notes",
+        "png" | "jpg" | "jpeg" | "webp" | "gif" | "bmp" | "tga" | "tif" | "tiff" | "exr" | "hdr" | "psd" | "kra" => "images",
+        "obj" | "fbx" | "glb" | "gltf" | "stl" | "blend" | "abc" | "usd" | "usdz" => "3d",
+        "mp4" | "mov" | "webm" | "mkv" | "avi" => "vidéos",
+        "pptx" | "docx" | "xlsx" | "odp" | "odt" | "ods" | "pdf" => "documents",
+        "json" if rel.ends_with(".board.json") => "boards",
+        "json" if rel.ends_with(".mat.json") || rel.ends_with(".comp.json") => "nodes",
+        "rs" | "py" | "js" | "ts" | "html" | "css" | "c" | "cpp" | "h" | "glsl" | "lua" | "sh" | "json" | "toml" | "yaml" | "yml" | "gd" => "code",
+        "wav" | "mp3" | "ogg" | "flac" => "audio",
+        _ => "autres",
+    }
+}
+
+fn compute_stats(root: &str, entries: &[Entry]) -> Stats {
+    let mut by: HashMap<&str, (usize, u64)> = HashMap::new();
+    let mut biggest = vec![];
+    let (mut files, mut dirs, mut total, mut words, mut linked) = (0, 0, 0u64, 0usize, 0);
+    for e in entries {
+        if e.is_dir {
+            dirs += 1;
+            continue;
+        }
+        files += 1;
+        if vault::is_external(&e.rel) {
+            linked += 1;
+        }
+        let size = vault::safe(root, &e.rel).ok().and_then(|p| std::fs::metadata(p).ok()).map(|m| m.len()).unwrap_or(0);
+        total += size;
+        let k = by.entry(kind_of(&e.rel)).or_default();
+        k.0 += 1;
+        k.1 += size;
+        biggest.push((e.rel.clone(), size));
+        if vault::is_md(&e.rel) && size < 2_000_000 {
+            words += vault::read(root, &e.rel).map(|t| t.split_whitespace().count()).unwrap_or(0);
+        }
+    }
+    biggest.sort_by(|a, b| b.1.cmp(&a.1));
+    biggest.truncate(12);
+    let mut by_kind: Vec<(String, usize, u64)> = by.into_iter().map(|(k, (n, s))| (k.to_string(), n, s)).collect();
+    by_kind.sort_by(|a, b| b.2.cmp(&a.2));
+    Stats { files, dirs, total, by_kind, biggest, words, linked }
+}
+
+pub fn human(n: u64) -> String {
+    let f = n as f64;
+    if f >= 1e9 {
+        format!("{:.1} Go", f / 1e9)
+    } else if f >= 1e6 {
+        format!("{:.1} Mo", f / 1e6)
+    } else if f >= 1e3 {
+        format!("{:.0} Ko", f / 1e3)
+    } else {
+        format!("{n} o")
+    }
+}
+
+impl App {
+    pub(super) fn stats_ui(&mut self, ctx: &egui::Context) {
+        let Some(st) = &self.stats else { return };
+        let p = theme::pal();
+        let mut close = false;
+        let mut open = None;
+        egui::Modal::new(egui::Id::unique("stats")).frame(egui::Frame::new().fill(p.bg).stroke(egui::Stroke::new(1.0, p.text)).inner_margin(16)).show(ctx, |ui| {
+            ui.set_width(620.0);
+            ui.label(caps("statistiques du coffre"));
+            ui.add_space(6.0);
+            ui.label(format!("{} fichiers · {} dossiers · {} au total · {} fichiers liés · {} mots dans les notes", st.files, st.dirs, human(st.total), st.linked, st.words));
+            ui.add_space(10.0);
+            let max = st.by_kind.iter().map(|k| k.2).max().unwrap_or(1).max(1);
+            for (k, n, s) in &st.by_kind {
+                ui.horizontal(|ui| {
+                    ui.add_sized([90.0, 18.0], egui::Label::new(RichText::new(k.as_str()).size(12.0)));
+                    let (r, _) = ui.allocate_exact_size(egui::vec2(280.0, 12.0), egui::Sense::hover());
+                    ui.painter().rect_filled(r, 0.0, p.line);
+                    ui.painter().rect_filled(egui::Rect::from_min_size(r.min, egui::vec2(280.0 * *s as f32 / max as f32, 12.0)), 0.0, p.accent);
+                    ui.label(RichText::new(format!("{n} · {}", human(*s))).color(p.muted).size(11.0));
+                });
+            }
+            ui.add_space(10.0);
+            ui.label(caps("les plus lourds"));
+            for (rel, s) in &st.biggest {
+                ui.horizontal(|ui| {
+                    if ui.add(egui::Button::new(RichText::new(vault::display_rel(rel)).size(11.5)).frame(false)).clicked() {
+                        open = Some(rel.clone());
+                    }
+                    ui.label(RichText::new(human(*s)).color(p.muted).size(11.0));
+                });
+            }
+            ui.add_space(8.0);
+            close = ui.button("fermer").clicked() || ui.input(|i| i.key_pressed(Key::Escape));
+        });
+        if let Some(r) = open {
+            self.stats = None;
+            self.open(r);
+            return;
+        }
+        if close {
+            self.stats = None;
+        }
+    }
+
+    // ---------- exécuter un script ----------
+
+    pub(super) fn run_current(&mut self) {
+        let Some(rel) = self.current().map(|d| d.rel.clone()) else { return };
+        self.flush_all();
+        let Some((prog, args)) = runner_for(&rel) else {
+            self.error = Some("Pas de façon connue d'exécuter ce type de fichier.".into());
+            return;
+        };
+        let Ok(path) = vault::safe(&self.root(), &rel) else { return };
+        let out = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut cmd = std::process::Command::new(&prog);
+        cmd.args(&args).arg(&path).current_dir(path.parent().unwrap_or(std::path::Path::new("."))).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).stdin(std::process::Stdio::null());
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(0x0800_0000);
+        }
+        match cmd.spawn() {
+            Ok(mut child) => {
+                let (o, d) = (out.clone(), done.clone());
+                let ctx = self.ctx.clone();
+                let stdout = child.stdout.take();
+                let stderr = child.stderr.take();
+                let child = std::sync::Arc::new(std::sync::Mutex::new(child));
+                let ch = child.clone();
+                std::thread::spawn(move || {
+                    use std::io::BufRead;
+                    let o2 = o.clone();
+                    let c2 = ctx.clone();
+                    let t = std::thread::spawn(move || {
+                        if let Some(e) = stderr {
+                            for l in std::io::BufReader::new(e).lines().map_while(Result::ok) {
+                                if let Ok(mut s) = o2.lock() {
+                                    s.push_str(&l);
+                                    s.push('\n');
+                                }
+                                if let Some(c) = &c2 {
+                                    c.request_repaint();
+                                }
+                            }
+                        }
+                    });
+                    if let Some(so) = stdout {
+                        for l in std::io::BufReader::new(so).lines().map_while(Result::ok) {
+                            if let Ok(mut s) = o.lock() {
+                                s.push_str(&l);
+                                s.push('\n');
+                            }
+                            if let Some(c) = &ctx {
+                                c.request_repaint();
+                            }
+                        }
+                    }
+                    let _ = t.join();
+                    let code = ch.lock().ok().and_then(|mut c| c.wait().ok()).and_then(|s| s.code());
+                    if let Ok(mut s) = o.lock() {
+                        s.push_str(&format!("\n— terminé (code {}) —\n", code.map(|c| c.to_string()).unwrap_or("?".into())));
+                    }
+                    d.store(true, std::sync::atomic::Ordering::Relaxed);
+                    if let Some(c) = &ctx {
+                        c.request_repaint();
+                    }
+                });
+                self.run = Some(Run { rel, out, done, child: Some(child) });
+            }
+            Err(e) => self.error = Some(format!("Impossible de lancer « {prog} » : {e}. Est-il installé ?")),
+        }
+    }
+
+    /// Panneau de sortie sous l'éditeur.
+    pub(super) fn run_panel(&mut self, ui: &mut egui::Ui) {
+        let Some(r) = &self.run else { return };
+        let p = theme::pal();
+        let mut close = false;
+        let mut stop = false;
+        let mut again = false;
+        let text = r.out.lock().map(|s| s.clone()).unwrap_or_default();
+        let running = !r.done.load(std::sync::atomic::Ordering::Relaxed);
+        egui::Panel::bottom("run-output").resizable(true).default_size(180.0).frame(egui::Frame::new().fill(egui::Color32::from_gray(22)).inner_margin(8)).show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(format!("sortie · {}", vault::display_rel(&r.rel))).color(egui::Color32::from_gray(170)).size(11.0));
+                if running {
+                    ui.add(egui::Spinner::new().size(10.0));
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    close = ui.small_button("×").clicked();
+                    if running {
+                        stop = ui.small_button("arrêter").clicked();
+                    } else {
+                        again = ui.small_button("relancer").clicked();
+                    }
+                });
+            });
+            egui::ScrollArea::vertical().stick_to_bottom(true).auto_shrink(false).show(ui, |ui| {
+                ui.label(RichText::new(if text.is_empty() { "…" } else { text.as_str() }).monospace().size(12.0).color(egui::Color32::from_gray(225)));
+            });
+        });
+        let _ = p;
+        if stop {
+            if let Some(c) = r.child.as_ref() {
+                if let Ok(mut c) = c.lock() {
+                    let _ = c.kill();
+                }
+            }
+        }
+        if close {
+            if running {
+                if let Some(c) = r.child.as_ref() {
+                    if let Ok(mut c) = c.lock() {
+                        let _ = c.kill();
+                    }
+                }
+            }
+            self.run = None;
+        }
+        if again {
+            self.run_current();
+        }
+    }
+}
+
+pub struct Run {
+    pub rel: String,
+    pub out: std::sync::Arc<std::sync::Mutex<String>>,
+    pub done: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    pub child: Option<std::sync::Arc<std::sync::Mutex<std::process::Child>>>,
+}
+
+/// Programme qui exécute ce fichier (et ses arguments avant le chemin).
+pub fn runner_for(rel: &str) -> Option<(String, Vec<String>)> {
+    let e = rel.rsplit_once('.').map(|(_, e)| e.to_lowercase())?;
+    let py = if cfg!(windows) { "python" } else { "python3" };
+    Some(match e.as_str() {
+        "py" => (py.into(), vec!["-u".into()]),
+        "js" | "mjs" => ("node".into(), vec![]),
+        "sh" => ("bash".into(), vec![]),
+        "lua" => ("lua".into(), vec![]),
+        "rb" => ("ruby".into(), vec![]),
+        "ps1" => ("powershell".into(), vec!["-NoProfile".into(), "-File".into()]),
+        "bat" | "cmd" => ("cmd".into(), vec!["/C".into()]),
+        _ => return None,
+    })
 }

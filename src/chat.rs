@@ -4,6 +4,7 @@ use crate::vault::{self, Entry};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::io::BufRead;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 const TEXT_EXT: [&str; 26] = [
@@ -26,10 +27,106 @@ pub struct Msg {
     pub text: String,
     pub sources: Vec<String>,
     pub error: Option<String>,
+    /// Noms des pièces jointes envoyées avec ce message.
+    pub attached: Vec<String>,
+}
+
+/// Pièce jointe : image (envoyée au modèle s'il voit les images) ou texte.
+#[derive(Clone)]
+pub enum Attachment {
+    Image { name: String, data_url: String },
+    Text { name: String, text: String },
+}
+
+impl Attachment {
+    pub fn name(&self) -> &str {
+        match self {
+            Attachment::Image { name, .. } | Attachment::Text { name, .. } => name,
+        }
+    }
+
+    /// Fichier ou dossier du disque → pièces jointes.
+    pub fn from_path(path: &std::path::Path) -> Vec<Attachment> {
+        let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        if path.is_dir() {
+            // Dossier : arborescence + contenu des fichiers texte (jusqu'à ~60 000 caractères)
+            let mut listing = String::new();
+            let mut texts = String::new();
+            let mut images = vec![];
+            let mut stack = vec![(path.to_path_buf(), 0usize)];
+            let mut count = 0;
+            while let Some((d, depth)) = stack.pop() {
+                let Ok(rd) = std::fs::read_dir(&d) else { continue };
+                let mut items: Vec<_> = rd.flatten().collect();
+                items.sort_by_key(|f| f.file_name());
+                for f in items {
+                    let fp = f.path();
+                    let n = f.file_name().to_string_lossy().to_string();
+                    if n.starts_with('.') || count > 400 {
+                        continue;
+                    }
+                    count += 1;
+                    let rel = fp.strip_prefix(path).map(|r| r.to_string_lossy().replace('\\', "/")).unwrap_or(n.clone());
+                    listing.push_str(&format!("{}{}{}\n", "  ".repeat(depth), n, if fp.is_dir() { "/" } else { "" }));
+                    if fp.is_dir() {
+                        if depth < 4 {
+                            stack.push((fp, depth + 1));
+                        }
+                    } else if is_text_path(&fp) && texts.len() < 60_000 {
+                        if let Ok(t) = std::fs::read_to_string(&fp) {
+                            let t: String = t.chars().take(8000).collect();
+                            texts.push_str(&format!("\n--- {rel} ---\n{t}\n"));
+                        }
+                    } else if crate::images::is_image(&n) && images.len() < 4 {
+                        images.extend(Self::image(&fp, &format!("{name}/{rel}")));
+                    }
+                }
+            }
+            let mut out = vec![Attachment::Text { name: format!("{name}/"), text: format!("Dossier {name} :\n{listing}{texts}") }];
+            out.extend(images);
+            return out;
+        }
+        if crate::images::is_image(&name) {
+            return Self::image(path, &name).into_iter().collect();
+        }
+        if is_text_path(path) {
+            if let Ok(t) = std::fs::read_to_string(path) {
+                return vec![Attachment::Text { name: name.clone(), text: t.chars().take(60_000).collect() }];
+            }
+        }
+        if crate::office::is_office(&name) {
+            if let Ok(t) = crate::office::to_text(path) {
+                return vec![Attachment::Text { name: name.clone(), text: t.chars().take(60_000).collect() }];
+            }
+        }
+        let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+        vec![Attachment::Text { name: name.clone(), text: format!("(fichier binaire {name}, {} Ko : contenu non lisible)", size / 1024) }]
+    }
+
+    fn image(path: &std::path::Path, name: &str) -> Option<Attachment> {
+        let img = image::open(path).ok()?;
+        Some(Self::from_image(img, name))
+    }
+
+    pub fn from_image(img: image::DynamicImage, name: &str) -> Attachment {
+        use base64::Engine;
+        let img = if img.width() > 1280 || img.height() > 1280 { img.thumbnail(1280, 1280) } else { img };
+        let mut buf = std::io::Cursor::new(Vec::new());
+        let _ = img.to_rgb8().write_to(&mut buf, image::ImageFormat::Jpeg);
+        let b64 = base64::engine::general_purpose::STANDARD.encode(buf.into_inner());
+        Attachment::Image { name: name.to_string(), data_url: format!("data:image/jpeg;base64,{b64}") }
+    }
+}
+
+fn is_text_path(p: &std::path::Path) -> bool {
+    let e = p.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+    TEXT_EXT.contains(&e.as_str()) || matches!(e.as_str(), "xml" | "svg" | "ini" | "cfg" | "log" | "gd" | "vue" | "svelte" | "php" | "rb" | "sql" | "bat" | "ps1" | "mjs" | "osl")
 }
 
 #[derive(Default)]
 pub struct Live {
+    /// Mis à vrai par « arrêter » : la génération s'interrompt.
+    pub stop: Arc<AtomicBool>,
     pub text: String,
     pub sources: Vec<String>,
     pub status: String,
@@ -43,11 +140,21 @@ pub struct Chat {
     pub input: String,
     pub live: Option<Arc<Mutex<Live>>>,
     pub include_open: bool,
+    pub attachments: Vec<Attachment>,
 }
 
 impl Chat {
     pub fn busy(&self) -> bool {
         self.live.is_some()
+    }
+
+    /// Interrompt la réponse en cours (le texte déjà reçu est gardé).
+    pub fn stop(&self) {
+        if let Some(l) = &self.live {
+            if let Ok(l) = l.lock() {
+                l.stop.store(true, Ordering::Relaxed);
+            }
+        }
     }
 
     /// Envoie la question. `open_file` = (chemin, contenu) du fichier ouvert, si on l'inclut.
@@ -65,9 +172,12 @@ impl Chat {
             return;
         }
         self.input.clear();
-        self.msgs.push(Msg { role: Role::User, text: q.clone(), sources: vec![], error: None });
+        let attachments = std::mem::take(&mut self.attachments);
+        let attached: Vec<String> = attachments.iter().map(|a| a.name().to_string()).collect();
+        self.msgs.push(Msg { role: Role::User, text: q.clone(), sources: vec![], error: None, attached });
         let history: Vec<Msg> = self.msgs.iter().rev().skip(1).take(8).rev().cloned().collect();
-        let live = Arc::new(Mutex::new(Live { status: "recherche dans le coffre…".into(), ..Default::default() }));
+        let stop = Arc::new(AtomicBool::new(false));
+        let live = Arc::new(Mutex::new(Live { status: "recherche dans le coffre…".into(), stop: stop.clone(), ..Default::default() }));
         self.live = Some(live.clone());
         std::thread::spawn(move || {
             let set = |f: &dyn Fn(&mut Live)| {
@@ -88,8 +198,8 @@ impl Chat {
             });
             let ready = if crate::ollama::is_local(&settings.url) { local.ensure_running(&settings.url) } else { Ok(()) };
             let result = ready.and_then(|_| {
-                let messages = build_messages(&entries, &hits, open_file.as_ref(), &history, &q);
-                stream(&settings, messages, &|delta: &str| {
+                let messages = build_messages(&entries, &hits, open_file.as_ref(), &history, &q, &attachments);
+                stream(&settings, messages, &stop, &|delta: &str| {
                     let d = delta.to_string();
                     set(&move |l: &mut Live| {
                         l.text.push_str(&d);
@@ -108,9 +218,12 @@ impl Chat {
 
     /// À appeler à chaque image : range la réponse terminée dans l'historique.
     pub fn poll(&mut self) {
-        let finished = self.live.as_ref().and_then(|l| l.lock().ok().filter(|l| l.done).map(|l| (l.text.clone(), l.sources.clone(), l.error.clone())));
-        if let Some((text, sources, error)) = finished {
-            self.msgs.push(Msg { role: Role::Assistant, text, sources, error });
+        let finished = self.live.as_ref().and_then(|l| l.lock().ok().filter(|l| l.done).map(|l| (l.text.clone(), l.sources.clone(), l.error.clone(), l.stop.load(Ordering::Relaxed))));
+        if let Some((mut text, sources, error, stopped)) = finished {
+            if stopped {
+                text.push_str("\n\n*(arrêté)*");
+            }
+            self.msgs.push(Msg { role: Role::Assistant, text, sources, error, attached: vec![] });
             self.live = None;
         }
     }
@@ -225,7 +338,7 @@ pub fn search(root: &str, entries: &[Entry], query: &str) -> Vec<Hit> {
     hits
 }
 
-fn build_messages(entries: &[Entry], hits: &[Hit], open: Option<&(String, String)>, history: &[Msg], q: &str) -> Vec<Value> {
+fn build_messages(entries: &[Entry], hits: &[Hit], open: Option<&(String, String)>, history: &[Msg], q: &str, attachments: &[Attachment]) -> Vec<Value> {
     let files: Vec<&str> = entries.iter().filter(|e| !e.is_dir).map(|e| e.rel.as_str()).take(400).collect();
     let mut sys = String::from(
         "Tu es l'assistant intégré à Aryadne, le logiciel de notes de l'utilisateur. Tu as accès à son coffre (un dossier de notes, de code et d'images).\n\
@@ -234,7 +347,9 @@ fn build_messages(entries: &[Entry], hits: &[Hit], open: Option<&(String, String
          - Appuie-toi sur les extraits fournis. Si l'information n'y est pas, dis-le et propose quel fichier ouvrir.\n\
          - Pour renvoyer vers une note .md, écris [[Nom de la note]] (sans .md). Pour un autre fichier, écris son chemin exact entre accents graves, par ex. `code/export.py`.\n\
          - Ne cite que des fichiers présents dans la liste ci-dessous.\n\
-         - Quand tu proposes du code, donne-le complet dans un bloc ```langage, prêt à être inséré tel quel. Si une sélection est fournie, ta réponse porte d'abord sur elle.\n\n",
+         - Quand tu proposes du code, donne-le complet dans un bloc ```langage, prêt à être inséré tel quel. Si une sélection est fournie, ta réponse porte d'abord sur elle.\n\
+         - Si la demande est ambiguë ou qu'il te manque une information importante, pose d'abord UNE question courte au lieu de deviner. Tu peux proposer des réponses toutes faites sur une ligne qui commence par « ?> », séparées par « | », par ex. :\n?> Un résumé court | Un plan détaillé | Les deux\n\
+         - Les pièces jointes (fichiers, dossiers, images) envoyées par l'utilisateur font partie de sa question.\n\n",
     );
     sys.push_str(&format!("Fichiers du coffre ({}) :\n{}\n", files.len(), files.join("\n")));
     if let Some((rel, text)) = open {
@@ -254,12 +369,42 @@ fn build_messages(entries: &[Entry], hits: &[Hit], open: Option<&(String, String
             msgs.push(json!({ "role": role, "content": m.text }));
         }
     }
-    msgs.push(json!({ "role": "user", "content": q }));
+    // Pièces jointes : le texte est ajouté à la question, les images envoyées à part.
+    let mut text = q.to_string();
+    for a in attachments {
+        if let Attachment::Text { name, text: t } = a {
+            text.push_str(&format!("\n\n[Pièce jointe : {name}]\n{t}"));
+        }
+    }
+    let images: Vec<&str> = attachments.iter().filter_map(|a| if let Attachment::Image { data_url, .. } = a { Some(data_url.as_str()) } else { None }).collect();
+    if images.is_empty() {
+        msgs.push(json!({ "role": "user", "content": text }));
+    } else {
+        let mut parts = vec![json!({ "type": "text", "text": text })];
+        for u in images {
+            parts.push(json!({ "type": "image_url", "image_url": { "url": u } }));
+        }
+        msgs.push(json!({ "role": "user", "content": parts }));
+    }
     msgs
 }
 
+/// Réponses proposées par l'IA (ligne « ?> a | b | c ») et texte sans cette ligne.
+pub fn split_choices(text: &str) -> (String, Vec<String>) {
+    let mut choices = vec![];
+    let mut kept = vec![];
+    for l in text.lines() {
+        if let Some(rest) = l.trim_start().strip_prefix("?>") {
+            choices.extend(rest.split('|').map(|c| c.trim().to_string()).filter(|c| !c.is_empty()));
+        } else {
+            kept.push(l);
+        }
+    }
+    (kept.join("\n"), choices)
+}
+
 /// Requête en streaming (Server-Sent Events) vers une API compatible OpenAI.
-fn stream(s: &crate::ai::Settings, messages: Vec<Value>, on_delta: &dyn Fn(&str)) -> Result<(), String> {
+fn stream(s: &crate::ai::Settings, messages: Vec<Value>, stop: &AtomicBool, on_delta: &dyn Fn(&str)) -> Result<(), String> {
     let url = format!("{}/chat/completions", s.url.trim_end_matches('/'));
     let mut req = crate::ollama::agent(600).post(&url);
     if !s.key.trim().is_empty() {
@@ -274,6 +419,9 @@ fn stream(s: &crate::ai::Settings, messages: Vec<Value>, on_delta: &dyn Fn(&str)
     })?;
     let reader = std::io::BufReader::new(resp.body_mut().with_config().limit(u64::MAX).reader());
     for line in reader.lines() {
+        if stop.load(Ordering::Relaxed) {
+            break;
+        }
         let line = line.map_err(|e| e.to_string())?;
         let Some(data) = line.strip_prefix("data:").map(str::trim) else { continue };
         if data == "[DONE]" {

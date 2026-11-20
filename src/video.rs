@@ -108,6 +108,17 @@ pub struct Viewer {
     pub play_fps: f32,
     pub on: usize,
     pub onion: bool,
+    /// Pelures : nombre d'images avant / après, opacité, teinte rouge-vert ou naturelle.
+    pub onion_before: usize,
+    pub onion_after: usize,
+    pub onion_opacity: f32,
+    pub onion_tint: bool,
+    pub onion_drawings: bool,
+    /// Repères : tiers, centre, zones de sécurité, cache de format.
+    pub guide_thirds: bool,
+    pub guide_center: bool,
+    pub guide_safe: bool,
+    pub guide_ratio: f32,
     pub draw: bool,
     pub pen: Color32,
     pub pen_width: f32,
@@ -139,6 +150,15 @@ impl Viewer {
             play_fps: fps,
             on: 1,
             onion: false,
+            onion_before: 2,
+            onion_after: 1,
+            onion_opacity: 0.45,
+            onion_tint: true,
+            onion_drawings: true,
+            guide_thirds: false,
+            guide_center: false,
+            guide_safe: false,
+            guide_ratio: 0.0,
             draw: false,
             pen: Color32::from_rgb(0xff, 0x4f, 0x1f),
             pen_width: 3.0,
@@ -306,6 +326,27 @@ impl Viewer {
             }
             ui.separator();
             ui.checkbox(&mut self.onion, "pelures");
+            let stay = egui::containers::menu::MenuConfig::new().close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
+            egui::containers::menu::MenuButton::new("▾").config(stay.clone()).ui(ui, |ui| {
+                ui.set_min_width(230.0);
+                ui.label(RichText::new("pelures d'oignon").color(p.muted).size(11.0));
+                ui.add(egui::Slider::new(&mut self.onion_before, 0..=6).text("images avant"));
+                ui.add(egui::Slider::new(&mut self.onion_after, 0..=6).text("images après"));
+                ui.add(egui::Slider::new(&mut self.onion_opacity, 0.05..=1.0).text("opacité"));
+                ui.checkbox(&mut self.onion_tint, "teinter (avant rouge, après vert)");
+                ui.checkbox(&mut self.onion_drawings, "inclure les dessins");
+                ui.label(RichText::new("L'écart suit le réglage « en 1s / 2s / 4s ».").color(p.muted).size(10.5));
+            });
+            egui::containers::menu::MenuButton::new("repères ▾").config(stay).ui(ui, |ui| {
+                ui.set_min_width(200.0);
+                ui.checkbox(&mut self.guide_thirds, "règle des tiers");
+                ui.checkbox(&mut self.guide_center, "centre");
+                ui.checkbox(&mut self.guide_safe, "zones de sécurité (action 93 %, titres 90 %)");
+                ui.label(RichText::new("cache de format").color(p.muted).size(11.0));
+                for (r, l) in [(0.0, "aucun"), (1.0, "1:1"), (1.85, "1.85:1"), (2.0, "2:1"), (2.39, "2.39:1 (scope)"), (16.0 / 9.0, "16:9"), (4.0 / 3.0, "4:3"), (9.0 / 16.0, "9:16 (vertical)")] {
+                    ui.radio_value(&mut self.guide_ratio, r, l);
+                }
+            });
             ui.checkbox(&mut self.draw, "dessiner");
             if self.draw {
                 ui.color_edit_button_srgba(&mut self.pen);
@@ -355,20 +396,70 @@ impl Viewer {
             Rect::from_center_size(rect.center(), vec2(w, w / aspect))
         };
         let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
+        // Pelures : les plus éloignées sont les plus pâles.
+        let mut ghosts: Vec<(usize, Color32)> = vec![];
         if self.onion && frames > 0 {
-            for (k, tint) in [(held.checked_sub(self.on), Color32::from_rgba_unmultiplied(255, 90, 90, 90)), (Some(held + self.on).filter(|&i| i < frames), Color32::from_rgba_unmultiplied(90, 255, 140, 90))] {
-                if let Some(t) = k.and_then(|i| self.frame_tex(&ctx, i)) {
-                    painter.image(t.id(), img_rect, uv, tint);
+            let fade = |k: usize, n: usize| self.onion_opacity * (1.0 - (k as f32 - 1.0) / n.max(1) as f32 * 0.7);
+            for k in (1..=self.onion_before).rev() {
+                if let Some(i) = held.checked_sub(k * self.on) {
+                    let a = (fade(k, self.onion_before) * 255.0) as u8;
+                    ghosts.push((i, if self.onion_tint { Color32::from_rgba_unmultiplied(255, 80, 80, a) } else { Color32::from_white_alpha(a) }));
+                }
+            }
+            for k in (1..=self.onion_after).rev() {
+                let i = held + k * self.on;
+                if i < frames {
+                    let a = (fade(k, self.onion_after) * 255.0) as u8;
+                    ghosts.push((i, if self.onion_tint { Color32::from_rgba_unmultiplied(80, 255, 140, a) } else { Color32::from_white_alpha(a) }));
                 }
             }
         }
         match self.frame_tex(&ctx, held) {
             Some(t) => {
-                let tint = if self.onion { Color32::from_white_alpha(170) } else { Color32::WHITE };
-                painter.image(t.id(), img_rect, uv, tint);
+                painter.image(t.id(), img_rect, uv, Color32::WHITE);
             }
             None => {
                 painter.text(rect.center(), egui::Align2::CENTER_CENTER, "extraction des images…", egui::FontId::monospace(13.0), p.muted);
+            }
+        }
+        // Les pelures passent par-dessus l'image courante, en transparence.
+        for (i, tint) in &ghosts {
+            if let Some(t) = self.frame_tex(&ctx, *i) {
+                painter.image(t.id(), img_rect, uv, *tint);
+            }
+        }
+        // Repères
+        let guide = Stroke::new(1.0, Color32::from_white_alpha(110));
+        if self.guide_ratio > 0.0 {
+            let r = self.guide_ratio;
+            let (w, h) = (img_rect.width(), img_rect.height());
+            let mask = Color32::from_black_alpha(170);
+            if w / h > r {
+                let bw = (w - h * r) / 2.0;
+                painter.rect_filled(Rect::from_min_size(img_rect.min, vec2(bw, h)), 0.0, mask);
+                painter.rect_filled(Rect::from_min_size(pos2(img_rect.right() - bw, img_rect.top()), vec2(bw, h)), 0.0, mask);
+            } else {
+                let bh = (h - w / r) / 2.0;
+                painter.rect_filled(Rect::from_min_size(img_rect.min, vec2(w, bh)), 0.0, mask);
+                painter.rect_filled(Rect::from_min_size(pos2(img_rect.left(), img_rect.bottom() - bh), vec2(w, bh)), 0.0, mask);
+            }
+        }
+        if self.guide_thirds {
+            for k in 1..3 {
+                let x = img_rect.left() + img_rect.width() * k as f32 / 3.0;
+                let y = img_rect.top() + img_rect.height() * k as f32 / 3.0;
+                painter.line_segment([pos2(x, img_rect.top()), pos2(x, img_rect.bottom())], guide);
+                painter.line_segment([pos2(img_rect.left(), y), pos2(img_rect.right(), y)], guide);
+            }
+        }
+        if self.guide_center {
+            let c = img_rect.center();
+            painter.line_segment([c - vec2(12.0, 0.0), c + vec2(12.0, 0.0)], guide);
+            painter.line_segment([c - vec2(0.0, 12.0), c + vec2(0.0, 12.0)], guide);
+        }
+        if self.guide_safe {
+            for k in [0.93, 0.90] {
+                painter.rect_stroke(Rect::from_center_size(img_rect.center(), img_rect.size() * k), 0.0, guide, egui::StrokeKind::Inside);
             }
         }
 
@@ -386,9 +477,11 @@ impl Viewer {
                 }
             }
         };
-        if self.onion {
-            if let Some(prev) = held.checked_sub(self.on).and_then(|i| self.lines.get(&i)) {
-                draw_lines(prev, 0.3);
+        if self.onion && self.onion_drawings {
+            for (i, tint) in &ghosts {
+                if let Some(ls) = self.lines.get(i) {
+                    draw_lines(ls, tint.a() as f32 / 255.0 * 0.8);
+                }
             }
         }
         if let Some(ls) = self.lines.get(&held) {

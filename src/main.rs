@@ -12,6 +12,7 @@ mod fbx;
 mod ffmpeg;
 mod images;
 mod live;
+mod nodes;
 mod model3d;
 mod office;
 mod ollama;
@@ -122,6 +123,7 @@ enum Content {
     Model(model3d::Viewer),
     Office(office::Viewer),
     Video(Box<video::Viewer>),
+    Nodes(Box<nodes::Editor>),
     /// Vidéo ouverte alors que ffmpeg n'est pas encore installé.
     NeedFfmpeg(Option<std::sync::Arc<std::sync::Mutex<ffmpeg::InstallState>>>),
     Unreadable(String),
@@ -203,6 +205,8 @@ struct App {
     timer: Option<extras::Timer>,
     tasks: extras::TasksState,
     tags: Option<(Instant, Vec<(String, usize)>)>,
+    stats: Option<extras::Stats>,
+    run: Option<extras::Run>,
     auto_query: String,
     toast: Option<(String, Instant)>,
     updater: updater::Updater,
@@ -265,6 +269,11 @@ impl App {
             return;
         }
         save_config("last_vault", &path);
+        let mut recent: Vec<String> = load_config("recent_vaults").map(|t| t.lines().map(String::from).collect()).unwrap_or_default();
+        recent.retain(|r| *r != path && !r.trim().is_empty());
+        recent.insert(0, path.clone());
+        recent.truncate(8);
+        save_config("recent_vaults", &recent.join("\n"));
         self.vault = Some(path);
         self.docs.clear();
         self.active = None;
@@ -304,6 +313,9 @@ impl App {
     fn flush(&mut self, i: usize) {
         let root = self.root();
         let Some(doc) = self.docs.get_mut(i) else { return };
+        if let Content::Nodes(ed) = &mut doc.content {
+            ed.save_if_due(true);
+        }
         if doc.dirty_since.take().is_none() {
             return;
         }
@@ -321,6 +333,11 @@ impl App {
     }
 
     fn flush_all(&mut self) {
+        for d in &mut self.docs {
+            if let Content::Nodes(ed) = &mut d.content {
+                ed.save_if_due(true);
+            }
+        }
         for i in 0..self.docs.len() {
             self.flush(i);
         }
@@ -362,10 +379,23 @@ impl App {
                             .filter_map(|e| vault::safe(&root, &e.rel).ok().map(|p| (e.name.clone(), p)))
                             .take(30)
                             .collect();
+                        v.mat_files = self
+                            .entries
+                            .iter()
+                            .filter(|e| !e.is_dir && e.rel.to_lowercase().ends_with(".mat.json"))
+                            .filter_map(|e| vault::safe(&root, &e.rel).ok().map(|p| (e.name.trim_end_matches(".mat.json").to_string(), p)))
+                            .take(40)
+                            .collect();
+                        v.root = root.clone();
                         Content::Model(v)
                     }
                     (Err(e), _) => Content::Unreadable(e),
                     _ => Content::Unreadable("Contexte indisponible.".into()),
+                }
+            } else if nodes::is_graph(&rel) {
+                match vault::safe(&self.root(), &rel).and_then(|p| nodes::Editor::open(p, &self.root())) {
+                    Ok(e) => Content::Nodes(Box::new(e)),
+                    Err(e) => Content::Unreadable(e),
                 }
             } else if video::is_video(&rel) {
                 self.video_content(&rel)
@@ -443,6 +473,11 @@ impl App {
             match a {
                 Action::Open(rel) => self.open(rel),
                 Action::OpenLink(name) => {
+                    // [[Note#Titre]] et [[Note^bloc]] : on ouvre la note
+                    let name = name.split(['#', '^']).next().unwrap_or(&name).trim().to_string();
+                    if name.is_empty() {
+                        continue;
+                    }
                     if self.entries.iter().any(|e| e.rel == name && !e.is_dir) {
                         self.open(name);
                         continue;
@@ -609,6 +644,7 @@ impl App {
         let p = theme::pal();
         let ctx = ui.ctx().clone();
         let mut cmd: Option<extras::Cmd> = None;
+        let mut open_vault: Option<String> = None;
         egui::Panel::top("top")
             .exact_size(38.0)
             .frame(egui::Frame::new().fill(p.bg).stroke(egui::Stroke::new(1.0, p.line)).inner_margin(egui::Margin::symmetric(12, 0)))
@@ -627,6 +663,8 @@ impl App {
                             ("nouvelle note   Ctrl+N", extras::Cmd::NewNote),
                             ("note du jour   Ctrl+J", extras::Cmd::Daily),
                             ("depuis un modèle…", extras::Cmd::FromTemplate),
+                            ("matériau en nodes", extras::Cmd::NewMaterial),
+                            ("compositing en nodes", extras::Cmd::NewCompositor),
                         ] {
                             if ui.button(label).clicked() {
                                 cmd = Some(c);
@@ -644,7 +682,18 @@ impl App {
                             }
                         }
                         ui.separator();
+                        let recent: Vec<String> = load_config("recent_vaults").map(|t| t.lines().map(String::from).filter(|r| *r != path).collect()).unwrap_or_default();
+                        if !recent.is_empty() {
+                            ui.menu_button("coffres récents", |ui| {
+                                for r in recent {
+                                    if ui.button(&r).clicked() {
+                                        open_vault = Some(r);
+                                    }
+                                }
+                            });
+                        }
                         for (label, c) in [
+                            ("statistiques du coffre", extras::Cmd::Stats),
                             ("sauvegarder maintenant (zip)", extras::Cmd::Backup),
                             ("ouvrir le dossier", extras::Cmd::OpenVaultFolder),
                             ("changer de coffre…", extras::Cmd::ChangeVault),
@@ -715,6 +764,9 @@ impl App {
             });
         if let Some(c) = cmd {
             self.run_cmd(c, &ctx);
+        }
+        if let Some(v) = open_vault {
+            self.load_vault(v);
         }
     }
 
@@ -1060,6 +1112,15 @@ impl App {
     }
 
     fn editor(&mut self, ui: &mut egui::Ui) {
+        let mut run_now = ui.input(|i| i.key_pressed(Key::F5)) && self.current().is_some_and(|d| extras::runner_for(&d.rel).is_some());
+        self.run_panel(ui);
+        self.editor_inner(ui, &mut run_now);
+        if run_now {
+            self.run_current();
+        }
+    }
+
+    fn editor_inner(&mut self, ui: &mut egui::Ui, run_now: &mut bool) {
         let p = theme::pal();
         egui::CentralPanel::default().frame(egui::Frame::new().fill(p.bg)).show(ui, |ui| {
             if self.docs.is_empty() {
@@ -1120,6 +1181,9 @@ impl App {
                         };
                         if let Err(e) = r {
                             self.error = Some(e);
+                        }
+                        if extras::runner_for(&rel).is_some() && ui.button("▶ exécuter").on_hover_text("Lance le script et affiche sa sortie (F5)").clicked() {
+                            *run_now = true;
                         }
                         if matches!(self.docs[i].content, Content::Text(_)) && ui.button("historique").on_hover_text("Versions précédentes de ce fichier").clicked() {
                             self.flush_all();
@@ -1207,6 +1271,9 @@ impl App {
                 }
                 Content::Office(viewer) => {
                     egui::Frame::new().inner_margin(egui::Margin::symmetric(16, 10)).show(ui, |ui| viewer.show(ui));
+                }
+                Content::Nodes(ed) => {
+                    egui::Frame::new().inner_margin(egui::Margin::symmetric(12, 8)).show(ui, |ui| ed.show(ui));
                 }
                 Content::Model(viewer) => {
                     egui::Frame::new().inner_margin(egui::Margin::symmetric(16, 10)).show(ui, |ui| viewer.show(ui));
@@ -2099,6 +2166,7 @@ impl App {
         let mut send = false;
         let mut goto = None;
         let mut insert: Option<String> = None;
+        let mut bar_out: Option<extras::ChatBarOut> = None;
         egui::Panel::right("assistant")
             .resizable(true)
             .default_size(340.0)
@@ -2139,6 +2207,9 @@ impl App {
                             }
                         }
                     });
+                    let settings = self.ai.clone().unwrap_or_else(ai::Settings::load);
+                    let of = self.open_file_path();
+                    bar_out = Some(extras::chat_bar(ui, &mut self.assistant, &self.local, &settings, of));
                     let edit = egui::TextEdit::multiline(&mut self.assistant.input).hint_text("demande quelque chose… (Entrée pour envoyer)").desired_rows(3).desired_width(f32::INFINITY);
                     let r = ui.add(edit);
                     if r.has_focus() && ui.input(|i| i.key_pressed(Key::Enter) && !i.modifiers.shift) {
@@ -2150,9 +2221,16 @@ impl App {
                     if self.assistant.msgs.is_empty() && !self.assistant.busy() {
                         ui.label(RichText::new("Pose une question sur ce que tu as à l'écran. Les blocs de code proposés peuvent être insérés directement dans le fichier ouvert.").color(p.muted).size(11.5));
                     }
-                    for m in &self.assistant.msgs {
+                    let n = self.assistant.msgs.len();
+                    let mut reply = None;
+                    for (k, m) in self.assistant.msgs.iter().enumerate() {
                         let user = m.role == chat::Role::User;
-                        msg_block(ui, user, &m.text, &m.sources, m.error.as_deref(), None, &existing, &paths, &mut goto);
+                        let (text, choices) = chat::split_choices(&m.text);
+                        let shown = if m.attached.is_empty() { text } else { format!("{text}\n\n📎 {}", m.attached.join(", ")) };
+                        msg_block(ui, user, &shown, &m.sources, m.error.as_deref(), None, &existing, &paths, &mut goto);
+                        if k + 1 == n && !user && self.assistant.live.is_none() {
+                            reply = extras::choice_buttons(ui, &choices);
+                        }
                         if !user {
                             for (k, block) in code_blocks(&m.text).into_iter().enumerate() {
                                 ui.horizontal(|ui| {
@@ -2173,9 +2251,16 @@ impl App {
                             msg_block(ui, false, &l.text, &[], l.error.as_deref(), status, &existing, &paths, &mut goto);
                         }
                     }
+                    if let Some(r) = reply {
+                        self.assistant.input = r;
+                        send = true;
+                    }
                 });
             });
-        if send {
+        if let Some(b) = bar_out {
+            self.apply_chat_bar(b, &ctxt);
+        }
+        if send && !self.assistant.busy() {
             let root = self.root();
             let entries = self.entries.clone();
             let settings = self.ai.clone().unwrap_or_else(ai::Settings::load);
@@ -2202,6 +2287,7 @@ impl App {
     fn chat_view(&mut self, ui: &mut egui::Ui) {
         let p = theme::pal();
         self.chat.poll();
+        let mut bar_out: Option<extras::ChatBarOut> = None;
         let existing: HashSet<String> = self.md.keys().cloned().collect();
         let paths: HashSet<String> = self.entries.iter().map(|e| e.rel.clone()).collect();
         let mut send = false;
@@ -2228,6 +2314,11 @@ impl App {
                         ui.label(RichText::new(format!("modèle : {model}")).color(p.muted).size(11.0));
                     });
                 });
+                ui.add_space(4.0);
+                let settings = self.ai.clone().unwrap_or_else(ai::Settings::load);
+                let of = self.open_file_path();
+                let bar = extras::chat_bar(ui, &mut self.chat, &self.local, &settings, of);
+                bar_out = Some(bar);
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
                     let enter = ui.input(|i| i.key_pressed(Key::Enter) && !i.modifiers.shift);
@@ -2276,8 +2367,17 @@ impl App {
                         }
                     }
                     let msgs = self.chat.msgs.clone();
-                    for m in &msgs {
-                        msg_block(ui, m.role == chat::Role::User, &m.text, &m.sources, m.error.as_deref(), None, &existing, &paths, &mut goto);
+                    let last = msgs.len().saturating_sub(1);
+                    for (k, m) in msgs.iter().enumerate() {
+                        let (text, choices) = chat::split_choices(&m.text);
+                        let shown = if m.attached.is_empty() { text } else { format!("{text}\n\n📎 {}", m.attached.join(", ")) };
+                        msg_block(ui, m.role == chat::Role::User, &shown, &m.sources, m.error.as_deref(), None, &existing, &paths, &mut goto);
+                        if k == last && m.role == chat::Role::Assistant && !self.chat.busy() {
+                            if let Some(c) = extras::choice_buttons(ui, &choices) {
+                                self.chat.input = c;
+                                send = true;
+                            }
+                        }
                     }
                     if let Some(live) = &self.chat.live {
                         if let Ok(l) = live.lock() {
@@ -2292,6 +2392,10 @@ impl App {
             }
         });
 
+        if let Some(b) = bar_out {
+            let ctx = ui.ctx().clone();
+            self.apply_chat_bar(b, &ctx);
+        }
         if send && !self.chat.busy() && !self.chat.input.trim().is_empty() {
             self.flush_all();
             let open = if self.chat.include_open {
@@ -3016,10 +3120,19 @@ impl App {
             let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::unique("drop")));
             painter.rect_filled(screen, 0.0, p.bg.linear_multiply(0.85));
             painter.rect_stroke(screen.shrink(16.0), 0.0, egui::Stroke::new(2.0, p.accent), egui::StrokeKind::Inside);
-            painter.text(screen.center(), egui::Align2::CENTER_CENTER, format!("déposer pour importer dans /{dir}"), egui::FontId::monospace(16.0), p.text);
+            painter.text(screen.center(), egui::Align2::CENTER_CENTER, if self.view() == View::Chat { "déposer pour joindre au message".to_string() } else { format!("déposer pour importer dans /{dir}") }, egui::FontId::monospace(16.0), p.text);
         }
         if !dropped.is_empty() {
             let paths: Vec<PathBuf> = dropped.iter().map(|f| f.path().to_path_buf()).collect();
+            // Dans le chat (ou sur le panneau de l'assistant) : les fichiers deviennent des pièces jointes.
+            let over_assistant = self.assistant_open && ctx.input(|i| i.pointer.hover_pos()).is_some_and(|pos| pos.x > ctx.content_rect().right() - 360.0);
+            if self.view() == View::Chat || over_assistant {
+                let chat = if over_assistant { &mut self.assistant } else { &mut self.chat };
+                for f in &paths {
+                    chat.attachments.extend(chat::Attachment::from_path(f));
+                }
+                return;
+            }
             self.import_paths(paths);
         }
     }
@@ -3221,6 +3334,7 @@ impl eframe::App for App {
             self.template_ui(&ctx);
             self.history_ui(&ctx);
             self.url_ui(&ctx);
+            self.stats_ui(&ctx);
             self.dialogs(&ctx);
             self.run_actions(&ctx);
         }
@@ -3248,9 +3362,11 @@ impl eframe::App for App {
 }
 
 /// Section « IA locale » des réglages : installer, démarrer, télécharger un modèle. Aucun admin.
-fn ollama_panel(ui: &mut egui::Ui, local: &ollama::Local, s: &ai::Settings, ctx: &egui::Context) {
+/// Renvoie vrai si le modèle choisi a changé.
+fn ollama_panel(ui: &mut egui::Ui, local: &ollama::Local, s: &mut ai::Settings, ctx: &egui::Context) -> bool {
     let p = theme::pal();
     let st = local.snapshot();
+    let mut changed = false;
     ui.label(caps("ia locale · ollama"));
     ui.add_space(4.0);
     let has_model = st.models.iter().any(|m| m == &s.model || m.starts_with(&format!("{}:", s.model)));
@@ -3271,9 +3387,62 @@ fn ollama_panel(ui: &mut egui::Ui, local: &ollama::Local, s: &ai::Settings, ctx:
             ui.label(RichText::new(b.to_string_lossy()).color(p.muted).size(10.5));
         }
     });
+    // Modèles installés
+    let ram = ollama::total_ram_gb();
     if !st.models.is_empty() {
-        ui.label(RichText::new(st.models.join("  ·  ")).color(p.muted).size(11.0));
+        ui.add_space(6.0);
+        ui.label(caps("modèles installés"));
+        let mut delete = None;
+        for m in &st.models {
+            let gb = st.sizes.get(m).copied().unwrap_or(0) as f32 / 1e9;
+            let active = *m == s.model || m.trim_end_matches(":latest") == s.model;
+            ui.horizontal(|ui| {
+                let name = RichText::new(m).family(if active { theme::bold() } else { egui::FontFamily::Monospace });
+                ui.label(if active { name.color(p.accent) } else { name });
+                ui.label(RichText::new(format!("{gb:.1} Go")).color(p.muted).size(11.0));
+                if active {
+                    ui.label(RichText::new("utilisé").color(p.accent).size(11.0));
+                } else if ui.small_button("utiliser").clicked() {
+                    s.model = m.trim_end_matches(":latest").to_string();
+                    changed = true;
+                }
+                if ui.small_button("supprimer").on_hover_text("Libère l'espace disque").clicked() {
+                    delete = Some(m.clone());
+                }
+            });
+        }
+        if let Some(m) = delete {
+            local.delete(&s.url, &m, ctx);
+        }
     }
+    // Télécharger n'importe quel modèle
+    ui.add_space(8.0);
+    ui.label(caps("télécharger un modèle"));
+    let id = egui::Id::unique("pull-name");
+    let mut name: String = ui.data_mut(|d| d.get_temp::<String>(id).unwrap_or_default());
+    let busy = st.task.is_some();
+    ui.horizontal(|ui| {
+        let r = ui.add(egui::TextEdit::singleline(&mut name).hint_text("qwen3.8:27b  ou  hf.co/utilisateur/modèle-GGUF").desired_width(320.0));
+        let go = (r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter))) || ui.add_enabled(!busy && !name.trim().is_empty(), egui::Button::new("télécharger")).clicked();
+        if go && !busy && !name.trim().is_empty() {
+            local.pull(&s.url, name.trim(), ctx);
+            s.model = name.trim().to_string();
+            changed = true;
+        }
+    });
+    ui.horizontal_wrapped(|ui| {
+        ui.label(RichText::new("suggestions :").color(p.muted).size(11.0));
+        for (m, gb) in [("qwen3.8:27b", 18.0), ("qwen3.8", 18.0), ("llama3.2", 2.0), ("gemma3", 3.3)] {
+            if ui.small_button(format!("{m} (~{gb} Go)")).clicked() {
+                name = m.to_string();
+            }
+        }
+    });
+    ui.label(RichText::new("N'importe quel nom de ollama.com/library, ou un GGUF de Hugging Face avec hf.co/…  Il faut à peu près la taille du modèle en mémoire (RAM ou carte graphique), plus 2 à 4 Go.").color(p.muted).size(10.5));
+    if let Some(r) = ram {
+        ui.label(RichText::new(format!("mémoire de cet ordinateur : {r:.0} Go")).color(p.muted).size(10.5));
+    }
+    ui.data_mut(|d| d.insert_temp(id, name));
     ui.add_space(6.0);
     if let Some((msg, progress)) = &st.task {
         match progress {
@@ -3287,7 +3456,7 @@ fn ollama_panel(ui: &mut egui::Ui, local: &ollama::Local, s: &ai::Settings, ctx:
                 });
             }
         }
-        return;
+        return changed;
     }
     ui.horizontal(|ui| {
         if st.checked && st.binary.is_none() && !st.running {
@@ -3324,6 +3493,7 @@ fn ollama_panel(ui: &mut egui::Ui, local: &ollama::Local, s: &ai::Settings, ctx:
     if let Some(e) = &st.error {
         ui.label(RichText::new(e).color(p.missing).size(11.5));
     }
+    changed
 }
 
 #[allow(clippy::too_many_arguments)]

@@ -270,9 +270,10 @@ checksum = "d3fb67a6e08acf24fdeccbac2cb6ac4305825bd1f117462e0e6f2f193345ad56"
 
 [[package]]
 name = "aryadne"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "arboard",
+ "base64 0.22.1",
  "chrono",
  "dirs",
  "eframe",

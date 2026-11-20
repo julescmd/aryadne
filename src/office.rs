@@ -176,6 +176,15 @@ fn num_in(name: &str) -> usize {
     name.chars().filter(|c| c.is_ascii_digit()).collect::<String>().parse().unwrap_or(0)
 }
 
+/// Texte brut d'un document (pour l'IA et la recherche).
+pub fn to_text(path: &Path) -> Result<String, String> {
+    Ok(match load(path)? {
+        Doc::Slides(sl) => sl.iter().enumerate().map(|(i, s)| format!("Diapo {} :\n{}", i + 1, s.texts.join("\n"))).collect::<Vec<_>>().join("\n\n"),
+        Doc::Sheets(sh) => sh.iter().map(|s| format!("Feuille {} :\n{}", s.name, s.rows.iter().take(300).map(|r| r.join("\t")).collect::<Vec<_>>().join("\n"))).collect::<Vec<_>>().join("\n\n"),
+        Doc::Text(paras, _) => paras.iter().map(|(_, t)| t.as_str()).collect::<Vec<_>>().join("\n"),
+    })
+}
+
 pub fn load(path: &Path) -> Result<Doc, String> {
     let ext = path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
     let mut ar = Archive::open(path)?;

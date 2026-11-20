@@ -838,6 +838,8 @@ pub struct Look {
     pub wire: f32,
     pub wire_color: [f32; 3],
     pub wire_only: bool,
+    /// Matériau en nodes (remplace le matériau prédéfini).
+    pub nodes: Option<std::sync::Arc<crate::nodes::Program>>,
 }
 
 impl Default for Look {
@@ -855,13 +857,14 @@ impl Default for Look {
             wire: 0.0,
             wire_color: [0.02, 0.02, 0.02],
             wire_only: false,
+            nodes: None,
         }
     }
 }
 
 impl Look {
     /// Clé de comparaison : l'image n'est recalculée que si elle change.
-    fn key(&self) -> (Material, bool, usize, [u32; 4], Light, bool, bool, [u32; 4], bool) {
+    fn key(&self) -> (Material, bool, usize, [u32; 4], Light, bool, bool, [u32; 4], bool, usize) {
         (
             self.material,
             self.smooth,
@@ -872,6 +875,7 @@ impl Look {
             self.blur_bg,
             [self.wire.to_bits(), self.wire_color[0].to_bits(), self.wire_color[1].to_bits(), self.wire_color[2].to_bits()],
             self.wire_only,
+            self.nodes.as_ref().map(|n| std::sync::Arc::as_ptr(n) as usize).unwrap_or(0),
         )
     }
 }
@@ -1018,14 +1022,33 @@ pub fn render(m: &Prepared, cam: &Camera, look: &Look, w: usize, h: usize) -> Fr
                 let lin = |x: f32| (x * 0.5 + 0.5).powf(2.2);
                 [lin(nv[0]) / exposure, lin(nv[1]) / exposure, lin(nv[2]) / exposure]
             } else {
-                let albedo = if look.material == Material::Color { m.colors[ti as usize] } else { albedo0 };
+                let (mut albedo, mut rough, mut metal, mut emit) = (if look.material == Material::Color { m.colors[ti as usize] } else { albedo0 }, rough, metal, [0.0f32; 3]);
+                if let Some(prog) = &look.nodes {
+                    let pos = [pa[0] * w0 + pb[0] * w1 + pc[0] * w2, pa[1] * w0 + pb[1] * w1 + pc[1] * w2, pa[2] * w0 + pb[2] * w1 + pc[2] * w2];
+                    let vc = m.colors[ti as usize];
+                    let g = |x: f32| x.max(0.0).powf(1.0 / 2.2);
+                    let c = crate::nodes::Ctx { uv: [pos[0] + 0.5, 0.5 - pos[1]], pos, nrm, view: v, vcol: [g(vc[0]), g(vc[1]), g(vc[2]), 1.0], res: [w as f32, h as f32] };
+                    let (col, r, mt, em) = NODE_REGS.with(|regs| prog.material(&c, &mut regs.borrow_mut()));
+                    let l = |x: f32| x.clamp(0.0, 1.0).powf(2.2);
+                    albedo = [l(col[0]), l(col[1]), l(col[2])];
+                    rough = r;
+                    metal = mt;
+                    emit = [em[0].max(0.0).powf(2.2), em[1].max(0.0).powf(2.2), em[2].max(0.0).powf(2.2)];
+                }
+                let albedo = if metal > 0.5 && look.nodes.is_some() { albedo } else { albedo };
                 let ndv = dot(nrm, v).clamp(0.0, 1.0);
                 let ne = rot_y(nrm, -look.env_rot);
                 let s = look.env_strength;
                 let irr = env.irradiance(ne);
                 let r = sub([2.0 * dot(nrm, v) * nrm[0], 2.0 * dot(nrm, v) * nrm[1], 2.0 * dot(nrm, v) * nrm[2]], v);
                 let refl = env.reflect(rot_y(r, -look.env_rot), rough);
-                let f0 = if metal > 0.5 { [0.95, 0.93, 0.88] } else { [0.04; 3] };
+                let f0 = if look.nodes.is_some() {
+                    [0.04 + (albedo[0] - 0.04) * metal, 0.04 + (albedo[1] - 0.04) * metal, 0.04 + (albedo[2] - 0.04) * metal]
+                } else if metal > 0.5 {
+                    [0.95, 0.93, 0.88]
+                } else {
+                    [0.04; 3]
+                };
                 let fres = (1.0 - ndv).powf(5.0);
                 let ndl = dot(nrm, ld).max(0.0);
                 let half = norm([ld[0] + v[0], ld[1] + v[1], ld[2] + v[2]]);
@@ -1038,7 +1061,7 @@ pub fn render(m: &Prepared, cam: &Camera, look: &Look, w: usize, h: usize) -> Fr
                     let f = f0[ch] + (1.0 - f0[ch]) * fres * (1.0 - rough).powf(2.0);
                     let diff = albedo[ch] * (irr[ch] * s + lc[ch] * li * ndl) * (1.0 - metal);
                     let spec = (refl[ch] * s + lc[ch] * li * spec_l * 0.25) * f;
-                    out[ch] = diff * (1.0 - f) + spec;
+                    out[ch] = diff * (1.0 - f) + spec + emit[ch];
                 }
                 out
             };
@@ -1087,6 +1110,42 @@ pub fn render(m: &Prepared, cam: &Camera, look: &Look, w: usize, h: usize) -> Fr
     Frame { w, h, rgba }
 }
 
+thread_local! {
+    static NODE_REGS: std::cell::RefCell<Vec<crate::nodes::V>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Sphère d'aperçu pour l'éditeur de matériaux.
+pub fn preview_sphere() -> Prepared {
+    let (n, m) = (64usize, 32usize);
+    let mut pos = vec![];
+    for j in 0..=m {
+        let t = j as f32 / m as f32 * std::f32::consts::PI;
+        for i in 0..=n {
+            let p = i as f32 / n as f32 * std::f32::consts::TAU;
+            pos.push([t.sin() * p.cos(), t.cos(), t.sin() * p.sin()]);
+        }
+    }
+    let mut tris = vec![];
+    for j in 0..m {
+        for i in 0..n {
+            let a = (j * (n + 1) + i) as u32;
+            let b = a + n as u32 + 1;
+            tris.push([a, a + 1, b + 1]);
+            tris.push([a, b + 1, b]);
+        }
+    }
+    let model = Model::new(pos, tris, None, false).expect("sphère");
+    Prepared::new(&model, false, 0)
+}
+
+/// Rendu de la sphère avec un matériau en nodes (pour l'aperçu de l'éditeur).
+pub fn render_material_preview(sphere: &Prepared, prog: std::sync::Arc<crate::nodes::Program>, size: usize) -> crate::nodes::Img {
+    let look = Look { nodes: Some(prog), show_bg: true, blur_bg: true, env: Env::preset(0), ..Default::default() };
+    let f = render(sphere, &Camera { yaw: 0.4, pitch: 0.25, dist: 2.0, ..Default::default() }, &look, size, size);
+    let px = f.rgba.chunks_exact(4).map(|c| [c[0] as f32 / 255.0, c[1] as f32 / 255.0, c[2] as f32 / 255.0, c[3] as f32 / 255.0]).collect();
+    crate::nodes::Img { w: size, h: size, px }
+}
+
 /// Image du modèle pour les miniatures des boards et des refs.
 pub fn thumbnail(model: &Model, w: u32, h: u32, _bg: [u8; 4]) -> image::RgbaImage {
     let prep = Prepared::new(model, model.z_up, 0);
@@ -1110,6 +1169,11 @@ pub struct Viewer {
     look: Look,
     /// HDRI du coffre proposés dans le menu (nom, chemin).
     pub hdr_files: Vec<(String, std::path::PathBuf)>,
+    /// Matériaux en nodes du coffre (nom, chemin), et celui qui est appliqué.
+    pub mat_files: Vec<(String, std::path::PathBuf)>,
+    pub root: String,
+    mat_active: Option<(std::path::PathBuf, Option<std::time::SystemTime>)>,
+    mat_error: Option<String>,
     env_loading: Option<Receiver<Result<Env, String>>>,
     env_error: Option<String>,
     subdiv: u8,
@@ -1136,6 +1200,10 @@ impl Viewer {
             cam: Camera::default(),
             look: Look::default(),
             hdr_files: vec![],
+            mat_files: vec![],
+            root: String::new(),
+            mat_active: None,
+            mat_error: None,
             env_loading: None,
             env_error: None,
             subdiv: 0,
@@ -1174,6 +1242,32 @@ impl Viewer {
         self.capture_msg = Some(match img.save(&out) {
             Ok(()) => format!("capture : {}", out.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()),
             Err(e) => format!("capture impossible : {e}"),
+        });
+    }
+
+    /// Tour complet du modèle en GIF animé (48 images, 520 px).
+    fn turntable_gif(&mut self) {
+        let Some((_, _, prep)) = &self.prepared else { return };
+        let size = 520;
+        let stem = self.path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "modele".into());
+        let out = self.path.with_file_name(format!("{stem}-turntable.gif"));
+        let r = (|| -> Result<(), String> {
+            let file = std::fs::File::create(&out).map_err(|e| e.to_string())?;
+            let mut enc = image::codecs::gif::GifEncoder::new_with_speed(file, 10);
+            enc.set_repeat(image::codecs::gif::Repeat::Infinite).map_err(|e| e.to_string())?;
+            let mut look = self.look.clone();
+            look.show_bg = true;
+            for k in 0..48 {
+                let cam = Camera { yaw: self.cam.yaw + k as f32 / 48.0 * std::f32::consts::TAU, ..self.cam };
+                let f = render(prep, &cam, &look, size, size);
+                let img = image::RgbaImage::from_raw(size as u32, size as u32, f.rgba).unwrap_or_default();
+                enc.encode_frame(image::Frame::from_parts(img, 0, 0, image::Delay::from_numer_denom_ms(1000, 24))).map_err(|e| e.to_string())?;
+            }
+            Ok(())
+        })();
+        self.capture_msg = Some(match r {
+            Ok(()) => format!("turntable : {}", out.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()),
+            Err(e) => format!("GIF impossible : {e}"),
         });
     }
 
@@ -1219,11 +1313,28 @@ impl Viewer {
             self.prepared = Some((z_up, self.subdiv, Prepared::new(model, z_up, self.subdiv)));
             self.last = None;
         }
+        // Matériau en nodes : rechargé quand le fichier change (édité dans un autre onglet)
+        if let Some((path, seen)) = &self.mat_active {
+            let mt = std::fs::metadata(path).and_then(|m| m.modified()).ok();
+            if mt != *seen {
+                let path = path.clone();
+                match crate::nodes::Graph::load(&path).and_then(|g| crate::nodes::Program::compile(&g, &self.root, 1024).map_err(|e| e.1)) {
+                    Ok(prog) => {
+                        self.look.nodes = Some(std::sync::Arc::new(prog));
+                        self.mat_error = None;
+                    }
+                    Err(e) => self.mat_error = Some(e),
+                }
+                self.mat_active = Some((path, mt));
+            }
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(700));
+        }
         let shown_tris = self.prepared.as_ref().map(|p| p.2.tri_count()).unwrap_or(0);
         let max_level = (0..=4u8).take_while(|l| model.tris.len() * 4usize.pow(*l as u32) <= MAX_SUBDIV_TRIS).last().unwrap_or(0);
         let ctx = ui.ctx().clone();
         let mut pick_hdr: Option<std::path::PathBuf> = None;
         let mut do_capture = false;
+        let mut do_gif = false;
 
         // ---------- barre d'outils : trois menus et quelques boutons ----------
         let stay = egui::containers::menu::MenuConfig::new().close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
@@ -1232,7 +1343,25 @@ impl Viewer {
                 ui.set_min_width(240.0);
                 ui.label(egui::RichText::new("matériau").color(p.muted).size(11.0));
                 for (m, l) in Material::ALL {
-                    ui.radio_value(&mut self.look.material, m, l);
+                    if ui.radio(self.look.material == m && self.mat_active.is_none(), l).clicked() {
+                        self.look.material = m;
+                        self.mat_active = None;
+                        self.look.nodes = None;
+                    }
+                }
+                if !self.mat_files.is_empty() {
+                    ui.label(egui::RichText::new("matériaux en nodes").color(p.muted).size(11.0));
+                    for (name, path) in self.mat_files.clone() {
+                        let on = self.mat_active.as_ref().is_some_and(|m| m.0 == path);
+                        if ui.radio(on, name).clicked() {
+                            self.mat_active = Some((path, None));
+                        }
+                    }
+                } else {
+                    ui.label(egui::RichText::new("crée un « matériau en nodes » (menu du coffre) pour le voir ici").color(p.muted).size(10.5));
+                }
+                if let Some(e) = &self.mat_error {
+                    ui.label(egui::RichText::new(e).color(p.missing).size(10.5));
                 }
                 ui.separator();
                 ui.checkbox(&mut self.look.smooth, "ombrage lisse");
@@ -1327,9 +1456,15 @@ impl Viewer {
                 }
             });
             ui.toggle_value(&mut self.turntable, "tourner").on_hover_text("Rotation automatique (platine)");
-            if ui.button("capture").on_hover_text("Enregistre un rendu PNG 2400 px à côté du modèle").clicked() {
-                do_capture = true;
-            }
+            egui::containers::menu::MenuButton::new("capture ▾").ui(ui, |ui| {
+                if ui.button("image PNG (2400 px)").clicked() {
+                    do_capture = true;
+                }
+                if ui.button("turntable GIF (48 images)").clicked() {
+                    do_gif = true;
+                }
+                ui.label(egui::RichText::new("enregistré à côté du modèle").color(p.muted).size(10.5));
+            });
             let s = model.size();
             let shown = if shown_tris != model.total_tris { format!(" · affiché : {}", fmt_n(shown_tris)) } else { String::new() };
             let text = format!("{} triangles{shown} · {} sommets · {:.2} × {:.2} × {:.2}", fmt_n(model.total_tris), fmt_n(model.total_vertices), s[0], s[1], s[2]);
@@ -1340,6 +1475,9 @@ impl Viewer {
         }
         if do_capture {
             self.capture();
+        }
+        if do_gif {
+            self.turntable_gif();
         }
 
         let (rect, resp) = ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());

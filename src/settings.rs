@@ -370,7 +370,10 @@ impl App {
             ui.add_space(14.0);
             ui.separator();
             ui.add_space(4.0);
-            ollama_panel(ui, &self.local, s, ctx);
+            if ollama_panel(ui, &self.local, s, ctx) {
+                s.save();
+                self.ai = Some(s.clone());
+            }
         }
     }
 

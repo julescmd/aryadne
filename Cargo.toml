@@ -1,9 +1,10 @@
 [package]
 name = "aryadne"
-version = "0.11.0"
+version = "0.12.0"
 edition = "2024"
 
 [dependencies]
+base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 arboard = "3.7.0"
 dirs = "7.0.0"

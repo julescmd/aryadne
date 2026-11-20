@@ -6,7 +6,7 @@ Le fil entre tes idées. Notes, code, références et moodboards dans un dossier
 
 100 % Rust ([egui](https://github.com/emilk/egui)). Un seul exécutable portable pour Windows et Linux : **aucune installation, aucun droit admin**. Look éditeur de code (JetBrains Mono, angles droits), mode clair par défaut, mode sombre en un clic.
 
-## Fonctionnalités (v0.11)
+## Fonctionnalités (v0.12)
 
 **3D**
 - Visionneuse intégrée pour OBJ, FBX (binaire), glTF / GLB et STL. Rendu par pixel avec profondeur (comme les pixols de ZBrush) : pas de trous ni de mouchetures, calculé sur tous les cœurs, et recalculé seulement quand la vue change.
@@ -14,7 +14,7 @@ Le fil entre tes idées. Notes, code, références et moodboards dans un dossier
 - Matériaux argile, gris, blanc, chrome, normales ou couleurs du fichier ; ombrage lisse.
 - Fil de fer par-dessus le modèle (opacité, noir / blanc / accent, ou fil de fer seul), sans les diagonales des quads.
 - Subdivisions (lissage de Loop, jusqu'à 2,5 millions de triangles).
-- Rotation automatique (platine) et capture PNG 2400 px à côté du modèle.
+- Rotation automatique (platine), capture PNG 2400 px et turntable en GIF animé.
 - Menus « affichage », « éclairage » et « vue » pour garder la barre propre.
 - Navigation façon Blender : glisser pour tourner, Maj ou clic droit pour déplacer, Ctrl ou molette pour zoomer, 1 / 3 / 7 pour les vues (Maj : opposée), 5 pour l'orthographique, Origine ou « . » pour cadrer. Repère des axes.
 - Les modèles très lourds (millions de triangles) sont simplifiés pour l'affichage en gardant leur forme.
@@ -70,6 +70,12 @@ Le fil entre tes idées. Notes, code, références et moodboards dans un dossier
 - Ctrl+F chercher, Ctrl+H remplacer (tout ou un par un), F3 suivant.
 - « aperçu live » pour le HTML / SVG : la page s'ouvre dans ton navigateur et se recharge à chaque enregistrement.
 
+**Nodes : matériaux et compositing**
+- Éditeur de nodes (glisser une sortie sur une entrée, Maj+A pour ajouter, zoom, déplacement), aperçu en direct à gauche, enregistré en JSON dans le coffre.
+- Matériaux (`.mat.json`) : bruit, Voronoï, damier, dégradés, rayures, Fresnel, géométrie (normale, position, pente), rampes, mélanges (multiplier, écran, incrustation…), teinte/saturation, niveaux, maths… vers couleur, rugosité, métal, émission. Appliqués aux modèles dans la visionneuse 3D (menu affichage), mis à jour en direct.
+- Compositing (`.comp.json`) : images du coffre, flou, netteté, halo, vignette, grain, aberration chromatique, pixeliser, postériser, contours, niveaux, couleurs… Export PNG en pleine résolution.
+- Node **shader perso** : un petit langage d'expressions (`r = mix(ar, br, fbm(x*6, y*6, 0))`), avec variables, fonctions de bruit et conditions, exécuté pixel par pixel.
+
 **Organisation**
 - Palette de commandes (`Ctrl+Maj+P`) : toutes les actions au clavier.
 - Barre du haut épurée : menu du coffre (nouvelle note, modèles, import, transfert, sauvegarde), menu « fenêtre » (thème, épingler, compact), réglages.
@@ -85,7 +91,21 @@ Le fil entre tes idées. Notes, code, références et moodboards dans un dossier
 - Aryadne s'ajoute tout seul au menu des applications (Linux) ou au menu Démarrer (Windows), avec son icône.
 - Sous Wayland, Aryadne passe par XWayland pour que le glisser-déposer de fichiers marche (réglable). Boutons « importer des fichiers… » et « lier un dossier… » partout.
 
+**Vidéo**
+- Pelures d'oignon réglables : jusqu'à 6 images avant et après, opacité dégressive, teinte rouge/vert ou naturelle, dessins inclus.
+- Repères : règle des tiers, centre, zones de sécurité, caches de format (2.39, 1.85, 16:9, 9:16…).
+
+**Code**
+- « ▶ exécuter » (F5) pour les scripts Python, JS, Bash, Lua, Ruby, PowerShell : sortie en direct sous l'éditeur, arrêter, relancer.
+
+**Coffre**
+- Coffres récents, statistiques (taille par type, fichiers les plus lourds, nombre de mots), liens `[[Note#Titre]]`, échéances `@AAAA-MM-JJ` dans les tâches.
+
 **Assistant IA partout** (`Ctrl+L`)
+- Pièces jointes : fichiers, images, dossiers entiers, fichier ouvert, image du presse-papiers (ou glisser dans le chat). Les images vont aux modèles qui voient (Qwen 3.8, Gemma 3…).
+- Choix du modèle directement dans le chat, bouton « arrêter » pendant la réponse.
+- L'IA peut poser une question en retour, avec des réponses toutes prêtes en boutons.
+- Gestion des modèles (réglages → IA) : liste des modèles installés avec leur taille, utiliser, supprimer, et télécharger n'importe quel modèle d'Ollama ou de Hugging Face (`hf.co/…`), par exemple `qwen3.8:27b`.
 - Panneau à côté de toutes les vues : il voit le fichier ouvert (ou ta sélection), ou le board courant. Boutons rapides (expliquer, corriger, améliorer, commenter...) et blocs de code insérables au curseur.
 
 **Cerveau**
