@@ -41,6 +41,7 @@ pub enum Cmd {
     Backup,
     Sync,
     Split,
+    Convert,
     OpenVaultFolder,
     ChangeVault,
     MenuEntry,
@@ -88,6 +89,7 @@ impl App {
             ("sauvegarder le coffre maintenant (zip)", "", Cmd::Backup),
             ("synchroniser avec le cloud", "", Cmd::Sync),
             ("vue côte à côte", "Ctrl+\\", Cmd::Split),
+            ("convertir / compresser des fichiers…", "", Cmd::Convert),
             ("réglages : coffre en ligne", "", Cmd::Settings(Tab::Cloud)),
             ("statistiques du coffre", "", Cmd::Stats),
             ("ouvrir le dossier du coffre", "", Cmd::OpenVaultFolder),
@@ -157,6 +159,16 @@ impl App {
             Cmd::Backup => self.start_backup(true),
             Cmd::Sync => self.start_sync(true),
             Cmd::Split => self.toggle_split(),
+            Cmd::Convert => {
+                let cur = self.current().and_then(|d| vault::safe(&self.root(), &d.rel).ok()).filter(|p| convert::kind_of(p).is_some());
+                let paths = match cur {
+                    Some(p) => vec![p],
+                    None => rfd::FileDialog::new().set_title("Fichiers à convertir").pick_files().unwrap_or_default(),
+                };
+                if !paths.is_empty() {
+                    self.convert = convert::Dlg::new(paths);
+                }
+            }
             Cmd::OpenVaultFolder => {
                 let r = settings::open_external(std::path::Path::new(&self.root()));
                 self.report(r);

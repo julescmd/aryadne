@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod cloud;
+mod convert;
 mod cloud_ui;
 mod lsp;
 mod ai;
@@ -212,6 +213,7 @@ struct App {
     cloud_next: Option<Instant>,
     cloud_seen: Option<Instant>,
     relay: cloud::Sync,
+    convert: Option<convert::Dlg>,
     /// Fichier affiché à droite en vue côte à côte.
     split: Option<String>,
     in_split: bool,
@@ -3458,6 +3460,12 @@ impl eframe::App for App {
             self.palette_ui(&ctx);
             self.template_ui(&ctx);
             self.history_ui(&ctx);
+            if let Some(d) = &mut self.convert {
+                if !d.ui(&ctx) {
+                    self.convert = None;
+                    self.refresh();
+                }
+            }
             self.url_ui(&ctx);
             self.stats_ui(&ctx);
             self.dialogs(&ctx);

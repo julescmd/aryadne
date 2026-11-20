@@ -29,7 +29,7 @@ pub struct Info {
     pub duration: f32,
 }
 
-fn probe(path: &Path) -> Result<Info, String> {
+pub fn probe(path: &Path) -> Result<Info, String> {
     let ffprobe = ffmpeg::find("ffprobe").ok_or("ffprobe introuvable")?;
     let out = ffmpeg::command(ffprobe)
         .args(["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height,r_frame_rate,avg_frame_rate:format=duration", "-of", "json"])
@@ -130,6 +130,12 @@ pub struct Viewer {
     current: Vec<[f32; 2]>,
     notes_path: PathBuf,
     pub export: Option<Export>,
+    /// Bande d'images sous la vidéo (façon Syncsketch)
+    pub show_strip: bool,
+    pub strip_h: f32,
+    strip_tex: HashMap<usize, TextureHandle>,
+    strip_lru: VecDeque<usize>,
+    strip_follow: bool,
 }
 
 impl Viewer {
@@ -173,6 +179,11 @@ impl Viewer {
             current: vec![],
             notes_path,
             export: None,
+            show_strip: true,
+            strip_h: 54.0,
+            strip_tex: HashMap::new(),
+            strip_lru: VecDeque::new(),
+            strip_follow: true,
         };
         if v.info.is_ok() {
             v.start_extract(ctx.clone());
@@ -253,6 +264,107 @@ impl Viewer {
             }
         }
         Some(t)
+    }
+
+    /// Petite image pour la bande (chargée à la demande, quelques-unes par image affichée).
+    fn strip_thumb(&mut self, ctx: &egui::Context, i: usize, h: u32, budget: &mut usize) -> Option<TextureHandle> {
+        if let Some(t) = self.strip_tex.get(&i) {
+            return Some(t.clone());
+        }
+        if *budget == 0 {
+            return None;
+        }
+        *budget -= 1;
+        let img = image::open(self.dir.join(format!("{:06}.jpg", i + 1))).ok()?;
+        let w = ((img.width() as f32 / img.height().max(1) as f32) * h as f32).max(1.0) as u32;
+        let img = img.resize_exact(w, h, image::imageops::FilterType::Triangle).to_rgba8();
+        let t = ctx.load_texture(format!("strip{i}"), egui::ColorImage::from_rgba_unmultiplied([img.width() as usize, img.height() as usize], img.as_raw()), egui::TextureOptions::LINEAR);
+        self.strip_tex.insert(i, t.clone());
+        self.strip_lru.push_back(i);
+        while self.strip_lru.len() > 600 {
+            if let Some(old) = self.strip_lru.pop_front() {
+                self.strip_tex.remove(&old);
+            }
+        }
+        Some(t)
+    }
+
+    /// Bande d'images : toutes les images côte à côte, clic ou glisser pour aller.
+    fn filmstrip(&mut self, ui: &mut egui::Ui, frames: usize, held: usize, aspect: f32) {
+        let p = theme::pal();
+        let ctx = ui.ctx().clone();
+        ui.horizontal(|ui| {
+            ui.toggle_value(&mut self.show_strip, RichText::new("bande d'images").size(11.0));
+            if self.show_strip {
+                ui.spacing_mut().slider_width = 90.0;
+                ui.add(egui::Slider::new(&mut self.strip_h, 28.0..=140.0).show_value(false).text(RichText::new("taille").size(10.5)));
+                ui.checkbox(&mut self.strip_follow, RichText::new("suivre la lecture").size(11.0));
+            }
+        });
+        if !self.show_strip || frames == 0 {
+            return;
+        }
+        let h = self.strip_h;
+        let w = (h * aspect).clamp(16.0, 400.0);
+        let total_w = frames as f32 * (w + 2.0);
+        let mut budget = 8usize;
+        let id = ui.make_persistent_id(("filmstrip", &self.path));
+        let mut sa = egui::ScrollArea::horizontal().id_salt(id).max_height(h + 24.0).auto_shrink([false, true]);
+        if self.strip_follow {
+            // Garde l'image courante visible (centrée)
+            let off: f32 = ui.data(|d| d.get_temp(id.with("off")).unwrap_or(0.0));
+            let view_w = ui.available_width();
+            let x = held as f32 * (w + 2.0);
+            if x < off || x + w > off + view_w {
+                sa = sa.horizontal_scroll_offset((x - view_w / 2.0).max(0.0));
+            }
+        }
+        let out = sa.show_viewport(ui, |ui, vp| {
+            let (rect, resp) = ui.allocate_exact_size(vec2(total_w, h + 18.0), Sense::click_and_drag());
+            let painter = ui.painter_at(rect);
+            let first = (vp.left() / (w + 2.0)).floor().max(0.0) as usize;
+            let last = ((vp.right() / (w + 2.0)).ceil() as usize + 1).min(frames);
+            let loop_r = (self.loop_in.unwrap_or(0), self.loop_out.unwrap_or(frames.saturating_sub(1)));
+            let has_loop = self.loop_in.is_some() || self.loop_out.is_some();
+            for i in first..last {
+                let r = Rect::from_min_size(pos2(rect.left() + i as f32 * (w + 2.0), rect.top()), vec2(w, h));
+                match self.strip_thumb(&ctx, i, (h * 1.5) as u32, &mut budget) {
+                    Some(t) => {
+                        painter.image(t.id(), r, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+                    }
+                    None => {
+                        painter.rect_filled(r, 0.0, Color32::from_gray(45));
+                    }
+                }
+                if has_loop && (i < loop_r.0 || i > loop_r.1) {
+                    painter.rect_filled(r, 0.0, Color32::from_black_alpha(140));
+                }
+                if self.lines.contains_key(&i) {
+                    painter.rect_filled(Rect::from_min_size(r.left_bottom() - vec2(0.0, 3.0), vec2(w, 3.0)), 0.0, p.accent);
+                }
+                if i == held {
+                    painter.rect_stroke(r, 0.0, Stroke::new(2.5, p.accent), egui::StrokeKind::Inside);
+                }
+                if i % 5 == 0 || i == held || w > 60.0 {
+                    let col = if i == held { p.accent } else { p.muted };
+                    painter.text(pos2(r.left() + 2.0, r.bottom() + 2.0), egui::Align2::LEFT_TOP, (i + 1).to_string(), egui::FontId::monospace(10.0), col);
+                }
+            }
+            if resp.clicked() || resp.dragged_by(egui::PointerButton::Primary) {
+                if let Some(pp) = resp.interact_pointer_pos() {
+                    self.cur = (((pp.x - rect.left()) / (w + 2.0)).floor().max(0.0) as usize).min(frames - 1);
+                    self.playing = false;
+                    self.strip_follow = false;
+                }
+            }
+            if budget == 0 {
+                ctx.request_repaint();
+            }
+        });
+        ui.data_mut(|d| d.insert_temp(id.with("off"), out.state.clamped_offset().x));
+        if self.playing {
+            self.strip_follow = true;
+        }
     }
 
     fn save_lines(&self) {
@@ -422,7 +534,8 @@ impl Viewer {
         self.export_panel(ui, &info);
 
         // Image
-        let avail = ui.available_size() - vec2(0.0, 46.0);
+        let strip = if self.show_strip { self.strip_h + 58.0 } else { 26.0 };
+        let avail = ui.available_size() - vec2(0.0, 46.0 + strip);
         let (rect, resp) = ui.allocate_exact_size(avail.max(vec2(100.0, 100.0)), Sense::click_and_drag());
         let painter = ui.painter_at(rect);
         painter.rect_filled(rect, 0.0, Color32::from_gray(18));
@@ -603,6 +716,7 @@ impl Viewer {
                 self.playing = false;
             }
         }
+        self.filmstrip(ui, frames, held, info.width as f32 / info.height.max(1) as f32);
     }
 
     fn export_panel(&mut self, ui: &mut egui::Ui, info: &Info) {

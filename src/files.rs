@@ -14,10 +14,22 @@ pub struct FilesState {
     pub sort: u8,
     pub show_ext: bool,
     pub hide_recent: bool,
+    /// Vue en grille avec miniatures (façon Unreal)
+    #[serde(default)]
+    pub grid: bool,
+    #[serde(default = "tile_default")]
+    pub tile: f32,
+    /// Dossier affiché en grille
+    #[serde(default)]
+    pub dir: String,
     #[serde(skip)]
     pub kind: Option<&'static str>,
     #[serde(skip)]
     loaded_for: String,
+}
+
+fn tile_default() -> f32 {
+    96.0
 }
 
 impl FilesState {
@@ -102,6 +114,7 @@ impl App {
                     ui.label(caps("fichiers"));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.add_space(8.0);
+                        let g = self.files.grid;
                         egui::containers::menu::MenuButton::new("⋯").ui(ui, |ui| {
                             ui.set_min_width(200.0);
                             ui.label(RichText::new("trier").color(p.muted).size(11.0));
@@ -136,6 +149,10 @@ impl App {
                                 }
                             }
                         });
+                        if ui.add(egui::Button::new(if g { "▦" } else { "≣" }).frame(false)).on_hover_text(if g { "vue en grille (clic : liste)" } else { "vue en liste (clic : grille avec miniatures)" }).clicked() {
+                            self.files.grid = !g;
+                            self.files.save();
+                        }
                         egui::containers::menu::MenuButton::new("+").ui(ui, |ui| {
                             ui.set_min_width(210.0);
                             let dir = self.target_dir(&self.notes_dir());
@@ -219,7 +236,9 @@ impl App {
                 egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
                     ui.spacing_mut().item_spacing.y = 0.0;
                     let searching = !self.filter.trim().is_empty() || self.files.kind.is_some();
-                    if searching {
+                    if self.files.grid {
+                        self.grid_view(ui, searching);
+                    } else if searching {
                         self.flat_list(ui);
                     } else {
                         // Épinglés et récents
@@ -271,6 +290,149 @@ impl App {
                     }
                 });
             });
+    }
+
+    /// Vue en grille : fil d'Ariane, taille des tuiles, miniatures.
+    fn grid_view(&mut self, ui: &mut egui::Ui, searching: bool) {
+        let p = theme::pal();
+        if !self.files.dir.is_empty() && !self.entries.iter().any(|e| e.is_dir && e.rel == self.files.dir) {
+            self.files.dir.clear();
+        }
+        ui.horizontal_wrapped(|ui| {
+            ui.add_space(10.0);
+            ui.spacing_mut().item_spacing.x = 2.0;
+            if !self.files.dir.is_empty() && ui.small_button("↑").on_hover_text("dossier parent").clicked() {
+                self.files.dir = vault::parent(&self.files.dir);
+                self.files.save();
+            }
+            if ui.add(egui::Button::new(RichText::new("coffre").size(11.5)).frame(false)).clicked() {
+                self.files.dir.clear();
+                self.files.save();
+            }
+            let parts: Vec<String> = self.files.dir.split('/').filter(|s| !s.is_empty()).map(String::from).collect();
+            for k in 0..parts.len() {
+                ui.label(RichText::new("/").color(p.muted).size(11.5));
+                let last = k + 1 == parts.len();
+                let t = RichText::new(vault::display_rel(&parts[k])).size(11.5);
+                if ui.add(egui::Button::new(if last { t.family(theme::bold()) } else { t }).frame(false)).clicked() {
+                    self.files.dir = parts[..=k].join("/");
+                    self.files.save();
+                }
+            }
+        });
+        ui.horizontal(|ui| {
+            ui.add_space(10.0);
+            ui.spacing_mut().slider_width = 110.0;
+            if ui.add(egui::Slider::new(&mut self.files.tile, 56.0..=220.0).show_value(false).text(RichText::new("taille").size(10.5))).drag_stopped() {
+                self.files.save();
+            }
+        });
+        ui.add_space(6.0);
+        let q = chat::fold(self.filter.trim());
+        let mut items: Vec<Entry> = if searching {
+            self.entries.iter().filter(|e| !e.is_dir && self.files.kind.is_none_or(|k| kind(&e.rel).2 == k) && (q.is_empty() || chat::fold(&e.rel).contains(&q))).take(600).cloned().collect()
+        } else {
+            let dir = self.files.dir.clone();
+            self.entries
+                .iter()
+                .filter(|e| {
+                    let par = vault::parent(&e.rel);
+                    let par = if par == vault::LINKED_FILES { String::new() } else { par };
+                    par == dir && e.rel != vault::LINKED_FILES
+                })
+                .cloned()
+                .collect()
+        };
+        match self.files.sort {
+            1 => items.sort_by(|a, b| (!a.is_dir).cmp(&!b.is_dir).then(b.modified.cmp(&a.modified))),
+            2 => items.sort_by(|a, b| (!a.is_dir).cmp(&!b.is_dir).then(kind(&a.rel).2.cmp(kind(&b.rel).2)).then(a.name.to_lowercase().cmp(&b.name.to_lowercase()))),
+            _ => items.sort_by(|a, b| (!a.is_dir).cmp(&!b.is_dir).then(a.name.to_lowercase().cmp(&b.name.to_lowercase()))),
+        }
+        let t = self.files.tile;
+        egui::Frame::new().inner_margin(egui::Margin { left: 10, right: 6, top: 0, bottom: 0 }).show(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
+                for e in &items {
+                    self.tile(ui, e, t, searching);
+                }
+            });
+        });
+        if items.is_empty() {
+            ui.label(RichText::new("   dossier vide").color(p.muted));
+        }
+    }
+
+    fn tile(&mut self, ui: &mut egui::Ui, e: &Entry, t: f32, with_path: bool) {
+        let p = theme::pal();
+        let (rect, resp) = ui.allocate_exact_size(egui::vec2(t, t + 30.0), egui::Sense::click_and_drag());
+        if !ui.is_rect_visible(rect) {
+            return;
+        }
+        let painter = ui.painter().clone();
+        let active = self.current().is_some_and(|d| d.rel == e.rel);
+        let selected = self.selected.as_deref() == Some(&e.rel);
+        let drop_target = e.is_dir && resp.dnd_hover_payload::<String>().is_some_and(|f| *f != e.rel);
+        let (icon, col, _) = if e.is_dir { ("▰", p.muted, "") } else { kind(&e.rel) };
+        let thumb = egui::Rect::from_min_size(rect.min, egui::vec2(t, t));
+        painter.rect_filled(thumb, 0.0, if drop_target { p.accent.linear_multiply(0.2) } else { p.bg });
+        let mut drawn = false;
+        if !e.is_dir && images::has_preview(&e.rel) {
+            if let images::Slot::Ready(l) = self.images.get(&e.rel, images::Size::Thumb) {
+                let s = l.tex.size_vec2();
+                let k = (thumb.width() / s.x).min(thumb.height() / s.y);
+                let r = egui::Rect::from_center_size(thumb.center(), s * k);
+                painter.image(l.tex.id(), r, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), egui::Color32::WHITE);
+                drawn = true;
+            }
+        }
+        if e.is_dir {
+            // Dossier dessiné : onglet + corps
+            let w = t * 0.5;
+            let body = egui::Rect::from_center_size(thumb.center() + egui::vec2(0.0, t * 0.04), egui::vec2(w, w * 0.68));
+            let tab = egui::Rect::from_min_size(body.min - egui::vec2(0.0, w * 0.12), egui::vec2(w * 0.42, w * 0.14));
+            let fc = egui::Color32::from_rgb(214, 170, 72);
+            painter.rect_filled(tab, 1.0, fc.gamma_multiply(0.8));
+            painter.rect_filled(body, 1.0, fc);
+            let n = self.entries.iter().filter(|c| !c.is_dir && c.rel.starts_with(&format!("{}/", e.rel))).count();
+            painter.text(body.center(), egui::Align2::CENTER_CENTER, n.to_string(), egui::FontId::monospace((t * 0.13).max(9.0)), egui::Color32::WHITE);
+        } else if !drawn {
+            painter.text(thumb.center(), egui::Align2::CENTER_CENTER, icon, egui::FontId::monospace(t * 0.32), col);
+        }
+        // Bande de couleur du type, comme dans Unreal
+        if !e.is_dir {
+            painter.rect_filled(egui::Rect::from_min_max(egui::pos2(thumb.left(), thumb.bottom() - 3.0), thumb.right_bottom()), 0.0, col);
+        }
+        let border = if active || selected { egui::Stroke::new(2.0, p.accent) } else if resp.hovered() { egui::Stroke::new(1.0, p.muted) } else { egui::Stroke::new(1.0, p.line) };
+        painter.rect_stroke(thumb, 0.0, border, egui::StrokeKind::Inside);
+        let name = e.name.trim_end_matches(".md").trim_end_matches(".board.json").trim_end_matches(".mat.json").trim_end_matches(".comp.json").to_string();
+        let font = egui::FontId::monospace(10.5);
+        let g = painter.layout(name, font.clone(), p.text, t);
+        let clip = egui::Rect::from_min_size(egui::pos2(rect.left(), thumb.bottom() + 3.0), egui::vec2(t, 26.0));
+        painter.with_clip_rect(clip).galley(clip.min, g, p.text);
+        let resp = if with_path { resp.on_hover_text(vault::display_rel(&e.rel)) } else { resp.on_hover_text(&e.name) };
+        if resp.drag_started() {
+            egui::DragAndDrop::set_payload(ui.ctx(), e.rel.clone());
+        }
+        if e.is_dir {
+            if let Some(from) = resp.dnd_release_payload::<String>() {
+                if *from != e.rel {
+                    self.actions.push(Action::Move((*from).clone(), e.rel.clone()));
+                }
+            }
+        }
+        if resp.clicked() {
+            self.selected = Some(e.rel.clone());
+            if e.is_dir {
+                self.files.dir = e.rel.clone();
+                self.files.save();
+            } else {
+                self.actions.push(Action::Open(e.rel.clone()));
+            }
+        }
+        let e = e.clone();
+        resp.context_menu(|ui| {
+            self.entry_menu(ui, &e);
+        });
     }
 
     /// Enfants d'un dossier, triés selon le réglage, puis récursion sur les dossiers ouverts.
@@ -454,6 +616,15 @@ impl App {
             }
             if ui.button("nouveau dossier ici").clicked() {
                 self.actions.push(Action::NewDir(dir.clone()));
+            }
+            if let Ok(path) = vault::safe(&self.root(), &e.rel) {
+                let ok = if e.is_dir { true } else { convert::kind_of(&path).is_some() };
+                if ok && ui.button(if e.is_dir { "convertir / compresser le dossier…" } else { "convertir / compresser…" }).clicked() {
+                    self.convert = convert::Dlg::new(vec![path]);
+                    if self.convert.is_none() {
+                        self.toast = Some(("rien à convertir ici (images, vidéos, sons)".into(), Instant::now()));
+                    }
+                }
             }
             ui.separator();
             let link_root = vault::is_link_root(&e.rel) || e.rel == vault::LINKED_FILES;
