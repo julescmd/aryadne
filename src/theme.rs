@@ -56,9 +56,17 @@ pub fn set_accent(c: Option<Color32>) {
     ACCENT.store(v, Ordering::Relaxed);
 }
 
+/// Couleur de l'espace de travail en cours : passe avant celle des réglages (0 = aucune).
+static WS_ACCENT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+pub fn set_workspace_accent(c: Option<[u8; 3]>) {
+    WS_ACCENT.store(c.map(|c| 0x0100_0000 | (c[0] as u32) << 16 | (c[1] as u32) << 8 | c[2] as u32).unwrap_or(0), Ordering::Relaxed);
+}
+
 pub fn pal() -> Palette {
     let mut p = if IS_DARK.load(Ordering::Relaxed) { DARK } else { LIGHT };
-    let a = ACCENT.load(Ordering::Relaxed);
+    let w = WS_ACCENT.load(Ordering::Relaxed);
+    let a = if w != 0 { w } else { ACCENT.load(Ordering::Relaxed) };
     if a != 0 {
         p.accent = rgb(a & 0xff_ffff);
         let lum = 0.2126 * p.accent.r() as f32 + 0.7152 * p.accent.g() as f32 + 0.0722 * p.accent.b() as f32;

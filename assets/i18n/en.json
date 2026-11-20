@@ -850,5 +850,16 @@
  "128 (lisse)": "128 (smooth)",
  "haute définition": "high-poly",
  "chemin du sculpt (facultatif)": "path to the sculpt (optional)",
- "Les détails de ce modèle sont reportés dans une normale en espace tangent. Il doit occuper la même place que le modèle ouvert.": "This model's details are transferred into a tangent-space normal map. It must occupy the same space as the open model."
+ "Les détails de ce modèle sont reportés dans une normale en espace tangent. Il doit occuper la même place que le modèle ouvert.": "This model's details are transferred into a tangent-space normal map. It must occupy the same space as the open model.",
+ "notes": "notes",
+ "vidéo": "video",
+ "IA": "AI",
+ "références": "references",
+ "espace": "workspace",
+ "nom de l'espace": "workspace name",
+ "celle des réglages": "use settings color",
+ "clic droit : renommer, couleur, dupliquer": "right click: rename, color, duplicate",
+ "Enregistrer la disposition actuelle comme nouvel espace de travail": "Save the current layout as a new workspace",
+ "détacher hors de l'application": "detach outside the app",
+ "cliquer pour rattacher à la fenêtre principale": "click to bring back into the main window"
 }

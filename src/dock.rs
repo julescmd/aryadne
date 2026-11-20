@@ -14,13 +14,15 @@ pub enum Side {
     Right,
     Bottom,
     Float,
+    /// Détaché dans sa propre fenêtre du système
+    Window,
 }
 
 #[derive(Clone, Copy, Serialize, Deserialize, Debug)]
-struct Place {
-    side: Side,
-    pos: [f32; 2],
-    size: [f32; 2],
+pub struct Place {
+    pub side: Side,
+    pub pos: [f32; 2],
+    pub size: [f32; 2],
 }
 
 static STATE: Mutex<Option<HashMap<String, Place>>> = Mutex::new(None);
@@ -45,6 +47,17 @@ fn save() {
     }
 }
 
+/// La disposition en cours (pour l'enregistrer dans un espace de travail).
+pub fn export() -> HashMap<String, Place> {
+    with(|m| m.clone())
+}
+
+/// Remplace la disposition (en changeant d'espace de travail).
+pub fn import(places: HashMap<String, Place>) {
+    with(|m| *m = places);
+    save();
+}
+
 /// Remet tous les panneaux à leur place d'origine.
 pub fn reset() {
     with(|m| m.clear());
@@ -63,7 +76,10 @@ fn set(id: &str, p: Place) {
 /// Où un panneau atterrirait si on le lâchait à `at`.
 fn drop_side(screen: Rect, at: Pos2) -> Side {
     let edge = 90.0;
-    if at.x < screen.left() + edge {
+    if !screen.expand(4.0).contains(at) {
+        // Lâché hors de l'application : le panneau devient une vraie fenêtre
+        Side::Window
+    } else if at.x < screen.left() + edge {
         Side::Left
     } else if at.x > screen.right() - edge {
         Side::Right
@@ -79,7 +95,7 @@ fn zone(screen: Rect, s: Side) -> Rect {
         Side::Left => Rect::from_min_size(screen.min, vec2(260.0, screen.height())),
         Side::Right => Rect::from_min_max(pos2(screen.right() - 300.0, screen.top()), screen.max),
         Side::Bottom => Rect::from_min_max(pos2(screen.left(), screen.bottom() - 220.0), screen.max),
-        Side::Float => Rect::NOTHING,
+        Side::Float | Side::Window => Rect::NOTHING,
     }
 }
 
@@ -94,6 +110,14 @@ fn grip(ui: &mut Ui, id: &str, title: &str, mut pl: Place) {
         ui.ctx().set_cursor_icon(if resp.dragged() { egui::CursorIcon::Grabbing } else { egui::CursorIcon::Grab });
     }
     let screen = ui.ctx().content_rect();
+    if pl.side == Side::Window {
+        // Dans sa propre fenêtre : un clic la ramène dans l'application
+        if resp.on_hover_text(crate::i18n::t("cliquer pour rattacher à la fenêtre principale")).clicked() {
+            pl.side = Side::Float;
+            set(id, pl);
+        }
+        return;
+    }
     if resp.dragged() {
         if let Some(at) = resp.interact_pointer_pos() {
             if pl.side == Side::Float {
@@ -123,7 +147,7 @@ fn grip(ui: &mut Ui, id: &str, title: &str, mut pl: Place) {
         }
     }
     resp.context_menu(|ui| {
-        for (s, l) in [(Side::Left, "ancrer à gauche"), (Side::Right, "ancrer à droite"), (Side::Bottom, "ancrer en bas"), (Side::Float, "fenêtre flottante")] {
+        for (s, l) in [(Side::Left, "ancrer à gauche"), (Side::Right, "ancrer à droite"), (Side::Bottom, "ancrer en bas"), (Side::Float, "fenêtre flottante"), (Side::Window, "détacher hors de l'application")] {
             if ui.radio(pl.side == s, crate::i18n::t(l)).clicked() {
                 pl.side = s;
                 set(id, pl);
@@ -150,6 +174,25 @@ pub fn show<R>(ui: &mut Ui, id: &str, title: &str, default: Side, size: f32, min
         Side::Left => Some(egui::Panel::left(id.to_string()).resizable(true).default_size(size).min_size(min).frame(frame).show(ui, body).inner),
         Side::Right => Some(egui::Panel::right(id.to_string()).resizable(true).default_size(size).min_size(min).frame(frame).show(ui, body).inner),
         Side::Bottom => Some(egui::Panel::bottom(id.to_string()).resizable(true).default_size(220.0).min_size(90.0).frame(frame).show(ui, body).inner),
+        Side::Window => {
+            let ctx = ui.ctx().clone();
+            let mut body = Some(body);
+            let mut back = false;
+            let vp = egui::ViewportBuilder::default().with_title(format!("{title} · Aryadne")).with_inner_size(vec2(pl.size[0].max(min), pl.size[1].max(240.0)));
+            let out = ctx.show_viewport_immediate(egui::ViewportId::from_hash_of(("dock", id)), vp, |ui, _class| {
+                if ui.ctx().input(|i| i.viewport().close_requested()) {
+                    back = true;
+                }
+                let body = body.take()?;
+                Some(egui::CentralPanel::default().frame(frame.stroke(Stroke::NONE)).show(ui, body).inner)
+            });
+            if back {
+                // Fermer la fenêtre détachée ramène le panneau à sa place d'origine
+                set(id, Place { side: default, ..pl });
+                ctx.request_repaint();
+            }
+            out
+        }
         Side::Float => {
             let ctx = ui.ctx().clone();
             let screen = ctx.content_rect();

@@ -2,6 +2,7 @@
 
 mod cloud;
 mod dock;
+mod workspace;
 mod retopo;
 mod bvh;
 mod convert;
@@ -257,6 +258,9 @@ struct App {
     send_code: String,
     github_token: String,
     error: Option<String>,
+    ws: workspace::Set,
+    ws_started: bool,
+    ws_name: String,
 }
 
 impl App {
@@ -285,6 +289,191 @@ impl App {
 
     fn view(&self) -> View {
         self.view.unwrap_or(View::Files)
+    }
+
+    // ---------- espaces de travail ----------
+
+    /// Range l'état actuel (onglets, vue, panneaux) dans l'espace en cours.
+    fn ws_capture(&mut self) {
+        let view = match self.view() {
+            View::Files => "files",
+            View::Brain => "brain",
+            View::Refs => "refs",
+            View::Boards => "boards",
+            View::Tasks => "tasks",
+            View::Chat => "chat",
+            View::Search => "search",
+        };
+        let w = &mut self.ws.list[self.ws.current];
+        w.places = dock::export();
+        w.tabs = self.docs.iter().map(|d| d.rel.clone()).collect();
+        w.active = self.active.and_then(|i| self.docs.get(i)).map(|d| d.rel.clone());
+        w.split = self.split.clone();
+        w.view = view.to_string();
+        w.assistant = self.assistant_open;
+    }
+
+    /// Met en place l'espace en cours : panneaux, couleur, onglets, vue.
+    fn ws_apply(&mut self, ctx: &egui::Context, tabs: bool) {
+        let w = self.ws.cur().clone();
+        dock::import(w.places);
+        theme::set_workspace_accent(w.accent);
+        theme::apply(ctx, self.prefs.dark);
+        if !tabs {
+            return;
+        }
+        self.assistant_open = w.assistant;
+        self.flush_all();
+        self.docs.clear();
+        self.active = None;
+        self.split = None;
+        let known: std::collections::HashSet<&str> = self.entries.iter().map(|e| e.rel.as_str()).collect();
+        let tabs: Vec<String> = w.tabs.iter().filter(|t| known.contains(t.as_str())).cloned().collect();
+        for t in &tabs {
+            self.open(t.clone());
+        }
+        if let Some(a) = w.active.filter(|a| tabs.contains(a)) {
+            self.open(a);
+        }
+        self.split = w.split.filter(|s| tabs.contains(s));
+        self.view = Some(match w.view.as_str() {
+            "brain" => View::Brain,
+            "refs" => View::Refs,
+            "boards" => View::Boards,
+            "tasks" => View::Tasks,
+            "chat" => View::Chat,
+            "search" => View::Search,
+            _ => View::Files,
+        });
+        self.update_backlinks();
+    }
+
+    fn ws_switch(&mut self, i: usize, ctx: &egui::Context) {
+        if i >= self.ws.list.len() || i == self.ws.current {
+            return;
+        }
+        self.ws_capture();
+        self.ws.current = i;
+        self.ws_apply(ctx, true);
+        self.ws.save();
+    }
+
+    /// Barre des espaces de travail, sous le menu.
+    fn ws_bar(&mut self, ui: &mut egui::Ui) {
+        let p = theme::pal();
+        let ctx = ui.ctx().clone();
+        if !self.ws_started {
+            // Au lancement : reprendre la disposition et la couleur, et les onglets si rien n'est ouvert
+            self.ws_started = true;
+            let tabs = self.docs.is_empty() && !self.ws.cur().tabs.is_empty();
+            self.ws_apply(&ctx, tabs);
+        }
+        if ctx.input(|i| i.viewport().close_requested()) {
+            self.ws_capture();
+            self.ws.save();
+        }
+        let mut go: Option<usize> = None;
+        let mut changed = false;
+        let mut add = false;
+        let mut dup: Option<usize> = None;
+        let mut del: Option<usize> = None;
+        let mut reset: Option<usize> = None;
+        egui::Panel::top("workspaces").exact_size(26.0).frame(egui::Frame::new().fill(p.panel).stroke(egui::Stroke::new(1.0, p.line)).inner_margin(egui::Margin::symmetric(10, 0))).show(ui, |ui| {
+            ui.horizontal_centered(|ui| {
+                ui.spacing_mut().item_spacing.x = 2.0;
+                let n = self.ws.list.len();
+                for i in 0..n {
+                    let on = i == self.ws.current;
+                    let color = self.ws.list[i].accent.map(|c| egui::Color32::from_rgb(c[0], c[1], c[2])).unwrap_or(if on { p.accent } else { p.muted });
+                    let label = crate::i18n::t(&self.ws.list[i].name);
+                    let mut text = egui::text::LayoutJob::default();
+                    let font = egui::FontId::new(12.0, if on { theme::bold() } else { egui::FontFamily::Proportional });
+                    text.append("● ", 0.0, egui::TextFormat { font_id: font.clone(), color, ..Default::default() });
+                    text.append(&label, 0.0, egui::TextFormat { font_id: font, color: if on { color } else { p.muted }, ..Default::default() });
+                    let r = ui.add(egui::Button::new(text).frame(false)).on_hover_text(crate::i18n::t("clic droit : renommer, couleur, dupliquer"));
+                    if r.clicked() {
+                        go = Some(i);
+                    }
+                    r.context_menu(|ui| {
+                        ui.set_min_width(210.0);
+                        if self.ws_name.is_empty() || ui.memory(|m| m.data.get_temp::<usize>(egui::Id::unique("ws-edit"))) != Some(i) {
+                            self.ws_name = self.ws.list[i].name.clone();
+                            ui.memory_mut(|m| m.data.insert_temp(egui::Id::unique("ws-edit"), i));
+                        }
+                        if ui.add(egui::TextEdit::singleline(&mut self.ws_name).hint_text(crate::i18n::t("nom de l'espace"))).changed() && !self.ws_name.trim().is_empty() {
+                            self.ws.list[i].name = self.ws_name.trim().to_string();
+                            changed = true;
+                        }
+                        ui.horizontal(|ui| {
+                            ui.label(crate::i18n::t("couleur"));
+                            let mut c = self.ws.list[i].accent.unwrap_or([p.accent.r(), p.accent.g(), p.accent.b()]);
+                            if ui.color_edit_button_srgb(&mut c).changed() {
+                                self.ws.list[i].accent = Some(c);
+                                changed = true;
+                            }
+                            if self.ws.list[i].accent.is_some() && ui.small_button(crate::i18n::t("celle des réglages")).clicked() {
+                                self.ws.list[i].accent = None;
+                                changed = true;
+                            }
+                        });
+                        ui.separator();
+                        if ui.button(crate::i18n::t("dupliquer")).clicked() {
+                            dup = Some(i);
+                            ui.close();
+                        }
+                        if ui.button(crate::i18n::t("réinitialiser la disposition")).clicked() {
+                            reset = Some(i);
+                            ui.close();
+                        }
+                        if n > 1 && ui.button(RichText::new(crate::i18n::t("supprimer")).color(p.missing)).clicked() {
+                            del = Some(i);
+                            ui.close();
+                        }
+                    });
+                    ui.add_space(6.0);
+                }
+                if ui.add(egui::Button::new(RichText::new("＋").color(p.muted)).frame(false)).on_hover_text(crate::i18n::t("Enregistrer la disposition actuelle comme nouvel espace de travail")).clicked() {
+                    add = true;
+                }
+            });
+        });
+        if add || dup.is_some() {
+            self.ws_capture();
+            let mut w = self.ws.list[dup.unwrap_or(self.ws.current)].clone();
+            w.name = if add { format!("{} {}", crate::i18n::t("espace"), self.ws.list.len() + 1) } else { format!("{} 2", w.name) };
+            self.ws.list.push(w);
+            go = Some(self.ws.list.len() - 1);
+        }
+        if let Some(i) = reset {
+            self.ws.list[i].places.clear();
+            if i == self.ws.current {
+                dock::reset();
+            }
+            changed = true;
+        }
+        if let Some(i) = del {
+            if i == self.ws.current {
+                // On quitte l'espace avant de le retirer
+                let to = if i == 0 { 1 } else { i - 1 };
+                self.ws.current = to;
+                self.ws_apply(&ctx, true);
+            }
+            self.ws.list.remove(i);
+            if self.ws.current > i {
+                self.ws.current -= 1;
+            }
+            go = None;
+            changed = true;
+        }
+        if changed {
+            let w = self.ws.cur().accent;
+            theme::set_workspace_accent(w);
+            theme::apply(&ctx, self.prefs.dark);
+            self.ws.save();
+        }
+        if let Some(i) = go {
+            self.ws_switch(i, &ctx);
+        }
     }
 
     fn report<T>(&mut self, r: Result<T, String>) -> Option<T> {
@@ -3425,6 +3614,7 @@ impl eframe::App for App {
                 self.compact_bar(ui);
             } else {
                 self.topbar(ui);
+                self.ws_bar(ui);
                 self.statusbar(ui);
                 self.explorer(ui);
             }
