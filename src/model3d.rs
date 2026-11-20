@@ -10,7 +10,7 @@ use std::io::BufRead;
 use std::path::Path;
 use std::sync::mpsc::{channel, Receiver};
 
-pub const EXT: [&str; 5] = ["obj", "fbx", "glb", "gltf", "stl"];
+pub const EXT: [&str; 6] = ["obj", "fbx", "glb", "gltf", "stl", "arya3"];
 /// Nombre de triangles visé pour l'affichage interactif.
 const MAX_TRIS: usize = 150_000;
 
@@ -55,7 +55,7 @@ impl Model {
         Self::with_edges(positions, tris, colors, None, z_up)
     }
 
-    fn with_edges(positions: Vec<V3>, tris: Vec<[u32; 3]>, colors: Option<Vec<Color32>>, edges: Option<Vec<u8>>, z_up: bool) -> Result<Self, String> {
+    pub(crate) fn with_edges(positions: Vec<V3>, tris: Vec<[u32; 3]>, colors: Option<Vec<Color32>>, edges: Option<Vec<u8>>, z_up: bool) -> Result<Self, String> {
         let n0 = tris.len();
         let edges = edges.filter(|e| e.len() == n0).unwrap_or_else(|| vec![7; n0]);
         let (tris, edges): (Vec<[u32; 3]>, Vec<u8>) = tris.into_iter().zip(edges).filter(|(t, _)| t.iter().all(|&i| (i as usize) < positions.len())).unzip();
@@ -179,6 +179,7 @@ pub fn load(path: &Path) -> Result<Model, String> {
             Model::with_edges(m.positions, m.tris, None, Some(m.edges), false)
         }
         "glb" | "gltf" => load_gltf(path),
+        "arya3" => crate::scene::build(&crate::scene::Scene::read(path)?, path).0,
         _ => Err("Format 3D non pris en charge.".into()),
     }
 }
@@ -1331,6 +1332,19 @@ pub struct Viewer {
     /// Maillage de base après « appliquer » (remplace celui du fichier, gardé dans .app/modifiers/)
     applied: Option<std::sync::Arc<crate::modifiers::Mesh>>,
     applied_ver: u64,
+    /// Scène `.arya3` ouverte : ses objets, celui qui est sélectionné, les erreurs de chargement
+    scene: Option<crate::scene::Scene>,
+    scene_sel: Option<usize>,
+    scene_errors: Vec<Option<String>>,
+    scene_rx: Option<Receiver<(Result<Model, String>, Vec<Option<String>>)>>,
+    scene_ver: u64,
+    scene_dirty: bool,
+    /// Cadre fixe de la scène : déplacer un objet ne doit pas recentrer ni redimensionner tout le reste
+    scene_frame: Option<(V3, V3)>,
+    /// Modèles à ajouter à la scène (glissés sur la fenêtre)
+    pub scene_add: Vec<std::path::PathBuf>,
+    /// Modèles du coffre proposés dans le panneau de scène
+    pub model_files: Vec<(String, std::path::PathBuf)>,
     /// Fenêtre d'export : format choisi et chemin de sortie
     export_dlg: Option<(&'static str, String)>,
     export_dir: Option<std::path::PathBuf>,
@@ -1378,6 +1392,15 @@ impl Viewer {
             stack_loaded: false,
             applied: None,
             applied_ver: 0,
+            scene: None,
+            scene_sel: None,
+            scene_errors: vec![],
+            scene_rx: None,
+            scene_ver: 0,
+            scene_dirty: false,
+            scene_frame: None,
+            scene_add: vec![],
+            model_files: vec![],
             export_dlg: None,
             export_dir: None,
             show_mods: false,
@@ -1456,6 +1479,201 @@ impl Viewer {
         });
     }
 
+    pub fn is_scene(&self) -> bool {
+        crate::scene::is_scene(&self.path)
+    }
+
+    /// Panneau de scène : la liste des objets, et la position, rotation et échelle de celui qui est choisi.
+    fn scene_panel(&mut self, ui: &mut egui::Ui) {
+        let p = theme::pal();
+        if self.scene.is_none() {
+            self.scene = Some(crate::scene::Scene::read(&self.path).unwrap_or_default());
+        }
+        // Résultat d'une reconstruction lancée après un changement
+        if let Some(rx) = &self.scene_rx {
+            if let Ok((m, errs)) = rx.try_recv() {
+                self.scene_errors = errs;
+                self.state = match m {
+                    Ok(mut m) => {
+                        match self.scene_frame {
+                            Some((lo, hi)) => (m.min, m.max) = (lo, hi),
+                            None => self.scene_frame = Some((m.min, m.max)),
+                        }
+                        State::Ready(std::sync::Arc::new(m))
+                    }
+                    Err(e) => {
+                        self.prepared = None;
+                        State::Failed(e)
+                    }
+                };
+                self.scene_ver += 1;
+                self.scene_rx = None;
+            } else {
+                ui.ctx().request_repaint_after(std::time::Duration::from_millis(40));
+            }
+        }
+        if let (None, State::Ready(m)) = (self.scene_frame, &self.state) {
+            self.scene_frame = Some((m.min, m.max));
+        }
+        let path = self.path.clone();
+        let scene = self.scene.as_mut().unwrap();
+        let mut changed = false;
+        let mut reframe = false;
+        for f in std::mem::take(&mut self.scene_add) {
+            if is_model(&f.to_string_lossy()) && !crate::scene::is_scene(&f) {
+                scene.add(&path, &f);
+                self.scene_sel = Some(scene.objects.len() - 1);
+                changed = true;
+            }
+        }
+        egui::Panel::left("scene-outliner").resizable(true).default_size(250.0).min_size(200.0).frame(egui::Frame::new().fill(p.panel).stroke(Stroke::new(1.0, p.line)).inner_margin(8)).show(ui, |ui| {
+            ui.spacing_mut().slider_width = 80.0;
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new(crate::i18n::t("SCÈNE")).size(10.5).color(p.muted).family(theme::bold()));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    egui::containers::menu::MenuButton::new(crate::i18n::t("＋ ajouter ▾")).ui(ui, |ui| {
+                        ui.set_min_width(240.0);
+                        if ui.button(crate::i18n::t("choisir un fichier…")).clicked() {
+                            if let Some(files) = rfd::FileDialog::new().add_filter("3D", &["obj", "fbx", "glb", "gltf", "stl"]).pick_files() {
+                                for f in files {
+                                    scene.add(&path, &f);
+                                    changed = true;
+                                }
+                                self.scene_sel = scene.objects.len().checked_sub(1);
+                            }
+                            ui.close();
+                        }
+                        if !self.model_files.is_empty() {
+                            ui.separator();
+                            ui.label(egui::RichText::new(crate::i18n::t("modèles du coffre")).size(10.5).color(p.muted));
+                            egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
+                                for (name, f) in &self.model_files {
+                                    if ui.button(name).clicked() {
+                                        scene.add(&path, f);
+                                        self.scene_sel = Some(scene.objects.len() - 1);
+                                        changed = true;
+                                        ui.close();
+                                    }
+                                }
+                            });
+                        }
+                    });
+                });
+            });
+            if ui.add(egui::Button::new(egui::RichText::new(crate::i18n::t("recadrer la vue sur la scène")).size(10.5).color(p.muted)).frame(false)).clicked() {
+                reframe = true;
+            }
+            if scene.objects.is_empty() {
+                ui.add_space(6.0);
+                ui.label(egui::RichText::new(crate::i18n::t("Scène vide. Glisse des modèles sur la fenêtre, ou ajoute-en avec le bouton.")).color(p.muted).size(11.0));
+            }
+            // (index, action) : 0 supprimer, 1 dupliquer
+            let mut action: Option<(usize, u8)> = None;
+            egui::ScrollArea::vertical().id_salt("scene-objects").max_height((ui.available_height() - 250.0).max(120.0)).show(ui, |ui| {
+                for (i, o) in scene.objects.iter_mut().enumerate() {
+                    ui.horizontal(|ui| {
+                        if ui.add(egui::Button::new(if o.visible { "◉" } else { "○" }).frame(false)).on_hover_text(crate::i18n::t("afficher / cacher")).clicked() {
+                            o.visible = !o.visible;
+                            changed = true;
+                        }
+                        let on = self.scene_sel == Some(i);
+                        let bad = self.scene_errors.get(i).and_then(|e| e.as_ref());
+                        let text = egui::RichText::new(&o.name).size(12.0).color(if bad.is_some() { p.missing } else if on { p.accent } else if o.visible { p.text } else { p.muted });
+                        let r = ui.add(egui::Button::new(if on { text.family(theme::bold()) } else { text }).frame(false));
+                        let r = match bad {
+                            Some(e) => r.on_hover_text(format!("{} : {e}", o.file)),
+                            None => r.on_hover_text(&o.file),
+                        };
+                        if r.clicked() {
+                            self.scene_sel = if on { None } else { Some(i) };
+                        }
+                        r.context_menu(|ui| {
+                            if ui.button(crate::i18n::t("dupliquer")).clicked() {
+                                action = Some((i, 1));
+                                ui.close();
+                            }
+                            if ui.button(egui::RichText::new(crate::i18n::t("retirer de la scène")).color(p.missing)).clicked() {
+                                action = Some((i, 0));
+                                ui.close();
+                            }
+                        });
+                    });
+                }
+            });
+            if let Some((i, a)) = action {
+                if a == 0 {
+                    scene.objects.remove(i);
+                    self.scene_sel = None;
+                } else {
+                    let mut c = scene.objects[i].clone();
+                    c.name = format!("{} copie", c.name);
+                    c.pos[0] += 1.0;
+                    scene.objects.insert(i + 1, c);
+                    self.scene_sel = Some(i + 1);
+                }
+                changed = true;
+            }
+            if let Some(o) = self.scene_sel.and_then(|i| scene.objects.get_mut(i)) {
+                ui.separator();
+                ui.label(egui::RichText::new(crate::i18n::t("OBJET")).size(10.5).color(p.muted).family(theme::bold()));
+                changed |= ui.add(egui::TextEdit::singleline(&mut o.name).desired_width(f32::INFINITY)).changed();
+                let mut row = |ui: &mut egui::Ui, label: &str, v: &mut [f32; 3], speed: f64, reset: [f32; 3]| {
+                    ui.horizontal(|ui| {
+                        if ui.add(egui::Button::new(egui::RichText::new(crate::i18n::t(label)).size(11.0).color(p.muted)).frame(false)).on_hover_text(crate::i18n::t("cliquer pour remettre à zéro")).clicked() {
+                            *v = reset;
+                            changed = true;
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        for (k, axis) in ["x", "y", "z"].iter().enumerate() {
+                            changed |= ui.add(egui::DragValue::new(&mut v[k]).speed(speed).prefix(format!("{axis} ")).max_decimals(3)).changed();
+                        }
+                    });
+                };
+                row(ui, "position", &mut o.pos, 0.01, [0.0; 3]);
+                row(ui, "rotation °", &mut o.rot, 0.5, [0.0; 3]);
+                row(ui, "échelle", &mut o.scale, 0.005, [1.0; 3]);
+                ui.horizontal(|ui| {
+                    let mut uniform = o.scale[0];
+                    if ui.add(egui::DragValue::new(&mut uniform).speed(0.005).prefix(format!("{} ", crate::i18n::t("uniforme")))).changed() {
+                        o.scale = [uniform; 3];
+                        changed = true;
+                    }
+                });
+                ui.horizontal(|ui| {
+                    let mut tinted = o.color.is_some();
+                    if ui.checkbox(&mut tinted, crate::i18n::t("couleur")).changed() {
+                        o.color = tinted.then_some([200, 200, 200]);
+                        changed = true;
+                    }
+                    if let Some(c) = &mut o.color {
+                        changed |= ui.color_edit_button_srgb(c).changed();
+                    }
+                });
+                ui.label(egui::RichText::new(&o.file).size(10.0).color(p.muted));
+            }
+        });
+        if reframe {
+            self.scene_frame = None;
+            self.scene_dirty = true;
+        }
+        if changed {
+            self.scene_dirty = true;
+            let _ = scene.write(&path);
+        }
+        // Reconstruction en arrière-plan, une à la fois : l'ancienne image reste affichée entre-temps
+        if self.scene_dirty && self.scene_rx.is_none() && !matches!(self.state, State::Loading(_)) {
+            self.scene_dirty = false;
+            let (tx, rx) = channel();
+            let (sc, ctx) = (scene.clone(), ui.ctx().clone());
+            std::thread::spawn(move || {
+                let _ = tx.send(crate::scene::build(&sc, &path));
+                ctx.request_repaint();
+            });
+            self.scene_rx = Some(rx);
+        }
+    }
+
     pub fn show(&mut self, ui: &mut egui::Ui) {
         let p = theme::pal();
         if let State::Loading(rx) = &self.state {
@@ -1465,6 +1683,9 @@ impl Viewer {
                     Err(e) => State::Failed(e),
                 };
             }
+        }
+        if crate::scene::is_scene(&self.path) {
+            self.scene_panel(ui);
         }
         if let Some(rx) = &self.env_loading {
             if let Ok(r) = rx.try_recv() {
@@ -1507,6 +1728,7 @@ impl Viewer {
             serde_json::to_string(&self.stack.iter().filter(|m| m.on).map(|m| m.kind).collect::<Vec<_>>()).unwrap_or_default().hash(&mut h);
             z_up.hash(&mut h);
             self.applied_ver.hash(&mut h);
+            self.scene_ver.hash(&mut h);
             h.finish()
         };
         if let Some(e) = &mut self.edit {

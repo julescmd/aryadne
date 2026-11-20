@@ -2,6 +2,7 @@
 
 mod cloud;
 mod dock;
+mod scene;
 mod workspace;
 mod retopo;
 mod bvh;
@@ -634,6 +635,13 @@ impl App {
                             .filter_map(|e| vault::safe(&root, &e.rel).ok().map(|p| (e.name.trim_end_matches(".mat.json").to_string(), p)))
                             .take(40)
                             .collect();
+                        v.model_files = self
+                            .entries
+                            .iter()
+                            .filter(|e| !e.is_dir && model3d::is_model(&e.rel) && !e.rel.to_lowercase().ends_with(".arya3"))
+                            .filter_map(|e| vault::safe(&root, &e.rel).ok().map(|p| (e.rel.clone(), p)))
+                            .take(200)
+                            .collect();
                         v.root = root.clone();
                         Content::Model(v)
                     }
@@ -930,6 +938,7 @@ impl App {
                             ("nouvelle note   Ctrl+N", extras::Cmd::NewNote),
                             ("note du jour   Ctrl+J", extras::Cmd::Daily),
                             ("depuis un modèle…", extras::Cmd::FromTemplate),
+                            ("scène 3D", extras::Cmd::NewScene),
                             ("matériau en nodes", extras::Cmd::NewMaterial),
                             ("compositing en nodes", extras::Cmd::NewCompositor),
                         ] {
@@ -3441,6 +3450,15 @@ impl App {
             // Un graphe de nodes ouvert garde les images glissées (nodes texture)
             if self.view() == View::Files && self.current().is_some_and(|d| matches!(d.content, Content::Nodes(_))) {
                 return;
+            }
+            // Une scène 3D ouverte reçoit les modèles glissés : ils y sont ajoutés, pas importés
+            if self.view() == View::Files && paths.iter().any(|f| model3d::is_model(&f.to_string_lossy())) {
+                if let Some(Content::Model(v)) = self.active.and_then(|i| self.docs.get_mut(i)).map(|d| &mut d.content) {
+                    if v.is_scene() {
+                        v.scene_add.extend(paths);
+                        return;
+                    }
+                }
             }
             // Dans le chat (ou sur le panneau de l'assistant) : les fichiers deviennent des pièces jointes.
             let over_assistant = self.assistant_open && ctx.input(|i| i.pointer.hover_pos()).is_some_and(|pos| pos.x > ctx.content_rect().right() - 360.0);

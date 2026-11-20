@@ -76,11 +76,11 @@ pub const DEFS: &[Def] = &[
     Def { op: "fresnel", label: "Fresnel", cat: "entrée", inputs: &[("puissance", Sock::Float, f(3.0))], outputs: &[("fresnel", Sock::Float)], params: &[], mat: true, comp: false },
     Def { op: "vcolor", label: "Couleur du fichier", cat: "entrée", inputs: &[], outputs: &[("couleur", Sock::Color)], params: &[], mat: true, comp: false },
     // Motifs
-    Def { op: "noise", label: "Bruit", cat: "motif", inputs: &[("échelle", Sock::Float, f(4.0)), ("détail", Sock::Float, f(4.0)), ("rugosité", Sock::Float, f(0.5))], outputs: &[("valeur", Sock::Float), ("couleur", Sock::Color)], params: &[], mat: true, comp: true },
-    Def { op: "voronoi", label: "Voronoï", cat: "motif", inputs: &[("échelle", Sock::Float, f(5.0))], outputs: &[("distance", Sock::Float), ("cellule", Sock::Color)], params: &[], mat: true, comp: true },
-    Def { op: "checker", label: "Damier", cat: "motif", inputs: &[("échelle", Sock::Float, f(8.0)), ("couleur A", Sock::Color, W), ("couleur B", Sock::Color, [0.15, 0.15, 0.15, 1.0])], outputs: &[("couleur", Sock::Color), ("valeur", Sock::Float)], params: &[], mat: true, comp: true },
-    Def { op: "gradient", label: "Dégradé", cat: "motif", inputs: &[], outputs: &[("valeur", Sock::Float)], params: &[ParamDef::Choice("type", &["horizontal", "vertical", "radial", "hauteur (3D)"])], mat: true, comp: true },
-    Def { op: "stripes", label: "Rayures", cat: "motif", inputs: &[("nombre", Sock::Float, f(10.0)), ("épaisseur", Sock::Float, f(0.5))], outputs: &[("valeur", Sock::Float)], params: &[ParamDef::Choice("axe", &["x", "y", "diagonale"])], mat: true, comp: true },
+    Def { op: "noise", label: "Bruit", cat: "motif", inputs: &[("échelle", Sock::Float, f(4.0)), ("détail", Sock::Float, f(4.0)), ("rugosité", Sock::Float, f(0.5)), ("coordonnées", Sock::Color, [0.0, 0.0, 0.0, 0.0])], outputs: &[("valeur", Sock::Float), ("couleur", Sock::Color)], params: &[], mat: true, comp: true },
+    Def { op: "voronoi", label: "Voronoï", cat: "motif", inputs: &[("échelle", Sock::Float, f(5.0)), ("coordonnées", Sock::Color, [0.0, 0.0, 0.0, 0.0])], outputs: &[("distance", Sock::Float), ("cellule", Sock::Color)], params: &[], mat: true, comp: true },
+    Def { op: "checker", label: "Damier", cat: "motif", inputs: &[("échelle", Sock::Float, f(8.0)), ("couleur A", Sock::Color, W), ("couleur B", Sock::Color, [0.15, 0.15, 0.15, 1.0]), ("coordonnées", Sock::Color, [0.0, 0.0, 0.0, 0.0])], outputs: &[("couleur", Sock::Color), ("valeur", Sock::Float)], params: &[], mat: true, comp: true },
+    Def { op: "gradient", label: "Dégradé", cat: "motif", inputs: &[("coordonnées", Sock::Color, [0.0, 0.0, 0.0, 0.0])], outputs: &[("valeur", Sock::Float)], params: &[ParamDef::Choice("type", &["horizontal", "vertical", "radial", "hauteur (3D)"])], mat: true, comp: true },
+    Def { op: "stripes", label: "Rayures", cat: "motif", inputs: &[("nombre", Sock::Float, f(10.0)), ("épaisseur", Sock::Float, f(0.5)), ("coordonnées", Sock::Color, [0.0, 0.0, 0.0, 0.0])], outputs: &[("valeur", Sock::Float)], params: &[ParamDef::Choice("axe", &["x", "y", "diagonale"])], mat: true, comp: true },
     // Couleur
     Def { op: "mix", label: "Mélange", cat: "couleur", inputs: &[("facteur", Sock::Float, f(0.5)), ("A", Sock::Color, [0.2, 0.2, 0.2, 1.0]), ("B", Sock::Color, [0.9, 0.9, 0.9, 1.0])], outputs: &[("couleur", Sock::Color)], params: &[ParamDef::Choice("mode", BLEND)], mat: true, comp: true },
     Def { op: "ramp", label: "Rampe de couleur", cat: "couleur", inputs: &[("facteur", Sock::Float, f(0.5)), ("couleur 1", Sock::Color, BLACK), ("couleur 2", Sock::Color, [0.95, 0.45, 0.2, 1.0]), ("couleur 3", Sock::Color, W)], outputs: &[("couleur", Sock::Color)], params: &[ParamDef::Float("milieu", 0.0, 1.0, 0.5)], mat: true, comp: true },
@@ -107,13 +107,13 @@ pub const DEFS: &[Def] = &[
     Def { op: "posterize", label: "Postériser", cat: "filtre", inputs: &[("image", Sock::Color, GRAY), ("niveaux", Sock::Float, f(5.0))], outputs: &[("image", Sock::Color)], params: &[], mat: true, comp: true },
     Def { op: "edges", label: "Contours", cat: "filtre", inputs: &[("image", Sock::Color, GRAY)], outputs: &[("contours", Sock::Float)], params: &[], mat: false, comp: true },
     // Motifs supplémentaires
-    Def { op: "bricks", label: "Briques", cat: "motif", inputs: &[("échelle", Sock::Float, f(6.0)), ("mortier", Sock::Float, f(0.06)), ("brique", Sock::Color, [0.62, 0.25, 0.16, 1.0]), ("joint", Sock::Color, [0.8, 0.78, 0.74, 1.0]), ("variation", Sock::Float, f(0.25))], outputs: &[("couleur", Sock::Color), ("masque", Sock::Float)], params: &[], mat: true, comp: true },
-    Def { op: "wood", label: "Bois", cat: "motif", inputs: &[("échelle", Sock::Float, f(3.0)), ("cernes", Sock::Float, f(12.0)), ("distorsion", Sock::Float, f(0.6)), ("clair", Sock::Color, [0.78, 0.56, 0.34, 1.0]), ("foncé", Sock::Color, [0.45, 0.27, 0.13, 1.0])], outputs: &[("couleur", Sock::Color), ("valeur", Sock::Float)], params: &[], mat: true, comp: true },
-    Def { op: "marble", label: "Marbre", cat: "motif", inputs: &[("échelle", Sock::Float, f(3.0)), ("veines", Sock::Float, f(6.0)), ("turbulence", Sock::Float, f(4.0)), ("fond", Sock::Color, [0.92, 0.91, 0.88, 1.0]), ("veine", Sock::Color, [0.25, 0.25, 0.28, 1.0])], outputs: &[("couleur", Sock::Color), ("valeur", Sock::Float)], params: &[], mat: true, comp: true },
-    Def { op: "hexagons", label: "Hexagones", cat: "motif", inputs: &[("échelle", Sock::Float, f(8.0)), ("bord", Sock::Float, f(0.08))], outputs: &[("bord", Sock::Float), ("cellule", Sock::Color)], params: &[], mat: true, comp: true },
-    Def { op: "dots", label: "Pois", cat: "motif", inputs: &[("échelle", Sock::Float, f(10.0)), ("rayon", Sock::Float, f(0.3))], outputs: &[("valeur", Sock::Float)], params: &[ParamDef::Choice("grille", &["carrée", "décalée"])], mat: true, comp: true },
-    Def { op: "waves", label: "Ondes", cat: "motif", inputs: &[("échelle", Sock::Float, f(6.0)), ("distorsion", Sock::Float, f(1.0))], outputs: &[("valeur", Sock::Float)], params: &[ParamDef::Choice("type", &["bandes", "anneaux"])], mat: true, comp: true },
-    Def { op: "whitenoise", label: "Bruit blanc", cat: "motif", inputs: &[("échelle", Sock::Float, f(64.0))], outputs: &[("valeur", Sock::Float), ("couleur", Sock::Color)], params: &[], mat: true, comp: true },
+    Def { op: "bricks", label: "Briques", cat: "motif", inputs: &[("échelle", Sock::Float, f(6.0)), ("mortier", Sock::Float, f(0.06)), ("brique", Sock::Color, [0.62, 0.25, 0.16, 1.0]), ("joint", Sock::Color, [0.8, 0.78, 0.74, 1.0]), ("variation", Sock::Float, f(0.25)), ("coordonnées", Sock::Color, [0.0, 0.0, 0.0, 0.0])], outputs: &[("couleur", Sock::Color), ("masque", Sock::Float)], params: &[], mat: true, comp: true },
+    Def { op: "wood", label: "Bois", cat: "motif", inputs: &[("échelle", Sock::Float, f(3.0)), ("cernes", Sock::Float, f(12.0)), ("distorsion", Sock::Float, f(0.6)), ("clair", Sock::Color, [0.78, 0.56, 0.34, 1.0]), ("foncé", Sock::Color, [0.45, 0.27, 0.13, 1.0]), ("coordonnées", Sock::Color, [0.0, 0.0, 0.0, 0.0])], outputs: &[("couleur", Sock::Color), ("valeur", Sock::Float)], params: &[], mat: true, comp: true },
+    Def { op: "marble", label: "Marbre", cat: "motif", inputs: &[("échelle", Sock::Float, f(3.0)), ("veines", Sock::Float, f(6.0)), ("turbulence", Sock::Float, f(4.0)), ("fond", Sock::Color, [0.92, 0.91, 0.88, 1.0]), ("veine", Sock::Color, [0.25, 0.25, 0.28, 1.0]), ("coordonnées", Sock::Color, [0.0, 0.0, 0.0, 0.0])], outputs: &[("couleur", Sock::Color), ("valeur", Sock::Float)], params: &[], mat: true, comp: true },
+    Def { op: "hexagons", label: "Hexagones", cat: "motif", inputs: &[("échelle", Sock::Float, f(8.0)), ("bord", Sock::Float, f(0.08)), ("coordonnées", Sock::Color, [0.0, 0.0, 0.0, 0.0])], outputs: &[("bord", Sock::Float), ("cellule", Sock::Color)], params: &[], mat: true, comp: true },
+    Def { op: "dots", label: "Pois", cat: "motif", inputs: &[("échelle", Sock::Float, f(10.0)), ("rayon", Sock::Float, f(0.3)), ("coordonnées", Sock::Color, [0.0, 0.0, 0.0, 0.0])], outputs: &[("valeur", Sock::Float)], params: &[ParamDef::Choice("grille", &["carrée", "décalée"])], mat: true, comp: true },
+    Def { op: "waves", label: "Ondes", cat: "motif", inputs: &[("échelle", Sock::Float, f(6.0)), ("distorsion", Sock::Float, f(1.0)), ("coordonnées", Sock::Color, [0.0, 0.0, 0.0, 0.0])], outputs: &[("valeur", Sock::Float)], params: &[ParamDef::Choice("type", &["bandes", "anneaux"])], mat: true, comp: true },
+    Def { op: "whitenoise", label: "Bruit blanc", cat: "motif", inputs: &[("échelle", Sock::Float, f(64.0)), ("coordonnées", Sock::Color, [0.0, 0.0, 0.0, 0.0])], outputs: &[("valeur", Sock::Float), ("couleur", Sock::Color)], params: &[], mat: true, comp: true },
     // Couleur supplémentaire
     Def { op: "curve", label: "Courbe (contraste en S)", cat: "couleur", inputs: &[("couleur", Sock::Color, GRAY), ("ombres", Sock::Float, f(0.0)), ("lumières", Sock::Float, f(0.0)), ("contraste S", Sock::Float, f(0.3))], outputs: &[("couleur", Sock::Color)], params: &[], mat: true, comp: true },
     Def { op: "whitebal", label: "Balance des blancs", cat: "couleur", inputs: &[("couleur", Sock::Color, GRAY), ("température", Sock::Float, f(0.0)), ("teinte", Sock::Float, f(0.0))], outputs: &[("couleur", Sock::Color)], params: &[], mat: true, comp: true },
@@ -123,19 +123,23 @@ pub const DEFS: &[Def] = &[
     Def { op: "dirblur", label: "Flou directionnel", cat: "filtre", inputs: &[("image", Sock::Color, GRAY)], outputs: &[("image", Sock::Color)], params: &[ParamDef::Float("angle", -180.0, 180.0, 0.0), ParamDef::Float("longueur (px)", 0.0, 200.0, 20.0)], mat: false, comp: true },
     Def { op: "radialblur", label: "Flou radial (zoom)", cat: "filtre", inputs: &[("image", Sock::Color, GRAY)], outputs: &[("image", Sock::Color)], params: &[ParamDef::Float("force", 0.0, 0.5, 0.08)], mat: false, comp: true },
     Def { op: "lens", label: "Distorsion d'objectif", cat: "filtre", inputs: &[("image", Sock::Color, GRAY)], outputs: &[("image", Sock::Color)], params: &[ParamDef::Float("distorsion", -1.0, 1.0, 0.15)], mat: false, comp: true },
+    // Coordonnées : à brancher dans l'entrée « coordonnées » des motifs pour les déplacer, tourner ou déformer
+    Def { op: "texcoord", label: "Coordonnées de texture", cat: "entrée", inputs: &[], outputs: &[("objet", Sock::Color), ("uv", Sock::Color)], params: &[], mat: true, comp: true },
+    Def { op: "mapping", label: "Placement (mapping)", cat: "entrée", inputs: &[("coordonnées", Sock::Color, [0.0, 0.0, 0.0, 0.0]), ("échelle", Sock::Float, f(1.0))], outputs: &[("coordonnées", Sock::Color)], params: &[ParamDef::Float("x", -5.0, 5.0, 0.0), ParamDef::Float("y", -5.0, 5.0, 0.0), ParamDef::Float("z", -5.0, 5.0, 0.0), ParamDef::Float("rotation X", -180.0, 180.0, 0.0), ParamDef::Float("rotation Y", -180.0, 180.0, 0.0), ParamDef::Float("rotation Z", -180.0, 180.0, 0.0), ParamDef::Float("étirer X", 0.05, 10.0, 1.0), ParamDef::Float("étirer Y", 0.05, 10.0, 1.0), ParamDef::Float("étirer Z", 0.05, 10.0, 1.0)], mat: true, comp: true },
+    Def { op: "warp", label: "Déformer les coordonnées", cat: "entrée", inputs: &[("coordonnées", Sock::Color, [0.0, 0.0, 0.0, 0.0]), ("force", Sock::Float, f(0.2)), ("échelle", Sock::Float, f(3.0)), ("détail", Sock::Float, f(3.0))], outputs: &[("coordonnées", Sock::Color)], params: &[], mat: true, comp: true },
     // Motifs supplémentaires
-    Def { op: "ridged", label: "Bruit crêté", cat: "motif", inputs: &[("échelle", Sock::Float, f(4.0)), ("détail", Sock::Float, f(5.0)), ("netteté", Sock::Float, f(2.0))], outputs: &[("valeur", Sock::Float)], params: &[], mat: true, comp: true },
-    Def { op: "cracks", label: "Fissures", cat: "motif", inputs: &[("échelle", Sock::Float, f(6.0)), ("largeur", Sock::Float, f(0.05)), ("distorsion", Sock::Float, f(0.3))], outputs: &[("fissures", Sock::Float), ("cellules", Sock::Float)], params: &[], mat: true, comp: true },
-    Def { op: "tiles", label: "Carrelage", cat: "motif", inputs: &[("échelle", Sock::Float, f(6.0)), ("joint", Sock::Float, f(0.05)), ("biseau", Sock::Float, f(0.1)), ("variation", Sock::Float, f(0.3))], outputs: &[("teinte", Sock::Float), ("joint", Sock::Float), ("hauteur", Sock::Float)], params: &[], mat: true, comp: true },
-    Def { op: "weave", label: "Tissage", cat: "motif", inputs: &[("échelle", Sock::Float, f(20.0))], outputs: &[("hauteur", Sock::Float), ("sens", Sock::Float)], params: &[], mat: true, comp: true },
+    Def { op: "ridged", label: "Bruit crêté", cat: "motif", inputs: &[("échelle", Sock::Float, f(4.0)), ("détail", Sock::Float, f(5.0)), ("netteté", Sock::Float, f(2.0)), ("coordonnées", Sock::Color, [0.0, 0.0, 0.0, 0.0])], outputs: &[("valeur", Sock::Float)], params: &[], mat: true, comp: true },
+    Def { op: "cracks", label: "Fissures", cat: "motif", inputs: &[("échelle", Sock::Float, f(6.0)), ("largeur", Sock::Float, f(0.05)), ("distorsion", Sock::Float, f(0.3)), ("coordonnées", Sock::Color, [0.0, 0.0, 0.0, 0.0])], outputs: &[("fissures", Sock::Float), ("cellules", Sock::Float)], params: &[], mat: true, comp: true },
+    Def { op: "tiles", label: "Carrelage", cat: "motif", inputs: &[("échelle", Sock::Float, f(6.0)), ("joint", Sock::Float, f(0.05)), ("biseau", Sock::Float, f(0.1)), ("variation", Sock::Float, f(0.3)), ("coordonnées", Sock::Color, [0.0, 0.0, 0.0, 0.0])], outputs: &[("teinte", Sock::Float), ("joint", Sock::Float), ("hauteur", Sock::Float)], params: &[], mat: true, comp: true },
+    Def { op: "weave", label: "Tissage", cat: "motif", inputs: &[("échelle", Sock::Float, f(20.0)), ("coordonnées", Sock::Color, [0.0, 0.0, 0.0, 0.0])], outputs: &[("hauteur", Sock::Float), ("sens", Sock::Float)], params: &[], mat: true, comp: true },
     Def { op: "shape", label: "Masque de forme", cat: "motif", inputs: &[("centre x", Sock::Float, f(0.5)), ("centre y", Sock::Float, f(0.5)), ("largeur", Sock::Float, f(0.5)), ("hauteur", Sock::Float, f(0.5)), ("douceur", Sock::Float, f(0.05))], outputs: &[("masque", Sock::Float)], params: &[ParamDef::Choice("forme", &["ellipse", "rectangle", "losange"])], mat: true, comp: true },
     // Usure : masques à la manière des générateurs de Substance
-    Def { op: "edgewear", label: "Usure des arêtes", cat: "usure", inputs: &[("intensité", Sock::Float, f(1.0)), ("quantité", Sock::Float, f(0.5)), ("contraste", Sock::Float, f(0.6)), ("échelle du bruit", Sock::Float, f(14.0))], outputs: &[("masque", Sock::Float)], params: &[], mat: true, comp: false },
-    Def { op: "cavdirt", label: "Saleté des creux", cat: "usure", inputs: &[("intensité", Sock::Float, f(1.0)), ("quantité", Sock::Float, f(0.5)), ("contraste", Sock::Float, f(0.5)), ("échelle du bruit", Sock::Float, f(8.0))], outputs: &[("masque", Sock::Float)], params: &[], mat: true, comp: false },
-    Def { op: "dust", label: "Poussière (dessus)", cat: "usure", inputs: &[("quantité", Sock::Float, f(0.5)), ("contraste", Sock::Float, f(0.5)), ("échelle du bruit", Sock::Float, f(8.0))], outputs: &[("masque", Sock::Float)], params: &[], mat: true, comp: false },
-    Def { op: "drips", label: "Coulures", cat: "usure", inputs: &[("échelle", Sock::Float, f(10.0)), ("longueur", Sock::Float, f(0.5)), ("quantité", Sock::Float, f(0.5))], outputs: &[("masque", Sock::Float)], params: &[], mat: true, comp: false },
-    Def { op: "scratches", label: "Rayures d'usure", cat: "usure", inputs: &[("échelle", Sock::Float, f(6.0)), ("quantité", Sock::Float, f(0.5)), ("finesse", Sock::Float, f(0.5))], outputs: &[("masque", Sock::Float)], params: &[], mat: true, comp: true },
-    Def { op: "grunge", label: "Saleté (grunge)", cat: "usure", inputs: &[("échelle", Sock::Float, f(3.0)), ("contraste", Sock::Float, f(0.5)), ("distorsion", Sock::Float, f(1.0))], outputs: &[("masque", Sock::Float)], params: &[], mat: true, comp: true },
+    Def { op: "edgewear", label: "Usure des arêtes", cat: "usure", inputs: &[("intensité", Sock::Float, f(1.0)), ("quantité", Sock::Float, f(0.5)), ("contraste", Sock::Float, f(0.6)), ("échelle du bruit", Sock::Float, f(14.0)), ("coordonnées", Sock::Color, [0.0, 0.0, 0.0, 0.0])], outputs: &[("masque", Sock::Float)], params: &[], mat: true, comp: false },
+    Def { op: "cavdirt", label: "Saleté des creux", cat: "usure", inputs: &[("intensité", Sock::Float, f(1.0)), ("quantité", Sock::Float, f(0.5)), ("contraste", Sock::Float, f(0.5)), ("échelle du bruit", Sock::Float, f(8.0)), ("coordonnées", Sock::Color, [0.0, 0.0, 0.0, 0.0])], outputs: &[("masque", Sock::Float)], params: &[], mat: true, comp: false },
+    Def { op: "dust", label: "Poussière (dessus)", cat: "usure", inputs: &[("quantité", Sock::Float, f(0.5)), ("contraste", Sock::Float, f(0.5)), ("échelle du bruit", Sock::Float, f(8.0)), ("coordonnées", Sock::Color, [0.0, 0.0, 0.0, 0.0])], outputs: &[("masque", Sock::Float)], params: &[], mat: true, comp: false },
+    Def { op: "drips", label: "Coulures", cat: "usure", inputs: &[("échelle", Sock::Float, f(10.0)), ("longueur", Sock::Float, f(0.5)), ("quantité", Sock::Float, f(0.5)), ("coordonnées", Sock::Color, [0.0, 0.0, 0.0, 0.0])], outputs: &[("masque", Sock::Float)], params: &[], mat: true, comp: false },
+    Def { op: "scratches", label: "Rayures d'usure", cat: "usure", inputs: &[("échelle", Sock::Float, f(6.0)), ("quantité", Sock::Float, f(0.5)), ("finesse", Sock::Float, f(0.5)), ("coordonnées", Sock::Color, [0.0, 0.0, 0.0, 0.0])], outputs: &[("masque", Sock::Float)], params: &[], mat: true, comp: true },
+    Def { op: "grunge", label: "Saleté (grunge)", cat: "usure", inputs: &[("échelle", Sock::Float, f(3.0)), ("contraste", Sock::Float, f(0.5)), ("distorsion", Sock::Float, f(1.0)), ("coordonnées", Sock::Color, [0.0, 0.0, 0.0, 0.0])], outputs: &[("masque", Sock::Float)], params: &[], mat: true, comp: true },
     // Couleur et étalonnage
     Def { op: "gamma", label: "Gamma", cat: "couleur", inputs: &[("couleur", Sock::Color, GRAY), ("gamma", Sock::Float, f(1.0))], outputs: &[("couleur", Sock::Color)], params: &[], mat: true, comp: true },
     Def { op: "tint", label: "Teinter (bichromie)", cat: "couleur", inputs: &[("couleur", Sock::Color, GRAY), ("ombres", Sock::Color, [0.1, 0.1, 0.25, 1.0]), ("lumières", Sock::Color, [1.0, 0.9, 0.7, 1.0]), ("force", Sock::Float, f(1.0))], outputs: &[("couleur", Sock::Color)], params: &[], mat: true, comp: true },
@@ -1550,7 +1554,36 @@ fn pixel(s: &Step, i: &[V], c: &Ctx) -> [V; 4] {
     let z = [0.0; 4];
     let one = |x: f32| [x, x, x, 1.0];
     let p3 = if c.pos == [0.0; 3] { [c.uv[0], c.uv[1], 0.0] } else { c.pos };
+    // Une entrée « coordonnées » branchée remplace la position : c'est elle que le motif lit
+    let linked = |k: usize| matches!(s.ins.get(k), Some(Src::Reg(_)));
+    let p3 = match s.op {
+        "mapping" | "warp" => if linked(0) { [i[0][0], i[0][1], i[0][2]] } else { p3 },
+        "texcoord" | "shape" => p3,
+        _ => match def(s.op) {
+            Some(d) if matches!(d.cat, "motif" | "usure") && linked(d.inputs.len() - 1) => {
+                let v = i[d.inputs.len() - 1];
+                [v[0], v[1], v[2]]
+            }
+            _ => p3,
+        },
+    };
     match s.op {
+        "texcoord" => [[p3[0], p3[1], p3[2], 1.0], [c.uv[0], c.uv[1], 0.0, 1.0], z, z],
+        "mapping" => {
+            let sc = i[1][0];
+            let q = [(p3[0] - pnum(&s.params, "x", 0.0)) * sc / pnum(&s.params, "étirer X", 1.0).max(0.01), (p3[1] - pnum(&s.params, "y", 0.0)) * sc / pnum(&s.params, "étirer Y", 1.0).max(0.01), (p3[2] - pnum(&s.params, "z", 0.0)) * sc / pnum(&s.params, "étirer Z", 1.0).max(0.01)];
+            let (sx, cx) = pnum(&s.params, "rotation X", 0.0).to_radians().sin_cos();
+            let q = [q[0], q[1] * cx - q[2] * sx, q[1] * sx + q[2] * cx];
+            let (sy, cy) = pnum(&s.params, "rotation Y", 0.0).to_radians().sin_cos();
+            let q = [q[0] * cy + q[2] * sy, q[1], -q[0] * sy + q[2] * cy];
+            let (sz, cz) = pnum(&s.params, "rotation Z", 0.0).to_radians().sin_cos();
+            [[q[0] * cz - q[1] * sz, q[0] * sz + q[1] * cz, q[2], 1.0], z, z, z]
+        }
+        "warp" => {
+            let (k, sc, oct) = (i[1][0], i[2][0], (i[3][0] as usize).clamp(1, 8));
+            let w = |ox: f32, oy: f32, oz: f32| (fbm(p3[0] * sc + ox, p3[1] * sc + oy, p3[2] * sc + oz, oct, 0.5) - 0.5) * 2.0 * k;
+            [[p3[0] + w(0.0, 0.0, 0.0), p3[1] + w(5.2, 1.3, 8.1), p3[2] + w(2.4, 7.9, 3.3), 1.0], z, z, z]
+        }
         "ridged" => {
             let (sc, oct, sharp) = (i[0][0], (i[1][0] as usize).clamp(1, 8), i[2][0].max(0.1));
             let (mut sum, mut amp, mut freq, mut norm) = (0.0f32, 1.0f32, 1.0f32, 0.0f32);
@@ -3584,6 +3617,43 @@ fn sock_color(s: Sock) -> Color32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn coordonnees_branchees_dans_un_motif() {
+        // Un damier lu à travers un « placement » décalé d'une demi-case change de couleur au même point
+        let build = |shift: f32| {
+            let mut g = Graph::new_material();
+            let out = g.nodes.iter().find(|n| n.op == "mat_out").unwrap().id;
+            let ck = g.add("checker", [0.0, 0.0]);
+            let mp = g.add("mapping", [-200.0, 0.0]);
+            g.nodes.iter_mut().find(|n| n.id == mp).unwrap().params.insert("x".into(), Param::F(shift));
+            let last = def("checker").unwrap().inputs.len() - 1;
+            g.connect(mp, 0, ck, last);
+            g.connect(ck, 0, out, 0);
+            Program::compile(&g, "", 64).ok().unwrap()
+        };
+        let c = Ctx { pos: [0.3, 0.3, 0.3], nrm: [0.0, 1.0, 0.0], ..Default::default() };
+        let (a, b) = (build(0.0).material(&c, &mut vec![]), build(0.125).material(&c, &mut vec![]));
+        assert!((a.color[0] - b.color[0]).abs() > 0.5, "{:?} {:?}", a.color, b.color);
+        // Chaque node du catalogue se compile et s'évalue sans valeur invalide
+        for d in DEFS.iter().filter(|d| d.mat && d.op != "mat_out" && !d.outputs.is_empty()) {
+            let mut g = Graph::new_material();
+            let out = g.nodes.iter().find(|n| n.op == "mat_out").unwrap().id;
+            let n = g.add(d.op, [0.0, 0.0]);
+            g.connect(n, 0, out, 0);
+            let s = Program::compile(&g, "", 64).ok().unwrap().material(&c, &mut vec![]);
+            assert!(s.color.iter().all(|x| x.is_finite()), "{}", d.op);
+        }
+        // Même chose côté compositing, sur une petite image
+        for d in DEFS.iter().filter(|d| d.comp && d.op != "comp_out" && !d.outputs.is_empty()) {
+            let mut g = Graph::new_compositor();
+            let out = g.nodes.iter().find(|n| n.op == "comp_out").unwrap().id;
+            let n = g.add(d.op, [0.0, 0.0]);
+            g.connect(n, 0, out, 0);
+            let img = Program::compile(&g, "", 64).ok().unwrap().composite(Some([24, 16]));
+            assert!(img.px.len() == 24 * 16 && img.px.iter().all(|p| p.iter().all(|x| x.is_finite())), "{}", d.op);
+        }
+    }
 
     #[test]
     fn recherche_de_nodes() {
