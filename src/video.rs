@@ -296,11 +296,11 @@ impl Viewer {
         let p = theme::pal();
         let ctx = ui.ctx().clone();
         ui.horizontal(|ui| {
-            ui.toggle_value(&mut self.show_strip, RichText::new("bande d'images").size(11.0));
+            ui.toggle_value(&mut self.show_strip, RichText::new(crate::i18n::t("bande d'images")).size(11.0));
             if self.show_strip {
                 ui.spacing_mut().slider_width = 90.0;
-                ui.add(egui::Slider::new(&mut self.strip_h, 28.0..=140.0).show_value(false).text(RichText::new("taille").size(10.5)));
-                ui.checkbox(&mut self.strip_follow, RichText::new("suivre la lecture").size(11.0));
+                ui.add(egui::Slider::new(&mut self.strip_h, 28.0..=140.0).show_value(false).text(RichText::new(crate::i18n::t("taille")).size(10.5)));
+                ui.checkbox(&mut self.strip_follow, RichText::new(crate::i18n::t("suivre la lecture")).size(11.0));
             }
         });
         if !self.show_strip || frames == 0 {
@@ -429,16 +429,16 @@ impl Viewer {
                 self.playing = !self.playing;
                 self.clock = None;
             }
-            if ui.button("◀").on_hover_text("image précédente (←)").clicked() {
+            if ui.button("◀").on_hover_text(crate::i18n::t("image précédente (←)")).clicked() {
                 self.cur = self.cur.saturating_sub(self.on);
                 self.playing = false;
             }
-            if ui.button("▶").on_hover_text("image suivante (→)").clicked() {
+            if ui.button("▶").on_hover_text(crate::i18n::t("image suivante (→)")).clicked() {
                 self.cur = (self.cur + self.on).min(frames.saturating_sub(1));
                 self.playing = false;
             }
             ui.separator();
-            ui.label("cadence");
+            ui.label(crate::i18n::t("cadence"));
             let mut fps = self.play_fps;
             if ui.add(egui::DragValue::new(&mut fps).range(1.0..=120.0).speed(0.2).suffix(" i/s")).changed() {
                 self.play_fps = fps;
@@ -451,63 +451,63 @@ impl Viewer {
                 }
             }
             ui.separator();
-            ui.label("en");
+            ui.label(crate::i18n::t("en"));
             for n in [1usize, 2, 3, 4] {
                 if ui.selectable_label(self.on == n, format!("{n}s")).on_hover_text(format!("chaque image tenue {n} fois (animation « en {n} »)")).clicked() {
                     self.on = n;
                 }
             }
-            ui.add(egui::DragValue::new(&mut self.on).range(1..=240).speed(0.1).suffix("s")).on_hover_text("n'importe quelle valeur : glisse ou double-clique pour taper");
+            ui.add(egui::DragValue::new(&mut self.on).range(1..=240).speed(0.1).suffix("s")).on_hover_text(crate::i18n::t("n'importe quelle valeur : glisse ou double-clique pour taper"));
             ui.separator();
-            if ui.small_button("[").on_hover_text("début de la boucle ici (I)").clicked() {
+            if ui.small_button("[").on_hover_text(crate::i18n::t("début de la boucle ici (I)")).clicked() {
                 self.loop_in = Some(self.cur);
                 self.clock = None;
             }
-            if ui.small_button("]").on_hover_text("fin de la boucle ici (O)").clicked() {
+            if ui.small_button("]").on_hover_text(crate::i18n::t("fin de la boucle ici (O)")).clicked() {
                 self.loop_out = Some(self.cur);
                 self.clock = None;
             }
-            if (self.loop_in.is_some() || self.loop_out.is_some()) && ui.small_button("×").on_hover_text("retirer la boucle").clicked() {
+            if (self.loop_in.is_some() || self.loop_out.is_some()) && ui.small_button("×").on_hover_text(crate::i18n::t("retirer la boucle")).clicked() {
                 self.loop_in = None;
                 self.loop_out = None;
             }
-            if ui.toggle_value(&mut self.pingpong, "⇄").on_hover_text("aller-retour (ping-pong)").changed() {
+            if ui.toggle_value(&mut self.pingpong, "⇄").on_hover_text(crate::i18n::t("aller-retour (ping-pong)")).changed() {
                 self.clock = None;
             }
             ui.separator();
-            ui.checkbox(&mut self.onion, "pelures");
+            ui.checkbox(&mut self.onion, crate::i18n::t("pelures"));
             let stay = egui::containers::menu::MenuConfig::new().close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
             egui::containers::menu::MenuButton::new("▾").config(stay.clone()).ui(ui, |ui| {
                 ui.set_min_width(230.0);
-                ui.label(RichText::new("pelures d'oignon").color(p.muted).size(11.0));
-                ui.add(egui::Slider::new(&mut self.onion_before, 0..=6).text("images avant"));
-                ui.add(egui::Slider::new(&mut self.onion_after, 0..=6).text("images après"));
-                ui.add(egui::Slider::new(&mut self.onion_opacity, 0.05..=1.0).text("opacité"));
-                ui.checkbox(&mut self.onion_tint, "teinter (avant rouge, après vert)");
-                ui.checkbox(&mut self.onion_drawings, "inclure les dessins");
-                ui.label(RichText::new("L'écart suit le réglage « en 1s / 2s / 4s ».").color(p.muted).size(10.5));
+                ui.label(RichText::new(crate::i18n::t("pelures d'oignon")).color(p.muted).size(11.0));
+                ui.add(egui::Slider::new(&mut self.onion_before, 0..=6).text(crate::i18n::t("images avant")));
+                ui.add(egui::Slider::new(&mut self.onion_after, 0..=6).text(crate::i18n::t("images après")));
+                ui.add(egui::Slider::new(&mut self.onion_opacity, 0.05..=1.0).text(crate::i18n::t("opacité")));
+                ui.checkbox(&mut self.onion_tint, crate::i18n::t("teinter (avant rouge, après vert)"));
+                ui.checkbox(&mut self.onion_drawings, crate::i18n::t("inclure les dessins"));
+                ui.label(RichText::new(crate::i18n::t("L'écart suit le réglage « en 1s / 2s / 4s ».")).color(p.muted).size(10.5));
             });
-            egui::containers::menu::MenuButton::new("repères ▾").config(stay).ui(ui, |ui| {
+            egui::containers::menu::MenuButton::new(crate::i18n::t("repères ▾")).config(stay).ui(ui, |ui| {
                 ui.set_min_width(200.0);
-                ui.checkbox(&mut self.guide_thirds, "règle des tiers");
-                ui.checkbox(&mut self.guide_center, "centre");
-                ui.checkbox(&mut self.guide_safe, "zones de sécurité (action 93 %, titres 90 %)");
-                ui.label(RichText::new("cache de format").color(p.muted).size(11.0));
+                ui.checkbox(&mut self.guide_thirds, crate::i18n::t("règle des tiers"));
+                ui.checkbox(&mut self.guide_center, crate::i18n::t("centre"));
+                ui.checkbox(&mut self.guide_safe, crate::i18n::t("zones de sécurité (action 93 %, titres 90 %)"));
+                ui.label(RichText::new(crate::i18n::t("cache de format")).color(p.muted).size(11.0));
                 for (r, l) in [(0.0, "aucun"), (1.0, "1:1"), (1.85, "1.85:1"), (2.0, "2:1"), (2.39, "2.39:1 (scope)"), (16.0 / 9.0, "16:9"), (4.0 / 3.0, "4:3"), (9.0 / 16.0, "9:16 (vertical)")] {
                     ui.radio_value(&mut self.guide_ratio, r, l);
                 }
             });
-            ui.checkbox(&mut self.draw, "dessiner");
+            ui.checkbox(&mut self.draw, crate::i18n::t("dessiner"));
             if self.draw {
                 ui.color_edit_button_srgba(&mut self.pen);
                 ui.add(egui::Slider::new(&mut self.pen_width, 1.0..=20.0).show_value(false));
-                if ui.small_button("effacer l'image").clicked() {
+                if ui.small_button(crate::i18n::t("effacer l'image")).clicked() {
                     self.lines.remove(&self.held(self.cur));
                     self.save_lines();
                 }
             }
             ui.separator();
-            if ui.button("exporter…").clicked() && self.export.is_none() {
+            if ui.button(crate::i18n::t("exporter…")).clicked() && self.export.is_none() {
                 self.export = Some(Export { fps: info.fps, every: self.on, format: "png", height: 0, with_drawings: true, job: None });
             }
         });
@@ -801,30 +801,30 @@ impl Viewer {
         let mut start = false;
         egui::Frame::new().fill(p.panel).stroke(Stroke::new(1.0, p.line)).inner_margin(10).show(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
-                ui.label(RichText::new("exporter").family(theme::bold()));
-                ui.label("format");
+                ui.label(RichText::new(crate::i18n::t("exporter")).family(theme::bold()));
+                ui.label(crate::i18n::t("format"));
                 for f in ["png", "jpg", "mp4"] {
                     if ui.selectable_label(ex.format == f, f).clicked() {
                         ex.format = f;
                     }
                 }
-                ui.label("cadence");
+                ui.label(crate::i18n::t("cadence"));
                 ui.add(egui::DragValue::new(&mut ex.fps).range(1.0..=120.0).speed(0.2).suffix(" i/s"));
-                ui.label("en");
+                ui.label(crate::i18n::t("en"));
                 for n in [1usize, 2, 3, 4] {
                     if ui.selectable_label(ex.every == n, format!("{n}s")).clicked() {
                         ex.every = n;
                     }
                 }
                 ui.add(egui::DragValue::new(&mut ex.every).range(1..=240).speed(0.1).suffix("s"));
-                ui.label("hauteur");
+                ui.label(crate::i18n::t("hauteur"));
                 for (h, l) in [(0u32, "originale"), (1080, "1080"), (720, "720")] {
                     if ui.selectable_label(ex.height == h, l).clicked() {
                         ex.height = h;
                     }
                 }
                 if ex.format != "mp4" {
-                    ui.checkbox(&mut ex.with_drawings, "avec les dessins");
+                    ui.checkbox(&mut ex.with_drawings, crate::i18n::t("avec les dessins"));
                 }
             });
             let total = (info.duration * ex.fps / ex.every as f32).round() as usize;
@@ -836,10 +836,10 @@ impl Viewer {
             ui.label(RichText::new(what).color(p.muted).size(11.0));
             ui.horizontal(|ui| {
                 let running = ex.job.as_ref().is_some_and(|j| !j.lock().unwrap().finished);
-                if ui.add_enabled(!running, egui::Button::new("exporter")).clicked() {
+                if ui.add_enabled(!running, egui::Button::new(crate::i18n::t("exporter"))).clicked() {
                     start = true;
                 }
-                if ui.button("fermer").clicked() {
+                if ui.button(crate::i18n::t("fermer")).clicked() {
                     close = true;
                 }
                 if let Some(j) = &ex.job {
@@ -849,7 +849,7 @@ impl Viewer {
                     } else if j.finished {
                         ui.label(RichText::new(format!("terminé : {}", j.out.as_ref().map(|o| o.display().to_string()).unwrap_or_default())).color(p.accent).size(11.5));
                         if let Some(o) = &j.out {
-                            if ui.small_button("ouvrir le dossier").clicked() {
+                            if ui.small_button(crate::i18n::t("ouvrir le dossier")).clicked() {
                                 crate::settings::reveal(o, o.is_file());
                             }
                         }

@@ -1375,7 +1375,7 @@ pub fn find_bar(ui: &mut egui::Ui, ed: &mut Editor, text: &mut String, id: Id) -
     egui::Frame::new().fill(p.panel).stroke(egui::Stroke::new(1.0, p.line)).inner_margin(egui::Margin::symmetric(12, 6)).show(ui, |ui| {
         ui.set_width(ui.available_width());
         ui.horizontal(|ui| {
-            let r = ui.add(egui::TextEdit::singleline(&mut f.query).hint_text("chercher").desired_width(220.0));
+            let r = ui.add(egui::TextEdit::singleline(&mut f.query).hint_text(crate::i18n::t("chercher")).desired_width(220.0));
             if f.focus {
                 r.request_focus();
                 f.focus = false;
@@ -1387,16 +1387,16 @@ pub fn find_bar(ui: &mut egui::Ui, ed: &mut Editor, text: &mut String, id: Id) -
             if r.has_focus() && ui.input(|i| i.key_pressed(Key::Escape)) {
                 close = true;
             }
-            ui.toggle_value(&mut f.case, "Aa").on_hover_text("respecter la casse");
+            ui.toggle_value(&mut f.case, crate::i18n::t("Aa")).on_hover_text(crate::i18n::t("respecter la casse"));
             let count = if f.query.is_empty() { String::new() } else if matches.is_empty() { "aucun".into() } else { format!("{}/{}", (f.current + 1).min(matches.len()), matches.len()) };
             ui.label(RichText::new(count).color(if matches.is_empty() && !f.query.is_empty() { p.missing } else { p.muted }).size(11.5));
-            if ui.small_button("↑").on_hover_text("précédent (Maj+F3)").clicked() {
+            if ui.small_button("↑").on_hover_text(crate::i18n::t("précédent (Maj+F3)")).clicked() {
                 go = Some(true);
             }
-            if ui.small_button("↓").on_hover_text("suivant (F3, Entrée)").clicked() {
+            if ui.small_button("↓").on_hover_text(crate::i18n::t("suivant (F3, Entrée)")).clicked() {
                 go = Some(false);
             }
-            ui.toggle_value(&mut f.show_replace, "remplacer").on_hover_text("Ctrl+H");
+            ui.toggle_value(&mut f.show_replace, crate::i18n::t("remplacer")).on_hover_text(crate::i18n::t("Ctrl+H"));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.small_button("×").clicked() {
                     close = true;
@@ -1405,13 +1405,13 @@ pub fn find_bar(ui: &mut egui::Ui, ed: &mut Editor, text: &mut String, id: Id) -
         });
         if f.show_replace {
             ui.horizontal(|ui| {
-                let r = ui.add(egui::TextEdit::singleline(&mut f.replace).hint_text("remplacer par").desired_width(220.0));
+                let r = ui.add(egui::TextEdit::singleline(&mut f.replace).hint_text(crate::i18n::t("remplacer par")).desired_width(220.0));
                 if r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
                     replace_one = true;
                     r.request_focus();
                 }
-                replace_one |= ui.button("remplacer").clicked();
-                replace_all |= ui.button("tout remplacer").clicked();
+                replace_one |= ui.button(crate::i18n::t("remplacer")).clicked();
+                replace_all |= ui.button(crate::i18n::t("tout remplacer")).clicked();
             });
         }
     });
@@ -1792,7 +1792,7 @@ pub fn after(ui: &mut egui::Ui, ed: &mut Editor, text: &str, lang: &str, out: &e
                     clicked = Some(k);
                 }
             }
-            ui.label(RichText::new("Tab / Entrée : insérer · Échap").size(10.0).color(p.muted));
+            ui.label(RichText::new(crate::i18n::t("Tab / Entrée : insérer · Échap")).size(10.0).color(p.muted));
         });
     });
     if clicked.is_some() {
@@ -2028,7 +2028,7 @@ pub fn goto_bar(ui: &mut egui::Ui, ed: &mut Editor, text: &str, lang: &str) {
         let syms = q.starts_with('@');
         ui.horizontal(|ui| {
             ui.label(RichText::new(if syms { "symbole" } else { "ligne" }).color(p.muted).size(11.5));
-            let r = ui.add(egui::TextEdit::singleline(q).hint_text("numéro de ligne, ou @ pour un symbole").desired_width(260.0));
+            let r = ui.add(egui::TextEdit::singleline(q).hint_text(crate::i18n::t("numéro de ligne, ou @ pour un symbole")).desired_width(260.0));
             r.request_focus();
             let total = text.lines().count();
             ui.label(RichText::new(format!("{total} lignes")).color(p.muted).size(11.0));
@@ -2055,7 +2055,7 @@ pub fn goto_bar(ui: &mut egui::Ui, ed: &mut Editor, text: &str, lang: &str) {
                 jump = list.first().map(|s| s.line).or(jump);
             }
             if list.is_empty() {
-                ui.label(RichText::new("aucun symbole").color(p.muted).size(11.0));
+                ui.label(RichText::new(crate::i18n::t("aucun symbole")).color(p.muted).size(11.0));
             }
         }
     });

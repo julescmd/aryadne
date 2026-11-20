@@ -1181,33 +1181,33 @@ pub fn panel(ui: &mut egui::Ui, stack: &mut Vec<Modifier>) -> bool {
     ui.spacing_mut().slider_width = 90.0;
     ui.set_max_width(ui.available_width());
     ui.horizontal(|ui| {
-        ui.label(RichText::new("MODIFICATEURS").size(10.5).color(p.muted).family(crate::theme::bold()));
+        ui.label(RichText::new(crate::i18n::t("MODIFICATEURS")).size(10.5).color(p.muted).family(crate::theme::bold()));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             egui::containers::menu::MenuButton::new("⋯").ui(ui, |ui| {
-                if ui.button("tout déplier").clicked() {
+                if ui.button(crate::i18n::t("tout déplier")).clicked() {
                     stack.iter_mut().for_each(|m| m.open = true);
                 }
-                if ui.button("tout replier").clicked() {
+                if ui.button(crate::i18n::t("tout replier")).clicked() {
                     stack.iter_mut().for_each(|m| m.open = false);
                 }
-                if ui.button("tout activer").clicked() {
+                if ui.button(crate::i18n::t("tout activer")).clicked() {
                     stack.iter_mut().for_each(|m| m.on = true);
                     changed = true;
                 }
-                if ui.button("tout désactiver").clicked() {
+                if ui.button(crate::i18n::t("tout désactiver")).clicked() {
                     stack.iter_mut().for_each(|m| m.on = false);
                     changed = true;
                 }
-                if ui.button("vider la pile").clicked() {
+                if ui.button(crate::i18n::t("vider la pile")).clicked() {
                     stack.clear();
                     changed = true;
                 }
             });
-            egui::containers::menu::MenuButton::new("＋ ajouter ▾").ui(ui, |ui| {
+            egui::containers::menu::MenuButton::new(crate::i18n::t("＋ ajouter ▾")).ui(ui, |ui| {
                 ui.set_min_width(300.0);
                 let id = egui::Id::unique("mod-search");
                 let mut q: String = ui.data_mut(|d| d.get_temp(id).unwrap_or_default());
-                ui.add(egui::TextEdit::singleline(&mut q).hint_text("chercher…").desired_width(280.0)).request_focus();
+                ui.add(egui::TextEdit::singleline(&mut q).hint_text(crate::i18n::t("chercher…")).desired_width(280.0)).request_focus();
                 let qf = crate::chat::fold(&q);
                 let mut pick = None;
                 egui::ScrollArea::vertical().max_height(440.0).show(ui, |ui| {
@@ -1216,10 +1216,10 @@ pub fn panel(ui: &mut egui::Ui, stack: &mut Vec<Modifier>) -> bool {
                         if items.is_empty() {
                             continue;
                         }
-                        ui.label(RichText::new(cat.to_uppercase()).size(10.0).color(p.muted).family(crate::theme::bold()));
+                        ui.label(RichText::new(crate::i18n::t(cat).to_uppercase()).size(10.0).color(p.muted).family(crate::theme::bold()));
                         for (i, (_, name, help)) in items {
-                            let r = ui.add(egui::Button::new(RichText::new(*name)).frame(false).min_size(egui::vec2(280.0, 0.0)));
-                            if r.on_hover_text(*help).clicked() {
+                            let r = ui.add(egui::Button::new(RichText::new(crate::i18n::t(name))).frame(false).min_size(egui::vec2(280.0, 0.0)));
+                            if r.on_hover_text(crate::i18n::t(help)).clicked() {
                                 pick = Some(i);
                             }
                         }
@@ -1240,7 +1240,7 @@ pub fn panel(ui: &mut egui::Ui, stack: &mut Vec<Modifier>) -> bool {
         });
     });
     if stack.is_empty() {
-        ui.label(RichText::new("Aucun modificateur. Ils s'appliquent de haut en bas, sans changer le fichier d'origine.").color(p.muted).size(11.0));
+        ui.label(RichText::new(crate::i18n::t("Aucun modificateur. Ils s'appliquent de haut en bas, sans changer le fichier d'origine.")).color(p.muted).size(11.0));
     }
     // (index, action) : -1 haut, 1 bas, 0 supprimer, 2 dupliquer
     let mut action: Option<(usize, i32)> = None;
@@ -1252,24 +1252,24 @@ pub fn panel(ui: &mut egui::Ui, stack: &mut Vec<Modifier>) -> bool {
                 if ui.add(egui::Button::new(if md.open { "▾" } else { "▸" }).frame(false)).clicked() {
                     md.open = !md.open;
                 }
-                if ui.checkbox(&mut md.on, "").on_hover_text("activer / désactiver").changed() {
+                if ui.checkbox(&mut md.on, "").on_hover_text(crate::i18n::t("activer / désactiver")).changed() {
                     changed = true;
                 }
-                let t = RichText::new(md.kind.name()).family(crate::theme::bold()).size(12.0);
+                let t = RichText::new(crate::i18n::t(md.kind.name())).family(crate::theme::bold()).size(12.0);
                 if ui.add(egui::Button::new(if md.on { t } else { t.color(p.muted).strikethrough() }).frame(false)).clicked() {
                     md.open = !md.open;
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.small_button("×").on_hover_text("supprimer").clicked() {
+                    if ui.small_button("×").on_hover_text(crate::i18n::t("supprimer")).clicked() {
                         action = Some((i, 0));
                     }
-                    if ui.small_button("⧉").on_hover_text("dupliquer").clicked() {
+                    if ui.small_button("⧉").on_hover_text(crate::i18n::t("dupliquer")).clicked() {
                         action = Some((i, 2));
                     }
-                    if i + 1 < n && ui.small_button("↓").on_hover_text("descendre").clicked() {
+                    if i + 1 < n && ui.small_button("↓").on_hover_text(crate::i18n::t("descendre")).clicked() {
                         action = Some((i, 1));
                     }
-                    if i > 0 && ui.small_button("↑").on_hover_text("monter").clicked() {
+                    if i > 0 && ui.small_button("↑").on_hover_text(crate::i18n::t("monter")).clicked() {
                         action = Some((i, -1));
                     }
                 });
@@ -1282,15 +1282,15 @@ pub fn panel(ui: &mut egui::Ui, stack: &mut Vec<Modifier>) -> bool {
                         md.common_open = !md.common_open;
                     }
                     if md.common_open {
-                        changed |= ui.add(egui::Slider::new(&mut md.influence, 0.0..=1.0).text("influence")).changed();
-                        changed |= ui.checkbox(&mut md.limit_on, "limiter à une zone").changed();
+                        changed |= ui.add(egui::Slider::new(&mut md.influence, 0.0..=1.0).text(crate::i18n::t("influence"))).changed();
+                        changed |= ui.checkbox(&mut md.limit_on, crate::i18n::t("limiter à une zone")).changed();
                         if md.limit_on {
                             changed |= axis_ui(ui, &mut md.limit_axis);
-                            changed |= ui.add(egui::Slider::new(&mut md.limit[0], -1.0..=1.0).text("début")).changed();
-                            changed |= ui.add(egui::Slider::new(&mut md.limit[1], -1.0..=1.0).text("fin")).changed();
-                            changed |= ui.add(egui::Slider::new(&mut md.falloff, 0.0..=1.0).text("fondu")).changed();
+                            changed |= ui.add(egui::Slider::new(&mut md.limit[0], -1.0..=1.0).text(crate::i18n::t("début"))).changed();
+                            changed |= ui.add(egui::Slider::new(&mut md.limit[1], -1.0..=1.0).text(crate::i18n::t("fin"))).changed();
+                            changed |= ui.add(egui::Slider::new(&mut md.falloff, 0.0..=1.0).text(crate::i18n::t("fondu"))).changed();
                         }
-                        changed |= ui.checkbox(&mut md.invert, "inverser la zone").changed();
+                        changed |= ui.checkbox(&mut md.invert, crate::i18n::t("inverser la zone")).changed();
                     }
                 }
             }
@@ -1317,7 +1317,7 @@ pub fn panel(ui: &mut egui::Ui, stack: &mut Vec<Modifier>) -> bool {
 fn axis_ui(ui: &mut egui::Ui, a: &mut u8) -> bool {
     let mut c = false;
     ui.horizontal(|ui| {
-        ui.label(RichText::new("axe").size(11.0));
+        ui.label(RichText::new(crate::i18n::t("axe")).size(11.0));
         for (k, l) in ["X", "Y", "Z"].iter().enumerate() {
             c |= ui.selectable_value(a, k as u8, *l).changed();
         }
@@ -1361,11 +1361,11 @@ fn params(ui: &mut egui::Ui, k: &mut Kind) -> bool {
         Kind::Mirror { axis, merge, extra, bisect } => {
             c |= axis_ui(ui, axis);
             c |= bool3_ui(ui, extra, "axes en plus");
-            c |= ui.checkbox(merge, "souder au milieu").changed();
-            c |= ui.checkbox(bisect, "couper avant (bisect)").changed();
+            c |= ui.checkbox(merge, crate::i18n::t("souder au milieu")).changed();
+            c |= ui.checkbox(bisect, crate::i18n::t("couper avant (bisect)")).changed();
         }
         Kind::Array { count, axis, offset, constant, rotate, scale } => {
-            c |= ui.add(egui::Slider::new(count, 1..=256).text("copies").logarithmic(true)).changed();
+            c |= ui.add(egui::Slider::new(count, 1..=256).text(crate::i18n::t("copies")).logarithmic(true)).changed();
             c |= axis_ui(ui, axis);
             s!(ui, offset, -3.0..=3.0, "écart (× taille)");
             c |= vec3_ui(ui, constant, "décalage", 0.01);
@@ -1373,29 +1373,29 @@ fn params(ui: &mut egui::Ui, k: &mut Kind) -> bool {
             s!(ui, scale, 0.5..=1.5, "échelle par copie");
         }
         Kind::Subdivision { levels, optimal, simple } => {
-            c |= ui.add(egui::Slider::new(levels, 0..=5).text("niveaux")).changed();
+            c |= ui.add(egui::Slider::new(levels, 0..=5).text(crate::i18n::t("niveaux"))).changed();
             ui.horizontal(|ui| {
-                c |= ui.selectable_value(simple, false, "Catmull-Clark").changed();
-                c |= ui.selectable_value(simple, true, "simple").changed();
+                c |= ui.selectable_value(simple, false, crate::i18n::t("Catmull-Clark")).changed();
+                c |= ui.selectable_value(simple, true, crate::i18n::t("simple")).changed();
             });
-            c |= ui.checkbox(optimal, "affichage optimal").on_hover_text("Le fil de fer montre seulement les arêtes de la cage d'origine").changed();
+            c |= ui.checkbox(optimal, crate::i18n::t("affichage optimal")).on_hover_text(crate::i18n::t("Le fil de fer montre seulement les arêtes de la cage d'origine")).changed();
         }
         Kind::Decimate { ratio } => s!(ui, ratio, 0.01..=1.0, "proportion gardée"),
         Kind::Smooth { iterations, factor, preserve_volume, axes } => {
-            c |= ui.add(egui::Slider::new(iterations, 1..=100).text("passes")).changed();
+            c |= ui.add(egui::Slider::new(iterations, 1..=100).text(crate::i18n::t("passes"))).changed();
             s!(ui, factor, -1.0..=1.0, "force");
-            c |= ui.checkbox(preserve_volume, "garder le volume (Taubin)").changed();
+            c |= ui.checkbox(preserve_volume, crate::i18n::t("garder le volume (Taubin)")).changed();
             c |= bool3_ui(ui, axes, "axes");
         }
         Kind::Displace { strength, scale, seed, octaves, roughness, direction, midlevel } => {
             s!(ui, strength, -0.5..=0.5, "force");
             s!(ui, scale, 0.1..=40.0, "échelle");
-            c |= ui.add(egui::Slider::new(octaves, 1..=10).text("octaves")).changed();
+            c |= ui.add(egui::Slider::new(octaves, 1..=10).text(crate::i18n::t("octaves"))).changed();
             s!(ui, roughness, 0.05..=0.95, "rugosité");
             s!(ui, midlevel, 0.0..=1.0, "niveau neutre");
             s!(ui, seed, 0.0..=100.0, "graine");
             ui.horizontal(|ui| {
-                ui.label(RichText::new("direction").size(11.0));
+                ui.label(RichText::new(crate::i18n::t("direction")).size(11.0));
                 for (v, l) in [(0u8, "normale"), (1, "X"), (2, "Y"), (3, "Z")] {
                     c |= ui.selectable_value(direction, v, l).changed();
                 }
@@ -1427,14 +1427,14 @@ fn params(ui: &mut egui::Ui, k: &mut Kind) -> bool {
         Kind::Solidify { thickness, offset, rim } => {
             s!(ui, thickness, -0.3..=0.3, "épaisseur");
             s!(ui, offset, -1.0..=1.0, "décalage");
-            c |= ui.checkbox(rim, "fermer les bords").changed();
+            c |= ui.checkbox(rim, crate::i18n::t("fermer les bords")).changed();
         }
         Kind::Wave { amplitude, frequency, axis, phase, radial } => {
             s!(ui, amplitude, -0.3..=0.3, "amplitude");
             s!(ui, frequency, 0.1..=40.0, "fréquence");
             s!(ui, phase, 0.0..=1.0, "phase");
             c |= axis_ui(ui, axis);
-            c |= ui.checkbox(radial, "circulaire").changed();
+            c |= ui.checkbox(radial, crate::i18n::t("circulaire")).changed();
         }
         Kind::Transform { scale, rotate, offset, scale3 } => {
             s!(ui, scale, 0.05..=5.0, "échelle");
@@ -1443,15 +1443,15 @@ fn params(ui: &mut egui::Ui, k: &mut Kind) -> bool {
             c |= vec3_ui(ui, offset, "décalage", 0.01);
         }
         Kind::Weld { distance } => {
-            c |= ui.add(egui::Slider::new(distance, 0.00001..=0.2).logarithmic(true).text("distance")).changed();
+            c |= ui.add(egui::Slider::new(distance, 0.00001..=0.2).logarithmic(true).text(crate::i18n::t("distance"))).changed();
         }
         Kind::Triangulate | Kind::FlipNormals => {
-            ui.label(RichText::new("sans réglage").size(11.0));
+            ui.label(RichText::new(crate::i18n::t("sans réglage")).size(11.0));
         }
         Kind::EdgeSplit { angle } => s!(ui, angle, 0.0..=180.0, "angle °"),
         Kind::Wireframe { thickness, keep } => {
-            c |= ui.add(egui::Slider::new(thickness, 0.0005..=0.1).logarithmic(true).text("épaisseur")).changed();
-            c |= ui.checkbox(keep, "garder le maillage").changed();
+            c |= ui.add(egui::Slider::new(thickness, 0.0005..=0.1).logarithmic(true).text(crate::i18n::t("épaisseur"))).changed();
+            c |= ui.checkbox(keep, crate::i18n::t("garder le maillage")).changed();
         }
         Kind::Explode { distance, random, seed } => {
             s!(ui, distance, 0.0..=1.0, "distance");
@@ -1462,10 +1462,10 @@ fn params(ui: &mut egui::Ui, k: &mut Kind) -> bool {
         Kind::Randomize { amount, seed, along_normal } => {
             s!(ui, amount, 0.0..=0.2, "quantité");
             s!(ui, seed, 0.0..=100.0, "graine");
-            c |= ui.checkbox(along_normal, "le long des normales").changed();
+            c |= ui.checkbox(along_normal, crate::i18n::t("le long des normales")).changed();
         }
         Kind::Voxelize { step } => {
-            c |= ui.add(egui::Slider::new(step, 0.002..=0.5).logarithmic(true).text("taille")).changed();
+            c |= ui.add(egui::Slider::new(step, 0.002..=0.5).logarithmic(true).text(crate::i18n::t("taille"))).changed();
         }
         Kind::Stretch { factor, axis } => {
             s!(ui, factor, -0.9..=3.0, "facteur");
@@ -1473,9 +1473,9 @@ fn params(ui: &mut egui::Ui, k: &mut Kind) -> bool {
         }
         Kind::Shear { factor, axis, along } => {
             s!(ui, factor, -2.0..=2.0, "facteur");
-            ui.label(RichText::new("déplace").size(11.0));
+            ui.label(RichText::new(crate::i18n::t("déplace")).size(11.0));
             c |= axis_ui(ui, axis);
-            ui.label(RichText::new("selon").size(11.0));
+            ui.label(RichText::new(crate::i18n::t("selon")).size(11.0));
             c |= axis_ui(ui, along);
         }
         Kind::Warp { from, to, radius } => {
@@ -1497,13 +1497,13 @@ fn params(ui: &mut egui::Ui, k: &mut Kind) -> bool {
         }
         Kind::Screw { angle, steps, height, axis } => {
             s!(ui, angle, -1440.0..=1440.0, "angle total °");
-            c |= ui.add(egui::Slider::new(steps, 1..=256).text("étapes").logarithmic(true)).changed();
+            c |= ui.add(egui::Slider::new(steps, 1..=256).text(crate::i18n::t("étapes")).logarithmic(true)).changed();
             s!(ui, height, -2.0..=2.0, "hauteur");
             c |= axis_ui(ui, axis);
         }
         Kind::Build { fraction, seed, random } => {
             s!(ui, fraction, 0.0..=1.0, "proportion");
-            c |= ui.checkbox(random, "ordre aléatoire").changed();
+            c |= ui.checkbox(random, crate::i18n::t("ordre aléatoire")).changed();
             if *random {
                 s!(ui, seed, 0.0..=100.0, "graine");
             }
@@ -1511,7 +1511,7 @@ fn params(ui: &mut egui::Ui, k: &mut Kind) -> bool {
         Kind::Slice { axis, position, flip } => {
             c |= axis_ui(ui, axis);
             s!(ui, position, -1.0..=1.0, "position");
-            c |= ui.checkbox(flip, "garder l'autre côté").changed();
+            c |= ui.checkbox(flip, crate::i18n::t("garder l'autre côté")).changed();
         }
         Kind::Lattice { amount, axis, curve } => {
             s!(ui, amount, -1.0..=1.0, "force");

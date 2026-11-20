@@ -111,38 +111,38 @@ impl App {
                 // En-tête : titre, « + » (créer / importer) et « ⋯ » (affichage)
                 ui.horizontal(|ui| {
                     ui.add_space(12.0);
-                    ui.label(caps("fichiers"));
+                    ui.label(caps(&crate::i18n::t("fichiers")));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.add_space(8.0);
                         let g = self.files.grid;
                         egui::containers::menu::MenuButton::new("⋯").ui(ui, |ui| {
                             ui.set_min_width(200.0);
-                            ui.label(RichText::new("trier").color(p.muted).size(11.0));
+                            ui.label(RichText::new(crate::i18n::t("trier")).color(p.muted).size(11.0));
                             for (k, l) in [(0u8, "par nom"), (1, "modifiés récemment"), (2, "par type")] {
-                                if ui.radio(self.files.sort == k, l).clicked() {
+                                if ui.radio(self.files.sort == k, crate::i18n::t(l)).clicked() {
                                     self.files.sort = k;
                                     self.files.save();
                                 }
                             }
                             ui.separator();
-                            if ui.checkbox(&mut self.files.show_ext, "afficher les extensions").changed() {
+                            if ui.checkbox(&mut self.files.show_ext, crate::i18n::t("afficher les extensions")).changed() {
                                 self.files.save();
                             }
                             let mut show_recent = !self.files.hide_recent;
-                            if ui.checkbox(&mut show_recent, "section « récents »").changed() {
+                            if ui.checkbox(&mut show_recent, crate::i18n::t("section « récents »")).changed() {
                                 self.files.hide_recent = !show_recent;
                                 self.files.save();
                             }
                             ui.separator();
-                            if ui.button("tout replier").clicked() {
+                            if ui.button(crate::i18n::t("tout replier")).clicked() {
                                 self.files.expanded.clear();
                                 self.files.save();
                             }
-                            if ui.button("tout déplier").clicked() {
+                            if ui.button(crate::i18n::t("tout déplier")).clicked() {
                                 self.files.expanded = self.entries.iter().filter(|e| e.is_dir).map(|e| e.rel.clone()).collect();
                                 self.files.save();
                             }
-                            if ui.button("montrer le fichier ouvert").clicked() {
+                            if ui.button(crate::i18n::t("montrer le fichier ouvert")).clicked() {
                                 if let Some(d) = self.current().map(|d| d.rel.clone()) {
                                     self.files.reveal(&d);
                                     self.selected = Some(d);
@@ -156,27 +156,27 @@ impl App {
                         egui::containers::menu::MenuButton::new("+").ui(ui, |ui| {
                             ui.set_min_width(210.0);
                             let dir = self.target_dir(&self.notes_dir());
-                            if ui.button("note").clicked() {
+                            if ui.button(crate::i18n::t("note")).clicked() {
                                 self.new_note();
                             }
-                            if ui.button("fichier…").clicked() {
+                            if ui.button(crate::i18n::t("fichier…")).clicked() {
                                 self.actions.push(Action::NewFile(dir.clone()));
                             }
-                            if ui.button("dossier…").clicked() {
+                            if ui.button(crate::i18n::t("dossier…")).clicked() {
                                 self.actions.push(Action::NewDir(self.target_dir("")));
                             }
                             ui.separator();
                             let ctx = ui.ctx().clone();
                             for (l, c) in [("note du jour", extras::Cmd::Daily), ("depuis un modèle…", extras::Cmd::FromTemplate), ("board…", extras::Cmd::NewBoard), ("matériau en nodes", extras::Cmd::NewMaterial), ("compositing en nodes", extras::Cmd::NewCompositor)] {
-                                if ui.button(l).clicked() {
+                                if ui.button(crate::i18n::t(l)).clicked() {
                                     self.run_cmd(c, &ctx);
                                 }
                             }
                             ui.separator();
-                            if ui.button("importer des fichiers…").clicked() {
+                            if ui.button(crate::i18n::t("importer des fichiers…")).clicked() {
                                 self.pick_import(false);
                             }
-                            if ui.button("lier un dossier…").clicked() {
+                            if ui.button(crate::i18n::t("lier un dossier…")).clicked() {
                                 self.pick_import(true);
                             }
                         });
@@ -190,7 +190,7 @@ impl App {
                         ui.set_width(ui.available_width() - 10.0);
                         ui.horizontal(|ui| {
                             ui.label(RichText::new("⌕").color(p.muted));
-                            ui.add(egui::TextEdit::singleline(&mut self.filter).hint_text("chercher un fichier").frame(egui::Frame::NONE).margin(egui::Margin::ZERO).desired_width(ui.available_width() - 16.0));
+                            ui.add(egui::TextEdit::singleline(&mut self.filter).hint_text(crate::i18n::t("chercher un fichier")).frame(egui::Frame::NONE).margin(egui::Margin::ZERO).desired_width(ui.available_width() - 16.0));
                             if !self.filter.is_empty() && ui.add(egui::Button::new(RichText::new("×").color(p.muted)).frame(false)).clicked() {
                                 self.filter.clear();
                             }
@@ -203,7 +203,7 @@ impl App {
                     ui.add_space(10.0);
                     ui.spacing_mut().item_spacing.x = 2.0;
                     let all = self.files.kind.is_none();
-                    if ui.add(egui::Button::new(RichText::new("tout").size(11.0).color(if all { p.on_accent } else { p.muted })).fill(if all { p.accent } else { p.panel }).stroke(egui::Stroke::NONE)).clicked() {
+                    if ui.add(egui::Button::new(RichText::new(crate::i18n::t("tout")).size(11.0).color(if all { p.on_accent } else { p.muted })).fill(if all { p.accent } else { p.panel }).stroke(egui::Stroke::NONE)).clicked() {
                         self.files.kind = None;
                     }
                     let present: HashSet<&str> = self.entries.iter().filter(|e| !e.is_dir).map(|e| kind(&e.rel).2).collect();
@@ -244,7 +244,7 @@ impl App {
                         // Épinglés et récents
                         let pinned: Vec<Entry> = self.files.pinned.iter().filter_map(|r| self.entries.iter().find(|e| e.rel == *r).cloned()).collect();
                         if !pinned.is_empty() {
-                            section(ui, "épinglés");
+                            section(ui, &crate::i18n::t("épinglés"));
                             for e in &pinned {
                                 self.row(ui, e, 0, true);
                             }
@@ -253,7 +253,7 @@ impl App {
                         if !self.files.hide_recent {
                             let recent: Vec<Entry> = self.files.recent.iter().filter(|r| !self.files.pinned.contains(r)).filter_map(|r| self.entries.iter().find(|e| e.rel == *r && !e.is_dir).cloned()).take(5).collect();
                             if !recent.is_empty() {
-                                section(ui, "récents");
+                                section(ui, &crate::i18n::t("récents"));
                                 for e in &recent {
                                     self.row(ui, e, 0, true);
                                 }
@@ -275,18 +275,18 @@ impl App {
                         self.selected = None;
                     }
                     bg.context_menu(|ui| {
-                        if ui.button("nouvelle note").clicked() {
+                        if ui.button(crate::i18n::t("nouvelle note")).clicked() {
                             self.new_note();
                         }
-                        if ui.button("nouveau fichier").clicked() {
+                        if ui.button(crate::i18n::t("nouveau fichier")).clicked() {
                             self.actions.push(Action::NewFile(String::new()));
                         }
-                        if ui.button("nouveau dossier").clicked() {
+                        if ui.button(crate::i18n::t("nouveau dossier")).clicked() {
                             self.actions.push(Action::NewDir(String::new()));
                         }
                     });
                     if self.entries.is_empty() {
-                        ui.label(RichText::new("   coffre vide : + pour créer, ou glisse des fichiers ici").color(p.muted));
+                        ui.label(RichText::new(crate::i18n::t("   coffre vide : + pour créer, ou glisse des fichiers ici")).color(p.muted));
                     }
                 });
             });
@@ -301,11 +301,11 @@ impl App {
         ui.horizontal_wrapped(|ui| {
             ui.add_space(10.0);
             ui.spacing_mut().item_spacing.x = 2.0;
-            if !self.files.dir.is_empty() && ui.small_button("↑").on_hover_text("dossier parent").clicked() {
+            if !self.files.dir.is_empty() && ui.small_button("↑").on_hover_text(crate::i18n::t("dossier parent")).clicked() {
                 self.files.dir = vault::parent(&self.files.dir);
                 self.files.save();
             }
-            if ui.add(egui::Button::new(RichText::new("coffre").size(11.5)).frame(false)).clicked() {
+            if ui.add(egui::Button::new(RichText::new(crate::i18n::t("coffre")).size(11.5)).frame(false)).clicked() {
                 self.files.dir.clear();
                 self.files.save();
             }
@@ -323,7 +323,7 @@ impl App {
         ui.horizontal(|ui| {
             ui.add_space(10.0);
             ui.spacing_mut().slider_width = 110.0;
-            if ui.add(egui::Slider::new(&mut self.files.tile, 56.0..=220.0).show_value(false).text(RichText::new("taille").size(10.5))).drag_stopped() {
+            if ui.add(egui::Slider::new(&mut self.files.tile, 56.0..=220.0).show_value(false).text(RichText::new(crate::i18n::t("taille")).size(10.5))).drag_stopped() {
                 self.files.save();
             }
         });
@@ -358,7 +358,7 @@ impl App {
             });
         });
         if items.is_empty() {
-            ui.label(RichText::new("   dossier vide").color(p.muted));
+            ui.label(RichText::new(crate::i18n::t("   dossier vide")).color(p.muted));
         }
     }
 
@@ -479,7 +479,7 @@ impl App {
             self.row(ui, e, 0, true);
         }
         if hits.is_empty() {
-            ui.label(RichText::new("   rien trouvé").color(p.muted));
+            ui.label(RichText::new(crate::i18n::t("   rien trouvé")).color(p.muted));
         }
     }
 
@@ -608,13 +608,13 @@ impl App {
 
             ui.label(RichText::new(&e.rel).color(p.muted).size(11.0));
             ui.separator();
-            if !e.is_dir && ui.button("ouvrir").clicked() {
+            if !e.is_dir && ui.button(crate::i18n::t("ouvrir")).clicked() {
                 self.actions.push(Action::Open(e.rel.clone()));
             }
-            if ui.button("nouveau fichier ici").clicked() {
+            if ui.button(crate::i18n::t("nouveau fichier ici")).clicked() {
                 self.actions.push(Action::NewFile(dir.clone()));
             }
-            if ui.button("nouveau dossier ici").clicked() {
+            if ui.button(crate::i18n::t("nouveau dossier ici")).clicked() {
                 self.actions.push(Action::NewDir(dir.clone()));
             }
             if let Ok(path) = vault::safe(&self.root(), &e.rel) {
@@ -628,14 +628,14 @@ impl App {
             }
             ui.separator();
             let link_root = vault::is_link_root(&e.rel) || e.rel == vault::LINKED_FILES;
-            if !link_root && ui.button("renommer / déplacer").clicked() {
+            if !link_root && ui.button(crate::i18n::t("renommer / déplacer")).clicked() {
                 self.actions.push(Action::Rename(e.rel.clone()));
             }
             if vault::is_external(&e.rel) && !e.is_dir {
-                if ui.button("déplacer dans le coffre").on_hover_text("Le fichier quitte son dossier d'origine").clicked() {
+                if ui.button(crate::i18n::t("déplacer dans le coffre")).on_hover_text(crate::i18n::t("Le fichier quitte son dossier d'origine")).clicked() {
                     self.dialog = Some(Dialog::MoveIn { rel: e.rel.clone(), copy: false });
                 }
-                if ui.button("copier dans le coffre").clicked() {
+                if ui.button(crate::i18n::t("copier dans le coffre")).clicked() {
                     self.dialog = Some(Dialog::MoveIn { rel: e.rel.clone(), copy: true });
                 }
             }
@@ -645,31 +645,31 @@ impl App {
                     self.error = Some(err);
                 }
             }
-            if !e.is_dir && ui.button("ouvrir avec…").clicked() {
+            if !e.is_dir && ui.button(crate::i18n::t("ouvrir avec…")).clicked() {
                 let r = vault::safe(&self.root(), &e.rel).and_then(|p| settings::open_with(&p));
                 if let Err(err) = r {
                     self.error = Some(err);
                 }
             }
             ui.separator();
-            if ui.button("exporter en zip…").clicked() {
+            if ui.button(crate::i18n::t("exporter en zip…")).clicked() {
                 self.export_zip(vec![e.rel.clone()], false);
             }
-            if (vault::is_md(&e.rel) || board::is_board(&e.rel)) && ui.button("exporter avec ses liens en zip…").on_hover_text("Ajoute les notes liées, les images citées et le contenu du board").clicked() {
+            if (vault::is_md(&e.rel) || board::is_board(&e.rel)) && ui.button(crate::i18n::t("exporter avec ses liens en zip…")).on_hover_text(crate::i18n::t("Ajoute les notes liées, les images citées et le contenu du board")).clicked() {
                 self.export_zip(vec![e.rel.clone()], true);
             }
-            if ui.button("envoyer à un autre ordi…").clicked() {
+            if ui.button(crate::i18n::t("envoyer à un autre ordi…")).clicked() {
                 let root = self.root();
                 self.send_files = transfer::collect(&root, &self.entries, &[e.rel.clone()], false);
                 self.dialog = Some(Dialog::Transfer { send: true });
             }
             ui.separator();
-            if ui.button("afficher dans le dossier").clicked() {
+            if ui.button(crate::i18n::t("afficher dans le dossier")).clicked() {
                 if let Ok(path) = vault::safe(&self.root(), &e.rel) {
                     settings::reveal(&path, !e.is_dir);
                 }
             }
-            if ui.button("copier le chemin").clicked() {
+            if ui.button(crate::i18n::t("copier le chemin")).clicked() {
                 let full = vault::safe(&self.root(), &e.rel).map(|p| p.to_string_lossy().to_string()).unwrap_or(e.rel.clone());
                 ui.ctx().copy_text(full);
             }

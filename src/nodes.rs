@@ -1632,15 +1632,15 @@ impl Editor {
         let mut add_now: Option<&'static str> = None;
         let mut preset: Option<&'static str> = None;
         ui.horizontal(|ui| {
-            egui::containers::menu::MenuButton::new("＋ ajouter ▾").ui(ui, |ui| {
+            egui::containers::menu::MenuButton::new(crate::i18n::t("＋ ajouter ▾")).ui(ui, |ui| {
                 for cat in CATS {
                     let items: Vec<&Def> = DEFS.iter().filter(|d| d.cat == cat && if kind == GraphKind::Material { d.mat } else { d.comp }).collect();
                     if items.is_empty() {
                         continue;
                     }
-                    ui.menu_button(cat, |ui| {
+                    ui.menu_button(crate::i18n::t(cat), |ui| {
                         for d in items {
-                            if ui.button(d.label).clicked() {
+                            if ui.button(crate::i18n::t(d.label)).clicked() {
                                 add_now = Some(d.op);
                             }
                         }
@@ -1648,32 +1648,32 @@ impl Editor {
                 }
             });
             if kind == GraphKind::Material {
-                egui::containers::menu::MenuButton::new("préréglages ▾").ui(ui, |ui| {
+                egui::containers::menu::MenuButton::new(crate::i18n::t("préréglages ▾")).ui(ui, |ui| {
                     for name in MATERIAL_PRESETS {
-                        if ui.button(name).on_hover_text("remplace le graphe actuel").clicked() {
+                        if ui.button(name).on_hover_text(crate::i18n::t("remplace le graphe actuel")).clicked() {
                             preset = Some(name);
                         }
                     }
                 });
             }
-            if ui.add_enabled(!self.undo.is_empty(), egui::Button::new("↶")).on_hover_text("annuler (Ctrl+Z)").clicked() {
+            if ui.add_enabled(!self.undo.is_empty(), egui::Button::new("↶")).on_hover_text(crate::i18n::t("annuler (Ctrl+Z)")).clicked() {
                 self.undo();
             }
-            if ui.add_enabled(!self.redo.is_empty(), egui::Button::new("↷")).on_hover_text("rétablir (Ctrl+Maj+Z)").clicked() {
+            if ui.add_enabled(!self.redo.is_empty(), egui::Button::new("↷")).on_hover_text(crate::i18n::t("rétablir (Ctrl+Maj+Z)")).clicked() {
                 self.redo();
             }
-            egui::containers::menu::MenuButton::new("aide ▾").ui(ui, |ui| {
-                ui.label(RichText::new("Maj+A ou clic droit : ajouter\nglisser dans le vide : sélection en rectangle (Maj : ajouter)\nclic molette ou clic droit glissé : se déplacer · molette : zoom\nglisser une sortie dans le vide : ajouter un node déjà relié\nCtrl+clic sur un lien : le couper\nA : tout · Alt+A : rien · X / Suppr : effacer\nMaj+D : dupliquer · Ctrl+C / Ctrl+V : copier, coller\nM : muet · H : réduire · P : miniature · F2 : renommer\nF : cadrer la sélection · Origine : tout cadrer\nCtrl+Z / Ctrl+Maj+Z : annuler, rétablir\nGlisser des images depuis l'ordinateur : nodes texture").size(11.0));
+            egui::containers::menu::MenuButton::new(crate::i18n::t("aide ▾")).ui(ui, |ui| {
+                ui.label(RichText::new(crate::i18n::t("Maj+A ou clic droit : ajouter\nglisser dans le vide : sélection en rectangle (Maj : ajouter)\nclic molette ou clic droit glissé : se déplacer · molette : zoom\nglisser une sortie dans le vide : ajouter un node déjà relié\nCtrl+clic sur un lien : le couper\nA : tout · Alt+A : rien · X / Suppr : effacer\nMaj+D : dupliquer · Ctrl+C / Ctrl+V : copier, coller\nM : muet · H : réduire · P : miniature · F2 : renommer\nF : cadrer la sélection · Origine : tout cadrer\nCtrl+Z / Ctrl+Maj+Z : annuler, rétablir\nGlisser des images depuis l'ordinateur : nodes texture")).size(11.0));
             });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if kind == GraphKind::Compositor && ui.button("exporter PNG").clicked() {
+                if kind == GraphKind::Compositor && ui.button(crate::i18n::t("exporter PNG")).clicked() {
                     self.export();
                 }
-                if ui.button("recadrer").clicked() {
+                if ui.button(crate::i18n::t("recadrer")).clicked() {
                     self.scene = Rect::ZERO;
                 }
                 let all_on = self.graph.nodes.iter().filter(|n| n.op != "mat_out" && n.op != "comp_out").all(|n| n.preview);
-                if ui.selectable_label(all_on, "miniatures").on_hover_text("aperçu sous chaque node").clicked() {
+                if ui.selectable_label(all_on, crate::i18n::t("miniatures")).on_hover_text(crate::i18n::t("aperçu sous chaque node")).clicked() {
                     for n in self.graph.nodes.iter_mut().filter(|n| n.op != "mat_out" && n.op != "comp_out") {
                         n.preview = !all_on;
                     }
@@ -1966,7 +1966,7 @@ impl Editor {
         let need_input = m.link.is_some();
         let area = egui::Area::new(egui::Id::unique("node-add")).order(egui::Order::Foreground).fixed_pos(m.at).show(ctx, |ui| {
             egui::Frame::new().fill(p.bg).stroke(Stroke::new(1.0, p.text)).inner_margin(6).show(ui, |ui| {
-                let r = ui.add(egui::TextEdit::singleline(&mut m.query).hint_text("chercher un node…").desired_width(360.0));
+                let r = ui.add(egui::TextEdit::singleline(&mut m.query).hint_text(crate::i18n::t("chercher un node…")).desired_width(360.0));
                 r.request_focus();
                 let q = crate::chat::fold(&m.query);
                 if q.is_empty() {
@@ -1980,7 +1980,7 @@ impl Editor {
                                     continue;
                                 }
                                 let active = m.cat == ci;
-                                let r = ui.add(egui::Button::new(RichText::new(format!("{cat}  ›")).color(if active { p.on_accent } else { p.text })).fill(if active { p.accent } else { Color32::TRANSPARENT }).stroke(Stroke::NONE).min_size(vec2(110.0, 22.0)));
+                                let r = ui.add(egui::Button::new(RichText::new(format!("{}  ›", crate::i18n::t(cat))).color(if active { p.on_accent } else { p.text })).fill(if active { p.accent } else { Color32::TRANSPARENT }).stroke(Stroke::NONE).min_size(vec2(110.0, 22.0)));
                                 if r.hovered() || r.clicked() {
                                     if m.cat != ci {
                                         m.sel = 0;
@@ -1995,7 +1995,7 @@ impl Editor {
                             let items: Vec<&Def> = DEFS.iter().filter(usable).filter(|d| d.cat == CATS[m.cat] && (!need_input || !d.inputs.is_empty())).collect();
                             for (k, d) in items.iter().enumerate() {
                                 let hi = k == m.sel;
-                                let r = ui.add(egui::Button::new(RichText::new(d.label).color(if hi { p.accent } else { p.text })).fill(if hi { p.line.gamma_multiply(0.6) } else { Color32::TRANSPARENT }).stroke(Stroke::NONE).min_size(vec2(220.0, 22.0)));
+                                let r = ui.add(egui::Button::new(RichText::new(crate::i18n::t(d.label)).color(if hi { p.accent } else { p.text })).fill(if hi { p.line.gamma_multiply(0.6) } else { Color32::TRANSPARENT }).stroke(Stroke::NONE).min_size(vec2(220.0, 22.0)));
                                 if r.hovered() {
                                     m.sel = k;
                                 }
@@ -2030,7 +2030,7 @@ impl Editor {
                     }
                     for (k, d) in list.iter().enumerate() {
                         let hi = k == m.sel;
-                        let r = ui.add(egui::Button::new(RichText::new(format!("{}   {}", d.label, d.cat)).color(if hi { p.accent } else { p.text })).fill(if hi { p.line.gamma_multiply(0.6) } else { Color32::TRANSPARENT }).stroke(Stroke::NONE).min_size(vec2(360.0, 22.0)));
+                        let r = ui.add(egui::Button::new(RichText::new(format!("{}   {}", crate::i18n::t(d.label), crate::i18n::t(d.cat))).color(if hi { p.accent } else { p.text })).fill(if hi { p.line.gamma_multiply(0.6) } else { Color32::TRANSPARENT }).stroke(Stroke::NONE).min_size(vec2(360.0, 22.0)));
                         if r.hovered() {
                             m.sel = k;
                         }
@@ -2039,7 +2039,7 @@ impl Editor {
                         }
                     }
                     if list.is_empty() {
-                        ui.label(RichText::new("aucun node").color(p.muted));
+                        ui.label(RichText::new(crate::i18n::t("aucun node")).color(p.muted));
                     }
                     let n = list.len();
                     if ui.input(|i| i.key_pressed(egui::Key::ArrowDown)) && n > 0 {
@@ -2113,13 +2113,13 @@ impl Editor {
             actions.push(Act::Clear);
         }
         bg.context_menu(|ui| {
-            if ui.button("ajouter un node…   Maj+A").clicked() {
+            if ui.button(crate::i18n::t("ajouter un node…   Maj+A")).clicked() {
                 if let Some(pt) = pointer {
                     actions.push(Act::OpenAdd(pt, None));
                 }
                 ui.close();
             }
-            if ui.add_enabled(self.clipboard.is_some(), egui::Button::new("coller   Ctrl+V")).clicked() {
+            if ui.add_enabled(self.clipboard.is_some(), egui::Button::new(crate::i18n::t("coller   Ctrl+V"))).clicked() {
                 if let (Some((nodes, links)), Some(pt)) = (self.clipboard.clone(), pointer) {
                     let min = nodes.iter().fold([f32::MAX; 2], |m, n| [m[0].min(n.pos[0]), m[1].min(n.pos[1])]);
                     let new = self.paste(nodes, links, [pt.x - min[0], pt.y - min[1]]);
@@ -2128,11 +2128,11 @@ impl Editor {
                 }
                 ui.close();
             }
-            if ui.button("tout sélectionner   A").clicked() {
+            if ui.button(crate::i18n::t("tout sélectionner   A")).clicked() {
                 self.selected = self.graph.nodes.iter().map(|n| n.id).collect();
                 ui.close();
             }
-            if ui.button("tout cadrer   Origine").clicked() {
+            if ui.button(crate::i18n::t("tout cadrer   Origine")).clicked() {
                 self.scene = Rect::ZERO;
                 ui.close();
             }
@@ -2220,7 +2220,7 @@ impl Editor {
             let has_out = !d.outputs.is_empty();
             let eye = Rect::from_min_size(pos2(head.right() - 22.0, head.top()), vec2(22.0, HEAD));
             if has_out && d.cat != "sortie" {
-                let er = ui.interact(eye, ui.scope_id().with(("node-eye", *id)), Sense::click()).on_hover_text("miniature (P)");
+                let er = ui.interact(eye, ui.scope_id().with(("node-eye", *id)), Sense::click()).on_hover_text(crate::i18n::t("miniature (P)"));
                 painter.text(eye.center(), egui::Align2::CENTER_CENTER, if preview_on { "◉" } else { "○" }, egui::FontId::monospace(11.0), Color32::WHITE);
                 if er.clicked() {
                     actions.push(Act::Node(*id, NodeOp::Preview));
@@ -2228,7 +2228,7 @@ impl Editor {
             }
             let title_rect = Rect::from_min_max(pos2(arrow.right(), head.top()), pos2(eye.left(), head.bottom()));
             let label = &self.graph.nodes[ni].label;
-            let title = if label.is_empty() { d.label.to_string() } else { label.clone() };
+            let title = if label.is_empty() { crate::i18n::t(d.label) } else { label.clone() };
             let title = if muted { format!("{title} (muet)") } else { title };
             match &mut self.rename {
                 Some((rid, text)) if rid == id => {
@@ -2276,7 +2276,7 @@ impl Editor {
                     ("déconnecter", NodeOp::Disconnect),
                     ("supprimer   X", NodeOp::Delete),
                 ] {
-                    if ui.button(label).clicked() {
+                    if ui.button(crate::i18n::t(label)).clicked() {
                         actions.push(Act::Node(*id, op));
                         ui.close();
                     }
@@ -2380,7 +2380,7 @@ impl Editor {
                     }
                     (ParamDef::Text(_), Param::S(code)) => {
                         let mut pick = None;
-                        egui::ComboBox::from_id_salt(("snip", *id)).selected_text(RichText::new("exemples").size(10.5)).width(NW - 24.0).show_ui(&mut child, |ui| {
+                        egui::ComboBox::from_id_salt(("snip", *id)).selected_text(RichText::new(crate::i18n::t("exemples")).size(10.5)).width(NW - 24.0).show_ui(&mut child, |ui| {
                             for (name, c) in SHADER_EXAMPLES {
                                 if ui.button(*name).clicked() {
                                     pick = Some(c.to_string());
@@ -2394,8 +2394,8 @@ impl Editor {
                         let prompt = self.ai_prompt.entry(*id).or_default();
                         let busy = self.ai_rx.is_some();
                         child.horizontal(|ui| {
-                            ui.add(egui::TextEdit::singleline(prompt).hint_text("décris l'effet…").desired_width(NW - 64.0).font(egui::FontId::monospace(10.5)));
-                            if ui.add_enabled(!busy && !prompt.trim().is_empty(), egui::Button::new(RichText::new(if busy { "…" } else { "IA" }).size(10.5))).on_hover_text("L'IA écrit le shader").clicked() {
+                            ui.add(egui::TextEdit::singleline(prompt).hint_text(crate::i18n::t("décris l'effet…")).desired_width(NW - 64.0).font(egui::FontId::monospace(10.5)));
+                            if ui.add_enabled(!busy && !prompt.trim().is_empty(), egui::Button::new(RichText::new(if busy { "…" } else { "IA" }).size(10.5))).on_hover_text(crate::i18n::t("L'IA écrit le shader")).clicked() {
                                 self.ai_request = Some((*id, prompt.trim().to_string()));
                             }
                         });
@@ -2406,7 +2406,7 @@ impl Editor {
                     }
                     (ParamDef::File(_), Param::S(rel)) => {
                         let label = if rel.is_empty() { "choisir une image…".to_string() } else { rel.rsplit('/').next().unwrap_or(rel).to_string() };
-                        if child.button(RichText::new(label).size(11.0)).on_hover_text("ou glisse une image dans le graphe").clicked() {
+                        if child.button(RichText::new(label).size(11.0)).on_hover_text(crate::i18n::t("ou glisse une image dans le graphe")).clicked() {
                             if let Some(f) = rfd::FileDialog::new().add_filter("images", &["png", "jpg", "jpeg", "webp", "tga", "tif", "tiff", "bmp", "exr", "hdr"]).pick_file() {
                                 let root = self.root.clone();
                                 let r = crate::vault::inside(&root, &f).map(Ok).unwrap_or_else(|| crate::vault::link_external(&root, &f));

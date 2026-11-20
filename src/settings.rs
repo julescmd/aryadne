@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 #[derive(Serialize, Deserialize, Clone, PartialEq)]
 #[serde(default)]
 pub struct Prefs {
+    /// Langue de l'interface (« fr », « en ») ; vide = langue du système
+    pub lang: String,
     pub dark: bool,
     /// Couleur d'accent [r, g, b] ; None = orange par défaut.
     pub accent: Option<[u8; 3]>,
@@ -32,6 +34,7 @@ pub struct Prefs {
 impl Default for Prefs {
     fn default() -> Self {
         Self {
+            lang: String::new(),
             dark: false,
             accent: None,
             ui_zoom: 1.0,
@@ -130,7 +133,7 @@ impl App {
 
             // Navigation
             let mut nav = ui.new_child(egui::UiBuilder::new().max_rect(nav_rect.shrink(14.0)).layout(egui::Layout::top_down(egui::Align::Min)));
-            nav.label(caps("réglages"));
+            nav.label(caps(&crate::i18n::t("réglages")));
             nav.add_space(10.0);
             for (t, label) in [
                 (Tab::Appearance, "apparence"),
@@ -142,13 +145,13 @@ impl App {
                 (Tab::Shortcuts, "raccourcis"),
             ] {
                 let active = st.tab == t;
-                let text = if active { RichText::new(format!("▌ {label}")).color(p.accent).family(theme::bold()) } else { RichText::new(format!("  {label}")).color(p.muted) };
+                let text = if active { RichText::new(format!("▌ {}", crate::i18n::t(label))).color(p.accent).family(theme::bold()) } else { RichText::new(format!("  {}", crate::i18n::t(label))).color(p.muted) };
                 if nav.add(egui::Button::new(text).frame(false)).clicked() {
                     st.tab = t;
                 }
             }
             let mut foot = ui.new_child(egui::UiBuilder::new().max_rect(nav_rect.shrink(14.0)).layout(egui::Layout::bottom_up(egui::Align::Min)));
-            if foot.button("fermer").clicked() {
+            if foot.button(crate::i18n::t("fermer")).clicked() {
                 close = true;
             }
             foot.label(RichText::new(format!("aryadne v{}", updater::CURRENT)).color(p.muted).size(10.5));
@@ -197,17 +200,27 @@ impl App {
 
     fn tab_appearance(&mut self, ui: &mut egui::Ui) {
         let p = theme::pal();
-        ui.label(caps("thème"));
+        ui.label(caps("langue / language"));
         ui.horizontal(|ui| {
-            if ui.selectable_label(!self.prefs.dark, "clair").clicked() {
+            for (code, name) in crate::i18n::LANGS {
+                if ui.selectable_label(crate::i18n::current() == *code, *name).clicked() {
+                    self.prefs.lang = code.to_string();
+                    crate::i18n::set(code);
+                }
+            }
+        });
+        ui.add_space(12.0);
+        ui.label(caps(&crate::i18n::t("thème")));
+        ui.horizontal(|ui| {
+            if ui.selectable_label(!self.prefs.dark, crate::i18n::t("clair")).clicked() {
                 self.prefs.dark = false;
             }
-            if ui.selectable_label(self.prefs.dark, "sombre").clicked() {
+            if ui.selectable_label(self.prefs.dark, crate::i18n::t("sombre")).clicked() {
                 self.prefs.dark = true;
             }
         });
         ui.add_space(14.0);
-        ui.label(caps("couleur d'accent"));
+        ui.label(caps(&crate::i18n::t("couleur d'accent")));
         ui.horizontal_wrapped(|ui| {
             for (name, c) in ACCENTS {
                 let col = egui::Color32::from_rgb(c[0], c[1], c[2]);
@@ -222,45 +235,45 @@ impl App {
                 }
             }
             let mut custom = self.prefs.accent.map(|[r, g, b]| egui::Color32::from_rgb(r, g, b)).unwrap_or(p.accent);
-            if ui.color_edit_button_srgba(&mut custom).on_hover_text("couleur personnalisée").changed() {
+            if ui.color_edit_button_srgba(&mut custom).on_hover_text(crate::i18n::t("couleur personnalisée")).changed() {
                 self.prefs.accent = Some([custom.r(), custom.g(), custom.b()]);
             }
         });
         ui.add_space(14.0);
-        ui.label(caps("taille de l'interface"));
+        ui.label(caps(&crate::i18n::t("taille de l'interface")));
         ui.horizontal(|ui| {
             ui.add(egui::Slider::new(&mut self.prefs.ui_zoom, 0.75..=1.6).step_by(0.05).custom_formatter(|v, _| format!("{:.0} %", v * 100.0)));
             if ui.button("100 %").clicked() {
                 self.prefs.ui_zoom = 1.0;
             }
         });
-        ui.label(RichText::new("Aussi avec Ctrl + / Ctrl − / Ctrl 0.").color(p.muted).size(11.0));
+        ui.label(RichText::new(crate::i18n::t("Aussi avec Ctrl + / Ctrl − / Ctrl 0.")).color(p.muted).size(11.0));
     }
 
     fn tab_editor(&mut self, ui: &mut egui::Ui) {
         let p = theme::pal();
-        ui.label(caps("éditeur"));
-        ui.add(egui::Slider::new(&mut self.prefs.editor_size, 10.0..=22.0).step_by(1.0).text("taille du texte"));
-        ui.checkbox(&mut self.prefs.line_numbers, "numéros de ligne (fichiers de code)");
-        ui.checkbox(&mut self.prefs.minimap, "mini-carte à droite (fichiers de code)");
-        ui.checkbox(&mut self.prefs.wrap_code, "retour à la ligne dans le code");
+        ui.label(caps(&crate::i18n::t("éditeur")));
+        ui.add(egui::Slider::new(&mut self.prefs.editor_size, 10.0..=22.0).step_by(1.0).text(crate::i18n::t("taille du texte")));
+        ui.checkbox(&mut self.prefs.line_numbers, crate::i18n::t("numéros de ligne (fichiers de code)"));
+        ui.checkbox(&mut self.prefs.minimap, crate::i18n::t("mini-carte à droite (fichiers de code)"));
+        ui.checkbox(&mut self.prefs.wrap_code, crate::i18n::t("retour à la ligne dans le code"));
         ui.add_space(10.0);
-        ui.label(caps("sauvegarde automatique"));
+        ui.label(caps(&crate::i18n::t("sauvegarde automatique")));
         ui.add(egui::Slider::new(&mut self.prefs.autosave_ms, 200..=5000).step_by(100.0).custom_formatter(|v, _| format!("{:.1} s après la dernière frappe", v / 1000.0)));
         ui.add_space(10.0);
-        ui.label(caps("notes"));
+        ui.label(caps(&crate::i18n::t("notes")));
         ui.horizontal(|ui| {
-            ui.label("dossier des nouvelles notes");
+            ui.label(crate::i18n::t("dossier des nouvelles notes"));
             ui.add(egui::TextEdit::singleline(&mut self.prefs.notes_dir).desired_width(160.0));
         });
-        ui.label(RichText::new("Utilisé pour Ctrl+N quand rien n'est sélectionné, et pour les liens [[ ]] vers des notes qui n'existent pas encore.").color(p.muted).size(11.0));
+        ui.label(RichText::new(crate::i18n::t("Utilisé pour Ctrl+N quand rien n'est sélectionné, et pour les liens [[ ]] vers des notes qui n'existent pas encore.")).color(p.muted).size(11.0));
     }
 
     /// Retourne true si les liens ont changé (il faut rescanner).
     fn tab_files(&mut self, ui: &mut egui::Ui) -> bool {
         let p = theme::pal();
         let mut changed = false;
-        ui.label(caps("fichiers glissés dans la fenêtre"));
+        ui.label(caps(&crate::i18n::t("fichiers glissés dans la fenêtre")));
         for (v, label, help) in [
             ("link", "lier (recommandé)", "Le fichier reste où il est. Aryadne l'affiche et le modifie à sa place."),
             ("move", "déplacer dans le coffre", "Le fichier quitte son dossier d'origine. Aucun doublon."),
@@ -273,41 +286,41 @@ impl App {
             }
         }
         ui.add_space(14.0);
-        ui.label(caps("sauvegarde"));
-        changed |= ui.checkbox(&mut self.prefs.backup_daily, "sauvegarder le coffre en zip une fois par jour (7 gardées)").changed();
+        ui.label(caps(&crate::i18n::t("sauvegarde")));
+        changed |= ui.checkbox(&mut self.prefs.backup_daily, crate::i18n::t("sauvegarder le coffre en zip une fois par jour (7 gardées)")).changed();
         ui.horizontal(|ui| {
             ui.label(RichText::new(format!("dans : {}", extras::backup_dir(&self.prefs).display())).color(p.muted).size(11.0));
-            if ui.small_button("changer…").clicked() {
+            if ui.small_button(crate::i18n::t("changer…")).clicked() {
                 if let Some(d) = rfd::FileDialog::new().set_title("Dossier des sauvegardes").pick_folder() {
                     self.prefs.backup_dir = d.display().to_string();
                     changed = true;
                 }
             }
-            if ui.small_button("sauvegarder maintenant").clicked() {
+            if ui.small_button(crate::i18n::t("sauvegarder maintenant")).clicked() {
                 self.start_backup(true);
             }
         });
-        ui.label(RichText::new("Les fichiers de plus de 50 Mo et la corbeille ne sont pas inclus. Chaque note garde aussi ses 40 dernières versions (historique).").color(p.muted).size(11.0));
+        ui.label(RichText::new(crate::i18n::t("Les fichiers de plus de 50 Mo et la corbeille ne sont pas inclus. Chaque note garde aussi ses 40 dernières versions (historique).")).color(p.muted).size(11.0));
         ui.add_space(14.0);
-        ui.label(caps("dossiers liés"));
-        ui.label(RichText::new("Des dossiers de ton disque affichés dans Aryadne sans rien copier (refs, projets Blender, cours…).").color(p.muted).size(11.0));
+        ui.label(caps(&crate::i18n::t("dossiers liés")));
+        ui.label(RichText::new(crate::i18n::t("Des dossiers de ton disque affichés dans Aryadne sans rien copier (refs, projets Blender, cours…).")).color(p.muted).size(11.0));
         let root = self.root();
         let links = vault::link_list();
         for f in &links.folders {
             ui.horizontal(|ui| {
                 ui.label(RichText::new(format!("@{}", f.name)).color(p.accent).family(theme::bold()));
                 ui.label(RichText::new(&f.path).color(p.muted).size(11.0));
-                if ui.small_button("ouvrir").clicked() {
+                if ui.small_button(crate::i18n::t("ouvrir")).clicked() {
                     reveal(std::path::Path::new(&f.path), false);
                 }
-                if ui.small_button("retirer").on_hover_text("Le dossier n'est pas supprimé").clicked() {
+                if ui.small_button(crate::i18n::t("retirer")).on_hover_text(crate::i18n::t("Le dossier n'est pas supprimé")).clicked() {
                     let r = vault::unlink(&root, &format!("@{}", f.name));
                     self.report(r);
                     changed = true;
                 }
             });
         }
-        if ui.button("+ lier un dossier…").clicked() {
+        if ui.button(crate::i18n::t("+ lier un dossier…")).clicked() {
             if let Some(dir) = rfd::FileDialog::new().set_title("Dossier à lier").pick_folder() {
                 let r = vault::link_external(&root, &dir);
                 self.report(r);
@@ -317,33 +330,33 @@ impl App {
         ui.add_space(8.0);
         ui.horizontal(|ui| {
             ui.label(format!("fichiers liés : {}", links.files.len()));
-            if !links.files.is_empty() && ui.small_button("tout retirer").on_hover_text("Les fichiers ne sont pas supprimés").clicked() {
+            if !links.files.is_empty() && ui.small_button(crate::i18n::t("tout retirer")).on_hover_text(crate::i18n::t("Les fichiers ne sont pas supprimés")).clicked() {
                 let r = vault::unlink(&root, vault::LINKED_FILES);
                 self.report(r);
                 changed = true;
             }
         });
         ui.add_space(14.0);
-        ui.label(caps("coffre"));
+        ui.label(caps(&crate::i18n::t("coffre")));
         ui.label(RichText::new(&root).color(p.muted).size(11.0));
         ui.horizontal(|ui| {
-            if ui.button("ouvrir le dossier").clicked() {
+            if ui.button(crate::i18n::t("ouvrir le dossier")).clicked() {
                 reveal(std::path::Path::new(&root), false);
             }
-            if ui.button("changer de coffre…").clicked() {
+            if ui.button(crate::i18n::t("changer de coffre…")).clicked() {
                 self.pick_vault();
                 changed = true;
             }
         });
-        ui.checkbox(&mut self.prefs.confirm_delete, "confirmer avant de supprimer");
+        ui.checkbox(&mut self.prefs.confirm_delete, crate::i18n::t("confirmer avant de supprimer"));
         changed
     }
 
     fn tab_ai(&mut self, ui: &mut egui::Ui, s: &mut ai::Settings, ctx: &egui::Context) {
         let p = theme::pal();
         let before = (s.url.clone(), s.model.clone(), s.key.clone(), s.keys.clone());
-        ui.label(caps("fournisseurs d'ia"));
-        ui.label(RichText::new("Colle une clé API pour brancher un service. Ses modèles apparaissent ensuite dans le menu du chat. Les clés restent sur cet ordinateur (dossier de config d'Aryadne).").color(p.muted).size(11.5));
+        ui.label(caps(&crate::i18n::t("fournisseurs d'ia")));
+        ui.label(RichText::new(crate::i18n::t("Colle une clé API pour brancher un service. Ses modèles apparaissent ensuite dans le menu du chat. Les clés restent sur cet ordinateur (dossier de config d'Aryadne).")).color(p.muted).size(11.5));
         ui.add_space(8.0);
         let active = s.provider_id();
         egui::Grid::new("ai-providers").num_columns(4).spacing([10.0, 8.0]).show(ui, |ui| {
@@ -351,15 +364,15 @@ impl App {
                 let on = active == pr.id;
                 ui.label(RichText::new(pr.name).strong().color(if on { p.accent } else { p.text }));
                 if pr.key_page.is_empty() {
-                    ui.label(RichText::new("local, gratuit, sans clé").color(p.muted).size(11.0));
+                    ui.label(RichText::new(crate::i18n::t("local, gratuit, sans clé")).color(p.muted).size(11.0));
                     ui.label("");
                 } else {
                     let key = s.keys.entry(pr.id.to_string()).or_default();
-                    let r = ui.add(egui::TextEdit::singleline(key).password(true).hint_text("clé api").desired_width(180.0));
+                    let r = ui.add(egui::TextEdit::singleline(key).password(true).hint_text(crate::i18n::t("clé api")).desired_width(180.0));
                     if r.lost_focus() && !key.trim().is_empty() {
                         ai::fetch_models(pr.id, key.clone(), ctx.clone());
                     }
-                    ui.hyperlink_to(RichText::new("clé ↗").size(11.0), pr.key_page).on_hover_text(pr.key_page);
+                    ui.hyperlink_to(RichText::new(crate::i18n::t("clé ↗")).size(11.0), pr.key_page).on_hover_text(pr.key_page);
                 }
                 let has_key = pr.key_page.is_empty() || s.keys.get(pr.id).is_some_and(|k| !k.trim().is_empty());
                 ui.horizontal(|ui| {
@@ -368,11 +381,11 @@ impl App {
                             ui.label(RichText::new(format!("✗ {e}")).color(p.missing).size(11.0));
                         } else if !pr.key_page.is_empty() {
                             ui.label(RichText::new(format!("✓ {} modèles", ai::models_of(pr.id).len())).color(p.muted).size(11.0));
-                            if ui.small_button("↻").on_hover_text("relire la liste des modèles").clicked() {
+                            if ui.small_button("↻").on_hover_text(crate::i18n::t("relire la liste des modèles")).clicked() {
                                 ai::fetch_models(pr.id, s.keys.get(pr.id).cloned().unwrap_or_default(), ctx.clone());
                             }
                         }
-                        if !on && ui.small_button("utiliser").clicked() {
+                        if !on && ui.small_button(crate::i18n::t("utiliser")).clicked() {
                             let m = if pr.id == "ollama" { self.local.snapshot().models.first().cloned().unwrap_or_else(|| "llama3.2".into()) } else { ai::models_of(pr.id).first().cloned().unwrap_or_default() };
                             s.use_model(pr.id, &m);
                         }
@@ -382,16 +395,16 @@ impl App {
             }
         });
         ui.add_space(12.0);
-        ui.label(caps("modèle actif"));
+        ui.label(caps(&crate::i18n::t("modèle actif")));
         egui::Grid::new("ai-grid").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
-            ui.label("modèle");
+            ui.label(crate::i18n::t("modèle"));
             ui.add(egui::TextEdit::singleline(&mut s.model).desired_width(380.0));
             ui.end_row();
-            ui.label("adresse");
-            ui.add(egui::TextEdit::singleline(&mut s.url).desired_width(380.0)).on_hover_text("Toute API compatible OpenAI. Change-la pour un serveur personnalisé.");
+            ui.label(crate::i18n::t("adresse"));
+            ui.add(egui::TextEdit::singleline(&mut s.url).desired_width(380.0)).on_hover_text(crate::i18n::t("Toute API compatible OpenAI. Change-la pour un serveur personnalisé."));
             ui.end_row();
             if active == "custom" {
-                ui.label("clé api");
+                ui.label(crate::i18n::t("clé api"));
                 ui.add(egui::TextEdit::singleline(&mut s.key).password(true).desired_width(380.0));
                 ui.end_row();
             }
@@ -426,14 +439,14 @@ impl App {
     /// Retourne true pour ouvrir la fenêtre de mise à jour.
     fn tab_updates(&mut self, ui: &mut egui::Ui) -> bool {
         let p = theme::pal();
-        ui.label(caps("mises à jour"));
+        ui.label(caps(&crate::i18n::t("mises à jour")));
         ui.label(format!("version installée : v{}", updater::CURRENT));
-        ui.checkbox(&mut self.prefs.auto_update, "vérifier au démarrage (toutes les 6 h)");
+        ui.checkbox(&mut self.prefs.auto_update, crate::i18n::t("vérifier au démarrage (toutes les 6 h)"));
         ui.label(RichText::new(format!("Source : releases de github.com/{}", updater::REPO)).color(p.muted).size(11.0));
         ui.add_space(8.0);
-        let check = ui.button("vérifier maintenant").clicked();
+        let check = ui.button(crate::i18n::t("vérifier maintenant")).clicked();
         ui.add_space(16.0);
-        ui.label(caps("système"));
+        ui.label(caps(&crate::i18n::t("système")));
         let label = if cfg!(windows) { "Aryadne dans le menu Démarrer" } else { "Aryadne dans le menu des applications (avec son icône)" };
         if ui.checkbox(&mut self.prefs.menu_entry, label).changed() {
             if self.prefs.menu_entry {
@@ -445,8 +458,8 @@ impl App {
             }
         }
         if cfg!(target_os = "linux") {
-            ui.checkbox(&mut self.prefs.wayland_native, "Wayland natif (plus net si l'écran est mis à l'échelle, mais le glisser-déposer de fichiers ne marche pas)");
-            ui.label(RichText::new("Prend effet au prochain démarrage.").color(p.muted).size(11.0));
+            ui.checkbox(&mut self.prefs.wayland_native, crate::i18n::t("Wayland natif (plus net si l'écran est mis à l'échelle, mais le glisser-déposer de fichiers ne marche pas)"));
+            ui.label(RichText::new(crate::i18n::t("Prend effet au prochain démarrage.")).color(p.muted).size(11.0));
         }
         check
     }
@@ -454,7 +467,7 @@ impl App {
 
 fn tab_shortcuts(ui: &mut egui::Ui) {
     let p = theme::pal();
-    ui.label(caps("raccourcis"));
+    ui.label(caps(&crate::i18n::t("raccourcis")));
     let rows = [
         ("Ctrl+P", "ouvrir un fichier, ou créer une note"),
         ("Ctrl+N", "nouvelle note"),

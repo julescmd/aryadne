@@ -4,6 +4,7 @@ mod cloud;
 mod convert;
 mod uvedit;
 mod zoomview;
+mod i18n;
 mod cloud_ui;
 mod lsp;
 mod ai;
@@ -259,6 +260,7 @@ impl App {
         egui_extras::install_image_loaders(ctx);
         theme::install_fonts(ctx);
         let prefs = settings::Prefs::load();
+        i18n::set(if prefs.lang.is_empty() { "fr" } else { &prefs.lang });
         prefs.apply(ctx);
         let mut app = Self { view: Some(View::Files), ai: Some(ai::Settings::load()), prefs, ..Default::default() };
         app.ctx = Some(ctx.clone());
@@ -723,7 +725,7 @@ impl App {
             .show(ui, |ui| {
                 ui.horizontal_centered(|ui| {
                     theme::mark(ui, 16.0);
-                    ui.label(RichText::new("aryadne").family(theme::bold()));
+                    ui.label(RichText::new(crate::i18n::t("aryadne")).family(theme::bold()));
                     // Menu du coffre : tout ce qui concerne les fichiers et le dossier
                     let path = self.root();
                     let short = path.split(['/', '\\']).filter(|s| !s.is_empty()).last().unwrap_or("").to_string();
@@ -738,7 +740,7 @@ impl App {
                             ("matériau en nodes", extras::Cmd::NewMaterial),
                             ("compositing en nodes", extras::Cmd::NewCompositor),
                         ] {
-                            if ui.button(label).clicked() {
+                            if ui.button(crate::i18n::t(label)).clicked() {
                                 cmd = Some(c);
                             }
                         }
@@ -749,14 +751,14 @@ impl App {
                             ("image depuis une URL…", extras::Cmd::ImportUrl),
                             ("transfert entre ordinateurs…", extras::Cmd::Transfer),
                         ] {
-                            if ui.button(label).clicked() {
+                            if ui.button(crate::i18n::t(label)).clicked() {
                                 cmd = Some(c);
                             }
                         }
                         ui.separator();
                         let recent: Vec<String> = load_config("recent_vaults").map(|t| t.lines().map(String::from).filter(|r| *r != path).collect()).unwrap_or_default();
                         if !recent.is_empty() {
-                            ui.menu_button("coffres récents", |ui| {
+                            ui.menu_button(crate::i18n::t("coffres récents"), |ui| {
                                 for r in recent {
                                     if ui.button(&r).clicked() {
                                         open_vault = Some(r);
@@ -771,7 +773,7 @@ impl App {
                             ("ouvrir le dossier", extras::Cmd::OpenVaultFolder),
                             ("changer de coffre…", extras::Cmd::ChangeVault),
                         ] {
-                            if ui.button(label).clicked() {
+                            if ui.button(crate::i18n::t(label)).clicked() {
                                 cmd = Some(c);
                             }
                         }
@@ -782,7 +784,7 @@ impl App {
                     for (label, v) in tabs {
                         let active = v == self.view();
                         let color = if active { p.text } else { p.muted };
-                        let text = RichText::new(label).color(color);
+                        let text = RichText::new(crate::i18n::t(label)).color(color);
                         let r = ui.add(egui::Label::new(if active { text.family(theme::bold()) } else { text }).sense(egui::Sense::click()));
                         if active {
                             let y = ui.max_rect().bottom();
@@ -794,20 +796,20 @@ impl App {
                         ui.add_space(8.0);
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.button("réglages").clicked() {
+                        if ui.button(crate::i18n::t("réglages")).clicked() {
                             cmd = Some(extras::Cmd::Settings(settings::Tab::Appearance));
                         }
                         // Fenêtre : thème, épingler, compact
-                        let (r, _) = egui::containers::menu::MenuButton::new("fenêtre ▾").ui(ui, |ui| {
+                        let (r, _) = egui::containers::menu::MenuButton::new(crate::i18n::t("fenêtre ▾")).ui(ui, |ui| {
                             ui.set_min_width(220.0);
                             if ui.button(if theme::is_dark() { "thème clair" } else { "thème sombre" }).clicked() {
                                 cmd = Some(extras::Cmd::Theme);
                             }
                             let mut pinned = self.pinned;
-                            if ui.checkbox(&mut pinned, "épingler au-dessus").on_hover_text("Garder Aryadne au-dessus de Blender et des autres fenêtres").changed() {
+                            if ui.checkbox(&mut pinned, crate::i18n::t("épingler au-dessus")).on_hover_text(crate::i18n::t("Garder Aryadne au-dessus de Blender et des autres fenêtres")).changed() {
                                 cmd = Some(extras::Cmd::Pin);
                             }
-                            if ui.button("mode compact   Ctrl+Maj+M").clicked() {
+                            if ui.button(crate::i18n::t("mode compact   Ctrl+Maj+M")).clicked() {
                                 cmd = Some(extras::Cmd::Compact);
                             }
                             ui.separator();
@@ -816,19 +818,19 @@ impl App {
                             }
                         });
                         if self.pinned {
-                            r.on_hover_text("épinglé");
+                            r.on_hover_text(crate::i18n::t("épinglé"));
                         }
-                        let ai_btn = egui::Button::new(if self.assistant_open { RichText::new("assistant").color(p.on_accent) } else { RichText::new("assistant") }).fill(if self.assistant_open { p.accent } else { p.bg });
-                        if ui.add(ai_btn).on_hover_text("Assistant IA à côté de tout (Ctrl+L)").clicked() {
+                        let ai_btn = egui::Button::new(if self.assistant_open { RichText::new(crate::i18n::t("assistant")).color(p.on_accent) } else { RichText::new(crate::i18n::t("assistant")) }).fill(if self.assistant_open { p.accent } else { p.bg });
+                        if ui.add(ai_btn).on_hover_text(crate::i18n::t("Assistant IA à côté de tout (Ctrl+L)")).clicked() {
                             cmd = Some(extras::Cmd::Assistant);
                         }
-                        let pal = egui::Button::new(RichText::new("⌘ commandes").color(p.muted)).fill(p.panel);
-                        if ui.add(pal).on_hover_text("Toutes les actions (Ctrl+Maj+P)").clicked() {
+                        let pal = egui::Button::new(RichText::new(crate::i18n::t("⌘ commandes")).color(p.muted)).fill(p.panel);
+                        if ui.add(pal).on_hover_text(crate::i18n::t("Toutes les actions (Ctrl+Maj+P)")).clicked() {
                             self.palette = Some((String::new(), 0));
                         }
                         if let Some(r) = self.updater.update_available() {
                             let b = egui::Button::new(RichText::new(format!("↑ {}", r.version)).color(p.on_accent).family(theme::bold())).fill(p.accent).stroke(egui::Stroke::NONE);
-                            if ui.add(b).on_hover_text("Nouvelle version disponible").clicked() {
+                            if ui.add(b).on_hover_text(crate::i18n::t("Nouvelle version disponible")).clicked() {
                                 self.dialog = Some(Dialog::Update);
                             }
                         }
@@ -863,24 +865,24 @@ impl App {
                         View::Files => ("ÉDITION", p.accent),
                     };
                     egui::Frame::new().fill(color).inner_margin(egui::Margin::symmetric(10, 4)).show(ui, |ui| {
-                        ui.label(RichText::new(mode).color(p.on_accent).family(theme::bold()).size(11.0));
+                        ui.label(RichText::new(crate::i18n::t(mode)).color(p.on_accent).family(theme::bold()).size(11.0));
                     });
                     if let Some(d) = self.current() {
                         ui.label(RichText::new(&d.rel).size(11.5));
                         if let Content::Text(t) = &d.content {
                             let lang = if vault::is_md(&d.rel) { "markdown".to_string() } else if ext(&d.rel).is_empty() { "texte".into() } else { ext(&d.rel) };
                             ui.label(RichText::new(lang).color(p.muted).size(11.5));
-                            ui.label(RichText::new(format!("{} lignes · {} mots", t.lines().count(), t.split_whitespace().count())).color(p.muted).size(11.5));
-                            ui.label(RichText::new(if d.dirty_since.is_some() { "● modifié" } else { "sauvé" }).color(p.muted).size(11.5));
+                            ui.label(RichText::new(format!("{} {} · {} {}", t.lines().count(), crate::i18n::t("lignes"), t.split_whitespace().count(), crate::i18n::t("mots"))).color(p.muted).size(11.5));
+                            ui.label(RichText::new(crate::i18n::t(if d.dirty_since.is_some() { "● modifié" } else { "sauvé" })).color(p.muted).size(11.5));
                             match &d.code.lsp {
                                 Some(l) => {
                                     let dead = l.server.dead.lock().ok().and_then(|x| x.clone());
                                     let (t, c) = if dead.is_some() { (format!("lsp : {} arrêté", l.server.name), p.missing) } else { (format!("lsp : {}", l.server.name), p.muted) };
-                                    ui.label(RichText::new(t).color(c).size(11.5)).on_hover_text("Complétion intelligente, erreurs en direct, survol, F12 : définition");
+                                    ui.label(RichText::new(t).color(c).size(11.5)).on_hover_text(crate::i18n::t("Complétion intelligente, erreurs en direct, survol, F12 : définition"));
                                 }
                                 None => {
                                     if let Some(sv) = lsp::suggested(&ext(&d.rel)) {
-                                        ui.label(RichText::new("sans lsp").color(p.muted.gamma_multiply(0.7)).size(11.5)).on_hover_text(format!("Installe « {sv} » pour la complétion intelligente, les erreurs en direct et F12 (définition). Aryadne le détecte tout seul."));
+                                        ui.label(RichText::new(crate::i18n::t("sans lsp")).color(p.muted.gamma_multiply(0.7)).size(11.5)).on_hover_text(format!("Installe « {sv} » pour la complétion intelligente, les erreurs en direct et F12 (définition). Aryadne le détecte tout seul."));
                                     }
                                 }
                             }
@@ -888,14 +890,14 @@ impl App {
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.add_space(8.0);
-                        if ui.add(egui::Button::new(RichText::new(format!("v{}", updater::CURRENT)).color(p.muted).size(11.0)).frame(false)).on_hover_text("Mises à jour").clicked() {
+                        if ui.add(egui::Button::new(RichText::new(format!("v{}", updater::CURRENT)).color(p.muted).size(11.0)).frame(false)).on_hover_text(crate::i18n::t("Mises à jour")).clicked() {
                             self.dialog = Some(Dialog::Update);
                         }
-                        ui.label(RichText::new("^P ouvrir · ^⇧P commandes").color(p.muted).size(11.0));
+                        ui.label(RichText::new(crate::i18n::t("^P ouvrir · ^⇧P commandes")).color(p.muted).size(11.0));
                         self.cloud_widget(ui);
                         if self.backup_rx.is_some() {
                             ui.add(egui::Spinner::new().size(10.0));
-                            ui.label(RichText::new("sauvegarde…").color(p.muted).size(11.0));
+                            ui.label(RichText::new(crate::i18n::t("sauvegarde…")).color(p.muted).size(11.0));
                         }
                         self.timer_widget(ui);
                     });
@@ -917,10 +919,10 @@ impl App {
                 ui.horizontal(|ui| {
                     ui.label(RichText::new(format!("◧ {name}")).family(theme::bold()));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.small_button("×").on_hover_text("fermer la vue côte à côte").clicked() {
+                        if ui.small_button("×").on_hover_text(crate::i18n::t("fermer la vue côte à côte")).clicked() {
                             self.split = None;
                         }
-                        if ui.small_button("⇄").on_hover_text("échanger les deux côtés").clicked() {
+                        if ui.small_button("⇄").on_hover_text(crate::i18n::t("échanger les deux côtés")).clicked() {
                             self.split_swap = true;
                         }
                     });
@@ -943,7 +945,7 @@ impl App {
                                 ui.spacing_mut().item_spacing.x = 8.0;
                                 ui.label(RichText::new(format!("{name}{mark}")).color(if active { p.text } else { p.muted }).size(12.0));
                                 let x = ui.add(egui::Label::new(RichText::new("×").color(p.muted)).sense(egui::Sense::click()));
-                                if x.on_hover_text("Fermer (Ctrl+W)").clicked() {
+                                if x.on_hover_text(crate::i18n::t("Fermer (Ctrl+W)")).clicked() {
                                     self.actions.push(Action::Close(i));
                                 }
                             });
@@ -1046,7 +1048,7 @@ impl App {
         egui::CentralPanel::default().frame(egui::Frame::new().fill(p.bg)).show(ui, |ui| {
             if self.docs.is_empty() {
                 ui.centered_and_justified(|ui| {
-                    ui.label(RichText::new("aucun fichier ouvert\n\n^P ouvrir · ^N nouvelle note · ^G cerveau").color(p.muted));
+                    ui.label(RichText::new(crate::i18n::t("aucun fichier ouvert\n\n^P ouvrir · ^N nouvelle note · ^G cerveau")).color(p.muted));
                 });
                 return;
             }
@@ -1077,14 +1079,14 @@ impl App {
                         // « ouvrir ▾ » : application par défaut, au choix, ou dans le dossier
                         let ext_label = if rel.to_lowercase().ends_with(".blend") { "dans Blender" } else { "avec l'app par défaut" };
                         let mut which = 0;
-                        egui::containers::menu::MenuButton::new("ouvrir ▾").ui(ui, |ui| {
+                        egui::containers::menu::MenuButton::new(crate::i18n::t("ouvrir ▾")).ui(ui, |ui| {
                             if ui.button(ext_label).clicked() {
                                 which = 1;
                             }
-                            if ui.button("avec…").on_hover_text("Choisir l'application").clicked() {
+                            if ui.button(crate::i18n::t("avec…")).on_hover_text(crate::i18n::t("Choisir l'application")).clicked() {
                                 which = 2;
                             }
-                            if ui.button("afficher dans le dossier").clicked() {
+                            if ui.button(crate::i18n::t("afficher dans le dossier")).clicked() {
                                 which = 3;
                             }
                         });
@@ -1105,15 +1107,15 @@ impl App {
                         }
                         if matches!(self.docs[i].content, Content::Text(_)) && !vault::is_md(&rel) {
                             let mut act = 0;
-                            egui::containers::menu::MenuButton::new("code ▾").ui(ui, |ui| {
+                            egui::containers::menu::MenuButton::new(crate::i18n::t("code ▾")).ui(ui, |ui| {
                                 ui.set_min_width(260.0);
                                 for (k, l) in [(1, "formater le fichier   Alt+Maj+F"), (2, "aller à la ligne   Ctrl+G"), (3, "aller au symbole   Ctrl+Maj+O"), (4, "retour à la ligne   Alt+Z"), (5, "terminal   Ctrl+`"), (6, "vérifier maintenant"), (7, "tout replier"), (8, "tout déplier"), (9, "vue côte à côte")] {
-                                    if ui.button(l).clicked() {
+                                    if ui.button(crate::i18n::t(l)).clicked() {
                                         act = k;
                                     }
                                 }
                                 ui.separator();
-                                ui.label(RichText::new("Ctrl+D : occurrence suivante (plusieurs curseurs)\nCtrl+Maj+L : toutes les occurrences\nCtrl+L : sélectionner la ligne\nAlt+↑↓ : déplacer · Alt+Maj+↑↓ : dupliquer\nCtrl+/ : commenter · Ctrl+] [ : indenter\nCtrl+Entrée : ligne en dessous\nCtrl+Espace : suggestions · Tab : extrait\nCtrl+Maj+[ ] : replier, déplier\nF12 : aller à la définition (LSP)").color(p.muted).size(10.5));
+                                ui.label(RichText::new(crate::i18n::t("Ctrl+D : occurrence suivante (plusieurs curseurs)\nCtrl+Maj+L : toutes les occurrences\nCtrl+L : sélectionner la ligne\nAlt+↑↓ : déplacer · Alt+Maj+↑↓ : dupliquer\nCtrl+/ : commenter · Ctrl+] [ : indenter\nCtrl+Entrée : ligne en dessous\nCtrl+Espace : suggestions · Tab : extrait\nCtrl+Maj+[ ] : replier, déplier\nF12 : aller à la définition (LSP)")).color(p.muted).size(10.5));
                             });
                             match act {
                                 1 => self.want_format = true,
@@ -1146,30 +1148,30 @@ impl App {
                                 _ => {}
                             }
                         }
-                        if rel.to_lowercase().ends_with(".py") && ui.button("▶ Blender").on_hover_text("Lance le script dans Blender en arrière-plan (blender --background --python)").clicked() {
+                        if rel.to_lowercase().ends_with(".py") && ui.button(crate::i18n::t("▶ Blender")).on_hover_text(crate::i18n::t("Lance le script dans Blender en arrière-plan (blender --background --python)")).clicked() {
                             self.want_blender = true;
                         }
-                        if extras::runner_for(&rel).is_some() && ui.button("▶ exécuter").on_hover_text("Lance le script et affiche sa sortie (F5)").clicked() {
+                        if extras::runner_for(&rel).is_some() && ui.button(crate::i18n::t("▶ exécuter")).on_hover_text(crate::i18n::t("Lance le script et affiche sa sortie (F5)")).clicked() {
                             *run_now = true;
                         }
-                        if matches!(self.docs[i].content, Content::Text(_)) && ui.button("historique").on_hover_text("Versions précédentes de ce fichier").clicked() {
+                        if matches!(self.docs[i].content, Content::Text(_)) && ui.button(crate::i18n::t("historique")).on_hover_text(crate::i18n::t("Versions précédentes de ce fichier")).clicked() {
                             self.flush_all();
                             self.history_dlg = Some(extras::HistoryDlg { versions: extras::history_list(&root, &rel), rel: rel.clone(), sel: 0, diff: true });
                         }
-                        if live::is_previewable(&rel) && ui.button("aperçu live").on_hover_text("Ouvre la page dans ton navigateur ; elle se recharge à chaque enregistrement").clicked() {
+                        if live::is_previewable(&rel) && ui.button(crate::i18n::t("aperçu live")).on_hover_text(crate::i18n::t("Ouvre la page dans ton navigateur ; elle se recharge à chaque enregistrement")).clicked() {
                             self.flush_all();
                             match live::open(&root, &rel) {
                                 Ok(url) => self.toast = Some((format!("aperçu : {url}"), Instant::now())),
                                 Err(e) => self.error = Some(e),
                             }
                         }
-                        if can_summarize && ui.button("résumer").on_hover_text("Résumé IA de ce fichier").clicked() {
+                        if can_summarize && ui.button(crate::i18n::t("résumer")).on_hover_text(crate::i18n::t("Résumé IA de ce fichier")).clicked() {
                             self.actions.push(Action::Summarize);
                         }
                         if is_md {
                             let d = &mut self.docs[i];
                             let label = if d.preview { "éditer" } else { "lire" };
-                            if ui.button(label).on_hover_text("Ctrl+E").clicked() {
+                            if ui.button(crate::i18n::t(label)).on_hover_text(crate::i18n::t("Ctrl+E")).clicked() {
                                 d.preview = !d.preview;
                             }
                         }
@@ -1185,7 +1187,7 @@ impl App {
                     ui.vertical_centered(|ui| {
                         ui.label(RichText::new(msg.as_str()).color(p.muted));
                         ui.add_space(10.0);
-                        open = ui.button("ouvrir avec l'app par défaut").clicked();
+                        open = ui.button(crate::i18n::t("ouvrir avec l'app par défaut")).clicked();
                     });
                     if open {
                         let r = vault::safe(&root, &rel).and_then(|p| settings::open_external(&p));
@@ -1198,12 +1200,12 @@ impl App {
                 Content::NeedFfmpeg(job) => {
                     let mut reopen = false;
                     egui::Frame::new().inner_margin(30).show(ui, |ui| {
-                        ui.label(RichText::new("Les vidéos ont besoin de ffmpeg.").family(theme::bold()));
+                        ui.label(RichText::new(crate::i18n::t("Les vidéos ont besoin de ffmpeg.")).family(theme::bold()));
                         ui.label(RichText::new(format!("Aryadne peut l'installer pour toi, sans droits admin (~100 Mo, dans {}).", ffmpeg::install_dir().display())).color(p.muted).size(12.0));
                         ui.add_space(10.0);
                         match job {
                             None => {
-                                let b = egui::Button::new(RichText::new("installer ffmpeg").color(p.on_accent).family(theme::bold())).fill(p.accent).stroke(egui::Stroke::NONE);
+                                let b = egui::Button::new(RichText::new(crate::i18n::t("installer ffmpeg")).color(p.on_accent).family(theme::bold())).fill(p.accent).stroke(egui::Stroke::NONE);
                                 if ui.add(b).clicked() {
                                     *job = Some(ffmpeg::install(ui.ctx().clone()));
                                 }
@@ -1300,7 +1302,7 @@ impl App {
                         images::Slot::Loading => {
                             ui.horizontal(|ui| {
                                 ui.spinner();
-                                ui.label(RichText::new("chargement…").color(p.muted));
+                                ui.label(RichText::new(crate::i18n::t("chargement…")).color(p.muted));
                             });
                         }
                         images::Slot::Failed(e) => {
@@ -1368,7 +1370,7 @@ impl App {
                         egui::Frame::new().fill(p.missing.gamma_multiply(0.12)).inner_margin(egui::Margin::symmetric(12, 4)).show(ui, |ui| {
                             ui.set_width(ui.available_width());
                             let t = format!("⚠ ligne {} : {}{}", d.line + 1, d.msg, if n > 1 { format!("  (+{} autre(s))", n - 1) } else { String::new() });
-                            if ui.add(egui::Button::new(RichText::new(t).color(p.missing).size(11.5)).frame(false)).on_hover_text("aller à l'erreur").clicked() {
+                            if ui.add(egui::Button::new(RichText::new(t).color(p.missing).size(11.5)).frame(false)).on_hover_text(crate::i18n::t("aller à l'erreur")).clicked() {
                                 ed.jump = Some(d.line);
                             }
                         });
@@ -1437,7 +1439,7 @@ impl App {
                     // Structure : fonctions, classes, titres… (clic = aller à la ligne)
                     let syms = self.current().and_then(|d| if let Content::Text(t) = &d.content { Some(code::symbols(t, &if vault::is_md(&d.rel) { "md".to_string() } else { ext(&d.rel) })) } else { None }).unwrap_or_default();
                     if !syms.is_empty() {
-                        ui.label(caps(&format!("structure · {}", syms.len())));
+                        ui.label(caps(&format!("{} · {}", crate::i18n::t("structure"), syms.len())));
                         ui.add_space(4.0);
                         let mut jump = None;
                         for sy in syms.iter().take(300) {
@@ -1461,10 +1463,10 @@ impl App {
                         ui.add_space(16.0);
                     }
                     if is_md {
-                        ui.label(caps(&format!("liens entrants · {}", self.backlinks.len())));
+                        ui.label(caps(&format!("{} · {}", crate::i18n::t("liens entrants"), self.backlinks.len())));
                         ui.add_space(4.0);
                         if self.backlinks.is_empty() {
-                            ui.label(RichText::new("aucune note ne pointe ici").color(p.muted).size(11.5));
+                            ui.label(RichText::new(crate::i18n::t("aucune note ne pointe ici")).color(p.muted).size(11.5));
                         }
                         for b in self.backlinks.clone() {
                             let r = egui::Frame::new().fill(p.bg).stroke(egui::Stroke::new(1.0, p.line)).inner_margin(8).show(ui, |ui| {
@@ -1484,12 +1486,12 @@ impl App {
                         ui.add_space(16.0);
                     }
 
-                    ui.label(caps("résumé ia"));
+                    ui.label(caps(&crate::i18n::t("résumé ia")));
                     ui.add_space(4.0);
                     let mut save = None;
                     match &self.summary {
                         None => {
-                            ui.label(RichText::new("ouvre un fichier et clique sur « résumer »").color(p.muted).size(11.5));
+                            ui.label(RichText::new(crate::i18n::t("ouvre un fichier et clique sur « résumer »")).color(p.muted).size(11.5));
                         }
                         Some((rel, Summary::Loading)) => {
                             ui.horizontal(|ui| {
@@ -1500,7 +1502,7 @@ impl App {
                         Some((rel, Summary::Failed(e))) => {
                             ui.label(RichText::new(rel).color(p.muted).size(11.0));
                             ui.label(RichText::new(e).color(p.missing).size(12.0));
-                            if ui.button("réglages ia").clicked() {
+                            if ui.button(crate::i18n::t("réglages ia")).clicked() {
                                 self.open_settings(ui.ctx());
                             }
                         }
@@ -1515,10 +1517,10 @@ impl App {
                                 }
                             });
                             ui.horizontal(|ui| {
-                                if ui.button("copier").clicked() {
+                                if ui.button(crate::i18n::t("copier")).clicked() {
                                     ui.ctx().copy_text(text.clone());
                                 }
-                                if ui.button("enregistrer en note").clicked() {
+                                if ui.button(crate::i18n::t("enregistrer en note")).clicked() {
                                     save = Some((rel.clone(), text.clone()));
                                 }
                             });
@@ -1553,7 +1555,7 @@ impl App {
             egui::Frame::new().fill(p.panel).stroke(egui::Stroke::new(1.0, p.line)).inner_margin(egui::Margin::symmetric(12, 5)).show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 ui.horizontal(|ui| {
-                    ui.label(caps("cerveau"));
+                    ui.label(caps(&crate::i18n::t("cerveau")));
                     ui.add_space(8.0);
                     // Fil d'Ariane : on remonte d'un clic
                     let mut go: Option<String> = None;
@@ -1574,20 +1576,20 @@ impl App {
                         self.brain.recenter();
                     }
                     ui.add_space(12.0);
-                    if ui.checkbox(&mut self.brain.with_folders, "dossiers").changed() {
+                    if ui.checkbox(&mut self.brain.with_folders, crate::i18n::t("dossiers")).changed() {
                         self.brain.dirty = true;
                     }
-                    if ui.checkbox(&mut self.brain.with_files, "tous les fichiers").changed() {
+                    if ui.checkbox(&mut self.brain.with_files, crate::i18n::t("tous les fichiers")).changed() {
                         self.brain.dirty = true;
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.button("recentrer").clicked() {
+                        if ui.button(crate::i18n::t("recentrer")).clicked() {
                             self.brain.recenter();
                         }
                         let busy = self.organize.as_ref().is_some_and(|o| o.rx.is_some());
                         if busy {
                             ui.spinner();
-                        } else if ui.button("ranger avec l'IA").on_hover_text("L'IA propose un rangement de ce dossier ; tu choisis quoi appliquer").clicked() {
+                        } else if ui.button(crate::i18n::t("ranger avec l'IA")).on_hover_text(crate::i18n::t("L'IA propose un rangement de ce dossier ; tu choisis quoi appliquer")).clicked() {
                             self.start_organize(ui.ctx());
                         }
                     });
@@ -1671,14 +1673,14 @@ impl App {
         let mut apply = false;
         egui::Modal::new(egui::Id::unique("organize")).frame(egui::Frame::new().fill(p.bg).stroke(egui::Stroke::new(1.0, p.line)).inner_margin(16)).show(ctx, |ui| {
             ui.set_width(620.0);
-            ui.label(caps("rangement proposé par l'ia"));
+            ui.label(caps(&crate::i18n::t("rangement proposé par l'ia")));
             ui.add_space(6.0);
             if let Some(e) = &o.error {
                 ui.label(RichText::new(e).color(p.missing));
             } else if o.moves.is_empty() {
-                ui.label(RichText::new("Rien à ranger : tout semble déjà à sa place.").color(p.muted));
+                ui.label(RichText::new(crate::i18n::t("Rien à ranger : tout semble déjà à sa place.")).color(p.muted));
             } else {
-                ui.label(RichText::new("Décoche ce que tu ne veux pas. Rien n'est déplacé avant « appliquer ».").color(p.muted).size(11.5));
+                ui.label(RichText::new(crate::i18n::t("Décoche ce que tu ne veux pas. Rien n'est déplacé avant « appliquer ».")).color(p.muted).size(11.5));
                 ui.add_space(6.0);
                 egui::ScrollArea::vertical().max_height(380.0).show(ui, |ui| {
                     for (on, m) in &mut o.moves {
@@ -1701,7 +1703,7 @@ impl App {
                     let b = egui::Button::new(RichText::new(format!("appliquer ({n})")).color(p.on_accent).family(theme::bold())).fill(p.accent).stroke(egui::Stroke::NONE);
                     apply = ui.add(b).clicked();
                 }
-                close = ui.button("fermer").clicked();
+                close = ui.button(crate::i18n::t("fermer")).clicked();
             });
         });
         let moves: Vec<OrganizeMove> = o.moves.iter().filter(|m| m.0).map(|m| m.1.clone()).collect();
@@ -1916,7 +1918,7 @@ impl App {
             egui::Frame::new().fill(p.panel).stroke(egui::Stroke::new(1.0, p.line)).inner_margin(egui::Margin::symmetric(12, 5)).show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 ui.horizontal(|ui| {
-                    ui.label(caps("board"));
+                    ui.label(caps(&crate::i18n::t("board")));
                     let current = self.board.rel.clone().unwrap_or_default();
                     let mut pick = None;
                     egui::ComboBox::from_id_salt("board-pick").selected_text(board::board_name(&current)).width(180.0).show_ui(ui, |ui| {
@@ -1929,7 +1931,7 @@ impl App {
                     if let Some(b) = pick {
                         self.open_board(b);
                     }
-                    if ui.button("+ board").clicked() {
+                    if ui.button(crate::i18n::t("+ board")).clicked() {
                         self.new_board("Moodboard");
                     }
                     ui.separator();
@@ -1950,26 +1952,26 @@ impl App {
                             }
                         }
                         ui.color_edit_button_srgba(&mut self.board.pen_color);
-                        ui.add(egui::Slider::new(&mut self.board.pen_width, 1.0..=40.0).show_value(false)).on_hover_text("épaisseur");
+                        ui.add(egui::Slider::new(&mut self.board.pen_width, 1.0..=40.0).show_value(false)).on_hover_text(crate::i18n::t("épaisseur"));
                     }
                     ui.separator();
-                    if ui.add_enabled(self.board.can_undo(), egui::Button::new("↶")).on_hover_text("annuler (Ctrl+Z)").clicked() {
+                    if ui.add_enabled(self.board.can_undo(), egui::Button::new("↶")).on_hover_text(crate::i18n::t("annuler (Ctrl+Z)")).clicked() {
                         self.board.undo();
                     }
-                    if ui.add_enabled(self.board.can_redo(), egui::Button::new("↷")).on_hover_text("rétablir (Ctrl+Y)").clicked() {
+                    if ui.add_enabled(self.board.can_redo(), egui::Button::new("↷")).on_hover_text(crate::i18n::t("rétablir (Ctrl+Y)")).clicked() {
                         self.board.redo();
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.button("cadrer").clicked() {
+                        if ui.button(crate::i18n::t("cadrer")).clicked() {
                             self.board.fit();
                         }
                     });
                 });
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new("auto").color(p.accent).family(theme::bold()));
-                    ui.add(egui::TextEdit::singleline(&mut self.auto_query).hint_text("mots-clés : forêt brume…").desired_width(200.0));
-                    if ui.button("par mots-clés").on_hover_text("Ajoute les images dont le nom, le dossier ou les notes qui les citent correspondent").clicked() {
+                    ui.label(RichText::new(crate::i18n::t("auto")).color(p.accent).family(theme::bold()));
+                    ui.add(egui::TextEdit::singleline(&mut self.auto_query).hint_text(crate::i18n::t("mots-clés : forêt brume…")).desired_width(200.0));
+                    if ui.button(crate::i18n::t("par mots-clés")).on_hover_text(crate::i18n::t("Ajoute les images dont le nom, le dossier ou les notes qui les citent correspondent")).clicked() {
                         let q = self.auto_query.clone();
                         let n = self.auto_board_keywords(&q);
                         self.toast(if n == 0 { "aucune image ne correspond".to_string() } else { format!("{n} images ajoutées") });
@@ -1978,7 +1980,7 @@ impl App {
                         .then(|| self.board.selection[0])
                         .and_then(|i| self.board.data.items.get(i))
                         .and_then(|it| if let board::Kind::Image { rel, .. } = &it.kind { Some(rel.clone()) } else { None });
-                    let btn = ui.add_enabled(seed.is_some(), egui::Button::new("par couleurs")).on_hover_text("Ajoute les refs aux couleurs proches de l'image sélectionnée").on_disabled_hover_text("sélectionne d'abord une seule image du board");
+                    let btn = ui.add_enabled(seed.is_some(), egui::Button::new(crate::i18n::t("par couleurs"))).on_hover_text(crate::i18n::t("Ajoute les refs aux couleurs proches de l'image sélectionnée")).on_disabled_hover_text("sélectionne d'abord une seule image du board");
                     if btn.clicked() {
                         if let Some(seed) = seed {
                             match self.auto_board_colors(&seed) {
@@ -2048,7 +2050,7 @@ impl App {
             egui::Panel::right("ref-detail").resizable(true).default_size(320.0).min_size(240.0)
                 .frame(egui::Frame::new().fill(p.panel).stroke(egui::Stroke::new(1.0, p.line)).inner_margin(12))
                 .show(ui, |ui| {
-                    ui.label(caps("référence"));
+                    ui.label(caps(&crate::i18n::t("référence")));
                     ui.label(RichText::new(&sel).size(11.5));
                     ui.add_space(6.0);
                     match self.images.get(&sel, images::Size::Full) {
@@ -2058,7 +2060,7 @@ impl App {
                             ui.add(egui::Image::new(&l.tex).fit_to_exact_size(s * scale));
                             ui.label(RichText::new(format!("{} × {} px", l.dims[0], l.dims[1])).color(p.muted).size(11.0));
                             ui.add_space(6.0);
-                            ui.label(caps("palette · clic pour copier"));
+                            ui.label(caps(&crate::i18n::t("palette · clic pour copier")));
                             ui.horizontal(|ui| {
                                 ui.spacing_mut().item_spacing.x = 4.0;
                                 let w = ((ui.available_width() - 4.0 * (l.palette.len() as f32 - 1.0)) / l.palette.len().max(1) as f32).max(12.0);
@@ -2086,16 +2088,16 @@ impl App {
                     }
                     ui.add_space(10.0);
                     ui.horizontal_wrapped(|ui| {
-                        if ui.button("ouvrir").clicked() {
+                        if ui.button(crate::i18n::t("ouvrir")).clicked() {
                             self.actions.push(Action::Open(sel.clone()));
                         }
-                        if ui.button("ajouter au board").clicked() {
+                        if ui.button(crate::i18n::t("ajouter au board")).clicked() {
                             self.ensure_board();
                             let c = self.board.view_center;
                             self.board.drop_file(&sel, c, &mut self.images);
                             self.toast(format!("ajouté à « {} »", board::board_name(self.board.rel.as_deref().unwrap_or(""))));
                         }
-                        if ui.button("board auto (couleurs)").on_hover_text("Ajoute cette image et les refs aux couleurs proches au board").clicked() {
+                        if ui.button(crate::i18n::t("board auto (couleurs)")).on_hover_text(crate::i18n::t("Ajoute cette image et les refs aux couleurs proches au board")).clicked() {
                             self.ensure_board();
                             match self.auto_board_colors(&sel) {
                                 Ok(n) => {
@@ -2105,7 +2107,7 @@ impl App {
                                 Err(e) => self.toast(e),
                             }
                         }
-                        if ui.button("explorateur").clicked() {
+                        if ui.button(crate::i18n::t("explorateur")).clicked() {
                             self.selected = Some(sel.clone());
                             self.files.reveal(&sel);
                         }
@@ -2118,7 +2120,7 @@ impl App {
                 ui.set_width(ui.available_width());
                 ui.horizontal(|ui| {
                     ui.label(caps(&format!("refs · {}", imgs.len())));
-                    ui.add(egui::TextEdit::singleline(&mut self.refs.filter).hint_text("filtrer par nom ou dossier").desired_width(200.0));
+                    ui.add(egui::TextEdit::singleline(&mut self.refs.filter).hint_text(crate::i18n::t("filtrer par nom ou dossier")).desired_width(200.0));
                     ui.separator();
                     for (s, label) in [(RefSort::Recent, "récentes"), (RefSort::Name, "nom"), (RefSort::Color, "couleur")] {
                         if ui.selectable_label(self.refs.sort == s, label).clicked() {
@@ -2127,17 +2129,17 @@ impl App {
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.add(egui::Slider::new(&mut self.refs.size, 90.0..=340.0).show_value(false));
-                        ui.label(RichText::new("taille").color(p.muted).size(11.0));
+                        ui.label(RichText::new(crate::i18n::t("taille")).color(p.muted).size(11.0));
                     });
                 });
             });
             if imgs.is_empty() {
                 ui.centered_and_justified(|ui| {
-                    ui.label(RichText::new("aucune image\n\nglisse des images dans la fenêtre, ou :").color(p.muted));
-                    if ui.button("importer des fichiers…").clicked() {
+                    ui.label(RichText::new(crate::i18n::t("aucune image\n\nglisse des images dans la fenêtre, ou :")).color(p.muted));
+                    if ui.button(crate::i18n::t("importer des fichiers…")).clicked() {
                         self.pick_import(false);
                     }
-                    if ui.button("lier un dossier…").clicked() {
+                    if ui.button(crate::i18n::t("lier un dossier…")).clicked() {
                         self.pick_import(true);
                     }
                 });
@@ -2252,12 +2254,12 @@ impl App {
             .frame(egui::Frame::new().fill(p.panel).stroke(egui::Stroke::new(1.0, p.line)).inner_margin(12))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label(caps("assistant"));
+                    ui.label(caps(&crate::i18n::t("assistant")));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.small_button("×").on_hover_text("Ctrl+L").clicked() {
+                        if ui.small_button("×").on_hover_text(crate::i18n::t("Ctrl+L")).clicked() {
                             self.assistant_open = false;
                         }
-                        if ui.small_button("vider").clicked() {
+                        if ui.small_button(crate::i18n::t("vider")).clicked() {
                             self.assistant.msgs.clear();
                         }
                     });
@@ -2288,7 +2290,7 @@ impl App {
                     let settings = self.ai.clone().unwrap_or_else(ai::Settings::load);
                     let of = self.open_file_path();
                     bar_out = Some(extras::chat_bar(ui, &mut self.assistant, &self.local, &settings, of));
-                    let edit = egui::TextEdit::multiline(&mut self.assistant.input).hint_text("demande quelque chose… (Entrée pour envoyer)").desired_rows(3).desired_width(f32::INFINITY);
+                    let edit = egui::TextEdit::multiline(&mut self.assistant.input).hint_text(crate::i18n::t("demande quelque chose… (Entrée pour envoyer)")).desired_rows(3).desired_width(f32::INFINITY);
                     let r = ui.add(edit);
                     if r.has_focus() && ui.input(|i| i.key_pressed(Key::Enter) && !i.modifiers.shift) {
                         self.assistant.input = self.assistant.input.trim_end_matches('\n').to_string();
@@ -2297,7 +2299,7 @@ impl App {
                 });
                 egui::ScrollArea::vertical().stick_to_bottom(true).auto_shrink(false).show(ui, |ui| {
                     if self.assistant.msgs.is_empty() && !self.assistant.busy() {
-                        ui.label(RichText::new("Pose une question sur ce que tu as à l'écran. Les blocs de code proposés peuvent être insérés directement dans le fichier ouvert.").color(p.muted).size(11.5));
+                        ui.label(RichText::new(crate::i18n::t("Pose une question sur ce que tu as à l'écran. Les blocs de code proposés peuvent être insérés directement dans le fichier ouvert.")).color(p.muted).size(11.5));
                     }
                     let n = self.assistant.msgs.len();
                     let mut reply = None;
@@ -2318,10 +2320,10 @@ impl App {
                             for (k, block) in code_blocks(&m.text).into_iter().enumerate() {
                                 ui.horizontal(|ui| {
                                     ui.label(RichText::new(format!("bloc {}", k + 1)).color(p.muted).size(11.0));
-                                    if ui.small_button("insérer au curseur").clicked() {
+                                    if ui.small_button(crate::i18n::t("insérer au curseur")).clicked() {
                                         insert = Some(block.clone());
                                     }
-                                    if ui.small_button("copier").clicked() {
+                                    if ui.small_button(crate::i18n::t("copier")).clicked() {
                                         ui.ctx().copy_text(block.clone());
                                     }
                                 });
@@ -2394,16 +2396,16 @@ impl App {
                     };
                     ui.add_enabled(open_name.is_some(), egui::Checkbox::new(&mut self.chat.include_open, RichText::new(label).size(11.5)));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.button("nouvelle").clicked() && !self.chat.busy() {
+                        if ui.button(crate::i18n::t("nouvelle")).clicked() && !self.chat.busy() {
                             self.chat.new_conversation();
                         }
                         // Conversations enregistrées
                         let root = self.root();
-                        egui::containers::menu::MenuButton::new("conversations ▾").ui(ui, |ui| {
+                        egui::containers::menu::MenuButton::new(crate::i18n::t("conversations ▾")).ui(ui, |ui| {
                             ui.set_min_width(320.0);
                             let list = chat::list_saved(&root);
                             if list.is_empty() {
-                                ui.label(RichText::new("aucune pour l'instant : elles s'enregistrent toutes seules").color(p.muted).size(11.0));
+                                ui.label(RichText::new(crate::i18n::t("aucune pour l'instant : elles s'enregistrent toutes seules")).color(p.muted).size(11.0));
                             }
                             for (id, title, _) in list.iter().take(40) {
                                 ui.horizontal(|ui| {
@@ -2411,7 +2413,7 @@ impl App {
                                     if ui.selectable_label(cur, if title.is_empty() { "(sans titre)" } else { title.as_str() }).clicked() && !self.chat.busy() {
                                         self.chat.load_saved(&root, id);
                                     }
-                                    if ui.small_button("×").on_hover_text("supprimer").clicked() {
+                                    if ui.small_button("×").on_hover_text(crate::i18n::t("supprimer")).clicked() {
                                         let _ = std::fs::remove_file(chat::chats_dir(&root).join(format!("{id}.json")));
                                         if cur {
                                             self.chat.new_conversation();
@@ -2421,11 +2423,11 @@ impl App {
                             }
                         });
                         if !self.chat.msgs.is_empty() {
-                            if ui.add(egui::TextEdit::singleline(&mut self.chat.title).hint_text("titre").desired_width(160.0)).changed() {
+                            if ui.add(egui::TextEdit::singleline(&mut self.chat.title).hint_text(crate::i18n::t("titre")).desired_width(160.0)).changed() {
                                 self.chat.saved_len = 0;
                             }
                         }
-                        if ui.add_enabled(!self.chat.msgs.is_empty(), egui::Button::new("enregistrer en note")).clicked() {
+                        if ui.add_enabled(!self.chat.msgs.is_empty(), egui::Button::new(crate::i18n::t("enregistrer en note"))).clicked() {
                             save = true;
                         }
                         let model = self.ai.clone().unwrap_or_default().model;
@@ -2441,7 +2443,7 @@ impl App {
                 ui.horizontal(|ui| {
                     let enter = ui.input(|i| i.key_pressed(Key::Enter) && !i.modifiers.shift);
                     let edit = egui::TextEdit::multiline(&mut self.chat.input)
-                        .hint_text("demande n'importe quoi sur ton coffre…  (entrée : envoyer · maj+entrée : nouvelle ligne)")
+                        .hint_text(crate::i18n::t("demande n'importe quoi sur ton coffre…  (entrée : envoyer · maj+entrée : nouvelle ligne)"))
                         .desired_rows(2)
                         .desired_width(ui.available_width() - 90.0);
                     let r = ui.add(edit);
@@ -2452,7 +2454,7 @@ impl App {
                         }
                         send = true;
                     }
-                    let btn = egui::Button::new(RichText::new("envoyer").color(p.on_accent).family(theme::bold())).fill(p.accent).stroke(egui::Stroke::NONE).min_size(egui::vec2(80.0, 40.0));
+                    let btn = egui::Button::new(RichText::new(crate::i18n::t("envoyer")).color(p.on_accent).family(theme::bold())).fill(p.accent).stroke(egui::Stroke::NONE).min_size(egui::vec2(80.0, 40.0));
                     if ui.add_enabled(!self.chat.busy(), btn).clicked() {
                         send = true;
                     }
@@ -2469,8 +2471,8 @@ impl App {
                     ui.set_max_width(860.0_f32.min(ui.available_width()));
                     if self.chat.msgs.is_empty() && !self.chat.busy() {
                         ui.add_space(30.0);
-                        ui.label(RichText::new("chat").size(22.0).family(theme::bold()));
-                        ui.label(RichText::new("// pose une question : je cherche dans tes notes, ton code et tes fichiers, et je te renvoie vers les bons.").color(p.muted));
+                        ui.label(RichText::new(crate::i18n::t("chat")).size(22.0).family(theme::bold()));
+                        ui.label(RichText::new(crate::i18n::t("// pose une question : je cherche dans tes notes, ton code et tes fichiers, et je te renvoie vers les bons.")).color(p.muted));
                         ui.add_space(14.0);
                         for s in [
                             "Résume mes projets en cours",
@@ -2606,20 +2608,20 @@ impl App {
         let r = egui::Modal::new(egui::Id::unique("transfer")).frame(frame).show(ctx, |ui| {
             ui.set_width(560.0);
             ui.horizontal(|ui| {
-                ui.label(caps("transfert entre ordinateurs"));
+                ui.label(caps(&crate::i18n::t("transfert entre ordinateurs")));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("fermer").clicked() {
+                    if ui.button(crate::i18n::t("fermer")).clicked() {
                         keep = false;
                     }
                 });
             });
-            ui.label(RichText::new("Sur le même réseau (wifi ou câble), sans cloud et sans limite de taille. Idéal pour les fichiers 3D.").color(p.muted).size(11.5));
+            ui.label(RichText::new(crate::i18n::t("Sur le même réseau (wifi ou câble), sans cloud et sans limite de taille. Idéal pour les fichiers 3D.")).color(p.muted).size(11.5));
             ui.add_space(8.0);
             ui.horizontal(|ui| {
-                if ui.selectable_label(!send, "recevoir").clicked() {
+                if ui.selectable_label(!send, crate::i18n::t("recevoir")).clicked() {
                     send = false;
                 }
-                if ui.selectable_label(send, "envoyer").clicked() {
+                if ui.selectable_label(send, crate::i18n::t("envoyer")).clicked() {
                     send = true;
                     let (found, c) = (self.peers.clone(), ctx.clone());
                     if let Ok(mut f) = found.lock() {
@@ -2632,27 +2634,27 @@ impl App {
             if !send {
                 match &self.receiver {
                     None => {
-                        ui.label("Mets cet ordinateur en réception, puis envoie depuis l'autre.");
+                        ui.label(crate::i18n::t("Mets cet ordinateur en réception, puis envoie depuis l'autre."));
                         ui.add_space(6.0);
-                        let b = egui::Button::new(RichText::new("commencer à recevoir").color(p.on_accent).family(theme::bold())).fill(p.accent).stroke(egui::Stroke::NONE);
+                        let b = egui::Button::new(RichText::new(crate::i18n::t("commencer à recevoir")).color(p.on_accent).family(theme::bold())).fill(p.accent).stroke(egui::Stroke::NONE);
                         if ui.add(b).clicked() {
                             match transfer::Receiver::start(self.root(), ctx.clone()) {
                                 Ok(r) => self.receiver = Some(r),
                                 Err(e) => self.error = Some(e),
                             }
                         }
-                        ui.label(RichText::new("Windows peut demander d'autoriser Aryadne sur le réseau : accepte pour les réseaux privés.").color(p.muted).size(11.0));
+                        ui.label(RichText::new(crate::i18n::t("Windows peut demander d'autoriser Aryadne sur le réseau : accepte pour les réseaux privés.")).color(p.muted).size(11.0));
                     }
                     Some(rx) => {
                         let ip = transfer::local_ip().unwrap_or_else(|| "?".into());
                         egui::Grid::new("rx").num_columns(2).spacing([16.0, 6.0]).show(ui, |ui| {
-                            ui.label("ordinateur");
+                            ui.label(crate::i18n::t("ordinateur"));
                             ui.label(RichText::new(transfer::hostname()).family(theme::bold()));
                             ui.end_row();
-                            ui.label("adresse");
+                            ui.label(crate::i18n::t("adresse"));
                             ui.label(RichText::new(format!("{ip}:{}", rx.port)).family(theme::bold()));
                             ui.end_row();
-                            ui.label("code");
+                            ui.label(crate::i18n::t("code"));
                             ui.label(RichText::new(&rx.code).size(28.0).color(p.accent).family(theme::bold()));
                             ui.end_row();
                         });
@@ -2669,10 +2671,10 @@ impl App {
                             ui.label(RichText::new(format!("derniers fichiers reçus : {}", pr.received.len())).size(11.5));
                         }
                         ui.horizontal(|ui| {
-                            if ui.button("arrêter").clicked() {
+                            if ui.button(crate::i18n::t("arrêter")).clicked() {
                                 self.receiver = None;
                             }
-                            if ui.button("ouvrir reçus/").clicked() {
+                            if ui.button(crate::i18n::t("ouvrir reçus/")).clicked() {
                                 if let Ok(path) = vault::safe(&self.root(), "reçus") {
                                     let _ = std::fs::create_dir_all(&path);
                                     settings::reveal(&path, false);
@@ -2699,7 +2701,7 @@ impl App {
                     }
                 });
                 ui.horizontal(|ui| {
-                    if ui.button("+ fichiers de l'ordi…").clicked() {
+                    if ui.button(crate::i18n::t("+ fichiers de l'ordi…")).clicked() {
                         if let Some(paths) = rfd::FileDialog::new().pick_files() {
                             let root = self.root();
                             for pth in paths {
@@ -2712,19 +2714,19 @@ impl App {
                         }
                     }
                     if let Some(d) = self.current().map(|d| d.rel.clone()) {
-                        if ui.button("+ fichier ouvert").clicked() && !self.send_files.contains(&d) {
+                        if ui.button(crate::i18n::t("+ fichier ouvert")).clicked() && !self.send_files.contains(&d) {
                             self.send_files.push(d);
                         }
                     }
-                    ui.label(RichText::new("ou clic droit dans l'explorateur").color(p.muted).size(11.0));
+                    ui.label(RichText::new(crate::i18n::t("ou clic droit dans l'explorateur")).color(p.muted).size(11.0));
                 });
                 ui.add_space(8.0);
-                ui.label(caps("vers"));
+                ui.label(caps(&crate::i18n::t("vers")));
                 let peers = self.peers.lock().map(|p| p.clone()).unwrap_or_default();
                 if peers.is_empty() {
                     ui.horizontal(|ui| {
-                        ui.label(RichText::new("aucun ordinateur trouvé (l'autre doit être en mode « recevoir »)").color(p.muted).size(11.5));
-                        if ui.small_button("chercher").clicked() {
+                        ui.label(RichText::new(crate::i18n::t("aucun ordinateur trouvé (l'autre doit être en mode « recevoir »)")).color(p.muted).size(11.5));
+                        if ui.small_button(crate::i18n::t("chercher")).clicked() {
                             transfer::discover(self.peers.clone(), ctx.clone());
                         }
                     });
@@ -2736,14 +2738,14 @@ impl App {
                     }
                 }
                 ui.horizontal(|ui| {
-                    ui.label("adresse");
+                    ui.label(crate::i18n::t("adresse"));
                     ui.add(egui::TextEdit::singleline(&mut self.send_addr).hint_text("192.168.1.42:47123").desired_width(200.0));
-                    ui.label("code");
+                    ui.label(crate::i18n::t("code"));
                     ui.add(egui::TextEdit::singleline(&mut self.send_code).hint_text("1234").desired_width(60.0));
                 });
                 ui.add_space(8.0);
                 let ready = !self.send_files.is_empty() && !self.send_addr.trim().is_empty() && self.send_code.trim().len() == 4;
-                let b = egui::Button::new(RichText::new("envoyer").color(p.on_accent).family(theme::bold())).fill(p.accent).stroke(egui::Stroke::NONE);
+                let b = egui::Button::new(RichText::new(crate::i18n::t("envoyer")).color(p.on_accent).family(theme::bold())).fill(p.accent).stroke(egui::Stroke::NONE);
                 if ui.add_enabled(ready, b).clicked() {
                     self.flush_all();
                     let job = transfer::send(self.root(), self.send_files.clone(), self.send_addr.trim().to_string(), self.send_code.clone(), ctx.clone());
@@ -2790,7 +2792,7 @@ impl App {
                     }
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.add(egui::Button::new(RichText::new("quitter le mode compact").size(11.0)).frame(false)).clicked() {
+                    if ui.add(egui::Button::new(RichText::new(crate::i18n::t("quitter le mode compact")).size(11.0)).frame(false)).clicked() {
                         self.compact = false;
                     }
                     let pin = if self.pinned { "épinglé ✓" } else { "épingler" };
@@ -2810,7 +2812,7 @@ impl App {
                 ui.set_width(ui.available_width());
                 ui.horizontal(|ui| {
                     ui.label(RichText::new("/").color(p.accent).size(18.0).family(theme::bold()));
-                    let r = ui.add(egui::TextEdit::singleline(&mut self.search.input).hint_text("chercher dans tout le coffre (notes, code, texte, noms de fichiers)…").font(egui::FontId::monospace(15.0)).frame(egui::Frame::NONE).desired_width(f32::INFINITY));
+                    let r = ui.add(egui::TextEdit::singleline(&mut self.search.input).hint_text(crate::i18n::t("chercher dans tout le coffre (notes, code, texte, noms de fichiers)…")).font(egui::FontId::monospace(15.0)).frame(egui::Frame::NONE).desired_width(f32::INFINITY));
                     if self.search.results.is_none() && self.search.input.is_empty() {
                         r.request_focus();
                     }
@@ -2819,7 +2821,7 @@ impl App {
             self.search.run(self.root(), self.entries.clone(), ctx.clone());
             let Some(res) = self.search.results.clone() else {
                 ui.add_space(30.0);
-                ui.vertical_centered(|ui| ui.label(RichText::new("tape au moins 2 caractères · majuscules et accents ignorés").color(p.muted)));
+                ui.vertical_centered(|ui| ui.label(RichText::new(crate::i18n::t("tape au moins 2 caractères · majuscules et accents ignorés")).color(p.muted)));
                 // Nuage de tags #mot trouvés dans les notes
                 if self.tags.as_ref().is_none_or(|(t, _)| t.elapsed() > Duration::from_secs(10)) {
                     self.tags = Some((Instant::now(), extras::collect_tags(&self.root(), &self.entries)));
@@ -2829,7 +2831,7 @@ impl App {
                     ui.add_space(24.0);
                     ui.horizontal(|ui| {
                         ui.add_space(16.0);
-                        ui.label(caps("tags"));
+                        ui.label(caps(&crate::i18n::t("tags")));
                     });
                     ui.horizontal_wrapped(|ui| {
                         ui.add_space(16.0);
@@ -2915,7 +2917,7 @@ impl App {
             ui.set_width(560.0);
             ui.horizontal(|ui| {
                 ui.label(RichText::new(">").color(p.accent).family(theme::bold()));
-                ui.add(egui::TextEdit::singleline(&mut query).hint_text("ouvrir un fichier, ou taper un nom pour créer une note").frame(egui::Frame::NONE).desired_width(f32::INFINITY)).request_focus();
+                ui.add(egui::TextEdit::singleline(&mut query).hint_text(crate::i18n::t("ouvrir un fichier, ou taper un nom pour créer une note")).frame(egui::Frame::NONE).desired_width(f32::INFINITY)).request_focus();
             });
             ui.separator();
             for (i, rel) in matches.iter().enumerate() {
@@ -2969,10 +2971,10 @@ impl App {
                 ui.add(egui::TextEdit::singleline(&mut this.dialog_text).hint_text(hint).desired_width(f32::INFINITY)).request_focus();
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
-                    if ui.button("ok").clicked() {
+                    if ui.button(crate::i18n::t("ok")).clicked() {
                         ok = true;
                     }
-                    if ui.button("annuler").clicked() {
+                    if ui.button(crate::i18n::t("annuler")).clicked() {
                         keep = false;
                     }
                 });
@@ -2989,7 +2991,7 @@ impl App {
             Dialog::ConfirmTrash { rel } => {
                 let r = egui::Modal::new(egui::Id::unique("trash")).frame(frame).show(ctx, |ui| {
                     ui.set_width(420.0);
-                    ui.label(caps("supprimer"));
+                    ui.label(caps(&crate::i18n::t("supprimer")));
                     ui.add_space(6.0);
                     if vault::is_external(rel) {
                         ui.label(format!("« {rel} » est dans un dossier lié : il sera retiré de son dossier d'origine et mis dans la corbeille du coffre (.app/trash)."));
@@ -2998,10 +3000,10 @@ impl App {
                     }
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
-                        if ui.button(RichText::new("supprimer").color(p.missing)).clicked() {
+                        if ui.button(RichText::new(crate::i18n::t("supprimer")).color(p.missing)).clicked() {
                             ok = true;
                         }
-                        if ui.button("annuler").clicked() {
+                        if ui.button(crate::i18n::t("annuler")).clicked() {
                             keep = false;
                         }
                     });
@@ -3022,10 +3024,10 @@ impl App {
                     ui.add_space(4.0);
                     ui.label(&name);
                     if !copy {
-                        ui.label(RichText::new("Le fichier quittera son dossier d'origine.").color(p.muted).size(11.0));
+                        ui.label(RichText::new(crate::i18n::t("Le fichier quittera son dossier d'origine.")).color(p.muted).size(11.0));
                     }
                     ui.add_space(8.0);
-                    ui.label("dans quel dossier du coffre ?");
+                    ui.label(crate::i18n::t("dans quel dossier du coffre ?"));
                     let dirs: Vec<String> = std::iter::once(String::new()).chain(self.entries.iter().filter(|e| e.is_dir && !vault::is_external(&e.rel)).map(|e| e.rel.clone())).collect();
                     for d in dirs {
                         let label = if d.is_empty() { "/ (racine)".to_string() } else { format!("/{d}") };
@@ -3035,7 +3037,7 @@ impl App {
                         }
                     }
                     ui.add_space(8.0);
-                    if ui.button("annuler").clicked() {
+                    if ui.button(crate::i18n::t("annuler")).clicked() {
                         keep = false;
                     }
                 });
@@ -3073,30 +3075,30 @@ impl App {
                 let mut choice = None;
                 let r = egui::Modal::new(egui::Id::unique("import")).frame(frame).show(ctx, |ui| {
                     ui.set_width(480.0);
-                    ui.label(caps("importer dans le coffre"));
+                    ui.label(caps(&crate::i18n::t("importer dans le coffre")));
                     ui.add_space(4.0);
                     let names: Vec<String> = files.iter().take(4).map(|f| f.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()).collect();
                     let more = if files.len() > 4 { format!(" et {} autres", files.len() - 4) } else { String::new() };
                     ui.label(format!("{}{} → /{}", names.join(", "), more, dir));
                     ui.add_space(8.0);
-                    let link = egui::Button::new(RichText::new("lier (garder à sa place)").color(p.on_accent).family(theme::bold())).fill(p.accent).stroke(egui::Stroke::NONE);
+                    let link = egui::Button::new(RichText::new(crate::i18n::t("lier (garder à sa place)")).color(p.on_accent).family(theme::bold())).fill(p.accent).stroke(egui::Stroke::NONE);
                     if ui.add(link).clicked() {
                         choice = Some("link");
                     }
-                    ui.label(RichText::new("Recommandé. Le fichier reste dans son dossier ; Aryadne l'affiche sans le copier.").color(p.muted).size(11.0));
+                    ui.label(RichText::new(crate::i18n::t("Recommandé. Le fichier reste dans son dossier ; Aryadne l'affiche sans le copier.")).color(p.muted).size(11.0));
                     ui.add_space(6.0);
-                    if ui.button("déplacer dans le coffre").clicked() {
+                    if ui.button(crate::i18n::t("déplacer dans le coffre")).clicked() {
                         choice = Some("move");
                     }
-                    ui.label(RichText::new("Le fichier quitte son dossier d'origine. Aucun doublon.").color(p.muted).size(11.0));
+                    ui.label(RichText::new(crate::i18n::t("Le fichier quitte son dossier d'origine. Aucun doublon.")).color(p.muted).size(11.0));
                     ui.add_space(6.0);
-                    if ui.button("copier dans le coffre").clicked() {
+                    if ui.button(crate::i18n::t("copier dans le coffre")).clicked() {
                         choice = Some("copy");
                     }
-                    ui.label(RichText::new("L'original reste en place : le fichier prend deux fois la place.").color(p.muted).size(11.0));
+                    ui.label(RichText::new(crate::i18n::t("L'original reste en place : le fichier prend deux fois la place.")).color(p.muted).size(11.0));
                     ui.add_space(8.0);
-                    ui.checkbox(&mut remember, "retenir ce choix (modifiable dans les réglages)");
-                    if ui.button("annuler").clicked() {
+                    ui.checkbox(&mut remember, crate::i18n::t("retenir ce choix (modifiable dans les réglages)"));
+                    if ui.button(crate::i18n::t("annuler")).clicked() {
                         keep = false;
                     }
                 });
@@ -3122,7 +3124,7 @@ impl App {
                 let mut token_changed = false;
                 let r = egui::Modal::new(egui::Id::unique("update")).frame(frame).show(ctx, |ui| {
                     ui.set_width(500.0);
-                    ui.label(caps("mises à jour"));
+                    ui.label(caps(&crate::i18n::t("mises à jour")));
                     ui.add_space(4.0);
                     ui.label(format!("Version installée : v{}", updater::CURRENT));
                     match up.update_available() {
@@ -3135,10 +3137,10 @@ impl App {
                             }
                         }
                         None if st.installed => {
-                            ui.label(RichText::new("Mise à jour installée. Redémarre pour l'utiliser.").color(p.accent));
+                            ui.label(RichText::new(crate::i18n::t("Mise à jour installée. Redémarre pour l'utiliser.")).color(p.accent));
                         }
                         None if st.checked && st.error.is_none() => {
-                            ui.label(RichText::new("Tu as la dernière version.").color(p.muted));
+                            ui.label(RichText::new(crate::i18n::t("Tu as la dernière version.")).color(p.muted));
                         }
                         None => {}
                     }
@@ -3148,7 +3150,7 @@ impl App {
                     if st.checking {
                         ui.horizontal(|ui| {
                             ui.spinner();
-                            ui.label("vérification…");
+                            ui.label(crate::i18n::t("vérification…"));
                         });
                     }
                     if let Some(e) = &st.error {
@@ -3157,20 +3159,20 @@ impl App {
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
                         if st.installed {
-                            if ui.button(RichText::new("redémarrer").family(theme::bold())).clicked() {
+                            if ui.button(RichText::new(crate::i18n::t("redémarrer")).family(theme::bold())).clicked() {
                                 self.flush_all();
                                 self.save_board();
                                 updater::restart(ctx);
                             }
                         } else if up.update_available().is_some() && st.progress.is_none() {
-                            if ui.button(RichText::new("installer").family(theme::bold())).clicked() {
+                            if ui.button(RichText::new(crate::i18n::t("installer")).family(theme::bold())).clicked() {
                                 up.install(self.github_token.clone(), ctx);
                             }
                         }
-                        if !st.checking && st.progress.is_none() && ui.button("vérifier").clicked() {
+                        if !st.checking && st.progress.is_none() && ui.button(crate::i18n::t("vérifier")).clicked() {
                             up.check(self.github_token.clone(), ctx);
                         }
-                        if ui.button("fermer").clicked() {
+                        if ui.button(crate::i18n::t("fermer")).clicked() {
                             keep = false;
                         }
                     });
@@ -3346,10 +3348,10 @@ impl App {
                 ui.add_space(ui.available_height() * 0.3);
                 theme::logo(ui, 64.0);
                 ui.add_space(12.0);
-                ui.label(RichText::new("aryadne").size(30.0).family(theme::bold()));
-                ui.label(RichText::new("// le fil entre tes idées").color(p.muted));
+                ui.label(RichText::new(crate::i18n::t("aryadne")).size(30.0).family(theme::bold()));
+                ui.label(RichText::new(crate::i18n::t("// le fil entre tes idées")).color(p.muted));
                 ui.add_space(22.0);
-                let btn = egui::Button::new(RichText::new("ouvrir ou créer un coffre").color(p.on_accent).family(theme::bold()))
+                let btn = egui::Button::new(RichText::new(crate::i18n::t("ouvrir ou créer un coffre")).color(p.on_accent).family(theme::bold()))
                     .fill(p.accent)
                     .stroke(egui::Stroke::NONE)
                     .min_size(egui::vec2(260.0, 38.0));
@@ -3489,10 +3491,10 @@ impl eframe::App for App {
             let p = theme::pal();
             let r = egui::Modal::new(egui::Id::unique("error")).frame(egui::Frame::new().fill(p.bg).stroke(egui::Stroke::new(1.0, p.missing)).inner_margin(16)).show(&ctx, |ui| {
                 ui.set_max_width(440.0);
-                ui.label(caps("erreur"));
+                ui.label(caps(&crate::i18n::t("erreur")));
                 ui.label(RichText::new(&e).color(p.missing));
                 ui.add_space(6.0);
-                ui.button("ok").clicked()
+                ui.button(crate::i18n::t("ok")).clicked()
             });
             if r.inner || r.should_close() {
                 self.error = None;
@@ -3513,7 +3515,7 @@ fn ollama_panel(ui: &mut egui::Ui, local: &ollama::Local, s: &mut ai::Settings, 
     let p = theme::pal();
     let st = local.snapshot();
     let mut changed = false;
-    ui.label(caps("ia locale · ollama"));
+    ui.label(caps(&crate::i18n::t("ia locale · ollama")));
     ui.add_space(4.0);
     let has_model = st.models.iter().any(|m| m == &s.model || m.starts_with(&format!("{}:", s.model)));
     let (dot, status) = if !st.checked {
@@ -3537,7 +3539,7 @@ fn ollama_panel(ui: &mut egui::Ui, local: &ollama::Local, s: &mut ai::Settings, 
     let ram = ollama::total_ram_gb();
     if !st.models.is_empty() {
         ui.add_space(6.0);
-        ui.label(caps("modèles installés"));
+        ui.label(caps(&crate::i18n::t("modèles installés")));
         let mut delete = None;
         for m in &st.models {
             let gb = st.sizes.get(m).copied().unwrap_or(0) as f32 / 1e9;
@@ -3547,12 +3549,12 @@ fn ollama_panel(ui: &mut egui::Ui, local: &ollama::Local, s: &mut ai::Settings, 
                 ui.label(if active { name.color(p.accent) } else { name });
                 ui.label(RichText::new(format!("{gb:.1} Go")).color(p.muted).size(11.0));
                 if active {
-                    ui.label(RichText::new("utilisé").color(p.accent).size(11.0));
-                } else if ui.small_button("utiliser").clicked() {
+                    ui.label(RichText::new(crate::i18n::t("utilisé")).color(p.accent).size(11.0));
+                } else if ui.small_button(crate::i18n::t("utiliser")).clicked() {
                     s.model = m.trim_end_matches(":latest").to_string();
                     changed = true;
                 }
-                if ui.small_button("supprimer").on_hover_text("Libère l'espace disque").clicked() {
+                if ui.small_button(crate::i18n::t("supprimer")).on_hover_text(crate::i18n::t("Libère l'espace disque")).clicked() {
                     delete = Some(m.clone());
                 }
             });
@@ -3563,13 +3565,13 @@ fn ollama_panel(ui: &mut egui::Ui, local: &ollama::Local, s: &mut ai::Settings, 
     }
     // Télécharger n'importe quel modèle
     ui.add_space(8.0);
-    ui.label(caps("télécharger un modèle"));
+    ui.label(caps(&crate::i18n::t("télécharger un modèle")));
     let id = egui::Id::unique("pull-name");
     let mut name: String = ui.data_mut(|d| d.get_temp::<String>(id).unwrap_or_default());
     let busy = st.task.is_some();
     ui.horizontal(|ui| {
-        let r = ui.add(egui::TextEdit::singleline(&mut name).hint_text("qwen3.8:27b  ou  hf.co/utilisateur/modèle-GGUF").desired_width(320.0));
-        let go = (r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter))) || ui.add_enabled(!busy && !name.trim().is_empty(), egui::Button::new("télécharger")).clicked();
+        let r = ui.add(egui::TextEdit::singleline(&mut name).hint_text(crate::i18n::t("qwen3.8:27b  ou  hf.co/utilisateur/modèle-GGUF")).desired_width(320.0));
+        let go = (r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter))) || ui.add_enabled(!busy && !name.trim().is_empty(), egui::Button::new(crate::i18n::t("télécharger"))).clicked();
         if go && !busy && !name.trim().is_empty() {
             local.pull(&s.url, name.trim(), ctx);
             s.model = name.trim().to_string();
@@ -3577,14 +3579,14 @@ fn ollama_panel(ui: &mut egui::Ui, local: &ollama::Local, s: &mut ai::Settings, 
         }
     });
     ui.horizontal_wrapped(|ui| {
-        ui.label(RichText::new("suggestions :").color(p.muted).size(11.0));
+        ui.label(RichText::new(crate::i18n::t("suggestions :")).color(p.muted).size(11.0));
         for (m, gb) in [("qwen3.8:27b", 18.0), ("qwen3.8", 18.0), ("llama3.2", 2.0), ("gemma3", 3.3)] {
             if ui.small_button(format!("{m} (~{gb} Go)")).clicked() {
                 name = m.to_string();
             }
         }
     });
-    ui.label(RichText::new("N'importe quel nom de ollama.com/library, ou un GGUF de Hugging Face avec hf.co/…  Il faut à peu près la taille du modèle en mémoire (RAM ou carte graphique), plus 2 à 4 Go.").color(p.muted).size(10.5));
+    ui.label(RichText::new(crate::i18n::t("N'importe quel nom de ollama.com/library, ou un GGUF de Hugging Face avec hf.co/…  Il faut à peu près la taille du modèle en mémoire (RAM ou carte graphique), plus 2 à 4 Go.")).color(p.muted).size(10.5));
     if let Some(r) = ram {
         ui.label(RichText::new(format!("mémoire de cet ordinateur : {r:.0} Go")).color(p.muted).size(10.5));
     }
@@ -3606,11 +3608,11 @@ fn ollama_panel(ui: &mut egui::Ui, local: &ollama::Local, s: &mut ai::Settings, 
     }
     ui.horizontal(|ui| {
         if st.checked && st.binary.is_none() && !st.running {
-            if ui.button("installer ollama (sans admin)").clicked() {
+            if ui.button(crate::i18n::t("installer ollama (sans admin)")).clicked() {
                 local.install(&s.url, ctx);
             }
         }
-        if st.binary.is_some() && !st.running && ui.button("démarrer").clicked() {
+        if st.binary.is_some() && !st.running && ui.button(crate::i18n::t("démarrer")).clicked() {
             let l = local.clone();
             let (url, c) = (s.url.clone(), ctx.clone());
             std::thread::spawn(move || {
@@ -3626,10 +3628,10 @@ fn ollama_panel(ui: &mut egui::Ui, local: &ollama::Local, s: &mut ai::Settings, 
                 local.pull(&s.url, &s.model, ctx);
             }
         }
-        if st.binary.is_some() && ui.button("mettre à jour").on_hover_text("Retélécharge la dernière version d'Ollama").clicked() {
+        if st.binary.is_some() && ui.button(crate::i18n::t("mettre à jour")).on_hover_text(crate::i18n::t("Retélécharge la dernière version d'Ollama")).clicked() {
             local.install(&s.url, ctx);
         }
-        if ui.small_button("↻").on_hover_text("Revérifier").clicked() {
+        if ui.small_button("↻").on_hover_text(crate::i18n::t("Revérifier")).clicked() {
             local.refresh(&s.url, ctx);
         }
     });
@@ -3680,7 +3682,7 @@ fn msg_block(
     });
     if !sources.is_empty() {
         ui.horizontal_wrapped(|ui| {
-            ui.label(RichText::new("sources :").color(p.muted).size(11.0));
+            ui.label(RichText::new(crate::i18n::t("sources :")).color(p.muted).size(11.0));
             for s in sources {
                 let name = if vault::is_md(s) { vault::stem(s) } else { s.clone() };
                 if ui.add(egui::Button::new(RichText::new(name).size(11.0).color(p.link))).on_hover_text(s).clicked() {

@@ -164,9 +164,9 @@ impl Dlg {
         egui::Modal::new(egui::Id::unique("convert")).frame(frame).show(ctx, |ui| {
             ui.set_width(620.0);
             ui.horizontal(|ui| {
-                ui.label(crate::caps("convertir et compresser"));
+                ui.label(crate::caps(&crate::i18n::t("convertir et compresser")));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("fermer").clicked() {
+                    if ui.button(crate::i18n::t("fermer")).clicked() {
                         open = false;
                     }
                 });
@@ -181,7 +181,7 @@ impl Dlg {
             ui.label(RichText::new(format!("{} {what} · {} · {}{}", self.files.len(), human(total), names.join(", "), if self.files.len() > 3 { "…" } else { "" })).color(p.muted).size(11.5));
             ui.add_space(8.0);
             ui.horizontal_wrapped(|ui| {
-                ui.label("format");
+                ui.label(crate::i18n::t("format"));
                 for (f, help) in formats(self.kind) {
                     if ui.selectable_label(self.fmt == *f, f.to_uppercase()).on_hover_text(*help).clicked() {
                         self.fmt = f;
@@ -191,12 +191,12 @@ impl Dlg {
             let lossy = matches!(self.fmt, "jpg" | "mp4" | "webm" | "mp3" | "ogg" | "m4a" | "gif");
             ui.spacing_mut().slider_width = 260.0;
             if lossy {
-                ui.add(egui::Slider::new(&mut self.quality, 1..=100).text("qualité")).on_hover_text("100 : presque sans perte, fichier lourd. 60-80 : bon compromis.");
+                ui.add(egui::Slider::new(&mut self.quality, 1..=100).text(crate::i18n::t("qualité"))).on_hover_text(crate::i18n::t("100 : presque sans perte, fichier lourd. 60-80 : bon compromis."));
             }
             match self.kind {
                 Kind::Image => {
                     ui.horizontal(|ui| {
-                        ui.label("plus grand côté");
+                        ui.label(crate::i18n::t("plus grand côté"));
                         for (v, l) in [(0u32, "original"), (4096, "4096"), (2048, "2048"), (1024, "1024"), (512, "512")] {
                             if ui.selectable_label(self.size == v, l).clicked() {
                                 self.size = v;
@@ -208,7 +208,7 @@ impl Dlg {
                 Kind::Video => {
                     if self.fmt != "mp3" && self.fmt != "wav" {
                         ui.horizontal(|ui| {
-                            ui.label("hauteur");
+                            ui.label(crate::i18n::t("hauteur"));
                             for (v, l) in [(0u32, "originale"), (2160, "2160"), (1080, "1080"), (720, "720"), (480, "480")] {
                                 if ui.selectable_label(self.size == v, l).clicked() {
                                     self.size = v;
@@ -217,7 +217,7 @@ impl Dlg {
                             ui.add(egui::DragValue::new(&mut self.size).range(0..=8640).suffix(" px"));
                         });
                         ui.horizontal(|ui| {
-                            ui.label("cadence");
+                            ui.label(crate::i18n::t("cadence"));
                             for (v, l) in [(0.0f32, "originale"), (24.0, "24"), (25.0, "25"), (30.0, "30"), (12.0, "12")] {
                                 if ui.selectable_label(self.fps == v, l).clicked() {
                                     self.fps = v;
@@ -226,14 +226,14 @@ impl Dlg {
                             ui.add(egui::DragValue::new(&mut self.fps).range(0.0..=240.0).speed(0.5).suffix(" i/s"));
                         });
                         if self.fmt != "gif" {
-                            ui.checkbox(&mut self.keep_audio, "garder le son");
+                            ui.checkbox(&mut self.keep_audio, crate::i18n::t("garder le son"));
                         }
                     }
                 }
                 Kind::Audio => {}
             }
             ui.horizontal(|ui| {
-                ui.label("enregistrer");
+                ui.label(crate::i18n::t("enregistrer"));
                 let label = match &self.out_dir {
                     Some(d) => d.display().to_string(),
                     None => "à côté de chaque fichier".into(),
@@ -249,7 +249,7 @@ impl Dlg {
             });
             let same_fmt = self.files.iter().all(|f| f.extension().map(|e| e.to_string_lossy().to_lowercase()).as_deref() == Some(self.fmt));
             if same_fmt {
-                ui.checkbox(&mut self.replace, "remplacer les originaux").on_hover_text("Sinon, le résultat est enregistré à côté avec « -compressé »");
+                ui.checkbox(&mut self.replace, crate::i18n::t("remplacer les originaux")).on_hover_text(crate::i18n::t("Sinon, le résultat est enregistré à côté avec « -compressé »"));
             }
             // Aperçu de qualité et taille estimée
             if self.kind == Kind::Image {
@@ -266,7 +266,7 @@ impl Dlg {
                     None => {
                         ui.horizontal(|ui| {
                             ui.spinner();
-                            ui.label(RichText::new("aperçu…").color(p.muted).size(11.0));
+                            ui.label(RichText::new(crate::i18n::t("aperçu…")).color(p.muted).size(11.0));
                         });
                     }
                 }
@@ -278,8 +278,8 @@ impl Dlg {
                 ui.add_space(6.0);
                 match &self.ffmpeg_install {
                     None => {
-                        ui.label(RichText::new("Les vidéos et les sons passent par ffmpeg (gratuit, installé sans admin).").color(p.muted).size(11.5));
-                        if ui.button("installer ffmpeg").clicked() {
+                        ui.label(RichText::new(crate::i18n::t("Les vidéos et les sons passent par ffmpeg (gratuit, installé sans admin).")).color(p.muted).size(11.5));
+                        if ui.button(crate::i18n::t("installer ffmpeg")).clicked() {
                             self.ffmpeg_install = Some(ffmpeg::install(ctx.clone()));
                         }
                     }
@@ -303,7 +303,7 @@ impl Dlg {
                     let t = if saved >= 0 { format!("✓ terminé : {} → {} ({} gagnés)", human(j.before), human(j.after), human(saved as u64)) } else { format!("✓ terminé : {} → {}", human(j.before), human(j.after)) };
                     ui.label(RichText::new(t).color(p.accent).size(11.5));
                     if let Some(first) = j.outputs.first() {
-                        if ui.button("montrer le résultat").clicked() {
+                        if ui.button(crate::i18n::t("montrer le résultat")).clicked() {
                             crate::settings::reveal(first, true);
                         }
                     }

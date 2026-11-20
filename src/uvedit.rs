@@ -1688,28 +1688,28 @@ impl Edit {
 
     fn selection_tools(&mut self, ui: &mut egui::Ui) {
         ui.horizontal_wrapped(|ui| {
-            if ui.small_button("tout").clicked() {
+            if ui.small_button(crate::i18n::t("tout")).clicked() {
                 self.sel = (0..self.topo.polys.len() as u32).collect();
                 self.version += 1;
             }
-            if ui.small_button("rien").clicked() {
+            if ui.small_button(crate::i18n::t("rien")).clicked() {
                 self.sel.clear();
                 self.version += 1;
             }
-            if ui.small_button("inverser").clicked() {
+            if ui.small_button(crate::i18n::t("inverser")).clicked() {
                 self.sel = (0..self.topo.polys.len() as u32).filter(|f| !self.sel.contains(f)).collect();
                 self.version += 1;
             }
-            if ui.small_button("agrandir").on_hover_text("faces voisines d'orientation proche").clicked() {
+            if ui.small_button(crate::i18n::t("agrandir")).on_hover_text(crate::i18n::t("faces voisines d'orientation proche")).clicked() {
                 self.grow(30.0);
                 self.version += 1;
             }
-            if ui.small_button("îlot").on_hover_text("faces reliées (jusqu'aux coutures)").clicked() {
+            if ui.small_button(crate::i18n::t("îlot")).on_hover_text(crate::i18n::t("faces reliées (jusqu'aux coutures)")).clicked() {
                 self.select_linked();
                 self.version += 1;
             }
         });
-        ui.label(RichText::new("clic : choisir · Maj+clic : ajouter · Ctrl+clic : retirer").color(crate::theme::pal().muted).size(10.0));
+        ui.label(RichText::new(crate::i18n::t("clic : choisir · Maj+clic : ajouter · Ctrl+clic : retirer")).color(crate::theme::pal().muted).size(10.0));
     }
 
     fn tab_materials(&mut self, ui: &mut egui::Ui) {
@@ -1733,10 +1733,10 @@ impl Edit {
             });
             ui.horizontal(|ui| {
                 ui.add_space(30.0);
-                if ui.small_button("assigner").on_hover_text("à la sélection").clicked() {
+                if ui.small_button(crate::i18n::t("assigner")).on_hover_text(crate::i18n::t("à la sélection")).clicked() {
                     assign = Some(k);
                 }
-                if ui.small_button("choisir").on_hover_text("sélectionner ses faces").clicked() {
+                if ui.small_button(crate::i18n::t("choisir")).on_hover_text(crate::i18n::t("sélectionner ses faces")).clicked() {
                     select = Some(k);
                 }
                 if k > 0 && ui.small_button("×").clicked() {
@@ -1767,7 +1767,7 @@ impl Edit {
             }
             self.changed();
         }
-        if ui.button("＋ matériau").clicked() {
+        if ui.button(crate::i18n::t("＋ matériau")).clicked() {
             let n = self.data.slots.len();
             self.data.slots.push(Slot { name: format!("matériau {}", n + 1), color: PALETTE[n % PALETTE.len()] });
             if !self.sel.is_empty() {
@@ -1777,44 +1777,44 @@ impl Edit {
             }
             self.changed();
         }
-        ui.label(RichText::new("Les IDs sont exportés en OBJ (usemtl + .mtl) et en GLB (un matériau par ID).").color(p.muted).size(10.0));
+        ui.label(RichText::new(crate::i18n::t("Les IDs sont exportés en OBJ (usemtl + .mtl) et en GLB (un matériau par ID).")).color(p.muted).size(10.0));
     }
 
     fn tab_seams(&mut self, ui: &mut egui::Ui) {
         let p = crate::theme::pal();
-        ui.label(RichText::new("clic sur une arête : poser / enlever une couture · Ctrl+clic : enlever").color(p.muted).size(10.0));
+        ui.label(RichText::new(crate::i18n::t("clic sur une arête : poser / enlever une couture · Ctrl+clic : enlever")).color(p.muted).size(10.0));
         ui.add_space(4.0);
-        ui.label(RichText::new("automatique avancé").size(11.0).strong());
+        ui.label(RichText::new(crate::i18n::t("automatique avancé")).size(11.0).strong());
         self.auto_options(ui);
-        if ui.button("coutures automatiques").on_hover_text("Coupe minimale pour que chaque îlot se déplie à plat (un cylindre = une couture droite), coutures dans les plis et les creux, découpe là où ça s'étire trop, puis fusion des îlots voisins").clicked() {
+        if ui.button(crate::i18n::t("coutures automatiques")).on_hover_text(crate::i18n::t("Coupe minimale pour que chaque îlot se déplie à plat (un cylindre = une couture droite), coutures dans les plis et les creux, découpe là où ça s'étire trop, puis fusion des îlots voisins")).clicked() {
             self.auto_now(false);
         }
         ui.add_space(6.0);
-        ui.label(RichText::new("autres méthodes").size(11.0).strong());
+        ui.label(RichText::new(crate::i18n::t("autres méthodes")).size(11.0).strong());
         ui.horizontal(|ui| {
-            ui.add(egui::Slider::new(&mut self.smart_angle, 15.0..=89.0).text("angle"));
+            ui.add(egui::Slider::new(&mut self.smart_angle, 15.0..=89.0).text(crate::i18n::t("angle")));
         });
-        ui.add(egui::Slider::new(&mut self.min_faces, 1..=2000).logarithmic(true).text("taille min. d'îlot"));
-        if ui.button("coutures intelligentes").on_hover_text("Regroupe les faces en îlots presque plats (comme Smart UV Project), en partant des grandes surfaces, puis place les coutures sur leurs bords").clicked() {
+        ui.add(egui::Slider::new(&mut self.min_faces, 1..=2000).logarithmic(true).text(crate::i18n::t("taille min. d'îlot")));
+        if ui.button(crate::i18n::t("coutures intelligentes")).on_hover_text(crate::i18n::t("Regroupe les faces en îlots presque plats (comme Smart UV Project), en partant des grandes surfaces, puis place les coutures sur leurs bords")).clicked() {
             self.data.seams = smart_seams(&self.topo, self.smart_angle, self.min_faces);
             self.message = Some(format!("{} coutures", self.data.seams.len()));
             self.changed();
         }
         ui.add_space(4.0);
-        ui.add(egui::Slider::new(&mut self.seam_angle, 5.0..=150.0).text("angle vif"));
+        ui.add(egui::Slider::new(&mut self.seam_angle, 5.0..=150.0).text(crate::i18n::t("angle vif")));
         ui.horizontal(|ui| {
-            if ui.button("sur les arêtes vives").clicked() {
+            if ui.button(crate::i18n::t("sur les arêtes vives")).clicked() {
                 self.data.seams = seams_by_angle(&self.topo, self.seam_angle);
                 self.changed();
             }
-            if ui.button("ajouter les vives").clicked() {
+            if ui.button(crate::i18n::t("ajouter les vives")).clicked() {
                 self.data.seams.extend(seams_by_angle(&self.topo, self.seam_angle));
                 self.changed();
             }
         });
         ui.add_space(4.0);
         ui.horizontal(|ui| {
-            if ui.button("contour de la sélection").on_hover_text("couture tout autour des faces sélectionnées").clicked() {
+            if ui.button(crate::i18n::t("contour de la sélection")).on_hover_text(crate::i18n::t("couture tout autour des faces sélectionnées")).clicked() {
                 for (e, fs) in &self.topo.edge_faces {
                     let inside = fs.iter().filter(|f| self.sel.contains(f)).count();
                     if inside == 1 && fs.len() == 2 {
@@ -1823,13 +1823,13 @@ impl Edit {
                 }
                 self.changed();
             }
-            if ui.button("tout effacer").clicked() {
+            if ui.button(crate::i18n::t("tout effacer")).clicked() {
                 self.data.seams.clear();
                 self.changed();
             }
         });
         ui.add_space(6.0);
-        if ui.button("déplier avec ces coutures →").clicked() {
+        if ui.button(crate::i18n::t("déplier avec ces coutures →")).clicked() {
             self.tab = 2;
             self.tool = Tool::Faces;
             self.unwrap_now();
@@ -1839,16 +1839,16 @@ impl Edit {
     fn auto_options(&mut self, ui: &mut egui::Ui) {
         let p = crate::theme::pal();
         ui.horizontal(|ui| {
-            ui.label(RichText::new("moins d'îlots").size(10.5).color(p.muted));
+            ui.label(RichText::new(crate::i18n::t("moins d'îlots")).size(10.5).color(p.muted));
             let mut v = 0.6 - self.auto.max_distortion;
             if ui.add(egui::Slider::new(&mut v, 0.0..=0.55).show_value(false)).changed() {
                 self.auto.max_distortion = 0.6 - v;
             }
-            ui.label(RichText::new("moins d'étirement").size(10.5).color(p.muted));
+            ui.label(RichText::new(crate::i18n::t("moins d'étirement")).size(10.5).color(p.muted));
         });
-        ui.add(egui::Slider::new(&mut self.auto.hard_angle, 30.0..=150.0).text("coupe toujours au-delà de (°)"));
-        ui.checkbox(&mut self.auto.split_materials, "séparer les matériaux");
-        ui.checkbox(&mut self.auto.hide_seams, "cacher les coutures (creux, dessous)");
+        ui.add(egui::Slider::new(&mut self.auto.hard_angle, 30.0..=150.0).text(crate::i18n::t("coupe toujours au-delà de (°)")));
+        ui.checkbox(&mut self.auto.split_materials, crate::i18n::t("séparer les matériaux"));
+        ui.checkbox(&mut self.auto.hide_seams, crate::i18n::t("cacher les coutures (creux, dessous)"));
     }
 
     fn auto_now(&mut self, then_unwrap: bool) {
@@ -1878,38 +1878,38 @@ impl Edit {
     fn tab_uv(&mut self, ui: &mut egui::Ui) {
         let p = crate::theme::pal();
         ui.horizontal_wrapped(|ui| {
-            if ui.button("auto (coutures + UV)").on_hover_text("Coutures automatiques avancées, dépliage, îlots redressés et rangés").clicked() {
+            if ui.button(crate::i18n::t("auto (coutures + UV)")).on_hover_text(crate::i18n::t("Coutures automatiques avancées, dépliage, îlots redressés et rangés")).clicked() {
                 self.auto_now(true);
             }
-            if ui.add_enabled(!self.data.seams.is_empty(), egui::Button::new("déplier mes coutures")).clicked() {
+            if ui.add_enabled(!self.data.seams.is_empty(), egui::Button::new(crate::i18n::t("déplier mes coutures"))).clicked() {
                 self.unwrap_now();
             }
-            if self.data.has_uv() && ui.button("ranger").on_hover_text("packing : même densité, rotation, rangement serré").clicked() {
+            if self.data.has_uv() && ui.button(crate::i18n::t("ranger")).on_hover_text(crate::i18n::t("packing : même densité, rotation, rangement serré")).clicked() {
                 pack(&self.topo, &mut self.data, &PackOptions { optimize: self.optimize, rotate: self.rotate, fixed_scale: None });
                 self.message = Some(format!("remplissage {:.0} %", fill_rate(&self.data) * 100.0));
                 self.changed();
             }
-            if ui.toggle_value(&mut self.checker, "damier").changed() {
+            if ui.toggle_value(&mut self.checker, crate::i18n::t("damier")).changed() {
                 self.version += 1;
             }
         });
-        egui::CollapsingHeader::new(RichText::new("réglages de l'auto").size(11.0)).show(ui, |ui| self.auto_options(ui));
+        egui::CollapsingHeader::new(RichText::new(crate::i18n::t("réglages de l'auto")).size(11.0)).show(ui, |ui| self.auto_options(ui));
         ui.horizontal(|ui| {
-            ui.checkbox(&mut self.optimize, "rangement optimisé").on_hover_text("essaie plusieurs ordres, rotations et largeurs et garde le plus serré");
-            ui.checkbox(&mut self.rotate, "rotation");
+            ui.checkbox(&mut self.optimize, crate::i18n::t("rangement optimisé")).on_hover_text(crate::i18n::t("essaie plusieurs ordres, rotations et largeurs et garde le plus serré"));
+            ui.checkbox(&mut self.rotate, crate::i18n::t("rotation"));
         });
         ui.horizontal(|ui| {
-            ui.label(RichText::new("texture").size(11.0));
+            ui.label(RichText::new(crate::i18n::t("texture")).size(11.0));
             egui::ComboBox::from_id_salt("uv-tex").selected_text(format!("{} px", self.data.texture_px)).width(80.0).show_ui(ui, |ui| {
                 for v in [512u32, 1024, 2048, 4096, 8192] {
                     ui.selectable_value(&mut self.data.texture_px, v, format!("{v}"));
                 }
             });
-            ui.label(RichText::new("marge").size(11.0));
+            ui.label(RichText::new(crate::i18n::t("marge")).size(11.0));
             ui.add(egui::DragValue::new(&mut self.data.margin_px).range(0.0..=64.0).suffix(" px"));
         });
         if !self.data.has_uv() {
-            ui.label(RichText::new("Pas encore d'UV : « déplier » pose des coutures automatiques si besoin, déplie (LSCM) et range les îlots.").color(p.muted).size(10.5));
+            ui.label(RichText::new(crate::i18n::t("Pas encore d'UV : « déplier » pose des coutures automatiques si besoin, déplie (LSCM) et range les îlots.")).color(p.muted).size(10.5));
             return;
         }
         // Densité de texels
@@ -1919,11 +1919,11 @@ impl Edit {
         ui.label(RichText::new(format!("densité : {avg:.0} px/unité (min {mn:.0}, max {mx:.0}) · remplissage {:.0} %", fill_rate(&self.data) * 100.0)).size(10.5).color(p.muted));
         ui.horizontal(|ui| {
             ui.add(egui::DragValue::new(&mut self.density_target).range(1.0..=100000.0).speed(4.0).suffix(" px/u"));
-            if ui.button("imposer la densité").on_hover_text("tous les îlots à cette densité (ils peuvent déborder du carré si elle est trop forte)").clicked() {
+            if ui.button(crate::i18n::t("imposer la densité")).on_hover_text(crate::i18n::t("tous les îlots à cette densité (ils peuvent déborder du carré si elle est trop forte)")).clicked() {
                 set_density(&self.topo, &mut self.data, self.density_target, self.scale);
                 self.changed();
             }
-            if ui.small_button("= actuelle").clicked() {
+            if ui.small_button(crate::i18n::t("= actuelle")).clicked() {
                 self.density_target = avg.round();
             }
         });
@@ -2048,7 +2048,7 @@ impl Edit {
         if resp.drag_stopped() {
             self.uv_drag = false;
         }
-        ui.label(RichText::new("clic : îlot · Maj : ajouter · glisser : déplacer").color(p.muted).size(10.0));
+        ui.label(RichText::new(crate::i18n::t("clic : îlot · Maj : ajouter · glisser : déplacer")).color(p.muted).size(10.0));
     }
 }
 

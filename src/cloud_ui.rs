@@ -95,13 +95,13 @@ impl App {
             return;
         }
         let (label, tip) = match (&s.error, s.finished_at) {
-            (Some(e), _) => (RichText::new("☁ erreur").color(p.missing), format!("Synchro échouée : {e}\nclic : réessayer")),
+            (Some(e), _) => (RichText::new(crate::i18n::t("☁ erreur")).color(p.missing), format!("Synchro échouée : {e}\nclic : réessayer")),
             (None, Some(t)) => {
                 let mins = t.elapsed().as_secs() / 60;
                 let when = if mins == 0 { "à l'instant".to_string() } else { format!("il y a {mins} min") };
-                (RichText::new("☁ synchronisé").color(p.muted), format!("Dernière synchro {when} : {} envoyé(s), {} reçu(s), {} supprimé(s)\nclic : synchroniser", s.up, s.down, s.deleted))
+                (RichText::new(crate::i18n::t("☁ synchronisé")).color(p.muted), format!("Dernière synchro {when} : {} envoyé(s), {} reçu(s), {} supprimé(s)\nclic : synchroniser", s.up, s.down, s.deleted))
             }
-            _ => (RichText::new("☁ synchroniser").color(p.muted), "Envoyer et recevoir les changements".to_string()),
+            _ => (RichText::new(crate::i18n::t("☁ synchroniser")).color(p.muted), "Envoyer et recevoir les changements".to_string()),
         };
         if ui.add(egui::Button::new(label.size(11.0)).frame(false)).on_hover_text(tip).clicked() {
             self.start_sync(true);
@@ -112,12 +112,12 @@ impl App {
         let p = theme::pal();
         let mut cfg = self.cloud_config();
         let before = cfg.clone();
-        ui.label(caps("transfert par internet et coffre en ligne"));
-        ui.label(RichText::new("Branche ton propre stockage compatible S3 : Cloudflare R2 (10 Go gratuits, téléchargement gratuit), Backblaze B2, AWS S3, MinIO… Les identifiants restent sur cet ordinateur, dans le dossier de config d'Aryadne : ils ne sont jamais copiés dans le coffre.").color(p.muted).size(11.5));
+        ui.label(caps(&crate::i18n::t("transfert par internet et coffre en ligne")));
+        ui.label(RichText::new(crate::i18n::t("Branche ton propre stockage compatible S3 : Cloudflare R2 (10 Go gratuits, téléchargement gratuit), Backblaze B2, AWS S3, MinIO… Les identifiants restent sur cet ordinateur, dans le dossier de config d'Aryadne : ils ne sont jamais copiés dans le coffre.")).color(p.muted).size(11.5));
         ui.add_space(8.0);
         ui.horizontal(|ui| {
-            ui.selectable_value(&mut cfg.full_sync, false, "relais temporaire");
-            ui.selectable_value(&mut cfg.full_sync, true, "synchro complète du coffre");
+            ui.selectable_value(&mut cfg.full_sync, false, crate::i18n::t("relais temporaire"));
+            ui.selectable_value(&mut cfg.full_sync, true, crate::i18n::t("synchro complète du coffre"));
         });
         let mode = if cfg.full_sync {
             "Le coffre entier est gardé en ligne et synchronisé entre tes ordinateurs. Occupe l'espace du coffre dans le bucket."
@@ -134,27 +134,27 @@ impl App {
             ] {
                 ui.label(RichText::new(l).size(11.5));
             }
-            ui.hyperlink_to(RichText::new("ouvrir R2 dans Cloudflare ↗").size(11.0), "https://dash.cloudflare.com/?to=/:account/r2/overview");
+            ui.hyperlink_to(RichText::new(crate::i18n::t("ouvrir R2 dans Cloudflare ↗")).size(11.0), "https://dash.cloudflare.com/?to=/:account/r2/overview");
         });
         ui.add_space(6.0);
         egui::Grid::new("cloud-grid").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
-            ui.label("adresse S3");
+            ui.label(crate::i18n::t("adresse S3"));
             ui.add(egui::TextEdit::singleline(&mut cfg.endpoint).hint_text("https://….r2.cloudflarestorage.com").desired_width(380.0));
             ui.end_row();
-            ui.label("bucket");
-            ui.add(egui::TextEdit::singleline(&mut cfg.bucket).hint_text("aryadne").desired_width(380.0));
+            ui.label(crate::i18n::t("bucket"));
+            ui.add(egui::TextEdit::singleline(&mut cfg.bucket).hint_text(crate::i18n::t("aryadne")).desired_width(380.0));
             ui.end_row();
-            ui.label("access key id");
+            ui.label(crate::i18n::t("access key id"));
             ui.add(egui::TextEdit::singleline(&mut cfg.access_key).desired_width(380.0));
             ui.end_row();
-            ui.label("secret access key");
+            ui.label(crate::i18n::t("secret access key"));
             ui.add(egui::TextEdit::singleline(&mut cfg.secret_key).password(true).desired_width(380.0));
             ui.end_row();
-            ui.label("région");
-            ui.add(egui::TextEdit::singleline(&mut cfg.region).hint_text("auto (R2)").desired_width(120.0));
+            ui.label(crate::i18n::t("région"));
+            ui.add(egui::TextEdit::singleline(&mut cfg.region).hint_text(crate::i18n::t("auto (R2)")).desired_width(120.0));
             ui.end_row();
             if cfg.full_sync {
-                ui.label("automatique");
+                ui.label(crate::i18n::t("automatique"));
                 ui.horizontal(|ui| {
                     for (v, l) in [(0, "à la main"), (5, "5 min"), (15, "15 min"), (60, "1 h")] {
                         ui.selectable_value(&mut cfg.every_min, v, l);
@@ -175,7 +175,7 @@ impl App {
         }
         ui.horizontal(|ui| {
             let busy = self.cloud.busy();
-            if ui.add_enabled(cfg.ready() && !busy, egui::Button::new("tester la connexion")).clicked() {
+            if ui.add_enabled(cfg.ready() && !busy, egui::Button::new(crate::i18n::t("tester la connexion"))).clicked() {
                 let c = cfg.clone();
                 let ctx = ctx.clone();
                 let prog = self.cloud.progress.clone();
@@ -188,10 +188,10 @@ impl App {
                     ctx.request_repaint();
                 });
             }
-            if cfg.full_sync && ui.add_enabled(cfg.ready() && !busy, egui::Button::new("synchroniser maintenant")).clicked() {
+            if cfg.full_sync && ui.add_enabled(cfg.ready() && !busy, egui::Button::new(crate::i18n::t("synchroniser maintenant"))).clicked() {
                 self.start_sync(true);
             }
-            if cfg.full_sync && ui.button("oublier l'état de synchro").on_hover_text("La prochaine synchro compare tout comme la première fois (sans rien supprimer)").clicked() && self.vault.is_some() {
+            if cfg.full_sync && ui.button(crate::i18n::t("oublier l'état de synchro")).on_hover_text(crate::i18n::t("La prochaine synchro compare tout comme la première fois (sans rien supprimer)")).clicked() && self.vault.is_some() {
                 cloud::reset(&self.root());
             }
         });
@@ -199,13 +199,13 @@ impl App {
         if let Some(e) = &s.error {
             ui.label(RichText::new(format!("✗ {e}")).color(p.missing).size(11.5));
         } else if s.step == "connexion ok" {
-            ui.label(RichText::new("✓ connexion ok").color(p.accent).size(11.5));
+            ui.label(RichText::new(crate::i18n::t("✓ connexion ok")).color(p.accent).size(11.5));
         } else if s.finished_at.is_some() {
             ui.label(RichText::new(format!("✓ {} envoyé(s), {} reçu(s), {} supprimé(s), {} conflit(s)", s.up, s.down, s.deleted, s.conflicts.len())).color(p.muted).size(11.5));
         }
         ui.add_space(8.0);
         if cfg.full_sync {
-        ui.label(RichText::new("Fichiers modifiés des deux côtés : les deux versions sont gardées (« (conflit …) »). Un fichier supprimé d'un côté va dans la corbeille de l'autre. Les dossiers liés de l'extérieur ne sont pas envoyés.").color(p.muted).size(11.0));
+        ui.label(RichText::new(crate::i18n::t("Fichiers modifiés des deux côtés : les deux versions sont gardées (« (conflit …) »). Un fichier supprimé d'un côté va dans la corbeille de l'autre. Les dossiers liés de l'extérieur ne sont pas envoyés.")).color(p.muted).size(11.0));
         }
     }
 
@@ -217,7 +217,7 @@ impl App {
                 ui.spinner();
                 let f = if s.total > 0 { s.done as f32 / s.total as f32 } else { 0.0 };
                 ui.add(egui::ProgressBar::new(f).corner_radius(0.0).fill(p.accent).desired_width(260.0).text(RichText::new(format!("{} / {} · {}", s.done, s.total, s.step)).size(11.0)));
-                if ui.small_button("annuler").clicked() {
+                if ui.small_button(crate::i18n::t("annuler")).clicked() {
                     self.relay.stop.store(true, std::sync::atomic::Ordering::Relaxed);
                 }
             });
@@ -249,11 +249,11 @@ impl App {
         let cfg = self.cloud_config();
         ui.add_space(10.0);
         ui.separator();
-        ui.label(caps("par internet"));
+        ui.label(caps(&crate::i18n::t("par internet")));
         if !cfg.ready() {
             ui.horizontal(|ui| {
-                ui.label(RichText::new("Pour recevoir d'un ordinateur ailleurs, branche un stockage (R2…).").color(p.muted).size(11.5));
-                if ui.small_button("réglages").clicked() {
+                ui.label(RichText::new(crate::i18n::t("Pour recevoir d'un ordinateur ailleurs, branche un stockage (R2…).")).color(p.muted).size(11.5));
+                if ui.small_button(crate::i18n::t("réglages")).clicked() {
                     self.open_settings_tab(ctx, settings::Tab::Cloud);
                 }
             });
@@ -269,27 +269,27 @@ impl App {
             None => {
                 ui.horizontal(|ui| {
                     ui.spinner();
-                    ui.label(RichText::new("recherche des colis en attente…").color(p.muted).size(11.5));
+                    ui.label(RichText::new(crate::i18n::t("recherche des colis en attente…")).color(p.muted).size(11.5));
                 });
             }
             Some(Err(e)) => {
                 ui.label(RichText::new(format!("✗ {e}")).color(p.missing).size(11.5));
             }
             Some(Ok(list)) if list.is_empty() => {
-                ui.label(RichText::new("Aucun colis en attente.").color(p.muted).size(11.5));
+                ui.label(RichText::new(crate::i18n::t("Aucun colis en attente.")).color(p.muted).size(11.5));
             }
             Some(Ok(list)) => {
                 for pk in list {
                     ui.horizontal(|ui| {
                         ui.label(RichText::new(format!("{} · {} fichier(s) · {} · {}", pk.from, pk.files, crate::transfer::human(pk.size), pk.date)).size(11.5));
-                        if ui.add_enabled(!self.relay.busy(), egui::Button::new("recevoir")).clicked() {
+                        if ui.add_enabled(!self.relay.busy(), egui::Button::new(crate::i18n::t("recevoir"))).clicked() {
                             take = Some(pk.id.clone());
                         }
                     });
                 }
             }
         }
-        if ui.small_button("actualiser").clicked() {
+        if ui.small_button(crate::i18n::t("actualiser")).clicked() {
             self.refresh_relay_list(ctx);
         }
         if let Some(id) = take {
@@ -317,19 +317,19 @@ impl App {
         let cfg = self.cloud_config();
         ui.add_space(10.0);
         ui.separator();
-        ui.label(caps("ou par internet"));
+        ui.label(caps(&crate::i18n::t("ou par internet")));
         if !cfg.ready() {
             ui.horizontal(|ui| {
-                ui.label(RichText::new("Pour envoyer vers un ordinateur ailleurs, branche un stockage (R2…).").color(p.muted).size(11.5));
-                if ui.small_button("réglages").clicked() {
+                ui.label(RichText::new(crate::i18n::t("Pour envoyer vers un ordinateur ailleurs, branche un stockage (R2…).")).color(p.muted).size(11.5));
+                if ui.small_button(crate::i18n::t("réglages")).clicked() {
                     self.open_settings_tab(ctx, settings::Tab::Cloud);
                 }
             });
             return;
         }
-        ui.label(RichText::new("Les fichiers passent par ton bucket et sont effacés dès que l'autre ordinateur les reçoit.").color(p.muted).size(11.0));
+        ui.label(RichText::new(crate::i18n::t("Les fichiers passent par ton bucket et sont effacés dès que l'autre ordinateur les reçoit.")).color(p.muted).size(11.0));
         let ok = !self.send_files.is_empty() && !self.relay.busy();
-        if ui.add_enabled(ok, egui::Button::new("envoyer par internet")).clicked() {
+        if ui.add_enabled(ok, egui::Button::new(crate::i18n::t("envoyer par internet"))).clicked() {
             self.flush_all();
             let (root, files) = (self.root(), self.send_files.clone());
             self.relay.run_job(ctx.clone(), move |prog, stop, ctx| cloud::relay_send(&cfg, &root, &files, prog, stop, ctx));

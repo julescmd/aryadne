@@ -228,7 +228,7 @@ impl App {
         let all = self.commands();
         let words: Vec<&str> = q.split_whitespace().collect();
         let matches: Vec<(&str, &str, Cmd)> = all.into_iter().filter(|(l, _, _)| {
-            let f = crate::chat::fold(l);
+            let f = crate::chat::fold(&format!("{l} {}", crate::i18n::t(l)));
             words.iter().all(|w| f.contains(w))
         }).collect();
         let (up, down, enter, esc) = ctx.input(|i| (i.key_pressed(Key::ArrowUp), i.key_pressed(Key::ArrowDown), i.key_pressed(Key::Enter), i.key_pressed(Key::Escape)));
@@ -244,7 +244,7 @@ impl App {
             ui.set_width(560.0);
             ui.horizontal(|ui| {
                 ui.label(RichText::new("⌘").color(p.accent).family(theme::bold()));
-                ui.add(egui::TextEdit::singleline(&mut query).hint_text("chercher une commande…").frame(egui::Frame::NONE).desired_width(f32::INFINITY)).request_focus();
+                ui.add(egui::TextEdit::singleline(&mut query).hint_text(crate::i18n::t("chercher une commande…")).frame(egui::Frame::NONE).desired_width(f32::INFINITY)).request_focus();
             });
             ui.separator();
             egui::ScrollArea::vertical().max_height(420.0).show(ui, |ui| {
@@ -256,14 +256,14 @@ impl App {
                             ui.scroll_to_rect(r, None);
                         }
                     }
-                    ui.painter().text(r.left_center() + egui::vec2(8.0, 0.0), egui::Align2::LEFT_CENTER, *label, egui::FontId::monospace(12.5), if i == sel { p.text } else { p.muted });
+                    ui.painter().text(r.left_center() + egui::vec2(8.0, 0.0), egui::Align2::LEFT_CENTER, crate::i18n::t(label), egui::FontId::monospace(12.5), if i == sel { p.text } else { p.muted });
                     ui.painter().text(r.right_center() - egui::vec2(8.0, 0.0), egui::Align2::RIGHT_CENTER, *keys, egui::FontId::monospace(11.0), p.muted);
                     if resp.clicked() {
                         chosen = Some(*cmd);
                     }
                 }
                 if matches.is_empty() {
-                    ui.label(RichText::new("aucune commande").color(p.muted));
+                    ui.label(RichText::new(crate::i18n::t("aucune commande")).color(p.muted));
                 }
             });
         });
@@ -305,14 +305,14 @@ impl App {
         let mut create = false;
         egui::Modal::new(egui::Id::unique("template")).frame(egui::Frame::new().fill(p.bg).stroke(egui::Stroke::new(1.0, p.text)).inner_margin(16)).show(ctx, |ui| {
             ui.set_width(460.0);
-            ui.label(caps("nouvelle note depuis un modèle"));
+            ui.label(caps(&crate::i18n::t("nouvelle note depuis un modèle")));
             ui.add_space(6.0);
             for (i, (name, _)) in list.iter().enumerate() {
                 ui.radio_value(&mut d.sel, i, name.as_str());
             }
-            ui.label(RichText::new("Les modèles sont des notes du dossier modèles/ : modifie-les ou ajoutes-en. {{titre}}, {{date}} et {{heure}} sont remplacés.").color(p.muted).size(11.0));
+            ui.label(RichText::new(crate::i18n::t("Les modèles sont des notes du dossier modèles/ : modifie-les ou ajoutes-en. {{titre}}, {{date}} et {{heure}} sont remplacés.")).color(p.muted).size(11.0));
             ui.add_space(8.0);
-            let r = ui.add(egui::TextEdit::singleline(&mut d.name).hint_text("titre de la note").desired_width(f32::INFINITY));
+            let r = ui.add(egui::TextEdit::singleline(&mut d.name).hint_text(crate::i18n::t("titre de la note")).desired_width(f32::INFINITY));
             if !r.has_focus() && d.name.is_empty() {
                 r.request_focus();
             }
@@ -321,8 +321,8 @@ impl App {
             }
             ui.add_space(8.0);
             ui.horizontal(|ui| {
-                create |= ui.button("créer").clicked();
-                close = ui.button("annuler").clicked() || ui.input(|i| i.key_pressed(Key::Escape));
+                create |= ui.button(crate::i18n::t("créer")).clicked();
+                close = ui.button(crate::i18n::t("annuler")).clicked() || ui.input(|i| i.key_pressed(Key::Escape));
             });
         });
         if create && !d.name.trim().is_empty() {
@@ -359,7 +359,7 @@ impl App {
             ui.label(caps(&format!("historique · {}", vault::display_rel(&d.rel))));
             ui.add_space(6.0);
             if d.versions.is_empty() {
-                ui.label(RichText::new("Aucune version enregistrée pour l'instant. Aryadne en garde une à chaque enregistrement (au plus une toutes les 2 minutes, les 40 dernières).").color(p.muted));
+                ui.label(RichText::new(crate::i18n::t("Aucune version enregistrée pour l'instant. Aryadne en garde une à chaque enregistrement (au plus une toutes les 2 minutes, les 40 dernières).")).color(p.muted));
             } else {
                 ui.horizontal_top(|ui| {
                     ui.vertical(|ui| {
@@ -377,7 +377,7 @@ impl App {
                         let (added, removed) = line_diff(&current, &text);
                         ui.horizontal(|ui| {
                             ui.label(RichText::new(format!("par rapport à maintenant : +{added} / −{removed} lignes")).color(p.muted).size(11.0));
-                            ui.checkbox(&mut d.diff, "voir les différences");
+                            ui.checkbox(&mut d.diff, crate::i18n::t("voir les différences"));
                         });
                         egui::ScrollArea::both().id_salt("hist-view").max_height(400.0).show(ui, |ui| {
                             if d.diff {
@@ -396,14 +396,14 @@ impl App {
                                 ui.add(egui::Label::new(RichText::new(&text).monospace().size(12.0)).wrap_mode(egui::TextWrapMode::Extend));
                             }
                         });
-                        if ui.button("restaurer cette version").clicked() {
+                        if ui.button(crate::i18n::t("restaurer cette version")).clicked() {
                             restore = Some(text);
                         }
                     });
                 });
             }
             ui.add_space(8.0);
-            close = ui.button("fermer").clicked() || ui.input(|i| i.key_pressed(Key::Escape));
+            close = ui.button(crate::i18n::t("fermer")).clicked() || ui.input(|i| i.key_pressed(Key::Escape));
         });
         if let Some(text) = restore {
             if let Some(i) = self.docs.iter().position(|x| x.rel == d.rel) {
@@ -479,16 +479,16 @@ impl App {
                 }
                 let left = total - el;
                 let txt = format!("◷ {} {:02}:{:02}", t.label, left / 60, left % 60);
-                if ui.add(egui::Button::new(RichText::new(txt).color(p.accent).size(11.0)).frame(false)).on_hover_text("cliquer pour arrêter").clicked() {
+                if ui.add(egui::Button::new(RichText::new(txt).color(p.accent).size(11.0)).frame(false)).on_hover_text(crate::i18n::t("cliquer pour arrêter")).clicked() {
                     self.timer = None;
                 }
                 ui.ctx().request_repaint_after(Duration::from_secs(1));
             }
             None => {
-                let r = ui.add(egui::Button::new(RichText::new("◷ minuteur").color(p.muted).size(11.0)).frame(false));
+                let r = ui.add(egui::Button::new(RichText::new(crate::i18n::t("◷ minuteur")).color(p.muted).size(11.0)).frame(false));
                 egui::Popup::menu(&r).show(|ui| {
                     for (m, l) in [(25, "25 min de concentration"), (50, "50 min"), (5, "pause 5 min"), (15, "pause 15 min")] {
-                        if ui.button(l).clicked() {
+                        if ui.button(crate::i18n::t(l)).clicked() {
                             self.timer = Some(Timer { start: Instant::now(), minutes: m, label: if m <= 15 { "pause" } else { "focus" } });
                         }
                     }
@@ -506,16 +506,16 @@ impl App {
         let mut go = false;
         egui::Modal::new(egui::Id::unique("url")).frame(egui::Frame::new().fill(p.bg).stroke(egui::Stroke::new(1.0, p.text)).inner_margin(16)).show(ctx, |ui| {
             ui.set_width(520.0);
-            ui.label(caps("importer une image depuis une URL"));
+            ui.label(caps(&crate::i18n::t("importer une image depuis une URL")));
             ui.add_space(6.0);
             let r = ui.add(egui::TextEdit::singleline(&mut url).hint_text("https://…/image.jpg").desired_width(f32::INFINITY));
             r.request_focus();
             go = r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
-            ui.label(RichText::new("L'image est enregistrée dans refs/ (Ctrl+V d'une URL dans les refs fait la même chose).").color(p.muted).size(11.0));
+            ui.label(RichText::new(crate::i18n::t("L'image est enregistrée dans refs/ (Ctrl+V d'une URL dans les refs fait la même chose).")).color(p.muted).size(11.0));
             ui.add_space(8.0);
             ui.horizontal(|ui| {
-                go |= ui.button("importer").clicked();
-                close = ui.button("annuler").clicked() || ui.input(|i| i.key_pressed(Key::Escape));
+                go |= ui.button(crate::i18n::t("importer")).clicked();
+                close = ui.button(crate::i18n::t("annuler")).clicked() || ui.input(|i| i.key_pressed(Key::Escape));
             });
         });
         if go && !url.trim().is_empty() {
@@ -570,31 +570,31 @@ impl App {
         let mut add = false;
         egui::CentralPanel::default().frame(egui::Frame::new().fill(p.bg).inner_margin(egui::Margin::symmetric(24, 16))).show(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.label(caps("tâches"));
+                ui.label(caps(&crate::i18n::t("tâches")));
                 let open_n = self.tasks.items.iter().filter(|t| !t.done).count();
                 ui.label(RichText::new(format!("{open_n} à faire · {} faites", self.tasks.items.len() - open_n)).color(p.muted).size(11.5));
                 ui.add_space(12.0);
-                ui.selectable_value(&mut self.tasks.show_done, false, "à faire");
-                ui.selectable_value(&mut self.tasks.show_done, true, "tout");
+                ui.selectable_value(&mut self.tasks.show_done, false, crate::i18n::t("à faire"));
+                ui.selectable_value(&mut self.tasks.show_done, true, crate::i18n::t("tout"));
                 ui.add_space(12.0);
-                ui.add(egui::TextEdit::singleline(&mut self.tasks.filter).hint_text("filtrer…").desired_width(180.0));
+                ui.add(egui::TextEdit::singleline(&mut self.tasks.filter).hint_text(crate::i18n::t("filtrer…")).desired_width(180.0));
             });
             ui.add_space(8.0);
             ui.horizontal(|ui| {
-                let r = ui.add(egui::TextEdit::singleline(&mut self.tasks.input).hint_text("nouvelle tâche (ajoutée à tâches.md) · Entrée").desired_width(420.0));
+                let r = ui.add(egui::TextEdit::singleline(&mut self.tasks.input).hint_text(crate::i18n::t("nouvelle tâche (ajoutée à tâches.md) · Entrée")).desired_width(420.0));
                 if r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
                     add = true;
                 }
-                add |= ui.button("ajouter").clicked();
+                add |= ui.button(crate::i18n::t("ajouter")).clicked();
             });
             ui.add_space(4.0);
-            ui.label(RichText::new("Toutes les cases « - [ ] » de tes notes, regroupées par note. Cocher ici coche dans la note. Ajoute « @2026-12-01 » pour une échéance.").color(p.muted).size(11.0));
+            ui.label(RichText::new(crate::i18n::t("Toutes les cases « - [ ] » de tes notes, regroupées par note. Cocher ici coche dans la note. Ajoute « @2026-12-01 » pour une échéance.")).color(p.muted).size(11.0));
             // Échéances à venir, toutes notes confondues
             let mut dated: Vec<&Task> = self.tasks.items.iter().filter(|t| !t.done && t.due.is_some()).collect();
             dated.sort_by(|a, b| a.due.cmp(&b.due));
             if !dated.is_empty() {
                 ui.add_space(8.0);
-                ui.label(caps("échéances"));
+                ui.label(caps(&crate::i18n::t("échéances")));
                 for t in dated.iter().take(8) {
                     let d = t.due.clone().unwrap_or_default();
                     let late = d.as_str() < today().as_str();
@@ -1070,16 +1070,16 @@ pub fn chat_bar(ui: &mut egui::Ui, chat: &mut chat::Chat, local: &ollama::Local,
     let p = theme::pal();
     let mut out = ChatBarOut::default();
     ui.horizontal_wrapped(|ui| {
-        egui::containers::menu::MenuButton::new("＋ joindre ▾").ui(ui, |ui| {
+        egui::containers::menu::MenuButton::new(crate::i18n::t("＋ joindre ▾")).ui(ui, |ui| {
             ui.set_min_width(220.0);
-            if ui.button("fichiers ou images…").clicked() {
+            if ui.button(crate::i18n::t("fichiers ou images…")).clicked() {
                 if let Some(files) = rfd::FileDialog::new().set_title("Joindre des fichiers").pick_files() {
                     for f in files {
                         chat.attachments.extend(chat::Attachment::from_path(&f));
                     }
                 }
             }
-            if ui.button("un dossier…").clicked() {
+            if ui.button(crate::i18n::t("un dossier…")).clicked() {
                 if let Some(d) = rfd::FileDialog::new().set_title("Joindre un dossier").pick_folder() {
                     chat.attachments.extend(chat::Attachment::from_path(&d));
                 }
@@ -1089,19 +1089,19 @@ pub fn chat_bar(ui: &mut egui::Ui, chat: &mut chat::Chat, local: &ollama::Local,
                     chat.attachments.extend(chat::Attachment::from_path(path));
                 }
             }
-            if ui.button("l'image du presse-papiers").clicked() {
+            if ui.button(crate::i18n::t("l'image du presse-papiers")).clicked() {
                 if let Some(img) = arboard::Clipboard::new().ok().and_then(|mut c| c.get_image().ok()) {
                     if let Some(buf) = image::RgbaImage::from_raw(img.width as u32, img.height as u32, img.bytes.into_owned()) {
                         chat.attachments.push(chat::Attachment::from_image(image::DynamicImage::ImageRgba8(buf), "presse-papiers.png"));
                     }
                 }
             }
-            ui.label(RichText::new("Tu peux aussi glisser des fichiers dans la fenêtre (vue chat).").color(p.muted).size(10.5));
+            ui.label(RichText::new(crate::i18n::t("Tu peux aussi glisser des fichiers dans la fenêtre (vue chat).")).color(p.muted).size(10.5));
         });
         let mut remove = None;
         for (i, a) in chat.attachments.iter().enumerate() {
             let icon = if matches!(a, chat::Attachment::Image { .. }) { "▣" } else { "▤" };
-            if ui.add(egui::Button::new(RichText::new(format!("{icon} {}  ×", a.name())).size(11.0)).fill(p.panel)).on_hover_text("retirer").clicked() {
+            if ui.add(egui::Button::new(RichText::new(format!("{icon} {}  ×", a.name())).size(11.0)).fill(p.panel)).on_hover_text(crate::i18n::t("retirer")).clicked() {
                 remove = Some(i);
             }
         }
@@ -1110,11 +1110,11 @@ pub fn chat_bar(ui: &mut egui::Ui, chat: &mut chat::Chat, local: &ollama::Local,
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if let Some(v) = chat.last_speed.filter(|_| !chat.busy()) {
-                ui.label(RichText::new(format!("{v:.0} jetons/s")).color(p.muted).size(10.5)).on_hover_text("vitesse de la dernière réponse");
+                ui.label(RichText::new(format!("{v:.0} jetons/s")).color(p.muted).size(10.5)).on_hover_text(crate::i18n::t("vitesse de la dernière réponse"));
             }
             if chat.busy() {
-                let b = egui::Button::new(RichText::new("■ arrêter").color(p.on_accent)).fill(p.missing).stroke(egui::Stroke::NONE);
-                if ui.add(b).on_hover_text("Arrêter la réponse").clicked() {
+                let b = egui::Button::new(RichText::new(crate::i18n::t("■ arrêter")).color(p.on_accent)).fill(p.missing).stroke(egui::Stroke::NONE);
+                if ui.add(b).on_hover_text(crate::i18n::t("Arrêter la réponse")).clicked() {
                     chat.stop();
                 }
             }
@@ -1122,13 +1122,13 @@ pub fn chat_bar(ui: &mut egui::Ui, chat: &mut chat::Chat, local: &ollama::Local,
             let st = local.snapshot();
             if ollama::is_local(&settings.url) {
                 let mut think = settings.think;
-                if ui.toggle_value(&mut think, "réflexion").on_hover_text("Les modèles comme Qwen 3.x réfléchissent avant de répondre : plus juste, mais bien plus lent. Désactivé = réponse directe.").changed() {
+                if ui.toggle_value(&mut think, crate::i18n::t("réflexion")).on_hover_text(crate::i18n::t("Les modèles comme Qwen 3.x réfléchissent avant de répondre : plus juste, mais bien plus lent. Désactivé = réponse directe.")).changed() {
                     out.think = Some(think);
                 }
                 let size_gb = st.sizes.iter().find(|(m, _)| m.trim_end_matches(":latest") == settings.model.trim_end_matches(":latest")).map(|(_, b)| *b as f32 / 1e9);
                 if let (Some(gb), Some(ram)) = (size_gb, ollama::total_ram_gb()) {
                     if gb * 1.2 > ram * 0.7 {
-                        ui.label(RichText::new("⚠ lent").color(p.missing).size(10.5)).on_hover_text(format!("Ce modèle fait {gb:.0} Go pour {ram:.0} Go de mémoire : il tournera très lentement. Un modèle de 4 à 8 milliards de paramètres (3 à 6 Go) répond beaucoup plus vite."));
+                        ui.label(RichText::new(crate::i18n::t("⚠ lent")).color(p.missing).size(10.5)).on_hover_text(format!("Ce modèle fait {gb:.0} Go pour {ram:.0} Go de mémoire : il tournera très lentement. Un modèle de 4 à 8 milliards de paramètres (3 à 6 Go) répond beaucoup plus vite."));
                     }
                 }
             }
@@ -1157,7 +1157,7 @@ pub fn chat_bar(ui: &mut egui::Ui, chat: &mut chat::Chat, local: &ollama::Local,
                     }
                 });
                 ui.separator();
-                if ui.button("ajouter Claude, ChatGPT, DeepSeek…").clicked() {
+                if ui.button(crate::i18n::t("ajouter Claude, ChatGPT, DeepSeek…")).clicked() {
                     out.manage_models = true;
                     ui.close();
                 }
@@ -1222,7 +1222,7 @@ pub fn file_buttons(ui: &mut egui::Ui, text: &str, exists: &dyn Fn(&str) -> bool
         ui.horizontal_wrapped(|ui| {
             let verb = if exists(&path) { "remplacer" } else { "créer" };
             ui.label(RichText::new(format!("▤ {path}")).color(p.muted).size(11.0));
-            if ui.add(egui::Button::new(RichText::new(format!("{verb} le fichier")).color(p.on_accent)).fill(p.accent).stroke(egui::Stroke::NONE)).on_hover_text("L'ancienne version reste dans l'historique du fichier").clicked() {
+            if ui.add(egui::Button::new(RichText::new(format!("{verb} le fichier")).color(p.on_accent)).fill(p.accent).stroke(egui::Stroke::NONE)).on_hover_text(crate::i18n::t("L'ancienne version reste dans l'historique du fichier")).clicked() {
                 picked = Some((path.clone(), content.clone()));
             }
         });
@@ -1237,7 +1237,7 @@ pub fn choice_buttons(ui: &mut egui::Ui, choices: &[String]) -> Option<String> {
         return None;
     }
     ui.horizontal_wrapped(|ui| {
-        ui.label(RichText::new("répondre :").color(p.muted).size(11.0));
+        ui.label(RichText::new(crate::i18n::t("répondre :")).color(p.muted).size(11.0));
         for c in choices {
             if ui.add(egui::Button::new(RichText::new(c).color(p.accent)).stroke(egui::Stroke::new(1.0, p.accent))).clicked() {
                 picked = Some(c.clone());
@@ -1327,7 +1327,7 @@ impl App {
         let mut open = None;
         egui::Modal::new(egui::Id::unique("stats")).frame(egui::Frame::new().fill(p.bg).stroke(egui::Stroke::new(1.0, p.text)).inner_margin(16)).show(ctx, |ui| {
             ui.set_width(620.0);
-            ui.label(caps("statistiques du coffre"));
+            ui.label(caps(&crate::i18n::t("statistiques du coffre")));
             ui.add_space(6.0);
             ui.label(format!("{} fichiers · {} dossiers · {} au total · {} fichiers liés · {} mots dans les notes", st.files, st.dirs, human(st.total), st.linked, st.words));
             ui.add_space(10.0);
@@ -1342,7 +1342,7 @@ impl App {
                 });
             }
             ui.add_space(10.0);
-            ui.label(caps("les plus lourds"));
+            ui.label(caps(&crate::i18n::t("les plus lourds")));
             for (rel, s) in &st.biggest {
                 ui.horizontal(|ui| {
                     if ui.add(egui::Button::new(RichText::new(vault::display_rel(rel)).size(11.5)).frame(false)).clicked() {
@@ -1352,7 +1352,7 @@ impl App {
                 });
             }
             ui.add_space(8.0);
-            close = ui.button("fermer").clicked() || ui.input(|i| i.key_pressed(Key::Escape));
+            close = ui.button(crate::i18n::t("fermer")).clicked() || ui.input(|i| i.key_pressed(Key::Escape));
         });
         if let Some(r) = open {
             self.stats = None;
@@ -1459,9 +1459,9 @@ impl App {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     close = ui.small_button("×").clicked();
                     if running {
-                        stop = ui.small_button("arrêter").clicked();
+                        stop = ui.small_button(crate::i18n::t("arrêter")).clicked();
                     } else {
-                        again = ui.small_button("relancer").clicked();
+                        again = ui.small_button(crate::i18n::t("relancer")).clicked();
                     }
                 });
             });
@@ -1596,13 +1596,13 @@ impl App {
                     ui.add(egui::Spinner::new().size(10.0));
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    close = ui.small_button("×").on_hover_text("Ctrl+`").clicked();
-                    if ui.small_button("effacer").clicked() {
+                    close = ui.small_button("×").on_hover_text(crate::i18n::t("Ctrl+`")).clicked();
+                    if ui.small_button(crate::i18n::t("effacer")).clicked() {
                         if let Ok(mut o) = t.out.lock() {
                             o.clear();
                         }
                     }
-                    if t.busy() && ui.small_button("arrêter (Ctrl+C)").clicked() {
+                    if t.busy() && ui.small_button(crate::i18n::t("arrêter (Ctrl+C)")).clicked() {
                         t.kill();
                     }
                 });
@@ -1611,7 +1611,7 @@ impl App {
             egui::Panel::bottom("terminal-input").frame(egui::Frame::NONE).show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.label(RichText::new("❯").color(theme::pal().accent).monospace());
-                    let r = ui.add(egui::TextEdit::singleline(&mut t.input).font(egui::FontId::monospace(12.5)).text_color(egui::Color32::from_gray(235)).frame(egui::Frame::NONE).desired_width(f32::INFINITY).hint_text("commande… (↑ ↓ historique)"));
+                    let r = ui.add(egui::TextEdit::singleline(&mut t.input).font(egui::FontId::monospace(12.5)).text_color(egui::Color32::from_gray(235)).frame(egui::Frame::NONE).desired_width(f32::INFINITY).hint_text(crate::i18n::t("commande… (↑ ↓ historique)")));
                     if t.focus {
                         r.request_focus();
                         t.focus = false;

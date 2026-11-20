@@ -523,7 +523,7 @@ impl Board {
             if let (Some(r), Some(Kind::Text { text, size })) = (r, self.data.items.get_mut(i).map(|it| &mut it.kind)) {
                 painter.rect_stroke(r.expand(4.0), 0.0, Stroke::new(1.0, p.accent), egui::StrokeKind::Outside);
                 let edit = egui::TextEdit::multiline(text)
-                    .hint_text("écris ici…")
+                    .hint_text(crate::i18n::t("écris ici…"))
                     .frame(egui::Frame::NONE)
                     .margin(egui::Margin::ZERO)
                     .font(egui::FontId::proportional((*size * zoom).max(6.0)))
@@ -843,21 +843,21 @@ impl Board {
                 ui.label(egui::RichText::new(format!("{n} élément(s)")).color(p.muted).size(11.0));
                 let first = self.data.items.get(self.selection[0]).cloned();
                 if let Some(Item { kind: Kind::Image { rel, .. } | Kind::Note { rel }, .. }) = &first {
-                    if ui.button("ouvrir").clicked() {
+                    if ui.button(crate::i18n::t("ouvrir")).clicked() {
                         event = Some(Event::Open(rel.clone()));
                         ui.close();
                     }
                 }
-                if ui.button("premier plan").clicked() {
+                if ui.button(crate::i18n::t("premier plan")).clicked() {
                     self.reorder(true);
                     ui.close();
                 }
-                if ui.button("arrière-plan").clicked() {
+                if ui.button(crate::i18n::t("arrière-plan")).clicked() {
                     self.reorder(false);
                     ui.close();
                 }
                 if self.selection.iter().any(|&i| matches!(self.data.items.get(i).map(|x| &x.kind), Some(Kind::Image { .. }))) {
-                    if ui.button("retourner horizontalement").clicked() {
+                    if ui.button(crate::i18n::t("retourner horizontalement")).clicked() {
                         self.checkpoint();
                         for &i in &self.selection {
                             if let Some(Item { kind: Kind::Image { flip, .. }, .. }) = self.data.items.get_mut(i) {
@@ -867,7 +867,7 @@ impl Board {
                         self.touch();
                         ui.close();
                     }
-                    if ui.button("taille d'origine").clicked() {
+                    if ui.button(crate::i18n::t("taille d'origine")).clicked() {
                         self.checkpoint();
                         for &i in &self.selection.clone() {
                             if let Some(it) = self.data.items.get_mut(i) {
@@ -885,9 +885,9 @@ impl Board {
                 }
                 if self.selection.iter().any(|&i| matches!(self.data.items.get(i).map(|x| &x.kind), Some(Kind::Text { .. }))) {
                     ui.horizontal(|ui| {
-                        ui.label("texte");
+                        ui.label(crate::i18n::t("texte"));
                         for (label, f) in [("−", 0.8), ("+", 1.25)] {
-                            if ui.button(label).clicked() {
+                            if ui.button(crate::i18n::t(label)).clicked() {
                                 self.checkpoint();
                                 for &i in &self.selection {
                                     if let Some(Item { kind: Kind::Text { size, .. }, .. }) = self.data.items.get_mut(i) {
@@ -899,30 +899,30 @@ impl Board {
                         }
                     });
                 }
-                if ui.button("dupliquer  ^D").clicked() {
+                if ui.button(crate::i18n::t("dupliquer  ^D")).clicked() {
                     self.duplicate_selection();
                     ui.close();
                 }
-                if ui.button(egui::RichText::new("supprimer  suppr").color(p.missing)).clicked() {
+                if ui.button(egui::RichText::new(crate::i18n::t("supprimer  suppr")).color(p.missing)).clicked() {
                     self.delete_selection();
                     ui.close();
                 }
                 ui.separator();
             }
-            if ui.button("coller une image  ^V").clicked() {
+            if ui.button(crate::i18n::t("coller une image  ^V")).clicked() {
                 event = Some(Event::PasteImage(menu_at));
                 ui.close();
             }
-            if ui.button("ajouter du texte").clicked() {
+            if ui.button(crate::i18n::t("ajouter du texte")).clicked() {
                 self.add(Kind::Text { text: String::new(), size: text_size() }, menu_at.to_vec2() + vec2(140.0, 20.0), vec2(280.0, 40.0));
                 self.editing = self.selection.last().copied();
                 ui.close();
             }
-            if ui.button("tout sélectionner  ^A").clicked() {
+            if ui.button(crate::i18n::t("tout sélectionner  ^A")).clicked() {
                 self.selection = (0..self.data.items.len()).collect();
                 ui.close();
             }
-            if ui.button("cadrer").clicked() {
+            if ui.button(crate::i18n::t("cadrer")).clicked() {
                 self.fit();
                 ui.close();
             }

@@ -500,7 +500,7 @@ impl Viewer {
                         }
                     });
                     if sheet.rows.len() >= 500 {
-                        ui.label(RichText::new("(500 premières lignes)").color(p.muted).size(11.0));
+                        ui.label(RichText::new(crate::i18n::t("(500 premières lignes)")).color(p.muted).size(11.0));
                     }
                 });
             }

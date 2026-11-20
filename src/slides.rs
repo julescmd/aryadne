@@ -805,11 +805,11 @@ impl Viewer {
             if ui.button("›").clicked() || (self.editing.is_none() && ui.input(|i| i.key_pressed(egui::Key::ArrowRight) || i.key_pressed(egui::Key::PageDown))) {
                 self.current = (self.current + 1).min(n - 1);
             }
-            ui.label(RichText::new("double-clic : modifier un texte · glisser : déplacer").color(p.muted).size(11.0));
+            ui.label(RichText::new(crate::i18n::t("double-clic : modifier un texte · glisser : déplacer")).color(p.muted).size(11.0));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if !self.edits.is_empty() {
                     let b = egui::Button::new(RichText::new(format!("enregistrer ({})", self.edits.len())).color(p.on_accent).family(crate::theme::bold())).fill(p.accent).stroke(Stroke::NONE);
-                    if ui.add(b).on_hover_text("Écrit les changements dans le fichier .pptx").clicked() {
+                    if ui.add(b).on_hover_text(crate::i18n::t("Écrit les changements dans le fichier .pptx")).clicked() {
                         self.commit_edit();
                         match save(&self.path, &self.edits) {
                             Ok(()) => {
@@ -819,7 +819,7 @@ impl Viewer {
                             Err(e) => self.message = Some(e),
                         }
                     }
-                    if ui.button("annuler").clicked() {
+                    if ui.button(crate::i18n::t("annuler")).clicked() {
                         self.edits.clear();
                         self.editing = None;
                         self.deck = load(&self.path);

@@ -92,7 +92,7 @@ fn inline(
             let t = RichText::new(seg).monospace().background_color(p.code_bg);
             if paths.contains(seg.trim_matches('/')) {
                 let r = ui.add(egui::Label::new(t.color(p.link).underline()).sense(egui::Sense::click()));
-                if r.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("ouvrir").clicked() {
+                if r.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(crate::i18n::t("ouvrir")).clicked() {
                     *clicked = Some(seg.trim_matches('/').to_string());
                 }
             } else {

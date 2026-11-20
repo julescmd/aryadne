@@ -90,7 +90,7 @@ impl Zoom {
             if ui.small_button("100 %").clicked() {
                 self.scale = Some(1.0);
             }
-            if ui.small_button("ajuster").clicked() {
+            if ui.small_button(crate::i18n::t("ajuster")).clicked() {
                 *self = Zoom::default();
             }
             ui.label(RichText::new(format!("{:.0} %", s * 100.0)).size(11.0).color(p.muted));
