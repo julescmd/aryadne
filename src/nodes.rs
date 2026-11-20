@@ -105,6 +105,23 @@ pub const DEFS: &[Def] = &[
     Def { op: "pixelate", label: "Pixeliser", cat: "filtre", inputs: &[("image", Sock::Color, GRAY)], outputs: &[("image", Sock::Color)], params: &[ParamDef::Float("taille (px)", 1.0, 64.0, 8.0)], mat: false, comp: true },
     Def { op: "posterize", label: "Postériser", cat: "filtre", inputs: &[("image", Sock::Color, GRAY), ("niveaux", Sock::Float, f(5.0))], outputs: &[("image", Sock::Color)], params: &[], mat: true, comp: true },
     Def { op: "edges", label: "Contours", cat: "filtre", inputs: &[("image", Sock::Color, GRAY)], outputs: &[("contours", Sock::Float)], params: &[], mat: false, comp: true },
+    // Motifs supplémentaires
+    Def { op: "bricks", label: "Briques", cat: "motif", inputs: &[("échelle", Sock::Float, f(6.0)), ("mortier", Sock::Float, f(0.06)), ("brique", Sock::Color, [0.62, 0.25, 0.16, 1.0]), ("joint", Sock::Color, [0.8, 0.78, 0.74, 1.0]), ("variation", Sock::Float, f(0.25))], outputs: &[("couleur", Sock::Color), ("masque", Sock::Float)], params: &[], mat: true, comp: true },
+    Def { op: "wood", label: "Bois", cat: "motif", inputs: &[("échelle", Sock::Float, f(3.0)), ("cernes", Sock::Float, f(12.0)), ("distorsion", Sock::Float, f(0.6)), ("clair", Sock::Color, [0.78, 0.56, 0.34, 1.0]), ("foncé", Sock::Color, [0.45, 0.27, 0.13, 1.0])], outputs: &[("couleur", Sock::Color), ("valeur", Sock::Float)], params: &[], mat: true, comp: true },
+    Def { op: "marble", label: "Marbre", cat: "motif", inputs: &[("échelle", Sock::Float, f(3.0)), ("veines", Sock::Float, f(6.0)), ("turbulence", Sock::Float, f(4.0)), ("fond", Sock::Color, [0.92, 0.91, 0.88, 1.0]), ("veine", Sock::Color, [0.25, 0.25, 0.28, 1.0])], outputs: &[("couleur", Sock::Color), ("valeur", Sock::Float)], params: &[], mat: true, comp: true },
+    Def { op: "hexagons", label: "Hexagones", cat: "motif", inputs: &[("échelle", Sock::Float, f(8.0)), ("bord", Sock::Float, f(0.08))], outputs: &[("bord", Sock::Float), ("cellule", Sock::Color)], params: &[], mat: true, comp: true },
+    Def { op: "dots", label: "Pois", cat: "motif", inputs: &[("échelle", Sock::Float, f(10.0)), ("rayon", Sock::Float, f(0.3))], outputs: &[("valeur", Sock::Float)], params: &[ParamDef::Choice("grille", &["carrée", "décalée"])], mat: true, comp: true },
+    Def { op: "waves", label: "Ondes", cat: "motif", inputs: &[("échelle", Sock::Float, f(6.0)), ("distorsion", Sock::Float, f(1.0))], outputs: &[("valeur", Sock::Float)], params: &[ParamDef::Choice("type", &["bandes", "anneaux"])], mat: true, comp: true },
+    Def { op: "whitenoise", label: "Bruit blanc", cat: "motif", inputs: &[("échelle", Sock::Float, f(64.0))], outputs: &[("valeur", Sock::Float), ("couleur", Sock::Color)], params: &[], mat: true, comp: true },
+    // Couleur supplémentaire
+    Def { op: "curve", label: "Courbe (contraste en S)", cat: "couleur", inputs: &[("couleur", Sock::Color, GRAY), ("ombres", Sock::Float, f(0.0)), ("lumières", Sock::Float, f(0.0)), ("contraste S", Sock::Float, f(0.3))], outputs: &[("couleur", Sock::Color)], params: &[], mat: true, comp: true },
+    Def { op: "whitebal", label: "Balance des blancs", cat: "couleur", inputs: &[("couleur", Sock::Color, GRAY), ("température", Sock::Float, f(0.0)), ("teinte", Sock::Float, f(0.0))], outputs: &[("couleur", Sock::Color)], params: &[], mat: true, comp: true },
+    Def { op: "exposure", label: "Exposition", cat: "couleur", inputs: &[("couleur", Sock::Color, GRAY), ("EV", Sock::Float, f(0.0))], outputs: &[("couleur", Sock::Color)], params: &[], mat: true, comp: true },
+    Def { op: "clamp", label: "Limiter", cat: "math", inputs: &[("valeur", Sock::Float, f(0.5)), ("min", Sock::Float, f(0.0)), ("max", Sock::Float, f(1.0))], outputs: &[("valeur", Sock::Float)], params: &[], mat: true, comp: true },
+    // Filtres supplémentaires
+    Def { op: "dirblur", label: "Flou directionnel", cat: "filtre", inputs: &[("image", Sock::Color, GRAY)], outputs: &[("image", Sock::Color)], params: &[ParamDef::Float("angle", -180.0, 180.0, 0.0), ParamDef::Float("longueur (px)", 0.0, 200.0, 20.0)], mat: false, comp: true },
+    Def { op: "radialblur", label: "Flou radial (zoom)", cat: "filtre", inputs: &[("image", Sock::Color, GRAY)], outputs: &[("image", Sock::Color)], params: &[ParamDef::Float("force", 0.0, 0.5, 0.08)], mat: false, comp: true },
+    Def { op: "lens", label: "Distorsion d'objectif", cat: "filtre", inputs: &[("image", Sock::Color, GRAY)], outputs: &[("image", Sock::Color)], params: &[ParamDef::Float("distorsion", -1.0, 1.0, 0.15)], mat: false, comp: true },
 ];
 
 pub fn def(op: &str) -> Option<&'static Def> {
@@ -163,6 +180,16 @@ pub struct Graph {
     pub links: Vec<Link>,
     #[serde(default)]
     pub next_id: u32,
+    /// Cadres de regroupement (visuels)
+    #[serde(default)]
+    pub frames: Vec<Frame>,
+}
+
+#[derive(Clone, Serialize, Deserialize, PartialEq)]
+pub struct Frame {
+    pub rect: [f32; 4],
+    pub label: String,
+    pub color: [u8; 3],
 }
 
 impl Graph {
@@ -258,7 +285,7 @@ impl Graph {
     }
 
     pub fn new_material() -> Graph {
-        let mut g = Graph { kind: GraphKind::Material, nodes: vec![], links: vec![], next_id: 0 };
+        let mut g = Graph { kind: GraphKind::Material, nodes: vec![], links: vec![], next_id: 0, frames: vec![] };
         let noise = g.add("noise", [0.0, 0.0]);
         let ramp = g.add("ramp", [220.0, 0.0]);
         let out = g.add("mat_out", [460.0, 40.0]);
@@ -268,7 +295,7 @@ impl Graph {
     }
 
     pub fn new_compositor() -> Graph {
-        let mut g = Graph { kind: GraphKind::Compositor, nodes: vec![], links: vec![], next_id: 0 };
+        let mut g = Graph { kind: GraphKind::Compositor, nodes: vec![], links: vec![], next_id: 0, frames: vec![] };
         let img = g.add("image", [0.0, 0.0]);
         let bc = g.add("brightcon", [220.0, 0.0]);
         let vig = g.add("vignette", [440.0, 20.0]);
@@ -304,7 +331,7 @@ pub const SHADER_EXAMPLES: &[(&str, &str)] = &[
 
 /// Matériaux prêts à l'emploi (menu « + » de l'éditeur).
 pub fn material_preset(name: &str) -> Option<Graph> {
-    let mut g = Graph { kind: GraphKind::Material, nodes: vec![], links: vec![], next_id: 0 };
+    let mut g = Graph { kind: GraphKind::Material, nodes: vec![], links: vec![], next_id: 0, frames: vec![] };
     let out = g.add("mat_out", [700.0, 40.0]);
     let set = |g: &mut Graph, id: u32, k: usize, v: V| {
         if let Some(n) = g.nodes.iter_mut().find(|n| n.id == id) {
@@ -1008,6 +1035,44 @@ impl Program {
                     let k = pnum(&s.params, "force", 0.8);
                     vec![src.iter().zip(&b).map(|(a, c)| [a[0] + (a[0] - c[0]) * k, a[1] + (a[1] - c[1]) * k, a[2] + (a[2] - c[2]) * k, a[3]]).collect()]
                 }
+                "dirblur" | "radialblur" | "lens" => {
+                    let src = get(&s.ins[0]);
+                    let img = Img { w, h, px: src };
+                    let ang = pnum(&s.params, "angle", 0.0).to_radians();
+                    let len = pnum(&s.params, "longueur (px)", 20.0);
+                    let force = pnum(&s.params, "force", 0.08);
+                    let dist = pnum(&s.params, "distorsion", 0.15);
+                    let out: Vec<V> = (0..n).into_par_iter().map(|i| {
+                        let (u, v) = (((i % w) as f32 + 0.5) / w as f32, ((i / w) as f32 + 0.5) / h as f32);
+                        match s.op {
+                            "lens" => {
+                                let (dx, dy) = (u - 0.5, v - 0.5);
+                                let r2 = dx * dx + dy * dy;
+                                let k = 1.0 + dist * r2 * 4.0;
+                                img.sample(0.5 + dx * k, 0.5 + dy * k)
+                            }
+                            _ => {
+                                let taps = 24;
+                                let mut acc = [0.0f32; 4];
+                                for t in 0..taps {
+                                    let f = t as f32 / (taps - 1) as f32 - 0.5;
+                                    let (su, sv) = if s.op == "dirblur" {
+                                        (u + ang.cos() * len * f / w as f32, v + ang.sin() * len * f / h as f32)
+                                    } else {
+                                        let k = 1.0 - force * (f + 0.5);
+                                        (0.5 + (u - 0.5) * k, 0.5 + (v - 0.5) * k)
+                                    };
+                                    let c = img.sample(su, sv);
+                                    for ch in 0..4 {
+                                        acc[ch] += c[ch];
+                                    }
+                                }
+                                [acc[0] / taps as f32, acc[1] / taps as f32, acc[2] / taps as f32, acc[3] / taps as f32]
+                            }
+                        }
+                    }).collect();
+                    vec![out]
+                }
                 "chroma" | "pixelate" | "edges" => {
                     let src = get(&s.ins[0]);
                     let img = Img { w, h, px: src };
@@ -1221,6 +1286,100 @@ fn pixel(s: &Step, i: &[V], c: &Ctx) -> [V; 4] {
             let v = ((t * i[0][0]).rem_euclid(1.0) < i[1][0]) as u8 as f32;
             [one(v), z, z, z]
         }
+        "bricks" => {
+            let sc = i[0][0].max(0.01);
+            let (u, v) = (p3[0] * sc, p3[1] * sc * 2.0);
+            let row = v.floor();
+            let uu = u + if (row as i32).rem_euclid(2) == 1 { 0.5 } else { 0.0 };
+            let (fx, fy) = (uu.fract().abs(), v.fract().abs());
+            let m = i[1][0].clamp(0.0, 0.45);
+            let mortar = fx < m || fx > 1.0 - m || fy < m * 2.0 || fy > 1.0 - m * 2.0;
+            let h = hash2(uu.floor(), row) * 2.0 - 1.0;
+            let k = 1.0 + h * i[4][0];
+            let b = i[2];
+            let col = if mortar { i[3] } else { [b[0] * k, b[1] * k, b[2] * k, 1.0] };
+            [col, one(if mortar { 0.0 } else { 1.0 }), z, z]
+        }
+        "wood" => {
+            let sc = i[0][0];
+            let q = [p3[0] * sc, p3[1] * sc, p3[2] * sc];
+            let d = fbm(q[0] * 0.8, q[1] * 0.8, q[2] * 0.8, 3, 0.5) * i[2][0];
+            let r = ((q[0] * q[0] + q[2] * q[2]).sqrt() + d) * i[1][0];
+            let t = (r.fract() * std::f32::consts::TAU).sin() * 0.5 + 0.5;
+            let t = t.powf(1.6);
+            let (a, b) = (i[3], i[4]);
+            [[b[0] + (a[0] - b[0]) * t, b[1] + (a[1] - b[1]) * t, b[2] + (a[2] - b[2]) * t, 1.0], one(t), z, z]
+        }
+        "marble" => {
+            let sc = i[0][0];
+            let q = [p3[0] * sc, p3[1] * sc, p3[2] * sc];
+            let tb = fbm(q[0], q[1], q[2], 5, 0.55) * i[2][0];
+            let t = ((q[0] * i[1][0] * 0.3 + tb) * std::f32::consts::PI).sin().abs();
+            let t = 1.0 - (1.0 - t).powf(6.0);
+            let (a, b) = (i[3], i[4]);
+            [[b[0] + (a[0] - b[0]) * t, b[1] + (a[1] - b[1]) * t, b[2] + (a[2] - b[2]) * t, 1.0], one(t), z, z]
+        }
+        "hexagons" => {
+            let sc = i[0][0].max(0.01);
+            let (x, y) = (p3[0] * sc, p3[1] * sc);
+            // Grille hexagonale (deux grilles décalées)
+            let r = [1.0f32, 1.7320508];
+            let h = [r[0] * 0.5, r[1] * 0.5];
+            let a = [x.rem_euclid(r[0]) - h[0], y.rem_euclid(r[1]) - h[1]];
+            let b = [(x - h[0]).rem_euclid(r[0]) - h[0], (y - h[1]).rem_euclid(r[1]) - h[1]];
+            let (g, id) = if a[0] * a[0] + a[1] * a[1] < b[0] * b[0] + b[1] * b[1] { (a, [(x / r[0]).floor(), (y / r[1]).floor()]) } else { (b, [((x - h[0]) / r[0]).floor() + 0.5, ((y - h[1]) / r[1]).floor() + 0.5]) };
+            let (ax, ay) = (g[0].abs(), g[1].abs());
+            let d = 0.5 - (ax * 0.5 + ay * 0.8660254).max(ax);
+            let edge = if d < i[1][0] * 0.5 { 1.0 } else { 0.0 };
+            let c = [hash2(id[0], id[1]), hash2(id[1] + 3.1, id[0]), hash2(id[0] * 1.7, id[1] + 9.2), 1.0];
+            [one(edge), c, z, z]
+        }
+        "dots" => {
+            let sc = i[0][0].max(0.01);
+            let (mut x, y) = (p3[0] * sc, p3[1] * sc);
+            if pstr(&s.params, "grille") == "décalée" && (y.floor() as i32).rem_euclid(2) == 1 {
+                x += 0.5;
+            }
+            let (dx, dy) = (x.fract().abs() - 0.5, y.fract().abs() - 0.5);
+            let d = (dx * dx + dy * dy).sqrt();
+            [one(if d < i[1][0] { 1.0 } else { 0.0 }), z, z, z]
+        }
+        "waves" => {
+            let sc = i[0][0];
+            let q = [p3[0] * sc, p3[1] * sc, p3[2] * sc];
+            let dist = fbm(q[0], q[1], q[2], 3, 0.5) * i[1][0];
+            let t = if pstr(&s.params, "type") == "anneaux" { (q[0] * q[0] + q[1] * q[1] + q[2] * q[2]).sqrt() } else { q[0] + q[1] };
+            [one(((t + dist) * std::f32::consts::TAU).sin() * 0.5 + 0.5), z, z, z]
+        }
+        "whitenoise" => {
+            let sc = i[0][0].max(0.01);
+            let (x, y, zz) = ((p3[0] * sc).floor(), (p3[1] * sc).floor(), (p3[2] * sc).floor());
+            let v = hash2(x + zz * 17.0, y);
+            [one(v), [v, hash2(y + 1.3, x + zz), hash2(x * 2.1, y + 7.7 + zz), 1.0], z, z]
+        }
+        "curve" => {
+            let c = i[0];
+            let (sh, hi, k) = (i[1][0], i[2][0], i[3][0]);
+            let f = |x: f32| {
+                let x = x.clamp(0.0, 1.0);
+                // S autour de 0,5, puis relève des ombres et des lumières
+                let s_ = x + k * (x - 0.5) * (1.0 - (2.0 * x - 1.0).abs());
+                let s_ = s_ + sh * (1.0 - s_) * (1.0 - s_) * s_ * 2.0 + hi * s_ * s_ * (1.0 - s_) * 2.0;
+                s_.clamp(0.0, 1.0)
+            };
+            [[f(c[0]), f(c[1]), f(c[2]), c[3]], z, z, z]
+        }
+        "whitebal" => {
+            let c = i[0];
+            let (t, g) = (i[1][0], i[2][0]);
+            [[c[0] * (1.0 + t * 0.4), c[1] * (1.0 - g * 0.3), c[2] * (1.0 - t * 0.4), c[3]], z, z, z]
+        }
+        "exposure" => {
+            let c = i[0];
+            let k = 2f32.powf(i[1][0]);
+            [[c[0] * k, c[1] * k, c[2] * k, c[3]], z, z, z]
+        }
+        "clamp" => [one(i[0][0].clamp(i[1][0].min(i[2][0]), i[2][0].max(i[1][0]))), z, z, z],
         "mix" => [blend(pstr(&s.params, "mode"), i[1], i[2], i[0][0].clamp(0.0, 1.0)), z, z, z],
         "ramp" => {
             let t = i[0][0].clamp(0.0, 1.0);
@@ -1360,6 +1519,8 @@ pub struct Editor {
     thumb_version: u64,
     rename: Option<(u32, String)>,
     frame_sel: bool,
+    frame_rename: Option<(usize, String)>,
+    frame_sel_request: bool,
 }
 
 enum Act {
@@ -1427,6 +1588,8 @@ impl Editor {
             thumb_version: 0,
             rename: None,
             frame_sel: false,
+            frame_rename: None,
+            frame_sel_request: false,
         })
     }
 
@@ -1798,6 +1961,13 @@ impl Editor {
                     }
                 }
             }
+            if (std::mem::take(&mut self.frame_sel_request) || (cmd && key(egui::Key::J))) && !self.selected.is_empty() {
+                let bb = self.bbox(Some(&self.selected)).expand(24.0);
+                let n = self.graph.frames.len();
+                let cols = [[90u8, 120, 200], [80, 160, 110], [200, 140, 60], [170, 90, 170], [200, 80, 80]];
+                self.graph.frames.push(Frame { rect: [bb.min.x, bb.min.y - 26.0, bb.width(), bb.height() + 26.0], label: format!("{} {}", crate::i18n::t("cadre"), n + 1), color: cols[n % cols.len()] });
+                self.changed();
+            }
             if key(egui::Key::F2) {
                 if let Some(&id) = self.selected.iter().next() {
                     actions.push(Act::Node(id, NodeOp::Rename));
@@ -2132,11 +2302,98 @@ impl Editor {
                 self.selected = self.graph.nodes.iter().map(|n| n.id).collect();
                 ui.close();
             }
+            if !self.selected.is_empty() && ui.button(crate::i18n::t("cadre autour de la sélection   Ctrl+J")).clicked() {
+                self.frame_sel_request = true;
+                ui.close();
+            }
             if ui.button(crate::i18n::t("tout cadrer   Origine")).clicked() {
                 self.scene = Rect::ZERO;
                 ui.close();
             }
         });
+        // Cadres (derrière les nodes) : glisser le titre déplace le cadre et ce qu'il contient
+        let mut frame_del = None;
+        for k in 0..self.graph.frames.len() {
+            let fr = self.graph.frames[k].clone();
+            let r = Rect::from_min_size(pos2(fr.rect[0], fr.rect[1]), vec2(fr.rect[2], fr.rect[3]));
+            let col = Color32::from_rgb(fr.color[0], fr.color[1], fr.color[2]);
+            painter.rect_filled(r, 2.0, col.gamma_multiply(0.12));
+            painter.rect_stroke(r, 2.0, Stroke::new(1.0, col.gamma_multiply(0.6)), egui::StrokeKind::Inside);
+            let title = Rect::from_min_size(r.min, vec2(r.width(), 26.0));
+            painter.rect_filled(title, 2.0, col.gamma_multiply(0.35));
+            match &mut self.frame_rename {
+                Some((fk, text)) if *fk == k => {
+                    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(title.shrink(3.0)));
+                    let te = child.add(egui::TextEdit::singleline(text).desired_width(title.width() - 10.0));
+                    te.request_focus();
+                    if te.lost_focus() || child.input(|i| i.key_pressed(egui::Key::Enter)) {
+                        self.graph.frames[k].label = text.trim().to_string();
+                        self.frame_rename = None;
+                        actions.push(Act::Changed);
+                    }
+                }
+                _ => {
+                    painter.text(title.left_center() + vec2(8.0, 0.0), egui::Align2::LEFT_CENTER, &fr.label, egui::FontId::monospace(13.0), p.text);
+                }
+            }
+            let tr = ui.interact(title, ui.scope_id().with(("frame-title", k)), Sense::click_and_drag());
+            if tr.dragged_by(egui::PointerButton::Primary) {
+                let d = tr.drag_delta();
+                let inside: Vec<u32> = self.graph.nodes.iter().filter(|n| r.contains(pos2(n.pos[0] + 20.0, n.pos[1] + 12.0))).map(|n| n.id).collect();
+                for n in self.graph.nodes.iter_mut().filter(|n| inside.contains(&n.id)) {
+                    n.pos[0] += d.x;
+                    n.pos[1] += d.y;
+                }
+                let f = &mut self.graph.frames[k];
+                f.rect[0] += d.x;
+                f.rect[1] += d.y;
+                self.dirty = Some(std::time::Instant::now());
+            }
+            if tr.drag_stopped() {
+                actions.push(Act::MoveEnd);
+            }
+            if tr.double_clicked() {
+                self.frame_rename = Some((k, fr.label.clone()));
+            }
+            tr.context_menu(|ui| {
+                if ui.button(crate::i18n::t("renommer le cadre")).clicked() {
+                    self.frame_rename = Some((k, fr.label.clone()));
+                    ui.close();
+                }
+                ui.horizontal(|ui| {
+                    for c in [[90u8, 120, 200], [80, 160, 110], [200, 140, 60], [170, 90, 170], [200, 80, 80], [120, 120, 120]] {
+                        let (cr, resp) = ui.allocate_exact_size(vec2(18.0, 18.0), Sense::click());
+                        ui.painter().rect_filled(cr, 2.0, Color32::from_rgb(c[0], c[1], c[2]));
+                        if resp.clicked() {
+                            self.graph.frames[k].color = c;
+                            actions.push(Act::Changed);
+                        }
+                    }
+                });
+                if ui.button(crate::i18n::t("supprimer le cadre")).clicked() {
+                    frame_del = Some(k);
+                    ui.close();
+                }
+            });
+            // Poignée de redimensionnement
+            let handle = Rect::from_min_size(r.max - vec2(14.0, 14.0), vec2(14.0, 14.0));
+            painter.line_segment([handle.right_top() + vec2(-2.0, 4.0), handle.left_bottom() + vec2(4.0, -2.0)], Stroke::new(1.0, col));
+            let hr = ui.interact(handle, ui.scope_id().with(("frame-size", k)), Sense::drag());
+            if hr.dragged() {
+                let d = hr.drag_delta();
+                let f = &mut self.graph.frames[k];
+                f.rect[2] = (f.rect[2] + d.x).max(80.0);
+                f.rect[3] = (f.rect[3] + d.y).max(60.0);
+                self.dirty = Some(std::time::Instant::now());
+            }
+            if hr.drag_stopped() {
+                actions.push(Act::MoveEnd);
+            }
+        }
+        if let Some(k) = frame_del {
+            self.graph.frames.remove(k);
+            actions.push(Act::Changed);
+        }
         // Mise en page
         let mut out_pos: HashMap<(u32, usize), Pos2> = HashMap::new();
         let mut in_pos: HashMap<(u32, usize), Pos2> = HashMap::new();
@@ -2286,7 +2543,7 @@ impl Editor {
             for (k, (name, sock)) in d.outputs.iter().enumerate() {
                 let sp = out_pos[&(*id, k)];
                 if !is_collapsed {
-                    painter.text(pos2(r.right() - 12.0, sp.y), egui::Align2::RIGHT_CENTER, *name, egui::FontId::monospace(11.0), p.text);
+                    painter.text(pos2(r.right() - 12.0, sp.y), egui::Align2::RIGHT_CENTER, crate::i18n::t(name), egui::FontId::monospace(11.0), p.text);
                 }
                 let hov = pointer.is_some_and(|pt| sp.distance(pt) < 9.0);
                 painter.circle(sp, if hov { 6.5 } else { 5.0 }, sock_color(*sock), Stroke::new(1.0, p.bg));
@@ -2317,14 +2574,14 @@ impl Editor {
                 let y = sp.y;
                 let row = Rect::from_min_size(pos2(r.left() + 10.0, y - ROW * 0.5 + 1.0), vec2(NW - 20.0, ROW - 2.0));
                 if linked {
-                    painter.text(row.left_center(), egui::Align2::LEFT_CENTER, *name, egui::FontId::monospace(11.0), p.text);
+                    painter.text(row.left_center(), egui::Align2::LEFT_CENTER, crate::i18n::t(name), egui::FontId::monospace(11.0), p.text);
                 } else {
                     while node.values.len() <= k {
                         node.values.push(d.inputs[node.values.len()].2);
                     }
                     let mut child = ui.new_child(egui::UiBuilder::new().max_rect(row).layout(egui::Layout::left_to_right(egui::Align::Center)));
                     child.spacing_mut().interact_size.y = ROW - 4.0;
-                    child.label(RichText::new(*name).size(11.0));
+                    child.label(RichText::new(crate::i18n::t(name)).size(11.0));
                     let v = &mut node.values[k];
                     let resp = match sock {
                         Sock::Float => child.add(egui::DragValue::new(&mut v[0]).speed(0.01).max_decimals(3)),
@@ -2373,7 +2630,7 @@ impl Editor {
                         });
                     }
                     (ParamDef::Float(_, lo, hi, _), Param::F(v)) => {
-                        child.label(RichText::new(name).size(11.0));
+                        child.label(RichText::new(crate::i18n::t(name)).size(11.0));
                         if child.add(egui::DragValue::new(v).range(*lo..=*hi).speed(0.05)).changed() {
                             actions.push(Act::Changed);
                         }
@@ -2576,6 +2833,29 @@ mod tests {
     use super::*;
 
     #[test]
+    fn tous_les_nodes() {
+        for d in DEFS.iter().filter(|d| !d.outputs.is_empty()) {
+            for kind in [GraphKind::Compositor, GraphKind::Material] {
+                if (kind == GraphKind::Material && !d.mat) || (kind == GraphKind::Compositor && !d.comp) {
+                    continue;
+                }
+                let mut g = if kind == GraphKind::Material { Graph::new_material() } else { Graph::new_compositor() };
+                let id = g.add(d.op, [0.0, 0.0]);
+                let probe = g.probe(id, 0).unwrap();
+                let prog = Program::compile(&probe, "/tmp", 64).unwrap_or_else(|e| panic!("{} : {}", d.op, e.1));
+                if kind == GraphKind::Compositor {
+                    let img = prog.composite(Some([16, 8]));
+                    assert!(img.px.iter().all(|p| p.iter().all(|x| x.is_finite())), "{}", d.op);
+                } else {
+                    let sphere = crate::model3d::preview_sphere();
+                    let img = crate::model3d::render_material_preview(&sphere, std::sync::Arc::new(prog), 24);
+                    assert!(img.px.iter().all(|p| p.iter().all(|x| x.is_finite())), "{}", d.op);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn shader_et_graphes() {
         let sh = Shader::compile("k = x * 2 + 1\nr = clamp(k, 0, 2) ; g = if(x > 0.5, 1, 0)\nb = -2 ^ 2").unwrap();
         let mut v = vec![0.0; sh.slots];
@@ -2587,7 +2867,7 @@ mod tests {
         assert!(Shader::compile(DEFAULT_SHADER).is_ok());
 
         // Compositing : couleur → inverser → sortie
-        let mut g = Graph { kind: GraphKind::Compositor, nodes: vec![], links: vec![], next_id: 0 };
+        let mut g = Graph { kind: GraphKind::Compositor, nodes: vec![], links: vec![], next_id: 0, frames: vec![] };
         let c = g.add("color", [0.0, 0.0]);
         g.nodes[0].values[0] = [0.2, 0.4, 0.6, 1.0];
         let inv = g.add("invert", [0.0, 0.0]);
