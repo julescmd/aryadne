@@ -282,17 +282,35 @@ fn decimate(mut pos: Vec<V3>, mut tris: Vec<[u32; 3]>, min_len: f32, sharp: &Fea
 }
 
 /// Coupe les arêtes plus longues que `max_len` (découpe conforme 1 → 2, 3 ou 4 triangles).
-fn refine(pos: Vec<V3>, tris: Vec<[u32; 3]>, max_len: f32) -> (Vec<V3>, Vec<[u32; 3]>) {
-    refine_n(pos, tris, max_len, 20)
+fn refine(pos: Vec<V3>, tris: Vec<[u32; 3]>, max_len: f32, cap: usize) -> (Vec<V3>, Vec<[u32; 3]>) {
+    refine_n(pos, tris, max_len, 20, cap)
 }
 
 #[cfg(test)]
 fn refine_once(pos: Vec<V3>, tris: Vec<[u32; 3]>) -> (Vec<V3>, Vec<[u32; 3]>) {
-    refine_n(pos, tris, 0.0, 1)
+    refine_n1(pos, tris)
 }
 
-fn refine_n(mut pos: Vec<V3>, mut tris: Vec<[u32; 3]>, max_len: f32, passes: usize) -> (Vec<V3>, Vec<[u32; 3]>) {
-    for _ in 0..passes {
+#[cfg(test)]
+fn refine_n1(pos: Vec<V3>, tris: Vec<[u32; 3]>) -> (Vec<V3>, Vec<[u32; 3]>) {
+    refine_n(pos, tris, 0.0, 0, usize::MAX)
+}
+
+fn refine_n(mut pos: Vec<V3>, mut tris: Vec<[u32; 3]>, max_len: f32, passes: usize, cap: usize) -> (Vec<V3>, Vec<[u32; 3]>) {
+    for _ in 0..(passes * 3).max(1) {
+        // Une arête n'est coupée que si elle est (presque) la plus longue d'un de ses triangles :
+        // sans ça, les triangles très allongés se multiplient par centaines de milliers.
+        let mut marked: HashSet<(u32, u32)> = HashSet::new();
+        for t in &tris {
+            let l = [0, 1, 2].map(|k| len(sub(pos[t[k] as usize], pos[t[(k + 1) % 3] as usize])));
+            let longest = l[0].max(l[1]).max(l[2]);
+            for k in 0..3 {
+                if l[k] > max_len && (l[k] >= 0.75 * longest || max_len <= 0.0) {
+                    let (a, b) = (t[k], t[(k + 1) % 3]);
+                    marked.insert((a.min(b), a.max(b)));
+                }
+            }
+        }
         let mut mid: HashMap<(u32, u32), u32> = HashMap::new();
         let mut out = Vec::with_capacity(tris.len() * 2);
         for t in &tris {
@@ -300,7 +318,7 @@ fn refine_n(mut pos: Vec<V3>, mut tris: Vec<[u32; 3]>, max_len: f32, passes: usi
             let mut n = 0;
             for k in 0..3 {
                 let (a, b) = (t[k], t[(k + 1) % 3]);
-                if len(sub(pos[a as usize], pos[b as usize])) > max_len {
+                if marked.contains(&(a.min(b), a.max(b))) {
                     m[k] = *mid.entry((a.min(b), a.max(b))).or_insert_with(|| {
                         pos.push(mul(add(pos[a as usize], pos[b as usize]), 0.5));
                         (pos.len() - 1) as u32
@@ -327,7 +345,7 @@ fn refine_n(mut pos: Vec<V3>, mut tris: Vec<[u32; 3]>, max_len: f32, passes: usi
         }
         let done = mid.is_empty();
         tris = out;
-        if done || tris.len() > 1_600_000 {
+        if done || tris.len() > cap {
             break;
         }
     }
@@ -746,6 +764,8 @@ fn cone_paths(g: &mut Graph, f: &[[u32; 3]]) -> Vec<ConePath> {
         }
         let border = comp.iter().copied().find(|&x| !sing[x as usize] && (0..3).any(|s| other(g, x, s) == u32::MAX));
         let root = border.or_else(|| comp.iter().copied().find(|&x| sing[x as usize])).unwrap_or(seed as u32);
+        // Zone coupée du reste par des singularités : la racine choisie est déjà prise, on repart d'ici
+        let root = if visited[root as usize] { seed as u32 } else { root };
         visited[root as usize] = true;
         if let Some(b) = border {
             exit[b as usize] = (0..3).find(|&s| other(g, b, s) == u32::MAX).unwrap() as u8;
@@ -1235,7 +1255,8 @@ pub fn remesh(pos: &[V3], tris: &[[u32; 3]], guides: &[Vec<V3>], opt: &Options, 
     let sharp0 = features(&pos, &tris, opt.sharp_angle, 0.0);
     let (pos, tris) = decimate(pos, tris, h / (dens * 2.15), &sharp0);
     lap("simplification");
-    let (v, f) = refine(pos, tris, h / dens);
+    // Garde-fou : un maillage fait de triangles très allongés ne doit pas exploser en taille
+    let (v, f) = refine(pos, tris, h / dens, (target * 60).max(40_000));
     let n_v = v.len();
     stats.dense = n_v;
 

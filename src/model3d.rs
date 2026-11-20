@@ -1822,7 +1822,12 @@ impl Viewer {
         let look_key = format!("{:?}", look.key());
         let key = (self.cam, size, z_up, self.prepared.as_ref().map(|p| p.1).unwrap_or(0), look_key);
         if self.last.as_ref() != Some(&key) || self.tex.is_none() {
-            let prep = &self.prepared.as_ref().unwrap().2;
+            // Le maillage peut être en cours de recalcul (modificateurs, sortie du mode édition)
+            let Some(prepared) = self.prepared.as_ref() else {
+                ui.ctx().request_repaint();
+                return;
+            };
+            let prep = &prepared.2;
             let frame = render(prep, &self.cam, &look, size[0], size[1]);
             let img = egui::ColorImage::from_rgba_unmultiplied([frame.w, frame.h], &frame.rgba);
             self.ids = Some((frame.w, frame.h, frame.ids));

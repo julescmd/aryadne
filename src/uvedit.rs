@@ -1535,7 +1535,8 @@ pub enum Tool {
 /// Retopologie qui tourne en arrière-plan
 pub struct RetopoJob {
     pub progress: std::sync::Arc<std::sync::Mutex<f32>>,
-    pub rx: std::sync::mpsc::Receiver<crate::retopo::Result>,
+    pub rx: std::sync::mpsc::Receiver<Option<crate::retopo::Result>>,
+    pub started: std::time::Instant,
 }
 
 pub struct Edit {
@@ -1919,14 +1920,24 @@ impl Edit {
 
     pub fn retopo_poll(&mut self) -> bool {
         let Some(j) = &self.retopo_job else { return false };
-        if let Ok(r) = j.rx.try_recv() {
+        // Le fil de calcul s'est arrêté sans rien renvoyer
+        let r = match j.rx.try_recv() {
+            Ok(r) => r,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => None,
+            Err(_) => return false,
+        };
+        let Some(r) = r else {
+            self.message = Some(crate::i18n::t("La retopologie a échoué sur ce modèle. Essaie avec moins de faces ou sans les arêtes vives."));
+            self.retopo_job = None;
+            return true;
+        };
+        {
             self.message = Some(format!("retopo : {} quads, {} pôles, {} sommets", r.quads(), r.stats.poles, r.pos.len()));
             self.retopo = Some(std::sync::Arc::new(r));
             self.retopo_job = None;
             self.retopo_show = true;
-            return true;
+            true
         }
-        false
     }
 
     fn tab_retopo(&mut self, ui: &mut egui::Ui) {
@@ -1964,9 +1975,14 @@ impl Edit {
         ui.add(egui::Slider::new(&mut self.retopo_opt.sharp_angle, 0.0..=90.0).suffix("°").text(crate::i18n::t("arêtes vives"))).on_hover_text(crate::i18n::t("Au-delà de cet angle, une arête devient une boucle nette du maillage (0 : désactivé). Les bords ouverts sont toujours suivis."));
         ui.add(egui::Slider::new(&mut self.retopo_opt.guide_radius, 0.5..=4.0).text(crate::i18n::t("portée des guides")));
         ui.add_space(6.0);
+        let mut cancel = false;
         if let Some(j) = &self.retopo_job {
             let f = j.progress.lock().map(|g| *g).unwrap_or(0.0);
-            ui.add(egui::ProgressBar::new(f).text(crate::i18n::t("calcul du flux…")));
+            let stage = if f < 0.05 { "préparation du maillage" } else if f < 0.35 { "calcul du flux" } else if f < 0.92 { "placement des pôles" } else { "construction des quads" };
+            ui.add(egui::ProgressBar::new(f).text(format!("{}… {} s", crate::i18n::t(stage), j.started.elapsed().as_secs())));
+            if ui.small_button(crate::i18n::t("annuler")).clicked() {
+                cancel = true;
+            }
             ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
         } else if ui.button(RichText::new(crate::i18n::t("▶ lancer la retopologie")).strong()).clicked() {
             let pos = self.topo.pos.clone();
@@ -1983,15 +1999,22 @@ impl Edit {
             let (tx, rx) = std::sync::mpsc::channel();
             let ctx = ui.ctx().clone();
             std::thread::spawn(move || {
-                let r = crate::retopo::remesh(&pos, &tris, &guides, &opt, &|f| {
-                    if let Ok(mut g) = pr.lock() {
-                        *g = f;
-                    }
-                });
-                let _ = tx.send(r);
+                // Une erreur dans le calcul ne doit pas laisser la barre tourner pour toujours
+                let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    crate::retopo::remesh(&pos, &tris, &guides, &opt, &|f| {
+                        if let Ok(mut g) = pr.lock() {
+                            *g = f;
+                        }
+                    })
+                }));
+                let _ = tx.send(r.ok());
                 ctx.request_repaint();
             });
-            self.retopo_job = Some(RetopoJob { progress, rx });
+            self.retopo_job = Some(RetopoJob { progress, rx, started: std::time::Instant::now() });
+        }
+        if cancel {
+            self.retopo_job = None;
+            self.message = Some(crate::i18n::t("retopologie annulée"));
         }
         if let Some(r) = &self.retopo {
             ui.add_space(6.0);
