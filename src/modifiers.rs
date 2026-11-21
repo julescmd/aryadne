@@ -1239,6 +1239,11 @@ pub fn export(m: &Mesh, model: &Model, z_up: bool, path: &std::path::Path) -> Re
 
 /// Panneau de la pile. Renvoie vrai si la pile a changé.
 pub fn panel(ui: &mut egui::Ui, stack: &mut Vec<Modifier>, applied: bool, request: &mut Option<Request>) -> bool {
+    panel_with(ui, stack, applied, request, true)
+}
+
+/// `can_apply` : faux là où « appliquer » n'a pas de sens (pile d'un objet de scène).
+pub fn panel_with(ui: &mut egui::Ui, stack: &mut Vec<Modifier>, applied: bool, request: &mut Option<Request>, can_apply: bool) -> bool {
     let p = crate::theme::pal();
     let mut changed = false;
     ui.spacing_mut().slider_width = 90.0;
@@ -1264,6 +1269,9 @@ pub fn panel(ui: &mut egui::Ui, stack: &mut Vec<Modifier>, applied: bool, reques
                 if ui.button(crate::i18n::t("vider la pile")).clicked() {
                     stack.clear();
                     changed = true;
+                }
+                if !can_apply {
+                    return;
                 }
                 ui.separator();
                 if ui.add_enabled(stack.iter().any(|m| m.on), egui::Button::new(crate::i18n::t("tout appliquer"))).on_hover_text(crate::i18n::t("Le résultat devient le maillage de base et la pile se vide")).clicked() {
@@ -1355,7 +1363,7 @@ pub fn panel(ui: &mut egui::Ui, stack: &mut Vec<Modifier>, applied: bool, reques
                     if ui.small_button("×").on_hover_text(crate::i18n::t("supprimer")).clicked() {
                         action = Some((i, 0));
                     }
-                    if md.on && ui.small_button("✔").on_hover_text(crate::i18n::t("Appliquer : le résultat devient le maillage de base (avec les modificateurs au-dessus)")).clicked() {
+                    if can_apply && md.on && ui.small_button("✔").on_hover_text(crate::i18n::t("Appliquer : le résultat devient le maillage de base (avec les modificateurs au-dessus)")).clicked() {
                         *request = Some(Request::ApplyUpTo(i));
                     }
                     if ui.small_button("⧉").on_hover_text(crate::i18n::t("dupliquer")).clicked() {

@@ -36,6 +36,9 @@ pub struct Object {
     /// Pile de modificateurs propre à cet objet (appliquée avant de le placer dans la scène)
     #[serde(default)]
     pub mods: Vec<crate::modifiers::Modifier>,
+    /// Matériau en nodes de l'objet : chemin dans le coffre (vide = aucun)
+    #[serde(default)]
+    pub material: String,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
@@ -75,7 +78,7 @@ impl Scene {
             name = format!("{stem}.{n:03}");
             n += 1;
         }
-        self.objects.push(Object { name, file, pos: [0.0; 3], rot: [0.0; 3], scale: [1.0; 3], visible: true, color: None, mods: vec![] });
+        self.objects.push(Object { name, file, pos: [0.0; 3], rot: [0.0; 3], scale: [1.0; 3], visible: true, color: None, mods: vec![], material: String::new() });
     }
 }
 
@@ -180,7 +183,7 @@ pub fn build_ranges(scene: &Scene, scene_path: &Path) -> (Result<crate::model3d:
     if tris.is_empty() {
         return (Err("Scène vide : glisse des modèles ici ou ajoute-en depuis le panneau.".into()), errors, ranges);
     }
-    (crate::model3d::Model::with_edges(pos, tris, Some(colors), Some(edges), false), errors, ranges)
+    (crate::model3d::Model::exact(pos, tris, Some(colors), Some(edges)), errors, ranges)
 }
 
 #[cfg(test)]

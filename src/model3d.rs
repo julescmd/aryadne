@@ -56,6 +56,16 @@ impl Model {
     }
 
     pub(crate) fn with_edges(positions: Vec<V3>, tris: Vec<[u32; 3]>, colors: Option<Vec<Color32>>, edges: Option<Vec<u8>>, z_up: bool) -> Result<Self, String> {
+        Self::assemble(positions, tris, colors, edges, z_up, true)
+    }
+
+    /// Sans simplification : une scène doit garder ses triangles dans l'ordre pour savoir à quel objet chacun appartient
+    /// (chaque modèle qu'elle réunit a déjà été allégé à son chargement).
+    pub(crate) fn exact(positions: Vec<V3>, tris: Vec<[u32; 3]>, colors: Option<Vec<Color32>>, edges: Option<Vec<u8>>) -> Result<Self, String> {
+        Self::assemble(positions, tris, colors, edges, false, false)
+    }
+
+    fn assemble(positions: Vec<V3>, tris: Vec<[u32; 3]>, colors: Option<Vec<Color32>>, edges: Option<Vec<u8>>, z_up: bool, simplify: bool) -> Result<Self, String> {
         let n0 = tris.len();
         let edges = edges.filter(|e| e.len() == n0).unwrap_or_else(|| vec![7; n0]);
         let (tris, edges): (Vec<[u32; 3]>, Vec<u8>) = tris.into_iter().zip(edges).filter(|(t, _)| t.iter().all(|&i| (i as usize) < positions.len())).unzip();
@@ -73,7 +83,9 @@ impl Model {
         }
         let (total_tris, total_vertices) = (tris.len(), positions.len());
         let mut m = Self { positions, tris, colors, edges, min, max, total_tris, total_vertices, z_up };
-        m.simplify(MAX_TRIS);
+        if simplify {
+            m.simplify(MAX_TRIS);
+        }
         Ok(m)
     }
 
@@ -1349,6 +1361,8 @@ pub struct Viewer {
     scene_ranges: Vec<(usize, usize, usize)>,
     /// Axe de la poignée de déplacement en cours de glissement
     gizmo_axis: Option<usize>,
+    /// Ce que fait la poignée : 0 déplacer, 1 tourner, 2 redimensionner
+    gizmo_mode: u8,
     scene_ver: u64,
     scene_dirty: bool,
     /// Cadre fixe de la scène : déplacer un objet ne doit pas recentrer ni redimensionner tout le reste
@@ -1410,6 +1424,7 @@ impl Viewer {
             scene_rx: None,
             scene_ranges: vec![],
             gizmo_axis: None,
+            gizmo_mode: 0,
             scene_ver: 0,
             scene_dirty: false,
             scene_frame: None,
@@ -1635,6 +1650,14 @@ impl Viewer {
                 ui.separator();
                 ui.label(egui::RichText::new(crate::i18n::t("OBJET")).size(10.5).color(p.muted).family(theme::bold()));
                 changed |= ui.add(egui::TextEdit::singleline(&mut o.name).desired_width(f32::INFINITY)).changed();
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 2.0;
+                    for (k, (label, key)) in [("déplacer", "W"), ("tourner", "E"), ("taille", "R")].iter().enumerate() {
+                        if ui.selectable_label(self.gizmo_mode == k as u8, egui::RichText::new(crate::i18n::t(label)).size(11.0)).on_hover_text(format!("{} ({key})", crate::i18n::t("Ce que fait la poignée dans la vue"))).clicked() {
+                            self.gizmo_mode = k as u8;
+                        }
+                    }
+                });
                 let mut row = |ui: &mut egui::Ui, label: &str, v: &mut [f32; 3], speed: f64, reset: [f32; 3]| {
                     ui.horizontal(|ui| {
                         if ui.add(egui::Button::new(egui::RichText::new(crate::i18n::t(label)).size(11.0).color(p.muted)).frame(false)).on_hover_text(crate::i18n::t("cliquer pour remettre à zéro")).clicked() {
@@ -1669,11 +1692,50 @@ impl Viewer {
                     }
                 });
                 ui.label(egui::RichText::new(&o.file).size(10.0).color(p.muted));
+                // Matériau en nodes de l'objet
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new(crate::i18n::t("matériau")).size(11.0).color(p.muted));
+                    let cur = if o.material.is_empty() { crate::i18n::t("aucun") } else { o.material.rsplit('/').next().unwrap_or(&o.material).trim_end_matches(".mat.json").to_string() };
+                    egui::ComboBox::from_id_salt("scene-object-material").selected_text(egui::RichText::new(cur).size(11.0)).width(110.0).show_ui(ui, |ui| {
+                        if ui.selectable_label(o.material.is_empty(), crate::i18n::t("aucun")).clicked() {
+                            o.material.clear();
+                            changed = true;
+                        }
+                        for (name, mpath) in &self.mat_files {
+                            let rel = mpath.strip_prefix(&self.root).map(|r| r.to_string_lossy().replace('\\', "/")).unwrap_or_else(|_| mpath.to_string_lossy().to_string());
+                            if ui.selectable_label(o.material == rel, name).clicked() {
+                                o.material = rel;
+                                changed = true;
+                            }
+                        }
+                    });
+                    if o.material.is_empty() {
+                        if ui.small_button("＋").on_hover_text(crate::i18n::t("Créer un matériau en nodes pour cet objet")).clicked() && !self.root.is_empty() {
+                            let dir = std::path::Path::new(&self.root).join("nodes");
+                            let _ = std::fs::create_dir_all(&dir);
+                            let mut file = dir.join(format!("{}.mat.json", o.name));
+                            let mut n = 2;
+                            while file.exists() {
+                                file = dir.join(format!("{} {n}.mat.json", o.name));
+                                n += 1;
+                            }
+                            if crate::nodes::Graph::new_material().save(&file).is_ok() {
+                                o.material = file.strip_prefix(&self.root).map(|r| r.to_string_lossy().replace('\\', "/")).unwrap_or_default();
+                                self.mat_files.push((o.name.clone(), file.clone()));
+                                self.open_request = Some(file);
+                                changed = true;
+                            }
+                        }
+                    } else if ui.small_button("✎").on_hover_text(crate::i18n::t("Ouvrir ce matériau dans l'éditeur de nodes")).clicked() {
+                        let raw = std::path::PathBuf::from(&o.material);
+                        self.open_request = Some(if raw.is_absolute() { raw } else { std::path::Path::new(&self.root).join(raw) });
+                    }
+                });
                 ui.separator();
                 // Pile de modificateurs de cet objet seulement
                 let mut req = None;
                 egui::ScrollArea::vertical().id_salt("scene-object-mods").show(ui, |ui| {
-                    changed |= crate::modifiers::panel(ui, &mut o.mods, false, &mut req);
+                    changed |= crate::modifiers::panel_with(ui, &mut o.mods, false, &mut req, false);
                 });
             }
         });
@@ -1807,6 +1869,41 @@ impl Viewer {
                 ui.label(crate::i18n::t("préparation du modèle…"));
             });
             return;
+        }
+        // Scène : un matériau par objet, rechargé dès que son fichier change ; chaque triangle sait à quel objet il appartient
+        if self.edit.is_none() {
+            if let Some(scene) = self.scene.as_ref().filter(|_| crate::scene::is_scene(&self.path)) {
+                self.slot_progs.resize(scene.objects.len(), None);
+                for (k, o) in scene.objects.iter().enumerate() {
+                    if o.material.is_empty() {
+                        if self.slot_progs[k].take().is_some() {
+                            self.slot_rev += 1;
+                        }
+                        continue;
+                    }
+                    let raw = std::path::PathBuf::from(&o.material);
+                    let path = if raw.is_absolute() { raw } else { std::path::Path::new(&self.root).join(raw) };
+                    let mt = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+                    let fresh = self.slot_progs[k].as_ref().is_some_and(|(p, seen, _)| *p == path && *seen == mt);
+                    if !fresh {
+                        match crate::nodes::Graph::load(&path).and_then(|g| crate::nodes::Program::compile(&g, &self.root, 1024).map_err(|e| e.1)) {
+                            Ok(prog) => self.slot_progs[k] = Some((path, mt, std::sync::Arc::new(prog))),
+                            Err(_) => self.slot_progs[k] = None,
+                        }
+                        self.slot_rev += 1;
+                    }
+                }
+                if let Some((_, _, prep)) = &mut self.prepared {
+                    let total = self.scene_ranges.last().map(|r| r.2);
+                    if prep.mat.len() != prep.tris.len() && total == Some(prep.tris.len()) {
+                        prep.mat = vec![0; prep.tris.len()];
+                        for (k, a, b) in &self.scene_ranges {
+                            prep.mat[*a..*b].fill(*k as u16);
+                        }
+                        self.last = None;
+                    }
+                }
+            }
         }
         // Matériaux en nodes des IDs : créés à la demande, rechargés dès que leur fichier change
         if let Some(e) = &mut self.edit {
@@ -2315,6 +2412,13 @@ impl Viewer {
         // Scène : poignée de déplacement de l'objet choisi (trois axes à attraper)
         let mut gizmo: Option<(Pos2, [Option<Pos2>; 3])> = None;
         if self.edit.is_none() && crate::scene::is_scene(&self.path) {
+            if resp.hovered() && !ui.ctx().egui_wants_keyboard_input() {
+                for (k, key) in [Key::W, Key::E, Key::R].into_iter().enumerate() {
+                    if ui.input(|i| i.key_pressed(key) && !i.modifiers.any()) {
+                        self.gizmo_mode = k as u8;
+                    }
+                }
+            }
             if let (Some(sel), Some((lo, hi)), Some(scene)) = (self.scene_sel, self.scene_frame, self.scene.as_mut()) {
                 if let Some(o) = scene.objects.get_mut(sel).filter(|o| o.visible) {
                     let longest = (hi[0] - lo[0]).max(hi[1] - lo[1]).max(hi[2] - lo[2]).max(1e-9);
@@ -2347,14 +2451,38 @@ impl Viewer {
                                 (a + ab * t - at).length()
                             };
                             self.gizmo_axis = ends.iter().enumerate().filter_map(|(k, e)| e.map(|e| (k, seg(po, e)))).filter(|x| x.1 < 10.0).min_by(|a, b| a.1.total_cmp(&b.1)).map(|x| x.0);
+                            // Le centre : taille uniforme, en mode taille
+                            if self.gizmo_mode == 2 && (at - po).length() < 9.0 {
+                                self.gizmo_axis = Some(3);
+                            }
                         }
                         if let (Some(k), true) = (self.gizmo_axis, resp.dragged_by(egui::PointerButton::Primary)) {
-                            if let Some(e) = ends[k] {
-                                let dir = e - po;
-                                let t = resp.drag_delta().dot(dir) / dir.length_sq().max(1e-6) * len;
-                                if t != 0.0 {
-                                    o.pos[k] += t * longest;
+                            let d = resp.drag_delta();
+                            if k == 3 {
+                                if d.x != 0.0 || d.y != 0.0 {
+                                    let f = (1.0 + (d.x - d.y) * 0.006).max(0.05);
+                                    o.scale = [o.scale[0] * f, o.scale[1] * f, o.scale[2] * f];
                                     self.scene_dirty = true;
+                                }
+                            } else if let Some(e) = ends[k] {
+                                let dir = e - po;
+                                // Le long de l'axe à l'écran (déplacer, taille) ou en travers (tourner)
+                                let along = d.dot(dir) / dir.length_sq().max(1e-6);
+                                let across = (d.x * dir.y - d.y * dir.x) / dir.length().max(1e-3);
+                                match self.gizmo_mode {
+                                    1 if across != 0.0 => {
+                                        o.rot[k] = (o.rot[k] + across * 0.6 + 180.0).rem_euclid(360.0) - 180.0;
+                                        self.scene_dirty = true;
+                                    }
+                                    2 if along != 0.0 => {
+                                        o.scale[k] = (o.scale[k] * (1.0 + along)).max(0.001);
+                                        self.scene_dirty = true;
+                                    }
+                                    0 if along != 0.0 => {
+                                        o.pos[k] += along * len * longest;
+                                        self.scene_dirty = true;
+                                    }
+                                    _ => {}
                                 }
                             }
                         }
@@ -2446,6 +2574,10 @@ impl Viewer {
         let scale = if interacting { if heavy { 0.4 } else { 0.6 } } else { ppp.min(2.0) };
         let size = [(rect.width() * scale).max(16.0) as usize, (rect.height() * scale).max(16.0) as usize];
         let mut look = self.look.clone();
+        if self.edit.is_none() && self.scene.is_some() {
+            look.slot_nodes = self.slot_progs.iter().map(|p| p.as_ref().map(|x| x.2.clone())).collect();
+            look.slot_rev = self.slot_rev;
+        }
         if let Some(e) = &self.edit {
             look.material = Material::Color;
             look.nodes = None;
@@ -2511,7 +2643,18 @@ impl Viewer {
                 if let Some(e) = ends[k] {
                     let on = self.gizmo_axis == Some(k);
                     over.line_segment([po, e], Stroke::new(if on { 4.0 } else { 2.5 }, col));
-                    over.circle_filled(e, if on { 6.5 } else { 5.0 }, col);
+                    let r = if on { 6.5 } else { 5.0 };
+                    match self.gizmo_mode {
+                        1 => {
+                            over.circle_stroke(e, r + 1.5, Stroke::new(2.5, col));
+                        }
+                        2 => {
+                            over.rect_filled(egui::Rect::from_center_size(e, egui::vec2(r * 2.0, r * 2.0)), 1.0, col);
+                        }
+                        _ => {
+                            over.circle_filled(e, r, col);
+                        }
+                    }
                 }
             }
             over.circle_filled(po, 3.5, Color32::WHITE);

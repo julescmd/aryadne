@@ -58,6 +58,16 @@ pub fn import(places: HashMap<String, Place>) {
     save();
 }
 
+/// Place un panneau à un endroit précis (un onglet qu'on vient de détacher, par exemple).
+pub fn put(id: &str, side: Side, pos: [f32; 2], size: [f32; 2]) {
+    set(id, Place { side, pos, size });
+}
+
+/// Le point `at` est-il hors de la fenêtre de l'application ?
+pub fn outside(ctx: &egui::Context, at: Pos2) -> bool {
+    !ctx.content_rect().expand(4.0).contains(at)
+}
+
 /// Remet tous les panneaux à leur place d'origine.
 pub fn reset() {
     with(|m| m.clear());

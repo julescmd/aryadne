@@ -260,6 +260,10 @@ struct App {
     github_token: String,
     error: Option<String>,
     ws: workspace::Set,
+    /// Onglets affichés dans leur propre panneau (déplaçable, détachable), en plus de la zone centrale
+    panes: Vec<String>,
+    /// Panneau en cours d'affichage (pour son en-tête)
+    pane_now: Option<usize>,
     ws_started: bool,
     ws_name: String,
 }
@@ -310,6 +314,7 @@ impl App {
         w.tabs = self.docs.iter().map(|d| d.rel.clone()).collect();
         w.active = self.active.and_then(|i| self.docs.get(i)).map(|d| d.rel.clone());
         w.split = self.split.clone();
+        w.panes = self.panes.clone();
         w.view = view.to_string();
         w.assistant = self.assistant_open;
     }
@@ -328,6 +333,7 @@ impl App {
         self.docs.clear();
         self.active = None;
         self.split = None;
+        self.panes.clear();
         let known: std::collections::HashSet<&str> = self.entries.iter().map(|e| e.rel.as_str()).collect();
         let tabs: Vec<String> = w.tabs.iter().filter(|t| known.contains(t.as_str())).cloned().collect();
         for t in &tabs {
@@ -337,6 +343,7 @@ impl App {
             self.open(a);
         }
         self.split = w.split.filter(|s| tabs.contains(s));
+        self.panes = w.panes.into_iter().filter(|s| tabs.contains(s)).collect();
         self.view = Some(match w.view.as_str() {
             "brain" => View::Brain,
             "refs" => View::Refs,
@@ -1121,6 +1128,13 @@ impl App {
                 ui.horizontal(|ui| {
                     ui.label(RichText::new(format!("◧ {name}")).family(theme::bold()));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if let Some(n) = self.pane_now {
+                            // Panneau à part : le fermer ramène simplement le fichier parmi les onglets
+                            if ui.small_button("×").on_hover_text(crate::i18n::t("remettre parmi les onglets")).clicked() && n < self.panes.len() {
+                                self.panes.remove(n);
+                            }
+                            return;
+                        }
                         if ui.small_button("×").on_hover_text(crate::i18n::t("fermer la vue côte à côte")).clicked() {
                             self.split = None;
                         }
@@ -1132,6 +1146,8 @@ impl App {
             });
             return;
         }
+        let mut tear: Option<(String, dock::Side, egui::Pos2)> = None;
+        let mut untear: Option<String> = None;
         egui::Frame::new().fill(p.panel).show(ui, |ui| {
             ui.set_width(ui.available_width());
             egui::ScrollArea::horizontal().id_salt("tabs").show(ui, |ui| {
@@ -1145,7 +1161,8 @@ impl App {
                         let r = egui::Frame::new().fill(fill).stroke(egui::Stroke::new(1.0, p.line)).inner_margin(egui::Margin { left: 12, right: 6, top: 6, bottom: 6 }).show(ui, |ui| {
                             ui.horizontal(|ui| {
                                 ui.spacing_mut().item_spacing.x = 8.0;
-                                ui.label(RichText::new(format!("{name}{mark}")).color(if active { p.text } else { p.muted }).size(12.0));
+                                let out = if self.panes.contains(&d.rel) { "◧ " } else { "" };
+                                ui.label(RichText::new(format!("{out}{name}{mark}")).color(if active { p.text } else { p.muted }).size(12.0));
                                 let x = ui.add(egui::Label::new(RichText::new("×").color(p.muted)).sense(egui::Sense::click()));
                                 if x.on_hover_text(crate::i18n::t("Fermer (Ctrl+W)")).clicked() {
                                     self.actions.push(Action::Close(i));
@@ -1156,12 +1173,52 @@ impl App {
                             let top = r.response.rect;
                             ui.painter().rect_filled(egui::Rect::from_min_size(top.min, egui::vec2(top.width(), 2.0)), 0.0, p.accent);
                         }
-                        let resp = r.response.interact(egui::Sense::click());
+                        let resp = r.response.interact(egui::Sense::click_and_drag());
                         if resp.clicked() {
                             self.active = Some(i);
                             self.selected = Some(d.rel.clone());
                             self.actions.push(Action::Open(d.rel.clone()));
                         }
+                        // Tirer un onglet hors de la barre : il devient un panneau à part (hors de l'app : une vraie fenêtre)
+                        if resp.dragged() {
+                            if let Some(at) = ui.ctx().pointer_latest_pos() {
+                                if (at.y - resp.rect.center().y).abs() > 36.0 || dock::outside(ui.ctx(), at) {
+                                    let painter = ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::unique("tab-drag")));
+                                    let ghost = egui::Rect::from_min_size(at + egui::vec2(8.0, 8.0), egui::vec2(220.0, 30.0));
+                                    painter.rect_filled(ghost, 6.0, p.accent.linear_multiply(0.2));
+                                    painter.rect_stroke(ghost, 6.0, egui::Stroke::new(2.0, p.accent), egui::StrokeKind::Inside);
+                                    painter.text(ghost.center(), egui::Align2::CENTER_CENTER, name, egui::FontId::proportional(12.0), p.accent);
+                                }
+                            }
+                        }
+                        if resp.drag_stopped() {
+                            if let Some(at) = ui.ctx().pointer_latest_pos() {
+                                let away = dock::outside(ui.ctx(), at);
+                                if away || (at.y - resp.rect.center().y).abs() > 36.0 {
+                                    tear = Some((d.rel.clone(), if away { dock::Side::Window } else { dock::Side::Float }, at));
+                                }
+                            }
+                        }
+                        resp.context_menu(|ui| {
+                            if self.panes.contains(&d.rel) {
+                                if ui.button(crate::i18n::t("remettre parmi les onglets")).clicked() {
+                                    untear = Some(d.rel.clone());
+                                    ui.close();
+                                }
+                            } else {
+                                for (label, side) in [("ouvrir dans un panneau flottant", dock::Side::Float), ("ouvrir dans un panneau à droite", dock::Side::Right), ("ouvrir dans un panneau en bas", dock::Side::Bottom), ("ouvrir dans sa propre fenêtre", dock::Side::Window)] {
+                                    if ui.button(crate::i18n::t(label)).clicked() {
+                                        tear = Some((d.rel.clone(), side, egui::pos2(260.0, 160.0)));
+                                        ui.close();
+                                    }
+                                }
+                            }
+                            ui.separator();
+                            if ui.button(crate::i18n::t("fermer")).clicked() {
+                                self.actions.push(Action::Close(i));
+                                ui.close();
+                            }
+                        });
                         if resp.middle_clicked() {
                             self.actions.push(Action::Close(i));
                         }
@@ -1169,6 +1226,58 @@ impl App {
                 });
             });
         });
+        if let Some(rel) = untear {
+            self.panes.retain(|r| *r != rel);
+        }
+        if let Some((rel, side, at)) = tear {
+            self.tear_tab(rel, side, at);
+        }
+    }
+
+    /// Sort un onglet dans son propre panneau.
+    fn tear_tab(&mut self, rel: String, side: dock::Side, at: egui::Pos2) {
+        if self.docs.len() < 2 {
+            self.toast = Some((crate::i18n::t("ouvre un deuxième fichier pour sortir celui-ci dans un panneau"), Instant::now()));
+            return;
+        }
+        let Some(j) = self.docs.iter().position(|d| d.rel == rel) else { return };
+        if self.split.as_deref() == Some(rel.as_str()) {
+            self.split = None;
+        }
+        if !self.panes.contains(&rel) {
+            self.panes.push(rel.clone());
+        }
+        dock::put(&format!("doc:{rel}"), side, [at.x - 20.0, at.y - 8.0], [640.0, 460.0]);
+        // La zone centrale montre un autre onglet, pour ne pas afficher deux fois le même fichier
+        if self.active == Some(j) {
+            self.active = (0..self.docs.len()).rev().find(|&k| k != j && !self.panes.contains(&self.docs[k].rel)).or(self.active);
+        }
+    }
+
+    /// Les onglets sortis : chacun dans un panneau qu'on déplace, ancre ou détache comme les autres.
+    fn doc_panes(&mut self, ui: &mut egui::Ui) {
+        let p = theme::pal();
+        self.panes.retain(|r| self.docs.iter().any(|d| &d.rel == r));
+        for n in 0..self.panes.len() {
+            let Some(rel) = self.panes.get(n).cloned() else { break };
+            let Some(j) = self.docs.iter().position(|d| d.rel == rel) else { continue };
+            // Le même fichier ne s'affiche qu'une fois par image
+            if Some(j) == self.active || self.split.as_deref() == Some(rel.as_str()) {
+                continue;
+            }
+            let title = rel.rsplit('/').next().unwrap_or(&rel).to_string();
+            dock::show(ui, &format!("doc:{rel}"), &title, dock::Side::Float, 520.0, 260.0, egui::Frame::new().fill(p.bg).stroke(egui::Stroke::new(1.0, p.line)), |ui| {
+                let keep = self.active;
+                self.active = Some(j);
+                self.in_split = true;
+                self.pane_now = Some(n);
+                let mut rn = false;
+                self.editor_inner(ui, &mut rn);
+                self.pane_now = None;
+                self.in_split = false;
+                self.active = keep;
+            });
+        }
     }
 
     /// Ouvre ou ferme la vue côte à côte : le fichier actif passe à droite,
@@ -1221,6 +1330,7 @@ impl App {
     }
 
     fn editor(&mut self, ui: &mut egui::Ui) {
+        self.doc_panes(ui);
         self.split_pane(ui);
         let mut run_now = ui.input(|i| i.key_pressed(Key::F5)) && self.current().is_some_and(|d| extras::runner_for(&d.rel).is_some());
         self.run_panel(ui);

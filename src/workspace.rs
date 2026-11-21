@@ -19,6 +19,9 @@ pub struct Workspace {
     pub active: Option<String>,
     #[serde(default)]
     pub split: Option<String>,
+    /// Onglets sortis dans leur propre panneau
+    #[serde(default)]
+    pub panes: Vec<String>,
     /// Vue affichée : files, brain, refs, boards, tasks, chat, search
     #[serde(default)]
     pub view: String,
