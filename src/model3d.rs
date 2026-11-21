@@ -1587,6 +1587,12 @@ pub struct Viewer {
     add_popup: Option<Pos2>,
     /// Le clic qui vient de valider une transformation : à ignorer pour la sélection, jusqu'au relâchement
     modal_click: bool,
+    /// Objets choisis en plus de l'objet actif (`scene_sel`) : Maj + clic, A, sélection au rectangle
+    scene_multi: Vec<usize>,
+    /// Pose de l'objet actif à l'image précédente : les autres objets choisis suivent ses changements
+    multi_follow: Option<(usize, ([f32; 3], [f32; 3], [f32; 3]))>,
+    /// Sélection au rectangle (B) : armée, puis coin de départ
+    box_sel: Option<Option<Pos2>>,
     /// Annuler dans la scène : dernier état enregistré, états précédents, états annulés
     scene_saved: Option<crate::scene::Scene>,
     scene_hist: Vec<crate::scene::Scene>,
@@ -1661,6 +1667,9 @@ impl Viewer {
             modal: None,
             add_popup: None,
             modal_click: false,
+            scene_multi: vec![],
+            multi_follow: None,
+            box_sel: None,
             scene_saved: None,
             scene_hist: vec![],
             scene_redo: vec![],
@@ -1971,24 +1980,68 @@ impl Viewer {
             if add {
                 self.add_popup = ui.input(|i| i.pointer.hover_pos()).or(Some(ui.ctx().content_rect().center()));
             }
+            let (all, none, parent, unparent, boxk) = ui.input(|i| (!i.modifiers.any() && i.key_pressed(Key::A), i.modifiers.alt && i.key_pressed(Key::A), !i.modifiers.any() && i.key_pressed(Key::P), i.modifiers.alt && i.key_pressed(Key::P), !i.modifiers.any() && i.key_pressed(Key::B)));
+            if all {
+                self.scene_multi = (0..scene.objects.len()).filter(|&k| scene.shown(k)).collect();
+                if sel.is_none() {
+                    self.scene_sel = self.scene_multi.last().copied();
+                }
+                self.multi_follow = None;
+            }
+            if none {
+                self.scene_multi.clear();
+                self.scene_sel = None;
+            }
+            if boxk {
+                self.box_sel = Some(None);
+            }
+            // Tous les objets choisis, l'actif en dernier
+            let mut chosen: Vec<usize> = self.scene_multi.iter().copied().filter(|&k| Some(k) != sel).collect();
+            chosen.extend(sel);
             if let Some(k) = sel {
-                if del {
-                    scene.remove(k);
+                if parent && chosen.len() > 1 {
+                    // P : les autres objets choisis deviennent les enfants de l'actif (Alt+P : plus de parent)
+                    let name = scene.objects[k].name.clone();
+                    for &c in chosen.iter().filter(|&&c| c != k) {
+                        if !scene.descends(k, c) {
+                            scene.objects[c].parent = name.clone();
+                        }
+                    }
+                    changed = true;
+                } else if unparent {
+                    for &c in &chosen {
+                        scene.objects[c].parent.clear();
+                    }
+                    changed = true;
+                } else if del {
+                    let mut order = chosen.clone();
+                    order.sort_unstable_by(|a, b| b.cmp(a));
+                    for c in order {
+                        scene.remove(c);
+                    }
                     self.scene_sel = None;
+                    self.scene_multi.clear();
                     changed = true;
                 } else if dup {
-                    let mut c = scene.objects[k].clone();
-                    c.name = format!("{} copie", c.name);
-                    scene.objects.insert(k + 1, c);
-                    self.scene_sel = Some(k + 1);
+                    // Les copies vont à la fin, deviennent la sélection, et partent tout de suite en déplacement
+                    let first = scene.objects.len();
+                    for &c in &chosen {
+                        let mut copy = scene.objects[c].clone();
+                        copy.name = format!("{} copie", copy.name);
+                        scene.objects.push(copy);
+                    }
+                    self.scene_multi = if chosen.len() > 1 { (first..scene.objects.len()).collect() } else { vec![] };
+                    self.scene_sel = Some(scene.objects.len() - 1);
+                    self.multi_follow = None;
                     changed = true;
-                    // Comme dans Blender : la copie part tout de suite en déplacement
                     if let Some(at) = ui.input(|i| i.pointer.hover_pos()) {
-                        let o = &scene.objects[k + 1];
+                        let o = &scene.objects[scene.objects.len() - 1];
                         self.modal = Some((0, None, (o.pos, o.rot, o.scale), at));
                     }
                 } else if hide {
-                    scene.objects[k].visible = false;
+                    for &c in &chosen {
+                        scene.objects[c].visible = false;
+                    }
                     changed = true;
                 }
             }
@@ -2023,6 +2076,32 @@ impl Viewer {
                     self.scene_saved = Some(scene.clone());
                 }
             }
+        }
+        // Sélection multiple : ce qui arrive à l'objet actif (poignée, G R S, champs) arrive aux autres objets choisis
+        self.scene_multi.retain(|&k| k < scene.objects.len());
+        if seek.is_some() {
+            self.multi_follow = None;
+        }
+        if let Some(a) = self.scene_sel.filter(|&k| k < scene.objects.len()) {
+            let cur = (scene.objects[a].pos, scene.objects[a].rot, scene.objects[a].scale);
+            if let Some((who, last)) = self.multi_follow {
+                if who == a && last != cur {
+                    for &k in self.scene_multi.iter().filter(|&&k| k != a) {
+                        let o = &mut scene.objects[k];
+                        for c in 0..3 {
+                            o.pos[c] += cur.0[c] - last.0[c];
+                            o.rot[c] += cur.1[c] - last.1[c];
+                            if last.2[c].abs() > 1e-6 {
+                                o.scale[c] *= cur.2[c] / last.2[c];
+                            }
+                        }
+                        self.scene_dirty = true;
+                    }
+                }
+            }
+            self.multi_follow = Some((a, cur));
+        } else {
+            self.multi_follow = None;
         }
         let pose_before = self.scene_sel.and_then(|k| scene.objects.get(k)).map(|o| (o.pos, o.rot, o.scale));
         let mut renamed: Option<(String, String)> = None;
@@ -2127,15 +2206,35 @@ impl Viewer {
                             changed = true;
                         }
                         let on = self.scene_sel == Some(i);
+                        let also = self.scene_multi.contains(&i);
                         let bad = self.scene_errors.get(i).and_then(|e| e.as_ref());
                         let text = egui::RichText::new(&o.name).size(12.0).color(if bad.is_some() { p.missing } else if on { p.accent } else if o.visible { p.text } else { p.muted });
+                        let text = if also && !on { text.color(p.accent.gamma_multiply(0.75)) } else { text };
                         let r = ui.add(egui::Button::new(if on { text.family(theme::bold()) } else { text }).frame(false));
                         let r = match bad {
                             Some(e) => r.on_hover_text(format!("{} : {e}", o.file)),
                             None => r.on_hover_text(&o.file),
                         };
                         if r.clicked() {
-                            self.scene_sel = if on { None } else { Some(i) };
+                            if ui.input(|x| x.modifiers.shift || x.modifiers.command) {
+                                // Maj ou Ctrl : ajoute à la sélection (l'objet cliqué devient l'actif), ou l'en retire
+                                if self.scene_multi.is_empty() {
+                                    self.scene_multi.extend(self.scene_sel);
+                                }
+                                if let Some(at) = self.scene_multi.iter().position(|&k| k == i) {
+                                    self.scene_multi.remove(at);
+                                    if on {
+                                        self.scene_sel = self.scene_multi.last().copied();
+                                    }
+                                } else {
+                                    self.scene_multi.push(i);
+                                    self.scene_sel = Some(i);
+                                }
+                            } else {
+                                self.scene_multi.clear();
+                                self.scene_sel = if on { None } else { Some(i) };
+                            }
+                            self.multi_follow = None;
                         }
                         r.context_menu(|ui| {
                             if ui.button(crate::i18n::t("dupliquer")).clicked() {
@@ -2151,6 +2250,7 @@ impl Viewer {
                 }
             });
             if let Some((i, a)) = action {
+                self.scene_multi.clear();
                 if a == 0 {
                     scene.remove(i);
                     self.scene_sel = None;
@@ -2382,6 +2482,8 @@ impl Viewer {
                 to.push(std::mem::replace(scene, prev));
                 self.scene_saved = Some(scene.clone());
                 self.scene_sel = self.scene_sel.filter(|&k| k < scene.objects.len());
+                self.scene_multi.clear();
+                self.multi_follow = None;
                 self.scene_dirty = true;
                 let _ = scene.write(&path);
             }
@@ -3063,6 +3165,7 @@ impl Viewer {
         // Le clic qui valide une transformation au clavier ne doit pas aussi choisir un autre objet
         let mut modal_ended = false;
         let mut marker_pick: Option<usize> = None;
+        let mut boxed_pick: Option<Vec<usize>> = None;
         if self.edit.is_none() && crate::scene::is_scene(&self.path) {
             if resp.hovered() && !ui.ctx().egui_wants_keyboard_input() {
                 // G, R, S : déplacer, tourner, redimensionner l'objet choisi à la souris, sans rien tenir
@@ -3254,11 +3357,32 @@ impl Viewer {
             if resp.clicked() && !skip_pick && !self.stack.iter().any(|m| m.on) && self.applied.is_none() {
                 if let (Some((_, _, prep)), Some(pt)) = (&self.prepared, resp.interact_pointer_pos()) {
                     let hit = pick(prep, &self.cam, rect.width(), rect.height(), pt.x - rect.left(), pt.y - rect.top());
-                    self.scene_sel = hit.and_then(|(tri, _)| self.scene_ranges.iter().find(|r| (r.1..r.2).contains(&(tri as usize))).map(|r| r.0));
+                    let hit = hit.and_then(|(tri, _)| self.scene_ranges.iter().find(|r| (r.1..r.2).contains(&(tri as usize))).map(|r| r.0));
+                    if ui.input(|i| i.modifiers.shift) {
+                        // Maj + clic : ajoute l'objet à la sélection et en fait l'actif, ou le retire s'il y était
+                        if let Some(k) = hit {
+                            if self.scene_multi.is_empty() {
+                                self.scene_multi.extend(self.scene_sel);
+                            }
+                            if let Some(at) = self.scene_multi.iter().position(|&m| m == k) {
+                                self.scene_multi.remove(at);
+                                if self.scene_sel == Some(k) {
+                                    self.scene_sel = self.scene_multi.last().copied();
+                                }
+                            } else {
+                                self.scene_multi.push(k);
+                                self.scene_sel = Some(k);
+                            }
+                        }
+                    } else {
+                        self.scene_multi.clear();
+                        self.scene_sel = hit;
+                    }
+                    self.multi_follow = None;
                 }
             }
         }
-        let dragging = self.gizmo_axis.is_none() && self.modal.is_none() && (resp.dragged_by(egui::PointerButton::Middle) || (!guiding && resp.dragged_by(egui::PointerButton::Primary)) || resp.dragged_by(egui::PointerButton::Secondary));
+        let dragging = self.gizmo_axis.is_none() && self.modal.is_none() && self.box_sel.is_none() && (resp.dragged_by(egui::PointerButton::Middle) || (!guiding && resp.dragged_by(egui::PointerButton::Primary)) || resp.dragged_by(egui::PointerButton::Secondary));
         if resp.clicked() {
             if let (Some(e), Some((_, _, prep)), Some(pt)) = (&mut self.edit, &self.prepared, resp.interact_pointer_pos()) {
                 if let Some((tri, bary)) = pick(prep, &self.cam, rect.width(), rect.height(), pt.x - rect.left(), pt.y - rect.top()) {
@@ -3397,12 +3521,46 @@ impl Viewer {
                 }
             };
             let over = ui.painter_at(rect);
+            // Sélection au rectangle (B, puis glisser) : prend les objets dont l'origine tombe dedans
+            let mut boxed: Option<egui::Rect> = None;
+            if let Some(start) = self.box_sel {
+                let (pressed, down, cur) = ui.input(|i| (i.pointer.primary_pressed(), i.pointer.primary_down(), i.pointer.latest_pos()));
+                match (start, cur) {
+                    (None, Some(c)) if pressed && rect.contains(c) => self.box_sel = Some(Some(c)),
+                    (Some(s), Some(c)) => {
+                        let area = egui::Rect::from_two_pos(s, c);
+                        over.rect_filled(area, 0.0, p.accent.gamma_multiply(0.12));
+                        over.rect_stroke(area, 0.0, Stroke::new(1.0, p.accent), egui::StrokeKind::Inside);
+                        if !down {
+                            boxed = Some(area);
+                            self.box_sel = None;
+                            self.modal_click = true;
+                        }
+                    }
+                    _ => {}
+                }
+                if ui.input(|i| i.key_pressed(Key::Escape)) {
+                    self.box_sel = None;
+                }
+                ui.ctx().request_repaint();
+            }
+            let mut in_box: Vec<usize> = vec![];
             for (k, o) in scene.objects.iter().enumerate() {
                 let kind = crate::scene::kind(o);
-                if !matches!(kind, crate::scene::Kind::Light | crate::scene::Kind::Camera) || !scene.shown(k) {
+                if !scene.shown(k) {
                     continue;
                 }
                 let Some(at) = project(scene.world(k, [0.0; 3])) else { continue };
+                if boxed.is_some_and(|b| b.contains(at)) {
+                    in_box.push(k);
+                }
+                // L'origine de chaque objet choisi : un point plein pour l'actif, un anneau pour les autres
+                if self.scene_multi.contains(&k) && self.scene_sel != Some(k) {
+                    over.circle_stroke(at, 4.0, Stroke::new(2.0, p.accent));
+                }
+                if !matches!(kind, crate::scene::Kind::Light | crate::scene::Kind::Camera) {
+                    continue;
+                }
                 let on = self.scene_sel == Some(k);
                 let col = if on { p.accent } else { p.text };
                 // Un trait montre le sens : où va la lumière, où regarde la caméra
@@ -3431,9 +3589,17 @@ impl Viewer {
                     marker_pick = Some(k);
                 }
             }
+            if boxed.is_some() {
+                boxed_pick = Some(in_box);
+            }
         }
         if let Some(k) = marker_pick {
             self.scene_sel = Some(k);
+        }
+        if let Some(list) = boxed_pick {
+            self.scene_sel = list.last().copied();
+            self.scene_multi = if list.len() > 1 { list } else { vec![] };
+            self.multi_follow = None;
         }
         if let Some((po, ends)) = gizmo {
             let over = ui.painter_at(rect);

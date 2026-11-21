@@ -1121,5 +1121,7 @@
  "Espace lire · S couper · Suppr supprimer · glisser les bords : raccourcir · Ctrl+molette : zoom · Ctrl+Z annuler": "Space play · S split · Del delete · drag edges: trim · Ctrl+wheel: zoom · Ctrl+Z undo",
  "clic droit : ajouter · Q aligner · Suppr supprimer · F2 renommer la node · molette : zoom · Ctrl+Z annuler": "right click: add · Q align · Del delete · F2 rename node · wheel: zoom · Ctrl+Z undo",
  "Ctrl+F chercher · Ctrl+Z annuler · F2 renommer le fichier · ^P ouvrir · ^⇧P commandes": "Ctrl+F find · Ctrl+Z undo · F2 rename file · ^P open · ^⇧P commands",
- "F2 renommer le fichier · ^P ouvrir · ^⇧P commandes": "F2 rename file · ^P open · ^⇧P commands"
+ "F2 renommer le fichier · ^P ouvrir · ^⇧P commandes": "F2 rename file · ^P open · ^⇧P commands",
+ "G R S : déplacer, tourner, taille (X Y Z : axe) · Maj+clic, A, B : sélection · Maj+A ajouter · X supprimer · Maj+D dupliquer · Ctrl+P parent · H cacher · I clé · Ctrl+Z annuler": "G R S: move, rotate, scale (X Y Z: axis) · Shift+click, A, B: select · Shift+A add · X delete · Shift+D duplicate · Ctrl+P parent · H hide · I key · Ctrl+Z undo",
+ "G R S : déplacer, tourner, taille (X Y Z : axe) · Maj+clic, A, B : sélection · Maj+A ajouter · X supprimer · Maj+D dupliquer · P parent · H cacher · I clé · Ctrl+Z annuler": "G R S: move, rotate, scale (X Y Z: axis) · Shift+click, A, B: select · Shift+A add · X delete · Shift+D duplicate · P parent · H hide · I key · Ctrl+Z undo"
 }

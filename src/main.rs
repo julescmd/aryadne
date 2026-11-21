@@ -1163,7 +1163,7 @@ impl App {
             return t("^P ouvrir · ^⇧P commandes");
         }
         match self.current().map(|d| &d.content) {
-            Some(Content::Model(v)) if v.is_scene() => t("G R S : déplacer, tourner, taille (X Y Z : axe) · Maj+A ajouter · X supprimer · Maj+D dupliquer · H cacher · I clé · Espace lire · Ctrl+Z annuler"),
+            Some(Content::Model(v)) if v.is_scene() => t("G R S : déplacer, tourner, taille (X Y Z : axe) · Maj+clic, A, B : sélection · Maj+A ajouter · X supprimer · Maj+D dupliquer · P parent · H cacher · I clé · Ctrl+Z annuler"),
             Some(Content::Model(_)) => t("glisser : tourner · Maj+glisser : déplacer · molette : zoom · 1 3 7 : vues · 5 : perspective · F2 renommer le fichier"),
             Some(Content::Montage(_)) => t("Espace lire · S couper · Suppr supprimer · glisser les bords : raccourcir · Ctrl+molette : zoom · Ctrl+Z annuler"),
             Some(Content::Nodes(_)) => t("clic droit : ajouter · Q aligner · Suppr supprimer · F2 renommer la node · molette : zoom · Ctrl+Z annuler"),
