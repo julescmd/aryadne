@@ -1054,5 +1054,10 @@
  "volume": "volume",
  "fondu d'entrée": "fade in",
  "fondu de sortie": "fade out",
- "Glisse des vidéos, des images ou des sons ici": "Drop videos, images or sounds here"
+ "Glisse des vidéos, des images ou des sons ici": "Drop videos, images or sounds here",
+ "Poser une clé ici : placement, taille et opacité. Ensuite, chaque réglage modifié pose sa clé tout seul.": "Set a key here: placement, size and opacity. After that, every changed setting sets its own key.",
+ "Retirer la clé de cet instant": "Remove this moment's key",
+ "clé(s)": "key(s)",
+ "＋ étalonnage en nodes": "＋ node grading",
+ "Un graphe de nodes (courbes, rampes, balance…) appliqué aux couleurs de ce clip": "A node graph (curves, ramps, balance…) applied to this clip's colors"
 }

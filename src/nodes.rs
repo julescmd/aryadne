@@ -1403,6 +1403,35 @@ impl Program {
 
     /// Compositing : calcule l'image de sortie à la taille donnée (ou celle de la première image).
     pub fn composite(&self, size: Option<[usize; 2]>) -> Img {
+        self.composite_over(size, None)
+    }
+
+    /// Table de couleurs 3D (format .cube) de ce graphe : chaque couleur d'entrée y trouve sa couleur de sortie.
+    /// Sert à appliquer un étalonnage en nodes à une vidéo. Seuls les réglages de couleur y entrent :
+    /// un flou ou une vignette dépendent de la place du pixel, pas de sa couleur.
+    pub fn lut_cube(&self, n: usize) -> String {
+        let n = n.clamp(2, 65);
+        // Image d'identité : rouge en x, vert puis bleu en y
+        let mut id = Img { w: n, h: n * n, px: Vec::with_capacity(n * n * n) };
+        let f = |k: usize| k as f32 / (n - 1) as f32;
+        for b in 0..n {
+            for g in 0..n {
+                for r in 0..n {
+                    id.px.push([f(r), f(g), f(b), 1.0]);
+                }
+            }
+        }
+        let out = self.composite_over(Some([n, n * n]), Some(&id));
+        let mut t = format!("TITLE \"Aryadne\"\nLUT_3D_SIZE {n}\n");
+        for p in &out.px {
+            let c = |x: f32| if x.is_finite() { x.clamp(0.0, 1.0) } else { 0.0 };
+            t += &format!("{:.5} {:.5} {:.5}\n", c(p[0]), c(p[1]), c(p[2]));
+        }
+        t
+    }
+
+    /// Comme `composite`, mais les nodes « Image » lisent `over` au lieu de leur fichier.
+    pub fn composite_over(&self, size: Option<[usize; 2]>, over: Option<&Img>) -> Img {
         let [w, h] = size.unwrap_or_else(|| self.steps.iter().find_map(|s| s.image.as_ref().map(|i| [i.w, i.h])).unwrap_or([512, 512]));
         let n = w * h;
         let mut bufs: Vec<Option<Vec<V>>> = vec![None; self.regs];
@@ -1576,7 +1605,7 @@ impl Program {
                         [a[0] + (b[0] - a[0]) * k, a[1] + (b[1] - a[1]) * k, a[2] + (b[2] - a[2]) * k, a[3]]
                     }).collect()]
                 }
-                "image" => match &s.image {
+                "image" => match over.or(s.image.as_deref()) {
                     Some(img) => {
                         let px: Vec<V> = if img.w == w && img.h == h { img.px.clone() } else { (0..n).into_par_iter().map(|i| img.sample(((i % w) as f32 + 0.5) / w as f32, ((i / w) as f32 + 0.5) / h as f32)).collect() };
                         let alpha: Vec<V> = px.iter().map(|p| [p[3]; 4]).collect();
@@ -4025,6 +4054,31 @@ mod tests {
         g.connect(cv, 0, out, 0);
         g.nodes.iter_mut().find(|n| n.id == out).unwrap().pos = [800.0, 60.0];
         g.save(std::path::Path::new(&out_path)).unwrap();
+    }
+
+    #[test]
+    fn table_de_couleurs() {
+        // Graphe neutre : la table rend chaque couleur telle quelle
+        let mut g = Graph::new_compositor();
+        g.nodes.retain(|n| n.op == "image" || n.op == "comp_out");
+        g.links.clear();
+        let (img, out) = (g.nodes[0].id, g.nodes[1].id);
+        g.connect(img, 0, out, 0);
+        let cube = Program::compile(&g, "", 64).ok().unwrap().lut_cube(5);
+        let rows: Vec<Vec<f32>> = cube.lines().skip(2).map(|l| l.split(' ').map(|x| x.parse().unwrap()).collect()).collect();
+        assert_eq!(rows.len(), 125);
+        // Le rouge varie le plus vite, puis le vert, puis le bleu
+        assert_eq!(rows[1], vec![0.25, 0.0, 0.0]);
+        assert_eq!(rows[5], vec![0.0, 0.25, 0.0]);
+        assert_eq!(rows[124], vec![1.0, 1.0, 1.0]);
+        // Avec une inversion entre les deux, la table inverse
+        let inv = g.add("invert", [100.0, 0.0]);
+        g.links.clear();
+        g.connect(img, 0, inv, 0);
+        g.connect(inv, 0, out, 0);
+        let cube = Program::compile(&g, "", 64).ok().unwrap().lut_cube(5);
+        let first: Vec<f32> = cube.lines().nth(2).unwrap().split(' ').map(|x| x.parse().unwrap()).collect();
+        assert!(first.iter().all(|x| (*x - 1.0).abs() < 1e-4), "{first:?}");
     }
 
     #[test]

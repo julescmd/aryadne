@@ -63,9 +63,99 @@ pub struct Clip {
     pub y: f32,
     #[serde(default = "one")]
     pub scale: f32,
+    /// Étalonnage en nodes : fichier de compositing appliqué à ce clip (vide = aucun)
+    #[serde(default)]
+    pub grade: String,
+    /// Clés d'animation du placement, de la taille et de l'opacité, triées par instant
+    #[serde(default)]
+    pub keys: Vec<PoseKey>,
+}
+
+/// Une clé : placement, taille et opacité du clip à un instant (en secondes depuis son début).
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Debug)]
+pub struct PoseKey {
+    pub t: f32,
+    pub x: f32,
+    pub y: f32,
+    pub scale: f32,
+    pub opacity: f32,
+}
+
+/// Expression ffmpeg qui suit des points (instant, valeur) en ligne droite de l'un à l'autre.
+pub fn expr(points: &[(f32, f32)], var: &str) -> String {
+    match points {
+        [] => "0".into(),
+        [(_, v)] => format!("{v:.4}"),
+        _ => {
+            let mut e = format!("{:.4}", points[points.len() - 1].1);
+            for w in points.windows(2).rev() {
+                let ((t0, v0), (t1, v1)) = (w[0], w[1]);
+                e = format!("if(lt({var},{t1:.4}),{v0:.4}+({:.4})*({var}-({t0:.4}))/{:.4},{e})", v1 - v0, (t1 - t0).max(1e-4));
+            }
+            format!("if(lt({var},{:.4}),{:.4},{e})", points[0].0, points[0].1)
+        }
+    }
+}
+
+/// Fichier de la table de couleurs d'un étalonnage : change de nom dès que le graphe est modifié.
+pub fn lut_file(grade: &Path) -> PathBuf {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    grade.hash(&mut h);
+    std::fs::metadata(grade).ok().and_then(|m| m.modified().ok()).hash(&mut h);
+    dirs::cache_dir().unwrap_or_else(std::env::temp_dir).join("aryadne").join("lut").join(format!("{:016x}.cube", h.finish()))
+}
+
+/// Calcule les tables de couleurs manquantes. Renvoie vrai si au moins une a été écrite.
+pub fn bake_luts(p: &Project, project: &Path, root: &str) -> bool {
+    let mut any = false;
+    for c in p.clips.iter().filter(|c| !c.grade.is_empty()) {
+        let g = resolve(project, &c.grade);
+        let out = lut_file(&g);
+        if out.exists() || !g.exists() {
+            continue;
+        }
+        if let Ok(prog) = crate::nodes::Graph::load(&g).and_then(|gr| crate::nodes::Program::compile(&gr, root, 64).map_err(|e| e.1)) {
+            if let Some(d) = out.parent() {
+                let _ = std::fs::create_dir_all(d);
+            }
+            any |= std::fs::write(&out, prog.lut_cube(33)).is_ok();
+        }
+    }
+    any
 }
 
 impl Clip {
+    /// Placement, taille et opacité à l'instant `t` de la timeline, d'après les clés (None sans clé).
+    pub fn pose_at(&self, t: f32) -> Option<PoseKey> {
+        let (k, r) = (&self.keys, t - self.start);
+        let (first, last) = (k.first()?, k.last()?);
+        if r <= first.t {
+            return Some(*first);
+        }
+        if r >= last.t {
+            return Some(*last);
+        }
+        let i = (0..k.len() - 1).find(|&i| r < k[i + 1].t)?;
+        let (a, b) = (k[i], k[i + 1]);
+        let f = (r - a.t) / (b.t - a.t).max(1e-4);
+        let m = |x: f32, y: f32| x + (y - x) * f;
+        Some(PoseKey { t: r, x: m(a.x, b.x), y: m(a.y, b.y), scale: m(a.scale, b.scale), opacity: m(a.opacity, b.opacity) })
+    }
+
+    /// Pose une clé à l'instant `t` de la timeline avec les réglages actuels.
+    pub fn set_key(&mut self, t: f32) {
+        let r = ((t - self.start).clamp(0.0, self.len()) * 100.0).round() / 100.0;
+        let key = PoseKey { t: r, x: self.x, y: self.y, scale: self.scale, opacity: self.opacity };
+        match self.keys.iter().position(|k| (k.t - r).abs() < 0.021) {
+            Some(i) => self.keys[i] = PoseKey { t: self.keys[i].t, ..key },
+            None => {
+                self.keys.push(key);
+                self.keys.sort_by(|a, b| a.t.total_cmp(&b.t));
+            }
+        }
+    }
+
     pub fn len(&self) -> f32 {
         ((self.src_out - self.src_in) / self.speed.max(0.01)).max(0.0)
     }
@@ -175,6 +265,8 @@ pub fn import(project: &Path, media: &Path, track: usize, start: f32) -> Result<
         x: 0.0,
         y: 0.0,
         scale: 1.0,
+        grade: String::new(),
+        keys: vec![],
     })
 }
 
@@ -203,15 +295,38 @@ pub fn graph(p: &Project, project: &Path, from: f32, w: u32, h: u32, realtime: b
         } else {
             args.extend(["-ss".into(), format!("{src_in:.3}"), "-t".into(), format!("{src_len:.3}"), "-i".into(), path]);
         }
-        if c.visual() && c.opacity > 0.0 {
-            let (cw, ch) = (((w as f32 * c.scale).round() as u32).max(2), ((h as f32 * c.scale).round() as u32).max(2));
-            filter += &format!("[{n}:v]fps={},setpts=(PTS-STARTPTS)/{:.4}+{st:.3}/TB,scale=w={cw}:h={ch}:force_original_aspect_ratio=decrease", p.fps, c.speed.max(0.01));
+        if c.visual() && (c.opacity > 0.0 || !c.keys.is_empty()) {
+            // Clés : chaque réglage animé devient une expression du temps de la timeline
+            let pts = |f: &dyn Fn(&PoseKey) -> f32| -> Vec<(f32, f32)> { c.keys.iter().map(|q| (c.start + q.t - from, f(q))).collect() };
+            let animated = c.keys.len() > 1;
+            filter += &format!("[{n}:v]fps={},setpts=(PTS-STARTPTS)/{:.4}+{st:.3}/TB", p.fps, c.speed.max(0.01));
+            if !c.grade.is_empty() {
+                let lut = lut_file(&resolve(project, &c.grade));
+                if lut.exists() {
+                    filter += &format!(",lut3d=file='{}'", lut.to_string_lossy().replace('\\', "/").replace(':', "\\:"));
+                }
+            }
+            if animated {
+                let e = expr(&pts(&|q| q.scale), "t");
+                filter += &format!(",scale=w='max(2,{w}*({e}))':h='max(2,{h}*({e}))':eval=frame:force_original_aspect_ratio=decrease");
+            } else {
+                let sc = c.keys.first().map(|q| q.scale).unwrap_or(c.scale);
+                let (cw, ch) = (((w as f32 * sc).round() as u32).max(2), ((h as f32 * sc).round() as u32).max(2));
+                filter += &format!(",scale=w={cw}:h={ch}:force_original_aspect_ratio=decrease");
+            }
             if c.brightness != 0.0 || c.contrast != 1.0 || c.saturation != 1.0 {
                 filter += &format!(",eq=brightness={:.3}:contrast={:.3}:saturation={:.3}", c.brightness.clamp(-1.0, 1.0), c.contrast.clamp(0.0, 4.0), c.saturation.clamp(0.0, 3.0));
             }
             filter += ",format=rgba";
-            if c.opacity < 1.0 {
-                filter += &format!(",colorchannelmixer=aa={:.3}", c.opacity.clamp(0.0, 1.0));
+            if animated {
+                if c.keys.iter().any(|q| q.opacity < 1.0) {
+                    filter += &format!(",geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='alpha(X,Y)*clip({},0,1)'", expr(&pts(&|q| q.opacity), "T"));
+                }
+            } else {
+                let op = c.keys.first().map(|q| q.opacity).unwrap_or(c.opacity);
+                if op < 1.0 {
+                    filter += &format!(",colorchannelmixer=aa={:.3}", op.clamp(0.0, 1.0));
+                }
             }
             if c.fade_in > 0.0 && skipped == 0.0 {
                 filter += &format!(",fade=t=in:st={st:.3}:d={:.3}:alpha=1", c.fade_in);
@@ -219,7 +334,8 @@ pub fn graph(p: &Project, project: &Path, from: f32, w: u32, h: u32, realtime: b
             if c.fade_out > 0.0 {
                 filter += &format!(",fade=t=out:st={:.3}:d={:.3}:alpha=1", (en - c.fade_out).max(0.0), c.fade_out);
             }
-            filter += &format!("[c{n}];[{last}][c{n}]overlay=x=(W-w)/2+{:.1}:y=(H-h)/2+{:.1}:enable='between(t,{st:.3},{en:.3})':eof_action=pass[o{n}];", c.x * k, c.y * k);
+            let (ex, ey) = if animated { (expr(&pts(&|q| q.x * k), "t"), expr(&pts(&|q| q.y * k), "t")) } else { (format!("{:.1}", c.keys.first().map(|q| q.x).unwrap_or(c.x) * k), format!("{:.1}", c.keys.first().map(|q| q.y).unwrap_or(c.y) * k)) };
+            filter += &format!("[c{n}];[{last}][c{n}]overlay=x='(W-w)/2+({ex})':y='(H-h)/2+({ey})':enable='between(t,{st:.3},{en:.3})':eof_action=pass[o{n}];");
             last = format!("o{n}");
         }
         if with_audio && c.has_audio && c.volume > 0.0 && c.kind != "image" {
@@ -299,6 +415,15 @@ pub struct Editor {
     message: Option<String>,
     /// Médias glissés sur la fenêtre, à ajouter
     pub add: Vec<PathBuf>,
+    /// Dossier du coffre (pour les images des graphes d'étalonnage)
+    root: String,
+    /// Graphe d'étalonnage à ouvrir dans l'éditeur de nodes
+    pub open_request: Option<PathBuf>,
+    /// Annuler / rétablir : états précédents du montage
+    saved: Project,
+    history: Vec<Project>,
+    redo: Vec<Project>,
+    last_head: f32,
 }
 
 impl Drop for Editor {
@@ -308,18 +433,37 @@ impl Drop for Editor {
 }
 
 impl Editor {
-    pub fn open(path: PathBuf) -> Editor {
+    pub fn open(path: PathBuf, root: &str) -> Editor {
         let (project, error) = match Project::read(&path) {
             Ok(p) => (p, None),
             Err(e) => (Project::default(), Some(e)),
         };
-        Editor { path, project, error, playhead: 0.0, selected: None, zoom: 60.0, scroll: 0.0, drag: None, tex: None, preview_rx: None, shown: None, rev: 0, play: None, export_rx: None, message: None, add: vec![] }
+        Editor { path, error, playhead: 0.0, selected: None, zoom: 60.0, scroll: 0.0, drag: None, tex: None, preview_rx: None, shown: None, rev: 0, play: None, export_rx: None, message: None, add: vec![], root: root.to_string(), open_request: None, saved: project.clone(), history: vec![], redo: vec![], last_head: 0.0, project }
     }
 
     fn changed(&mut self) {
+        if self.saved != self.project {
+            self.history.push(std::mem::replace(&mut self.saved, self.project.clone()));
+            if self.history.len() > 200 {
+                self.history.remove(0);
+            }
+            self.redo.clear();
+        }
         self.rev += 1;
         if let Err(e) = self.project.write(&self.path) {
             self.message = Some(e);
+        }
+    }
+
+    /// Revient un pas en arrière (ou en avant avec `forward`).
+    fn undo(&mut self, forward: bool) {
+        let (from, to) = if forward { (&mut self.redo, &mut self.history) } else { (&mut self.history, &mut self.redo) };
+        if let Some(p) = from.pop() {
+            to.push(std::mem::replace(&mut self.project, p));
+            self.saved = self.project.clone();
+            self.selected = self.selected.filter(|&s| s < self.project.clips.len());
+            self.rev += 1;
+            let _ = self.project.write(&self.path);
         }
     }
 
@@ -376,6 +520,20 @@ impl Editor {
                 }
                 Err(e) => self.message = Some(format!("{} : {e}", f.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default())),
             }
+        }
+        // Étalonnages en nodes : la table de couleurs se refait dès que son graphe change
+        if bake_luts(&self.project, &self.path, &self.root) {
+            self.rev += 1;
+        }
+        // Clips animés : leurs réglages suivent la tête de lecture
+        if self.playhead != self.last_head {
+            self.last_head = self.playhead;
+            for c in &mut self.project.clips {
+                if let Some(k) = c.pose_at(self.playhead) {
+                    (c.x, c.y, c.scale, c.opacity) = (k.x, k.y, k.scale, k.opacity);
+                }
+            }
+            self.saved = self.project.clone();
         }
         // Images de la lecture en cours
         let mut ended = false;
@@ -443,6 +601,7 @@ impl Editor {
         let mut toggle_play = false;
         let mut split = false;
         let mut delete = false;
+        let mut undo: Option<bool> = None;
         ui.horizontal(|ui| {
             if ui.button(if self.play.is_some() { "⏸" } else { "▶" }).on_hover_text(crate::i18n::t("lire / arrêter (Espace)")).clicked() {
                 toggle_play = true;
@@ -463,6 +622,12 @@ impl Editor {
             }
             if ui.add_enabled(self.selected.is_some(), egui::Button::new(crate::i18n::t("supprimer"))).clicked() {
                 delete = true;
+            }
+            if ui.add_enabled(!self.history.is_empty(), egui::Button::new("↶")).on_hover_text(crate::i18n::t("annuler (Ctrl+Z)")).clicked() {
+                undo = Some(false);
+            }
+            if ui.add_enabled(!self.redo.is_empty(), egui::Button::new("↷")).on_hover_text(crate::i18n::t("rétablir (Ctrl+Maj+Z)")).clicked() {
+                undo = Some(true);
             }
             if ui.button(crate::i18n::t("＋ piste")).clicked() {
                 self.project.tracks += 1;
@@ -511,9 +676,18 @@ impl Editor {
         if !ctx.egui_wants_keyboard_input() {
             ui.input(|i| {
                 toggle_play |= i.key_pressed(egui::Key::Space);
+                if i.modifiers.command && i.key_pressed(egui::Key::Z) {
+                    undo = Some(i.modifiers.shift);
+                }
+                if i.modifiers.command && i.key_pressed(egui::Key::Y) {
+                    undo = Some(true);
+                }
                 split |= i.key_pressed(egui::Key::S) && !i.modifiers.any();
                 delete |= i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace);
             });
+        }
+        if let Some(forward) = undo {
+            self.undo(forward);
         }
         if toggle_play {
             if self.play.is_some() { self.stop() } else { self.start(&ctx) }
@@ -544,15 +718,20 @@ impl Editor {
         egui::Panel::bottom("montage-timeline").exact_size(tl_h).frame(egui::Frame::new().fill(p.panel).stroke(Stroke::new(1.0, p.line))).show(ui, |ui| self.timeline(ui));
         if let Some(s) = self.selected.filter(|&s| s < self.project.clips.len()) {
             let mut ch = false;
-            egui::Panel::right("montage-clip").exact_size(250.0).frame(egui::Frame::new().fill(p.panel).stroke(Stroke::new(1.0, p.line)).inner_margin(10)).show(ui, |ui| {
+            let head = self.playhead;
+            let (mut new_grade, mut open_grade) = (false, false);
+            let mut pose_before: Option<(f32, f32, f32, f32)> = None;
+            let mut ch2 = false;
+            egui::Panel::right("montage-clip").exact_size(280.0).frame(egui::Frame::new().fill(p.panel).stroke(Stroke::new(1.0, p.line)).inner_margin(10)).show(ui, |ui| {
                 let c = &mut self.project.clips[s];
+                ui.spacing_mut().slider_width = 84.0;
                 ui.label(RichText::new(crate::i18n::t("CLIP")).size(10.5).color(p.muted).family(crate::theme::bold()));
                 ch |= ui.add(egui::TextEdit::singleline(&mut c.name).desired_width(f32::INFINITY)).changed();
                 ui.label(RichText::new(&c.file).size(10.0).color(p.muted));
                 ui.add_space(6.0);
                 let mut row = |ui: &mut egui::Ui, label: &str, v: &mut f32, r: std::ops::RangeInclusive<f32>, reset: f32| {
                     ui.horizontal(|ui| {
-                        if ui.add(egui::Button::new(RichText::new(crate::i18n::t(label)).size(11.0).color(p.muted)).frame(false).min_size(vec2(84.0, 0.0))).on_hover_text(crate::i18n::t("cliquer pour remettre à zéro")).clicked() {
+                        if ui.add(egui::Button::new(RichText::new(crate::i18n::t(label)).size(11.0).color(p.muted)).frame(false).min_size(vec2(78.0, 0.0))).on_hover_text(crate::i18n::t("cliquer pour remettre à zéro")).clicked() {
                             *v = reset;
                             ch = true;
                         }
@@ -560,6 +739,26 @@ impl Editor {
                     });
                 };
                 if c.kind != "audio" {
+                    // Clés d'animation du placement, de la taille et de l'opacité
+                    ui.horizontal(|ui| {
+                        let inside = head >= c.start - 1e-3 && head <= c.end() + 1e-3;
+                        let rel = head - c.start;
+                        let on_key = c.keys.iter().any(|k| (k.t - rel).abs() < 0.021);
+                        if ui.add_enabled(inside, egui::Button::new(RichText::new(if on_key { "◆" } else { "◇" }).color(if on_key { p.accent } else { p.text }))).on_hover_text(crate::i18n::t("Poser une clé ici : placement, taille et opacité. Ensuite, chaque réglage modifié pose sa clé tout seul.")).clicked() {
+                            c.set_key(head);
+                            ch2 = true;
+                        }
+                        if ui.add_enabled(on_key, egui::Button::new("✕")).on_hover_text(crate::i18n::t("Retirer la clé de cet instant")).clicked() {
+                            c.keys.retain(|k| (k.t - rel).abs() >= 0.021);
+                            ch2 = true;
+                        }
+                        ui.label(RichText::new(format!("{} {}", c.keys.len(), crate::i18n::t("clé(s)"))).size(11.0).color(p.muted));
+                        if !c.keys.is_empty() && ui.small_button(crate::i18n::t("tout retirer")).clicked() {
+                            c.keys.clear();
+                            ch2 = true;
+                        }
+                    });
+                    pose_before = Some((c.x, c.y, c.scale, c.opacity));
                     row(ui, "opacité", &mut c.opacity, 0.0..=1.0, 1.0);
                     row(ui, "taille", &mut c.scale, 0.05..=3.0, 1.0);
                     row(ui, "décalage x", &mut c.x, -2000.0..=2000.0, 0.0);
@@ -569,6 +768,21 @@ impl Editor {
                     row(ui, "luminosité", &mut c.brightness, -0.5..=0.5, 0.0);
                     row(ui, "contraste", &mut c.contrast, 0.2..=2.5, 1.0);
                     row(ui, "saturation", &mut c.saturation, 0.0..=3.0, 1.0);
+                    ui.horizontal(|ui| {
+                        if c.grade.is_empty() {
+                            if ui.button(crate::i18n::t("＋ étalonnage en nodes")).on_hover_text(crate::i18n::t("Un graphe de nodes (courbes, rampes, balance…) appliqué aux couleurs de ce clip")).clicked() {
+                                new_grade = true;
+                            }
+                        } else {
+                            if ui.button(crate::i18n::t("nodes ✎")).on_hover_text(&c.grade).clicked() {
+                                open_grade = true;
+                            }
+                            if ui.small_button(crate::i18n::t("retirer")).clicked() {
+                                c.grade.clear();
+                                ch2 = true;
+                            }
+                        }
+                    });
                     ui.separator();
                 }
                 if c.kind != "image" {
@@ -580,6 +794,40 @@ impl Editor {
                 row(ui, "fondu d'entrée", &mut c.fade_in, 0.0..=5.0, 0.0);
                 row(ui, "fondu de sortie", &mut c.fade_out, 0.0..=5.0, 0.0);
             });
+            ch |= ch2;
+            // Un clip déjà animé : chaque réglage modifié pose sa clé à la tête de lecture
+            {
+                let c = &mut self.project.clips[s];
+                if !c.keys.is_empty() && pose_before.is_some_and(|b| b != (c.x, c.y, c.scale, c.opacity)) && head >= c.start - 1e-3 && head <= c.end() + 1e-3 {
+                    c.set_key(head);
+                }
+            }
+            if new_grade {
+                let stem = self.path.file_stem().map(|x| x.to_string_lossy().to_string()).unwrap_or_else(|| "montage".into());
+                let dir = self.path.parent().unwrap_or(Path::new("")).to_path_buf();
+                let mut file = dir.join(format!("{stem} - {}.comp.json", self.project.clips[s].name));
+                let mut n = 2;
+                while file.exists() {
+                    file = dir.join(format!("{stem} - {} {n}.comp.json", self.project.clips[s].name));
+                    n += 1;
+                }
+                // Graphe de départ : l'image du clip, des courbes, la sortie
+                let mut g = crate::nodes::Graph::new_compositor();
+                g.nodes.retain(|x| x.op == "image" || x.op == "comp_out");
+                g.links.clear();
+                let (img, out) = (g.nodes[0].id, g.nodes[1].id);
+                let cv = g.add("curves", [240.0, 0.0]);
+                g.connect(img, 0, cv, 0);
+                g.connect(cv, 0, out, 0);
+                if g.save(&file).is_ok() {
+                    self.project.clips[s].grade = file.file_name().map(|x| x.to_string_lossy().to_string()).unwrap_or_default();
+                    self.open_request = Some(file);
+                    ch = true;
+                }
+            }
+            if open_grade {
+                self.open_request = Some(resolve(&self.path, &self.project.clips[s].grade));
+            }
             if ch {
                 self.changed();
             }
@@ -761,7 +1009,7 @@ mod tests {
     #[test]
     fn coupe_et_durees() {
         let mut p = Project::default();
-        let c = Clip { name: "a".into(), file: "a.mp4".into(), kind: "video".into(), track: 1, start: 2.0, src_in: 1.0, src_out: 9.0, media: 10.0, has_audio: true, speed: 2.0, opacity: 1.0, volume: 1.0, fade_in: 0.5, fade_out: 0.5, brightness: 0.0, contrast: 1.0, saturation: 1.0, x: 0.0, y: 0.0, scale: 1.0 };
+        let c = Clip { name: "a".into(), file: "a.mp4".into(), kind: "video".into(), track: 1, start: 2.0, src_in: 1.0, src_out: 9.0, media: 10.0, has_audio: true, speed: 2.0, opacity: 1.0, volume: 1.0, fade_in: 0.5, fade_out: 0.5, brightness: 0.0, contrast: 1.0, saturation: 1.0, x: 0.0, y: 0.0, scale: 1.0, grade: String::new(), keys: vec![] };
         p.clips.push(c);
         // 8 s de source à vitesse 2 : 4 s sur la timeline
         assert_eq!(p.clips[0].len(), 4.0);
@@ -778,6 +1026,19 @@ mod tests {
         assert!(audio && (total - 3.5).abs() < 1e-3);
         assert!(args.windows(2).any(|w| w[0] == "-ss" && w[1] == "2.000"), "{args:?}");
         assert!(filter.contains("overlay") && filter.ends_with("[vout]"));
+        // Clés : à mi-chemin entre deux clés, la pose est entre les deux ; l'expression ffmpeg suit les mêmes points
+        let c = &mut p.clips[0];
+        c.set_key(2.0);
+        c.x = 100.0;
+        c.opacity = 0.0;
+        c.set_key(3.0);
+        let mid = c.pose_at(2.5).unwrap();
+        assert!((mid.x - 50.0).abs() < 1e-3 && (mid.opacity - 0.5).abs() < 1e-3);
+        c.x = 80.0;
+        c.set_key(3.0);
+        assert!(c.keys.len() == 2 && c.keys[1].x == 80.0);
+        assert_eq!(expr(&[(0.0, 1.0)], "t"), "1.0000");
+        assert_eq!(expr(&[(1.0, 0.0), (3.0, 10.0)], "t"), "if(lt(t,1.0000),0.0000,if(lt(t,3.0000),0.0000+(10.0000)*(t-(1.0000))/2.0000,10.0000))");
     }
 
     #[test]
@@ -800,11 +1061,30 @@ mod tests {
         a.src_out = 2.0;
         let mut b = import(&file, &dir.join("b.mp4"), 1, 2.0).unwrap();
         b.fade_out = 0.5;
-        b.saturation = 0.3;
+        // Le premier clip glisse, rétrécit et s'efface ; le second passe par un étalonnage en nodes qui inverse les couleurs
+        a.set_key(0.0);
+        (a.x, a.scale, a.opacity) = (60.0, 0.5, 0.2);
+        a.set_key(2.0);
+        let mut g = crate::nodes::Graph::new_compositor();
+        g.nodes.retain(|x| x.op == "image" || x.op == "comp_out");
+        g.links.clear();
+        let (img, out) = (g.nodes[0].id, g.nodes[1].id);
+        let inv = g.add("invert", [100.0, 0.0]);
+        g.connect(img, 0, inv, 0);
+        g.connect(inv, 0, out, 0);
+        g.save(&dir.join("inverse.comp.json")).unwrap();
+        b.grade = "inverse.comp.json".into();
         p.clips = vec![a, b];
         p.write(&file).unwrap();
-        // Aperçu au milieu du second clip
+        // Aperçu au milieu du second clip : sans la table, puis avec (les barres claires deviennent sombres)
+        let _ = std::fs::remove_file(lut_file(&dir.join("inverse.comp.json")));
+        let plain = frame(&p, &file, 3.0, 160).unwrap();
+        assert!(bake_luts(&p, &file, ""));
         let img = frame(&p, &file, 3.0, 160).unwrap();
+        assert!(plain.get_pixel(10, 10).0[0] > 150 && img.get_pixel(10, 10).0[0] < 100, "{:?} {:?}", plain.get_pixel(10, 10), img.get_pixel(10, 10));
+        // Au milieu de l'animation du premier clip, l'image est plus petite que le cadre : un coin reste noir
+        let anim = frame(&p, &file, 1.0, 160).unwrap();
+        assert!(anim.get_pixel(2, 2).0[0] < 20 && anim.pixels().any(|px| px.0[0] > 60));
         assert_eq!((img.width(), img.height()), (160, 120));
         assert!(img.pixels().any(|px| px.0[0] > 60));
         let out = dir.join("essai.mp4");

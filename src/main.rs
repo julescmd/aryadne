@@ -667,7 +667,7 @@ impl App {
                     Content::NeedFfmpeg(None)
                 } else {
                     match vault::safe(&self.root(), &rel) {
-                        Ok(p) => Content::Montage(Box::new(montage::Editor::open(p))),
+                        Ok(p) => Content::Montage(Box::new(montage::Editor::open(p, &self.root()))),
                         Err(e) => Content::Unreadable(e),
                     }
                 }
@@ -1523,6 +1523,9 @@ impl App {
                 }
                 Content::Montage(m) => {
                     egui::Frame::new().inner_margin(egui::Margin::symmetric(8, 6)).show(ui, |ui| m.show(ui));
+                    if let Some(path) = m.open_request.take() {
+                        open_material = Some(path);
+                    }
                 }
                 Content::NeedFfmpeg(job) => {
                     let mut reopen = false;
