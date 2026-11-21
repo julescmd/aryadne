@@ -95,6 +95,8 @@ const FILTERS: [(&str, &str); 9] = [("notes", "#"), ("images", "▣"), ("3d", "�
 impl App {
     pub(super) fn explorer(&mut self, ui: &mut egui::Ui) {
         let p = theme::pal();
+        self.explorer_prev = std::mem::take(&mut self.explorer_order);
+        self.multi.retain(|m| self.entries.iter().any(|e| &e.rel == m));
         let root = self.root();
         if self.files.loaded_for != root {
             self.files = FilesState::load(&root);
@@ -103,6 +105,7 @@ impl App {
             }
         }
         crate::dock::show(ui, "explorer", &crate::i18n::t("fichiers"), crate::dock::Side::Left, 260.0, 180.0, egui::Frame::new().fill(p.panel).stroke(egui::Stroke::new(1.0, p.line)).inner_margin(egui::Margin::symmetric(0, 8)), |ui| {
+                self.explorer_rect = Some(ui.max_rect().expand(8.0));
                 // En-tête : titre, « + » (créer / importer) et « ⋯ » (affichage)
                 ui.horizontal(|ui| {
                     ui.add_space(12.0);
@@ -357,6 +360,35 @@ impl App {
         }
     }
 
+    /// Ctrl + clic ajoute ou retire un élément de la sélection ; Maj + clic prend tout ce qui se trouve
+    /// entre l'élément courant et celui-ci. Renvoie vrai si le clic a servi à ça.
+    fn multi_click(&mut self, ui: &egui::Ui, rel: &str) -> bool {
+        let (ctrl, shift) = ui.input(|i| (i.modifiers.command, i.modifiers.shift));
+        if !ctrl && !shift {
+            return false;
+        }
+        if self.multi.is_empty() {
+            self.multi.extend(self.selected.iter().cloned());
+        }
+        if shift {
+            let order = &self.explorer_prev;
+            let anchor = self.selected.as_ref().and_then(|s| order.iter().position(|o| o == s));
+            if let (Some(a), Some(b)) = (anchor, order.iter().position(|o| o == rel)) {
+                for r in &order[a.min(b)..=a.max(b)] {
+                    if !self.multi.contains(r) {
+                        self.multi.push(r.clone());
+                    }
+                }
+            }
+        } else if let Some(i) = self.multi.iter().position(|m| m == rel) {
+            self.multi.remove(i);
+        } else {
+            self.multi.push(rel.to_string());
+            self.selected = Some(rel.to_string());
+        }
+        true
+    }
+
     fn tile(&mut self, ui: &mut egui::Ui, e: &Entry, t: f32, with_path: bool) {
         let p = theme::pal();
         let (rect, resp) = ui.allocate_exact_size(egui::vec2(t, t + 30.0), egui::Sense::click_and_drag());
@@ -364,8 +396,9 @@ impl App {
             return;
         }
         let painter = ui.painter().clone();
+        self.explorer_order.push(e.rel.clone());
         let active = self.current().is_some_and(|d| d.rel == e.rel);
-        let selected = self.selected.as_deref() == Some(&e.rel);
+        let selected = self.selected.as_deref() == Some(&e.rel) || self.multi.contains(&e.rel);
         let drop_target = e.is_dir && resp.dnd_hover_payload::<String>().is_some_and(|f| *f != e.rel);
         let (icon, col, _) = if e.is_dir { ("▰", p.muted, "") } else { kind(&e.rel) };
         let thumb = egui::Rect::from_min_size(rect.min, egui::vec2(t, t));
@@ -415,7 +448,10 @@ impl App {
                 }
             }
         }
-        if resp.clicked() {
+        if resp.clicked() && self.multi_click(ui, &e.rel) {
+            // Ctrl ou Maj : la sélection a changé, on n'ouvre rien
+        } else if resp.clicked() {
+            self.multi.clear();
             self.selected = Some(e.rel.clone());
             if e.is_dir {
                 self.files.dir = e.rel.clone();
@@ -485,7 +521,8 @@ impl App {
         let dirty = self.docs.iter().any(|d| d.rel == e.rel && d.dirty_since.is_some());
         let h = if with_path { 34.0 } else { 24.0 };
         let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), h), egui::Sense::click_and_drag());
-        let selected = self.selected.as_deref() == Some(&e.rel);
+        self.explorer_order.push(e.rel.clone());
+        let selected = self.selected.as_deref() == Some(&e.rel) || self.multi.contains(&e.rel);
         let painter = ui.painter().clone();
         let drop_target = e.is_dir && resp.dnd_hover_payload::<String>().is_some_and(|f| *f != e.rel);
         if drop_target {
@@ -571,7 +608,10 @@ impl App {
                 }
             }
         }
-        if resp.clicked() {
+        if resp.clicked() && self.multi_click(ui, &e.rel) {
+            // Ctrl ou Maj : la sélection a changé, on n'ouvre rien
+        } else if resp.clicked() {
+            self.multi.clear();
             self.selected = Some(e.rel.clone());
             if e.is_dir {
                 if !self.files.expanded.remove(&e.rel) {
@@ -678,7 +718,9 @@ impl App {
                         self.links_dirty = true;
                     }
                 } else {
-                    self.actions.push(Action::Trash(e.rel.clone()));
+                    // Sur une sélection multiple, la suppression vaut pour toute la sélection
+                    let many = self.multi.len() > 1 && self.multi.contains(&e.rel);
+                    self.actions.push(Action::Trash(if many { self.multi.join("\n") } else { e.rel.clone() }));
                 }
             }
     }

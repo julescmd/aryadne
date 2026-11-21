@@ -1110,5 +1110,16 @@
  "fichier(s) corrigé(s) pour suivre les nouveaux noms": "file(s) updated to follow the new names",
  "fichier(s) avec une ancienne extension : palette de commandes → « passer aux nouvelles extensions »": "file(s) with an old extension: command palette → \"switch to the new extensions\"",
  "board": "board",
- "Planche d'images, de notes et de liens": "Board of images, notes and links"
+ "Planche d'images, de notes et de liens": "Board of images, notes and links",
+ "rien à annuler dans les fichiers": "nothing to undo in the files",
+ "annulé": "undone",
+ "Mettre": "Move",
+ "éléments à la corbeille du coffre (.app/trash) ? Ctrl+Z dans l'explorateur les remet.": "items to the vault trash (.app/trash)? Ctrl+Z in the explorer brings them back.",
+ "F2 renommer · Suppr supprimer · Ctrl+clic et Maj+clic : plusieurs · Ctrl+A tout · Ctrl+Z annuler · glisser : déplacer": "F2 rename · Del delete · Ctrl+click and Shift+click: several · Ctrl+A all · Ctrl+Z undo · drag: move",
+ "G R S : déplacer, tourner, taille (X Y Z : axe) · Maj+A ajouter · X supprimer · Maj+D dupliquer · H cacher · I clé · Espace lire · Ctrl+Z annuler": "G R S: move, rotate, scale (X Y Z: axis) · Shift+A add · X delete · Shift+D duplicate · H hide · I key · Space play · Ctrl+Z undo",
+ "glisser : tourner · Maj+glisser : déplacer · molette : zoom · 1 3 7 : vues · 5 : perspective · F2 renommer le fichier": "drag: orbit · Shift+drag: pan · wheel: zoom · 1 3 7: views · 5: perspective · F2 rename file",
+ "Espace lire · S couper · Suppr supprimer · glisser les bords : raccourcir · Ctrl+molette : zoom · Ctrl+Z annuler": "Space play · S split · Del delete · drag edges: trim · Ctrl+wheel: zoom · Ctrl+Z undo",
+ "clic droit : ajouter · Q aligner · Suppr supprimer · F2 renommer la node · molette : zoom · Ctrl+Z annuler": "right click: add · Q align · Del delete · F2 rename node · wheel: zoom · Ctrl+Z undo",
+ "Ctrl+F chercher · Ctrl+Z annuler · F2 renommer le fichier · ^P ouvrir · ^⇧P commandes": "Ctrl+F find · Ctrl+Z undo · F2 rename file · ^P open · ^⇧P commands",
+ "F2 renommer le fichier · ^P ouvrir · ^⇧P commandes": "F2 rename file · ^P open · ^⇧P commands"
 }

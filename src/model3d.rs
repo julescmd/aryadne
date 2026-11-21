@@ -1587,6 +1587,10 @@ pub struct Viewer {
     add_popup: Option<Pos2>,
     /// Le clic qui vient de valider une transformation : à ignorer pour la sélection, jusqu'au relâchement
     modal_click: bool,
+    /// Annuler dans la scène : dernier état enregistré, états précédents, états annulés
+    scene_saved: Option<crate::scene::Scene>,
+    scene_hist: Vec<crate::scene::Scene>,
+    scene_redo: Vec<crate::scene::Scene>,
     scene_ver: u64,
     scene_dirty: bool,
     /// Cadre fixe de la scène : déplacer un objet ne doit pas recentrer ni redimensionner tout le reste
@@ -1657,6 +1661,9 @@ impl Viewer {
             modal: None,
             add_popup: None,
             modal_click: false,
+            scene_saved: None,
+            scene_hist: vec![],
+            scene_redo: vec![],
             scene_ver: 0,
             scene_dirty: false,
             scene_frame: None,
@@ -2012,6 +2019,8 @@ impl Viewer {
                 self.anim_frame = f;
                 if scene.apply_frame(f) {
                     self.scene_dirty = true;
+                    // Changer d'image n'est pas une action à annuler
+                    self.scene_saved = Some(scene.clone());
                 }
             }
         }
@@ -2352,6 +2361,30 @@ impl Viewer {
         if changed {
             self.scene_dirty = true;
             let _ = scene.write(&path);
+        }
+        // Annuler (Ctrl+Z) et rétablir (Ctrl+Maj+Z) : un pas par action terminée, une fois la souris relâchée
+        let (undo, redo, down) = ui.input(|i| (i.modifiers.command && !i.modifiers.shift && i.key_pressed(Key::Z), i.modifiers.command && (i.modifiers.shift && i.key_pressed(Key::Z) || i.key_pressed(Key::Y)), i.pointer.any_down()));
+        if self.scene_saved.is_none() {
+            self.scene_saved = Some(scene.clone());
+        }
+        if !down && self.modal.is_none() && self.scene_saved.as_ref() != Some(scene) {
+            if let Some(prev) = self.scene_saved.replace(scene.clone()) {
+                self.scene_hist.push(prev);
+                if self.scene_hist.len() > 200 {
+                    self.scene_hist.remove(0);
+                }
+                self.scene_redo.clear();
+            }
+        }
+        if !ui.ctx().egui_wants_keyboard_input() && self.edit.is_none() && self.modal.is_none() && (undo || redo) {
+            let (from, to) = if redo { (&mut self.scene_redo, &mut self.scene_hist) } else { (&mut self.scene_hist, &mut self.scene_redo) };
+            if let Some(prev) = from.pop() {
+                to.push(std::mem::replace(scene, prev));
+                self.scene_saved = Some(scene.clone());
+                self.scene_sel = self.scene_sel.filter(|&k| k < scene.objects.len());
+                self.scene_dirty = true;
+                let _ = scene.write(&path);
+            }
         }
         // Reconstruction en arrière-plan, une à la fois : l'ancienne image reste affichée entre-temps
         if self.scene_dirty && self.scene_rx.is_none() && !matches!(self.state, State::Loading(_)) {

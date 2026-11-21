@@ -110,8 +110,8 @@ Le fil entre tes idées. Notes, code, références et moodboards dans un dossier
 
 **Nodes : matériaux et compositing**
 - Éditeur de nodes (glisser une sortie sur une entrée, Maj+A pour ajouter, zoom, déplacement), aperçu en direct à gauche, enregistré en JSON dans le coffre.
-- Matériaux (`.mat.json`) : bruit, Voronoï, damier, dégradés, rayures, Fresnel, géométrie (normale, position, pente), rampes, mélanges (multiplier, écran, incrustation…), teinte/saturation, niveaux, maths… vers couleur, rugosité, métal, émission. Appliqués aux modèles dans la visionneuse 3D (menu affichage), mis à jour en direct.
-- Compositing (`.comp.json`) : images du coffre, flou, netteté, halo, vignette, grain, aberration chromatique, pixeliser, postériser, contours, niveaux, couleurs… Export PNG en pleine résolution.
+- Matériaux (`.arymat`) : bruit, Voronoï, damier, dégradés, rayures, Fresnel, géométrie (normale, position, pente), rampes, mélanges (multiplier, écran, incrustation…), teinte/saturation, niveaux, maths… vers couleur, rugosité, métal, émission. Appliqués aux modèles dans la visionneuse 3D (menu affichage), mis à jour en direct.
+- Compositing (`.arycomp`) : images du coffre, flou, netteté, halo, vignette, grain, aberration chromatique, pixeliser, postériser, contours, niveaux, couleurs… Export PNG en pleine résolution.
 - 14 nodes de plus (briques, bois, marbre, hexagones, points, vagues, bruit blanc, courbe, balance des blancs, exposition, bornes, flou directionnel et radial, objectif) et des **cadres** pour grouper les nodes (Ctrl+J).
 - Préréglages de matériaux (bois, pierre, métal rouillé, toon, céramique, or) et exemples de shaders.
 - Node **shader perso** : un petit langage d'expressions (`r = mix(ar, br, fbm(x*6, y*6, 0))`), avec variables, fonctions de bruit et conditions, exécuté pixel par pixel.
@@ -164,7 +164,7 @@ Le fil entre tes idées. Notes, code, références et moodboards dans un dossier
 - Palette de 5 couleurs extraite, clic pour copier le hex.
 
 **Boards** (`Ctrl+4`)
-- Canevas infini façon PureRef, enregistré dans `boards/*.board.json`. Les images gardent leurs proportions.
+- Canevas infini façon PureRef, enregistré dans `boards/*.aryboard`. Les images gardent leurs proportions.
 - Outils : sélection (V), dessin à main levée (B, Maj = ligne droite), gomme (E), texte (T). Couleur et épaisseur du trait.
 - Sélection multiple au lasso ou Maj+clic, 4 poignées de redimensionnement (Maj = proportions libres), annuler / rétablir (`Ctrl+Z` / `Ctrl+Y`), `Ctrl+A`, `Ctrl+D`, `Suppr`.
 - Coller une image du presse-papier (`Ctrl+V`, enregistrée dans `refs/`).

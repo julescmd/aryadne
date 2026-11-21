@@ -168,6 +168,14 @@ enum Action {
     Reload(String),
 }
 
+/// Une opération sur les fichiers qu'on peut annuler depuis l'explorateur.
+enum FileOp {
+    /// (chemin d'origine, emplacement dans la corbeille)
+    Trashed(String, PathBuf),
+    /// (ancien chemin, nouveau chemin)
+    Renamed(String, String),
+}
+
 enum Dialog {
     NewFile { dir: String },
     NewDir { dir: String },
@@ -273,6 +281,17 @@ struct App {
     landing_name: String,
     /// Fenêtre « nouveau fichier » : genre choisi et nom tapé
     new_file: Option<(usize, String)>,
+    /// Explorateur : éléments choisis en plus de `selected` (Ctrl + clic, Maj + clic)
+    multi: Vec<String>,
+    /// L'explorateur a reçu le dernier clic : F2, Suppr et Ctrl+Z s'adressent à lui
+    explorer_focus: bool,
+    explorer_rect: Option<egui::Rect>,
+    /// Éléments affichés dans l'explorateur, dans l'ordre (image en cours, image précédente)
+    explorer_order: Vec<String>,
+    explorer_prev: Vec<String>,
+    /// Opérations sur les fichiers à annuler, par lots
+    file_undo: Vec<Vec<FileOp>>,
+    undoing: bool,
 }
 
 impl App {
@@ -1055,15 +1074,77 @@ impl App {
             }
         }
         self.selected = Some(to.to_string());
+        if !self.undoing {
+            self.file_undo.push(vec![FileOp::Renamed(from.to_string(), to.to_string())]);
+        }
         self.refresh();
     }
 
-    fn do_trash(&mut self, rel: &str) {
-        let r = vault::trash(&self.root(), rel);
-        if self.report(r).is_none() {
+    /// Annule la dernière opération de l'explorateur : suppression, renommage ou déplacement.
+    fn undo_file_op(&mut self) {
+        let Some(batch) = self.file_undo.pop() else {
+            self.toast = Some((crate::i18n::t("rien à annuler dans les fichiers"), Instant::now()));
+            return;
+        };
+        let root = self.root();
+        let (mut done, mut last) = (0, None);
+        for op in batch.into_iter().rev() {
+            match op {
+                FileOp::Trashed(rel, bin) => {
+                    if self.report(vault::restore(&root, &bin, &rel)).is_some() {
+                        done += 1;
+                        last = Some(rel);
+                    }
+                }
+                FileOp::Renamed(from, to) => {
+                    self.undoing = true;
+                    self.do_rename(&to, &from);
+                    self.undoing = false;
+                    done += 1;
+                    last = Some(from);
+                }
+            }
+        }
+        self.refresh();
+        if let Some(rel) = last {
+            self.selected = Some(rel.clone());
+            self.files.reveal(&rel);
+            self.toast = Some((format!("{} : {done}", crate::i18n::t("annulé")), Instant::now()));
+        }
+    }
+
+    /// Ce que l'explorateur considère comme choisi : la sélection multiple, sinon l'élément courant.
+    fn explorer_selection(&self) -> Vec<String> {
+        if self.multi.len() > 1 { self.multi.clone() } else { self.selected.iter().cloned().collect() }
+    }
+
+    /// Met à la corbeille un élément, ou plusieurs séparés par des retours à la ligne. Annulable.
+    fn do_trash(&mut self, rels: &str) {
+        let mut batch = vec![];
+        let mut removed: Vec<String> = vec![];
+        // Un dossier choisi emporte déjà ce qu'il contient
+        let all: Vec<&str> = rels.lines().filter(|r| !r.is_empty()).collect();
+        for rel in all.iter().filter(|r| !all.iter().any(|d| *d != **r && r.starts_with(&format!("{d}/")))) {
+            match vault::trash_to(&self.root(), rel) {
+                Ok(bin) => {
+                    removed.push(rel.to_string());
+                    if let Some(b) = bin {
+                        batch.push(FileOp::Trashed(rel.to_string(), b));
+                    }
+                }
+                Err(e) => {
+                    self.report::<()>(Err(e));
+                }
+            }
+        }
+        if !batch.is_empty() {
+            self.file_undo.push(batch);
+        }
+        if removed.is_empty() {
             return;
         }
-        let gone = |d: &Doc| d.rel == rel || d.rel.starts_with(&format!("{rel}/"));
+        self.multi.clear();
+        let gone = |d: &Doc| removed.iter().any(|rel| &d.rel == rel || d.rel.starts_with(&format!("{rel}/")));
         self.docs.retain(|d| !gone(d));
         self.active = if self.docs.is_empty() { None } else { Some(self.active.unwrap_or(0).min(self.docs.len() - 1)) };
         self.selected = None;
@@ -1072,11 +1153,59 @@ impl App {
 
     // ---------- clavier ----------
 
+    /// Les raccourcis disponibles à l'endroit où l'on travaille, pour la barre du bas.
+    fn key_hints(&self) -> String {
+        let t = crate::i18n::t;
+        if self.explorer_focus {
+            return t("F2 renommer · Suppr supprimer · Ctrl+clic et Maj+clic : plusieurs · Ctrl+A tout · Ctrl+Z annuler · glisser : déplacer");
+        }
+        if self.view() != View::Files {
+            return t("^P ouvrir · ^⇧P commandes");
+        }
+        match self.current().map(|d| &d.content) {
+            Some(Content::Model(v)) if v.is_scene() => t("G R S : déplacer, tourner, taille (X Y Z : axe) · Maj+A ajouter · X supprimer · Maj+D dupliquer · H cacher · I clé · Espace lire · Ctrl+Z annuler"),
+            Some(Content::Model(_)) => t("glisser : tourner · Maj+glisser : déplacer · molette : zoom · 1 3 7 : vues · 5 : perspective · F2 renommer le fichier"),
+            Some(Content::Montage(_)) => t("Espace lire · S couper · Suppr supprimer · glisser les bords : raccourcir · Ctrl+molette : zoom · Ctrl+Z annuler"),
+            Some(Content::Nodes(_)) => t("clic droit : ajouter · Q aligner · Suppr supprimer · F2 renommer la node · molette : zoom · Ctrl+Z annuler"),
+            Some(Content::Text(_)) => t("Ctrl+F chercher · Ctrl+Z annuler · F2 renommer le fichier · ^P ouvrir · ^⇧P commandes"),
+            _ => t("F2 renommer le fichier · ^P ouvrir · ^⇧P commandes"),
+        }
+    }
+
     fn shortcuts(&mut self, ctx: &egui::Context) {
         if self.vault.is_none() || self.dialog.is_some() {
             return;
         }
         let pressed = |m: Modifiers, k: Key| ctx.input_mut(|i| i.consume_shortcut(&KeyboardShortcut::new(m, k)));
+        // Qui a reçu le dernier clic : l'explorateur ou le reste ?
+        if let (true, Some(at)) = ctx.input(|i| (i.pointer.any_pressed(), i.pointer.interact_pos())) {
+            self.explorer_focus = self.explorer_rect.is_some_and(|r| r.contains(at));
+        }
+        // F2 renomme partout : l'élément choisi dans l'explorateur, sinon le fichier ouvert
+        // (l'éditeur de nodes garde F2 pour renommer une node)
+        let typing = ctx.egui_wants_keyboard_input();
+        let in_nodes = !self.explorer_focus && matches!(self.current().map(|d| &d.content), Some(Content::Nodes(_)));
+        if !in_nodes && pressed(Modifiers::NONE, Key::F2) {
+            let target = if self.explorer_focus { self.selected.clone() } else { self.current().map(|d| d.rel.clone()).or(self.selected.clone()) };
+            if let Some(rel) = target {
+                self.actions.push(Action::Rename(rel));
+            }
+        }
+        if self.explorer_focus && !typing {
+            let sel = self.explorer_selection();
+            if !sel.is_empty() && (pressed(Modifiers::NONE, Key::Delete) || pressed(Modifiers::NONE, Key::Backspace)) {
+                self.actions.push(Action::Trash(sel.join("\n")));
+            }
+            if pressed(Modifiers::COMMAND, Key::Z) {
+                self.undo_file_op();
+            }
+            if pressed(Modifiers::COMMAND, Key::A) {
+                self.multi = self.explorer_prev.clone();
+            }
+            if pressed(Modifiers::NONE, Key::Escape) {
+                self.multi.clear();
+            }
+        }
         if pressed(Modifiers::COMMAND | Modifiers::SHIFT, Key::P) {
             self.palette = Some((String::new(), 0));
         }
@@ -1327,7 +1456,8 @@ impl App {
                         if ui.add(egui::Button::new(RichText::new(format!("v{}", updater::CURRENT)).color(p.muted).size(11.0)).frame(false)).on_hover_text(crate::i18n::t("Mises à jour")).clicked() {
                             self.dialog = Some(Dialog::Update);
                         }
-                        ui.label(RichText::new(crate::i18n::t("^P ouvrir · ^⇧P commandes")).color(p.muted).size(11.0));
+                        // Les touches utiles là où on se trouve, comme la barre d'état de Blender
+                        ui.label(RichText::new(self.key_hints()).color(p.muted).size(11.0));
                         self.cloud_widget(ui);
                         if self.backup_rx.is_some() {
                             ui.add(egui::Spinner::new().size(10.0));
@@ -3528,7 +3658,12 @@ impl App {
                     if vault::is_external(rel) {
                         ui.label(format!("« {rel} » est dans un dossier lié : il sera retiré de son dossier d'origine et mis dans la corbeille du coffre (.app/trash)."));
                     } else {
-                        ui.label(format!("Mettre « {rel} » à la corbeille du coffre (.app/trash) ?"));
+                        let n = rel.lines().count();
+                        if n > 1 {
+                            ui.label(format!("{} {n} {}", crate::i18n::t("Mettre"), crate::i18n::t("éléments à la corbeille du coffre (.app/trash) ? Ctrl+Z dans l'explorateur les remet.")));
+                        } else {
+                            ui.label(format!("Mettre « {rel} » à la corbeille du coffre (.app/trash) ?"));
+                        }
                     }
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {

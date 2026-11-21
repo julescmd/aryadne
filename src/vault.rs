@@ -368,15 +368,39 @@ pub fn rename(root: &str, from: &str, to: &str) -> Result<(), String> {
 
 /// « Supprimer » déplace dans .app/trash : rien n'est jamais perdu par accident.
 pub fn trash(root: &str, rel: &str) -> Result<(), String> {
+    trash_to(root, rel).map(|_| ())
+}
+
+/// Remet à sa place un élément mis à la corbeille (pour annuler une suppression).
+pub fn restore(root: &str, bin: &Path, rel: &str) -> Result<(), String> {
+    let dst = safe(root, rel)?;
+    if dst.exists() {
+        return Err(format!("« {rel} » existe déjà."));
+    }
+    if let Some(dir) = dst.parent() {
+        fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    }
+    move_path(bin, &dst)
+}
+
+/// Comme `trash`, en renvoyant où l'élément a été rangé dans la corbeille (None pour un lien simplement retiré).
+pub fn trash_to(root: &str, rel: &str) -> Result<Option<PathBuf>, String> {
     if is_link_root(rel) || rel == LINKED_FILES {
-        return unlink(root, rel);
+        return unlink(root, rel).map(|_| None);
     }
     let src = safe(root, rel)?;
     let bin = Path::new(root).join(".app/trash");
     fs::create_dir_all(&bin).map_err(|e| e.to_string())?;
     let ts = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
     let name = rel.rsplit('/').next().unwrap_or(rel);
-    move_path(&src, &bin.join(format!("{ts}_{name}")))
+    // Deux éléments du même nom supprimés dans la même seconde ne doivent pas s'écraser
+    let mut dst = bin.join(format!("{ts}_{name}"));
+    let mut n = 2;
+    while dst.exists() {
+        dst = bin.join(format!("{ts}-{n}_{name}"));
+        n += 1;
+    }
+    move_path(&src, &dst).map(|_| Some(dst))
 }
 
 /// Si `src` est déjà dans le coffre, son chemin relatif.
