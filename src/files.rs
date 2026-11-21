@@ -214,8 +214,8 @@ impl App {
                             "code" => "a.py",
                             "docs" => "a.pptx",
                             "vidéos" => "a.mp4",
-                            "boards" => "a.board.json",
-                            "nodes" => "a.mat.json",
+                            "boards" => "a.aryboard",
+                            "nodes" => "a.arymat",
                             _ => "a",
                         }).1;
                         let b = egui::Button::new(RichText::new(icon).size(12.0).color(if on { p.on_accent } else { col })).fill(if on { col } else { p.panel }).stroke(egui::Stroke::NONE).min_size(egui::vec2(24.0, 18.0));
@@ -399,7 +399,7 @@ impl App {
         }
         let border = if active || selected { egui::Stroke::new(2.0, p.accent) } else if resp.hovered() { egui::Stroke::new(1.0, p.muted) } else { egui::Stroke::new(1.0, p.line) };
         painter.rect_stroke(thumb, 0.0, border, egui::StrokeKind::Inside);
-        let name = e.name.trim_end_matches(".md").trim_end_matches(".board.json").trim_end_matches(".mat.json").trim_end_matches(".comp.json").to_string();
+        let name = crate::formats::strip(e.name.trim_end_matches(".md")).to_string();
         let font = egui::FontId::monospace(10.5);
         let g = painter.layout(name, font.clone(), p.text, t);
         let clip = egui::Rect::from_min_size(egui::pos2(rect.left(), thumb.bottom() + 3.0), egui::vec2(t, 26.0));

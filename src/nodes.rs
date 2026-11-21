@@ -13,8 +13,7 @@ use std::path::{Path, PathBuf};
 pub type V = [f32; 4];
 
 pub fn is_graph(rel: &str) -> bool {
-    let l = rel.to_lowercase();
-    l.ends_with(".mat.json") || l.ends_with(".comp.json")
+    crate::formats::has(rel, "mat") || crate::formats::has(rel, "comp")
 }
 
 // ---------- définitions des nodes ----------
@@ -3945,7 +3944,7 @@ impl Editor {
                     let q = |x: f32| (x.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
                     *px = image::Rgba([q(c[0]), q(c[1]), q(c[2]), q(c[3])]);
                 }
-                let stem = self.path.file_name().map(|n| n.to_string_lossy().trim_end_matches(".comp.json").to_string()).unwrap_or_else(|| "composite".into());
+                let stem = self.path.file_name().map(|n| n.to_string_lossy().to_string()).map(|n| crate::formats::strip(&n).to_string()).unwrap_or_else(|| "composite".into());
                 let out = self.path.with_file_name(format!("{stem}.png"));
                 self.message = Some(match buf.save(&out) {
                     Ok(()) => format!("exporté : {}", out.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()),

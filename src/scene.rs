@@ -1,4 +1,4 @@
-//! Scène 3D (`.arya3`) : une liste d'objets, chacun pointant vers un fichier de modèle avec
+//! Scène 3D (`.aryscene`) : une liste d'objets, chacun pointant vers un fichier de modèle avec
 //! sa position, sa rotation et son échelle. Le fichier est du JSON lisible ; les modèles
 //! restent à leur place sur le disque, la scène ne fait que les réunir.
 
@@ -7,7 +7,6 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-pub const EXT: &str = "arya3";
 
 fn one3() -> [f32; 3] {
     [1.0; 3]
@@ -187,7 +186,7 @@ fn end() -> i32 {
 }
 
 pub fn is_scene(path: &Path) -> bool {
-    path.extension().is_some_and(|e| e.to_string_lossy().eq_ignore_ascii_case(EXT))
+    crate::formats::has(&path.to_string_lossy(), "scene")
 }
 
 impl Scene {

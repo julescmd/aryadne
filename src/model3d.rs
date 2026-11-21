@@ -10,7 +10,7 @@ use std::io::BufRead;
 use std::path::Path;
 use std::sync::mpsc::{channel, Receiver};
 
-pub const EXT: [&str; 6] = ["obj", "fbx", "glb", "gltf", "stl", "arya3"];
+pub const EXT: [&str; 7] = ["obj", "fbx", "glb", "gltf", "stl", "aryscene", "arya3"];
 /// Nombre de triangles visé pour l'affichage interactif.
 const MAX_TRIS: usize = 150_000;
 
@@ -191,7 +191,7 @@ pub fn load(path: &Path) -> Result<Model, String> {
             Model::with_edges(m.positions, m.tris, None, Some(m.edges), false)
         }
         "glb" | "gltf" => load_gltf(path),
-        "arya3" => crate::scene::build(&crate::scene::Scene::read(path)?, path).0,
+        "arya3" | "aryscene" => crate::scene::build(&crate::scene::Scene::read(path)?, path).0,
         _ => Err("Format 3D non pris en charge.".into()),
     }
 }
@@ -2264,7 +2264,7 @@ impl Viewer {
                 // Matériau en nodes de l'objet
                 ui.horizontal(|ui| {
                     ui.label(egui::RichText::new(crate::i18n::t("matériau")).size(11.0).color(p.muted));
-                    let cur = if o.material.is_empty() { crate::i18n::t("aucun") } else { o.material.rsplit('/').next().unwrap_or(&o.material).trim_end_matches(".mat.json").to_string() };
+                    let cur = if o.material.is_empty() { crate::i18n::t("aucun") } else { crate::formats::strip(o.material.rsplit('/').next().unwrap_or(&o.material)).to_string() };
                     egui::ComboBox::from_id_salt("scene-object-material").selected_text(egui::RichText::new(cur).size(11.0)).width(110.0).show_ui(ui, |ui| {
                         if ui.selectable_label(o.material.is_empty(), crate::i18n::t("aucun")).clicked() {
                             o.material.clear();
@@ -2282,10 +2282,10 @@ impl Viewer {
                         if ui.small_button("＋").on_hover_text(crate::i18n::t("Créer un matériau en nodes pour cet objet")).clicked() && !self.root.is_empty() {
                             let dir = std::path::Path::new(&self.root).join("nodes");
                             let _ = std::fs::create_dir_all(&dir);
-                            let mut file = dir.join(format!("{}.mat.json", o.name));
+                            let mut file = dir.join(format!("{}.{}", o.name, crate::formats::ext("mat")));
                             let mut n = 2;
                             while file.exists() {
-                                file = dir.join(format!("{} {n}.mat.json", o.name));
+                                file = dir.join(format!("{} {n}.{}", o.name, crate::formats::ext("mat")));
                                 n += 1;
                             }
                             if crate::nodes::Graph::new_material().save(&file).is_ok() {
@@ -2519,10 +2519,10 @@ impl Viewer {
                     let _ = std::fs::create_dir_all(&dir);
                     let stem = self.path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "Matériau".into());
                     let base = format!("{stem} - {}", e.data.slots[k].name);
-                    let mut path = dir.join(format!("{base}.mat.json"));
+                    let mut path = dir.join(format!("{base}.{}", crate::formats::ext("mat")));
                     let mut n = 2;
                     while path.exists() {
-                        path = dir.join(format!("{base} {n}.mat.json"));
+                        path = dir.join(format!("{base} {n}.{}", crate::formats::ext("mat")));
                         n += 1;
                     }
                     if crate::nodes::Graph::new_material().save(&path).is_ok() {
@@ -2630,15 +2630,15 @@ impl Viewer {
                     let dir = std::path::Path::new(&self.root).join("nodes");
                     let _ = std::fs::create_dir_all(&dir);
                     let stem = self.path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "Matériau".into());
-                    let mut path = dir.join(format!("{stem}.mat.json"));
+                    let mut path = dir.join(format!("{stem}.{}", crate::formats::ext("mat")));
                     let mut n = 2;
                     while path.exists() {
-                        path = dir.join(format!("{stem} {n}.mat.json"));
+                        path = dir.join(format!("{stem} {n}.{}", crate::formats::ext("mat")));
                         n += 1;
                     }
                     match crate::nodes::Graph::new_material().save(&path) {
                         Ok(()) => {
-                            let name = path.file_name().map(|s| s.to_string_lossy().trim_end_matches(".mat.json").to_string()).unwrap_or_default();
+                            let name = path.file_name().map(|s| s.to_string_lossy().to_string()).map(|n| crate::formats::strip(&n).to_string()).unwrap_or_default();
                             self.mat_files.push((name, path.clone()));
                             self.mat_active = Some((path.clone(), None));
                             self.open_request = Some(path);

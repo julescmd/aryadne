@@ -1103,5 +1103,12 @@
  "dossier": "folder",
  "Pour ranger": "To keep things tidy",
  "nom": "name",
- "ce nom est déjà pris dans ce dossier": "this name is already taken in this folder"
+ "ce nom est déjà pris dans ce dossier": "this name is already taken in this folder",
+ "coffre : passer aux nouvelles extensions": "vault: switch to the new extensions",
+ "toutes les extensions sont déjà à jour": "all extensions are already up to date",
+ "fichier(s) renommé(s)": "file(s) renamed",
+ "fichier(s) corrigé(s) pour suivre les nouveaux noms": "file(s) updated to follow the new names",
+ "fichier(s) avec une ancienne extension : palette de commandes → « passer aux nouvelles extensions »": "file(s) with an old extension: command palette → \"switch to the new extensions\"",
+ "board": "board",
+ "Planche d'images, de notes et de liens": "Board of images, notes and links"
 }

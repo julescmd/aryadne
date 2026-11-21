@@ -1,4 +1,4 @@
-//! Montage vidéo (`.aryav`) : des pistes, des clips qu'on déplace, raccourcit et coupe,
+//! Montage vidéo (`.aryseq`) : des pistes, des clips qu'on déplace, raccourcit et coupe,
 //! un aperçu à la tête de lecture et un export. Le fichier est du JSON lisible ; les médias
 //! restent à leur place. Tout le calcul d'image passe par ffmpeg, avec un seul graphe de
 //! filtres pour l'aperçu, la lecture et l'export : ce qu'on voit est ce qu'on exporte.
@@ -11,10 +11,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Stdio};
 use std::sync::mpsc::{channel, sync_channel, Receiver};
 
-pub const EXT: &str = "aryav";
-
 pub fn is_project(rel: &str) -> bool {
-    rel.to_lowercase().ends_with(&format!(".{EXT}"))
+    crate::formats::has(rel, "seq")
 }
 
 fn one() -> f32 {
@@ -1042,10 +1040,10 @@ impl Editor {
             if new_grade {
                 let stem = self.path.file_stem().map(|x| x.to_string_lossy().to_string()).unwrap_or_else(|| "montage".into());
                 let dir = self.path.parent().unwrap_or(Path::new("")).to_path_buf();
-                let mut file = dir.join(format!("{stem} - {}.comp.json", self.project.clips[s].name));
+                let mut file = dir.join(format!("{stem} - {}.{}", self.project.clips[s].name, crate::formats::ext("comp")));
                 let mut n = 2;
                 while file.exists() {
-                    file = dir.join(format!("{stem} - {} {n}.comp.json", self.project.clips[s].name));
+                    file = dir.join(format!("{stem} - {} {n}.{}", self.project.clips[s].name, crate::formats::ext("comp")));
                     n += 1;
                 }
                 // Graphe de départ : l'image du clip, des courbes, la sortie

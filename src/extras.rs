@@ -54,6 +54,7 @@ pub enum Cmd {
     NewScene,
     NewMontage,
     NewFile,
+    UpgradeExtensions,
     NewCompositor,
     Stats,
     RunFile,
@@ -76,6 +77,7 @@ impl App {
             ("nouvelle note depuis un modèle", "", Cmd::FromTemplate),
             ("nouveau board", "", Cmd::NewBoard),
             ("nouveau fichier… (choisir le genre)", "", Cmd::NewFile),
+            ("coffre : passer aux nouvelles extensions", "", Cmd::UpgradeExtensions),
             ("nouvelle scène 3D", "", Cmd::NewScene),
             ("nouveau montage vidéo", "", Cmd::NewMontage),
             ("nouveau matériau (nodes)", "", Cmd::NewMaterial),
@@ -193,11 +195,47 @@ impl App {
             Cmd::Timer(min) => self.timer = Some(Timer { start: Instant::now(), minutes: min, label: if min <= 10 { "pause" } else { "focus" } }),
             Cmd::StopTimer => self.timer = None,
             Cmd::NewFile => self.new_file = Some((0, String::new())),
+            Cmd::UpgradeExtensions => {
+                // Renomme les fichiers aux anciennes extensions, puis corrige les fichiers qui les citent
+                self.flush_all();
+                let root = self.root();
+                let open: Vec<String> = self.docs.iter().map(|d| d.rel.clone()).collect();
+                let active = self.active.and_then(|i| self.docs.get(i)).map(|d| d.rel.clone());
+                let mut renamed: Vec<(String, String)> = vec![];
+                for e in self.entries.iter().filter(|e| !e.is_dir) {
+                    let Some(new) = crate::formats::upgrade(&e.rel) else { continue };
+                    if self.entries.iter().any(|x| x.rel == new) {
+                        continue;
+                    }
+                    if let (Ok(a), Ok(b)) = (vault::safe(&root, &e.rel), vault::safe(&root, &new)) {
+                        if std::fs::rename(a, b).is_ok() {
+                            renamed.push((e.rel.clone(), new));
+                        }
+                    }
+                }
+                if renamed.is_empty() {
+                    self.toast = Some((crate::i18n::t("toutes les extensions sont déjà à jour"), Instant::now()));
+                } else {
+                    let (fixed, _) = crate::formats::relink(std::path::Path::new(&root), &renamed);
+                    self.docs.clear();
+                    self.active = None;
+                    self.split = None;
+                    self.refresh();
+                    let map = |r: &String| renamed.iter().find(|x| &x.0 == r).map(|x| x.1.clone()).unwrap_or_else(|| r.clone());
+                    for r in &open {
+                        self.open(map(r));
+                    }
+                    if let Some(a) = active {
+                        self.open(map(&a));
+                    }
+                    self.toast = Some((format!("{} {} · {fixed} {}", renamed.len(), crate::i18n::t("fichier(s) renommé(s)"), crate::i18n::t("fichier(s) corrigé(s) pour suivre les nouveaux noms")), Instant::now()));
+                }
+            }
             Cmd::NewMontage => {
-                let mut rel = "Montage.aryav".to_string();
+                let mut rel = format!("Montage.{}", crate::formats::ext("seq"));
                 let mut i = 2;
                 while self.entries.iter().any(|e| e.rel == rel) {
-                    rel = format!("Montage {i}.aryav");
+                    rel = format!("Montage {i}.{}", crate::formats::ext("seq"));
                     i += 1;
                 }
                 let r = vault::safe(&self.root(), &rel).and_then(|p| crate::montage::Project::default().write(&p));
@@ -208,10 +246,10 @@ impl App {
             }
             Cmd::NewScene => {
                 let dir = if self.entries.iter().any(|e| e.is_dir && e.rel == "3d") { "3d/" } else { "" };
-                let mut rel = format!("{dir}Scène.arya3");
+                let mut rel = format!("{dir}Scène.{}", crate::formats::ext("scene"));
                 let mut i = 2;
                 while self.entries.iter().any(|e| e.rel == rel) {
-                    rel = format!("{dir}Scène {i}.arya3");
+                    rel = format!("{dir}Scène {i}.{}", crate::formats::ext("scene"));
                     i += 1;
                 }
                 let r = vault::safe(&self.root(), &rel).and_then(|p| crate::scene::Scene::starter().write(&p));
@@ -227,7 +265,7 @@ impl App {
                     "nodes".to_string()
                 };
                 let base = if mat { "Matériau" } else { "Compositing" };
-                let ext = if mat { "mat.json" } else { "comp.json" };
+                let ext = crate::formats::ext(if mat { "mat" } else { "comp" });
                 let mut rel = format!("{dir}/{base}.{ext}");
                 let mut i = 2;
                 while self.entries.iter().any(|e| e.rel == rel) {
@@ -1295,6 +1333,15 @@ pub struct Stats {
 }
 
 fn kind_of(rel: &str) -> &'static str {
+    // Les formats d'Aryadne d'abord, anciennes extensions comprises
+    match crate::formats::of(rel).map(|f| f.id) {
+        Some("board") => return "boards",
+        Some("mat") | Some("comp") => return "nodes",
+        Some("scene") => return "3d",
+        Some("seq") => return "vidéos",
+        Some("image") => return "images",
+        _ => {}
+    }
     let e = rel.rsplit_once('.').map(|(_, e)| e.to_lowercase()).unwrap_or_default();
     match e.as_str() {
         "md" | "txt" => "notes",
@@ -1302,8 +1349,6 @@ fn kind_of(rel: &str) -> &'static str {
         "obj" | "fbx" | "glb" | "gltf" | "stl" | "blend" | "abc" | "usd" | "usdz" => "3d",
         "mp4" | "mov" | "webm" | "mkv" | "avi" => "vidéos",
         "pptx" | "docx" | "xlsx" | "odp" | "odt" | "ods" | "pdf" => "documents",
-        "json" if rel.ends_with(".board.json") => "boards",
-        "json" if rel.ends_with(".mat.json") || rel.ends_with(".comp.json") => "nodes",
         "rs" | "py" | "js" | "ts" | "html" | "css" | "c" | "cpp" | "h" | "glsl" | "lua" | "sh" | "json" | "toml" | "yaml" | "yml" | "gd" => "code",
         "wav" | "mp3" | "ogg" | "flac" => "audio",
         _ => "autres",

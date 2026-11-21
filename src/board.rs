@@ -145,12 +145,12 @@ impl Default for Board {
 }
 
 pub fn is_board(rel: &str) -> bool {
-    rel.to_lowercase().ends_with(".board.json")
+    crate::formats::has(rel, "board")
 }
 
 pub fn board_name(rel: &str) -> String {
     let name = rel.rsplit('/').next().unwrap_or(rel);
-    name.strip_suffix(".board.json").unwrap_or(name).to_string()
+    crate::formats::strip(name).to_string()
 }
 
 /// Distance d'un point à un segment.
@@ -1037,5 +1037,6 @@ mod tests {
         assert!(!b.hit(&s, pos2(5.0, 30.0), 2.0));
         assert!(is_board("boards/Forêt.board.json"));
         assert_eq!(board_name("boards/Forêt.board.json"), "Forêt");
+        assert!(is_board("boards/Forêt.aryboard") && board_name("boards/Forêt.aryboard") == "Forêt");
     }
 }

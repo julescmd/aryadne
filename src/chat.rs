@@ -430,7 +430,7 @@ fn tokens(s: &str) -> Vec<String> {
 
 fn is_text(rel: &str) -> bool {
     let e = rel.rsplit_once('.').map(|(_, e)| e.to_lowercase()).unwrap_or_default();
-    TEXT_EXT.contains(&e.as_str()) && !rel.ends_with(".board.json")
+    TEXT_EXT.contains(&e.as_str()) && !crate::board::is_board(rel)
 }
 
 /// Recherche plein texte (score de type TF-IDF) sur des morceaux de fichiers.
@@ -536,7 +536,7 @@ fn build_messages(entries: &[Entry], hits: &[Hit], open: Option<&(String, String
          - Si la demande est ambiguë ou qu'il te manque une information importante, pose d'abord UNE question courte au lieu de deviner. Tu peux proposer des réponses toutes faites sur une ligne qui commence par « ?> », séparées par « | », par ex. :\n?> Un résumé court | Un plan détaillé | Les deux\n\
          - Les pièces jointes (fichiers, dossiers, images) envoyées par l'utilisateur font partie de sa question.\n\
          - Si tu as besoin du contenu complet d'un fichier qui n'est pas fourni ci-dessous, réponds SEULEMENT par une ou plusieurs lignes « LIRE: chemin/du/fichier ». Le contenu te sera envoyé, puis tu répondras.\n\
-         - Tu peux modifier un fichier (note, board .board.json, code…) : donne son contenu COMPLET dans un bloc dont la première ligne est ```fichier:chemin/du/fichier (puis le contenu, puis ```). L'utilisateur pourra l'appliquer en un clic. Pour un board, garde le même format JSON et change seulement ce qui est demandé (par exemple les champs x et y des éléments).\n\n",
+         - Tu peux modifier un fichier (note, board .aryboard, code…) : donne son contenu COMPLET dans un bloc dont la première ligne est ```fichier:chemin/du/fichier (puis le contenu, puis ```). L'utilisateur pourra l'appliquer en un clic. Pour un board, garde le même format JSON et change seulement ce qui est demandé (par exemple les champs x et y des éléments).\n\n",
     );
     sys.push_str(&format!("Fichiers du coffre ({}) :\n{}\n", files.len(), files.join("\n")));
     if let Some((rel, text)) = open {

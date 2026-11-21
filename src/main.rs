@@ -2,6 +2,7 @@
 
 mod cloud;
 mod dock;
+mod formats;
 mod montage;
 mod scene;
 mod workspace;
@@ -362,7 +363,7 @@ impl App {
         self.update_backlinks();
         // Espace 3D sans rien d'ouvert : on arrive dans une scène, la dernière utilisée ou une neuve (cube, lumière, caméra)
         if w.kind == "3d" && self.docs.is_empty() && !self.entries.is_empty() {
-            let last = self.entries.iter().filter(|e| !e.is_dir && e.rel.to_lowercase().ends_with(".arya3")).max_by_key(|e| e.modified).map(|e| e.rel.clone());
+            let last = self.entries.iter().filter(|e| !e.is_dir && formats::has(&e.rel, "scene")).max_by_key(|e| e.modified).map(|e| e.rel.clone());
             match last {
                 Some(rel) => self.open(rel),
                 None => self.run_cmd(extras::Cmd::NewScene, ctx),
@@ -374,16 +375,15 @@ impl App {
     fn new_file_window(&mut self, ctx: &egui::Context) {
         let Some((mut kind, mut name)) = self.new_file.take() else { return };
         let p = theme::pal();
-        // (nom, extension, à quoi ça sert)
-        const KINDS: [(&str, &str, &str); 7] = [
-            ("note", "md", "Texte en Markdown : notes, listes, liens entre notes"),
-            ("scène 3D", "arya3", "Modèles, lumières, caméras et animation ; arrive avec un cube, une lumière et une caméra"),
-            ("montage vidéo", "aryav", "Timeline de vidéos, d'images, de sons et de titres"),
-            ("matériau en nodes", "mat.json", "Matériau pour les modèles et les objets d'une scène"),
-            ("compositing en nodes", "comp.json", "Retouche d'image ou étalonnage d'un clip"),
-            ("fichier de code ou de texte", "", "Tape le nom avec son extension : main.py, style.css, notes.txt…"),
-            ("dossier", "/", "Pour ranger"),
-        ];
+        // (nom, extension, à quoi ça sert) : la note, puis tous les formats d'Aryadne prêts à l'emploi, puis le reste
+        let mut kinds: Vec<(&str, &str, &str)> = vec![("note", "md", "Texte en Markdown : notes, listes, liens entre notes")];
+        kinds.extend(formats::ALL.iter().filter(|f| f.ready).map(|f| (f.label, f.ext, f.help)));
+        kinds.push(("fichier de code ou de texte", "", "Tape le nom avec son extension : main.py, style.css, notes.txt…"));
+        kinds.push(("dossier", "/", "Pour ranger"));
+        let kind_max = kinds.len() - 1;
+        kind = kind.min(kind_max);
+        #[allow(non_snake_case)]
+        let KINDS = &kinds;
         let (mut keep, mut go) = (true, false);
         egui::Window::new(crate::i18n::t("nouveau fichier")).collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]).show(ctx, |ui| {
             ui.set_min_width(470.0);
@@ -435,6 +435,11 @@ impl App {
                     self.refresh();
                     return;
                 }
+            } else if ext == "aryboard" {
+                if let Some(rel) = self.new_board(&clean) {
+                    self.open(rel);
+                    return;
+                }
             } else if self.entries.iter().any(|e| e.rel == rel) {
                 self.toast = Some((crate::i18n::t("ce nom est déjà pris dans ce dossier"), Instant::now()));
             } else {
@@ -443,10 +448,10 @@ impl App {
                         let _ = std::fs::create_dir_all(d);
                     }
                     match ext {
-                        "arya3" => scene::Scene::starter().write(&path),
-                        "aryav" => montage::Project::default().write(&path),
-                        "mat.json" => nodes::Graph::new_material().save(&path),
-                        "comp.json" => nodes::Graph::new_compositor().save(&path),
+                        "aryscene" => scene::Scene::starter().write(&path),
+                        "aryseq" => montage::Project::default().write(&path),
+                        "arymat" => nodes::Graph::new_material().save(&path),
+                        "arycomp" => nodes::Graph::new_compositor().save(&path),
                         _ => std::fs::write(&path, "").map_err(|e| e.to_string()),
                     }
                 });
@@ -471,14 +476,14 @@ impl App {
         let ext = |rel: &str| rel.rsplit('.').next().unwrap_or("").to_lowercase();
         type Pick = fn(&str) -> bool;
         let (subtitle, actions, pick): (&str, Vec<(&str, extras::Cmd)>, Pick) = match w.kind.as_str() {
-            "3d" => ("Une scène réunit des modèles, des lumières et des caméras. Une scène neuve arrive avec un cube, une lumière et une caméra.", vec![("nouvelle scène 3D", extras::Cmd::NewScene), ("importer des fichiers…", extras::Cmd::Import)], |r| r.to_lowercase().ends_with(".arya3") || model3d::is_model(r)),
+            "3d" => ("Une scène réunit des modèles, des lumières et des caméras. Une scène neuve arrive avec un cube, une lumière et une caméra.", vec![("nouvelle scène 3D", extras::Cmd::NewScene), ("importer des fichiers…", extras::Cmd::Import)], |r| model3d::is_model(r)),
             "video" => ("Un montage assemble des vidéos, des images, des sons et des titres sur une timeline.", vec![("nouveau montage vidéo", extras::Cmd::NewMontage), ("importer des fichiers…", extras::Cmd::Import)], |r| montage::is_project(r) || video::is_video(r)),
             "mat" => ("Un matériau en nodes s'applique aux modèles et aux objets d'une scène ; un compositing retouche une image ou étalonne un clip.", vec![("nouveau matériau (nodes)", extras::Cmd::NewMaterial), ("nouveau compositing (nodes)", extras::Cmd::NewCompositor)], |r| nodes::is_graph(r)),
             "2d" => ("Images, croquis et planches.", vec![("nouveau board", extras::Cmd::NewBoard), ("importer des fichiers…", extras::Cmd::Import)], |r| images::is_image(r)),
             "code" => ("Crée un fichier en lui donnant son nom, ou rouvre un fichier récent.", vec![], |_| false),
             _ => ("Écris une note, ou rouvre un fichier récent.", vec![("nouvelle note", extras::Cmd::NewNote), ("note du jour", extras::Cmd::Daily)], |r| r.to_lowercase().ends_with(".md")),
         };
-        let mut recent: Vec<(String, u64)> = self.entries.iter().filter(|e| !e.is_dir && if w.kind == "code" { CODE.contains(&ext(&e.rel).as_str()) && !nodes::is_graph(&e.rel) && !e.rel.to_lowercase().ends_with(".board.json") } else { pick(&e.rel) }).map(|e| (e.rel.clone(), e.modified)).collect();
+        let mut recent: Vec<(String, u64)> = self.entries.iter().filter(|e| !e.is_dir && if w.kind == "code" { CODE.contains(&ext(&e.rel).as_str()) && !nodes::is_graph(&e.rel) && formats::of(&e.rel).is_none() } else { pick(&e.rel) }).map(|e| (e.rel.clone(), e.modified)).collect();
         recent.sort_by(|a, b| b.1.cmp(&a.1));
         recent.truncate(10);
         let mut run: Option<extras::Cmd> = None;
@@ -580,6 +585,11 @@ impl App {
             self.ws_started = true;
             let tabs = self.docs.is_empty() && !self.ws.cur().tabs.is_empty();
             self.ws_apply(&ctx, tabs);
+            // Fichiers aux anciennes extensions : on le signale une fois, la conversion reste un choix
+            let old = self.entries.iter().filter(|e| !e.is_dir && formats::upgrade(&e.rel).is_some()).count();
+            if old > 0 {
+                self.toast = Some((format!("{old} {}", crate::i18n::t("fichier(s) avec une ancienne extension : palette de commandes → « passer aux nouvelles extensions »")), Instant::now()));
+            }
         }
         if ctx.input(|i| i.viewport().close_requested()) {
             self.ws_capture();
@@ -843,14 +853,14 @@ impl App {
                         v.mat_files = self
                             .entries
                             .iter()
-                            .filter(|e| !e.is_dir && e.rel.to_lowercase().ends_with(".mat.json"))
-                            .filter_map(|e| vault::safe(&root, &e.rel).ok().map(|p| (e.name.trim_end_matches(".mat.json").to_string(), p)))
+                            .filter(|e| !e.is_dir && formats::has(&e.rel, "mat"))
+                            .filter_map(|e| vault::safe(&root, &e.rel).ok().map(|p| (formats::strip(&e.name).to_string(), p)))
                             .take(40)
                             .collect();
                         v.model_files = self
                             .entries
                             .iter()
-                            .filter(|e| !e.is_dir && model3d::is_model(&e.rel) && !e.rel.to_lowercase().ends_with(".arya3"))
+                            .filter(|e| !e.is_dir && model3d::is_model(&e.rel) && !formats::has(&e.rel, "scene"))
                             .filter_map(|e| vault::safe(&root, &e.rel).ok().map(|p| (e.rel.clone(), p)))
                             .take(200)
                             .collect();
@@ -2278,10 +2288,10 @@ impl App {
 
     fn new_board(&mut self, name: &str) -> Option<String> {
         let dir = if self.entries.iter().any(|e| e.rel == "boards") { "boards" } else { "" };
-        let mut rel = vault::join(dir, &format!("{name}.board.json"));
+        let mut rel = vault::join(dir, &format!("{name}.{}", formats::ext("board")));
         let mut i = 2;
         while self.entries.iter().any(|e| e.rel == rel) {
-            rel = vault::join(dir, &format!("{name} {i}.board.json"));
+            rel = vault::join(dir, &format!("{name} {i}.{}", formats::ext("board")));
             i += 1;
         }
         let r = vault::write(&self.root(), &rel, "{\n  \"items\": []\n}\n");
