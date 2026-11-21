@@ -1059,5 +1059,17 @@
  "Retirer la clé de cet instant": "Remove this moment's key",
  "clé(s)": "key(s)",
  "＋ étalonnage en nodes": "＋ node grading",
- "Un graphe de nodes (courbes, rampes, balance…) appliqué aux couleurs de ce clip": "A node graph (curves, ramps, balance…) applied to this clip's colors"
+ "Un graphe de nodes (courbes, rampes, balance…) appliqué aux couleurs de ce clip": "A node graph (curves, ramps, balance…) applied to this clip's colors",
+ "＋ texte": "＋ text",
+ "Ajoute un titre à la tête de lecture": "Adds a title at the playhead",
+ "contour": "outline",
+ "gras": "bold",
+ "normal": "regular",
+ "mono": "mono",
+ "police…": "font…",
+ "Choisir un fichier de police (.ttf, .otf)": "Pick a font file (.ttf, .otf)",
+ "fondu enchaîné": "crossfade",
+ "enchaîner avec le clip précédent": "crossfade with the previous clip",
+ "Recule ce clip pour qu'il chevauche la fin du précédent sur la même piste, et fond l'un dans l'autre (image et son)": "Moves this clip back so it overlaps the end of the previous one on the same track, and blends one into the other (picture and sound)",
+ "Aucun clip avant celui-ci sur cette piste.": "No clip before this one on this track."
 }

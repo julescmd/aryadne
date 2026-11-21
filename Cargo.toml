@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+ab_glyph = "0.2"
 arboard = "3.7.0"
 dirs = "7.0.0"
 eframe = "0.37.0"

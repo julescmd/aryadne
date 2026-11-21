@@ -69,6 +69,127 @@ pub struct Clip {
     /// Clés d'animation du placement, de la taille et de l'opacité, triées par instant
     #[serde(default)]
     pub keys: Vec<PoseKey>,
+    /// Titre (clip de genre « text ») : le texte, sa taille en pixels du projet, sa couleur, sa police, son contour
+    #[serde(default)]
+    pub text: String,
+    #[serde(default = "text_size")]
+    pub text_size: f32,
+    #[serde(default = "white")]
+    pub text_color: [u8; 3],
+    /// « lato », « lato-bold », « mono », ou le chemin d'un fichier de police
+    #[serde(default)]
+    pub font: String,
+    #[serde(default)]
+    pub outline: bool,
+    /// Fondu enchaîné avec le clip qui précède sur la même piste, en secondes (0 : aucun)
+    #[serde(default)]
+    pub xfade: f32,
+}
+
+fn text_size() -> f32 {
+    72.0
+}
+fn white() -> [u8; 3] {
+    [255; 3]
+}
+
+/// Dessine un titre sur une image transparente de la taille du projet, centré.
+pub fn render_text(c: &Clip, w: u32, h: u32) -> image::RgbaImage {
+    use ab_glyph::{Font, FontArc, PxScale, ScaleFont};
+    let mut img = image::RgbaImage::new(w.max(1), h.max(1));
+    let font = match c.font.as_str() {
+        "" | "lato-bold" => FontArc::try_from_slice(include_bytes!("../assets/fonts/Lato-Bold.ttf")).ok(),
+        "lato" => FontArc::try_from_slice(include_bytes!("../assets/fonts/Lato-Regular.ttf")).ok(),
+        "mono" => FontArc::try_from_slice(include_bytes!("../assets/fonts/JetBrainsMono-Bold.ttf")).ok(),
+        path => std::fs::read(path).ok().and_then(|b| FontArc::try_from_vec(b).ok()).or_else(|| FontArc::try_from_slice(include_bytes!("../assets/fonts/Lato-Bold.ttf")).ok()),
+    };
+    let Some(font) = font else { return img };
+    let size = c.text_size.clamp(4.0, 2000.0);
+    let sf = font.as_scaled(PxScale::from(size));
+    let line_h = sf.height() + sf.line_gap();
+    let lines: Vec<&str> = c.text.lines().collect();
+    let width = |l: &str| {
+        let mut x = 0.0;
+        let mut prev = None;
+        for ch in l.chars() {
+            let g = sf.glyph_id(ch);
+            if let Some(p) = prev {
+                x += sf.kern(p, g);
+            }
+            x += sf.h_advance(g);
+            prev = Some(g);
+        }
+        x
+    };
+    let top = (h as f32 - line_h * lines.len() as f32) / 2.0;
+    // Contour : le même texte en noir, décalé tout autour, sous le texte en couleur
+    let reach = if c.outline { (size / 18.0).max(1.5) } else { 0.0 };
+    let mut passes: Vec<(f32, f32, [u8; 3])> = vec![];
+    if c.outline {
+        for k in 0..16 {
+            let a = k as f32 / 16.0 * std::f32::consts::TAU;
+            passes.push((a.cos() * reach, a.sin() * reach, [0, 0, 0]));
+        }
+    }
+    passes.push((0.0, 0.0, c.text_color));
+    for (dx, dy, col) in passes {
+        for (li, l) in lines.iter().enumerate() {
+            let mut x = (w as f32 - width(l)) / 2.0 + dx;
+            let y = top + li as f32 * line_h + sf.ascent() + dy;
+            let mut prev = None;
+            for ch in l.chars() {
+                let id = sf.glyph_id(ch);
+                if let Some(p) = prev {
+                    x += sf.kern(p, id);
+                }
+                let glyph = id.with_scale_and_position(PxScale::from(size), ab_glyph::point(x, y));
+                x += sf.h_advance(id);
+                prev = Some(id);
+                if let Some(o) = font.outline_glyph(glyph) {
+                    let b = o.px_bounds();
+                    o.draw(|gx, gy, cov| {
+                        let (px, py) = (b.min.x as i32 + gx as i32, b.min.y as i32 + gy as i32);
+                        if px < 0 || py < 0 || px >= w as i32 || py >= h as i32 || cov <= 0.0 {
+                            return;
+                        }
+                        let d = img.get_pixel_mut(px as u32, py as u32);
+                        let a = cov.min(1.0);
+                        let da = d.0[3] as f32 / 255.0;
+                        let oa = a + da * (1.0 - a);
+                        for k in 0..3 {
+                            d.0[k] = ((col[k] as f32 * a + d.0[k] as f32 * da * (1.0 - a)) / oa.max(1e-6)) as u8;
+                        }
+                        d.0[3] = (oa * 255.0) as u8;
+                    });
+                }
+            }
+        }
+    }
+    img
+}
+
+/// Image d'un titre, gardée en cache : son nom change dès que le texte ou son allure change.
+pub fn text_file(c: &Clip, p: &Project) -> PathBuf {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    (&c.text, c.text_size.to_bits(), c.text_color, &c.font, c.outline, p.width, p.height).hash(&mut h);
+    dirs::cache_dir().unwrap_or_else(std::env::temp_dir).join("aryadne").join("titres").join(format!("{:016x}.png", h.finish()))
+}
+
+/// Dessine les titres qui n'ont pas encore leur image. Renvoie vrai si au moins une a été écrite.
+pub fn bake_texts(p: &Project) -> bool {
+    let mut any = false;
+    for c in p.clips.iter().filter(|c| c.kind == "text") {
+        let out = text_file(c, p);
+        if out.exists() {
+            continue;
+        }
+        if let Some(d) = out.parent() {
+            let _ = std::fs::create_dir_all(d);
+        }
+        any |= render_text(c, p.width, p.height).save(&out).is_ok();
+    }
+    any
 }
 
 /// Une clé : placement, taille et opacité du clip à un instant (en secondes depuis son début).
@@ -200,6 +321,55 @@ impl Project {
         self.clips.iter().map(|c| c.end()).fold(0.0, f32::max)
     }
 
+    /// Fondu enchaîné : le clip `i` recule pour chevaucher de `d` secondes la fin du clip qui le précède sur sa piste.
+    /// Renvoie faux s'il n'y a pas de clip avant lui.
+    pub fn crossfade(&mut self, i: usize, d: f32) -> bool {
+        let Some(c) = self.clips.get(i).cloned() else { return false };
+        let prev = self.clips.iter().enumerate().filter(|(k, a)| *k != i && a.track == c.track && a.start < c.start).map(|(_, a)| a.end()).fold(f32::MIN, f32::max);
+        if prev == f32::MIN {
+            return false;
+        }
+        let d = d.clamp(0.05, c.len() * 0.9);
+        self.clips[i].start = (prev - d).max(0.0);
+        self.clips[i].xfade = d;
+        true
+    }
+
+    /// Ajoute un titre de quatre secondes sur la piste du haut, à l'instant `t`.
+    pub fn add_text(&mut self, t: f32) -> usize {
+        self.clips.push(Clip {
+            name: "titre".into(),
+            file: String::new(),
+            kind: "text".into(),
+            track: self.tracks.saturating_sub(1),
+            start: t,
+            src_in: 0.0,
+            src_out: 4.0,
+            media: 0.0,
+            has_audio: false,
+            speed: 1.0,
+            opacity: 1.0,
+            volume: 1.0,
+            fade_in: 0.3,
+            fade_out: 0.3,
+            brightness: 0.0,
+            contrast: 1.0,
+            saturation: 1.0,
+            x: 0.0,
+            y: 0.0,
+            scale: 1.0,
+            grade: String::new(),
+            keys: vec![],
+            text: "Titre".into(),
+            text_size: (self.height as f32 / 9.0).round(),
+            text_color: [255; 3],
+            font: String::new(),
+            outline: true,
+            xfade: 0.0,
+        });
+        self.clips.len() - 1
+    }
+
     /// Coupe le clip `i` en deux à l'instant `t` de la timeline. Renvoie l'indice de la seconde moitié.
     pub fn split(&mut self, i: usize, t: f32) -> Option<usize> {
         let c = self.clips.get(i)?.clone();
@@ -267,6 +437,12 @@ pub fn import(project: &Path, media: &Path, track: usize, start: f32) -> Result<
         scale: 1.0,
         grade: String::new(),
         keys: vec![],
+        text: String::new(),
+        text_size: 72.0,
+        text_color: [255; 3],
+        font: String::new(),
+        outline: false,
+        xfade: 0.0,
     })
 }
 
@@ -289,8 +465,8 @@ pub fn graph(p: &Project, project: &Path, from: f32, w: u32, h: u32, realtime: b
         let skipped = (from - c.start).max(0.0);
         let (st, en) = ((c.start - from).max(0.0), c.end() - from);
         let (src_in, src_len) = (c.src_in + skipped * c.speed, (c.src_out - c.src_in) - skipped * c.speed);
-        let path = resolve(project, &c.file).to_string_lossy().to_string();
-        if c.kind == "image" {
+        let path = if c.kind == "text" { text_file(c, p) } else { resolve(project, &c.file) }.to_string_lossy().to_string();
+        if c.kind == "image" || c.kind == "text" {
             args.extend(["-loop".into(), "1".into(), "-t".into(), format!("{:.3}", en - st), "-i".into(), path]);
         } else {
             args.extend(["-ss".into(), format!("{src_in:.3}"), "-t".into(), format!("{src_len:.3}"), "-i".into(), path]);
@@ -328,8 +504,10 @@ pub fn graph(p: &Project, project: &Path, from: f32, w: u32, h: u32, realtime: b
                     filter += &format!(",colorchannelmixer=aa={:.3}", op.clamp(0.0, 1.0));
                 }
             }
-            if c.fade_in > 0.0 && skipped == 0.0 {
-                filter += &format!(",fade=t=in:st={st:.3}:d={:.3}:alpha=1", c.fade_in);
+            // Fondu enchaîné : ce clip apparaît par-dessus la fin du précédent
+            let fin = c.fade_in.max(c.xfade);
+            if fin > 0.0 && skipped == 0.0 {
+                filter += &format!(",fade=t=in:st={st:.3}:d={fin:.3}:alpha=1");
             }
             if c.fade_out > 0.0 {
                 filter += &format!(",fade=t=out:st={:.3}:d={:.3}:alpha=1", (en - c.fade_out).max(0.0), c.fade_out);
@@ -338,8 +516,23 @@ pub fn graph(p: &Project, project: &Path, from: f32, w: u32, h: u32, realtime: b
             filter += &format!("[c{n}];[{last}][c{n}]overlay=x='(W-w)/2+({ex})':y='(H-h)/2+({ey})':enable='between(t,{st:.3},{en:.3})':eof_action=pass[o{n}];");
             last = format!("o{n}");
         }
-        if with_audio && c.has_audio && c.volume > 0.0 && c.kind != "image" {
-            filter += &format!("[{n}:a]asetpts=PTS-STARTPTS,atempo={:.4},volume={:.3},adelay={}:all=1[a{n}];", c.speed.clamp(0.5, 2.0), c.volume, (st * 1000.0) as u64);
+        if with_audio && c.has_audio && c.volume > 0.0 && c.kind != "image" && c.kind != "text" {
+            filter += &format!("[{n}:a]asetpts=PTS-STARTPTS,atempo={:.4},volume={:.3}", c.speed.clamp(0.5, 2.0), c.volume);
+            // Le son suit les fondus de l'image, et s'efface sous un clip qui arrive en fondu enchaîné
+            let fin = c.fade_in.max(c.xfade);
+            if fin > 0.0 && skipped == 0.0 {
+                filter += &format!(",afade=t=in:st=0:d={fin:.3}");
+            }
+            let next = p.clips.iter().filter(|b| b.track == c.track && b.xfade > 0.0 && b.start > c.start && b.start < c.end()).map(|b| (b.start, b.xfade)).min_by(|a, b| a.0.total_cmp(&b.0));
+            let out = match next {
+                Some((bs, d)) => Some((bs - c.start - skipped, d)),
+                None if c.fade_out > 0.0 => Some((en - st - c.fade_out, c.fade_out)),
+                None => None,
+            };
+            if let Some((at, d)) = out {
+                filter += &format!(",afade=t=out:st={:.3}:d={d:.3}", at.max(0.0));
+            }
+            filter += &format!(",adelay={}:all=1[a{n}];", (st * 1000.0) as u64);
             audio.push(format!("[a{n}]"));
         }
         n += 1;
@@ -358,6 +551,7 @@ pub fn export(p: &Project, project: &Path, out: &Path) -> Result<(), String> {
         return Err("Le montage est vide.".into());
     }
     let (w, h) = (p.width.max(2) / 2 * 2, p.height.max(2) / 2 * 2);
+    bake_texts(p);
     let (inputs, filter, has_audio, total) = graph(p, project, 0.0, w, h, false, true);
     let mut cmd = ffmpeg::command(ff);
     cmd.args(["-v", "error", "-y"]).args(inputs).args(["-filter_complex", &filter, "-map", "[vout]"]);
@@ -376,6 +570,7 @@ pub fn export(p: &Project, project: &Path, out: &Path) -> Result<(), String> {
 pub fn frame(p: &Project, project: &Path, t: f32, w: u32) -> Result<image::RgbaImage, String> {
     let ff = ffmpeg::find("ffmpeg").ok_or("ffmpeg n'est pas installé.")?;
     let h = ((w as f32 * p.height as f32 / p.width.max(1) as f32).round() as u32).max(2);
+    bake_texts(p);
     let (inputs, filter, _, _) = graph(p, project, t, w, h, false, false);
     let o = ffmpeg::command(ff).args(["-v", "error"]).args(inputs).args(["-filter_complex", &filter, "-map", "[vout]", "-frames:v", "1", "-f", "image2pipe", "-vcodec", "png", "-"]).output().map_err(|e| e.to_string())?;
     image::load_from_memory(&o.stdout).map(|i| i.to_rgba8()).map_err(|_| format!("aperçu impossible : {}", String::from_utf8_lossy(&o.stderr).lines().last().unwrap_or("?")))
@@ -522,7 +717,7 @@ impl Editor {
             }
         }
         // Étalonnages en nodes : la table de couleurs se refait dès que son graphe change
-        if bake_luts(&self.project, &self.path, &self.root) {
+        if bake_luts(&self.project, &self.path, &self.root) | bake_texts(&self.project) {
             self.rev += 1;
         }
         // Clips animés : leurs réglages suivent la tête de lecture
@@ -616,6 +811,11 @@ impl Editor {
                 if let Some(files) = rfd::FileDialog::new().pick_files() {
                     self.add.extend(files);
                 }
+            }
+            if ui.button(crate::i18n::t("＋ texte")).on_hover_text(crate::i18n::t("Ajoute un titre à la tête de lecture")).clicked() {
+                let k = self.project.add_text(self.playhead);
+                self.selected = Some(k);
+                self.changed();
             }
             if ui.button(crate::i18n::t("couper")).on_hover_text(crate::i18n::t("Coupe le clip choisi à la tête de lecture (S)")).clicked() {
                 split = true;
@@ -722,6 +922,8 @@ impl Editor {
             let (mut new_grade, mut open_grade) = (false, false);
             let mut pose_before: Option<(f32, f32, f32, f32)> = None;
             let mut ch2 = false;
+            let mut ch_text = false;
+            let mut do_xfade = false;
             egui::Panel::right("montage-clip").exact_size(280.0).frame(egui::Frame::new().fill(p.panel).stroke(Stroke::new(1.0, p.line)).inner_margin(10)).show(ui, |ui| {
                 let c = &mut self.project.clips[s];
                 ui.spacing_mut().slider_width = 84.0;
@@ -729,6 +931,29 @@ impl Editor {
                 ch |= ui.add(egui::TextEdit::singleline(&mut c.name).desired_width(f32::INFINITY)).changed();
                 ui.label(RichText::new(&c.file).size(10.0).color(p.muted));
                 ui.add_space(6.0);
+                if c.kind == "text" {
+                    ch_text |= ui.add(egui::TextEdit::multiline(&mut c.text).desired_rows(3).desired_width(f32::INFINITY)).changed();
+                    ui.horizontal(|ui| {
+                        ch_text |= ui.add(egui::DragValue::new(&mut c.text_size).range(6.0..=1000.0).suffix(" px")).changed();
+                        ch_text |= ui.color_edit_button_srgb(&mut c.text_color).changed();
+                        ch_text |= ui.checkbox(&mut c.outline, crate::i18n::t("contour")).changed();
+                    });
+                    ui.horizontal(|ui| {
+                        for (id, label) in [("", "gras"), ("lato", "normal"), ("mono", "mono")] {
+                            if ui.selectable_label(c.font == id || (id.is_empty() && c.font == "lato-bold"), RichText::new(crate::i18n::t(label)).size(11.0)).clicked() {
+                                c.font = id.to_string();
+                                ch_text = true;
+                            }
+                        }
+                        if ui.small_button(crate::i18n::t("police…")).on_hover_text(crate::i18n::t("Choisir un fichier de police (.ttf, .otf)")).clicked() {
+                            if let Some(f) = rfd::FileDialog::new().add_filter("police", &["ttf", "otf"]).pick_file() {
+                                c.font = f.to_string_lossy().to_string();
+                                ch_text = true;
+                            }
+                        }
+                    });
+                    ui.separator();
+                }
                 let mut row = |ui: &mut egui::Ui, label: &str, v: &mut f32, r: std::ops::RangeInclusive<f32>, reset: f32| {
                     ui.horizontal(|ui| {
                         if ui.add(egui::Button::new(RichText::new(crate::i18n::t(label)).size(11.0).color(p.muted)).frame(false).min_size(vec2(78.0, 0.0))).on_hover_text(crate::i18n::t("cliquer pour remettre à zéro")).clicked() {
@@ -785,16 +1010,28 @@ impl Editor {
                     });
                     ui.separator();
                 }
-                if c.kind != "image" {
+                if c.kind != "image" && c.kind != "text" {
                     row(ui, "vitesse", &mut c.speed, 0.25..=4.0, 1.0);
                 }
                 if c.has_audio {
                     row(ui, "volume", &mut c.volume, 0.0..=2.0, 1.0);
                 }
+                row(ui, "fondu enchaîné", &mut c.xfade, 0.0..=5.0, 0.0);
+                if ui.button(RichText::new(crate::i18n::t("enchaîner avec le clip précédent")).size(11.0)).on_hover_text(crate::i18n::t("Recule ce clip pour qu'il chevauche la fin du précédent sur la même piste, et fond l'un dans l'autre (image et son)")).clicked() {
+                    do_xfade = true;
+                }
                 row(ui, "fondu d'entrée", &mut c.fade_in, 0.0..=5.0, 0.0);
                 row(ui, "fondu de sortie", &mut c.fade_out, 0.0..=5.0, 0.0);
             });
-            ch |= ch2;
+            ch |= ch2 | ch_text;
+            if do_xfade {
+                let d = if self.project.clips[s].xfade > 0.0 { self.project.clips[s].xfade } else { 1.0 };
+                if self.project.crossfade(s, d) {
+                    ch = true;
+                } else {
+                    self.message = Some(crate::i18n::t("Aucun clip avant celui-ci sur cette piste."));
+                }
+            }
             // Un clip déjà animé : chaque réglage modifié pose sa clé à la tête de lecture
             {
                 let c = &mut self.project.clips[s];
@@ -974,6 +1211,7 @@ impl Editor {
             let base = match c.kind.as_str() {
                 "audio" => Color32::from_rgb(70, 150, 110),
                 "image" => Color32::from_rgb(170, 120, 60),
+                "text" => Color32::from_rgb(150, 90, 170),
                 _ => Color32::from_rgb(70, 110, 180),
             };
             let on = self.selected == Some(i);
@@ -1009,7 +1247,7 @@ mod tests {
     #[test]
     fn coupe_et_durees() {
         let mut p = Project::default();
-        let c = Clip { name: "a".into(), file: "a.mp4".into(), kind: "video".into(), track: 1, start: 2.0, src_in: 1.0, src_out: 9.0, media: 10.0, has_audio: true, speed: 2.0, opacity: 1.0, volume: 1.0, fade_in: 0.5, fade_out: 0.5, brightness: 0.0, contrast: 1.0, saturation: 1.0, x: 0.0, y: 0.0, scale: 1.0, grade: String::new(), keys: vec![] };
+        let c = Clip { name: "a".into(), file: "a.mp4".into(), kind: "video".into(), track: 1, start: 2.0, src_in: 1.0, src_out: 9.0, media: 10.0, has_audio: true, speed: 2.0, opacity: 1.0, volume: 1.0, fade_in: 0.5, fade_out: 0.5, brightness: 0.0, contrast: 1.0, saturation: 1.0, x: 0.0, y: 0.0, scale: 1.0, grade: String::new(), keys: vec![], text: String::new(), text_size: 72.0, text_color: [255; 3], font: String::new(), outline: false, xfade: 0.0 };
         p.clips.push(c);
         // 8 s de source à vitesse 2 : 4 s sur la timeline
         assert_eq!(p.clips[0].len(), 4.0);
@@ -1038,6 +1276,22 @@ mod tests {
         c.set_key(3.0);
         assert!(c.keys.len() == 2 && c.keys[1].x == 80.0);
         assert_eq!(expr(&[(0.0, 1.0)], "t"), "1.0000");
+        // Titre : des pixels opaques au centre, rien dans les coins ; avec contour, du noir autour des lettres
+        let k = p.add_text(1.0);
+        p.clips[k].text = "Aryadne".into();
+        let img = render_text(&p.clips[k], 640, 360);
+        assert_eq!(img.get_pixel(3, 3).0[3], 0);
+        assert!(img.pixels().filter(|px| px.0[3] > 200 && px.0[0] > 200).count() > 500);
+        assert!(img.pixels().any(|px| px.0[3] > 200 && px.0[0] < 30));
+        assert_ne!(text_file(&p.clips[k], &p), text_file(&Clip { text: "autre".into(), ..p.clips[k].clone() }, &p));
+        // Fondu enchaîné : le second clip recule pour chevaucher la fin du premier
+        let mut q = Project::default();
+        let base = Clip { start: 0.0, src_in: 0.0, src_out: 4.0, speed: 1.0, keys: vec![], track: 1, opacity: 1.0, fade_in: 0.0, fade_out: 0.0, ..p.clips[0].clone() };
+        q.clips = vec![base.clone(), Clip { start: 4.0, ..base }];
+        assert!(q.crossfade(1, 1.0) && !q.crossfade(0, 1.0));
+        assert_eq!((q.clips[1].start, q.clips[1].xfade, q.duration()), (3.0, 1.0, 7.0));
+        let (_, f, _, _) = graph(&q, Path::new("/x/m.aryav"), 0.0, 640, 360, false, true);
+        assert!(f.contains("fade=t=in:st=3.000:d=1.000:alpha=1") && f.contains("afade=t=out:st=3.000:d=1.000") && f.contains("afade=t=in:st=0:d=1.000"), "{f}");
         assert_eq!(expr(&[(1.0, 0.0), (3.0, 10.0)], "t"), "if(lt(t,1.0000),0.0000,if(lt(t,3.0000),0.0000+(10.0000)*(t-(1.0000))/2.0000,10.0000))");
     }
 
@@ -1074,7 +1328,11 @@ mod tests {
         g.connect(inv, 0, out, 0);
         g.save(&dir.join("inverse.comp.json")).unwrap();
         b.grade = "inverse.comp.json".into();
-        p.clips = vec![a, b];
+        // Un titre par-dessus le tout
+        let mut with_title = Project { width: 320, height: 240, ..Default::default() };
+        let t = with_title.add_text(0.5);
+        let title = with_title.clips[t].clone();
+        p.clips = vec![a, b, title];
         p.write(&file).unwrap();
         // Aperçu au milieu du second clip : sans la table, puis avec (les barres claires deviennent sombres)
         let _ = std::fs::remove_file(lut_file(&dir.join("inverse.comp.json")));
