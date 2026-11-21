@@ -3,6 +3,7 @@
 mod cloud;
 mod dock;
 mod formats;
+mod meshedit;
 mod montage;
 mod scene;
 mod workspace;
@@ -1163,6 +1164,7 @@ impl App {
             return t("^P ouvrir · ^⇧P commandes");
         }
         match self.current().map(|d| &d.content) {
+            Some(Content::Model(v)) if v.is_mesh_edit() => t("MODE ÉDITION · Tab sortir · clic, Maj+clic, A, B : sommets · G R S (X Y Z : axe) · E extruder · F face · X supprimer · Ctrl+Z annuler"),
             Some(Content::Model(v)) if v.is_scene() => t("G R S : déplacer, tourner, taille (X Y Z : axe) · Maj+clic, A, B : sélection · Maj+A ajouter · X supprimer · Maj+D dupliquer · P parent · H cacher · I clé · Ctrl+Z annuler"),
             Some(Content::Model(_)) => t("glisser : tourner · Maj+glisser : déplacer · molette : zoom · 1 3 7 : vues · 5 : perspective · F2 renommer le fichier"),
             Some(Content::Montage(_)) => t("Espace lire · S couper · Suppr supprimer · glisser les bords : raccourcir · Ctrl+molette : zoom · Ctrl+Z annuler"),

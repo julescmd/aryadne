@@ -800,7 +800,8 @@ impl Prepared {
 
     /// Depuis un maillage modifié : recentré et remis à l'échelle pour tenir dans la vue.
     /// Pour une scène : positions gardées telles quelles (pas de recentrage), sol fixé par l'appelant.
-    pub fn from_mesh_fixed(m: crate::modifiers::Mesh, floor: f32) -> Self {
+    pub fn from_mesh_fixed(mut m: crate::modifiers::Mesh, floor: f32) -> Self {
+        split_sharp(&mut m.pos, &mut m.tris, 38.0);
         let nrm = vertex_normals(&m.pos, &m.tris);
         let lin = |c: u8| (c as f32 / 255.0).powf(2.2);
         let colors = m.colors.iter().map(|c| [lin(c.r()), lin(c.g()), lin(c.b())]).collect();
@@ -1400,6 +1401,50 @@ pub fn render(m: &Prepared, cam: &Camera, look: &Look, w: usize, h: usize) -> Fr
     Frame { w, h, rgba, ids, depth }
 }
 
+/// Mode édition d'un objet de scène.
+struct MeshEdit {
+    obj: usize,
+    file: std::path::PathBuf,
+    mesh: crate::meshedit::EMesh,
+    sel: Vec<bool>,
+    hist: Vec<(crate::meshedit::EMesh, Vec<bool>)>,
+    /// Transformation en cours : genre (0 déplacer, 1 tourner, 2 taille), axe imposé dans la scène, sommets de départ, souris de départ
+    modal: Option<(u8, Option<V3>, Vec<V3>, Pos2)>,
+    boxing: Option<Option<Pos2>>,
+    skip_click: bool,
+}
+
+/// Sépare les sommets partagés par des faces qui font entre elles un angle marqué : les arêtes vives
+/// restent nettes à l'éclairage, les surfaces courbes restent lisses. L'ordre des triangles ne change pas.
+fn split_sharp(pos: &mut Vec<V3>, tris: &mut [[u32; 3]], limit_deg: f32) {
+    let cos = limit_deg.to_radians().cos();
+    let face: Vec<V3> = tris.iter().map(|t| norm(cross(sub(pos[t[1] as usize], pos[t[0] as usize]), sub(pos[t[2] as usize], pos[t[0] as usize])))).collect();
+    // Pour chaque sommet : les groupes de faces déjà rencontrés (normale de référence, sommet qui les porte)
+    let mut groups: Vec<Vec<(V3, u32)>> = vec![vec![]; pos.len()];
+    for (ti, t) in tris.iter_mut().enumerate() {
+        for k in 0..3 {
+            let v = t[k] as usize;
+            let n = face[ti];
+            if n == [0.0; 3] {
+                continue;
+            }
+            match groups[v].iter().find(|g| dot(g.0, n) > cos) {
+                Some(g) => t[k] = g.1,
+                None => {
+                    let idx = if groups[v].is_empty() {
+                        v as u32
+                    } else {
+                        pos.push(pos[v]);
+                        pos.len() as u32 - 1
+                    };
+                    groups[v].push((n, idx));
+                    t[k] = idx;
+                }
+            }
+        }
+    }
+}
+
 /// Cadre d'une scène : au moins 12 unités de côté autour de l'origine, pour qu'un cube neuf
 /// arrive à une taille raisonnable sur la grille plutôt que de remplir toute la vue.
 pub fn scene_bounds(lo: V3, hi: V3) -> (V3, V3) {
@@ -1593,6 +1638,12 @@ pub struct Viewer {
     multi_follow: Option<(usize, ([f32; 3], [f32; 3], [f32; 3]))>,
     /// Sélection au rectangle (B) : armée, puis coin de départ
     box_sel: Option<Option<Pos2>>,
+    /// Mode édition (Tab) : le maillage de l'objet actif, modifiable sommet par sommet
+    mesh: Option<MeshEdit>,
+    /// Demande d'entrer ou de sortir du mode édition (bouton du panneau)
+    mesh_toggle: bool,
+    /// Un champ avait le clavier à l'image précédente (Tab y sert alors à passer au champ suivant)
+    kb_busy: bool,
     /// Annuler dans la scène : dernier état enregistré, états précédents, états annulés
     scene_saved: Option<crate::scene::Scene>,
     scene_hist: Vec<crate::scene::Scene>,
@@ -1670,6 +1721,9 @@ impl Viewer {
             scene_multi: vec![],
             multi_follow: None,
             box_sel: None,
+            mesh: None,
+            mesh_toggle: false,
+            kb_busy: false,
             scene_saved: None,
             scene_hist: vec![],
             scene_redo: vec![],
@@ -1811,6 +1865,354 @@ impl Viewer {
             Ok(()) => format!("turntable : {}", out.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()),
             Err(e) => format!("GIF impossible : {e}"),
         });
+    }
+
+    pub fn is_mesh_edit(&self) -> bool {
+        self.mesh.is_some()
+    }
+
+    /// Entre en mode édition sur l'objet actif. Son maillage devient un fichier OBJ à côté de la scène
+    /// (le modèle d'origine n'est jamais modifié), que le mode édition réécrit à chaque changement.
+    fn enter_mesh_edit(&mut self) {
+        let (Some(k), Some(scene)) = (self.scene_sel, self.scene.as_mut()) else {
+            self.capture_msg = Some(crate::i18n::t("choisis d'abord un objet à modifier"));
+            return;
+        };
+        let Some(o) = scene.objects.get(k).filter(|o| crate::scene::kind(o) == crate::scene::Kind::Model) else {
+            self.capture_msg = Some(crate::i18n::t("seuls les objets à maillage se modifient en mode édition"));
+            return;
+        };
+        let stem = self.path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "scène".into());
+        let dir = self.path.parent().unwrap_or(std::path::Path::new("")).to_path_buf();
+        let prefix = format!("{stem} - ");
+        let (file, mesh) = if o.file.starts_with(&prefix) && o.file.to_lowercase().ends_with(".obj") {
+            // Déjà un maillage propre à cette scène
+            let f = crate::scene::resolve(&self.path, &o.file);
+            match crate::meshedit::EMesh::read_obj(&f) {
+                Ok(m) => (f, m),
+                Err(e) => {
+                    self.capture_msg = Some(e);
+                    return;
+                }
+            }
+        } else {
+            let model = match crate::scene::source_model(&self.path, o) {
+                Ok(m) => m,
+                Err(e) => {
+                    self.capture_msg = Some(e);
+                    return;
+                }
+            };
+            let mesh = crate::meshedit::EMesh::from_model(&model);
+            let mut name = format!("{prefix}{}.obj", o.name);
+            let mut n = 2;
+            while dir.join(&name).exists() {
+                name = format!("{prefix}{} {n}.obj", o.name);
+                n += 1;
+            }
+            let f = dir.join(&name);
+            if let Err(e) = mesh.write_obj(&f) {
+                self.capture_msg = Some(e);
+                return;
+            }
+            scene.objects[k].file = name;
+            let _ = scene.write(&self.path);
+            self.scene_dirty = true;
+            (f, mesh)
+        };
+        let n = mesh.pos.len();
+        self.mesh = Some(MeshEdit { obj: k, file, mesh, sel: vec![false; n], hist: vec![], modal: None, boxing: None, skip_click: false });
+        self.scene_multi.clear();
+        self.capture_msg = None;
+    }
+
+    /// Mode édition : affichage des sommets et des arêtes par-dessus la vue, sélection, et outils au clavier.
+    fn mesh_edit_ui(&mut self, ui: &mut egui::Ui, rect: egui::Rect, resp: &egui::Response) {
+        if !crate::scene::is_scene(&self.path) || self.edit.is_some() {
+            return;
+        }
+        let p = theme::pal();
+        let typing = ui.ctx().egui_wants_keyboard_input();
+        // Tab : egui s'en sert pour passer d'un champ à l'autre ; sur la vue, sans champ actif, il change de mode
+        let tab = resp.hovered() && !self.kb_busy && self.modal.is_none() && ui.input(|i| i.key_pressed(Key::Tab));
+        if tab {
+            ui.ctx().memory_mut(|m| {
+                if let Some(id) = m.focused() {
+                    m.surrender_focus(id);
+                }
+            });
+        }
+        self.kb_busy = ui.ctx().memory(|m| m.focused().is_some());
+        let typing = typing && !tab;
+        if std::mem::take(&mut self.mesh_toggle) || tab {
+            if self.mesh.take().is_none() {
+                self.enter_mesh_edit();
+            }
+        }
+        let (Some((lo, hi)), Some(scene)) = (self.scene_frame, self.scene.as_ref()) else { return };
+        let Some(obj) = self.mesh.as_ref().map(|m| m.obj) else { return };
+        if obj >= scene.objects.len() || self.scene_sel != Some(obj) {
+            self.mesh = None;
+            return;
+        }
+        // De l'objet vers la scène : origine et axes ; et le chemin inverse
+        let origin = scene.world(obj, [0.0; 3]);
+        let cols = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]].map(|e| sub(scene.world(obj, e), origin));
+        let Some(inv) = crate::meshedit::inverse(cols) else { return };
+        let to_world = |v: V3| {
+            let w = crate::meshedit::apply(&cols, v);
+            [w[0] + origin[0], w[1] + origin[1], w[2] + origin[2]]
+        };
+        let to_local = |w: V3| crate::meshedit::apply(&inv, sub(w, origin));
+        let longest = (hi[0] - lo[0]).max(hi[1] - lo[1]).max(hi[2] - lo[2]).max(1e-9);
+        let c = [(lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0, (lo[2] + hi[2]) / 2.0];
+        let focal = rect.height().min(rect.width()) * 1.2;
+        let (cam, rc) = (self.cam, rect.center());
+        let view = |w: V3| cam.view([(w[0] - c[0]) / longest, (w[1] - c[1]) / longest, (w[2] - c[2]) / longest]);
+        let project = |w: V3| -> Option<Pos2> {
+            let q = view(w);
+            if cam.ortho {
+                Some(pos2(rc.x + q[0] * focal / cam.dist, rc.y - q[1] * focal / cam.dist))
+            } else {
+                (q[2] < -0.05).then(|| pos2(rc.x + q[0] / -q[2] * focal, rc.y - q[1] / -q[2] * focal))
+            }
+        };
+        let me = self.mesh.as_mut().unwrap();
+        me.sel.resize(me.mesh.pos.len(), false);
+        let mut dirty = false;
+        let hovered = resp.hovered();
+        let (pressed, secondary, cur) = ui.input(|i| (i.pointer.primary_pressed(), i.pointer.secondary_pressed(), i.pointer.hover_pos().or(i.pointer.latest_pos())));
+        let key = |k: Key| !typing && ui.input(|i| i.key_pressed(k) && !i.modifiers.any());
+        let snapshot = |me: &mut MeshEdit| {
+            me.hist.push((me.mesh.clone(), me.sel.clone()));
+            if me.hist.len() > 100 {
+                me.hist.remove(0);
+            }
+        };
+        // ---- Transformation en cours
+        if let Some((kind, axis, orig, from)) = me.modal.take() {
+            let mut axis = axis;
+            for (k, kk) in [Key::X, Key::Y, Key::Z].into_iter().enumerate() {
+                if ui.input(|i| i.key_pressed(kk)) {
+                    let mut e = [0.0f32; 3];
+                    e[k] = 1.0;
+                    axis = if axis == Some(e) { None } else { Some(e) };
+                }
+            }
+            let chosen: Vec<usize> = (0..orig.len()).filter(|&i| me.sel.get(i).copied().unwrap_or(false)).collect();
+            let worlds: Vec<V3> = chosen.iter().map(|&i| to_world(orig[i])).collect();
+            let n = worlds.len().max(1) as f32;
+            let pivot = worlds.iter().fold([0.0f32; 3], |a, w| [a[0] + w[0] / n, a[1] + w[1] / n, a[2] + w[2] / n]);
+            let q = view(pivot);
+            let center = project(pivot).unwrap_or(rc);
+            let cancel = secondary || ui.input(|i| i.key_pressed(Key::Escape));
+            let confirm = pressed || ui.input(|i| i.key_pressed(Key::Enter));
+            if cancel {
+                me.mesh.pos = orig;
+                me.hist.pop();
+                dirty = true;
+                me.skip_click = true;
+            } else if let Some(cur) = cur {
+                let d = cur - from;
+                let toward = cam.unrotate([0.0, 0.0, 1.0]);
+                for (&i, w) in chosen.iter().zip(&worlds) {
+                    let nw = match kind {
+                        0 => {
+                            let per_px = if cam.ortho { cam.dist / focal } else { (-q[2]).max(0.05) / focal } * longest;
+                            let (right, up) = (cam.unrotate([1.0, 0.0, 0.0]), cam.unrotate([0.0, 1.0, 0.0]));
+                            let mv = [0, 1, 2].map(|k| (right[k] * d.x - up[k] * d.y) * per_px);
+                            let mv = match axis {
+                                Some(a) => {
+                                    // Le long de l'axe : on suit sa direction à l'écran
+                                    let tip = project([pivot[0] + a[0], pivot[1] + a[1], pivot[2] + a[2]]).unwrap_or(center);
+                                    let s = tip - center;
+                                    let t = if s.length_sq() > 1e-3 { d.dot(s) / s.length_sq() } else { dot(mv, a) };
+                                    [a[0] * t, a[1] * t, a[2] * t]
+                                }
+                                None => mv,
+                            };
+                            [w[0] + mv[0], w[1] + mv[1], w[2] + mv[2]]
+                        }
+                        1 => {
+                            let a = axis.unwrap_or_else(|| {
+                                let k = (0..3).max_by(|x, y| toward[*x].abs().total_cmp(&toward[*y].abs())).unwrap_or(1);
+                                let mut e = [0.0f32; 3];
+                                e[k] = 1.0;
+                                e
+                            });
+                            let mut turn = (cur - center).angle() - (from - center).angle();
+                            if turn > std::f32::consts::PI {
+                                turn -= std::f32::consts::TAU;
+                            } else if turn < -std::f32::consts::PI {
+                                turn += std::f32::consts::TAU;
+                            }
+                            let th = -turn * if dot(a, toward) >= 0.0 { 1.0 } else { -1.0 };
+                            // Rotation autour de l'axe (formule de Rodrigues)
+                            let v = sub(*w, pivot);
+                            let (cs, sn) = (th.cos(), th.sin());
+                            let (kxv, kdv) = (cross(a, v), dot(a, v));
+                            [0, 1, 2].map(|k| pivot[k] + v[k] * cs + kxv[k] * sn + a[k] * kdv * (1.0 - cs))
+                        }
+                        _ => {
+                            let f = ((cur - center).length() / (from - center).length().max(8.0)).max(0.001);
+                            let v = sub(*w, pivot);
+                            match axis {
+                                Some(a) => {
+                                    let along = dot(v, a);
+                                    [0, 1, 2].map(|k| pivot[k] + v[k] + a[k] * along * (f - 1.0))
+                                }
+                                None => [pivot[0] + v[0] * f, pivot[1] + v[1] * f, pivot[2] + v[2] * f],
+                            }
+                        }
+                    };
+                    me.mesh.pos[i] = to_local(nw);
+                }
+                dirty = true;
+                if confirm {
+                    me.skip_click = true;
+                } else {
+                    me.modal = Some((kind, axis, orig, from));
+                }
+            } else {
+                me.modal = Some((kind, axis, orig, from));
+            }
+            let what = [crate::i18n::t("déplacer"), crate::i18n::t("tourner"), crate::i18n::t("taille")][kind.min(2) as usize].clone();
+            ui.painter_at(rect).text(rect.left_bottom() + egui::vec2(12.0, -10.0), egui::Align2::LEFT_BOTTOM, format!("{what}   ·   X Y Z : {}   ·   {}   ·   {}", crate::i18n::t("imposer un axe"), crate::i18n::t("clic : valider"), crate::i18n::t("Échap : annuler")), egui::FontId::monospace(11.5), p.accent);
+            ui.ctx().request_repaint();
+        } else if hovered || me.boxing.is_some() {
+            let any = me.sel.iter().any(|s| *s);
+            // ---- Outils
+            let start = if key(Key::G) { Some(0u8) } else if key(Key::R) { Some(1) } else if key(Key::S) { Some(2) } else { None };
+            if let (Some(kind), true, Some(at)) = (start, any, cur) {
+                snapshot(me);
+                me.modal = Some((kind, None, me.mesh.pos.clone(), at));
+            }
+            if key(Key::E) && any {
+                snapshot(me);
+                match me.mesh.extrude(&me.sel) {
+                    Some((sel, dir)) => {
+                        me.sel = sel;
+                        // Les nouvelles faces partent le long de leur normale
+                        let w = norm(crate::meshedit::apply(&cols, dir));
+                        if let Some(at) = cur {
+                            me.modal = Some((0, Some(w), me.mesh.pos.clone(), at));
+                        }
+                        dirty = true;
+                    }
+                    None => {
+                        me.hist.pop();
+                        self.capture_msg = Some(crate::i18n::t("extruder demande au moins une face dont tous les sommets sont choisis"));
+                    }
+                }
+            }
+            if (key(Key::X) || key(Key::Delete)) && any {
+                snapshot(me);
+                let sel = std::mem::take(&mut me.sel);
+                me.mesh.delete(&sel);
+                me.sel = vec![false; me.mesh.pos.len()];
+                dirty = true;
+            }
+            if key(Key::F) {
+                // Les sommets choisis, rangés en tournant autour de leur centre vu d'ici : la face regarde vers nous
+                let pts: Vec<(u32, Pos2)> = (0..me.mesh.pos.len()).filter(|&i| me.sel[i]).filter_map(|i| project(to_world(me.mesh.pos[i])).map(|s| (i as u32, s))).collect();
+                if pts.len() >= 3 {
+                    let n = pts.len() as f32;
+                    let mid = pts.iter().fold(egui::Vec2::ZERO, |a, x| a + x.1.to_vec2() / n);
+                    let mut order = pts.clone();
+                    order.sort_by(|a, b| (b.1.to_vec2() - mid).angle().total_cmp(&(a.1.to_vec2() - mid).angle()));
+                    snapshot(me);
+                    if me.mesh.fill(&order.iter().map(|x| x.0).collect::<Vec<u32>>()) {
+                        dirty = true;
+                    } else {
+                        me.hist.pop();
+                    }
+                }
+            }
+            if key(Key::A) {
+                me.sel.iter_mut().for_each(|s| *s = true);
+            }
+            if !typing && ui.input(|i| i.modifiers.alt && i.key_pressed(Key::A)) {
+                me.sel.iter_mut().for_each(|s| *s = false);
+            }
+            if key(Key::B) {
+                me.boxing = Some(None);
+            }
+            if !typing && ui.input(|i| i.modifiers.command && i.key_pressed(Key::Z)) {
+                if let Some((m, s)) = me.hist.pop() {
+                    me.mesh = m;
+                    me.sel = s;
+                    dirty = true;
+                }
+            }
+            // ---- Sélection : rectangle, ou clic sur le sommet le plus proche
+            let shift = ui.input(|i| i.modifiers.shift);
+            if let Some(start) = me.boxing {
+                let down = ui.input(|i| i.pointer.primary_down());
+                match (start, cur) {
+                    (None, Some(at)) if pressed && rect.contains(at) => me.boxing = Some(Some(at)),
+                    (Some(s), Some(at)) => {
+                        let area = egui::Rect::from_two_pos(s, at);
+                        ui.painter_at(rect).rect_filled(area, 0.0, p.accent.gamma_multiply(0.12));
+                        ui.painter_at(rect).rect_stroke(area, 0.0, Stroke::new(1.0, p.accent), egui::StrokeKind::Inside);
+                        if !down {
+                            for i in 0..me.mesh.pos.len() {
+                                let inside = project(to_world(me.mesh.pos[i])).is_some_and(|s| area.contains(s));
+                                me.sel[i] = if shift { me.sel[i] || inside } else { inside };
+                            }
+                            me.boxing = None;
+                            me.skip_click = true;
+                        }
+                    }
+                    _ => {}
+                }
+                if ui.input(|i| i.key_pressed(Key::Escape)) {
+                    me.boxing = None;
+                }
+                ui.ctx().request_repaint();
+            } else if resp.clicked() && !me.skip_click {
+                if let Some(at) = resp.interact_pointer_pos() {
+                    let near = (0..me.mesh.pos.len()).filter_map(|i| project(to_world(me.mesh.pos[i])).map(|s| (i, (s - at).length()))).filter(|x| x.1 < 11.0).min_by(|a, b| a.1.total_cmp(&b.1));
+                    match near {
+                        Some((i, _)) if shift => me.sel[i] = !me.sel[i],
+                        Some((i, _)) => {
+                            me.sel.iter_mut().for_each(|s| *s = false);
+                            me.sel[i] = true;
+                        }
+                        None if !shift => me.sel.iter_mut().for_each(|s| *s = false),
+                        None => {}
+                    }
+                }
+            }
+        }
+        if !ui.input(|i| i.pointer.any_down()) && !pressed {
+            me.skip_click = false;
+        }
+        // ---- Affichage : arêtes puis sommets (au-delà d'un certain nombre, seulement les sommets choisis)
+        let over = ui.painter_at(rect);
+        let screen: Vec<Option<Pos2>> = me.mesh.pos.iter().map(|v| project(to_world(*v))).collect();
+        let light = me.mesh.pos.len() <= 20_000;
+        if light {
+            for (a, b) in me.mesh.edges() {
+                if let (Some(sa), Some(sb)) = (screen[a as usize], screen[b as usize]) {
+                    let on = me.sel[a as usize] && me.sel[b as usize];
+                    over.line_segment([sa, sb], Stroke::new(if on { 1.8 } else { 1.0 }, if on { p.accent } else { Color32::from_black_alpha(150) }));
+                }
+            }
+        }
+        for (i, s) in screen.iter().enumerate() {
+            if let Some(s) = s {
+                if me.sel[i] {
+                    over.circle_filled(*s, 3.5, p.accent);
+                } else if light {
+                    over.circle_filled(*s, 2.2, Color32::from_black_alpha(200));
+                }
+            }
+        }
+        if dirty {
+            let _ = me.mesh.write_obj(&me.file);
+            self.scene_dirty = true;
+            ui.ctx().request_repaint();
+        }
     }
 
     pub fn is_scene(&self) -> bool {
@@ -1971,7 +2373,7 @@ impl Viewer {
                 self.add_popup = None;
             }
         }
-        if !ui.ctx().egui_wants_keyboard_input() && self.edit.is_none() && self.modal.is_none() {
+        if !ui.ctx().egui_wants_keyboard_input() && self.edit.is_none() && self.modal.is_none() && self.mesh.is_none() {
             let sel = self.scene_sel.filter(|&k| k < scene.objects.len());
             let (del, dup, hide, show_all, add) = ui.input(|i| {
                 let plain = !i.modifiers.any();
@@ -2328,9 +2730,15 @@ impl Viewer {
                         changed |= ui.add(egui::Slider::new(&mut o.opacity, 0.0..=1.0).show_value(false)).changed();
                     });
                 }
+                if crate::scene::kind(o) == crate::scene::Kind::Model {
+                    let on = self.mesh.is_some();
+                    if ui.add(egui::Button::new(egui::RichText::new(crate::i18n::t(if on { "sortir du mode édition (Tab)" } else { "mode édition (Tab)" })).size(11.5).color(if on { p.on_accent } else { p.text })).fill(if on { p.accent } else { p.panel })).on_hover_text(crate::i18n::t("Modifier le maillage : sommets, extrusion, faces. Le maillage devient un fichier OBJ à côté de la scène ; le modèle d'origine n'est pas touché.")).clicked() {
+                        self.mesh_toggle = true;
+                    }
+                }
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 2.0;
-                    for (k, (label, key)) in [("déplacer", "W"), ("tourner", "E"), ("taille", "R")].iter().enumerate() {
+                    for (k, (label, key)) in [("déplacer", "G"), ("tourner", "R"), ("taille", "S")].iter().enumerate() {
                         if ui.selectable_label(self.gizmo_mode == k as u8, egui::RichText::new(crate::i18n::t(label)).size(11.0)).on_hover_text(format!("{} ({key})", crate::i18n::t("Ce que fait la poignée dans la vue"))).clicked() {
                             self.gizmo_mode = k as u8;
                         }
@@ -3166,7 +3574,7 @@ impl Viewer {
         let mut modal_ended = false;
         let mut marker_pick: Option<usize> = None;
         let mut boxed_pick: Option<Vec<usize>> = None;
-        if self.edit.is_none() && crate::scene::is_scene(&self.path) {
+        if self.edit.is_none() && self.mesh.is_none() && crate::scene::is_scene(&self.path) {
             if resp.hovered() && !ui.ctx().egui_wants_keyboard_input() {
                 // G, R, S : déplacer, tourner, redimensionner l'objet choisi à la souris, sans rien tenir
                 if self.modal.is_none() {
@@ -3382,7 +3790,7 @@ impl Viewer {
                 }
             }
         }
-        let dragging = self.gizmo_axis.is_none() && self.modal.is_none() && self.box_sel.is_none() && (resp.dragged_by(egui::PointerButton::Middle) || (!guiding && resp.dragged_by(egui::PointerButton::Primary)) || resp.dragged_by(egui::PointerButton::Secondary));
+        let dragging = self.gizmo_axis.is_none() && self.modal.is_none() && self.box_sel.is_none() && self.mesh.as_ref().is_none_or(|m| m.modal.is_none() && m.boxing.is_none()) && (resp.dragged_by(egui::PointerButton::Middle) || (!guiding && resp.dragged_by(egui::PointerButton::Primary)) || resp.dragged_by(egui::PointerButton::Secondary));
         if resp.clicked() {
             if let (Some(e), Some((_, _, prep)), Some(pt)) = (&mut self.edit, &self.prepared, resp.interact_pointer_pos()) {
                 if let Some((tri, bary)) = pick(prep, &self.cam, rect.width(), rect.height(), pt.x - rect.left(), pt.y - rect.top()) {
@@ -3506,6 +3914,7 @@ impl Viewer {
         if let Some(t) = &self.tex {
             painter.image(t.id(), rect, egui::Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
         }
+        self.mesh_edit_ui(ui, rect, &resp);
         // Repères des lumières et des caméras de la scène
         if let (Some(scene), Some((lo, hi)), true) = (self.scene.as_ref(), self.scene_frame, self.edit.is_none()) {
             let longest = (hi[0] - lo[0]).max(hi[1] - lo[1]).max(hi[2] - lo[2]).max(1e-9);
@@ -3712,7 +4121,7 @@ impl Viewer {
             painter.line_segment([o, end], Stroke::new(2.0, col));
             painter.text(end, egui::Align2::CENTER_CENTER, label, egui::FontId::monospace(10.0), col);
         }
-        let hint = self.capture_msg.clone().unwrap_or_else(|| if self.modal.is_some() { String::new() } else if crate::scene::is_scene(&self.path) { crate::i18n::t("G R S : déplacer, tourner, taille · Maj+A : ajouter · X : supprimer · Maj+D : dupliquer · H : cacher · I : clé · 1 3 7 : vues") } else { "glisser : tourner · Maj / clic droit : déplacer · molette : zoom · L : lumière · H : HDRI · 1 3 7 : vues".into() });
+        let hint = self.capture_msg.clone().unwrap_or_else(|| if self.modal.is_some() || self.mesh.as_ref().is_some_and(|m| m.modal.is_some()) { String::new() } else if self.mesh.is_some() { crate::i18n::t("MODE ÉDITION · Tab : sortir · clic, Maj+clic, A, B : sommets · G R S · E extruder · F face · X supprimer · Ctrl+Z") } else if crate::scene::is_scene(&self.path) { crate::i18n::t("G R S : déplacer, tourner, taille · Maj+A : ajouter · X : supprimer · Maj+D : dupliquer · H : cacher · I : clé · 1 3 7 : vues") } else { "glisser : tourner · Maj / clic droit : déplacer · molette : zoom · L : lumière · H : HDRI · 1 3 7 : vues".into() });
         painter.text(rect.right_bottom() + vec2(-12.0, -10.0), egui::Align2::RIGHT_BOTTOM, hint, egui::FontId::monospace(10.5), if self.look.show_bg { Color32::from_gray(220) } else { p.muted });
     }
 }

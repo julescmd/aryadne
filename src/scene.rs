@@ -547,6 +547,15 @@ fn cached(path: &Path) -> Result<Arc<crate::model3d::Model>, String> {
     Ok(m)
 }
 
+/// Le modèle d'origine d'un objet (forme de base ou fichier), tel qu'il est avant d'être placé dans la scène.
+pub fn source_model(scene_path: &Path, o: &Object) -> Result<Arc<crate::model3d::Model>, String> {
+    if o.file.starts_with('@') {
+        primitive(&o.file).map(Arc::new).ok_or_else(|| format!("forme inconnue : {}", o.file))
+    } else {
+        cached(&resolve(scene_path, &o.file))
+    }
+}
+
 /// Réunit les objets visibles en un seul modèle, Y en haut.
 /// Renvoie aussi, pour chaque objet, l'erreur de chargement éventuelle.
 pub fn build(scene: &Scene, scene_path: &Path) -> (Result<crate::model3d::Model, String>, Vec<Option<String>>) {

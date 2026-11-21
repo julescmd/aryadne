@@ -1123,5 +1123,13 @@
  "Ctrl+F chercher · Ctrl+Z annuler · F2 renommer le fichier · ^P ouvrir · ^⇧P commandes": "Ctrl+F find · Ctrl+Z undo · F2 rename file · ^P open · ^⇧P commands",
  "F2 renommer le fichier · ^P ouvrir · ^⇧P commandes": "F2 rename file · ^P open · ^⇧P commands",
  "G R S : déplacer, tourner, taille (X Y Z : axe) · Maj+clic, A, B : sélection · Maj+A ajouter · X supprimer · Maj+D dupliquer · Ctrl+P parent · H cacher · I clé · Ctrl+Z annuler": "G R S: move, rotate, scale (X Y Z: axis) · Shift+click, A, B: select · Shift+A add · X delete · Shift+D duplicate · Ctrl+P parent · H hide · I key · Ctrl+Z undo",
- "G R S : déplacer, tourner, taille (X Y Z : axe) · Maj+clic, A, B : sélection · Maj+A ajouter · X supprimer · Maj+D dupliquer · P parent · H cacher · I clé · Ctrl+Z annuler": "G R S: move, rotate, scale (X Y Z: axis) · Shift+click, A, B: select · Shift+A add · X delete · Shift+D duplicate · P parent · H hide · I key · Ctrl+Z undo"
+ "G R S : déplacer, tourner, taille (X Y Z : axe) · Maj+clic, A, B : sélection · Maj+A ajouter · X supprimer · Maj+D dupliquer · P parent · H cacher · I clé · Ctrl+Z annuler": "G R S: move, rotate, scale (X Y Z: axis) · Shift+click, A, B: select · Shift+A add · X delete · Shift+D duplicate · P parent · H hide · I key · Ctrl+Z undo",
+ "choisis d'abord un objet à modifier": "select an object to edit first",
+ "seuls les objets à maillage se modifient en mode édition": "only mesh objects can be edited in edit mode",
+ "extruder demande au moins une face dont tous les sommets sont choisis": "extrude needs at least one face with all its vertices selected",
+ "MODE ÉDITION · Tab : sortir · clic, Maj+clic, A, B : sommets · G R S · E extruder · F face · X supprimer · Ctrl+Z": "EDIT MODE · Tab: exit · click, Shift+click, A, B: vertices · G R S · E extrude · F face · X delete · Ctrl+Z",
+ "MODE ÉDITION · Tab sortir · clic, Maj+clic, A, B : sommets · G R S (X Y Z : axe) · E extruder · F face · X supprimer · Ctrl+Z annuler": "EDIT MODE · Tab exit · click, Shift+click, A, B: vertices · G R S (X Y Z: axis) · E extrude · F face · X delete · Ctrl+Z undo",
+ "mode édition (Tab)": "edit mode (Tab)",
+ "sortir du mode édition (Tab)": "leave edit mode (Tab)",
+ "Modifier le maillage : sommets, extrusion, faces. Le maillage devient un fichier OBJ à côté de la scène ; le modèle d'origine n'est pas touché.": "Edit the mesh: vertices, extrusion, faces. The mesh becomes an OBJ file next to the scene; the original model is untouched."
 }
