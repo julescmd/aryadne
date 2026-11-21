@@ -1019,5 +1019,13 @@
  "regarder par ici": "look through",
  "poser sur la vue": "set from view",
  "Aligne la vue sur cette caméra": "Align the view with this camera",
- "Enregistre la vue actuelle dans cette caméra": "Store the current view in this camera"
+ "Enregistre la vue actuelle dans cette caméra": "Store the current view in this camera",
+ "soleil": "sun",
+ "ponctuelle": "point",
+ "portée": "range",
+ "Une direction : tourne-la pour changer d'où vient la lumière": "A direction: rotate it to change where the light comes from",
+ "Elle éclaire autour d'elle : déplace-la": "It lights its surroundings: move it",
+ "Sa couleur se règle plus bas.": "Its color is set below.",
+ "ombres portées": "cast shadows",
+ "Chaque lumière projette l'ombre des objets. Plus lent sur les gros modèles.": "Each light casts object shadows. Slower on heavy models."
 }

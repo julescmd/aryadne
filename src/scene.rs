@@ -21,6 +21,9 @@ fn half() -> f32 {
 fn energy() -> f32 {
     1.2
 }
+fn range() -> f32 {
+    8.0
+}
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct Object {
@@ -57,12 +60,29 @@ pub struct Object {
     /// Force d'une lumière
     #[serde(default = "energy")]
     pub energy: f32,
+    /// Lumière ponctuelle (elle éclaire autour d'elle) plutôt que soleil (une direction)
+    #[serde(default)]
+    pub point: bool,
+    /// Portée d'une lumière ponctuelle, dans les unités de la scène
+    #[serde(default = "range")]
+    pub range: f32,
 }
 
 impl Object {
     pub fn new(name: String, file: String) -> Object {
-        Object { name, file, pos: [0.0; 3], rot: [0.0; 3], scale: [1.0; 3], visible: true, color: None, mods: vec![], material: String::new(), parent: String::new(), opacity: 0.5, role: String::new(), energy: 1.2 }
+        Object { name, file, pos: [0.0; 3], rot: [0.0; 3], scale: [1.0; 3], visible: true, color: None, mods: vec![], material: String::new(), parent: String::new(), opacity: 0.5, role: String::new(), energy: 1.2, point: false, range: 8.0 }
     }
+}
+
+/// Une lumière de la scène, prête pour le rendu.
+#[derive(Clone, Copy, Debug)]
+pub struct SceneLight {
+    pub point: bool,
+    /// Soleil : direction vers la lumière. Ponctuelle : sa position dans la scène.
+    pub at: [f32; 3],
+    pub color: [f32; 3],
+    pub energy: f32,
+    pub range: f32,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -153,17 +173,33 @@ impl Scene {
     }
 
     /// La première lumière affichée : direction vers elle (pour l'éclairage), couleur et force.
+    #[cfg(test)]
     pub fn light(&self) -> Option<([f32; 3], [f32; 3], f32)> {
-        let k = (0..self.objects.len()).find(|&k| kind(&self.objects[k]) == Kind::Light && self.shown(k))?;
-        let (a, b) = (self.world(k, [0.0; 3]), self.world(k, [0.0, 1.0, 0.0]));
-        let d = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
-        let l = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
-        if l < 1e-9 {
-            return None;
+        self.lights().into_iter().find(|l| !l.point).map(|l| (l.at, l.color, l.energy))
+    }
+
+    /// Toutes les lumières affichées, dans l'ordre de la scène.
+    pub fn lights(&self) -> Vec<SceneLight> {
+        let mut out = vec![];
+        for k in 0..self.objects.len() {
+            let o = &self.objects[k];
+            if kind(o) != Kind::Light || !self.shown(k) {
+                continue;
+            }
+            let color = o.color.map(|c| [c[0] as f32 / 255.0, c[1] as f32 / 255.0, c[2] as f32 / 255.0]).unwrap_or([1.0, 0.97, 0.92]);
+            let a = self.world(k, [0.0; 3]);
+            if o.point {
+                out.push(SceneLight { point: true, at: a, color, energy: o.energy.max(0.0), range: o.range.max(1e-3) });
+                continue;
+            }
+            let b = self.world(k, [0.0, 1.0, 0.0]);
+            let d = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+            let l = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+            if l > 1e-9 {
+                out.push(SceneLight { point: false, at: [d[0] / l, d[1] / l, d[2] / l], color, energy: o.energy.max(0.0), range: 0.0 });
+            }
         }
-        let o = &self.objects[k];
-        let c = o.color.map(|c| [c[0] as f32 / 255.0, c[1] as f32 / 255.0, c[2] as f32 / 255.0]).unwrap_or([1.0, 0.97, 0.92]);
-        Some(([d[0] / l, d[1] / l, d[2] / l], c, o.energy.max(0.0)))
+        out
     }
 
     pub fn parent_of(&self, k: usize) -> Option<usize> {
@@ -445,6 +481,12 @@ mod tests {
         assert!((l.light().unwrap().0[1] - 1.0).abs() < 1e-5);
         l.objects[k].rot = [0.0, 0.0, 90.0];
         assert!((l.light().unwrap().0[0] + 1.0).abs() < 1e-5);
+        // Une ponctuelle donne sa position, et n'est pas prise pour le soleil
+        let q = l.add_role("lampe", "light");
+        l.objects[q].point = true;
+        l.objects[q].pos = [1.0, 2.0, 3.0];
+        let all = l.lights();
+        assert!(all.len() == 2 && all[1].point && all[1].at == [1.0, 2.0, 3.0]);
         // Sans modèle, la scène s'ouvre quand même
         assert!(build_ranges(&l, &file).0.is_ok());
         // Objet caché ou fichier manquant : la scène reste lisible

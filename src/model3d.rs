@@ -775,6 +775,8 @@ pub struct Prepared {
     pub mat: Vec<u16>,
     /// Courbure par sommet, calculée à la demande (node « courbure »)
     curv: std::sync::OnceLock<Vec<f32>>,
+    /// Arbre de rayons pour les ombres portées, construit au premier besoin
+    bvh: std::sync::OnceLock<crate::bvh::Bvh>,
 }
 
 impl Prepared {
@@ -790,7 +792,7 @@ impl Prepared {
         let floor = pos.iter().map(|v| v[1]).fold(f32::MAX, f32::min);
         let lin = |c: u8| (c as f32 / 255.0).powf(2.2);
         let colors = colors.iter().map(|c| [lin(c.r()), lin(c.g()), lin(c.b())]).collect();
-        Self { pos, nrm, tris, colors, edges, floor, uv: vec![], mat: vec![], curv: std::sync::OnceLock::new() }
+        Self { pos, nrm, tris, colors, edges, floor, uv: vec![], mat: vec![], curv: std::sync::OnceLock::new(), bvh: std::sync::OnceLock::new() }
     }
     pub fn tri_count(&self) -> usize {
         self.tris.len()
@@ -802,7 +804,7 @@ impl Prepared {
         let nrm = vertex_normals(&m.pos, &m.tris);
         let lin = |c: u8| (c as f32 / 255.0).powf(2.2);
         let colors = m.colors.iter().map(|c| [lin(c.r()), lin(c.g()), lin(c.b())]).collect();
-        Self { pos: m.pos, nrm, tris: m.tris, colors, edges: m.edges, floor, uv: vec![], mat: vec![], curv: std::sync::OnceLock::new() }
+        Self { pos: m.pos, nrm, tris: m.tris, colors, edges: m.edges, floor, uv: vec![], mat: vec![], curv: std::sync::OnceLock::new(), bvh: std::sync::OnceLock::new() }
     }
 
     pub fn from_mesh(m: crate::modifiers::Mesh) -> Self {
@@ -822,7 +824,7 @@ impl Prepared {
         let floor = pos.iter().map(|v| v[1]).fold(f32::MAX, f32::min);
         let lin = |c: u8| (c as f32 / 255.0).powf(2.2);
         let colors = m.colors.iter().map(|c| [lin(c.r()), lin(c.g()), lin(c.b())]).collect();
-        Self { pos, nrm, tris: m.tris, colors, edges: m.edges, floor, uv: vec![], mat: vec![], curv: std::sync::OnceLock::new() }
+        Self { pos, nrm, tris: m.tris, colors, edges: m.edges, floor, uv: vec![], mat: vec![], curv: std::sync::OnceLock::new(), bvh: std::sync::OnceLock::new() }
     }
 }
 
@@ -850,6 +852,10 @@ pub struct Look {
     /// Matériaux en nodes par ID de matériau (mode édition) ; `slot_rev` change quand l'un d'eux change
     pub slot_nodes: Vec<Option<std::sync::Arc<crate::nodes::Program>>>,
     pub slot_rev: u64,
+    /// Lumières de la scène ; vide : la lumière unique de la vue (`light`)
+    pub lamps: Vec<Lamp>,
+    /// Ombres portées (un rayon par lumière et par pixel)
+    pub shadows: bool,
 }
 
 impl Default for Look {
@@ -871,6 +877,8 @@ impl Default for Look {
             uv_checker: false,
             slot_nodes: vec![],
             slot_rev: 0,
+            lamps: vec![],
+            shadows: false,
         }
     }
 }
@@ -882,7 +890,15 @@ impl Look {
             self.material,
             self.smooth,
             std::sync::Arc::as_ptr(&self.env) as usize,
-            [self.env_rot.to_bits(), self.env_strength.to_bits(), self.exposure.to_bits(), 0],
+            [self.env_rot.to_bits(), self.env_strength.to_bits(), self.exposure.to_bits(), {
+                use std::hash::{Hash, Hasher};
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                self.shadows.hash(&mut h);
+                for l in &self.lamps {
+                    (l.point, l.at.map(f32::to_bits), l.color.map(f32::to_bits), l.intensity.to_bits(), l.range.to_bits()).hash(&mut h);
+                }
+                h.finish() as u32
+            }],
             self.light,
             self.show_bg,
             self.blur_bg,
@@ -893,6 +909,18 @@ impl Look {
             self.slot_rev,
         )
     }
+}
+
+/// Une lumière du rendu, dans l'espace du modèle préparé.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Lamp {
+    pub point: bool,
+    /// Soleil : direction vers la lumière. Ponctuelle : sa position.
+    pub at: V3,
+    pub color: [f32; 3],
+    pub intensity: f32,
+    /// Portée d'une ponctuelle : au-delà, elle n'éclaire plus
+    pub range: f32,
 }
 
 pub struct Frame {
@@ -1012,6 +1040,9 @@ pub fn render(m: &Prepared, cam: &Camera, look: &Look, w: usize, h: usize) -> Fr
     let exposure = 2f32.powf(look.exposure);
     let env = &look.env;
     let ld = look.light.dir();
+    // Les lumières à calculer : celles de la scène, sinon la lumière de la vue
+    let lamps: Vec<Lamp> = if look.lamps.is_empty() { vec![Lamp { point: false, at: ld, color: look.light.color, intensity: look.light.intensity, range: 0.0 }] } else { look.lamps.clone() };
+    let bvh = look.shadows.then(|| m.bvh.get_or_init(|| crate::bvh::Bvh::new(&m.pos, &m.tris)));
     let (albedo0, rough, metal) = look.material.params();
     let wire = look.wire;
 
@@ -1082,6 +1113,37 @@ pub fn render(m: &Prepared, cam: &Camera, look: &Look, w: usize, h: usize) -> Fr
                     let t = tone([c[0] * s, c[1] * s, c[2] * s], exposure);
                     chunk[o..o + 3].copy_from_slice(&t);
                     chunk[o + 3] = 255;
+                } else if let Some(b) = bvh {
+                    // Sol : là où un objet cache une lumière, une ombre se pose sur le plan du sol
+                    let eye = if cam.ortho { cam.unrotate([(x as f32 + 0.5 - cx) / ortho_scale - cam.pan[0], -(y as f32 + 0.5 - cy) / ortho_scale - cam.pan[1], cam.dist]) } else { cam.unrotate([-cam.pan[0], -cam.pan[1], cam.dist]) };
+                    if ray[1].abs() > 1e-5 {
+                        let tt = (m.floor - eye[1]) / ray[1];
+                        if tt > 0.0 {
+                            let hit = [eye[0] + ray[0] * tt, m.floor + 1e-3, eye[2] + ray[2] * tt];
+                            let (mut dark, mut total) = (0.0f32, 0.0f32);
+                            for lamp in &lamps {
+                                let (dir, reach, fall) = if lamp.point {
+                                    let to = sub(lamp.at, hit);
+                                    let d = dot(to, to).sqrt().max(1e-6);
+                                    ([to[0] / d, to[1] / d, to[2] / d], d, (1.0 - (d / lamp.range.max(1e-6)).min(1.0).powi(2)).powi(2))
+                                } else {
+                                    (lamp.at, 1e6, 1.0)
+                                };
+                                let e = lamp.intensity * fall * dir[1].max(0.0);
+                                if e <= 0.0 {
+                                    continue;
+                                }
+                                total += e;
+                                if b.occluded(hit, dir, 1e-3, reach) {
+                                    dark += e;
+                                }
+                            }
+                            if dark > 0.0 {
+                                chunk[o..o + 3].copy_from_slice(&[0, 0, 0]);
+                                chunk[o + 3] = (dark / total.max(1e-6) * 0.42 * 255.0) as u8;
+                            }
+                        }
+                    }
                 }
                 continue;
             }
@@ -1164,7 +1226,6 @@ pub fn render(m: &Prepared, cam: &Camera, look: &Look, w: usize, h: usize) -> Fr
                 let (ao, sheen, sss, sss_col) = extra;
                 let irr = env.irradiance(ne);
                 let irr = [irr[0] * ao, irr[1] * ao, irr[2] * ao];
-                let wrap = ((dot(nrm, ld) + 0.6) / 1.6).max(0.0);
                 let r = sub([2.0 * dot(nrm, v) * nrm[0], 2.0 * dot(nrm, v) * nrm[1], 2.0 * dot(nrm, v) * nrm[2]], v);
                 let refl = env.reflect(rot_y(r, -look.env_rot), rough);
                 let f0 = if look.nodes.is_some() || slot_prog.is_some() {
@@ -1175,22 +1236,63 @@ pub fn render(m: &Prepared, cam: &Camera, look: &Look, w: usize, h: usize) -> Fr
                     [0.04; 3]
                 };
                 let fres = (1.0 - ndv).powf(5.0);
-                let ndl = dot(nrm, ld).max(0.0);
-                let half = norm([ld[0] + v[0], ld[1] + v[1], ld[2] + v[2]]);
                 let shin = 2.0 / (rough * rough).max(0.002) - 2.0;
-                let spec_l = dot(nrm, half).max(0.0).powf(shin) * (shin + 8.0) / 25.0;
-                let li = look.light.intensity;
-                let lc = look.light.color;
                 let (transmission, ior, coat, toon, spec_k) = surf;
-                // Toon : la lumière tombe par paliers, et l'ambiance devient une teinte plate
-                let (ndl, irr, spec_l) = if toon >= 1.0 {
-                    let bands = toon.round();
-                    let q = ((ndl * bands).ceil() / bands).min(1.0);
+                // Toon : l'ambiance devient une teinte plate
+                let irr = if toon >= 1.0 {
                     let amb = (irr[0] + irr[1] + irr[2]) / 3.0;
-                    (q, [amb.min(0.35); 3], if spec_l > 0.6 { 1.0 } else { 0.0 })
+                    [amb.min(0.35); 3]
                 } else {
-                    (ndl, irr, spec_l)
+                    irr
                 };
+                // Chaque lumière ajoute sa part : éclairage direct, reflet, et lumière qui déborde (sous-surface)
+                let (mut l_diff, mut l_spec, mut l_wrap) = ([0.0f32; 3], [0.0f32; 3], [0.0f32; 3]);
+                let here = [pa[0] * w0 + pb[0] * w1 + pc[0] * w2, pa[1] * w0 + pb[1] * w1 + pc[1] * w2, pa[2] * w0 + pb[2] * w1 + pc[2] * w2];
+                for lamp in &lamps {
+                    let (dir, reach, fall) = if lamp.point {
+                        let to = sub(lamp.at, here);
+                        let d = dot(to, to).sqrt().max(1e-6);
+                        let k = (1.0 - (d / lamp.range.max(1e-6)).min(1.0).powi(2)).powi(2);
+                        ([to[0] / d, to[1] / d, to[2] / d], d, k)
+                    } else {
+                        (lamp.at, f32::MAX, 1.0)
+                    };
+                    if fall <= 0.0 || lamp.intensity <= 0.0 {
+                        continue;
+                    }
+                    let raw = dot(nrm, dir);
+                    let mut lit = fall * lamp.intensity;
+                    // Ombre portée : quelque chose entre ce point et la lumière ?
+                    if let Some(b) = bvh {
+                        if raw > 0.0 || sss > 0.0 {
+                            let side = if dot(face, dir) >= 0.0 { 1.0 } else { -1.0 };
+                            let o = [here[0] + face[0] * side * 2e-3, here[1] + face[1] * side * 2e-3, here[2] + face[2] * side * 2e-3];
+                            if b.occluded(o, dir, 1e-3, if lamp.point { reach - 4e-3 } else { 1e6 }) {
+                                lit = 0.0;
+                            }
+                        }
+                    }
+                    if lit <= 0.0 {
+                        continue;
+                    }
+                    let ndl = raw.max(0.0);
+                    let half = norm([dir[0] + v[0], dir[1] + v[1], dir[2] + v[2]]);
+                    let spec_l = dot(nrm, half).max(0.0).powf(shin) * (shin + 8.0) / 25.0;
+                    let wrap = ((raw + 0.6) / 1.6).max(0.0);
+                    // Toon : la lumière tombe par paliers
+                    let (ndl, spec_l) = if toon >= 1.0 {
+                        let bands = toon.round();
+                        (((ndl * bands).ceil() / bands).min(1.0), if spec_l > 0.6 { 1.0 } else { 0.0 })
+                    } else {
+                        (ndl, spec_l)
+                    };
+                    for ch in 0..3 {
+                        let e = lamp.color[ch] * lit;
+                        l_diff[ch] += e * ndl;
+                        l_spec[ch] += e * spec_l;
+                        l_wrap[ch] += e * (wrap - ndl).max(0.0);
+                    }
+                }
                 // Ce qu'on voit à travers : l'environnement dans la direction réfractée
                 let through = if transmission > 0.0 {
                     let eta = 1.0 / ior;
@@ -1210,12 +1312,12 @@ pub fn render(m: &Prepared, cam: &Camera, look: &Look, w: usize, h: usize) -> Fr
                 let mut out = [0.0f32; 3];
                 for ch in 0..3 {
                     let f = f0[ch] + (1.0 - f0[ch]) * fres * (1.0 - rough).powf(2.0);
-                    let diff = albedo[ch] * (irr[ch] * s + lc[ch] * li * ndl) * (1.0 - metal);
+                    let diff = albedo[ch] * (irr[ch] * s + l_diff[ch]) * (1.0 - metal);
                     let diff = diff * (1.0 - transmission) + through[ch] * s * albedo[ch] * transmission * (1.0 - metal);
-                    let diff = diff + sss_col[ch] * albedo[ch] * lc[ch] * li * (wrap - ndl).max(0.0) * sss * (1.0 - metal);
-                    let spec = (refl[ch] * s * (0.5 + 0.5 * ao) + lc[ch] * li * spec_l * 0.25) * f * spec_k;
-                    let diff = diff + sheen * fres.sqrt() * (irr[ch] * s + lc[ch] * li * ndl) * (0.5 + 0.5 * albedo[ch]) * 0.6;
-                    let clear = coat * (coat_refl[ch] * s + lc[ch] * li * spec_l * 0.25) * (0.04 + 0.96 * fres);
+                    let diff = diff + sss_col[ch] * albedo[ch] * l_wrap[ch] * sss * (1.0 - metal);
+                    let spec = (refl[ch] * s * (0.5 + 0.5 * ao) + l_spec[ch] * 0.25) * f * spec_k;
+                    let diff = diff + sheen * fres.sqrt() * (irr[ch] * s + l_diff[ch]) * (0.5 + 0.5 * albedo[ch]) * 0.6;
+                    let clear = coat * (coat_refl[ch] * s + l_spec[ch] * 0.25) * (0.04 + 0.96 * fres);
                     out[ch] = diff * (1.0 - f) + spec + clear + emit[ch];
                 }
                 out
@@ -1795,7 +1897,17 @@ impl Viewer {
                             ui.label(egui::RichText::new(crate::i18n::t("force")).size(11.0).color(p.muted));
                             changed |= ui.add(egui::Slider::new(&mut o.energy, 0.0..=5.0)).changed();
                         });
-                        ui.label(egui::RichText::new(crate::i18n::t("Tourne-la pour changer d'où vient la lumière. Sa couleur se règle plus bas.")).size(10.0).color(p.muted));
+                        ui.horizontal(|ui| {
+                            changed |= ui.selectable_value(&mut o.point, false, egui::RichText::new(crate::i18n::t("soleil")).size(11.0)).on_hover_text(crate::i18n::t("Une direction : tourne-la pour changer d'où vient la lumière")).changed();
+                            changed |= ui.selectable_value(&mut o.point, true, egui::RichText::new(crate::i18n::t("ponctuelle")).size(11.0)).on_hover_text(crate::i18n::t("Elle éclaire autour d'elle : déplace-la")).changed();
+                        });
+                        if o.point {
+                            ui.horizontal(|ui| {
+                                ui.label(egui::RichText::new(crate::i18n::t("portée")).size(11.0).color(p.muted));
+                                changed |= ui.add(egui::DragValue::new(&mut o.range).speed(0.05).range(0.01..=10000.0)).changed();
+                            });
+                        }
+                        ui.label(egui::RichText::new(crate::i18n::t("Sa couleur se règle plus bas.")).size(10.0).color(p.muted));
                     }
                     crate::scene::Kind::Camera => {
                         ui.horizontal(|ui| {
@@ -2264,6 +2376,8 @@ impl Viewer {
             });
             egui::containers::menu::MenuButton::new(crate::i18n::t("éclairage ▾")).config(stay.clone()).ui(ui, |ui| {
                 ui.set_min_width(280.0);
+                ui.checkbox(&mut self.look.shadows, crate::i18n::t("ombres portées")).on_hover_text(crate::i18n::t("Chaque lumière projette l'ombre des objets. Plus lent sur les gros modèles."));
+                ui.separator();
                 ui.label(egui::RichText::new(crate::i18n::t("environnement (HDRI)")).color(p.muted).size(11.0));
                 for (i, name) in PRESETS.iter().enumerate() {
                     if ui.selectable_label(self.look.env.name == *name, *name).clicked() {
@@ -2801,11 +2915,13 @@ impl Viewer {
         let mut refs_key = 0u64;
         if let (Some(scene), Some((lo, hi)), true) = (self.scene.as_ref(), self.scene_frame, self.edit.is_none()) {
             use std::hash::{Hash, Hasher};
-            if let Some((d, color, energy)) = scene.light() {
-                look.light = Light { azimuth: d[0].atan2(d[2]), elevation: d[1].clamp(-1.0, 1.0).asin(), intensity: energy, color };
-            }
             let longest = (hi[0] - lo[0]).max(hi[1] - lo[1]).max(hi[2] - lo[2]).max(1e-9);
             let c = [(lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0, (lo[2] + hi[2]) / 2.0];
+            look.lamps = scene
+                .lights()
+                .into_iter()
+                .map(|l| Lamp { point: l.point, at: if l.point { [(l.at[0] - c[0]) / longest, (l.at[1] - c[1]) / longest, (l.at[2] - c[2]) / longest] } else { l.at }, color: l.color, intensity: l.energy, range: l.range / longest })
+                .collect();
             let nrm = |v: V3| [(v[0] - c[0]) / longest, (v[1] - c[1]) / longest, (v[2] - c[2]) / longest];
             let mut hsh = std::collections::hash_map::DefaultHasher::new();
             for (k, o) in scene.objects.iter().enumerate() {
@@ -2909,8 +3025,11 @@ impl Viewer {
                 let l = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt().max(1e-9);
                 let reach = longest * 0.12;
                 if let Some(tip) = project([a[0] + d[0] / l * reach, a[1] + d[1] / l * reach, a[2] + d[2] / l * reach]) {
-                    over.line_segment([at, tip], Stroke::new(1.5, col));
-                    over.circle_filled(tip, 2.5, col);
+                    // Une ponctuelle éclaire partout : pas de sens à montrer
+                    if !(kind == crate::scene::Kind::Light && o.point) {
+                        over.line_segment([at, tip], Stroke::new(1.5, col));
+                        over.circle_filled(tip, 2.5, col);
+                    }
                 }
                 if kind == crate::scene::Kind::Light {
                     over.circle_filled(at, 5.0, Color32::from_rgb(250, 200, 60));
@@ -3432,5 +3551,40 @@ mod apercu_smart {
             let bytes: Vec<u8> = img.px.iter().flat_map(|c| [(c[0] * 255.0) as u8, (c[1] * 255.0) as u8, (c[2] * 255.0) as u8, 255]).collect();
             image::RgbaImage::from_raw(420, 420, bytes).unwrap().save(format!("/tmp/smart{k}.png")).unwrap();
         }
+    }
+}
+
+#[cfg(test)]
+mod ombres {
+    use super::*;
+
+    /// Un petit carré au-dessus d'un grand : avec les ombres, le grand s'assombrit sous le petit.
+    #[test]
+    fn ombre_portee_et_lumiere_ponctuelle() {
+        let quad = |y: f32, r: f32, base: u32| (vec![[-r, y, -r], [r, y, -r], [r, y, r], [-r, y, r]], vec![[base, base + 2, base + 1], [base, base + 3, base + 2]]);
+        let (mut pos, mut tris) = quad(0.0, 0.5, 0);
+        let (p2, t2) = quad(0.2, 0.12, 4);
+        pos.extend(p2);
+        tris.extend(t2);
+        let n = tris.len();
+        let prep = Prepared::from_mesh_fixed(crate::modifiers::Mesh { pos, tris, colors: vec![Color32::from_gray(200); n], edges: vec![7; n] }, 0.0);
+        let cam = Camera { yaw: 0.0, pitch: 1.2, dist: 2.0, ..Default::default() };
+        let mut look = Look::default();
+        look.env_strength = 0.05;
+        look.lamps = vec![Lamp { point: false, at: [0.0, 1.0, 0.0], color: [1.0; 3], intensity: 2.0, range: 0.0 }];
+        let lum = |f: &Frame| f.rgba.chunks(4).map(|p| p[0] as u64).sum::<u64>();
+        let open = render(&prep, &cam, &look, 160, 160);
+        look.shadows = true;
+        let shaded = render(&prep, &cam, &look, 160, 160);
+        let darker = open.rgba.chunks(4).zip(shaded.rgba.chunks(4)).filter(|(a, b)| a[0] as i32 > b[0] as i32 + 40).count();
+        assert!(darker > 150 && darker < 4000, "{darker}");
+        assert!(lum(&shaded) < lum(&open));
+        // Ponctuelle : près du centre, elle éclaire plus le milieu du sol que ses coins, et rien hors de portée
+        look.shadows = false;
+        look.lamps = vec![Lamp { point: true, at: [0.4, 0.05, 0.4], color: [1.0; 3], intensity: 3.0, range: 0.5 }];
+        let near = render(&prep, &cam, &look, 160, 160);
+        look.lamps[0].at = [5.0, 5.0, 5.0];
+        let far = render(&prep, &cam, &look, 160, 160);
+        assert!(lum(&near) > lum(&far));
     }
 }
