@@ -2,6 +2,7 @@
 
 mod cloud;
 mod dock;
+mod montage;
 mod scene;
 mod workspace;
 mod retopo;
@@ -138,6 +139,7 @@ enum Content {
     Model(model3d::Viewer),
     Office(office::Viewer),
     Video(Box<video::Viewer>),
+    Montage(Box<montage::Editor>),
     Nodes(Box<nodes::Editor>),
     /// Vidéo ouverte alors que ffmpeg n'est pas encore installé.
     NeedFfmpeg(Option<std::sync::Arc<std::sync::Mutex<ffmpeg::InstallState>>>),
@@ -660,6 +662,15 @@ impl App {
                     Ok(e) => Content::Nodes(Box::new(e)),
                     Err(e) => Content::Unreadable(e),
                 }
+            } else if montage::is_project(&rel) {
+                if ffmpeg::find("ffmpeg").is_none() {
+                    Content::NeedFfmpeg(None)
+                } else {
+                    match vault::safe(&self.root(), &rel) {
+                        Ok(p) => Content::Montage(Box::new(montage::Editor::open(p))),
+                        Err(e) => Content::Unreadable(e),
+                    }
+                }
             } else if video::is_video(&rel) {
                 self.video_content(&rel)
             } else if office::is_office(&rel) {
@@ -946,6 +957,7 @@ impl App {
                             ("note du jour   Ctrl+J", extras::Cmd::Daily),
                             ("depuis un modèle…", extras::Cmd::FromTemplate),
                             ("scène 3D", extras::Cmd::NewScene),
+                            ("montage vidéo", extras::Cmd::NewMontage),
                             ("matériau en nodes", extras::Cmd::NewMaterial),
                             ("compositing en nodes", extras::Cmd::NewCompositor),
                         ] {
@@ -1508,6 +1520,9 @@ impl App {
                 }
                 Content::Video(viewer) => {
                     egui::Frame::new().inner_margin(egui::Margin::symmetric(16, 10)).show(ui, |ui| viewer.show(ui));
+                }
+                Content::Montage(m) => {
+                    egui::Frame::new().inner_margin(egui::Margin::symmetric(8, 6)).show(ui, |ui| m.show(ui));
                 }
                 Content::NeedFfmpeg(job) => {
                     let mut reopen = false;
@@ -3562,6 +3577,13 @@ impl App {
                 return;
             }
             // Une scène 3D ouverte reçoit les modèles glissés : ils y sont ajoutés, pas importés
+            // Un montage ouvert reçoit les médias glissés : ils deviennent des clips
+            if self.view() == View::Files {
+                if let Some(Content::Montage(m)) = self.active.and_then(|i| self.docs.get_mut(i)).map(|d| &mut d.content) {
+                    m.add.extend(paths);
+                    return;
+                }
+            }
             let for_scene = |f: &PathBuf| {
                 let n = f.to_string_lossy().to_lowercase();
                 model3d::is_model(&n) || [".png", ".jpg", ".jpeg", ".webp"].iter().any(|e| n.ends_with(e))

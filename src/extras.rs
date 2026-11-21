@@ -52,6 +52,7 @@ pub enum Cmd {
     Reload,
     NewMaterial,
     NewScene,
+    NewMontage,
     NewCompositor,
     Stats,
     RunFile,
@@ -74,6 +75,7 @@ impl App {
             ("nouvelle note depuis un modèle", "", Cmd::FromTemplate),
             ("nouveau board", "", Cmd::NewBoard),
             ("nouvelle scène 3D", "", Cmd::NewScene),
+            ("nouveau montage vidéo", "", Cmd::NewMontage),
             ("nouveau matériau (nodes)", "", Cmd::NewMaterial),
             ("nouveau compositing (nodes)", "", Cmd::NewCompositor),
             ("importer des fichiers…", "", Cmd::Import),
@@ -188,6 +190,19 @@ impl App {
             Cmd::Updates => self.dialog = Some(Dialog::Update),
             Cmd::Timer(min) => self.timer = Some(Timer { start: Instant::now(), minutes: min, label: if min <= 10 { "pause" } else { "focus" } }),
             Cmd::StopTimer => self.timer = None,
+            Cmd::NewMontage => {
+                let mut rel = "Montage.aryav".to_string();
+                let mut i = 2;
+                while self.entries.iter().any(|e| e.rel == rel) {
+                    rel = format!("Montage {i}.aryav");
+                    i += 1;
+                }
+                let r = vault::safe(&self.root(), &rel).and_then(|p| crate::montage::Project::default().write(&p));
+                if self.report(r).is_some() {
+                    self.refresh();
+                    self.open(rel);
+                }
+            }
             Cmd::NewScene => {
                 let dir = if self.entries.iter().any(|e| e.is_dir && e.rel == "3d") { "3d/" } else { "" };
                 let mut rel = format!("{dir}Scène.arya3");

@@ -162,7 +162,7 @@ impl App {
                             }
                             ui.separator();
                             let ctx = ui.ctx().clone();
-                            for (l, c) in [("note du jour", extras::Cmd::Daily), ("depuis un modèle…", extras::Cmd::FromTemplate), ("board…", extras::Cmd::NewBoard), ("scène 3D", extras::Cmd::NewScene), ("matériau en nodes", extras::Cmd::NewMaterial), ("compositing en nodes", extras::Cmd::NewCompositor)] {
+                            for (l, c) in [("note du jour", extras::Cmd::Daily), ("depuis un modèle…", extras::Cmd::FromTemplate), ("board…", extras::Cmd::NewBoard), ("scène 3D", extras::Cmd::NewScene), ("montage vidéo", extras::Cmd::NewMontage), ("matériau en nodes", extras::Cmd::NewMaterial), ("compositing en nodes", extras::Cmd::NewCompositor)] {
                                 if ui.button(crate::i18n::t(l)).clicked() {
                                     self.run_cmd(c, &ctx);
                                 }
