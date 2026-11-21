@@ -856,6 +856,9 @@ pub struct Look {
     pub lamps: Vec<Lamp>,
     /// Ombres portées (un rayon par lumière et par pixel)
     pub shadows: bool,
+    /// Douceur des ombres (0 : bord net) et nombre de rayons par lumière
+    pub shadow_soft: f32,
+    pub shadow_samples: u8,
 }
 
 impl Default for Look {
@@ -879,6 +882,8 @@ impl Default for Look {
             slot_rev: 0,
             lamps: vec![],
             shadows: false,
+            shadow_soft: 0.35,
+            shadow_samples: 8,
         }
     }
 }
@@ -893,7 +898,7 @@ impl Look {
             [self.env_rot.to_bits(), self.env_strength.to_bits(), self.exposure.to_bits(), {
                 use std::hash::{Hash, Hasher};
                 let mut h = std::collections::hash_map::DefaultHasher::new();
-                self.shadows.hash(&mut h);
+                (self.shadows, self.shadow_soft.to_bits(), self.shadow_samples).hash(&mut h);
                 for l in &self.lamps {
                     (l.point, l.at.map(f32::to_bits), l.color.map(f32::to_bits), l.intensity.to_bits(), l.range.to_bits()).hash(&mut h);
                 }
@@ -1043,6 +1048,32 @@ pub fn render(m: &Prepared, cam: &Camera, look: &Look, w: usize, h: usize) -> Fr
     // Les lumières à calculer : celles de la scène, sinon la lumière de la vue
     let lamps: Vec<Lamp> = if look.lamps.is_empty() { vec![Lamp { point: false, at: ld, color: look.light.color, intensity: look.light.intensity, range: 0.0 }] } else { look.lamps.clone() };
     let bvh = look.shadows.then(|| m.bvh.get_or_init(|| crate::bvh::Bvh::new(&m.pos, &m.tris)));
+    // Part de lumière qui arrive en `o` : plusieurs rayons légèrement écartés donnent un bord d'ombre doux.
+    // Le motif d'écart tourne d'un pixel à l'autre, ce qui change les marches d'escalier en grain fin.
+    let (soft, samples) = (look.shadow_soft.clamp(0.0, 1.0), if look.shadow_soft > 0.0 { look.shadow_samples.clamp(1, 32) as usize } else { 1 });
+    let shadow = |b: &crate::bvh::Bvh, o: V3, dir: V3, reach: f32, point: bool, x: usize, y: usize| -> f32 {
+        if samples <= 1 {
+            return if b.occluded(o, dir, 1e-3, reach) { 0.0 } else { 1.0 };
+        }
+        let t1 = norm(cross(dir, if dir[1].abs() < 0.9 { [0.0, 1.0, 0.0] } else { [1.0, 0.0, 0.0] }));
+        let t2 = cross(dir, t1);
+        let mut h = (x as u32).wrapping_mul(0x9E37_79B9) ^ (y as u32).wrapping_mul(0x85EB_CA6B);
+        h ^= h >> 15;
+        h = h.wrapping_mul(0x2C1B_3C6D);
+        let turn = (h >> 8) as f32 / 16_777_216.0 * std::f32::consts::TAU;
+        // Écart : un angle pour un soleil ; pour une ponctuelle, la taille de la source vue d'ici
+        let spread = if point { soft * 0.06 / reach.max(0.05) } else { soft * 0.09 };
+        let mut open = 0.0;
+        for k in 0..samples {
+            let r = ((k as f32 + 0.5) / samples as f32).sqrt() * spread;
+            let a = turn + k as f32 * 2.399_963;
+            let d = norm([dir[0] + (t1[0] * a.cos() + t2[0] * a.sin()) * r, dir[1] + (t1[1] * a.cos() + t2[1] * a.sin()) * r, dir[2] + (t1[2] * a.cos() + t2[2] * a.sin()) * r]);
+            if !b.occluded(o, d, 1e-3, reach) {
+                open += 1.0;
+            }
+        }
+        open / samples as f32
+    };
     let (albedo0, rough, metal) = look.material.params();
     let wire = look.wire;
 
@@ -1134,9 +1165,7 @@ pub fn render(m: &Prepared, cam: &Camera, look: &Look, w: usize, h: usize) -> Fr
                                     continue;
                                 }
                                 total += e;
-                                if b.occluded(hit, dir, 1e-3, reach) {
-                                    dark += e;
-                                }
+                                dark += e * (1.0 - shadow(b, hit, dir, reach, lamp.point, x, y));
                             }
                             if dark > 0.0 {
                                 chunk[o..o + 3].copy_from_slice(&[0, 0, 0]);
@@ -1267,9 +1296,7 @@ pub fn render(m: &Prepared, cam: &Camera, look: &Look, w: usize, h: usize) -> Fr
                         if raw > 0.0 || sss > 0.0 {
                             let side = if dot(face, dir) >= 0.0 { 1.0 } else { -1.0 };
                             let o = [here[0] + face[0] * side * 2e-3, here[1] + face[1] * side * 2e-3, here[2] + face[2] * side * 2e-3];
-                            if b.occluded(o, dir, 1e-3, if lamp.point { reach - 4e-3 } else { 1e6 }) {
-                                lit = 0.0;
-                            }
+                            lit *= shadow(b, o, dir, if lamp.point { reach - 4e-3 } else { 1e6 }, lamp.point, x, y);
                         }
                     }
                     if lit <= 0.0 {
@@ -1638,13 +1665,69 @@ impl Viewer {
         self.env_error = None;
     }
 
-    fn capture(&mut self) {
-        let Some((_, _, prep)) = &self.prepared else { return };
+    /// Ce que la vue affiche vraiment : matériaux par objet, lumières de la scène, images de référence.
+    /// Les captures passent par ici aussi, pour donner la même image que la vue.
+    fn render_setup(&mut self) -> (Look, Vec<RefPlane>, u64) {
         let mut look = self.look.clone();
-        if !look.show_bg {
-            look.show_bg = false;
+        if self.edit.is_none() && self.scene.is_some() {
+            look.slot_nodes = self.slot_progs.iter().map(|p| p.as_ref().map(|x| x.2.clone())).collect();
+            look.slot_rev = self.slot_rev;
         }
-        let f = render(prep, &self.cam, &look, 2400, 2400);
+        if let Some(e) = &self.edit {
+            look.material = Material::Color;
+            look.nodes = None;
+            look.slot_nodes = self.slot_progs.iter().map(|p| p.as_ref().map(|x| x.2.clone())).collect();
+            look.slot_rev = self.slot_rev;
+            look.uv_checker = e.checker && e.data.has_uv();
+            if look.wire == 0.0 {
+                look.wire = 0.35;
+            }
+        }
+        // Scène : sa première lumière remplace celle de la vue, et ses images de référence entrent dans le rendu
+        let mut refs: Vec<RefPlane> = vec![];
+        let mut refs_key = 0u64;
+        if let (Some(scene), Some((lo, hi)), true) = (self.scene.as_ref(), self.scene_frame, self.edit.is_none()) {
+            use std::hash::{Hash, Hasher};
+            let longest = (hi[0] - lo[0]).max(hi[1] - lo[1]).max(hi[2] - lo[2]).max(1e-9);
+            let c = [(lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0, (lo[2] + hi[2]) / 2.0];
+            look.lamps = scene
+                .lights()
+                .into_iter()
+                .map(|l| Lamp { point: l.point, at: if l.point { [(l.at[0] - c[0]) / longest, (l.at[1] - c[1]) / longest, (l.at[2] - c[2]) / longest] } else { l.at }, color: l.color, intensity: l.energy, range: l.range / longest })
+                .collect();
+            let nrm = |v: V3| [(v[0] - c[0]) / longest, (v[1] - c[1]) / longest, (v[2] - c[2]) / longest];
+            let mut hsh = std::collections::hash_map::DefaultHasher::new();
+            for (k, o) in scene.objects.iter().enumerate() {
+                if crate::scene::kind(o) != crate::scene::Kind::Image || !scene.shown(k) || o.opacity <= 0.0 {
+                    continue;
+                }
+                let file = crate::scene::resolve(&self.path, &o.file);
+                let entry = self.ref_tex.entry(file.clone()).or_insert_with(|| {
+                    image::open(&file).ok().map(|im| std::sync::Arc::new(if im.width().max(im.height()) > 2048 { im.thumbnail(2048, 2048) } else { im }.to_rgba8()))
+                });
+                let Some(img) = entry else { continue };
+                let aspect = img.width() as f32 / img.height().max(1) as f32;
+                let (p0, px, py) = (nrm(scene.world(k, [0.0; 3])), nrm(scene.world(k, [aspect, 0.0, 0.0])), nrm(scene.world(k, [0.0, 1.0, 0.0])));
+                let plane = RefPlane { center: p0, ux: [px[0] - p0[0], px[1] - p0[1], px[2] - p0[2]], uy: [py[0] - p0[0], py[1] - p0[1], py[2] - p0[2]], img: img.clone(), opacity: o.opacity };
+                file.hash(&mut hsh);
+                for v in [plane.center, plane.ux, plane.uy] {
+                    v.map(|x| x.to_bits()).hash(&mut hsh);
+                }
+                plane.opacity.to_bits().hash(&mut hsh);
+                refs.push(plane);
+            }
+            refs_key = hsh.finish();
+        }
+        (look, refs, refs_key)
+    }
+
+    fn capture(&mut self) {
+        let (mut look, refs, _) = self.render_setup();
+        // Image fixe : on peut se permettre des ombres plus fines qu'à l'écran
+        look.shadow_samples = look.shadow_samples.max(16);
+        let Some((_, _, prep)) = &self.prepared else { return };
+        let mut f = render(prep, &self.cam, &look, 2400, 2400);
+        draw_refs(&mut f, &self.cam, &refs);
         let img = image::RgbaImage::from_raw(2400, 2400, f.rgba).unwrap_or_default();
         let img = image::DynamicImage::ImageRgba8(img);
         let stem = self.path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "modele".into());
@@ -1665,6 +1748,8 @@ impl Viewer {
 
     /// Tour complet du modèle en GIF animé (48 images, 520 px).
     fn turntable_gif(&mut self) {
+        let (mut look, refs, _) = self.render_setup();
+        look.show_bg = true;
         let Some((_, _, prep)) = &self.prepared else { return };
         let size = 520;
         let stem = self.path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "modele".into());
@@ -1673,11 +1758,10 @@ impl Viewer {
             let file = std::fs::File::create(&out).map_err(|e| e.to_string())?;
             let mut enc = image::codecs::gif::GifEncoder::new_with_speed(file, 10);
             enc.set_repeat(image::codecs::gif::Repeat::Infinite).map_err(|e| e.to_string())?;
-            let mut look = self.look.clone();
-            look.show_bg = true;
             for k in 0..48 {
                 let cam = Camera { yaw: self.cam.yaw + k as f32 / 48.0 * std::f32::consts::TAU, ..self.cam };
-                let f = render(prep, &cam, &look, size, size);
+                let mut f = render(prep, &cam, &look, size, size);
+                draw_refs(&mut f, &cam, &refs);
                 let img = image::RgbaImage::from_raw(size as u32, size as u32, f.rgba).unwrap_or_default();
                 enc.encode_frame(image::Frame::from_parts(img, 0, 0, image::Delay::from_numer_denom_ms(1000, 24))).map_err(|e| e.to_string())?;
             }
@@ -2377,6 +2461,12 @@ impl Viewer {
             egui::containers::menu::MenuButton::new(crate::i18n::t("éclairage ▾")).config(stay.clone()).ui(ui, |ui| {
                 ui.set_min_width(280.0);
                 ui.checkbox(&mut self.look.shadows, crate::i18n::t("ombres portées")).on_hover_text(crate::i18n::t("Chaque lumière projette l'ombre des objets. Plus lent sur les gros modèles."));
+                if self.look.shadows {
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new(crate::i18n::t("douceur")).color(p.muted).size(11.0));
+                        ui.add(egui::Slider::new(&mut self.look.shadow_soft, 0.0..=1.0).show_value(false)).on_hover_text(crate::i18n::t("0 : bord net. Plus haut : pénombre large, calculée avec plusieurs rayons."));
+                    });
+                }
                 ui.separator();
                 ui.label(egui::RichText::new(crate::i18n::t("environnement (HDRI)")).color(p.muted).size(11.0));
                 for (i, name) in PRESETS.iter().enumerate() {
@@ -2895,55 +2985,10 @@ impl Viewer {
         let heavy = shown_tris > 600_000;
         let scale = if interacting { if heavy { 0.4 } else { 0.6 } } else { ppp.min(2.0) };
         let size = [(rect.width() * scale).max(16.0) as usize, (rect.height() * scale).max(16.0) as usize];
-        let mut look = self.look.clone();
-        if self.edit.is_none() && self.scene.is_some() {
-            look.slot_nodes = self.slot_progs.iter().map(|p| p.as_ref().map(|x| x.2.clone())).collect();
-            look.slot_rev = self.slot_rev;
-        }
-        if let Some(e) = &self.edit {
-            look.material = Material::Color;
-            look.nodes = None;
-            look.slot_nodes = self.slot_progs.iter().map(|p| p.as_ref().map(|x| x.2.clone())).collect();
-            look.slot_rev = self.slot_rev;
-            look.uv_checker = e.checker && e.data.has_uv();
-            if look.wire == 0.0 {
-                look.wire = 0.35;
-            }
-        }
-        // Scène : sa première lumière remplace celle de la vue, et ses images de référence entrent dans le rendu
-        let mut refs: Vec<RefPlane> = vec![];
-        let mut refs_key = 0u64;
-        if let (Some(scene), Some((lo, hi)), true) = (self.scene.as_ref(), self.scene_frame, self.edit.is_none()) {
-            use std::hash::{Hash, Hasher};
-            let longest = (hi[0] - lo[0]).max(hi[1] - lo[1]).max(hi[2] - lo[2]).max(1e-9);
-            let c = [(lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0, (lo[2] + hi[2]) / 2.0];
-            look.lamps = scene
-                .lights()
-                .into_iter()
-                .map(|l| Lamp { point: l.point, at: if l.point { [(l.at[0] - c[0]) / longest, (l.at[1] - c[1]) / longest, (l.at[2] - c[2]) / longest] } else { l.at }, color: l.color, intensity: l.energy, range: l.range / longest })
-                .collect();
-            let nrm = |v: V3| [(v[0] - c[0]) / longest, (v[1] - c[1]) / longest, (v[2] - c[2]) / longest];
-            let mut hsh = std::collections::hash_map::DefaultHasher::new();
-            for (k, o) in scene.objects.iter().enumerate() {
-                if crate::scene::kind(o) != crate::scene::Kind::Image || !scene.shown(k) || o.opacity <= 0.0 {
-                    continue;
-                }
-                let file = crate::scene::resolve(&self.path, &o.file);
-                let entry = self.ref_tex.entry(file.clone()).or_insert_with(|| {
-                    image::open(&file).ok().map(|im| std::sync::Arc::new(if im.width().max(im.height()) > 2048 { im.thumbnail(2048, 2048) } else { im }.to_rgba8()))
-                });
-                let Some(img) = entry else { continue };
-                let aspect = img.width() as f32 / img.height().max(1) as f32;
-                let (p0, px, py) = (nrm(scene.world(k, [0.0; 3])), nrm(scene.world(k, [aspect, 0.0, 0.0])), nrm(scene.world(k, [0.0, 1.0, 0.0])));
-                let plane = RefPlane { center: p0, ux: [px[0] - p0[0], px[1] - p0[1], px[2] - p0[2]], uy: [py[0] - p0[0], py[1] - p0[1], py[2] - p0[2]], img: img.clone(), opacity: o.opacity };
-                file.hash(&mut hsh);
-                for v in [plane.center, plane.ux, plane.uy] {
-                    v.map(|x| x.to_bits()).hash(&mut hsh);
-                }
-                plane.opacity.to_bits().hash(&mut hsh);
-                refs.push(plane);
-            }
-            refs_key = hsh.finish();
+        let (mut look, refs, refs_key) = self.render_setup();
+        // Pendant qu'on tourne autour du modèle : moins de rayons d'ombre, pour rester fluide
+        if interacting {
+            look.shadow_samples = look.shadow_samples.min(2);
         }
         let look_key = format!("{:?}|{refs_key}", look.key());
         let key = (self.cam, size, z_up, self.prepared.as_ref().map(|p| p.1).unwrap_or(0), look_key);

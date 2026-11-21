@@ -1027,5 +1027,6 @@
  "Elle éclaire autour d'elle : déplace-la": "It lights its surroundings: move it",
  "Sa couleur se règle plus bas.": "Its color is set below.",
  "ombres portées": "cast shadows",
- "Chaque lumière projette l'ombre des objets. Plus lent sur les gros modèles.": "Each light casts object shadows. Slower on heavy models."
+ "Chaque lumière projette l'ombre des objets. Plus lent sur les gros modèles.": "Each light casts object shadows. Slower on heavy models.",
+ "0 : bord net. Plus haut : pénombre large, calculée avec plusieurs rayons.": "0: hard edge. Higher: wide penumbra, computed with several rays."
 }
