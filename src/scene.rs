@@ -18,6 +18,9 @@ fn yes() -> bool {
 fn half() -> f32 {
     0.5
 }
+fn energy() -> f32 {
+    1.2
+}
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct Object {
@@ -48,6 +51,18 @@ pub struct Object {
     /// Opacité d'une image de référence
     #[serde(default = "half")]
     pub opacity: f32,
+    /// « light » ou « camera » pour un objet sans fichier qui n'est pas un simple groupe
+    #[serde(default)]
+    pub role: String,
+    /// Force d'une lumière
+    #[serde(default = "energy")]
+    pub energy: f32,
+}
+
+impl Object {
+    pub fn new(name: String, file: String) -> Object {
+        Object { name, file, pos: [0.0; 3], rot: [0.0; 3], scale: [1.0; 3], visible: true, color: None, mods: vec![], material: String::new(), parent: String::new(), opacity: 0.5, role: String::new(), energy: 1.2 }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -57,11 +72,19 @@ pub enum Kind {
     Image,
     /// Sans fichier : sert à regrouper d'autres objets
     Empty,
+    /// Lumière directionnelle : elle éclaire dans le sens de son axe Y vers le bas
+    Light,
+    /// Point de vue enregistré
+    Camera,
 }
 
 pub fn kind(o: &Object) -> Kind {
     let ext = o.file.rsplit('.').next().unwrap_or("").to_lowercase();
-    if o.file.trim().is_empty() {
+    if o.role == "light" {
+        Kind::Light
+    } else if o.role == "camera" {
+        Kind::Camera
+    } else if o.file.trim().is_empty() {
         Kind::Empty
     } else if matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "webp" | "bmp" | "gif" | "tga" | "tif" | "tiff") {
         Kind::Image
@@ -107,19 +130,40 @@ impl Scene {
             name = format!("{stem}.{n:03}");
             n += 1;
         }
-        self.objects.push(Object { name, file, pos: [0.0; 3], rot: [0.0; 3], scale: [1.0; 3], visible: true, color: None, mods: vec![], material: String::new(), parent: String::new(), opacity: 0.5 });
+        self.objects.push(Object::new(name, file));
     }
 
     /// Ajoute un groupe vide et renvoie son indice.
     pub fn add_empty(&mut self) -> usize {
-        let mut name = "groupe".to_string();
+        self.add_role("groupe", "")
+    }
+
+    /// Ajoute un objet sans fichier : groupe (rôle vide), « light » ou « camera ».
+    pub fn add_role(&mut self, base: &str, role: &str) -> usize {
+        let mut name = base.to_string();
         let mut n = 2;
         while self.objects.iter().any(|o| o.name == name) {
-            name = format!("groupe.{n:03}");
+            name = format!("{base}.{n:03}");
             n += 1;
         }
-        self.objects.push(Object { name, file: String::new(), pos: [0.0; 3], rot: [0.0; 3], scale: [1.0; 3], visible: true, color: None, mods: vec![], material: String::new(), parent: String::new(), opacity: 0.5 });
+        let mut o = Object::new(name, String::new());
+        o.role = role.to_string();
+        self.objects.push(o);
         self.objects.len() - 1
+    }
+
+    /// La première lumière affichée : direction vers elle (pour l'éclairage), couleur et force.
+    pub fn light(&self) -> Option<([f32; 3], [f32; 3], f32)> {
+        let k = (0..self.objects.len()).find(|&k| kind(&self.objects[k]) == Kind::Light && self.shown(k))?;
+        let (a, b) = (self.world(k, [0.0; 3]), self.world(k, [0.0, 1.0, 0.0]));
+        let d = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+        let l = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+        if l < 1e-9 {
+            return None;
+        }
+        let o = &self.objects[k];
+        let c = o.color.map(|c| [c[0] as f32 / 255.0, c[1] as f32 / 255.0, c[2] as f32 / 255.0]).unwrap_or([1.0, 0.97, 0.92]);
+        Some(([d[0] / l, d[1] / l, d[2] / l], c, o.energy.max(0.0)))
     }
 
     pub fn parent_of(&self, k: usize) -> Option<usize> {
@@ -319,7 +363,20 @@ pub fn build_ranges(scene: &Scene, scene_path: &Path) -> (Result<crate::model3d:
         }
     }
     if tris.is_empty() {
-        return (Err("Scène vide : glisse des modèles ici ou ajoute-en depuis le panneau.".into()), errors, ranges);
+        // Rien que des images, des lumières, des caméras ou des groupes : la scène s'ouvre quand même,
+        // avec un cadre autour d'eux (et un triangle sans surface, que le rendu ignore)
+        let others: Vec<[f32; 3]> = (0..scene.objects.len()).filter(|&k| scene.shown(k) && kind(&scene.objects[k]) != Kind::Model && errors[k].is_none()).map(|k| scene.world(k, [0.0; 3])).collect();
+        if others.is_empty() {
+            return (Err("Scène vide : glisse des modèles ici ou ajoute-en depuis le panneau.".into()), errors, ranges);
+        }
+        let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
+        for p in &others {
+            for a in 0..3 {
+                lo[a] = lo[a].min(p[a] - 2.0);
+                hi[a] = hi[a].max(p[a] + 2.0);
+            }
+        }
+        return (crate::model3d::Model::exact(vec![lo, hi], vec![[0, 0, 0]], None, None), errors, vec![]);
     }
     (crate::model3d::Model::exact(pos, tris, Some(colors), Some(edges)), errors, ranges)
 }
@@ -382,6 +439,14 @@ mod tests {
         assert_eq!(h.tree().len(), 4);
         h.remove(g);
         assert!(h.objects.iter().all(|o| o.parent != "décor"));
+        // Lumière : au repos elle vient d'en haut ; tournée de 90° autour de Z, elle vient de -X
+        let mut l = Scene::default();
+        let k = l.add_role("soleil", "light");
+        assert!((l.light().unwrap().0[1] - 1.0).abs() < 1e-5);
+        l.objects[k].rot = [0.0, 0.0, 90.0];
+        assert!((l.light().unwrap().0[0] + 1.0).abs() < 1e-5);
+        // Sans modèle, la scène s'ouvre quand même
+        assert!(build_ranges(&l, &file).0.is_ok());
         // Objet caché ou fichier manquant : la scène reste lisible
         s.objects[0].visible = false;
         s.objects[1].file = "absent.obj".into();

@@ -901,6 +901,8 @@ pub struct Frame {
     pub rgba: Vec<u8>,
     /// Triangle visible à chaque pixel (u32::MAX : fond)
     pub ids: Vec<u32>,
+    /// Profondeur à chaque pixel, dans l'espace caméra (plus grand = plus près ; f32::MIN : fond)
+    pub depth: Vec<f32>,
 }
 
 fn rot_y(d: V3, a: f32) -> V3 {
@@ -1015,7 +1017,7 @@ pub fn render(m: &Prepared, cam: &Camera, look: &Look, w: usize, h: usize) -> Fr
 
     let band = 16usize;
     let mut rgba = vec![0u8; w * h * 4];
-    let ids: Vec<Vec<u32>> = rgba.par_chunks_mut(w * 4 * band).enumerate().map(|(bi, chunk)| {
+    let bands: Vec<(Vec<u32>, Vec<f32>)> = rgba.par_chunks_mut(w * 4 * band).enumerate().map(|(bi, chunk)| {
         let y0 = bi * band;
         let rows = chunk.len() / (w * 4);
         let n = w * rows;
@@ -1259,9 +1261,83 @@ pub fn render(m: &Prepared, cam: &Camera, look: &Look, w: usize, h: usize) -> Fr
             let _ = col;
             chunk[o..o + 3].copy_from_slice(&rgb);
         }
-        tri
+        (tri, depth)
     }).collect();
-    Frame { w, h, rgba, ids: ids.concat() }
+    let (mut ids, mut depth) = (Vec::with_capacity(w * h), Vec::with_capacity(w * h));
+    for (i, d) in bands {
+        ids.extend(i);
+        depth.extend(d);
+    }
+    Frame { w, h, rgba, ids, depth }
+}
+
+/// Image de référence posée dans l'espace : centre et deux côtés (largeur, hauteur), dans l'espace du rendu.
+pub struct RefPlane {
+    pub center: V3,
+    pub ux: V3,
+    pub uy: V3,
+    pub img: std::sync::Arc<image::RgbaImage>,
+    pub opacity: f32,
+}
+
+/// Dessine les images de référence dans le rendu, pixel par pixel, en respectant la profondeur :
+/// un modèle placé devant une image la cache.
+pub fn draw_refs(frame: &mut Frame, cam: &Camera, refs: &[RefPlane]) {
+    use rayon::prelude::*;
+    if refs.is_empty() {
+        return;
+    }
+    let (w, h) = (frame.w, frame.h);
+    let focal = w.min(h) as f32 * 1.2;
+    let (cx, cy) = (w as f32 / 2.0, h as f32 / 2.0);
+    let ortho_scale = focal / cam.dist;
+    for r in refs {
+        if r.opacity <= 0.0 || r.img.width() == 0 || r.img.height() == 0 {
+            continue;
+        }
+        // Le plan dans l'espace caméra
+        let (o, u, v) = (cam.view(r.center), cam.rotate(r.ux), cam.rotate(r.uy));
+        let depth = &frame.depth;
+        let ortho = cam.ortho;
+        frame.rgba.par_chunks_mut(w * 4).enumerate().for_each(|(y, row)| {
+            for x in 0..w {
+                // Rayon du pixel : origine et direction
+                let (ro, rd) = if ortho { ([(x as f32 + 0.5 - cx) / ortho_scale, -(y as f32 + 0.5 - cy) / ortho_scale, 0.0], [0.0, 0.0, -1.0]) } else { ([0.0; 3], [(x as f32 + 0.5 - cx) / focal, -(y as f32 + 0.5 - cy) / focal, -1.0]) };
+                let rhs = [ro[0] - o[0], ro[1] - o[1], ro[2] - o[2]];
+                // Intersection du rayon avec le plan : (ro + t·rd − o) · n = 0
+                let n = cross(u, v);
+                let den = dot(n, rd);
+                if den.abs() < 1e-9 {
+                    continue;
+                }
+                let t = -dot(n, rhs) / den;
+                // Point d'impact, puis coordonnées dans le plan par projection sur ses côtés
+                let hit = [ro[0] + rd[0] * t, ro[1] + rd[1] * t, ro[2] + rd[2] * t];
+                if t <= 0.0 || (!ortho && hit[2] > -0.02) {
+                    continue;
+                }
+                let q = [hit[0] - o[0], hit[1] - o[1], hit[2] - o[2]];
+                let (a, b) = (dot(q, u) / dot(u, u).max(1e-12), dot(q, v) / dot(v, v).max(1e-12));
+                if !(-0.5..=0.5).contains(&a) || !(-0.5..=0.5).contains(&b) {
+                    continue;
+                }
+                if hit[2] <= depth[y * w + x] {
+                    continue;
+                }
+                let px = r.img.get_pixel((((a + 0.5) * r.img.width() as f32) as u32).min(r.img.width() - 1), (((0.5 - b) * r.img.height() as f32) as u32).min(r.img.height() - 1)).0;
+                let alpha = px[3] as f32 / 255.0 * r.opacity.clamp(0.0, 1.0);
+                let d = &mut row[x * 4..x * 4 + 4];
+                if d[3] == 0 {
+                    d[..3].copy_from_slice(&px[..3]);
+                    d[3] = (alpha * 255.0) as u8;
+                } else {
+                    for c in 0..3 {
+                        d[c] = (d[c] as f32 + (px[c] as f32 - d[c] as f32) * alpha) as u8;
+                    }
+                }
+            }
+        });
+    }
 }
 
 thread_local! {
@@ -1364,7 +1440,7 @@ pub struct Viewer {
     /// Ce que fait la poignée : 0 déplacer, 1 tourner, 2 redimensionner
     gizmo_mode: u8,
     /// Images de référence de la scène, chargées une fois (texture et rapport largeur / hauteur)
-    ref_tex: std::collections::HashMap<std::path::PathBuf, Option<(egui::TextureHandle, f32)>>,
+    ref_tex: std::collections::HashMap<std::path::PathBuf, Option<std::sync::Arc<image::RgbaImage>>>,
     scene_ver: u64,
     scene_dirty: bool,
     /// Cadre fixe de la scène : déplacer un objet ne doit pas recentrer ni redimensionner tout le reste
@@ -1556,8 +1632,11 @@ impl Viewer {
         let mut changed = false;
         let mut reframe = false;
         let mut renamed: Option<(String, String)> = None;
+        // Caméra à poser sur la vue actuelle, ou vue à aligner sur une caméra
+        let mut set_camera: Option<usize> = None;
+        let mut look_through: Option<usize> = None;
         for f in std::mem::take(&mut self.scene_add) {
-            let image = crate::scene::kind(&crate::scene::Object { name: String::new(), file: f.to_string_lossy().to_string(), pos: [0.0; 3], rot: [0.0; 3], scale: [1.0; 3], visible: true, color: None, mods: vec![], material: String::new(), parent: String::new(), opacity: 0.5 }) == crate::scene::Kind::Image;
+            let image = crate::scene::kind(&crate::scene::Object::new(String::new(), f.to_string_lossy().to_string())) == crate::scene::Kind::Image;
             if (is_model(&f.to_string_lossy()) || image) && !crate::scene::is_scene(&f) {
                 scene.add(&path, &f);
                 self.scene_sel = Some(scene.objects.len() - 1);
@@ -1580,6 +1659,21 @@ impl Viewer {
                                 self.scene_sel = scene.objects.len().checked_sub(1);
                             }
                             ui.close();
+                        }
+                        for (label, base, role) in [("lumière", "soleil", "light"), ("caméra (point de vue)", "caméra", "camera")] {
+                            if ui.button(crate::i18n::t(label)).clicked() {
+                                let k = scene.add_role(base, role);
+                                if role == "light" {
+                                    // Posée en hauteur, penchée : un éclairage de trois quarts
+                                    scene.objects[k].pos = [0.0, 3.0, 0.0];
+                                    scene.objects[k].rot = [35.0, 0.0, -35.0];
+                                } else {
+                                    set_camera = Some(k);
+                                }
+                                self.scene_sel = Some(k);
+                                changed = true;
+                                ui.close();
+                            }
                         }
                         if ui.button(crate::i18n::t("groupe vide")).on_hover_text(crate::i18n::t("Un objet sans forme, pour déplacer plusieurs objets ensemble")).clicked() {
                             self.scene_sel = Some(scene.add_empty());
@@ -1621,6 +1715,8 @@ impl Viewer {
                             crate::scene::Kind::Model => "▣",
                             crate::scene::Kind::Image => "▨",
                             crate::scene::Kind::Empty => "◇",
+                            crate::scene::Kind::Light => "☀",
+                            crate::scene::Kind::Camera => "◎",
                         };
                         ui.label(egui::RichText::new(icon).size(11.0).color(p.muted));
                         if ui.add(egui::Button::new(if o.visible { "◉" } else { "○" }).frame(false)).on_hover_text(crate::i18n::t("afficher / cacher")).clicked() {
@@ -1693,6 +1789,26 @@ impl Viewer {
                         }
                     });
                 });
+                match crate::scene::kind(o) {
+                    crate::scene::Kind::Light => {
+                        ui.horizontal(|ui| {
+                            ui.label(egui::RichText::new(crate::i18n::t("force")).size(11.0).color(p.muted));
+                            changed |= ui.add(egui::Slider::new(&mut o.energy, 0.0..=5.0)).changed();
+                        });
+                        ui.label(egui::RichText::new(crate::i18n::t("Tourne-la pour changer d'où vient la lumière. Sa couleur se règle plus bas.")).size(10.0).color(p.muted));
+                    }
+                    crate::scene::Kind::Camera => {
+                        ui.horizontal(|ui| {
+                            if ui.button(crate::i18n::t("regarder par ici")).on_hover_text(crate::i18n::t("Aligne la vue sur cette caméra")).clicked() {
+                                look_through = self.scene_sel;
+                            }
+                            if ui.button(crate::i18n::t("poser sur la vue")).on_hover_text(crate::i18n::t("Enregistre la vue actuelle dans cette caméra")).clicked() {
+                                set_camera = self.scene_sel;
+                            }
+                        });
+                    }
+                    _ => {}
+                }
                 if crate::scene::kind(o) == crate::scene::Kind::Image {
                     ui.horizontal(|ui| {
                         ui.label(egui::RichText::new(crate::i18n::t("opacité")).size(11.0).color(p.muted));
@@ -1788,6 +1904,28 @@ impl Viewer {
                 });
             }
         });
+        if let Some((lo, hi)) = self.scene_frame {
+            let longest = (hi[0] - lo[0]).max(hi[1] - lo[1]).max(hi[2] - lo[2]).max(1e-9);
+            let c = [(lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0, (lo[2] + hi[2]) / 2.0];
+            if let Some(o) = set_camera.and_then(|k| scene.objects.get_mut(k)) {
+                // Où se trouve l'œil de la vue, et dans quel sens il regarde
+                let eye = self.cam.unrotate([-self.cam.pan[0], -self.cam.pan[1], self.cam.dist]);
+                o.pos = [eye[0] * longest + c[0], eye[1] * longest + c[1], eye[2] * longest + c[2]];
+                o.rot = [-self.cam.pitch.to_degrees(), -self.cam.yaw.to_degrees(), 0.0];
+                o.parent.clear();
+                changed = true;
+            }
+            if let Some(k) = look_through.filter(|&k| k < scene.objects.len()) {
+                let w = scene.world(k, [0.0; 3]);
+                let o = &scene.objects[k];
+                self.cam.yaw = -o.rot[1].to_radians();
+                self.cam.pitch = -o.rot[0].to_radians();
+                self.cam.ortho = false;
+                let r = self.cam.rotate([(w[0] - c[0]) / longest, (w[1] - c[1]) / longest, (w[2] - c[2]) / longest]);
+                self.cam.pan = [-r[0], -r[1]];
+                self.cam.dist = r[2].max(0.05);
+            }
+        }
         if let Some((old, new)) = renamed {
             // Les enfants suivent le nouveau nom de leur parent
             if let Some(k) = self.scene_sel.filter(|&k| k < scene.objects.len()) {
@@ -2467,6 +2605,7 @@ impl Viewer {
         }
         // Scène : poignée de déplacement de l'objet choisi (trois axes à attraper)
         let mut gizmo: Option<(Pos2, [Option<Pos2>; 3])> = None;
+        let mut marker_pick: Option<usize> = None;
         if self.edit.is_none() && crate::scene::is_scene(&self.path) {
             if resp.hovered() && !ui.ctx().egui_wants_keyboard_input() {
                 for (k, key) in [Key::W, Key::E, Key::R].into_iter().enumerate() {
@@ -2657,7 +2796,40 @@ impl Viewer {
                 look.wire = 0.35;
             }
         }
-        let look_key = format!("{:?}", look.key());
+        // Scène : sa première lumière remplace celle de la vue, et ses images de référence entrent dans le rendu
+        let mut refs: Vec<RefPlane> = vec![];
+        let mut refs_key = 0u64;
+        if let (Some(scene), Some((lo, hi)), true) = (self.scene.as_ref(), self.scene_frame, self.edit.is_none()) {
+            use std::hash::{Hash, Hasher};
+            if let Some((d, color, energy)) = scene.light() {
+                look.light = Light { azimuth: d[0].atan2(d[2]), elevation: d[1].clamp(-1.0, 1.0).asin(), intensity: energy, color };
+            }
+            let longest = (hi[0] - lo[0]).max(hi[1] - lo[1]).max(hi[2] - lo[2]).max(1e-9);
+            let c = [(lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0, (lo[2] + hi[2]) / 2.0];
+            let nrm = |v: V3| [(v[0] - c[0]) / longest, (v[1] - c[1]) / longest, (v[2] - c[2]) / longest];
+            let mut hsh = std::collections::hash_map::DefaultHasher::new();
+            for (k, o) in scene.objects.iter().enumerate() {
+                if crate::scene::kind(o) != crate::scene::Kind::Image || !scene.shown(k) || o.opacity <= 0.0 {
+                    continue;
+                }
+                let file = crate::scene::resolve(&self.path, &o.file);
+                let entry = self.ref_tex.entry(file.clone()).or_insert_with(|| {
+                    image::open(&file).ok().map(|im| std::sync::Arc::new(if im.width().max(im.height()) > 2048 { im.thumbnail(2048, 2048) } else { im }.to_rgba8()))
+                });
+                let Some(img) = entry else { continue };
+                let aspect = img.width() as f32 / img.height().max(1) as f32;
+                let (p0, px, py) = (nrm(scene.world(k, [0.0; 3])), nrm(scene.world(k, [aspect, 0.0, 0.0])), nrm(scene.world(k, [0.0, 1.0, 0.0])));
+                let plane = RefPlane { center: p0, ux: [px[0] - p0[0], px[1] - p0[1], px[2] - p0[2]], uy: [py[0] - p0[0], py[1] - p0[1], py[2] - p0[2]], img: img.clone(), opacity: o.opacity };
+                file.hash(&mut hsh);
+                for v in [plane.center, plane.ux, plane.uy] {
+                    v.map(|x| x.to_bits()).hash(&mut hsh);
+                }
+                plane.opacity.to_bits().hash(&mut hsh);
+                refs.push(plane);
+            }
+            refs_key = hsh.finish();
+        }
+        let look_key = format!("{:?}|{refs_key}", look.key());
         let key = (self.cam, size, z_up, self.prepared.as_ref().map(|p| p.1).unwrap_or(0), look_key);
         if self.last.as_ref() != Some(&key) || self.tex.is_none() {
             // Le maillage peut être en cours de recalcul (modificateurs, sortie du mode édition)
@@ -2666,7 +2838,8 @@ impl Viewer {
                 return;
             };
             let prep = &prepared.2;
-            let frame = render(prep, &self.cam, &look, size[0], size[1]);
+            let mut frame = render(prep, &self.cam, &look, size[0], size[1]);
+            draw_refs(&mut frame, &self.cam, &refs);
             let img = egui::ColorImage::from_rgba_unmultiplied([frame.w, frame.h], &frame.rgba);
             self.ids = Some((frame.w, frame.h, frame.ids));
             match &mut self.tex {
@@ -2706,8 +2879,8 @@ impl Viewer {
         if let Some(t) = &self.tex {
             painter.image(t.id(), rect, egui::Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
         }
-        // Images de référence de la scène : des plans placés dans l'espace, dessinés par-dessus le rendu
-        if let (Some(scene), Some((lo, hi))) = (self.scene.as_ref().filter(|_| self.edit.is_none()), self.scene_frame) {
+        // Repères des lumières et des caméras de la scène
+        if let (Some(scene), Some((lo, hi)), true) = (self.scene.as_ref(), self.scene_frame, self.edit.is_none()) {
             let longest = (hi[0] - lo[0]).max(hi[1] - lo[1]).max(hi[2] - lo[2]).max(1e-9);
             let c = [(lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0, (lo[2] + hi[2]) / 2.0];
             let focal = rect.height().min(rect.width()) * 1.2;
@@ -2720,46 +2893,41 @@ impl Viewer {
                     (q[2] < -0.05).then(|| pos2(rc.x + q[0] / -q[2] * focal, rc.y - q[1] / -q[2] * focal))
                 }
             };
+            let over = ui.painter_at(rect);
             for (k, o) in scene.objects.iter().enumerate() {
-                if crate::scene::kind(o) != crate::scene::Kind::Image || !scene.shown(k) || o.opacity <= 0.0 {
+                let kind = crate::scene::kind(o);
+                if !matches!(kind, crate::scene::Kind::Light | crate::scene::Kind::Camera) || !scene.shown(k) {
                     continue;
                 }
-                let file = crate::scene::resolve(&self.path, &o.file);
-                let ctx = ui.ctx().clone();
-                let entry = self.ref_tex.entry(file.clone()).or_insert_with(|| {
-                    image::open(&file).ok().map(|im| {
-                        let im = if im.width().max(im.height()) > 2048 { im.thumbnail(2048, 2048) } else { im }.to_rgba8();
-                        let (w, h) = (im.width() as usize, im.height() as usize);
-                        (ctx.load_texture(format!("ref:{}", file.display()), egui::ColorImage::from_rgba_unmultiplied([w, h], &im), egui::TextureOptions::LINEAR), w as f32 / h.max(1) as f32)
-                    })
-                });
-                let Some((tex, aspect)) = entry else { continue };
-                // Un quadrillage plutôt qu'un seul rectangle : la perspective reste juste
-                let n = 10;
-                let mut mesh = egui::Mesh::with_texture(tex.id());
-                let tint = Color32::from_white_alpha((o.opacity.clamp(0.0, 1.0) * 255.0) as u8);
-                let mut ok = true;
-                for j in 0..=n {
-                    for i in 0..=n {
-                        let (u, v) = (i as f32 / n as f32, j as f32 / n as f32);
-                        match project(scene.world(k, [(u - 0.5) * *aspect, 0.5 - v, 0.0])) {
-                            Some(pt) => mesh.vertices.push(egui::epaint::Vertex { pos: pt, uv: pos2(u, v), color: tint }),
-                            None => ok = false,
-                        }
-                    }
+                let Some(at) = project(scene.world(k, [0.0; 3])) else { continue };
+                let on = self.scene_sel == Some(k);
+                let col = if on { p.accent } else { p.text };
+                // Un trait montre le sens : où va la lumière, où regarde la caméra
+                let ahead = if kind == crate::scene::Kind::Light { [0.0, -1.0, 0.0] } else { [0.0, 0.0, -1.0] };
+                let (a, b) = (scene.world(k, [0.0; 3]), scene.world(k, ahead));
+                let d = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+                let l = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt().max(1e-9);
+                let reach = longest * 0.12;
+                if let Some(tip) = project([a[0] + d[0] / l * reach, a[1] + d[1] / l * reach, a[2] + d[2] / l * reach]) {
+                    over.line_segment([at, tip], Stroke::new(1.5, col));
+                    over.circle_filled(tip, 2.5, col);
                 }
-                if !ok {
-                    continue;
+                if kind == crate::scene::Kind::Light {
+                    over.circle_filled(at, 5.0, Color32::from_rgb(250, 200, 60));
+                    over.circle_stroke(at, 8.5, Stroke::new(1.5, col));
+                } else {
+                    let body = egui::Rect::from_center_size(at, egui::vec2(16.0, 11.0));
+                    over.rect_filled(body, 2.0, p.panel);
+                    over.rect_stroke(body, 2.0, Stroke::new(1.5, col), egui::StrokeKind::Inside);
                 }
-                for j in 0..n {
-                    for i in 0..n {
-                        let a = (j * (n + 1) + i) as u32;
-                        let b = a + n as u32 + 1;
-                        mesh.indices.extend([a, a + 1, b, a + 1, b + 1, b]);
-                    }
+                // Un clic sur le repère choisit l'objet
+                if resp.clicked() && resp.interact_pointer_pos().is_some_and(|m| (m - at).length() < 11.0) {
+                    marker_pick = Some(k);
                 }
-                ui.painter_at(rect).add(egui::Shape::mesh(mesh));
             }
+        }
+        if let Some(k) = marker_pick {
+            self.scene_sel = Some(k);
         }
         if let Some((po, ends)) = gizmo {
             let over = ui.painter_at(rect);

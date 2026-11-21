@@ -1012,5 +1012,12 @@
  "rouge": "red",
  "vert": "green",
  "bleu": "blue",
- "Remettre cette courbe droite": "Reset this curve to a straight line"
+ "Remettre cette courbe droite": "Reset this curve to a straight line",
+ "lumière": "light",
+ "caméra (point de vue)": "camera (viewpoint)",
+ "Tourne-la pour changer d'où vient la lumière. Sa couleur se règle plus bas.": "Rotate it to change where the light comes from. Its color is set below.",
+ "regarder par ici": "look through",
+ "poser sur la vue": "set from view",
+ "Aligne la vue sur cette caméra": "Align the view with this camera",
+ "Enregistre la vue actuelle dans cette caméra": "Store the current view in this camera"
 }
