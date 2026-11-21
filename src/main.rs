@@ -3562,7 +3562,11 @@ impl App {
                 return;
             }
             // Une scène 3D ouverte reçoit les modèles glissés : ils y sont ajoutés, pas importés
-            if self.view() == View::Files && paths.iter().any(|f| model3d::is_model(&f.to_string_lossy())) {
+            let for_scene = |f: &PathBuf| {
+                let n = f.to_string_lossy().to_lowercase();
+                model3d::is_model(&n) || [".png", ".jpg", ".jpeg", ".webp"].iter().any(|e| n.ends_with(e))
+            };
+            if self.view() == View::Files && paths.iter().any(for_scene) {
                 if let Some(Content::Model(v)) = self.active.and_then(|i| self.docs.get_mut(i)).map(|d| &mut d.content) {
                     if v.is_scene() {
                         v.scene_add.extend(paths);

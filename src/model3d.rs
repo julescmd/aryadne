@@ -1363,6 +1363,8 @@ pub struct Viewer {
     gizmo_axis: Option<usize>,
     /// Ce que fait la poignée : 0 déplacer, 1 tourner, 2 redimensionner
     gizmo_mode: u8,
+    /// Images de référence de la scène, chargées une fois (texture et rapport largeur / hauteur)
+    ref_tex: std::collections::HashMap<std::path::PathBuf, Option<(egui::TextureHandle, f32)>>,
     scene_ver: u64,
     scene_dirty: bool,
     /// Cadre fixe de la scène : déplacer un objet ne doit pas recentrer ni redimensionner tout le reste
@@ -1425,6 +1427,7 @@ impl Viewer {
             scene_ranges: vec![],
             gizmo_axis: None,
             gizmo_mode: 0,
+            ref_tex: Default::default(),
             scene_ver: 0,
             scene_dirty: false,
             scene_frame: None,
@@ -1552,8 +1555,10 @@ impl Viewer {
         let scene = self.scene.as_mut().unwrap();
         let mut changed = false;
         let mut reframe = false;
+        let mut renamed: Option<(String, String)> = None;
         for f in std::mem::take(&mut self.scene_add) {
-            if is_model(&f.to_string_lossy()) && !crate::scene::is_scene(&f) {
+            let image = crate::scene::kind(&crate::scene::Object { name: String::new(), file: f.to_string_lossy().to_string(), pos: [0.0; 3], rot: [0.0; 3], scale: [1.0; 3], visible: true, color: None, mods: vec![], material: String::new(), parent: String::new(), opacity: 0.5 }) == crate::scene::Kind::Image;
+            if (is_model(&f.to_string_lossy()) || image) && !crate::scene::is_scene(&f) {
                 scene.add(&path, &f);
                 self.scene_sel = Some(scene.objects.len() - 1);
                 changed = true;
@@ -1567,13 +1572,18 @@ impl Viewer {
                     egui::containers::menu::MenuButton::new(crate::i18n::t("＋ ajouter ▾")).ui(ui, |ui| {
                         ui.set_min_width(240.0);
                         if ui.button(crate::i18n::t("choisir un fichier…")).clicked() {
-                            if let Some(files) = rfd::FileDialog::new().add_filter("3D", &["obj", "fbx", "glb", "gltf", "stl"]).pick_files() {
+                            if let Some(files) = rfd::FileDialog::new().add_filter(crate::i18n::t("modèles et images"), &["obj", "fbx", "glb", "gltf", "stl", "png", "jpg", "jpeg", "webp"]).pick_files() {
                                 for f in files {
                                     scene.add(&path, &f);
                                     changed = true;
                                 }
                                 self.scene_sel = scene.objects.len().checked_sub(1);
                             }
+                            ui.close();
+                        }
+                        if ui.button(crate::i18n::t("groupe vide")).on_hover_text(crate::i18n::t("Un objet sans forme, pour déplacer plusieurs objets ensemble")).clicked() {
+                            self.scene_sel = Some(scene.add_empty());
+                            changed = true;
                             ui.close();
                         }
                         if !self.model_files.is_empty() {
@@ -1603,8 +1613,16 @@ impl Viewer {
             // (index, action) : 0 supprimer, 1 dupliquer
             let mut action: Option<(usize, u8)> = None;
             egui::ScrollArea::vertical().id_salt("scene-objects").max_height((ui.available_height() - 250.0).max(120.0)).show(ui, |ui| {
-                for (i, o) in scene.objects.iter_mut().enumerate() {
+                for (i, depth) in scene.tree() {
+                    let o = &mut scene.objects[i];
                     ui.horizontal(|ui| {
+                        ui.add_space(depth as f32 * 14.0);
+                        let icon = match crate::scene::kind(o) {
+                            crate::scene::Kind::Model => "▣",
+                            crate::scene::Kind::Image => "▨",
+                            crate::scene::Kind::Empty => "◇",
+                        };
+                        ui.label(egui::RichText::new(icon).size(11.0).color(p.muted));
                         if ui.add(egui::Button::new(if o.visible { "◉" } else { "○" }).frame(false)).on_hover_text(crate::i18n::t("afficher / cacher")).clicked() {
                             o.visible = !o.visible;
                             changed = true;
@@ -1635,7 +1653,7 @@ impl Viewer {
             });
             if let Some((i, a)) = action {
                 if a == 0 {
-                    scene.objects.remove(i);
+                    scene.remove(i);
                     self.scene_sel = None;
                 } else {
                     let mut c = scene.objects[i].clone();
@@ -1646,10 +1664,41 @@ impl Viewer {
                 }
                 changed = true;
             }
+            // Parents possibles pour l'objet choisi : tout sauf lui-même et ses propres enfants
+            let parents: Vec<String> = match self.scene_sel {
+                Some(s) if s < scene.objects.len() => (0..scene.objects.len()).filter(|&k| k != s && !scene.descends(k, s)).map(|k| scene.objects[k].name.clone()).collect(),
+                _ => vec![],
+            };
             if let Some(o) = self.scene_sel.and_then(|i| scene.objects.get_mut(i)) {
                 ui.separator();
                 ui.label(egui::RichText::new(crate::i18n::t("OBJET")).size(10.5).color(p.muted).family(theme::bold()));
-                changed |= ui.add(egui::TextEdit::singleline(&mut o.name).desired_width(f32::INFINITY)).changed();
+                let before = o.name.clone();
+                if ui.add(egui::TextEdit::singleline(&mut o.name).desired_width(f32::INFINITY)).changed() {
+                    renamed = Some((before, o.name.clone()));
+                    changed = true;
+                }
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new(crate::i18n::t("parent")).size(11.0).color(p.muted));
+                    let cur = if o.parent.is_empty() { crate::i18n::t("aucun") } else { o.parent.clone() };
+                    egui::ComboBox::from_id_salt("scene-object-parent").selected_text(egui::RichText::new(cur).size(11.0)).width(130.0).show_ui(ui, |ui| {
+                        if ui.selectable_label(o.parent.is_empty(), crate::i18n::t("aucun")).clicked() {
+                            o.parent.clear();
+                            changed = true;
+                        }
+                        for name in &parents {
+                            if ui.selectable_label(&o.parent == name, name).clicked() {
+                                o.parent = name.clone();
+                                changed = true;
+                            }
+                        }
+                    });
+                });
+                if crate::scene::kind(o) == crate::scene::Kind::Image {
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new(crate::i18n::t("opacité")).size(11.0).color(p.muted));
+                        changed |= ui.add(egui::Slider::new(&mut o.opacity, 0.0..=1.0).show_value(false)).changed();
+                    });
+                }
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 2.0;
                     for (k, (label, key)) in [("déplacer", "W"), ("tourner", "E"), ("taille", "R")].iter().enumerate() {
@@ -1739,6 +1788,13 @@ impl Viewer {
                 });
             }
         });
+        if let Some((old, new)) = renamed {
+            // Les enfants suivent le nouveau nom de leur parent
+            if let Some(k) = self.scene_sel.filter(|&k| k < scene.objects.len()) {
+                scene.objects[k].name = old;
+                scene.rename(k, &new);
+            }
+        }
         if reframe {
             self.scene_frame = None;
             self.scene_dirty = true;
@@ -2420,10 +2476,24 @@ impl Viewer {
                 }
             }
             if let (Some(sel), Some((lo, hi)), Some(scene)) = (self.scene_sel, self.scene_frame, self.scene.as_mut()) {
-                if let Some(o) = scene.objects.get_mut(sel).filter(|o| o.visible) {
+                // Place de l'objet dans la scène et direction de ses axes, parents compris
+                let placed = scene.objects.get(sel).map(|o| {
+                    let base = scene.from_parent(sel, o.pos);
+                    let axes = [0, 1, 2].map(|k| {
+                        let mut q = o.pos;
+                        q[k] += 1.0;
+                        let e = scene.from_parent(sel, q);
+                        let d = [e[0] - base[0], e[1] - base[1], e[2] - base[2]];
+                        let l = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt().max(1e-9);
+                        ([d[0] / l, d[1] / l, d[2] / l], l)
+                    });
+                    (base, axes)
+                });
+                let shown = sel < scene.objects.len() && scene.shown(sel);
+                if let (Some(o), Some((base, axes))) = (scene.objects.get_mut(sel).filter(|_| shown), placed) {
                     let longest = (hi[0] - lo[0]).max(hi[1] - lo[1]).max(hi[2] - lo[2]).max(1e-9);
                     let c = [(lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0, (lo[2] + hi[2]) / 2.0];
-                    let origin = [(o.pos[0] - c[0]) / longest, (o.pos[1] - c[1]) / longest, (o.pos[2] - c[2]) / longest];
+                    let origin = [(base[0] - c[0]) / longest, (base[1] - c[1]) / longest, (base[2] - c[2]) / longest];
                     let focal = rect.height().min(rect.width()) * 1.2;
                     let (ortho, dist, rc) = (self.cam.ortho, self.cam.dist, rect.center());
                     let cam = &self.cam;
@@ -2438,9 +2508,8 @@ impl Viewer {
                     let len = 0.16 * dist / 2.2;
                     if let Some(po) = project(origin) {
                         let ends = [0, 1, 2].map(|k| {
-                            let mut e = origin;
-                            e[k] += len;
-                            project(e)
+                            let a = axes[k].0;
+                            project([origin[0] + a[0] * len, origin[1] + a[1] * len, origin[2] + a[2] * len])
                         });
                         if resp.drag_started_by(egui::PointerButton::Primary) {
                             let at = ui.input(|i| i.pointer.press_origin()).unwrap_or(po);
@@ -2479,7 +2548,7 @@ impl Viewer {
                                         self.scene_dirty = true;
                                     }
                                     0 if along != 0.0 => {
-                                        o.pos[k] += along * len * longest;
+                                        o.pos[k] += along * len * longest / axes[k].1;
                                         self.scene_dirty = true;
                                     }
                                     _ => {}
@@ -2636,6 +2705,61 @@ impl Viewer {
         }
         if let Some(t) = &self.tex {
             painter.image(t.id(), rect, egui::Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+        }
+        // Images de référence de la scène : des plans placés dans l'espace, dessinés par-dessus le rendu
+        if let (Some(scene), Some((lo, hi))) = (self.scene.as_ref().filter(|_| self.edit.is_none()), self.scene_frame) {
+            let longest = (hi[0] - lo[0]).max(hi[1] - lo[1]).max(hi[2] - lo[2]).max(1e-9);
+            let c = [(lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0, (lo[2] + hi[2]) / 2.0];
+            let focal = rect.height().min(rect.width()) * 1.2;
+            let (cam, rc) = (self.cam, rect.center());
+            let project = |v: V3| -> Option<Pos2> {
+                let q = cam.view([(v[0] - c[0]) / longest, (v[1] - c[1]) / longest, (v[2] - c[2]) / longest]);
+                if cam.ortho {
+                    Some(pos2(rc.x + q[0] * focal / cam.dist, rc.y - q[1] * focal / cam.dist))
+                } else {
+                    (q[2] < -0.05).then(|| pos2(rc.x + q[0] / -q[2] * focal, rc.y - q[1] / -q[2] * focal))
+                }
+            };
+            for (k, o) in scene.objects.iter().enumerate() {
+                if crate::scene::kind(o) != crate::scene::Kind::Image || !scene.shown(k) || o.opacity <= 0.0 {
+                    continue;
+                }
+                let file = crate::scene::resolve(&self.path, &o.file);
+                let ctx = ui.ctx().clone();
+                let entry = self.ref_tex.entry(file.clone()).or_insert_with(|| {
+                    image::open(&file).ok().map(|im| {
+                        let im = if im.width().max(im.height()) > 2048 { im.thumbnail(2048, 2048) } else { im }.to_rgba8();
+                        let (w, h) = (im.width() as usize, im.height() as usize);
+                        (ctx.load_texture(format!("ref:{}", file.display()), egui::ColorImage::from_rgba_unmultiplied([w, h], &im), egui::TextureOptions::LINEAR), w as f32 / h.max(1) as f32)
+                    })
+                });
+                let Some((tex, aspect)) = entry else { continue };
+                // Un quadrillage plutôt qu'un seul rectangle : la perspective reste juste
+                let n = 10;
+                let mut mesh = egui::Mesh::with_texture(tex.id());
+                let tint = Color32::from_white_alpha((o.opacity.clamp(0.0, 1.0) * 255.0) as u8);
+                let mut ok = true;
+                for j in 0..=n {
+                    for i in 0..=n {
+                        let (u, v) = (i as f32 / n as f32, j as f32 / n as f32);
+                        match project(scene.world(k, [(u - 0.5) * *aspect, 0.5 - v, 0.0])) {
+                            Some(pt) => mesh.vertices.push(egui::epaint::Vertex { pos: pt, uv: pos2(u, v), color: tint }),
+                            None => ok = false,
+                        }
+                    }
+                }
+                if !ok {
+                    continue;
+                }
+                for j in 0..n {
+                    for i in 0..n {
+                        let a = (j * (n + 1) + i) as u32;
+                        let b = a + n as u32 + 1;
+                        mesh.indices.extend([a, a + 1, b, a + 1, b + 1, b]);
+                    }
+                }
+                ui.painter_at(rect).add(egui::Shape::mesh(mesh));
+            }
         }
         if let Some((po, ends)) = gizmo {
             let over = ui.painter_at(rect);

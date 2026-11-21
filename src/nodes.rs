@@ -39,6 +39,8 @@ pub enum ParamDef {
     File(&'static str),
     /// Dégradé à plusieurs couleurs, réglé à la souris comme dans Blender
     Ramp(&'static str),
+    /// Courbes de réglage (ensemble, rouge, vert, bleu), tracées à la souris
+    Curve(&'static str),
 }
 
 pub struct Def {
@@ -86,6 +88,7 @@ pub const DEFS: &[Def] = &[
     // Couleur
     Def { op: "mix", label: "Mélange", cat: "couleur", inputs: &[("facteur", Sock::Float, f(0.5)), ("A", Sock::Color, [0.2, 0.2, 0.2, 1.0]), ("B", Sock::Color, [0.9, 0.9, 0.9, 1.0])], outputs: &[("couleur", Sock::Color)], params: &[ParamDef::Choice("mode", BLEND)], mat: true, comp: true },
     Def { op: "colorramp", label: "Rampe de couleur", cat: "couleur", inputs: &[("facteur", Sock::Float, f(0.5))], outputs: &[("couleur", Sock::Color), ("alpha", Sock::Float)], params: &[ParamDef::Ramp("dégradé"), ParamDef::Choice("interpolation", &["linéaire", "lisse", "constante"])], mat: true, comp: true },
+    Def { op: "curves", label: "Courbes RVB", cat: "couleur", inputs: &[("couleur", Sock::Color, GRAY), ("force", Sock::Float, f(1.0))], outputs: &[("couleur", Sock::Color)], params: &[ParamDef::Curve("courbes")], mat: true, comp: true },
     Def { op: "ramp", label: "Rampe à 3 entrées", cat: "couleur", inputs: &[("facteur", Sock::Float, f(0.5)), ("couleur 1", Sock::Color, BLACK), ("couleur 2", Sock::Color, [0.95, 0.45, 0.2, 1.0]), ("couleur 3", Sock::Color, W)], outputs: &[("couleur", Sock::Color)], params: &[ParamDef::Float("milieu", 0.0, 1.0, 0.5)], mat: true, comp: true },
     Def { op: "hsv", label: "Teinte / saturation", cat: "couleur", inputs: &[("couleur", Sock::Color, GRAY), ("teinte", Sock::Float, f(0.0)), ("saturation", Sock::Float, f(1.0)), ("valeur", Sock::Float, f(1.0))], outputs: &[("couleur", Sock::Color)], params: &[], mat: true, comp: true },
     Def { op: "brightcon", label: "Luminosité / contraste", cat: "couleur", inputs: &[("couleur", Sock::Color, GRAY), ("luminosité", Sock::Float, f(0.0)), ("contraste", Sock::Float, f(0.0))], outputs: &[("couleur", Sock::Color)], params: &[], mat: true, comp: true },
@@ -166,6 +169,62 @@ pub const DEFS: &[Def] = &[
     Def { op: "emboss", label: "Gaufrage", cat: "filtre", inputs: &[("image", Sock::Color, GRAY)], outputs: &[("image", Sock::Color)], params: &[ParamDef::Float("force", 0.0, 4.0, 1.0), ParamDef::Float("angle", -180.0, 180.0, 135.0)], mat: false, comp: true },
     Def { op: "glitch", label: "Glitch", cat: "filtre", inputs: &[("image", Sock::Color, GRAY)], outputs: &[("image", Sock::Color)], params: &[ParamDef::Float("force", 0.0, 1.0, 0.3), ParamDef::Float("blocs", 2.0, 80.0, 24.0), ParamDef::Float("graine", 0.0, 100.0, 1.0)], mat: false, comp: true },
 ];
+
+pub const DEFAULT_CURVES: &str = "0,0;1,1|0,0;1,1|0,0;1,1|0,0;1,1";
+
+/// Lit quatre courbes (ensemble, rouge, vert, bleu) : des points « x,y » triés par x.
+pub fn parse_curves(t: &str) -> [Vec<[f32; 2]>; 4] {
+    let mut out: [Vec<[f32; 2]>; 4] = Default::default();
+    for (k, part) in t.split('|').take(4).enumerate() {
+        out[k] = part
+            .split(';')
+            .filter_map(|s| {
+                let (x, y) = s.split_once(',')?;
+                let (x, y): (f32, f32) = (x.trim().parse().ok()?, y.trim().parse().ok()?);
+                (x.is_finite() && y.is_finite()).then(|| [x.clamp(0.0, 1.0), y.clamp(0.0, 1.0)])
+            })
+            .collect();
+    }
+    for c in &mut out {
+        if c.len() < 2 {
+            *c = vec![[0.0, 0.0], [1.0, 1.0]];
+        }
+        c.sort_by(|a, b| a[0].total_cmp(&b[0]));
+    }
+    out
+}
+
+pub fn curves_string(c: &[Vec<[f32; 2]>; 4]) -> String {
+    c.iter().map(|pts| pts.iter().map(|p| format!("{:.4},{:.4}", p[0], p[1])).collect::<Vec<_>>().join(";")).collect::<Vec<_>>().join("|")
+}
+
+/// Valeur d'une courbe en `x` : passe par tous les points, en douceur, sans dépasser 0 à 1.
+pub fn eval_curve(pts: &[[f32; 2]], x: f32) -> f32 {
+    let x = if x.is_finite() { x.clamp(0.0, 1.0) } else { 0.0 };
+    let n = pts.len();
+    if x <= pts[0][0] {
+        return pts[0][1];
+    }
+    if x >= pts[n - 1][0] {
+        return pts[n - 1][1];
+    }
+    let i = (0..n - 1).find(|&i| x <= pts[i + 1][0]).unwrap_or(n - 2);
+    let (a, b) = (pts[i], pts[i + 1]);
+    let w = (b[0] - a[0]).max(1e-6);
+    // Pentes prises sur les voisins ; aux extrémités, celle du segment
+    let slope = |j: usize| {
+        if j == 0 || j == n - 1 {
+            let (p, q) = if j == 0 { (pts[0], pts[1]) } else { (pts[n - 2], pts[n - 1]) };
+            (q[1] - p[1]) / (q[0] - p[0]).max(1e-6)
+        } else {
+            (pts[j + 1][1] - pts[j - 1][1]) / (pts[j + 1][0] - pts[j - 1][0]).max(1e-6)
+        }
+    };
+    let t = (x - a[0]) / w;
+    let (t2, t3) = (t * t, t * t * t);
+    let y = (2.0 * t3 - 3.0 * t2 + 1.0) * a[1] + (t3 - 2.0 * t2 + t) * w * slope(i) + (-2.0 * t3 + 3.0 * t2) * b[1] + (t3 - t2) * w * slope(i + 1);
+    y.clamp(0.0, 1.0)
+}
 
 pub const DEFAULT_RAMP: &str = "0,0,0,0,1;1,1,1,1,1";
 
@@ -299,6 +358,9 @@ impl Graph {
                 }
                 ParamDef::Ramp(n) => {
                     params.insert(n.to_string(), Param::S(DEFAULT_RAMP.to_string()));
+                }
+                ParamDef::Curve(n) => {
+                    params.insert(n.to_string(), Param::S(DEFAULT_CURVES.to_string()));
                 }
             }
         }
@@ -1197,6 +1259,8 @@ struct Step {
     image: Option<std::sync::Arc<Img>>,
     /// Dégradé déjà lu (node « Rampe de couleur »)
     ramp: Option<std::sync::Arc<Vec<(f32, V)>>>,
+    /// Courbes déjà calculées en tables de 256 valeurs (node « Courbes RVB »)
+    curves: Option<std::sync::Arc<[Vec<f32>; 4]>>,
 }
 
 #[derive(Clone, Copy)]
@@ -1300,7 +1364,15 @@ impl Program {
             };
             base.insert(id, regs);
             let ramp = d.params.iter().find_map(|p| if let ParamDef::Ramp(k) = p { Some(std::sync::Arc::new(parse_ramp(pstr(&n.params, k)))) } else { None });
-            steps.push(Step { op: d.op, ins, base: regs, nout: d.outputs.len(), params: n.params.clone(), shader, image, ramp });
+            let curves = d.params.iter().find_map(|p| {
+                if let ParamDef::Curve(k) = p {
+                    let c = parse_curves(pstr(&n.params, k));
+                    Some(std::sync::Arc::new([0, 1, 2, 3].map(|ch| (0..256).map(|i| eval_curve(&c[ch], i as f32 / 255.0)).collect::<Vec<f32>>())))
+                } else {
+                    None
+                }
+            });
+            steps.push(Step { op: d.op, ins, base: regs, nout: d.outputs.len(), params: n.params.clone(), shader, image, ramp, curves });
             regs += d.outputs.len().max(4);
         }
         let uses_curvature = steps.iter().any(|s| matches!(s.op, "curvature" | "edgewear" | "cavdirt"));
@@ -2016,6 +2088,18 @@ fn pixel(s: &Step, i: &[V], c: &Ctx) -> [V; 4] {
         }
         "clamp" => [one(i[0][0].clamp(i[1][0].min(i[2][0]), i[2][0].max(i[1][0]))), z, z, z],
         "mix" => [blend(pstr(&s.params, "mode"), i[1], i[2], i[0][0].clamp(0.0, 1.0)), z, z, z],
+        "curves" => {
+            let Some(t) = &s.curves else { return [i[0], z, z, z] };
+            // Lecture dans la table, avec interpolation entre deux cases
+            let look = |tab: &Vec<f32>, x: f32| {
+                let f = if x.is_finite() { x.clamp(0.0, 1.0) * 255.0 } else { 0.0 };
+                let k = (f as usize).min(254);
+                tab[k] + (tab[k + 1] - tab[k]) * (f - k as f32)
+            };
+            let k = i[1][0].clamp(0.0, 1.0);
+            let f = |ch: usize| i[0][ch] + (look(&t[0], look(&t[ch + 1], i[0][ch])) - i[0][ch]) * k;
+            [[f(0), f(1), f(2), i[0][3]], z, z, z]
+        }
         "colorramp" => {
             let mode = match pstr(&s.params, "interpolation") {
                 "lisse" => 1,
@@ -2388,7 +2472,7 @@ impl Editor {
         if n.collapsed {
             return HEAD;
         }
-        let rows = d.outputs.len() + d.inputs.len() + d.params.iter().map(|pp| match pp { ParamDef::Text(_) => 9, ParamDef::Ramp(_) => 3, _ => 1 }).sum::<usize>();
+        let rows = d.outputs.len() + d.inputs.len() + d.params.iter().map(|pp| match pp { ParamDef::Text(_) => 9, ParamDef::Ramp(_) => 3, ParamDef::Curve(_) => 7, _ => 1 }).sum::<usize>();
         let thumb = if n.preview && !d.outputs.is_empty() { THUMB + 8.0 } else { 0.0 };
         HEAD + rows as f32 * ROW + 8.0 + thumb
     }
@@ -3369,6 +3453,7 @@ impl Editor {
                 let (h, name) = match pd {
                     ParamDef::Text(n) => (9.0 * ROW, *n),
                     ParamDef::Ramp(n) => (3.0 * ROW, *n),
+                    ParamDef::Curve(n) => (7.0 * ROW, *n),
                     ParamDef::Choice(n, _) | ParamDef::Float(n, ..) | ParamDef::File(n) => (ROW, *n),
                 };
                 let row = Rect::from_min_size(pos2(r.left() + 8.0, y + 1.0), vec2(NW - 16.0, h - 2.0));
@@ -3414,6 +3499,93 @@ impl Editor {
                         });
                         let te = egui::TextEdit::multiline(code).code_editor().desired_width(NW - 18.0).desired_rows(7).font(egui::FontId::monospace(10.5));
                         if child.add(te).changed() {
+                            actions.push(Act::Changed);
+                        }
+                    }
+                    (ParamDef::Curve(_), Param::S(text)) => {
+                        let mut curves = parse_curves(text);
+                        let ch_id = egui::Id::unique(("curve-ch", *id));
+                        let mut ch: usize = child.data(|d| d.get_temp(ch_id)).unwrap_or(0).min(3);
+                        let mut edited = false;
+                        // Choix de la courbe, et remise à zéro
+                        let tabs = Rect::from_min_size(row.min, vec2(row.width(), ROW));
+                        let mut tu = child.new_child(egui::UiBuilder::new().max_rect(tabs).layout(egui::Layout::left_to_right(egui::Align::Center)));
+                        tu.spacing_mut().item_spacing.x = 2.0;
+                        let tints = [p.text, Color32::from_rgb(230, 80, 80), Color32::from_rgb(90, 190, 90), Color32::from_rgb(80, 140, 240)];
+                        for (k, label) in ["C", "R", "V", "B"].iter().enumerate() {
+                            if tu.selectable_label(ch == k, RichText::new(*label).size(11.0).color(tints[k])).on_hover_text(crate::i18n::t(["ensemble", "rouge", "vert", "bleu"][k])).clicked() {
+                                ch = k;
+                            }
+                        }
+                        if tu.small_button("↺").on_hover_text(crate::i18n::t("Remettre cette courbe droite")).clicked() {
+                            curves[ch] = vec![[0.0, 0.0], [1.0, 1.0]];
+                            edited = true;
+                        }
+                        // Le tracé : clic dans le vide pour ajouter un point, glisser pour le déplacer, clic droit pour le retirer
+                        let plot = Rect::from_min_max(pos2(row.left(), row.top() + ROW + 2.0), pos2(row.right(), row.bottom() - 2.0));
+                        let resp = child.interact(plot, egui::Id::unique(("curve-plot", *id)), Sense::click_and_drag());
+                        let painter = child.painter();
+                        painter.rect_filled(plot, 2.0, p.bg);
+                        for g in 1..4 {
+                            let t = g as f32 / 4.0;
+                            painter.line_segment([pos2(plot.left() + plot.width() * t, plot.top()), pos2(plot.left() + plot.width() * t, plot.bottom())], Stroke::new(1.0, p.line));
+                            painter.line_segment([pos2(plot.left(), plot.top() + plot.height() * t), pos2(plot.right(), plot.top() + plot.height() * t)], Stroke::new(1.0, p.line));
+                        }
+                        painter.rect_stroke(plot, 2.0, Stroke::new(1.0, p.line), egui::StrokeKind::Inside);
+                        let to_screen = |q: [f32; 2]| pos2(plot.left() + q[0] * plot.width(), plot.bottom() - q[1] * plot.height());
+                        let from_screen = |at: Pos2| [((at.x - plot.left()) / plot.width()).clamp(0.0, 1.0), ((plot.bottom() - at.y) / plot.height()).clamp(0.0, 1.0)];
+                        let grab_id = egui::Id::unique(("curve-grab", *id));
+                        let mut grab: Option<usize> = child.data(|d| d.get_temp(grab_id));
+                        if let Some(at) = resp.interact_pointer_pos() {
+                            let near = curves[ch].iter().enumerate().map(|(k, q)| (k, (to_screen(*q) - at).length())).min_by(|a, b| a.1.total_cmp(&b.1)).unwrap();
+                            if resp.secondary_clicked() {
+                                if near.1 < 9.0 && curves[ch].len() > 2 {
+                                    curves[ch].remove(near.0);
+                                    edited = true;
+                                }
+                            } else if grab.is_none() && resp.is_pointer_button_down_on() && child.input(|i| i.pointer.primary_down()) {
+                                if near.1 < 9.0 {
+                                    grab = Some(near.0);
+                                } else {
+                                    let q = from_screen(at);
+                                    curves[ch].push(q);
+                                    curves[ch].sort_by(|a, b| a[0].total_cmp(&b[0]));
+                                    grab = curves[ch].iter().position(|x| *x == q);
+                                    edited = true;
+                                }
+                            }
+                            if let (Some(g), true) = (grab, resp.dragged_by(egui::PointerButton::Primary)) {
+                                if g < curves[ch].len() {
+                                    let mut q = from_screen(at);
+                                    // Un point reste entre ses deux voisins
+                                    let lo = if g > 0 { curves[ch][g - 1][0] + 0.005 } else { 0.0 };
+                                    let hi = if g + 1 < curves[ch].len() { curves[ch][g + 1][0] - 0.005 } else { 1.0 };
+                                    q[0] = q[0].clamp(lo.min(hi), hi.max(lo));
+                                    curves[ch][g] = q;
+                                    edited = true;
+                                }
+                            }
+                        }
+                        if !resp.is_pointer_button_down_on() {
+                            grab = None;
+                        }
+                        match grab {
+                            Some(g) => {
+                                child.data_mut(|d| d.insert_temp(grab_id, g));
+                            }
+                            None => {
+                                child.data_mut(|d| d.remove::<usize>(grab_id));
+                            }
+                        }
+                        let line: Vec<Pos2> = (0..=48).map(|k| k as f32 / 48.0).map(|x| to_screen([x, eval_curve(&curves[ch], x)])).collect();
+                        painter.add(egui::Shape::line(line, Stroke::new(1.8, tints[ch])));
+                        for (k, q) in curves[ch].iter().enumerate() {
+                            painter.circle_filled(to_screen(*q), if grab == Some(k) { 4.5 } else { 3.5 }, tints[ch]);
+                            painter.circle_stroke(to_screen(*q), if grab == Some(k) { 4.5 } else { 3.5 }, Stroke::new(1.0, p.bg));
+                        }
+                        child.data_mut(|d| d.insert_temp(ch_id, ch));
+                        if edited {
+                            *text = curves_string(&curves);
                             actions.push(Act::Changed);
                         }
                     }
@@ -3551,6 +3723,7 @@ impl Editor {
                             ParamDef::Float(_, _, _, v) => Param::F(*v),
                             ParamDef::Choice(_, c) => Param::S(c[0].to_string()),
                             ParamDef::Ramp(_) => Param::S(DEFAULT_RAMP.to_string()),
+                            ParamDef::Curve(_) => Param::S(DEFAULT_CURVES.to_string()),
                             _ => Param::S(String::new()),
                         };
                     }
@@ -3846,8 +4019,26 @@ mod tests {
         let cr = g.add("colorramp", [300.0, 60.0]);
         g.nodes.iter_mut().find(|n| n.id == cr).unwrap().params.insert("dégradé".into(), Param::S("0.15,0.05,0.1,0.35,1;0.45,0.1,0.6,0.7,1;0.6,0.95,0.85,0.3,1;0.9,0.9,0.2,0.1,1".into()));
         g.connect(no, 0, cr, 0);
-        g.connect(cr, 0, out, 0);
+        let cv = g.add("curves", [540.0, 60.0]);
+        g.nodes.iter_mut().find(|n| n.id == cv).unwrap().params.insert("courbes".into(), Param::S("0,0;0.3,0.1;0.7,0.9;1,1|0,0;1,1|0,0;1,1|0,0;0.5,0.7;1,1".into()));
+        g.connect(cr, 0, cv, 0);
+        g.connect(cv, 0, out, 0);
+        g.nodes.iter_mut().find(|n| n.id == out).unwrap().pos = [800.0, 60.0];
         g.save(std::path::Path::new(&out_path)).unwrap();
+    }
+
+    #[test]
+    fn courbes_rvb() {
+        let c = parse_curves("0,0;0.5,0.8;1,1|0,0;1,1|0,1;1,0|");
+        assert_eq!(c[0].len(), 3);
+        assert_eq!(c[3], vec![[0.0, 0.0], [1.0, 1.0]]);
+        // La courbe passe par ses points et reste entre 0 et 1
+        assert!((eval_curve(&c[0], 0.5) - 0.8).abs() < 1e-5);
+        assert!((0..=100).all(|k| (0.0..=1.0).contains(&eval_curve(&c[0], k as f32 / 100.0))));
+        // Une droite reste une droite ; une courbe inversée inverse
+        assert!((eval_curve(&c[1], 0.3) - 0.3).abs() < 1e-5);
+        assert!((eval_curve(&c[2], 0.25) - 0.75).abs() < 1e-5);
+        assert_eq!(parse_curves(&curves_string(&c)), c);
     }
 
     #[test]

@@ -15,6 +15,9 @@ fn one3() -> [f32; 3] {
 fn yes() -> bool {
     true
 }
+fn half() -> f32 {
+    0.5
+}
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct Object {
@@ -39,6 +42,32 @@ pub struct Object {
     /// Matériau en nodes de l'objet : chemin dans le coffre (vide = aucun)
     #[serde(default)]
     pub material: String,
+    /// Nom de l'objet parent (vide = aucun) : l'enfant suit ses déplacements, rotations et changements de taille
+    #[serde(default)]
+    pub parent: String,
+    /// Opacité d'une image de référence
+    #[serde(default = "half")]
+    pub opacity: f32,
+}
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Kind {
+    Model,
+    /// Image de référence : un plan dans la scène, affiché par-dessus le rendu
+    Image,
+    /// Sans fichier : sert à regrouper d'autres objets
+    Empty,
+}
+
+pub fn kind(o: &Object) -> Kind {
+    let ext = o.file.rsplit('.').next().unwrap_or("").to_lowercase();
+    if o.file.trim().is_empty() {
+        Kind::Empty
+    } else if matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "webp" | "bmp" | "gif" | "tga" | "tif" | "tiff") {
+        Kind::Image
+    } else {
+        Kind::Model
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
@@ -78,7 +107,116 @@ impl Scene {
             name = format!("{stem}.{n:03}");
             n += 1;
         }
-        self.objects.push(Object { name, file, pos: [0.0; 3], rot: [0.0; 3], scale: [1.0; 3], visible: true, color: None, mods: vec![], material: String::new() });
+        self.objects.push(Object { name, file, pos: [0.0; 3], rot: [0.0; 3], scale: [1.0; 3], visible: true, color: None, mods: vec![], material: String::new(), parent: String::new(), opacity: 0.5 });
+    }
+
+    /// Ajoute un groupe vide et renvoie son indice.
+    pub fn add_empty(&mut self) -> usize {
+        let mut name = "groupe".to_string();
+        let mut n = 2;
+        while self.objects.iter().any(|o| o.name == name) {
+            name = format!("groupe.{n:03}");
+            n += 1;
+        }
+        self.objects.push(Object { name, file: String::new(), pos: [0.0; 3], rot: [0.0; 3], scale: [1.0; 3], visible: true, color: None, mods: vec![], material: String::new(), parent: String::new(), opacity: 0.5 });
+        self.objects.len() - 1
+    }
+
+    pub fn parent_of(&self, k: usize) -> Option<usize> {
+        let p = &self.objects.get(k)?.parent;
+        if p.is_empty() {
+            return None;
+        }
+        self.objects.iter().position(|o| &o.name == p).filter(|&i| i != k)
+    }
+
+    /// Fait passer un point de l'espace du parent de `k` à celui de la scène.
+    pub fn from_parent(&self, k: usize, mut p: [f32; 3]) -> [f32; 3] {
+        let mut cur = k;
+        // La limite protège d'une boucle de parents écrite à la main dans le fichier
+        for _ in 0..32 {
+            let Some(up) = self.parent_of(cur) else { break };
+            p = transform(&self.objects[up], p);
+            cur = up;
+        }
+        p
+    }
+
+    /// Place un point de l'objet `k` dans la scène, parents compris.
+    pub fn world(&self, k: usize, p: [f32; 3]) -> [f32; 3] {
+        self.from_parent(k, transform(&self.objects[k], p))
+    }
+
+    /// Un objet est affiché s'il est visible et que ses parents le sont.
+    pub fn shown(&self, k: usize) -> bool {
+        let mut cur = k;
+        for _ in 0..32 {
+            if !self.objects[cur].visible {
+                return false;
+            }
+            match self.parent_of(cur) {
+                Some(up) => cur = up,
+                None => break,
+            }
+        }
+        true
+    }
+
+    /// `k` a-t-il `anc` parmi ses parents ? (pour refuser de créer une boucle)
+    pub fn descends(&self, k: usize, anc: usize) -> bool {
+        let mut cur = k;
+        for _ in 0..32 {
+            match self.parent_of(cur) {
+                Some(up) if up == anc => return true,
+                Some(up) => cur = up,
+                None => break,
+            }
+        }
+        false
+    }
+
+    /// Les objets dans l'ordre de l'arbre, avec leur profondeur.
+    pub fn tree(&self) -> Vec<(usize, usize)> {
+        fn walk(s: &Scene, parent: Option<usize>, depth: usize, out: &mut Vec<(usize, usize)>) {
+            if depth > 32 {
+                return;
+            }
+            for k in 0..s.objects.len() {
+                if s.parent_of(k) == parent && !out.iter().any(|x| x.0 == k) {
+                    out.push((k, depth));
+                    walk(s, Some(k), depth + 1, out);
+                }
+            }
+        }
+        let mut out = vec![];
+        walk(self, None, 0, &mut out);
+        // Objets pris dans une boucle : affichés quand même, à plat
+        for k in 0..self.objects.len() {
+            if !out.iter().any(|x| x.0 == k) {
+                out.push((k, 0));
+            }
+        }
+        out
+    }
+
+    /// Renomme un objet sans perdre ses enfants.
+    pub fn rename(&mut self, k: usize, name: &str) {
+        let old = std::mem::replace(&mut self.objects[k].name, name.to_string());
+        for o in &mut self.objects {
+            if o.parent == old && !old.is_empty() {
+                o.parent = name.to_string();
+            }
+        }
+    }
+
+    /// Retire un objet ; ses enfants remontent d'un cran et restent où ils sont dans la scène… à leur parent près.
+    pub fn remove(&mut self, k: usize) {
+        let gone = self.objects.remove(k);
+        for o in &mut self.objects {
+            if o.parent == gone.name {
+                o.parent = gone.parent.clone();
+            }
+        }
     }
 }
 
@@ -138,7 +276,7 @@ pub fn build_ranges(scene: &Scene, scene_path: &Path) -> (Result<crate::model3d:
     let (mut pos, mut tris, mut colors, mut edges) = (vec![], vec![], vec![], vec![]);
     let mut errors = vec![None; scene.objects.len()];
     for (k, o) in scene.objects.iter().enumerate() {
-        if !o.visible {
+        if !scene.shown(k) || kind(o) != Kind::Model {
             continue;
         }
         let path = resolve(scene_path, &o.file);
@@ -159,7 +297,7 @@ pub fn build_ranges(scene: &Scene, scene_path: &Path) -> (Result<crate::model3d:
                     let (c, origin) = (up(c), up([-c[0] / longest, -c[1] / longest, -c[2] / longest]));
                     let mesh = crate::modifiers::apply(&o.mods, crate::modifiers::Mesh::from_model(&m, m.z_up), origin);
                     ranges.push((k, tris.len(), tris.len() + mesh.tris.len()));
-                    pos.extend(mesh.pos.iter().map(|p| transform(o, [p[0] * longest + c[0], p[1] * longest + c[1], p[2] * longest + c[2]])));
+                    pos.extend(mesh.pos.iter().map(|p| scene.world(k, [p[0] * longest + c[0], p[1] * longest + c[1], p[2] * longest + c[2]])));
                     tris.extend(mesh.tris.iter().map(|t| [t[0] + base, t[1] + base, t[2] + base]));
                     match o.color {
                         Some(c) => colors.extend(std::iter::repeat_n(eframe::egui::Color32::from_rgb(c[0], c[1], c[2]), mesh.tris.len())),
@@ -169,7 +307,7 @@ pub fn build_ranges(scene: &Scene, scene_path: &Path) -> (Result<crate::model3d:
                     continue;
                 }
                 ranges.push((k, tris.len(), tris.len() + m.tris.len()));
-                pos.extend(m.positions.iter().map(|p| transform(o, if m.z_up { [p[0], p[2], -p[1]] } else { *p })));
+                pos.extend(m.positions.iter().map(|p| scene.world(k, if m.z_up { [p[0], p[2], -p[1]] } else { *p })));
                 tris.extend(m.tris.iter().map(|t| [t[0] + base, t[1] + base, t[2] + base]));
                 match o.color {
                     Some(c) => colors.extend(std::iter::repeat_n(eframe::egui::Color32::from_rgb(c[0], c[1], c[2]), m.tris.len())),
@@ -225,6 +363,25 @@ mod tests {
         for k in 0..3 {
             assert!((m2.min[k] - m.min[k]).abs() < 1e-4 && (m2.max[k] - m.max[k]).abs() < 1e-4);
         }
+        // Hiérarchie : l'enfant suit son parent, et un groupe vide ou une image n'ajoute aucun triangle
+        let mut h = s.clone();
+        let g = h.add_empty();
+        h.objects[g].pos = [0.0, 5.0, 0.0];
+        h.objects[0].parent = h.objects[g].name.clone();
+        h.add(&file, &dir.join("croquis.png"));
+        assert_eq!(kind(&h.objects[3]), Kind::Image);
+        let (mh, eh, rh) = build_ranges(&h, &file);
+        assert!(eh.iter().all(|e| e.is_none()) && rh.len() == 2);
+        assert!((mh.unwrap().positions[1][1] - 5.0).abs() < 1e-4);
+        assert_eq!(h.tree(), vec![(1, 0), (2, 0), (0, 1), (3, 0)]);
+        h.rename(g, "décor");
+        assert_eq!(h.objects[0].parent, "décor");
+        // Une boucle de parents ne bloque rien
+        h.objects[g].parent = h.objects[0].name.clone();
+        assert!(h.world(0, [0.0; 3]).iter().all(|x| x.is_finite()));
+        assert_eq!(h.tree().len(), 4);
+        h.remove(g);
+        assert!(h.objects.iter().all(|o| o.parent != "décor"));
         // Objet caché ou fichier manquant : la scène reste lisible
         s.objects[0].visible = false;
         s.objects[1].file = "absent.obj".into();

@@ -1001,5 +1001,16 @@
  "ouvrir dans un panneau à droite": "open in a panel on the right",
  "ouvrir dans un panneau en bas": "open in a panel at the bottom",
  "ouvrir dans sa propre fenêtre": "open in its own window",
- "ouvre un deuxième fichier pour sortir celui-ci dans un panneau": "open a second file to move this one into a panel"
+ "ouvre un deuxième fichier pour sortir celui-ci dans un panneau": "open a second file to move this one into a panel",
+ "modèles et images": "models and images",
+ "groupe vide": "empty group",
+ "Un objet sans forme, pour déplacer plusieurs objets ensemble": "A shapeless object, to move several objects together",
+ "parent": "parent",
+ "Courbes RVB": "RGB curves",
+ "courbes": "curves",
+ "ensemble": "combined",
+ "rouge": "red",
+ "vert": "green",
+ "bleu": "blue",
+ "Remettre cette courbe droite": "Reset this curve to a straight line"
 }
