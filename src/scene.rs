@@ -66,11 +66,56 @@ pub struct Object {
     /// Portée d'une lumière ponctuelle, dans les unités de la scène
     #[serde(default = "range")]
     pub range: f32,
+    /// Clés d'animation, triées par image
+    #[serde(default)]
+    pub keys: Vec<Key>,
+}
+
+/// Une clé : la pose complète de l'objet à une image donnée.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+pub struct Key {
+    pub frame: i32,
+    pub pos: [f32; 3],
+    pub rot: [f32; 3],
+    pub scale: [f32; 3],
+    /// Départ et arrivée en douceur vers la clé suivante (sinon vitesse constante)
+    #[serde(default = "yes")]
+    pub ease: bool,
 }
 
 impl Object {
+    /// Pose de l'objet à l'image `f` d'après ses clés (None s'il n'en a pas).
+    pub fn pose_at(&self, f: f32) -> Option<([f32; 3], [f32; 3], [f32; 3])> {
+        let k = &self.keys;
+        let (first, last) = (k.first()?, k.last()?);
+        if f <= first.frame as f32 {
+            return Some((first.pos, first.rot, first.scale));
+        }
+        if f >= last.frame as f32 {
+            return Some((last.pos, last.rot, last.scale));
+        }
+        let i = (0..k.len() - 1).find(|&i| f < k[i + 1].frame as f32)?;
+        let (a, b) = (&k[i], &k[i + 1]);
+        let t = (f - a.frame as f32) / (b.frame - a.frame).max(1) as f32;
+        let t = if a.ease { t * t * (3.0 - 2.0 * t) } else { t };
+        let mix = |x: [f32; 3], y: [f32; 3]| [x[0] + (y[0] - x[0]) * t, x[1] + (y[1] - x[1]) * t, x[2] + (y[2] - x[2]) * t];
+        Some((mix(a.pos, b.pos), mix(a.rot, b.rot), mix(a.scale, b.scale)))
+    }
+
+    /// Pose une clé à l'image `frame` avec la pose actuelle (ou remplace celle qui s'y trouve).
+    pub fn set_key(&mut self, frame: i32) {
+        let key = Key { frame, pos: self.pos, rot: self.rot, scale: self.scale, ease: true };
+        match self.keys.iter().position(|k| k.frame == frame) {
+            Some(i) => self.keys[i] = Key { ease: self.keys[i].ease, ..key },
+            None => {
+                self.keys.push(key);
+                self.keys.sort_by_key(|k| k.frame);
+            }
+        }
+    }
+
     pub fn new(name: String, file: String) -> Object {
-        Object { name, file, pos: [0.0; 3], rot: [0.0; 3], scale: [1.0; 3], visible: true, color: None, mods: vec![], material: String::new(), parent: String::new(), opacity: 0.5, role: String::new(), energy: 1.2, point: false, range: 8.0 }
+        Object { name, file, pos: [0.0; 3], rot: [0.0; 3], scale: [1.0; 3], visible: true, color: None, mods: vec![], material: String::new(), parent: String::new(), opacity: 0.5, role: String::new(), energy: 1.2, point: false, range: 8.0, keys: vec![] }
     }
 }
 
@@ -113,12 +158,32 @@ pub fn kind(o: &Object) -> Kind {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+impl Default for Scene {
+    fn default() -> Scene {
+        Scene { version: 1, objects: vec![], fps: 24.0, start: 0, end: 120 }
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct Scene {
     #[serde(default)]
     pub version: u32,
     #[serde(default)]
     pub objects: Vec<Object>,
+    /// Animation : images par seconde, première et dernière image
+    #[serde(default = "fps")]
+    pub fps: f32,
+    #[serde(default)]
+    pub start: i32,
+    #[serde(default = "end")]
+    pub end: i32,
+}
+
+fn fps() -> f32 {
+    24.0
+}
+fn end() -> i32 {
+    120
 }
 
 pub fn is_scene(path: &Path) -> bool {
@@ -135,8 +200,22 @@ impl Scene {
     }
 
     pub fn write(&self, path: &Path) -> Result<(), String> {
-        let s = Scene { version: 1, objects: self.objects.clone() };
+        let s = Scene { version: 1, ..self.clone() };
         std::fs::write(path, serde_json::to_string_pretty(&s).map_err(|e| e.to_string())?).map_err(|e| e.to_string())
+    }
+
+    /// Met chaque objet animé dans sa pose de l'image `f`. Renvoie vrai si quelque chose a bougé.
+    pub fn apply_frame(&mut self, f: f32) -> bool {
+        let mut moved = false;
+        for o in &mut self.objects {
+            if let Some((p, r, s)) = o.pose_at(f) {
+                if (o.pos, o.rot, o.scale) != (p, r, s) {
+                    (o.pos, o.rot, o.scale) = (p, r, s);
+                    moved = true;
+                }
+            }
+        }
+        moved
     }
 
     /// Ajoute un modèle à la scène, posé à l'origine.
@@ -475,6 +554,23 @@ mod tests {
         assert_eq!(h.tree().len(), 4);
         h.remove(g);
         assert!(h.objects.iter().all(|o| o.parent != "décor"));
+        // Animation : deux clés, la pose au milieu est entre les deux, et en douceur aux extrémités
+        let mut a = Scene::default();
+        let k = a.add_role("cube", "");
+        a.objects[k].set_key(0);
+        a.objects[k].pos = [10.0, 0.0, 0.0];
+        a.objects[k].set_key(20);
+        assert_eq!(a.objects[k].keys.len(), 2);
+        assert!(a.apply_frame(10.0));
+        assert!((a.objects[k].pos[0] - 5.0).abs() < 1e-4);
+        a.apply_frame(2.0);
+        assert!(a.objects[k].pos[0] < 0.5, "départ en douceur");
+        a.apply_frame(99.0);
+        assert_eq!(a.objects[k].pos[0], 10.0);
+        // Reposer une clé sur la même image la remplace
+        a.objects[k].pos = [4.0, 0.0, 0.0];
+        a.objects[k].set_key(20);
+        assert!(a.objects[k].keys.len() == 2 && a.objects[k].keys[1].pos[0] == 4.0);
         // Lumière : au repos elle vient d'en haut ; tournée de 90° autour de Z, elle vient de -X
         let mut l = Scene::default();
         let k = l.add_role("soleil", "light");

@@ -1570,6 +1570,11 @@ pub struct Viewer {
     gizmo_mode: u8,
     /// Images de référence de la scène, chargées une fois (texture et rapport largeur / hauteur)
     ref_tex: std::collections::HashMap<std::path::PathBuf, Option<std::sync::Arc<image::RgbaImage>>>,
+    /// Animation de la scène : image courante, lecture en cours, clé automatique
+    anim_frame: f32,
+    anim_playing: bool,
+    anim_auto: bool,
+    anim_last: Option<std::time::Instant>,
     scene_ver: u64,
     scene_dirty: bool,
     /// Cadre fixe de la scène : déplacer un objet ne doit pas recentrer ni redimensionner tout le reste
@@ -1633,6 +1638,10 @@ impl Viewer {
             gizmo_axis: None,
             gizmo_mode: 0,
             ref_tex: Default::default(),
+            anim_frame: 0.0,
+            anim_playing: false,
+            anim_auto: false,
+            anim_last: None,
             scene_ver: 0,
             scene_dirty: false,
             scene_frame: None,
@@ -1817,6 +1826,108 @@ impl Viewer {
         let scene = self.scene.as_mut().unwrap();
         let mut changed = false;
         let mut reframe = false;
+        // ---- Timeline : lecture, image courante, clés de l'objet choisi
+        let mut seek: Option<f32> = None;
+        if self.anim_playing {
+            let now = std::time::Instant::now();
+            let dt = self.anim_last.map(|t| now.duration_since(t).as_secs_f32()).unwrap_or(0.0).min(0.25);
+            self.anim_last = Some(now);
+            let (a, b) = (scene.start as f32, scene.end.max(scene.start + 1) as f32);
+            let mut f = self.anim_frame + dt * scene.fps.max(1.0);
+            if f > b {
+                f = a + (f - b) % (b - a);
+            }
+            seek = Some(f);
+            ui.ctx().request_repaint();
+        } else {
+            self.anim_last = None;
+        }
+        egui::Panel::bottom("scene-timeline").exact_size(58.0).frame(egui::Frame::new().fill(p.panel).stroke(Stroke::new(1.0, p.line)).inner_margin(egui::Margin::symmetric(10, 4))).show(ui, |ui| {
+            ui.horizontal(|ui| {
+                if ui.button(if self.anim_playing { "⏸" } else { "▶" }).on_hover_text(crate::i18n::t("lire / arrêter (Espace)")).clicked() {
+                    self.anim_playing = !self.anim_playing;
+                }
+                if ui.button("⏮").on_hover_text(crate::i18n::t("revenir au début")).clicked() {
+                    seek = Some(scene.start as f32);
+                }
+                let mut fr = self.anim_frame.round() as i32;
+                if ui.add(egui::DragValue::new(&mut fr).prefix(format!("{} ", crate::i18n::t("image")))).changed() {
+                    seek = Some(fr as f32);
+                }
+                ui.separator();
+                let sel = self.scene_sel.filter(|&k| k < scene.objects.len());
+                let here = self.anim_frame.round() as i32;
+                let on_key = sel.is_some_and(|k| scene.objects[k].keys.iter().any(|x| x.frame == here));
+                if ui.add_enabled(sel.is_some(), egui::Button::new(egui::RichText::new(if on_key { "◆" } else { "◇" }).color(if on_key { p.accent } else { p.text }))).on_hover_text(crate::i18n::t("Poser une clé pour l'objet choisi à cette image (K)")).clicked() {
+                    if let Some(k) = sel {
+                        scene.objects[k].set_key(here);
+                        changed = true;
+                    }
+                }
+                if ui.add_enabled(on_key, egui::Button::new("✕")).on_hover_text(crate::i18n::t("Retirer la clé de cette image")).clicked() {
+                    if let Some(k) = sel {
+                        scene.objects[k].keys.retain(|x| x.frame != here);
+                        changed = true;
+                    }
+                }
+                if let Some(key) = sel.and_then(|k| scene.objects[k].keys.iter_mut().find(|x| x.frame == here)) {
+                    changed |= ui.checkbox(&mut key.ease, crate::i18n::t("en douceur")).on_hover_text(crate::i18n::t("Départ et arrivée en douceur jusqu'à la clé suivante")).changed();
+                }
+                ui.toggle_value(&mut self.anim_auto, egui::RichText::new(crate::i18n::t("clé auto")).size(11.0)).on_hover_text(crate::i18n::t("Chaque déplacement pose une clé à l'image courante"));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    changed |= ui.add(egui::DragValue::new(&mut scene.fps).range(1.0..=120.0).suffix(" i/s")).changed();
+                    changed |= ui.add(egui::DragValue::new(&mut scene.end).prefix(format!("{} ", crate::i18n::t("fin")))).changed();
+                    changed |= ui.add(egui::DragValue::new(&mut scene.start).prefix(format!("{} ", crate::i18n::t("début")))).changed();
+                });
+            });
+            // La règle : un clic ou un glissement déplace la tête de lecture ; les losanges sont les clés de l'objet choisi
+            let (r, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 20.0), egui::Sense::click_and_drag());
+            let (a, b) = (scene.start as f32, scene.end.max(scene.start + 1) as f32);
+            let x_of = |f: f32| r.left() + 6.0 + (r.width() - 12.0) * ((f - a) / (b - a)).clamp(0.0, 1.0);
+            let painter = ui.painter();
+            painter.rect_filled(r, 3.0, p.bg);
+            let step = [1, 2, 5, 10, 20, 50, 100, 200, 500].into_iter().find(|s| (r.width() - 12.0) / (b - a) * *s as f32 > 46.0).unwrap_or(1000);
+            let mut f = (scene.start as f32 / step as f32).ceil() as i32 * step;
+            while f <= scene.end {
+                let x = x_of(f as f32);
+                painter.line_segment([egui::pos2(x, r.bottom() - 5.0), egui::pos2(x, r.bottom())], Stroke::new(1.0, p.muted));
+                painter.text(egui::pos2(x + 3.0, r.top() + 1.0), egui::Align2::LEFT_TOP, f.to_string(), egui::FontId::monospace(9.0), p.muted);
+                f += step;
+            }
+            for (k, o) in scene.objects.iter().enumerate() {
+                let on = self.scene_sel == Some(k);
+                for key in &o.keys {
+                    let c = egui::pos2(x_of(key.frame as f32), r.center().y + 3.0);
+                    let d = if on { 4.5 } else { 2.5 };
+                    painter.add(egui::Shape::convex_polygon(vec![c + egui::vec2(0.0, -d), c + egui::vec2(d, 0.0), c + egui::vec2(0.0, d), c + egui::vec2(-d, 0.0)], if on { p.accent } else { p.muted }, Stroke::NONE));
+                }
+            }
+            let x = x_of(self.anim_frame);
+            painter.line_segment([egui::pos2(x, r.top()), egui::pos2(x, r.bottom())], Stroke::new(2.0, p.accent));
+            if let Some(at) = resp.interact_pointer_pos().filter(|_| resp.dragged() || resp.clicked()) {
+                seek = Some((a + (b - a) * ((at.x - r.left() - 6.0) / (r.width() - 12.0)).clamp(0.0, 1.0)).round());
+            }
+        });
+        if !ui.ctx().egui_wants_keyboard_input() {
+            if ui.input(|i| i.key_pressed(Key::Space)) {
+                self.anim_playing = !self.anim_playing;
+            }
+            if ui.input(|i| i.key_pressed(Key::K) && !i.modifiers.any()) {
+                if let Some(k) = self.scene_sel.filter(|&k| k < scene.objects.len()) {
+                    scene.objects[k].set_key(self.anim_frame.round() as i32);
+                    changed = true;
+                }
+            }
+        }
+        if let Some(f) = seek {
+            if f != self.anim_frame {
+                self.anim_frame = f;
+                if scene.apply_frame(f) {
+                    self.scene_dirty = true;
+                }
+            }
+        }
+        let pose_before = self.scene_sel.and_then(|k| scene.objects.get(k)).map(|o| (o.pos, o.rot, o.scale));
         let mut renamed: Option<(String, String)> = None;
         // Caméra à poser sur la vue actuelle, ou vue à aligner sur une caméra
         let mut set_camera: Option<usize> = None;
@@ -2127,6 +2238,14 @@ impl Viewer {
             if let Some(k) = self.scene_sel.filter(|&k| k < scene.objects.len()) {
                 scene.objects[k].name = old;
                 scene.rename(k, &new);
+            }
+        }
+        // Clé automatique : l'objet choisi vient d'être déplacé à la main
+        if self.anim_auto {
+            if let Some(o) = self.scene_sel.and_then(|k| scene.objects.get_mut(k)) {
+                if pose_before.is_some_and(|b| b != (o.pos, o.rot, o.scale)) {
+                    o.set_key(self.anim_frame.round() as i32);
+                }
             }
         }
         if reframe {
@@ -2904,7 +3023,12 @@ impl Viewer {
             }
             if self.gizmo_axis.is_some() && (resp.drag_stopped() || !ui.input(|i| i.pointer.primary_down())) {
                 self.gizmo_axis = None;
-                if let Some(scene) = &self.scene {
+                if let Some(scene) = &mut self.scene {
+                    if self.anim_auto {
+                        if let Some(o) = self.scene_sel.and_then(|k| scene.objects.get_mut(k)) {
+                            o.set_key(self.anim_frame.round() as i32);
+                        }
+                    }
                     let _ = scene.write(&self.path);
                 }
             }

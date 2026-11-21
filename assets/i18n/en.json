@@ -729,7 +729,7 @@
  "fresnel": "fresnel",
  "gamma": "gamma",
  "grille": "grid",
- "image": "image",
+ "image": "frame",
  "joint": "grout",
  "longueur (px)": "length (px)",
  "luminosité": "brightness",
@@ -1028,5 +1028,13 @@
  "Sa couleur se règle plus bas.": "Its color is set below.",
  "ombres portées": "cast shadows",
  "Chaque lumière projette l'ombre des objets. Plus lent sur les gros modèles.": "Each light casts object shadows. Slower on heavy models.",
- "0 : bord net. Plus haut : pénombre large, calculée avec plusieurs rayons.": "0: hard edge. Higher: wide penumbra, computed with several rays."
+ "0 : bord net. Plus haut : pénombre large, calculée avec plusieurs rayons.": "0: hard edge. Higher: wide penumbra, computed with several rays.",
+ "lire / arrêter (Espace)": "play / stop (Space)",
+ "revenir au début": "back to start",
+ "Poser une clé pour l'objet choisi à cette image (K)": "Set a key for the selected object at this frame (K)",
+ "Retirer la clé de cette image": "Remove this frame's key",
+ "en douceur": "ease",
+ "Départ et arrivée en douceur jusqu'à la clé suivante": "Ease in and out up to the next key",
+ "clé auto": "auto key",
+ "Chaque déplacement pose une clé à l'image courante": "Every move sets a key at the current frame"
 }
