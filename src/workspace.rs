@@ -27,32 +27,39 @@ pub struct Workspace {
     pub view: String,
     #[serde(default)]
     pub assistant: bool,
+    /// Ce à quoi sert l'espace : notes, 3d, 2d, video, code, ai, refs, mat. Décide de l'écran d'accueil.
+    #[serde(default)]
+    pub kind: String,
 }
 
 #[derive(Serialize, Deserialize)]
 pub struct Set {
     pub current: usize,
     pub list: Vec<Workspace>,
+    /// Espaces fournis d'origine déjà ajoutés (pour en proposer de nouveaux à une installation existante)
+    #[serde(default)]
+    pub seeded: u32,
 }
 
 fn path() -> Option<std::path::PathBuf> {
     dirs::config_dir().map(|d| d.join("aryadne").join("workspaces.json"))
 }
 
-/// Les espaces fournis d'origine : (nom, couleur, vue, assistant ouvert).
-pub const PRESETS: [(&str, Option<[u8; 3]>, &str, bool); 7] = [
-    ("notes", None, "files", false),
-    ("3D", Some([0x3d, 0x9b, 0xff]), "files", false),
-    ("2D", Some([0xe8, 0x5d, 0xa8]), "files", false),
-    ("vidéo", Some([0x9b, 0x6d, 0xff]), "files", false),
-    ("code", Some([0x3f, 0xc9, 0x7e]), "files", false),
-    ("IA", Some([0xf2, 0xb5, 0x3a]), "chat", true),
-    ("références", Some([0x2c, 0xc4, 0xc4]), "refs", false),
+/// Les espaces fournis d'origine : (nom, couleur, vue, assistant ouvert, genre).
+pub const PRESETS: [(&str, Option<[u8; 3]>, &str, bool, &str); 8] = [
+    ("notes", None, "files", false, "notes"),
+    ("3D", Some([0x3d, 0x9b, 0xff]), "files", false, "3d"),
+    ("2D", Some([0xe8, 0x5d, 0xa8]), "files", false, "2d"),
+    ("vidéo", Some([0x9b, 0x6d, 0xff]), "files", false, "video"),
+    ("code", Some([0x3f, 0xc9, 0x7e]), "files", false, "code"),
+    ("IA", Some([0xf2, 0xb5, 0x3a]), "chat", true, "ai"),
+    ("références", Some([0x2c, 0xc4, 0xc4]), "refs", false, "refs"),
+    ("matériaux", Some([0xe0, 0x7a, 0x3a]), "files", false, "mat"),
 ];
 
 pub fn preset(i: usize) -> Workspace {
-    let (name, accent, view, assistant) = PRESETS[i];
-    Workspace { name: name.to_string(), accent, view: view.to_string(), assistant, ..Default::default() }
+    let (name, accent, view, assistant, kind) = PRESETS[i];
+    Workspace { name: name.to_string(), accent, view: view.to_string(), assistant, kind: kind.to_string(), ..Default::default() }
 }
 
 impl Default for Set {
@@ -70,8 +77,20 @@ impl Set {
                 // Première fois : l'espace « notes » reprend la disposition déjà en place
                 let mut list: Vec<Workspace> = (0..PRESETS.len()).map(preset).collect();
                 list[0].places = crate::dock::export();
-                Set { current: 0, list }
+                Set { current: 0, list, seeded: 1 }
             });
+        // Installation d'avant les genres : on les retrouve par le nom, et l'espace « matériaux » s'ajoute
+        for w in &mut s.list {
+            if w.kind.is_empty() {
+                w.kind = PRESETS.iter().find(|p| p.0 == w.name).map(|p| p.4).unwrap_or("notes").to_string();
+            }
+        }
+        if s.seeded < 1 {
+            if !s.list.iter().any(|w| w.kind == "mat") {
+                s.list.push(preset(7));
+            }
+            s.seeded = 1;
+        }
         if s.list.is_empty() {
             s.list.push(preset(0));
         }
@@ -99,7 +118,7 @@ mod tests {
 
     #[test]
     fn espaces_aller_retour() {
-        let mut s = Set { current: 1, list: (0..PRESETS.len()).map(preset).collect() };
+        let mut s = Set { current: 1, list: (0..PRESETS.len()).map(preset).collect(), seeded: 1 };
         s.list[1].tabs = vec!["modele.glb".into()];
         s.list[1].places.insert("side".into(), crate::dock::Place { side: crate::dock::Side::Window, pos: [1.0, 2.0], size: [300.0, 400.0] });
         let back: Set = serde_json::from_slice(&serde_json::to_vec(&s).unwrap()).unwrap();
@@ -109,5 +128,6 @@ mod tests {
         // Un ancien fichier sans les champs récents reste lisible
         let old: Set = serde_json::from_str(r#"{"current":5,"list":[{"name":"a"}]}"#).unwrap();
         assert_eq!(old.list[0].view, "");
+        assert_eq!(preset(1).kind, "3d");
     }
 }

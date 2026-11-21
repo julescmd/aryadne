@@ -232,6 +232,30 @@ impl Scene {
         self.objects.push(Object::new(name, file));
     }
 
+    /// Ajoute une forme de base (« @cube », « @sphere »…) et renvoie son indice.
+    pub fn add_primitive(&mut self, id: &str) -> usize {
+        let base = PRIMITIVES.iter().find(|p| p.0 == id).map(|p| p.1).unwrap_or("forme");
+        let mut name = base.to_string();
+        let mut n = 2;
+        while self.objects.iter().any(|o| o.name == name) {
+            name = format!("{base}.{n:03}");
+            n += 1;
+        }
+        self.objects.push(Object::new(name, id.to_string()));
+        self.objects.len() - 1
+    }
+
+    /// La scène de départ : un cube, une lumière, une caméra.
+    pub fn starter() -> Scene {
+        let mut s = Scene::default();
+        s.add_primitive("@cube");
+        let l = s.add_role("soleil", "light");
+        (s.objects[l].pos, s.objects[l].rot) = ([4.0, 6.0, 3.0], [35.0, 0.0, -35.0]);
+        let c = s.add_role("caméra", "camera");
+        (s.objects[c].pos, s.objects[c].rot) = ([7.0, 5.0, 7.0], [-28.0, 45.0, 0.0]);
+        s
+    }
+
     /// Ajoute un groupe vide et renvoie son indice.
     pub fn add_empty(&mut self) -> usize {
         self.add_role("groupe", "")
@@ -379,6 +403,109 @@ impl Scene {
     }
 }
 
+/// Formes de base : (identifiant rangé dans `file`, nom).
+pub const PRIMITIVES: [(&str, &str); 6] = [("@cube", "cube"), ("@sphere", "sphère"), ("@plane", "plan"), ("@cylinder", "cylindre"), ("@cone", "cône"), ("@torus", "tore")];
+
+/// Construit une forme de base. Les faces sont des quads ou des polygones, comme dans un fichier de modèle.
+pub fn primitive(id: &str) -> Option<crate::model3d::Model> {
+    use std::f32::consts::{PI, TAU};
+    let mut pos: Vec<[f32; 3]> = vec![];
+    let (mut tris, mut edges): (Vec<[u32; 3]>, Vec<u8>) = (vec![], vec![]);
+    // Un polygone devient un éventail de triangles dont seuls les vrais côtés sont marqués
+    let mut poly = |p: &[u32]| {
+        for k in 1..p.len() - 1 {
+            tris.push([p[0], p[k], p[k + 1]]);
+            edges.push(crate::model3d::fan_mask(k, p.len()));
+        }
+    };
+    // Face plate : ses propres sommets, pour garder des arêtes nettes à l'éclairage
+    fn flat(pos: &mut Vec<[f32; 3]>, pts: &[[f32; 3]]) -> Vec<u32> {
+        let base = pos.len() as u32;
+        pos.extend_from_slice(pts);
+        (base..base + pts.len() as u32).collect()
+    }
+    match id {
+        "@cube" => {
+            let v: Vec<[f32; 3]> = (0..8).map(|i| [if i & 1 == 0 { -1.0 } else { 1.0 }, if i & 2 == 0 { -1.0 } else { 1.0 }, if i & 4 == 0 { -1.0 } else { 1.0 }]).collect();
+            for q in [[1usize, 3, 7, 5], [0, 4, 6, 2], [2, 6, 7, 3], [0, 1, 5, 4], [4, 5, 7, 6], [0, 2, 3, 1]] {
+                let f = flat(&mut pos, &q.map(|i| v[i]));
+                poly(&f);
+            }
+        }
+        "@plane" => {
+            pos = vec![[-1.0, 0.0, -1.0], [-1.0, 0.0, 1.0], [1.0, 0.0, 1.0], [1.0, 0.0, -1.0]];
+            poly(&[0, 1, 2, 3]);
+        }
+        "@sphere" => {
+            let (segs, rings) = (32u32, 16u32);
+            pos.push([0.0, 1.0, 0.0]);
+            for j in 1..rings {
+                let th = PI * j as f32 / rings as f32;
+                for i in 0..segs {
+                    let ph = TAU * i as f32 / segs as f32;
+                    pos.push([th.sin() * ph.cos(), th.cos(), th.sin() * ph.sin()]);
+                }
+            }
+            pos.push([0.0, -1.0, 0.0]);
+            let at = |i: u32, j: u32| 1 + (j - 1) * segs + i % segs;
+            let last = pos.len() as u32 - 1;
+            for i in 0..segs {
+                poly(&[0, at(i + 1, 1), at(i, 1)]);
+                for j in 1..rings - 1 {
+                    poly(&[at(i, j), at(i + 1, j), at(i + 1, j + 1), at(i, j + 1)]);
+                }
+                poly(&[last, at(i, rings - 1), at(i + 1, rings - 1)]);
+            }
+        }
+        "@cylinder" | "@cone" => {
+            let segs = 32u32;
+            let cone = id == "@cone";
+            for i in 0..segs {
+                let ph = TAU * i as f32 / segs as f32;
+                pos.push([ph.cos(), -1.0, ph.sin()]);
+            }
+            if cone {
+                pos.push([0.0, 1.0, 0.0]);
+                for i in 0..segs {
+                    poly(&[segs, (i + 1) % segs, i]);
+                }
+            } else {
+                for i in 0..segs {
+                    let ph = TAU * i as f32 / segs as f32;
+                    pos.push([ph.cos(), 1.0, ph.sin()]);
+                }
+                for i in 0..segs {
+                    poly(&[segs + i, segs + (i + 1) % segs, (i + 1) % segs, i]);
+                }
+                let top: Vec<[f32; 3]> = (0..segs).rev().map(|i| pos[(segs + i) as usize]).collect();
+                let f = flat(&mut pos, &top);
+                poly(&f);
+            }
+            let bottom: Vec<[f32; 3]> = (0..segs).map(|i| pos[i as usize]).collect();
+            let f = flat(&mut pos, &bottom);
+            poly(&f);
+        }
+        "@torus" => {
+            let (major, minor, big, small) = (48u32, 16u32, 1.0f32, 0.25f32);
+            for i in 0..major {
+                let u = TAU * i as f32 / major as f32;
+                for j in 0..minor {
+                    let v = TAU * j as f32 / minor as f32;
+                    pos.push([(big + small * v.cos()) * u.cos(), small * v.sin(), (big + small * v.cos()) * u.sin()]);
+                }
+            }
+            let at = |i: u32, j: u32| (i % major) * minor + j % minor;
+            for i in 0..major {
+                for j in 0..minor {
+                    poly(&[at(i, j), at(i, j + 1), at(i + 1, j + 1), at(i + 1, j)]);
+                }
+            }
+        }
+        _ => return None,
+    }
+    crate::model3d::Model::exact(pos, tris, None, Some(edges)).ok()
+}
+
 pub fn resolve(scene_path: &Path, file: &str) -> PathBuf {
     let p = Path::new(file);
     if p.is_absolute() { p.to_path_buf() } else { scene_path.parent().unwrap_or(Path::new("")).join(p) }
@@ -444,7 +571,8 @@ pub fn build_ranges(scene: &Scene, scene_path: &Path) -> (Result<crate::model3d:
             errors[k] = Some("une scène ne peut pas en contenir une autre".into());
             continue;
         }
-        match cached(&path) {
+        let loaded = if o.file.starts_with('@') { primitive(&o.file).map(Arc::new).ok_or_else(|| format!("forme inconnue : {}", o.file)) } else { cached(&path) };
+        match loaded {
             Ok(m) => {
                 let base = pos.len() as u32;
                 if o.mods.iter().any(|md| md.on) {
@@ -554,6 +682,28 @@ mod tests {
         assert_eq!(h.tree().len(), 4);
         h.remove(g);
         assert!(h.objects.iter().all(|o| o.parent != "décor"));
+        // Formes de base : fermées (chaque arête partagée par deux faces), tournées vers l'extérieur
+        for (id, _) in PRIMITIVES {
+            let m = primitive(id).unwrap();
+            let mut count = std::collections::HashMap::new();
+            let mut vol = 0.0f32;
+            for t in &m.tris {
+                for k in 0..3 {
+                    // Les faces plates ont leurs propres sommets : on compare les positions, pas les indices
+                    let key = |i: u32| m.positions[i as usize].map(|x| (x * 1000.0).round() as i32);
+                    let (a, b) = (key(t[k]), key(t[(k + 1) % 3]));
+                    *count.entry(if a < b { (a, b) } else { (b, a) }).or_insert(0) += 1;
+                }
+                let (a, b, c) = (m.positions[t[0] as usize], m.positions[t[1] as usize], m.positions[t[2] as usize]);
+                vol += a[0] * (b[1] * c[2] - b[2] * c[1]) - a[1] * (b[0] * c[2] - b[2] * c[0]) + a[2] * (b[0] * c[1] - b[1] * c[0]);
+            }
+            if id != "@plane" {
+                assert!(count.values().all(|n| *n == 2), "{id} n'est pas fermé");
+                assert!(vol > 0.0, "{id} est tourné vers l'intérieur");
+            }
+        }
+        let st = Scene::starter();
+        assert!(build_ranges(&st, &file).0.unwrap().tris.len() == 12 && st.lights().len() == 1);
         // Animation : deux clés, la pose au milieu est entre les deux, et en douceur aux extrémités
         let mut a = Scene::default();
         let k = a.add_role("cube", "");

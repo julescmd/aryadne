@@ -53,6 +53,7 @@ pub enum Cmd {
     NewMaterial,
     NewScene,
     NewMontage,
+    NewFile,
     NewCompositor,
     Stats,
     RunFile,
@@ -74,6 +75,7 @@ impl App {
             ("note du jour", "Ctrl+J", Cmd::Daily),
             ("nouvelle note depuis un modèle", "", Cmd::FromTemplate),
             ("nouveau board", "", Cmd::NewBoard),
+            ("nouveau fichier… (choisir le genre)", "", Cmd::NewFile),
             ("nouvelle scène 3D", "", Cmd::NewScene),
             ("nouveau montage vidéo", "", Cmd::NewMontage),
             ("nouveau matériau (nodes)", "", Cmd::NewMaterial),
@@ -190,6 +192,7 @@ impl App {
             Cmd::Updates => self.dialog = Some(Dialog::Update),
             Cmd::Timer(min) => self.timer = Some(Timer { start: Instant::now(), minutes: min, label: if min <= 10 { "pause" } else { "focus" } }),
             Cmd::StopTimer => self.timer = None,
+            Cmd::NewFile => self.new_file = Some((0, String::new())),
             Cmd::NewMontage => {
                 let mut rel = "Montage.aryav".to_string();
                 let mut i = 2;
@@ -211,7 +214,7 @@ impl App {
                     rel = format!("{dir}Scène {i}.arya3");
                     i += 1;
                 }
-                let r = vault::safe(&self.root(), &rel).and_then(|p| crate::scene::Scene::default().write(&p));
+                let r = vault::safe(&self.root(), &rel).and_then(|p| crate::scene::Scene::starter().write(&p));
                 if self.report(r).is_some() {
                     self.refresh();
                     self.open(rel);

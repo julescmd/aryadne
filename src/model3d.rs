@@ -1400,6 +1400,12 @@ pub fn render(m: &Prepared, cam: &Camera, look: &Look, w: usize, h: usize) -> Fr
     Frame { w, h, rgba, ids, depth }
 }
 
+/// Cadre d'une scène : au moins 12 unités de côté autour de l'origine, pour qu'un cube neuf
+/// arrive à une taille raisonnable sur la grille plutôt que de remplir toute la vue.
+pub fn scene_bounds(lo: V3, hi: V3) -> (V3, V3) {
+    ([lo[0].min(-6.0), lo[1].min(-6.0), lo[2].min(-6.0)], [hi[0].max(6.0), hi[1].max(6.0), hi[2].max(6.0)])
+}
+
 /// Image de référence posée dans l'espace : centre et deux côtés (largeur, hauteur), dans l'espace du rendu.
 pub struct RefPlane {
     pub center: V3,
@@ -1575,6 +1581,12 @@ pub struct Viewer {
     anim_playing: bool,
     anim_auto: bool,
     anim_last: Option<std::time::Instant>,
+    /// Transformation au clavier en cours (G, R, S) : genre, axe imposé, pose de départ, position de la souris au départ
+    modal: Option<(u8, Option<usize>, ([f32; 3], [f32; 3], [f32; 3]), Pos2)>,
+    /// Menu « ajouter » ouvert sous le curseur (Maj+A)
+    add_popup: Option<Pos2>,
+    /// Le clic qui vient de valider une transformation : à ignorer pour la sélection, jusqu'au relâchement
+    modal_click: bool,
     scene_ver: u64,
     scene_dirty: bool,
     /// Cadre fixe de la scène : déplacer un objet ne doit pas recentrer ni redimensionner tout le reste
@@ -1642,6 +1654,9 @@ impl Viewer {
             anim_playing: false,
             anim_auto: false,
             anim_last: None,
+            modal: None,
+            add_popup: None,
+            modal_click: false,
             scene_ver: 0,
             scene_dirty: false,
             scene_frame: None,
@@ -1804,7 +1819,7 @@ impl Viewer {
                     Ok(mut m) => {
                         match self.scene_frame {
                             Some((lo, hi)) => (m.min, m.max) = (lo, hi),
-                            None => self.scene_frame = Some((m.min, m.max)),
+                            None => self.scene_frame = Some(scene_bounds(m.min, m.max)),
                         }
                         State::Ready(std::sync::Arc::new(m))
                     }
@@ -1820,7 +1835,7 @@ impl Viewer {
             }
         }
         if let (None, State::Ready(m)) = (self.scene_frame, &self.state) {
-            self.scene_frame = Some((m.min, m.max));
+            self.scene_frame = Some(scene_bounds(m.min, m.max));
         }
         let path = self.path.clone();
         let scene = self.scene.as_mut().unwrap();
@@ -1908,7 +1923,80 @@ impl Viewer {
                 seek = Some((a + (b - a) * ((at.x - r.left() - 6.0) / (r.width() - 12.0)).clamp(0.0, 1.0)).round());
             }
         });
+        // Menu « ajouter » sous le curseur (Maj+A), comme dans Blender
+        if let Some(at) = self.add_popup {
+            let mut close = false;
+            let area = egui::Area::new(egui::Id::unique("scene-add-popup")).order(egui::Order::Foreground).fixed_pos(at).show(ui.ctx(), |ui| {
+                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    ui.set_min_width(170.0);
+                    ui.label(egui::RichText::new(crate::i18n::t("AJOUTER")).size(10.5).color(p.muted).family(theme::bold()));
+                    for (id, label) in crate::scene::PRIMITIVES {
+                        if ui.button(crate::i18n::t(label)).clicked() {
+                            self.scene_sel = Some(scene.add_primitive(id));
+                            changed = true;
+                            close = true;
+                        }
+                    }
+                    ui.separator();
+                    for (label, base, role) in [("lumière", "soleil", "light"), ("caméra (point de vue)", "caméra", "camera"), ("groupe vide", "groupe", "")] {
+                        if ui.button(crate::i18n::t(label)).clicked() {
+                            let k = scene.add_role(base, role);
+                            if role == "light" {
+                                (scene.objects[k].pos, scene.objects[k].rot) = ([0.0, 3.0, 0.0], [35.0, 0.0, -35.0]);
+                            }
+                            self.scene_sel = Some(k);
+                            changed = true;
+                            close = true;
+                        }
+                    }
+                });
+            });
+            if close || ui.input(|i| i.key_pressed(Key::Escape)) || (ui.input(|i| i.pointer.any_pressed()) && !area.response.contains_pointer()) {
+                self.add_popup = None;
+            }
+        }
+        if !ui.ctx().egui_wants_keyboard_input() && self.edit.is_none() && self.modal.is_none() {
+            let sel = self.scene_sel.filter(|&k| k < scene.objects.len());
+            let (del, dup, hide, show_all, add) = ui.input(|i| {
+                let plain = !i.modifiers.any();
+                (plain && (i.key_pressed(Key::X) || i.key_pressed(Key::Delete)), i.modifiers.shift && i.key_pressed(Key::D), plain && i.key_pressed(Key::H), i.modifiers.alt && i.key_pressed(Key::H), i.modifiers.shift && i.key_pressed(Key::A))
+            });
+            if add {
+                self.add_popup = ui.input(|i| i.pointer.hover_pos()).or(Some(ui.ctx().content_rect().center()));
+            }
+            if let Some(k) = sel {
+                if del {
+                    scene.remove(k);
+                    self.scene_sel = None;
+                    changed = true;
+                } else if dup {
+                    let mut c = scene.objects[k].clone();
+                    c.name = format!("{} copie", c.name);
+                    scene.objects.insert(k + 1, c);
+                    self.scene_sel = Some(k + 1);
+                    changed = true;
+                    // Comme dans Blender : la copie part tout de suite en déplacement
+                    if let Some(at) = ui.input(|i| i.pointer.hover_pos()) {
+                        let o = &scene.objects[k + 1];
+                        self.modal = Some((0, None, (o.pos, o.rot, o.scale), at));
+                    }
+                } else if hide {
+                    scene.objects[k].visible = false;
+                    changed = true;
+                }
+            }
+            if show_all {
+                scene.objects.iter_mut().for_each(|o| o.visible = true);
+                changed = true;
+            }
+        }
         if !ui.ctx().egui_wants_keyboard_input() {
+            if ui.input(|i| i.key_pressed(Key::I) && !i.modifiers.any()) {
+                if let Some(k) = self.scene_sel.filter(|&k| k < scene.objects.len()) {
+                    scene.objects[k].set_key(self.anim_frame.round() as i32);
+                    changed = true;
+                }
+            }
             if ui.input(|i| i.key_pressed(Key::Space)) {
                 self.anim_playing = !self.anim_playing;
             }
@@ -1940,13 +2028,22 @@ impl Viewer {
                 changed = true;
             }
         }
-        egui::Panel::left("scene-outliner").resizable(true).default_size(250.0).min_size(200.0).frame(egui::Frame::new().fill(p.panel).stroke(Stroke::new(1.0, p.line)).inner_margin(8)).show(ui, |ui| {
+        egui::Panel::right("scene-outliner").resizable(true).default_size(270.0).min_size(200.0).frame(egui::Frame::new().fill(p.panel).stroke(Stroke::new(1.0, p.line)).inner_margin(8)).show(ui, |ui| {
             ui.spacing_mut().slider_width = 80.0;
             ui.horizontal(|ui| {
                 ui.label(egui::RichText::new(crate::i18n::t("SCÈNE")).size(10.5).color(p.muted).family(theme::bold()));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     egui::containers::menu::MenuButton::new(crate::i18n::t("＋ ajouter ▾")).ui(ui, |ui| {
                         ui.set_min_width(240.0);
+                        ui.menu_button(crate::i18n::t("forme de base"), |ui| {
+                            for (id, label) in crate::scene::PRIMITIVES {
+                                if ui.button(crate::i18n::t(label)).clicked() {
+                                    self.scene_sel = Some(scene.add_primitive(id));
+                                    changed = true;
+                                    ui.close();
+                                }
+                            }
+                        });
                         if ui.button(crate::i18n::t("choisir un fichier…")).clicked() {
                             if let Some(files) = rfd::FileDialog::new().add_filter(crate::i18n::t("modèles et images"), &["obj", "fbx", "glb", "gltf", "stl", "png", "jpg", "jpeg", "webp"]).pick_files() {
                                 for f in files {
@@ -2913,6 +3010,8 @@ impl Viewer {
 
         // ---------- navigation façon Blender ----------
         let (mods, lkey, hkey) = ui.input(|i| (i.modifiers, i.key_down(Key::L), i.key_down(Key::H)));
+        // Dans une scène, H cache l'objet choisi (comme dans Blender) : il ne fait plus tourner le HDRI
+        let hkey = hkey && !crate::scene::is_scene(&self.path);
         let guiding = self.edit.as_ref().is_some_and(|e| e.tool == crate::uvedit::Tool::Guides) && !mods.shift;
         if guiding && resp.dragged_by(egui::PointerButton::Primary) {
             if let (Some(e), Some((_, _, prep)), Some(pt)) = (&mut self.edit, &self.prepared, resp.interact_pointer_pos()) {
@@ -2928,14 +3027,96 @@ impl Viewer {
         }
         // Scène : poignée de déplacement de l'objet choisi (trois axes à attraper)
         let mut gizmo: Option<(Pos2, [Option<Pos2>; 3])> = None;
+        // Le clic qui valide une transformation au clavier ne doit pas aussi choisir un autre objet
+        let mut modal_ended = false;
         let mut marker_pick: Option<usize> = None;
         if self.edit.is_none() && crate::scene::is_scene(&self.path) {
             if resp.hovered() && !ui.ctx().egui_wants_keyboard_input() {
-                for (k, key) in [Key::W, Key::E, Key::R].into_iter().enumerate() {
-                    if ui.input(|i| i.key_pressed(key) && !i.modifiers.any()) {
-                        self.gizmo_mode = k as u8;
+                // G, R, S : déplacer, tourner, redimensionner l'objet choisi à la souris, sans rien tenir
+                if self.modal.is_none() {
+                    let start = ui.input(|i| if i.modifiers.any() { None } else if i.key_pressed(Key::G) { Some(0u8) } else if i.key_pressed(Key::R) { Some(1) } else if i.key_pressed(Key::S) { Some(2) } else { None });
+                    if let (Some(kind), Some(o), Some(at)) = (start, self.scene_sel.and_then(|k| self.scene.as_ref().and_then(|s| s.objects.get(k))), ui.input(|i| i.pointer.hover_pos())) {
+                        self.modal = Some((kind, None, (o.pos, o.rot, o.scale), at));
+                        self.gizmo_mode = kind;
                     }
                 }
+            }
+            if let (Some((kind, axis, orig, from)), Some(sel), Some((lo, hi))) = (self.modal, self.scene_sel, self.scene_frame) {
+                let longest = (hi[0] - lo[0]).max(hi[1] - lo[1]).max(hi[2] - lo[2]).max(1e-9);
+                let c = [(lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0, (lo[2] + hi[2]) / 2.0];
+                let focal = rect.height().min(rect.width()) * 1.2;
+                let cam = self.cam;
+                // X, Y, Z imposent un axe (le même une seconde fois le libère)
+                let mut axis = axis;
+                for (k, key) in [Key::X, Key::Y, Key::Z].into_iter().enumerate() {
+                    if ui.input(|i| i.key_pressed(key)) {
+                        axis = if axis == Some(k) { None } else { Some(k) };
+                    }
+                }
+                let (confirm, cancel, cur) = ui.input(|i| (i.pointer.primary_pressed() || i.key_pressed(Key::Enter), i.pointer.secondary_pressed() || i.key_pressed(Key::Escape), i.pointer.hover_pos().or(i.pointer.latest_pos())));
+                let world = self.scene.as_ref().filter(|s| sel < s.objects.len()).map(|s| s.from_parent(sel, orig.0));
+                if let (Some(scene), Some(cur), Some(world)) = (self.scene.as_mut(), cur, world) {
+                    if let Some(o) = scene.objects.get_mut(sel) {
+                        let q = cam.view([(world[0] - c[0]) / longest, (world[1] - c[1]) / longest, (world[2] - c[2]) / longest]);
+                        let center = if cam.ortho { pos2(rect.center().x + q[0] * focal / cam.dist, rect.center().y - q[1] * focal / cam.dist) } else { pos2(rect.center().x + q[0] / (-q[2]).max(0.05) * focal, rect.center().y - q[1] / (-q[2]).max(0.05) * focal) };
+                        let before = (o.pos, o.rot, o.scale);
+                        (o.pos, o.rot, o.scale) = orig;
+                        if cancel {
+                            self.modal = None;
+                        } else {
+                            let d = cur - from;
+                            match kind {
+                                0 => {
+                                    // Dans le plan de l'écran, à la profondeur de l'objet
+                                    let per_px = if cam.ortho { cam.dist / focal } else { (-q[2]).max(0.05) / focal } * longest;
+                                    let (right, up) = (cam.unrotate([1.0, 0.0, 0.0]), cam.unrotate([0.0, 1.0, 0.0]));
+                                    let mv = [0, 1, 2].map(|k| (right[k] * d.x - up[k] * d.y) * per_px);
+                                    match axis {
+                                        Some(k) => o.pos[k] += mv[k],
+                                        None => o.pos = [orig.0[0] + mv[0], orig.0[1] + mv[1], orig.0[2] + mv[2]],
+                                    }
+                                }
+                                1 => {
+                                    // Autour de l'axe imposé, sinon de celui qui regarde le plus vers la caméra
+                                    let toward = cam.unrotate([0.0, 0.0, 1.0]);
+                                    let k = axis.unwrap_or_else(|| (0..3).max_by(|a, b| toward[*a].abs().total_cmp(&toward[*b].abs())).unwrap_or(1));
+                                    let (a0, a1) = ((from - center).angle(), (cur - center).angle());
+                                    let mut turn = (a1 - a0).to_degrees();
+                                    if turn > 180.0 {
+                                        turn -= 360.0;
+                                    } else if turn < -180.0 {
+                                        turn += 360.0;
+                                    }
+                                    o.rot[k] = orig.1[k] - turn * if toward[k] >= 0.0 { 1.0 } else { -1.0 };
+                                }
+                                _ => {
+                                    let f = ((cur - center).length() / (from - center).length().max(8.0)).max(0.001);
+                                    match axis {
+                                        Some(k) => o.scale[k] = orig.2[k] * f,
+                                        None => o.scale = [orig.2[0] * f, orig.2[1] * f, orig.2[2] * f],
+                                    }
+                                }
+                            }
+                            self.modal = if confirm { None } else { Some((kind, axis, orig, from)) };
+                        }
+                        if before != (o.pos, o.rot, o.scale) {
+                            self.scene_dirty = true;
+                        }
+                        if self.modal.is_none() {
+                            if !cancel && self.anim_auto {
+                                o.set_key(self.anim_frame.round() as i32);
+                            }
+                            let _ = scene.write(&self.path);
+                            modal_ended = true;
+                            self.modal_click = true;
+                        }
+                        ui.ctx().request_repaint();
+                    }
+                }
+                // Rappel des touches, en bas de la vue
+                let what = [crate::i18n::t("déplacer"), crate::i18n::t("tourner"), crate::i18n::t("taille")][kind.min(2) as usize].clone();
+                let ax = axis.map(|k| format!(" · {} {}", crate::i18n::t("axe"), ["X", "Y", "Z"][k])).unwrap_or_default();
+                ui.painter_at(rect).text(rect.left_bottom() + egui::vec2(12.0, -10.0), egui::Align2::LEFT_BOTTOM, format!("{what}{ax}   ·   X Y Z : {}   ·   {}   ·   {}", crate::i18n::t("imposer un axe"), crate::i18n::t("clic : valider"), crate::i18n::t("Échap : annuler")), egui::FontId::monospace(11.5), p.accent);
             }
             if let (Some(sel), Some((lo, hi)), Some(scene)) = (self.scene_sel, self.scene_frame, self.scene.as_mut()) {
                 // Place de l'objet dans la scène et direction de ses axes, parents compris
@@ -3033,14 +3214,18 @@ impl Viewer {
                 }
             }
             // Clic sur un objet : il devient l'objet choisi (clic dans le vide : plus rien)
-            if resp.clicked() && !self.stack.iter().any(|m| m.on) && self.applied.is_none() {
+            let skip_pick = modal_ended || self.modal_click || self.modal.is_some();
+            if !modal_ended && !ui.input(|i| i.pointer.any_down()) {
+                self.modal_click = false;
+            }
+            if resp.clicked() && !skip_pick && !self.stack.iter().any(|m| m.on) && self.applied.is_none() {
                 if let (Some((_, _, prep)), Some(pt)) = (&self.prepared, resp.interact_pointer_pos()) {
                     let hit = pick(prep, &self.cam, rect.width(), rect.height(), pt.x - rect.left(), pt.y - rect.top());
                     self.scene_sel = hit.and_then(|(tri, _)| self.scene_ranges.iter().find(|r| (r.1..r.2).contains(&(tri as usize))).map(|r| r.0));
                 }
             }
         }
-        let dragging = self.gizmo_axis.is_none() && (resp.dragged_by(egui::PointerButton::Middle) || (!guiding && resp.dragged_by(egui::PointerButton::Primary)) || resp.dragged_by(egui::PointerButton::Secondary));
+        let dragging = self.gizmo_axis.is_none() && self.modal.is_none() && (resp.dragged_by(egui::PointerButton::Middle) || (!guiding && resp.dragged_by(egui::PointerButton::Primary)) || resp.dragged_by(egui::PointerButton::Secondary));
         if resp.clicked() {
             if let (Some(e), Some((_, _, prep)), Some(pt)) = (&mut self.edit, &self.prepared, resp.interact_pointer_pos()) {
                 if let Some((tri, bary)) = pick(prep, &self.cam, rect.width(), rect.height(), pt.x - rect.left(), pt.y - rect.top()) {
@@ -3328,7 +3513,7 @@ impl Viewer {
             painter.line_segment([o, end], Stroke::new(2.0, col));
             painter.text(end, egui::Align2::CENTER_CENTER, label, egui::FontId::monospace(10.0), col);
         }
-        let hint = self.capture_msg.clone().unwrap_or_else(|| "glisser : tourner · Maj / clic droit : déplacer · molette : zoom · L : lumière · H : HDRI · 1 3 7 : vues".into());
+        let hint = self.capture_msg.clone().unwrap_or_else(|| if self.modal.is_some() { String::new() } else if crate::scene::is_scene(&self.path) { crate::i18n::t("G R S : déplacer, tourner, taille · Maj+A : ajouter · X : supprimer · Maj+D : dupliquer · H : cacher · I : clé · 1 3 7 : vues") } else { "glisser : tourner · Maj / clic droit : déplacer · molette : zoom · L : lumière · H : HDRI · 1 3 7 : vues".into() });
         painter.text(rect.right_bottom() + vec2(-12.0, -10.0), egui::Align2::RIGHT_BOTTOM, hint, egui::FontId::monospace(10.5), if self.look.show_bg { Color32::from_gray(220) } else { p.muted });
     }
 }

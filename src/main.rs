@@ -268,6 +268,10 @@ struct App {
     pane_now: Option<usize>,
     ws_started: bool,
     ws_name: String,
+    /// Nom tapé dans l'écran d'accueil (nouveau fichier de code)
+    landing_name: String,
+    /// Fenêtre « nouveau fichier » : genre choisi et nom tapé
+    new_file: Option<(usize, String)>,
 }
 
 impl App {
@@ -356,6 +360,205 @@ impl App {
             _ => View::Files,
         });
         self.update_backlinks();
+        // Espace 3D sans rien d'ouvert : on arrive dans une scène, la dernière utilisée ou une neuve (cube, lumière, caméra)
+        if w.kind == "3d" && self.docs.is_empty() && !self.entries.is_empty() {
+            let last = self.entries.iter().filter(|e| !e.is_dir && e.rel.to_lowercase().ends_with(".arya3")).max_by_key(|e| e.modified).map(|e| e.rel.clone());
+            match last {
+                Some(rel) => self.open(rel),
+                None => self.run_cmd(extras::Cmd::NewScene, ctx),
+            }
+        }
+    }
+
+    /// Fenêtre « nouveau fichier » : la liste des genres de fichiers qu'Aryadne sait créer, puis un nom.
+    fn new_file_window(&mut self, ctx: &egui::Context) {
+        let Some((mut kind, mut name)) = self.new_file.take() else { return };
+        let p = theme::pal();
+        // (nom, extension, à quoi ça sert)
+        const KINDS: [(&str, &str, &str); 7] = [
+            ("note", "md", "Texte en Markdown : notes, listes, liens entre notes"),
+            ("scène 3D", "arya3", "Modèles, lumières, caméras et animation ; arrive avec un cube, une lumière et une caméra"),
+            ("montage vidéo", "aryav", "Timeline de vidéos, d'images, de sons et de titres"),
+            ("matériau en nodes", "mat.json", "Matériau pour les modèles et les objets d'une scène"),
+            ("compositing en nodes", "comp.json", "Retouche d'image ou étalonnage d'un clip"),
+            ("fichier de code ou de texte", "", "Tape le nom avec son extension : main.py, style.css, notes.txt…"),
+            ("dossier", "/", "Pour ranger"),
+        ];
+        let (mut keep, mut go) = (true, false);
+        egui::Window::new(crate::i18n::t("nouveau fichier")).collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]).show(ctx, |ui| {
+            ui.set_min_width(470.0);
+            for (k, (label, ext, help)) in KINDS.iter().enumerate() {
+                ui.horizontal(|ui| {
+                    if ui.radio(kind == k, RichText::new(crate::i18n::t(label)).family(theme::bold())).clicked() {
+                        kind = k;
+                    }
+                    if !ext.is_empty() && *ext != "/" {
+                        ui.label(RichText::new(format!(".{ext}")).monospace().size(11.0).color(p.accent));
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.add_space(24.0);
+                    ui.label(RichText::new(crate::i18n::t(help)).size(11.0).color(p.muted));
+                });
+            }
+            ui.add_space(8.0);
+            let dir = self.target_dir("");
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(if dir.is_empty() { "/".to_string() } else { format!("{dir}/") }).monospace().size(11.0).color(p.muted));
+                let r = ui.add(egui::TextEdit::singleline(&mut name).hint_text(crate::i18n::t("nom")).desired_width(240.0));
+                if !r.has_focus() && name.is_empty() {
+                    r.request_focus();
+                }
+                let ext = KINDS[kind].1;
+                if !ext.is_empty() && ext != "/" {
+                    ui.label(RichText::new(format!(".{ext}")).monospace().size(11.0).color(p.muted));
+                }
+                go |= r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            });
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                go |= ui.add(egui::Button::new(RichText::new(crate::i18n::t("créer")).color(p.on_accent)).fill(p.accent)).clicked();
+                if ui.button(crate::i18n::t("annuler")).clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                    keep = false;
+                }
+            });
+        });
+        let clean = name.trim().trim_matches('/').replace('\\', "/");
+        if go && !clean.is_empty() {
+            let dir = self.target_dir("");
+            let ext = KINDS[kind].1;
+            let file = if ext.is_empty() || ext == "/" || clean.to_lowercase().ends_with(&format!(".{ext}")) { clean.clone() } else { format!("{clean}.{ext}") };
+            let rel = if dir.is_empty() { file } else { format!("{dir}/{file}") };
+            if ext == "/" {
+                let r = vault::safe(&self.root(), &rel).and_then(|path| std::fs::create_dir_all(path).map_err(|e| e.to_string()));
+                if self.report(r).is_some() {
+                    self.refresh();
+                    return;
+                }
+            } else if self.entries.iter().any(|e| e.rel == rel) {
+                self.toast = Some((crate::i18n::t("ce nom est déjà pris dans ce dossier"), Instant::now()));
+            } else {
+                let r = vault::safe(&self.root(), &rel).and_then(|path| {
+                    if let Some(d) = path.parent() {
+                        let _ = std::fs::create_dir_all(d);
+                    }
+                    match ext {
+                        "arya3" => scene::Scene::starter().write(&path),
+                        "aryav" => montage::Project::default().write(&path),
+                        "mat.json" => nodes::Graph::new_material().save(&path),
+                        "comp.json" => nodes::Graph::new_compositor().save(&path),
+                        _ => std::fs::write(&path, "").map_err(|e| e.to_string()),
+                    }
+                });
+                if self.report(r).is_some() {
+                    self.refresh();
+                    self.open(rel);
+                    return;
+                }
+            }
+        }
+        if keep {
+            self.new_file = Some((kind, name));
+        }
+    }
+
+    /// Écran d'accueil de l'espace de travail, quand rien n'est ouvert : de quoi créer, et les fichiers récents du bon genre.
+    fn landing(&mut self, ui: &mut egui::Ui) {
+        let p = theme::pal();
+        let ctx = ui.ctx().clone();
+        let w = self.ws.cur().clone();
+        const CODE: [&str; 28] = ["rs", "py", "js", "ts", "tsx", "jsx", "html", "css", "json", "toml", "yaml", "yml", "c", "h", "cpp", "hpp", "java", "go", "lua", "sh", "glsl", "wgsl", "cs", "php", "rb", "swift", "kt", "sql"];
+        let ext = |rel: &str| rel.rsplit('.').next().unwrap_or("").to_lowercase();
+        type Pick = fn(&str) -> bool;
+        let (subtitle, actions, pick): (&str, Vec<(&str, extras::Cmd)>, Pick) = match w.kind.as_str() {
+            "3d" => ("Une scène réunit des modèles, des lumières et des caméras. Une scène neuve arrive avec un cube, une lumière et une caméra.", vec![("nouvelle scène 3D", extras::Cmd::NewScene), ("importer des fichiers…", extras::Cmd::Import)], |r| r.to_lowercase().ends_with(".arya3") || model3d::is_model(r)),
+            "video" => ("Un montage assemble des vidéos, des images, des sons et des titres sur une timeline.", vec![("nouveau montage vidéo", extras::Cmd::NewMontage), ("importer des fichiers…", extras::Cmd::Import)], |r| montage::is_project(r) || video::is_video(r)),
+            "mat" => ("Un matériau en nodes s'applique aux modèles et aux objets d'une scène ; un compositing retouche une image ou étalonne un clip.", vec![("nouveau matériau (nodes)", extras::Cmd::NewMaterial), ("nouveau compositing (nodes)", extras::Cmd::NewCompositor)], |r| nodes::is_graph(r)),
+            "2d" => ("Images, croquis et planches.", vec![("nouveau board", extras::Cmd::NewBoard), ("importer des fichiers…", extras::Cmd::Import)], |r| images::is_image(r)),
+            "code" => ("Crée un fichier en lui donnant son nom, ou rouvre un fichier récent.", vec![], |_| false),
+            _ => ("Écris une note, ou rouvre un fichier récent.", vec![("nouvelle note", extras::Cmd::NewNote), ("note du jour", extras::Cmd::Daily)], |r| r.to_lowercase().ends_with(".md")),
+        };
+        let mut recent: Vec<(String, u64)> = self.entries.iter().filter(|e| !e.is_dir && if w.kind == "code" { CODE.contains(&ext(&e.rel).as_str()) && !nodes::is_graph(&e.rel) && !e.rel.to_lowercase().ends_with(".board.json") } else { pick(&e.rel) }).map(|e| (e.rel.clone(), e.modified)).collect();
+        recent.sort_by(|a, b| b.1.cmp(&a.1));
+        recent.truncate(10);
+        let mut run: Option<extras::Cmd> = None;
+        let mut open: Option<String> = None;
+        let mut create: Option<String> = None;
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            ui.vertical_centered(|ui| {
+                ui.add_space((ui.available_height() * 0.16).max(24.0));
+                ui.set_max_width(520.0);
+                let accent = w.accent.map(|c| egui::Color32::from_rgb(c[0], c[1], c[2])).unwrap_or(p.accent);
+                ui.label(RichText::new(crate::i18n::t(&w.name)).size(30.0).family(theme::bold()).color(accent));
+                ui.add_space(6.0);
+                ui.label(RichText::new(crate::i18n::t(subtitle)).color(p.muted));
+                ui.add_space(18.0);
+                if w.kind == "code" {
+                    ui.horizontal(|ui| {
+                        ui.add_space((ui.available_width() - 380.0).max(0.0) / 2.0);
+                        let r = ui.add(egui::TextEdit::singleline(&mut self.landing_name).hint_text(crate::i18n::t("nom du fichier, par exemple main.py")).desired_width(260.0));
+                        let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                        if (ui.add(egui::Button::new(RichText::new(crate::i18n::t("créer")).color(p.on_accent)).fill(accent)).clicked() || enter) && !self.landing_name.trim().is_empty() {
+                            create = Some(self.landing_name.trim().to_string());
+                        }
+                    });
+                }
+                ui.horizontal(|ui| {
+                    let total: f32 = actions.len() as f32 * 190.0;
+                    ui.add_space((ui.available_width() - total).max(0.0) / 2.0);
+                    for (k, (label, cmd)) in actions.iter().enumerate() {
+                        let text = RichText::new(crate::i18n::t(label)).color(if k == 0 { p.on_accent } else { p.text });
+                        let b = if k == 0 { egui::Button::new(text).fill(accent) } else { egui::Button::new(text) };
+                        if ui.add(b.min_size(egui::vec2(170.0, 30.0))).clicked() {
+                            run = Some(*cmd);
+                        }
+                    }
+                });
+                ui.add_space(22.0);
+                if !recent.is_empty() {
+                    ui.label(caps(&crate::i18n::t("récents")));
+                    ui.add_space(4.0);
+                    for (rel, _) in &recent {
+                        let name = rel.rsplit('/').next().unwrap_or(rel);
+                        let dir = rel.rsplit_once('/').map(|x| x.0).unwrap_or("");
+                        let mut job = egui::text::LayoutJob::default();
+                        job.append(name, 0.0, egui::TextFormat { font_id: egui::FontId::proportional(13.0), color: p.text, ..Default::default() });
+                        if !dir.is_empty() {
+                            job.append(&format!("   {dir}"), 0.0, egui::TextFormat { font_id: egui::FontId::proportional(11.0), color: p.muted, ..Default::default() });
+                        }
+                        if ui.add(egui::Button::new(job).frame(false)).clicked() {
+                            open = Some(rel.clone());
+                        }
+                    }
+                }
+                ui.add_space(18.0);
+                ui.label(RichText::new(crate::i18n::t("^P ouvrir un fichier · glisse des fichiers ici pour les importer")).size(11.0).color(p.muted));
+            });
+        });
+        if let Some(c) = run {
+            self.run_cmd(c, &ctx);
+        }
+        if let Some(rel) = open {
+            self.open(rel);
+        }
+        if let Some(name) = create {
+            // Un nom sans extension devient un fichier texte ; un nom déjà pris est simplement rouvert
+            let rel = if name.contains('.') { name } else { format!("{name}.txt") };
+            if !self.entries.iter().any(|e| e.rel == rel) {
+                let r = vault::safe(&self.root(), &rel).and_then(|path| {
+                    if let Some(d) = path.parent() {
+                        let _ = std::fs::create_dir_all(d);
+                    }
+                    std::fs::write(&path, "").map_err(|e| e.to_string())
+                });
+                if self.report(r).is_none() {
+                    return;
+                }
+                self.refresh();
+            }
+            self.landing_name.clear();
+            self.open(rel);
+        }
     }
 
     fn ws_switch(&mut self, i: usize, ctx: &egui::Context) {
@@ -1371,9 +1574,7 @@ impl App {
         self.feed_project_words();
         egui::CentralPanel::default().frame(egui::Frame::new().fill(p.bg)).show(ui, |ui| {
             if self.docs.is_empty() {
-                ui.centered_and_justified(|ui| {
-                    ui.label(RichText::new(crate::i18n::t("aucun fichier ouvert\n\n^P ouvrir · ^N nouvelle note · ^G cerveau")).color(p.muted));
-                });
+                self.landing(ui);
                 return;
             }
             self.tabs(ui);
@@ -3265,6 +3466,7 @@ impl App {
     }
 
     fn dialogs(&mut self, ctx: &egui::Context) {
+        self.new_file_window(ctx);
         // Une fenêtre s'affiche à l'image suivante : sinon le clic qui l'ouvre compte
         // comme un clic à l'extérieur et la referme aussitôt.
         if self.dialog.is_none() {
