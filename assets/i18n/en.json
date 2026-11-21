@@ -980,5 +980,15 @@
  "rotation Z": "rotation Z",
  "étirer X": "stretch X",
  "étirer Y": "stretch Y",
- "étirer Z": "stretch Z"
+ "étirer Z": "stretch Z",
+ "Rampe à 3 entrées": "3-input ramp",
+ "dégradé": "gradient",
+ "interpolation": "interpolation",
+ "linéaire": "linear",
+ "lisse": "smooth",
+ "constante": "constant",
+ "position de la couleur choisie": "position of the selected color",
+ "Ajouter une couleur (ou double clic sur le dégradé)": "Add a color (or double-click the gradient)",
+ "Retirer la couleur choisie": "Remove the selected color",
+ "Inverser le dégradé": "Flip the gradient"
 }

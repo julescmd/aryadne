@@ -785,6 +785,14 @@ impl Prepared {
     }
 
     /// Depuis un maillage modifié : recentré et remis à l'échelle pour tenir dans la vue.
+    /// Pour une scène : positions gardées telles quelles (pas de recentrage), sol fixé par l'appelant.
+    pub fn from_mesh_fixed(m: crate::modifiers::Mesh, floor: f32) -> Self {
+        let nrm = vertex_normals(&m.pos, &m.tris);
+        let lin = |c: u8| (c as f32 / 255.0).powf(2.2);
+        let colors = m.colors.iter().map(|c| [lin(c.r()), lin(c.g()), lin(c.b())]).collect();
+        Self { pos: m.pos, nrm, tris: m.tris, colors, edges: m.edges, floor, uv: vec![], mat: vec![], curv: std::sync::OnceLock::new() }
+    }
+
     pub fn from_mesh(m: crate::modifiers::Mesh) -> Self {
         let mut lo = [f32::MAX; 3];
         let mut hi = [f32::MIN; 3];
@@ -1336,7 +1344,11 @@ pub struct Viewer {
     scene: Option<crate::scene::Scene>,
     scene_sel: Option<usize>,
     scene_errors: Vec<Option<String>>,
-    scene_rx: Option<Receiver<(Result<Model, String>, Vec<Option<String>>)>>,
+    scene_rx: Option<Receiver<(Result<Model, String>, Vec<Option<String>>, Vec<(usize, usize, usize)>)>>,
+    /// Triangles de chaque objet dans le modèle réuni (objet, début, fin)
+    scene_ranges: Vec<(usize, usize, usize)>,
+    /// Axe de la poignée de déplacement en cours de glissement
+    gizmo_axis: Option<usize>,
     scene_ver: u64,
     scene_dirty: bool,
     /// Cadre fixe de la scène : déplacer un objet ne doit pas recentrer ni redimensionner tout le reste
@@ -1396,6 +1408,8 @@ impl Viewer {
             scene_sel: None,
             scene_errors: vec![],
             scene_rx: None,
+            scene_ranges: vec![],
+            gizmo_axis: None,
             scene_ver: 0,
             scene_dirty: false,
             scene_frame: None,
@@ -1488,11 +1502,15 @@ impl Viewer {
         let p = theme::pal();
         if self.scene.is_none() {
             self.scene = Some(crate::scene::Scene::read(&self.path).unwrap_or_default());
+            // Les couleurs des objets se voient d'emblée, et un premier passage relève les triangles de chacun
+            self.look.material = Material::Color;
+            self.scene_dirty = true;
         }
         // Résultat d'une reconstruction lancée après un changement
         if let Some(rx) = &self.scene_rx {
-            if let Ok((m, errs)) = rx.try_recv() {
+            if let Ok((m, errs, ranges)) = rx.try_recv() {
                 self.scene_errors = errs;
+                self.scene_ranges = ranges;
                 self.state = match m {
                     Ok(mut m) => {
                         match self.scene_frame {
@@ -1651,6 +1669,12 @@ impl Viewer {
                     }
                 });
                 ui.label(egui::RichText::new(&o.file).size(10.0).color(p.muted));
+                ui.separator();
+                // Pile de modificateurs de cet objet seulement
+                let mut req = None;
+                egui::ScrollArea::vertical().id_salt("scene-object-mods").show(ui, |ui| {
+                    changed |= crate::modifiers::panel(ui, &mut o.mods, false, &mut req);
+                });
             }
         });
         if reframe {
@@ -1667,7 +1691,7 @@ impl Viewer {
             let (tx, rx) = channel();
             let (sc, ctx) = (scene.clone(), ui.ctx().clone());
             std::thread::spawn(move || {
-                let _ = tx.send(crate::scene::build(&sc, &path));
+                let _ = tx.send(crate::scene::build_ranges(&sc, &path));
                 ctx.request_repaint();
             });
             self.scene_rx = Some(rx);
@@ -1756,6 +1780,11 @@ impl Viewer {
             let (tx, rx) = channel();
             let (m, stack, ctx) = (model.clone(), self.stack.clone(), ui.ctx().clone());
             let applied = self.applied.clone();
+            // Scène : le sol est le plan y = 0 du monde, et rien n'est recentré quand un objet bouge
+            let fixed_floor = self.scene_frame.filter(|_| self.is_scene()).map(|(lo, hi)| {
+                let longest = (hi[0] - lo[0]).max(hi[1] - lo[1]).max(hi[2] - lo[2]).max(1e-9);
+                -((lo[1] + hi[1]) / 2.0) / longest
+            });
             std::thread::spawn(move || {
                 let s = m.size();
                 let longest = s[0].max(s[1]).max(s[2]).max(1e-9);
@@ -1764,7 +1793,10 @@ impl Viewer {
                 let origin = if z_up { [o[0], o[2], -o[1]] } else { o };
                 let base = applied.map(|a| (*a).clone()).unwrap_or_else(|| crate::modifiers::Mesh::from_model(&m, z_up));
                 let mesh = crate::modifiers::apply(&stack, base, origin);
-                let _ = tx.send(Prepared::from_mesh(mesh));
+                let _ = tx.send(match fixed_floor {
+                    Some(f) => Prepared::from_mesh_fixed(mesh, f),
+                    None => Prepared::from_mesh(mesh),
+                });
                 ctx.request_repaint();
             });
             self.job = Some((key, rx));
@@ -2280,7 +2312,71 @@ impl Viewer {
                 e.guide_end();
             }
         }
-        let dragging = resp.dragged_by(egui::PointerButton::Middle) || (!guiding && resp.dragged_by(egui::PointerButton::Primary)) || resp.dragged_by(egui::PointerButton::Secondary);
+        // Scène : poignée de déplacement de l'objet choisi (trois axes à attraper)
+        let mut gizmo: Option<(Pos2, [Option<Pos2>; 3])> = None;
+        if self.edit.is_none() && crate::scene::is_scene(&self.path) {
+            if let (Some(sel), Some((lo, hi)), Some(scene)) = (self.scene_sel, self.scene_frame, self.scene.as_mut()) {
+                if let Some(o) = scene.objects.get_mut(sel).filter(|o| o.visible) {
+                    let longest = (hi[0] - lo[0]).max(hi[1] - lo[1]).max(hi[2] - lo[2]).max(1e-9);
+                    let c = [(lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0, (lo[2] + hi[2]) / 2.0];
+                    let origin = [(o.pos[0] - c[0]) / longest, (o.pos[1] - c[1]) / longest, (o.pos[2] - c[2]) / longest];
+                    let focal = rect.height().min(rect.width()) * 1.2;
+                    let (ortho, dist, rc) = (self.cam.ortho, self.cam.dist, rect.center());
+                    let cam = &self.cam;
+                    let project = |v: V3| -> Option<Pos2> {
+                        let q = cam.view(v);
+                        if ortho {
+                            Some(pos2(rc.x + q[0] * focal / dist, rc.y - q[1] * focal / dist))
+                        } else {
+                            (q[2] < -0.05).then(|| pos2(rc.x + q[0] / -q[2] * focal, rc.y - q[1] / -q[2] * focal))
+                        }
+                    };
+                    let len = 0.16 * dist / 2.2;
+                    if let Some(po) = project(origin) {
+                        let ends = [0, 1, 2].map(|k| {
+                            let mut e = origin;
+                            e[k] += len;
+                            project(e)
+                        });
+                        if resp.drag_started_by(egui::PointerButton::Primary) {
+                            let at = ui.input(|i| i.pointer.press_origin()).unwrap_or(po);
+                            // Distance du curseur à chaque axe, à l'écran
+                            let seg = |a: Pos2, b: Pos2| {
+                                let ab = b - a;
+                                let t = ((at - a).dot(ab) / ab.length_sq().max(1e-6)).clamp(0.0, 1.0);
+                                (a + ab * t - at).length()
+                            };
+                            self.gizmo_axis = ends.iter().enumerate().filter_map(|(k, e)| e.map(|e| (k, seg(po, e)))).filter(|x| x.1 < 10.0).min_by(|a, b| a.1.total_cmp(&b.1)).map(|x| x.0);
+                        }
+                        if let (Some(k), true) = (self.gizmo_axis, resp.dragged_by(egui::PointerButton::Primary)) {
+                            if let Some(e) = ends[k] {
+                                let dir = e - po;
+                                let t = resp.drag_delta().dot(dir) / dir.length_sq().max(1e-6) * len;
+                                if t != 0.0 {
+                                    o.pos[k] += t * longest;
+                                    self.scene_dirty = true;
+                                }
+                            }
+                        }
+                        gizmo = Some((po, ends));
+                    }
+                }
+            }
+            if self.gizmo_axis.is_some() && (resp.drag_stopped() || !ui.input(|i| i.pointer.primary_down())) {
+                self.gizmo_axis = None;
+                if let Some(scene) = &self.scene {
+                    let _ = scene.write(&self.path);
+                }
+            }
+            // Clic sur un objet : il devient l'objet choisi (clic dans le vide : plus rien)
+            if resp.clicked() && !self.stack.iter().any(|m| m.on) && self.applied.is_none() {
+                if let (Some((_, _, prep)), Some(pt)) = (&self.prepared, resp.interact_pointer_pos()) {
+                    let hit = pick(prep, &self.cam, rect.width(), rect.height(), pt.x - rect.left(), pt.y - rect.top());
+                    self.scene_sel = hit.and_then(|(tri, _)| self.scene_ranges.iter().find(|r| (r.1..r.2).contains(&(tri as usize))).map(|r| r.0));
+                }
+            }
+        }
+        let dragging = self.gizmo_axis.is_none() && (resp.dragged_by(egui::PointerButton::Middle) || (!guiding && resp.dragged_by(egui::PointerButton::Primary)) || resp.dragged_by(egui::PointerButton::Secondary));
         if resp.clicked() {
             if let (Some(e), Some((_, _, prep)), Some(pt)) = (&mut self.edit, &self.prepared, resp.interact_pointer_pos()) {
                 if let Some((tri, bary)) = pick(prep, &self.cam, rect.width(), rect.height(), pt.x - rect.left(), pt.y - rect.top()) {
@@ -2408,6 +2504,18 @@ impl Viewer {
         }
         if let Some(t) = &self.tex {
             painter.image(t.id(), rect, egui::Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+        }
+        if let Some((po, ends)) = gizmo {
+            let over = ui.painter_at(rect);
+            for (k, col) in [Color32::from_rgb(235, 70, 80), Color32::from_rgb(110, 200, 60), Color32::from_rgb(60, 130, 240)].into_iter().enumerate() {
+                if let Some(e) = ends[k] {
+                    let on = self.gizmo_axis == Some(k);
+                    over.line_segment([po, e], Stroke::new(if on { 4.0 } else { 2.5 }, col));
+                    over.circle_filled(e, if on { 6.5 } else { 5.0 }, col);
+                }
+            }
+            over.circle_filled(po, 3.5, Color32::WHITE);
+            over.circle_stroke(po, 3.5, Stroke::new(1.0, Color32::from_gray(40)));
         }
         // Coutures (mode édition), en rouge par-dessus le modèle
         if let (Some(e), Some((_, _, prep))) = (&self.edit, &self.prepared) {

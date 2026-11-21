@@ -37,6 +37,8 @@ pub enum ParamDef {
     Float(&'static str, f32, f32, f32),
     Text(&'static str),
     File(&'static str),
+    /// Dégradé à plusieurs couleurs, réglé à la souris comme dans Blender
+    Ramp(&'static str),
 }
 
 pub struct Def {
@@ -83,7 +85,8 @@ pub const DEFS: &[Def] = &[
     Def { op: "stripes", label: "Rayures", cat: "motif", inputs: &[("nombre", Sock::Float, f(10.0)), ("épaisseur", Sock::Float, f(0.5)), ("coordonnées", Sock::Color, [0.0, 0.0, 0.0, 0.0])], outputs: &[("valeur", Sock::Float)], params: &[ParamDef::Choice("axe", &["x", "y", "diagonale"])], mat: true, comp: true },
     // Couleur
     Def { op: "mix", label: "Mélange", cat: "couleur", inputs: &[("facteur", Sock::Float, f(0.5)), ("A", Sock::Color, [0.2, 0.2, 0.2, 1.0]), ("B", Sock::Color, [0.9, 0.9, 0.9, 1.0])], outputs: &[("couleur", Sock::Color)], params: &[ParamDef::Choice("mode", BLEND)], mat: true, comp: true },
-    Def { op: "ramp", label: "Rampe de couleur", cat: "couleur", inputs: &[("facteur", Sock::Float, f(0.5)), ("couleur 1", Sock::Color, BLACK), ("couleur 2", Sock::Color, [0.95, 0.45, 0.2, 1.0]), ("couleur 3", Sock::Color, W)], outputs: &[("couleur", Sock::Color)], params: &[ParamDef::Float("milieu", 0.0, 1.0, 0.5)], mat: true, comp: true },
+    Def { op: "colorramp", label: "Rampe de couleur", cat: "couleur", inputs: &[("facteur", Sock::Float, f(0.5))], outputs: &[("couleur", Sock::Color), ("alpha", Sock::Float)], params: &[ParamDef::Ramp("dégradé"), ParamDef::Choice("interpolation", &["linéaire", "lisse", "constante"])], mat: true, comp: true },
+    Def { op: "ramp", label: "Rampe à 3 entrées", cat: "couleur", inputs: &[("facteur", Sock::Float, f(0.5)), ("couleur 1", Sock::Color, BLACK), ("couleur 2", Sock::Color, [0.95, 0.45, 0.2, 1.0]), ("couleur 3", Sock::Color, W)], outputs: &[("couleur", Sock::Color)], params: &[ParamDef::Float("milieu", 0.0, 1.0, 0.5)], mat: true, comp: true },
     Def { op: "hsv", label: "Teinte / saturation", cat: "couleur", inputs: &[("couleur", Sock::Color, GRAY), ("teinte", Sock::Float, f(0.0)), ("saturation", Sock::Float, f(1.0)), ("valeur", Sock::Float, f(1.0))], outputs: &[("couleur", Sock::Color)], params: &[], mat: true, comp: true },
     Def { op: "brightcon", label: "Luminosité / contraste", cat: "couleur", inputs: &[("couleur", Sock::Color, GRAY), ("luminosité", Sock::Float, f(0.0)), ("contraste", Sock::Float, f(0.0))], outputs: &[("couleur", Sock::Color)], params: &[], mat: true, comp: true },
     Def { op: "levels", label: "Niveaux", cat: "couleur", inputs: &[("couleur", Sock::Color, GRAY), ("noir", Sock::Float, f(0.0)), ("blanc", Sock::Float, f(1.0)), ("gamma", Sock::Float, f(1.0))], outputs: &[("couleur", Sock::Color)], params: &[], mat: true, comp: true },
@@ -163,6 +166,47 @@ pub const DEFS: &[Def] = &[
     Def { op: "emboss", label: "Gaufrage", cat: "filtre", inputs: &[("image", Sock::Color, GRAY)], outputs: &[("image", Sock::Color)], params: &[ParamDef::Float("force", 0.0, 4.0, 1.0), ParamDef::Float("angle", -180.0, 180.0, 135.0)], mat: false, comp: true },
     Def { op: "glitch", label: "Glitch", cat: "filtre", inputs: &[("image", Sock::Color, GRAY)], outputs: &[("image", Sock::Color)], params: &[ParamDef::Float("force", 0.0, 1.0, 0.3), ParamDef::Float("blocs", 2.0, 80.0, 24.0), ParamDef::Float("graine", 0.0, 100.0, 1.0)], mat: false, comp: true },
 ];
+
+pub const DEFAULT_RAMP: &str = "0,0,0,0,1;1,1,1,1,1";
+
+/// Lit un dégradé « position,r,v,b,a;… », trié par position.
+pub fn parse_ramp(t: &str) -> Vec<(f32, V)> {
+    let mut stops: Vec<(f32, V)> = t
+        .split(';')
+        .filter_map(|s| {
+            let v: Vec<f32> = s.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+            (v.len() == 5 && v.iter().all(|x| x.is_finite())).then(|| (v[0].clamp(0.0, 1.0), [v[1], v[2], v[3], v[4]]))
+        })
+        .collect();
+    if stops.is_empty() {
+        stops = vec![(0.0, [0.0, 0.0, 0.0, 1.0]), (1.0, [1.0, 1.0, 1.0, 1.0])];
+    }
+    stops.sort_by(|a, b| a.0.total_cmp(&b.0));
+    stops
+}
+
+pub fn ramp_string(stops: &[(f32, V)]) -> String {
+    stops.iter().map(|(p, c)| format!("{:.4},{:.4},{:.4},{:.4},{:.4}", p, c[0], c[1], c[2], c[3])).collect::<Vec<_>>().join(";")
+}
+
+/// Couleur du dégradé en `t` (0 linéaire, 1 lisse, 2 constante).
+pub fn eval_ramp(stops: &[(f32, V)], t: f32, mode: u8) -> V {
+    let t = if t.is_finite() { t.clamp(0.0, 1.0) } else { 0.0 };
+    if t <= stops[0].0 {
+        return stops[0].1;
+    }
+    for w in stops.windows(2) {
+        if t <= w[1].0 {
+            if mode == 2 {
+                return w[0].1;
+            }
+            let k = ((t - w[0].0) / (w[1].0 - w[0].0).max(1e-6)).clamp(0.0, 1.0);
+            let k = if mode == 1 { k * k * (3.0 - 2.0 * k) } else { k };
+            return [0, 1, 2, 3].map(|c| w[0].1[c] + (w[1].1[c] - w[0].1[c]) * k);
+        }
+    }
+    stops[stops.len() - 1].1
+}
 
 pub fn def(op: &str) -> Option<&'static Def> {
     DEFS.iter().find(|d| d.op == op)
@@ -252,6 +296,9 @@ impl Graph {
                 }
                 ParamDef::File(n) => {
                     params.insert(n.to_string(), Param::S(String::new()));
+                }
+                ParamDef::Ramp(n) => {
+                    params.insert(n.to_string(), Param::S(DEFAULT_RAMP.to_string()));
                 }
             }
         }
@@ -1148,6 +1195,8 @@ struct Step {
     shader: Option<Shader>,
     /// Image chargée (node « Image »)
     image: Option<std::sync::Arc<Img>>,
+    /// Dégradé déjà lu (node « Rampe de couleur »)
+    ramp: Option<std::sync::Arc<Vec<(f32, V)>>>,
 }
 
 #[derive(Clone, Copy)]
@@ -1250,7 +1299,8 @@ impl Program {
                 None
             };
             base.insert(id, regs);
-            steps.push(Step { op: d.op, ins, base: regs, nout: d.outputs.len(), params: n.params.clone(), shader, image });
+            let ramp = d.params.iter().find_map(|p| if let ParamDef::Ramp(k) = p { Some(std::sync::Arc::new(parse_ramp(pstr(&n.params, k)))) } else { None });
+            steps.push(Step { op: d.op, ins, base: regs, nout: d.outputs.len(), params: n.params.clone(), shader, image, ramp });
             regs += d.outputs.len().max(4);
         }
         let uses_curvature = steps.iter().any(|s| matches!(s.op, "curvature" | "edgewear" | "cavdirt"));
@@ -1852,11 +1902,13 @@ fn pixel(s: &Step, i: &[V], c: &Ctx) -> [V; 4] {
             [if k == 0 { i[1] } else { i[2] }, one(k as f32), z, z]
         }
         "gradient" => {
+            // Avec des coordonnées branchées, le dégradé les suit ; sinon il suit l'image (ou la hauteur du modèle)
+            let (gu, gv, gh) = if linked(0) { (p3[0], p3[1], p3[1]) } else { (c.uv[0], c.uv[1], c.pos[1] + 0.5) };
             let v = match pstr(&s.params, "type") {
-                "vertical" => c.uv[1],
-                "radial" => 1.0 - ((c.uv[0] - 0.5).powi(2) + (c.uv[1] - 0.5).powi(2)).sqrt() * 2.0,
-                "hauteur (3D)" => c.pos[1] + 0.5,
-                _ => c.uv[0],
+                "vertical" => gv,
+                "radial" => 1.0 - ((gu - 0.5).powi(2) + (gv - 0.5).powi(2)).sqrt() * 2.0,
+                "hauteur (3D)" => gh,
+                _ => gu,
             };
             [one(v.clamp(0.0, 1.0)), z, z, z]
         }
@@ -1964,6 +2016,15 @@ fn pixel(s: &Step, i: &[V], c: &Ctx) -> [V; 4] {
         }
         "clamp" => [one(i[0][0].clamp(i[1][0].min(i[2][0]), i[2][0].max(i[1][0]))), z, z, z],
         "mix" => [blend(pstr(&s.params, "mode"), i[1], i[2], i[0][0].clamp(0.0, 1.0)), z, z, z],
+        "colorramp" => {
+            let mode = match pstr(&s.params, "interpolation") {
+                "lisse" => 1,
+                "constante" => 2,
+                _ => 0,
+            };
+            let col = s.ramp.as_ref().map(|r| eval_ramp(r, i[0][0], mode)).unwrap_or([0.5, 0.5, 0.5, 1.0]);
+            [col, one(col[3]), z, z]
+        }
         "ramp" => {
             let t = i[0][0].clamp(0.0, 1.0);
             let m = pnum(&s.params, "milieu", 0.5).clamp(0.01, 0.99);
@@ -2327,7 +2388,7 @@ impl Editor {
         if n.collapsed {
             return HEAD;
         }
-        let rows = d.outputs.len() + d.inputs.len() + d.params.iter().map(|pp| if matches!(pp, ParamDef::Text(_)) { 9 } else { 1 }).sum::<usize>();
+        let rows = d.outputs.len() + d.inputs.len() + d.params.iter().map(|pp| match pp { ParamDef::Text(_) => 9, ParamDef::Ramp(_) => 3, _ => 1 }).sum::<usize>();
         let thumb = if n.preview && !d.outputs.is_empty() { THUMB + 8.0 } else { 0.0 };
         HEAD + rows as f32 * ROW + 8.0 + thumb
     }
@@ -3266,6 +3327,9 @@ impl Editor {
                 let row = Rect::from_min_size(pos2(r.left() + 10.0, y - ROW * 0.5 + 1.0), vec2(NW - 20.0, ROW - 2.0));
                 if linked {
                     painter.text(row.left_center(), egui::Align2::LEFT_CENTER, crate::i18n::t(name), egui::FontId::monospace(11.0), p.text);
+                } else if *name == "coordonnées" {
+                    // Rien à régler à la main : sans lien, le motif suit la surface
+                    painter.text(row.left_center(), egui::Align2::LEFT_CENTER, crate::i18n::t(name), egui::FontId::monospace(11.0), p.muted);
                 } else {
                     while node.values.len() <= k {
                         node.values.push(d.inputs[node.values.len()].2);
@@ -3304,6 +3368,7 @@ impl Editor {
             for pd in d.params {
                 let (h, name) = match pd {
                     ParamDef::Text(n) => (9.0 * ROW, *n),
+                    ParamDef::Ramp(n) => (3.0 * ROW, *n),
                     ParamDef::Choice(n, _) | ParamDef::Float(n, ..) | ParamDef::File(n) => (ROW, *n),
                 };
                 let row = Rect::from_min_size(pos2(r.left() + 8.0, y + 1.0), vec2(NW - 16.0, h - 2.0));
@@ -3352,6 +3417,121 @@ impl Editor {
                             actions.push(Act::Changed);
                         }
                     }
+                    (ParamDef::Ramp(_), Param::S(text)) => {
+                        let mut stops = parse_ramp(text);
+                        let sel_id = egui::Id::unique(("ramp-sel", *id));
+                        let mut sel: usize = child.data(|d| d.get_temp(sel_id)).unwrap_or(0).min(stops.len() - 1);
+                        let mut edited = false;
+                        // La barre : damier sous la transparence, dégradé par tranches, poignées en dessous
+                        let bar = Rect::from_min_size(row.min, vec2(row.width(), ROW * 1.25));
+                        let resp = child.interact(bar.expand2(vec2(0.0, 6.0)), egui::Id::unique(("ramp-bar", *id)), Sense::click_and_drag());
+                        let painter = child.painter();
+                        let mode = 0;
+                        let strips = 48;
+                        for k in 0..strips {
+                            let (a, b) = (k as f32 / strips as f32, (k + 1) as f32 / strips as f32);
+                            let c = eval_ramp(&stops, (a + b) * 0.5, mode);
+                            let seg = Rect::from_min_max(pos2(bar.left() + bar.width() * a, bar.top()), pos2(bar.left() + bar.width() * b + 0.5, bar.bottom() - 7.0));
+                            if c[3] < 0.999 {
+                                painter.rect_filled(seg, 0.0, if k % 2 == 0 { Color32::from_gray(150) } else { Color32::from_gray(100) });
+                            }
+                            let g = |x: f32| (x.clamp(0.0, 1.0) * 255.0) as u8;
+                            painter.rect_filled(seg, 0.0, Color32::from_rgba_unmultiplied(g(c[0]), g(c[1]), g(c[2]), g(c[3])));
+                        }
+                        painter.rect_stroke(Rect::from_min_max(bar.min, pos2(bar.right(), bar.bottom() - 7.0)), 2.0, Stroke::new(1.0, p.line), egui::StrokeKind::Inside);
+                        let x_of = |t: f32| bar.left() + bar.width() * t;
+                        let t_of = |x: f32| ((x - bar.left()) / bar.width()).clamp(0.0, 1.0);
+                        if let Some(at) = resp.interact_pointer_pos() {
+                            if resp.drag_started() || resp.clicked() || resp.double_clicked() {
+                                // La poignée la plus proche, si elle est sous le curseur
+                                // On juge d'après l'endroit où le bouton a été enfoncé : le glissement ne démarre qu'après quelques pixels
+                                let down = child.input(|i| i.pointer.press_origin()).unwrap_or(at);
+                                let near = stops.iter().enumerate().map(|(k, s)| (k, (x_of(s.0) - down.x).abs())).min_by(|a, b| a.1.total_cmp(&b.1)).unwrap();
+                                if near.1 < 8.0 && !resp.double_clicked() {
+                                    sel = near.0;
+                                } else if resp.double_clicked() || child.input(|i| i.modifiers.ctrl) {
+                                    // Double clic (ou Ctrl + clic) : nouvelle couleur, prise dans le dégradé à cet endroit
+                                    let t = t_of(at.x);
+                                    stops.push((t, eval_ramp(&stops, t, 0)));
+                                    stops.sort_by(|a, b| a.0.total_cmp(&b.0));
+                                    sel = stops.iter().position(|s| s.0 == t).unwrap_or(0);
+                                    edited = true;
+                                }
+                            }
+                            // Dès que le bouton s'enfonce : a-t-on attrapé une poignée ? Si oui, elle devient la couleur choisie
+                            let grabbed_id = egui::Id::unique(("ramp-grab", *id));
+                            let mut grabbed: Option<bool> = child.data(|d| d.get_temp(grabbed_id));
+                            if grabbed.is_none() && resp.is_pointer_button_down_on() {
+                                let near = stops.iter().enumerate().map(|(k, s)| (k, (x_of(s.0) - at.x).abs())).min_by(|a, b| a.1.total_cmp(&b.1)).unwrap();
+                                grabbed = Some(near.1 < 8.0);
+                                if near.1 < 8.0 {
+                                    sel = near.0;
+                                }
+                                child.data_mut(|d| d.insert_temp(grabbed_id, grabbed.unwrap()));
+                            }
+                            let grabbed = grabbed.unwrap_or(false);
+                            if resp.dragged() && grabbed && sel < stops.len() {
+                                let c = stops[sel].1;
+                                stops[sel].0 = t_of(at.x);
+                                stops.sort_by(|a, b| a.0.total_cmp(&b.0));
+                                sel = stops.iter().position(|s| s.1 == c && (x_of(s.0) - at.x).abs() < 1.5).unwrap_or(sel.min(stops.len() - 1));
+                                edited = true;
+                            }
+                        }
+                        if !resp.is_pointer_button_down_on() {
+                            child.data_mut(|d| d.remove::<bool>(egui::Id::unique(("ramp-grab", *id))));
+                        }
+                        for (k, st) in stops.iter().enumerate() {
+                            let x = x_of(st.0);
+                            let g = |v: f32| (v.clamp(0.0, 1.0) * 255.0) as u8;
+                            let tri = vec![pos2(x, bar.bottom() - 9.0), pos2(x - 5.0, bar.bottom() - 1.0), pos2(x + 5.0, bar.bottom() - 1.0)];
+                            painter.add(egui::Shape::convex_polygon(tri, Color32::from_rgb(g(st.1[0]), g(st.1[1]), g(st.1[2])), Stroke::new(if k == sel { 2.0 } else { 1.0 }, if k == sel { p.accent } else { p.text })));
+                        }
+                        // Sous la barre : couleur et position de la poignée choisie, ajouter, retirer, inverser
+                        let tools = Rect::from_min_max(pos2(row.left(), bar.bottom() + 8.0), row.max);
+                        let mut tu = child.new_child(egui::UiBuilder::new().max_rect(tools).layout(egui::Layout::left_to_right(egui::Align::Center)));
+                        tu.spacing_mut().item_spacing.x = 3.0;
+                        let mut rgba = egui::Rgba::from_rgba_unmultiplied(stops[sel].1[0], stops[sel].1[1], stops[sel].1[2], stops[sel].1[3]);
+                        if egui::color_picker::color_edit_button_rgba(&mut tu, &mut rgba, egui::color_picker::Alpha::OnlyBlend).changed() {
+                            let a = rgba.a();
+                            let un = if a > 1e-4 { [rgba.r() / a, rgba.g() / a, rgba.b() / a, a] } else { [0.0, 0.0, 0.0, 0.0] };
+                            stops[sel].1 = un;
+                            edited = true;
+                        }
+                        let mut pos = stops[sel].0;
+                        tu.spacing_mut().interact_size.x = 34.0;
+                        if tu.add(egui::DragValue::new(&mut pos).range(0.0..=1.0).speed(0.005).max_decimals(2)).on_hover_text(crate::i18n::t("position de la couleur choisie")).changed() {
+                            let c = stops[sel].1;
+                            stops[sel].0 = pos;
+                            stops.sort_by(|a, b| a.0.total_cmp(&b.0));
+                            sel = stops.iter().position(|s| s.1 == c && s.0 == pos).unwrap_or(sel);
+                            edited = true;
+                        }
+                        if tu.small_button("＋").on_hover_text(crate::i18n::t("Ajouter une couleur (ou double clic sur le dégradé)")).clicked() {
+                            let (a, b) = if sel + 1 < stops.len() { (stops[sel].0, stops[sel + 1].0) } else if sel > 0 { (stops[sel - 1].0, stops[sel].0) } else { (0.0, 1.0) };
+                            let t = (a + b) * 0.5;
+                            stops.push((t, eval_ramp(&stops, t, 0)));
+                            stops.sort_by(|a, b| a.0.total_cmp(&b.0));
+                            sel = stops.iter().position(|s| s.0 == t).unwrap_or(0);
+                            edited = true;
+                        }
+                        if tu.add_enabled(stops.len() > 1, egui::Button::new("−").small()).on_hover_text(crate::i18n::t("Retirer la couleur choisie")).clicked() {
+                            stops.remove(sel);
+                            sel = sel.min(stops.len() - 1);
+                            edited = true;
+                        }
+                        if tu.small_button("⇄").on_hover_text(crate::i18n::t("Inverser le dégradé")).clicked() {
+                            stops.iter_mut().for_each(|s| s.0 = 1.0 - s.0);
+                            stops.reverse();
+                            sel = stops.len() - 1 - sel;
+                            edited = true;
+                        }
+                        child.data_mut(|d| d.insert_temp(sel_id, sel));
+                        if edited {
+                            *text = ramp_string(&stops);
+                            actions.push(Act::Changed);
+                        }
+                    }
                     (ParamDef::File(_), Param::S(rel)) => {
                         let label = if rel.is_empty() { "choisir une image…".to_string() } else { rel.rsplit('/').next().unwrap_or(rel).to_string() };
                         if child.button(RichText::new(label).size(11.0)).on_hover_text(crate::i18n::t("ou glisse une image dans le graphe")).clicked() {
@@ -3370,6 +3550,7 @@ impl Editor {
                         *slot = match pd {
                             ParamDef::Float(_, _, _, v) => Param::F(*v),
                             ParamDef::Choice(_, c) => Param::S(c[0].to_string()),
+                            ParamDef::Ramp(_) => Param::S(DEFAULT_RAMP.to_string()),
                             _ => Param::S(String::new()),
                         };
                     }
@@ -3653,6 +3834,33 @@ mod tests {
             let img = Program::compile(&g, "", 64).ok().unwrap().composite(Some([24, 16]));
             assert!(img.px.len() == 24 * 16 && img.px.iter().all(|p| p.iter().all(|x| x.is_finite())), "{}", d.op);
         }
+    }
+
+    /// RAMP_OUT=chemin.mat.json cargo test rampe_exemple : écrit un matériau d'essai avec une rampe à quatre couleurs
+    #[test]
+    fn rampe_exemple() {
+        let Ok(out_path) = std::env::var("RAMP_OUT") else { return };
+        let mut g = Graph::new_material();
+        let out = g.nodes.iter().find(|n| n.op == "mat_out").unwrap().id;
+        let no = g.add("noise", [60.0, 60.0]);
+        let cr = g.add("colorramp", [300.0, 60.0]);
+        g.nodes.iter_mut().find(|n| n.id == cr).unwrap().params.insert("dégradé".into(), Param::S("0.15,0.05,0.1,0.35,1;0.45,0.1,0.6,0.7,1;0.6,0.95,0.85,0.3,1;0.9,0.9,0.2,0.1,1".into()));
+        g.connect(no, 0, cr, 0);
+        g.connect(cr, 0, out, 0);
+        g.save(std::path::Path::new(&out_path)).unwrap();
+    }
+
+    #[test]
+    fn rampe_de_couleur() {
+        let stops = parse_ramp("1,1,0,0,1; 0,0,0,1,1; 0.5,0,1,0,0.5");
+        assert_eq!(stops.len(), 3);
+        assert!(stops[0].0 == 0.0 && stops[1].0 == 0.5);
+        assert_eq!(eval_ramp(&stops, 0.25, 0), [0.0, 0.5, 0.5, 0.75]);
+        assert_eq!(eval_ramp(&stops, 0.25, 2), [0.0, 0.0, 1.0, 1.0]);
+        assert_eq!(eval_ramp(&stops, 2.0, 0), [1.0, 0.0, 0.0, 1.0]);
+        assert_eq!(parse_ramp(&ramp_string(&stops)), stops);
+        // Un texte abîmé redonne un dégradé noir vers blanc plutôt qu'une erreur
+        assert_eq!(parse_ramp("n'importe quoi").len(), 2);
     }
 
     #[test]

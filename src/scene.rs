@@ -33,6 +33,9 @@ pub struct Object {
     /// Couleur d'affichage ; None = celles du fichier
     #[serde(default)]
     pub color: Option<[u8; 3]>,
+    /// Pile de modificateurs propre à cet objet (appliquée avant de le placer dans la scène)
+    #[serde(default)]
+    pub mods: Vec<crate::modifiers::Modifier>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
@@ -72,7 +75,7 @@ impl Scene {
             name = format!("{stem}.{n:03}");
             n += 1;
         }
-        self.objects.push(Object { name, file, pos: [0.0; 3], rot: [0.0; 3], scale: [1.0; 3], visible: true, color: None });
+        self.objects.push(Object { name, file, pos: [0.0; 3], rot: [0.0; 3], scale: [1.0; 3], visible: true, color: None, mods: vec![] });
     }
 }
 
@@ -121,6 +124,14 @@ fn cached(path: &Path) -> Result<Arc<crate::model3d::Model>, String> {
 /// Réunit les objets visibles en un seul modèle, Y en haut.
 /// Renvoie aussi, pour chaque objet, l'erreur de chargement éventuelle.
 pub fn build(scene: &Scene, scene_path: &Path) -> (Result<crate::model3d::Model, String>, Vec<Option<String>>) {
+    let (m, e, _) = build_ranges(scene, scene_path);
+    (m, e)
+}
+
+/// Comme `build`, avec en plus la plage de triangles de chaque objet (objet, début, fin) :
+/// c'est ce qui permet de retrouver l'objet sous le curseur.
+pub fn build_ranges(scene: &Scene, scene_path: &Path) -> (Result<crate::model3d::Model, String>, Vec<Option<String>>, Vec<(usize, usize, usize)>) {
+    let mut ranges = vec![];
     let (mut pos, mut tris, mut colors, mut edges) = (vec![], vec![], vec![], vec![]);
     let mut errors = vec![None; scene.objects.len()];
     for (k, o) in scene.objects.iter().enumerate() {
@@ -136,6 +147,25 @@ pub fn build(scene: &Scene, scene_path: &Path) -> (Result<crate::model3d::Model,
         match cached(&path) {
             Ok(m) => {
                 let base = pos.len() as u32;
+                if o.mods.iter().any(|md| md.on) {
+                    // Modificateurs de l'objet : calculés dans son espace ramené à 1, puis remis à sa taille
+                    let sz = m.size();
+                    let longest = sz[0].max(sz[1]).max(sz[2]).max(1e-9);
+                    let c = [(m.min[0] + m.max[0]) / 2.0, (m.min[1] + m.max[1]) / 2.0, (m.min[2] + m.max[2]) / 2.0];
+                    let up = |v: [f32; 3]| if m.z_up { [v[0], v[2], -v[1]] } else { v };
+                    let (c, origin) = (up(c), up([-c[0] / longest, -c[1] / longest, -c[2] / longest]));
+                    let mesh = crate::modifiers::apply(&o.mods, crate::modifiers::Mesh::from_model(&m, m.z_up), origin);
+                    ranges.push((k, tris.len(), tris.len() + mesh.tris.len()));
+                    pos.extend(mesh.pos.iter().map(|p| transform(o, [p[0] * longest + c[0], p[1] * longest + c[1], p[2] * longest + c[2]])));
+                    tris.extend(mesh.tris.iter().map(|t| [t[0] + base, t[1] + base, t[2] + base]));
+                    match o.color {
+                        Some(c) => colors.extend(std::iter::repeat_n(eframe::egui::Color32::from_rgb(c[0], c[1], c[2]), mesh.tris.len())),
+                        None => colors.extend(mesh.colors.iter().copied()),
+                    }
+                    edges.extend(mesh.edges.iter().copied());
+                    continue;
+                }
+                ranges.push((k, tris.len(), tris.len() + m.tris.len()));
                 pos.extend(m.positions.iter().map(|p| transform(o, if m.z_up { [p[0], p[2], -p[1]] } else { *p })));
                 tris.extend(m.tris.iter().map(|t| [t[0] + base, t[1] + base, t[2] + base]));
                 match o.color {
@@ -148,9 +178,9 @@ pub fn build(scene: &Scene, scene_path: &Path) -> (Result<crate::model3d::Model,
         }
     }
     if tris.is_empty() {
-        return (Err("Scène vide : glisse des modèles ici ou ajoute-en depuis le panneau.".into()), errors);
+        return (Err("Scène vide : glisse des modèles ici ou ajoute-en depuis le panneau.".into()), errors, ranges);
     }
-    (crate::model3d::Model::with_edges(pos, tris, Some(colors), Some(edges), false), errors)
+    (crate::model3d::Model::with_edges(pos, tris, Some(colors), Some(edges), false), errors, ranges)
 }
 
 #[cfg(test)]
@@ -177,9 +207,21 @@ mod tests {
         let m = m.unwrap();
         assert!(errs.iter().all(|e| e.is_none()));
         assert_eq!(m.tris.len(), 2);
+        assert_eq!(build_ranges(&s, &file).2, vec![(0, 0, 1), (1, 1, 2)]);
         // Le second triangle : (1,0,0) → échelle 2 → tourné de 90° autour de Z → (0,2,0) → déplacé
         let p = m.positions[4];
         assert!((p[0] - 10.0).abs() < 1e-4 && (p[1] - 2.0).abs() < 1e-4, "{p:?}");
+        // Un modificateur sur un seul objet : lui change, l'autre non
+        let mut s2 = s.clone();
+        s2.objects[0].mods = vec![crate::modifiers::Modifier::new(crate::modifiers::Kind::Subdivision { levels: 1, optimal: false, simple: true })];
+        let (m2, _, r2) = build_ranges(&s2, &file);
+        let m2 = m2.unwrap();
+        assert_eq!(m2.tris.len(), 7);
+        assert_eq!(r2, vec![(0, 0, 6), (1, 6, 7)]);
+        // Le modificateur ne déplace pas l'objet : mêmes limites qu'avant
+        for k in 0..3 {
+            assert!((m2.min[k] - m.min[k]).abs() < 1e-4 && (m2.max[k] - m.max[k]).abs() < 1e-4);
+        }
         // Objet caché ou fichier manquant : la scène reste lisible
         s.objects[0].visible = false;
         s.objects[1].file = "absent.obj".into();
