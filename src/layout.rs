@@ -133,3 +133,68 @@ mod tests {
         assert_eq!(panes(&back).len(), 5);
     }
 }
+
+// ---------------------------------------------------------------------- panneaux des éditeurs
+//
+// Un éditeur (3D, montage, retouche…) propose ses panneaux (outliner, propriétés, timeline, projet…).
+// Rangé dans la disposition, un tel panneau a sa propre case : l'éditeur y dessine son contenu
+// au lieu de son panneau intérieur. Sinon, il reste dans l'éditeur, comme avant.
+
+use eframe::egui;
+use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
+
+thread_local! {
+    static OFFERED: RefCell<HashMap<String, String>> = RefCell::new(HashMap::new());
+    static OFFERED_LAST: RefCell<HashMap<String, String>> = RefCell::new(HashMap::new());
+    static RECTS: RefCell<HashMap<String, egui::Rect>> = RefCell::new(HashMap::new());
+    static DOCKED: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
+    static TITLES: RefCell<HashMap<String, String>> = RefCell::new(HashMap::new());
+}
+
+/// Identifiant de case d'un panneau d'éditeur.
+pub fn editor_pane(id: &str) -> String {
+    format!("ed:{id}")
+}
+
+/// L'éditeur propose ce panneau cette image-ci. Renvoie la case où le dessiner s'il est rangé dans la disposition.
+pub fn offer(id: &str, title: &str) -> Option<egui::Rect> {
+    let key = editor_pane(id);
+    OFFERED.with(|o| o.borrow_mut().insert(key.clone(), title.to_string()));
+    TITLES.with(|t| t.borrow_mut().insert(key.clone(), title.to_string()));
+    if DOCKED.with(|d| d.borrow().contains(&key)) { RECTS.with(|r| r.borrow().get(&key).copied()) } else { None }
+}
+
+/// Dessine `body` dans la case `r` d'un panneau d'éditeur rangé dans la disposition.
+pub fn draw_in<R>(ui: &mut egui::Ui, r: egui::Rect, fill: egui::Color32, margin: f32, body: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(r.shrink(margin)).layout(egui::Layout::top_down(egui::Align::Min)));
+    child.set_clip_rect(r);
+    child.painter().rect_filled(r, 0.0, fill);
+    body(&mut child)
+}
+
+/// Panneaux proposés à l'image précédente (id de case → titre), et début d'une nouvelle image.
+pub fn offered_take() -> HashMap<String, String> {
+    let now = OFFERED.with(|o| std::mem::take(&mut *o.borrow_mut()));
+    OFFERED_LAST.with(|l| *l.borrow_mut() = now.clone());
+    now
+}
+
+/// Panneaux proposés par l'éditeur affiché (pour le menu « fenêtre »).
+pub fn offered() -> Vec<(String, String)> {
+    let mut v: Vec<(String, String)> = OFFERED_LAST.with(|l| l.borrow().iter().map(|(a, b)| (a.clone(), b.clone())).collect());
+    v.sort();
+    v
+}
+
+pub fn set_docked(ids: HashSet<String>) {
+    DOCKED.with(|d| *d.borrow_mut() = ids);
+}
+
+pub fn set_rect(id: &str, r: egui::Rect) {
+    RECTS.with(|m| m.borrow_mut().insert(id.to_string(), r));
+}
+
+pub fn title(id: &str) -> Option<String> {
+    TITLES.with(|t| t.borrow().get(id).cloned())
+}

@@ -355,6 +355,10 @@ struct App {
     explorer_rect: Option<egui::Rect>,
     /// Disposition en cases de l'espace en cours
     tree: Option<layout::Layout>,
+    /// Panneaux d'éditeur proposés à l'image précédente (case → titre)
+    offered_now: HashMap<String, String>,
+    /// Panneaux d'éditeur à ranger dans la disposition (vrai) ou à rendre à l'éditeur (faux)
+    dock_editor_panes: Vec<(String, bool)>,
     /// Demandé depuis le menu d'un onglet
     reset_layout: bool,
     /// Éléments affichés dans l'explorateur, dans l'ordre (image en cours, image précédente)
@@ -1107,6 +1111,7 @@ impl App {
             "terminal" => self.terminal.is_some(),
             "assistant" => self.assistant_open,
             "side" => self.side_wanted(),
+            v if v.starts_with("ed:") => self.offered_now.contains_key(v),
             v => v.strip_prefix("view:").is_some_and(|k| self.view_panels.iter().any(|x| x == k)),
         }
     }
@@ -1118,6 +1123,7 @@ impl App {
             "terminal" => "terminal".into(),
             "assistant" => crate::i18n::t("assistant"),
             "side" => crate::i18n::t("structure"),
+            v if v.starts_with("ed:") => layout::title(v).map(|t| crate::i18n::t(&t)).unwrap_or_else(|| v.trim_start_matches("ed:").to_string()),
             v => {
                 let id = v.strip_prefix("view:").unwrap_or(v);
                 let kind = id.split('#').next().unwrap_or("");
@@ -1166,6 +1172,14 @@ impl App {
     /// La disposition en cases : chaque panneau dans sa case, les panneaux sortis dans leur fenêtre.
     fn tiles(&mut self, ui: &mut egui::Ui) {
         let mut tree = self.tree.take().unwrap_or_else(|| layout::default_layout(true));
+        self.offered_now = layout::offered_take();
+        for (id, on) in std::mem::take(&mut self.dock_editor_panes) {
+            if on {
+                layout::add(&mut tree, &id, "");
+            } else {
+                layout::remove(&mut tree, &id);
+            }
+        }
         // Les pages ajoutées par le menu « fenêtre » ont leur case ; celles qu'on a fermées la perdent
         for v in self.view_panels.clone() {
             layout::add(&mut tree, &format!("view:{v}"), "side");
@@ -1187,6 +1201,7 @@ impl App {
         let outside: Vec<String> = panes.iter().filter(|p| dock::side_of(p) == Some(dock::Side::Window)).cloned().collect();
         dock::set_managed(panes.iter().filter(|p| !outside.contains(p)).cloned().collect());
         layout::set_visibility(&mut tree, &|p| !outside.iter().any(|o| o == p) && self.pane_open(p));
+        layout::set_docked(panes.iter().filter(|p| p.starts_with("ed:") && self.offered_now.contains_key(*p)).cloned().collect());
         for o in &outside {
             if self.pane_open(o) && o != layout::MAIN {
                 self.pane_body(ui, o);
@@ -1962,6 +1977,19 @@ impl App {
                             let mut term = self.terminal.is_some();
                             if ui.checkbox(&mut term, format!("{}   Ctrl+`", crate::i18n::t("terminal"))).changed() {
                                 self.toggle_terminal();
+                            }
+                            // Panneaux de l'éditeur affiché : dans l'éditeur, ou dans leur propre case de la disposition
+                            let offered = layout::offered();
+                            if !offered.is_empty() {
+                                ui.separator();
+                                ui.label(caps(&crate::i18n::t("panneaux de l'éditeur, dans leur case")));
+                                let in_tree: Vec<String> = self.tree.as_ref().map(layout::panes).unwrap_or_default();
+                                for (id, title) in offered {
+                                    let mut on = in_tree.contains(&id);
+                                    if ui.checkbox(&mut on, crate::i18n::t(&title)).on_hover_text(crate::i18n::t("Coché : le panneau a sa propre case, qu'on glisse où on veut. Décoché : il revient dans l'éditeur.")).changed() {
+                                        self.dock_editor_panes.push((id, on));
+                                    }
+                                }
                             }
                             ui.separator();
                             // Nouvelles fenêtres : autant qu'on veut, chacune se place par son en-tête
@@ -5138,6 +5166,14 @@ struct Panes<'a> {
 impl egui_tiles::Behavior<String> for Panes<'_> {
     fn pane_ui(&mut self, ui: &mut egui::Ui, _tile: egui_tiles::TileId, pane: &mut String) -> egui_tiles::UiResponse {
         let id = pane.clone();
+        if id.starts_with("ed:") {
+            // L'éditeur y dessine lui-même son panneau : on retient juste la place
+            layout::set_rect(&id, ui.max_rect());
+            if !self.app.offered_now.contains_key(&id) {
+                ui.label(egui::RichText::new(crate::i18n::t("Ce panneau appartient à un autre éditeur.")).color(theme::pal().muted).size(11.0));
+            }
+            return egui_tiles::UiResponse::None;
+        }
         ui.push_id(("pane", &id), |ui| {
             let rect = ui.max_rect();
             ui.set_clip_rect(ui.clip_rect().intersect(rect));
@@ -5165,6 +5201,10 @@ impl egui_tiles::Behavior<String> for Panes<'_> {
             v => {
                 if let Some(k) = v.strip_prefix("view:") {
                     self.app.view_panels.retain(|x| x != k);
+                    return true;
+                }
+                if v.starts_with("ed:") {
+                    // Le panneau retourne dans son éditeur
                     return true;
                 }
             }

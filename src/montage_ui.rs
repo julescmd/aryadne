@@ -748,22 +748,66 @@ impl Editor {
 
         let panel_frame = egui::Frame::new().fill(p.panel).stroke(Stroke::new(1.0, p.line));
         let full_h = ui.available_height();
-        egui::Panel::bottom("montage-lower").resizable(true).default_size((full_h * 0.46).max(220.0)).min_size(180.0).max_size((full_h * 0.75).max(200.0)).frame(egui::Frame::new()).show(ui, |ui| {
-            egui::Panel::left("montage-bin").resizable(true).default_size(260.0).min_size(180.0).max_size(520.0).frame(panel_frame.inner_margin(6)).show(ui, |ui| self.bin_panel(ui));
-            egui::Panel::left("montage-tools").exact_size(36.0).resizable(false).frame(egui::Frame::new().fill(p.panel).stroke(Stroke::new(1.0, p.line)).inner_margin(egui::Margin::symmetric(3, 8))).show(ui, |ui| self.tools_panel(ui));
-            egui::CentralPanel::default().frame(egui::Frame::new().fill(p.bg)).show(ui, |ui| self.timeline_panel(ui));
-        });
-        egui::Panel::left("montage-top-left").resizable(true).default_size((ui.available_width() * 0.4).max(300.0)).min_size(260.0).max_size((ui.available_width() * 0.7).max(300.0)).frame(panel_frame.inner_margin(8)).show(ui, |ui| {
+        // Chaque panneau peut avoir sa propre case dans la disposition (menu « fenêtre »)
+        let bin_r = crate::layout::offer("montage-project", "projet (montage)");
+        let tl_r = crate::layout::offer("montage-timeline", "timeline (montage)");
+        let fx_r = crate::layout::offer("montage-fx", "options d'effet, source, effets");
+        let prog_r = crate::layout::offer("montage-program", "moniteur programme");
+        let timeline_block = |this: &mut Editor, ui: &mut egui::Ui| {
+            egui::Panel::left("montage-tools").exact_size(36.0).resizable(false).frame(egui::Frame::new().fill(p.panel).stroke(Stroke::new(1.0, p.line)).inner_margin(egui::Margin::symmetric(3, 8))).show(ui, |ui| this.tools_panel(ui));
+            egui::CentralPanel::default().frame(egui::Frame::new().fill(p.bg)).show(ui, |ui| this.timeline_panel(ui));
+        };
+        let top_left = |this: &mut Editor, ui: &mut egui::Ui| {
             let tabs = ["options d'effet", "source", "effets"];
-            tab_row(ui, &mut self.top_tab, &tabs);
+            tab_row(ui, &mut this.top_tab, &tabs);
             ui.add_space(4.0);
-            match self.top_tab {
-                0 => self.effect_controls(ui),
-                1 => self.source_panel(ui),
-                _ => self.effects_panel(ui),
+            match this.top_tab {
+                0 => this.effect_controls(ui),
+                1 => this.source_panel(ui),
+                _ => this.effects_panel(ui),
             }
-        });
-        egui::CentralPanel::default().frame(egui::Frame::new().fill(p.panel).inner_margin(8)).show(ui, |ui| self.program_monitor(ui));
+        };
+        if bin_r.is_none() || tl_r.is_none() {
+            egui::Panel::bottom("montage-lower").resizable(true).default_size((full_h * 0.46).max(220.0)).min_size(180.0).max_size((full_h * 0.75).max(200.0)).frame(egui::Frame::new()).show(ui, |ui| {
+                if bin_r.is_none() {
+                    let pf = panel_frame.inner_margin(6);
+                    if tl_r.is_none() {
+                        egui::Panel::left("montage-bin").resizable(true).default_size(260.0).min_size(180.0).max_size(520.0).frame(pf).show(ui, |ui| self.bin_panel(ui));
+                    } else {
+                        egui::CentralPanel::default().frame(pf).show(ui, |ui| self.bin_panel(ui));
+                    }
+                }
+                if tl_r.is_none() {
+                    timeline_block(self, ui);
+                }
+            });
+        }
+        if let Some(r) = bin_r {
+            crate::layout::draw_in(ui, r, p.panel, 6.0, |ui| self.bin_panel(ui));
+        }
+        if let Some(r) = tl_r {
+            crate::layout::draw_in(ui, r, p.bg, 0.0, |ui| timeline_block(self, ui));
+        }
+        match fx_r {
+            Some(r) => crate::layout::draw_in(ui, r, p.panel, 8.0, |ui| top_left(self, ui)),
+            None if prog_r.is_some() => {
+                egui::CentralPanel::default().frame(panel_frame.inner_margin(8)).show(ui, |ui| top_left(self, ui));
+            }
+            None => {
+                egui::Panel::left("montage-top-left").resizable(true).default_size((ui.available_width() * 0.4).max(300.0)).min_size(260.0).max_size((ui.available_width() * 0.7).max(300.0)).frame(panel_frame.inner_margin(8)).show(ui, |ui| top_left(self, ui));
+            }
+        }
+        match prog_r {
+            Some(r) => crate::layout::draw_in(ui, r, p.panel, 8.0, |ui| self.program_monitor(ui)),
+            None => {
+                egui::CentralPanel::default().frame(egui::Frame::new().fill(p.panel).inner_margin(8)).show(ui, |ui| self.program_monitor(ui));
+            }
+        }
+        if fx_r.is_some() && prog_r.is_some() {
+            egui::CentralPanel::default().frame(egui::Frame::new().fill(p.panel)).show(ui, |ui| {
+                ui.centered_and_justified(|ui| ui.label(RichText::new(crate::i18n::t("Les panneaux du montage sont dans leurs cases.")).color(p.muted)));
+            });
+        }
     }
 
     fn poll_playback(&mut self, ctx: &egui::Context) {

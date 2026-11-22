@@ -648,7 +648,12 @@ impl Editor {
             ui.label(egui::RichText::new(m).size(11.0).color(p.muted));
         }
         // ---- Calques, à droite
-        egui::Panel::right(egui::Id::unique(("paint-layers", self.path.to_string_lossy().to_string()))).resizable(true).max_size(480.0).default_size(230.0).min_size(180.0).frame(egui::Frame::new().fill(p.panel).stroke(Stroke::new(1.0, p.line)).inner_margin(8)).show(ui, |ui| self.layers_panel(ui));
+        match crate::layout::offer("paint-layers", "calques (retouche)") {
+            Some(r) => crate::layout::draw_in(ui, r, p.panel, 8.0, |ui| self.layers_panel(ui)),
+            None => {
+                egui::Panel::right(egui::Id::unique(("paint-layers", self.path.to_string_lossy().to_string()))).resizable(true).max_size(480.0).default_size(230.0).min_size(180.0).frame(egui::Frame::new().fill(p.panel).stroke(Stroke::new(1.0, p.line)).inner_margin(8)).show(ui, |ui| self.layers_panel(ui));
+            }
+        }
         // ---- Réglage en cours : fenêtre avec aperçu en direct
         if let Some((kind, _, mut v)) = self.adjust.clone() {
             let mut close = None;

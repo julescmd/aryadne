@@ -2765,7 +2765,7 @@ impl Viewer {
         // Timeline (une bande) ou éditeur de courbes (un panneau qu'on agrandit)
         let tl_frame = egui::Frame::new().fill(p.panel).stroke(Stroke::new(1.0, p.line)).inner_margin(egui::Margin::symmetric(10, 4));
         let tl_panel = if self.anim_graph { egui::Panel::bottom("scene-graph").resizable(true).default_size(300.0).min_size(160.0).max_size((ui.available_height() * 0.7).max(180.0)) } else { egui::Panel::bottom("scene-timeline").exact_size(58.0) };
-        tl_panel.frame(tl_frame).show(ui, |ui| {
+        let sub_body = |ui: &mut egui::Ui| {
             ui.horizontal(|ui| {
                 if ui.button(if self.anim_playing { "⏸" } else { "▶" }).on_hover_text(crate::i18n::t("lire / arrêter (Espace)")).clicked() {
                     self.anim_playing = !self.anim_playing;
@@ -2871,7 +2871,12 @@ impl Viewer {
             if let Some(at) = resp.interact_pointer_pos().filter(|_| resp.dragged() || resp.clicked()) {
                 seek = Some((a + (b - a) * ((at.x - r.left() - 6.0) / (r.width() - 12.0)).clamp(0.0, 1.0)).round());
             }
-        });
+        };
+        if let Some(sub_r) = crate::layout::offer("3d-timeline", "timeline 3D") {
+            crate::layout::draw_in(ui, sub_r, p.panel, 6.0, sub_body);
+        } else {
+            tl_panel.frame(tl_frame).show(ui, sub_body);
+        }
         // Menu « ajouter » de l'en-tête
         if let Some(id) = self.hdr_add.take() {
             let k = match id {
@@ -3073,7 +3078,7 @@ impl Viewer {
                 changed = true;
             }
         }
-        egui::Panel::right("scene-outliner").resizable(true).default_size(270.0).min_size(220.0).max_size((ui.available_width() * 0.45).max(240.0)).frame(egui::Frame::new().fill(p.panel).stroke(Stroke::new(1.0, p.line)).inner_margin(8)).show(ui, |ui| {
+        let sub_body = |ui: &mut egui::Ui| {
             ui.spacing_mut().slider_width = 80.0;
             ui.horizontal(|ui| {
                 ui.label(egui::RichText::new(crate::i18n::t("SCÈNE")).size(10.5).color(p.muted).family(theme::bold()));
@@ -3439,7 +3444,12 @@ impl Viewer {
                 });
             });
             self.prop_tab = new_tab;
-        });
+        };
+        if let Some(sub_r) = crate::layout::offer("3d-outliner", "outliner et propriétés") {
+            crate::layout::draw_in(ui, sub_r, p.panel, 8.0, sub_body);
+        } else {
+            egui::Panel::right("scene-outliner").resizable(true).default_size(270.0).min_size(220.0).max_size((ui.available_width() * 0.45).max(240.0)).frame(egui::Frame::new().fill(p.panel).stroke(Stroke::new(1.0, p.line)).inner_margin(8)).show(ui, sub_body);
+        }
         if let Some((lo, hi)) = self.scene_frame {
             let longest = (hi[0] - lo[0]).max(hi[1] - lo[1]).max(hi[2] - lo[2]).max(1e-9);
             let c = [(lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0, (lo[2] + hi[2]) / 2.0];
