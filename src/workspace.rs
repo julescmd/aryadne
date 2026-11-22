@@ -113,7 +113,8 @@ pub fn accepts(kind: &str, rel: &str) -> bool {
 
 pub fn preset(i: usize) -> Workspace {
     let (name, accent, view, assistant, kind) = PRESETS[i];
-    Workspace { name: name.to_string(), accent, view: view.to_string(), assistant, kind: kind.to_string(), explorer: true, ..Default::default() }
+    // La 3D garde toute la place pour la scène : l'explorateur s'ouvre au besoin (Ctrl+B)
+    Workspace { name: name.to_string(), accent, view: view.to_string(), assistant, kind: kind.to_string(), explorer: kind != "3d", ..Default::default() }
 }
 
 impl Default for Set {

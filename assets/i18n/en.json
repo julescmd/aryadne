@@ -1242,5 +1242,15 @@
  "ajouter une fenêtre": "add a window",
  "le fichier ouvert, à part": "the open file, separately",
  "fichiers (Ctrl+B)": "files (Ctrl+B)",
- "terminal": "terminal"
+ "terminal": "terminal",
+ "données (lumière, caméra, fichier)": "data (light, camera, file)",
+ "monde": "world",
+ "objet(s)": "object(s)",
+ "intensité du ciel": "sky strength",
+ "rotation du ciel": "sky rotation",
+ "Le reste de l'éclairage : menu « éclairage » de l'en-tête.": "More lighting: the header's lighting menu.",
+ "Choisis un objet dans la liste ou dans la vue.": "Select an object in the list or the view.",
+ "Sa couleur se règle dans l'onglet objet.": "Its color is set in the object tab.",
+ "sélection rectangle": "box select",
+ "cadrer la scène": "frame the scene"
 }

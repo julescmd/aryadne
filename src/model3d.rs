@@ -1405,6 +1405,27 @@ fn add3(a: V3, b: V3) -> V3 {
     [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
 }
 
+/// Onglets de l'éditeur de propriétés de la scène, comme ceux de Blender.
+#[derive(Clone, Copy, PartialEq, Default)]
+enum PropTab {
+    #[default]
+    Object,
+    Modifiers,
+    Material,
+    Data,
+    Scene,
+    World,
+}
+
+const PROP_TABS: [(PropTab, &str, &str); 6] = [
+    (PropTab::Object, "▣", "objet"),
+    (PropTab::Modifiers, "⚙", "modificateurs"),
+    (PropTab::Material, "●", "matériau"),
+    (PropTab::Data, "✦", "données (lumière, caméra, fichier)"),
+    (PropTab::Scene, "▤", "scène"),
+    (PropTab::World, "◐", "monde"),
+];
+
 /// Éléments de l'en-tête de la vue 3D, dans l'ordre. Ajouter un menu : une variante ici, une ligne dans HEADER,
 /// un bras dans le match de `show`.
 #[derive(Clone, Copy, PartialEq)]
@@ -1414,6 +1435,8 @@ enum Hdr {
     Select,
     Add,
     Object,
+    /// Outils de poignée dans l'en-tête (remplacé par la barre d'outils à gauche de la vue ; gardé pour un en-tête sans barre)
+    #[allow(dead_code)]
     Tools,
     Fill,
     Shading,
@@ -1423,7 +1446,7 @@ enum Hdr {
     Busy,
 }
 
-const HEADER: [Hdr; 12] = [Hdr::Mode, Hdr::View, Hdr::Select, Hdr::Add, Hdr::Object, Hdr::Tools, Hdr::Fill, Hdr::Shading, Hdr::Overlays, Hdr::Light, Hdr::Modifiers, Hdr::Busy];
+const HEADER: [Hdr; 11] = [Hdr::Mode, Hdr::View, Hdr::Select, Hdr::Add, Hdr::Object, Hdr::Fill, Hdr::Shading, Hdr::Overlays, Hdr::Light, Hdr::Modifiers, Hdr::Busy];
 
 /// Projection de l'espace normalisé de la vue vers l'écran.
 fn projector(cam: Camera, rect: egui::Rect) -> impl Fn(V3) -> Option<Pos2> {
@@ -1707,6 +1730,10 @@ pub struct Viewer {
     mesh: Option<MeshEdit>,
     /// Demande d'entrer ou de sortir du mode édition (bouton du panneau)
     mesh_toggle: bool,
+    /// La vue de la frame précédente (l'en-tête et les outils flottent par-dessus)
+    vp_rect: Option<egui::Rect>,
+    hdr_h: f32,
+    prop_tab: PropTab,
     /// Éditeur de courbes à la place de la timeline
     anim_graph: bool,
     graph: crate::graph::Graph,
@@ -1798,6 +1825,9 @@ impl Viewer {
             box_sel: None,
             mesh: None,
             mesh_toggle: false,
+            vp_rect: None,
+            hdr_h: 30.0,
+            prop_tab: PropTab::Object,
             anim_graph: false,
             graph: Default::default(),
             hdr_key: None,
@@ -2730,7 +2760,7 @@ impl Viewer {
             }
             // (index, action) : 0 supprimer, 1 dupliquer
             let mut action: Option<(usize, u8)> = None;
-            egui::ScrollArea::vertical().id_salt("scene-objects").max_height((ui.available_height() - 250.0).max(120.0)).show(ui, |ui| {
+            egui::ScrollArea::vertical().id_salt("scene-objects").max_height((ui.available_height() * 0.36).max(110.0)).show(ui, |ui| {
                 for (i, depth) in scene.tree() {
                     let o = &mut scene.objects[i];
                     ui.horizontal(|ui| {
@@ -2810,152 +2840,217 @@ impl Viewer {
                 Some(s) if s < scene.objects.len() => (0..scene.objects.len()).filter(|&k| k != s && !scene.descends(k, s)).map(|k| scene.objects[k].name.clone()).collect(),
                 _ => vec![],
             };
-            if let Some(o) = self.scene_sel.and_then(|i| scene.objects.get_mut(i)) {
-                ui.separator();
-                ui.label(egui::RichText::new(crate::i18n::t("OBJET")).size(10.5).color(p.muted).family(theme::bold()));
-                let before = o.name.clone();
-                if ui.add(egui::TextEdit::singleline(&mut o.name).desired_width(f32::INFINITY)).changed() {
-                    renamed = Some((before, o.name.clone()));
-                    changed = true;
-                }
-                ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new(crate::i18n::t("parent")).size(11.0).color(p.muted));
-                    let cur = if o.parent.is_empty() { crate::i18n::t("aucun") } else { o.parent.clone() };
-                    egui::ComboBox::from_id_salt("scene-object-parent").selected_text(egui::RichText::new(cur).size(11.0)).width(130.0).show_ui(ui, |ui| {
-                        if ui.selectable_label(o.parent.is_empty(), crate::i18n::t("aucun")).clicked() {
-                            o.parent.clear();
-                            changed = true;
+            // ---- Propriétés, comme l'éditeur de Blender : une colonne d'onglets, et le contenu à côté
+            ui.separator();
+            let tab = self.prop_tab;
+            let mut new_tab = tab;
+            ui.horizontal_top(|ui| {
+                ui.vertical(|ui| {
+                    ui.spacing_mut().item_spacing.y = 3.0;
+                    for (t, icon, tip) in PROP_TABS {
+                        let on = tab == t;
+                        let b = egui::Button::new(egui::RichText::new(icon).size(14.0).color(if on { p.on_accent } else { p.muted })).fill(if on { p.accent } else { p.panel }).min_size(egui::vec2(26.0, 26.0));
+                        if ui.add(b).on_hover_text(crate::i18n::t(tip)).clicked() {
+                            new_tab = t;
                         }
-                        for name in &parents {
-                            if ui.selectable_label(&o.parent == name, name).clicked() {
-                                o.parent = name.clone();
-                                changed = true;
-                            }
-                        }
-                    });
-                });
-                match crate::scene::kind(o) {
-                    crate::scene::Kind::Light => {
-                        ui.horizontal(|ui| {
-                            ui.label(egui::RichText::new(crate::i18n::t("force")).size(11.0).color(p.muted));
-                            changed |= ui.add(egui::Slider::new(&mut o.energy, 0.0..=5.0)).changed();
-                        });
-                        ui.horizontal(|ui| {
-                            changed |= ui.selectable_value(&mut o.point, false, egui::RichText::new(crate::i18n::t("soleil")).size(11.0)).on_hover_text(crate::i18n::t("Une direction : tourne-la pour changer d'où vient la lumière")).changed();
-                            changed |= ui.selectable_value(&mut o.point, true, egui::RichText::new(crate::i18n::t("ponctuelle")).size(11.0)).on_hover_text(crate::i18n::t("Elle éclaire autour d'elle : déplace-la")).changed();
-                        });
-                        if o.point {
-                            ui.horizontal(|ui| {
-                                ui.label(egui::RichText::new(crate::i18n::t("portée")).size(11.0).color(p.muted));
-                                changed |= ui.add(egui::DragValue::new(&mut o.range).speed(0.05).range(0.01..=10000.0)).changed();
-                            });
-                        }
-                        ui.label(egui::RichText::new(crate::i18n::t("Sa couleur se règle plus bas.")).size(10.0).color(p.muted));
-                    }
-                    crate::scene::Kind::Camera => {
-                        ui.horizontal(|ui| {
-                            if ui.button(crate::i18n::t("regarder par ici")).on_hover_text(crate::i18n::t("Aligne la vue sur cette caméra")).clicked() {
-                                look_through = self.scene_sel;
-                            }
-                            if ui.button(crate::i18n::t("poser sur la vue")).on_hover_text(crate::i18n::t("Enregistre la vue actuelle dans cette caméra")).clicked() {
-                                set_camera = self.scene_sel;
-                            }
-                        });
-                    }
-                    _ => {}
-                }
-                if crate::scene::kind(o) == crate::scene::Kind::Image {
-                    ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new(crate::i18n::t("opacité")).size(11.0).color(p.muted));
-                        changed |= ui.add(egui::Slider::new(&mut o.opacity, 0.0..=1.0).show_value(false)).changed();
-                    });
-                }
-                if crate::scene::kind(o) == crate::scene::Kind::Model {
-                    let on = self.mesh.is_some();
-                    if ui.add(egui::Button::new(egui::RichText::new(crate::i18n::t(if on { "sortir du mode édition (Tab)" } else { "mode édition (Tab)" })).size(11.5).color(if on { p.on_accent } else { p.text })).fill(if on { p.accent } else { p.panel })).on_hover_text(crate::i18n::t("Modifier le maillage : sommets, extrusion, faces. Le maillage devient un fichier OBJ à côté de la scène ; le modèle d'origine n'est pas touché.")).clicked() {
-                        self.mesh_toggle = true;
-                    }
-                }
-                let mut row = |ui: &mut egui::Ui, label: &str, v: &mut [f32; 3], speed: f64, reset: [f32; 3]| {
-                    ui.horizontal(|ui| {
-                        if ui.add(egui::Button::new(egui::RichText::new(crate::i18n::t(label)).size(11.0).color(p.muted)).frame(false)).on_hover_text(crate::i18n::t("cliquer pour remettre à zéro")).clicked() {
-                            *v = reset;
-                            changed = true;
-                        }
-                    });
-                    ui.horizontal(|ui| {
-                        for (k, axis) in ["x", "y", "z"].iter().enumerate() {
-                            changed |= ui.add(egui::DragValue::new(&mut v[k]).speed(speed).prefix(format!("{axis} ")).max_decimals(3)).changed();
-                        }
-                    });
-                };
-                row(ui, "position", &mut o.pos, 0.01, [0.0; 3]);
-                row(ui, "rotation °", &mut o.rot, 0.5, [0.0; 3]);
-                row(ui, "échelle", &mut o.scale, 0.005, [1.0; 3]);
-                ui.horizontal(|ui| {
-                    let mut uniform = o.scale[0];
-                    if ui.add(egui::DragValue::new(&mut uniform).speed(0.005).prefix(format!("{} ", crate::i18n::t("uniforme")))).changed() {
-                        o.scale = [uniform; 3];
-                        changed = true;
-                    }
-                });
-                ui.horizontal(|ui| {
-                    let mut tinted = o.color.is_some();
-                    if ui.checkbox(&mut tinted, crate::i18n::t("couleur")).changed() {
-                        o.color = tinted.then_some([200, 200, 200]);
-                        changed = true;
-                    }
-                    if let Some(c) = &mut o.color {
-                        changed |= ui.color_edit_button_srgb(c).changed();
-                    }
-                });
-                ui.label(egui::RichText::new(&o.file).size(10.0).color(p.muted));
-                // Matériau en nodes de l'objet
-                ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new(crate::i18n::t("matériau")).size(11.0).color(p.muted));
-                    let cur = if o.material.is_empty() { crate::i18n::t("aucun") } else { crate::formats::strip(o.material.rsplit('/').next().unwrap_or(&o.material)).to_string() };
-                    egui::ComboBox::from_id_salt("scene-object-material").selected_text(egui::RichText::new(cur).size(11.0)).width(110.0).show_ui(ui, |ui| {
-                        if ui.selectable_label(o.material.is_empty(), crate::i18n::t("aucun")).clicked() {
-                            o.material.clear();
-                            changed = true;
-                        }
-                        for (name, mpath) in &self.mat_files {
-                            let rel = mpath.strip_prefix(&self.root).map(|r| r.to_string_lossy().replace('\\', "/")).unwrap_or_else(|_| mpath.to_string_lossy().to_string());
-                            if ui.selectable_label(o.material == rel, name).clicked() {
-                                o.material = rel;
-                                changed = true;
-                            }
-                        }
-                    });
-                    if o.material.is_empty() {
-                        if ui.small_button("＋").on_hover_text(crate::i18n::t("Créer un matériau en nodes pour cet objet")).clicked() && !self.root.is_empty() {
-                            let dir = std::path::Path::new(&self.root).join("nodes");
-                            let _ = std::fs::create_dir_all(&dir);
-                            let mut file = dir.join(format!("{}.{}", o.name, crate::formats::ext("mat")));
-                            let mut n = 2;
-                            while file.exists() {
-                                file = dir.join(format!("{} {n}.{}", o.name, crate::formats::ext("mat")));
-                                n += 1;
-                            }
-                            if crate::nodes::Graph::new_material().save(&file).is_ok() {
-                                o.material = file.strip_prefix(&self.root).map(|r| r.to_string_lossy().replace('\\', "/")).unwrap_or_default();
-                                self.mat_files.push((o.name.clone(), file.clone()));
-                                self.open_request = Some(file);
-                                changed = true;
-                            }
-                        }
-                    } else if ui.small_button("✎").on_hover_text(crate::i18n::t("Ouvrir ce matériau dans l'éditeur de nodes")).clicked() {
-                        let raw = std::path::PathBuf::from(&o.material);
-                        self.open_request = Some(if raw.is_absolute() { raw } else { std::path::Path::new(&self.root).join(raw) });
                     }
                 });
                 ui.separator();
-                // Pile de modificateurs de cet objet seulement
-                let mut req = None;
-                egui::ScrollArea::vertical().id_salt("scene-object-mods").show(ui, |ui| {
-                    changed |= crate::modifiers::panel_with(ui, &mut o.mods, false, &mut req, false);
+                ui.vertical(|ui| {
+                    let title = PROP_TABS.iter().find(|x| x.0 == tab).map(|x| x.2).unwrap_or("");
+                    ui.label(egui::RichText::new(crate::i18n::t(title).to_uppercase()).size(10.5).color(p.muted).family(theme::bold()));
+                    egui::ScrollArea::vertical().id_salt("scene-props").show(ui, |ui| {
+                        match tab {
+                            PropTab::Scene => {
+                                ui.horizontal(|ui| {
+                                    ui.label(egui::RichText::new(crate::i18n::t("images/s")).size(11.0).color(p.muted));
+                                    changed |= ui.add(egui::DragValue::new(&mut scene.fps).range(1.0..=120.0)).changed();
+                                });
+                                ui.horizontal(|ui| {
+                                    ui.label(egui::RichText::new(crate::i18n::t("début")).size(11.0).color(p.muted));
+                                    changed |= ui.add(egui::DragValue::new(&mut scene.start)).changed();
+                                    ui.label(egui::RichText::new(crate::i18n::t("fin")).size(11.0).color(p.muted));
+                                    changed |= ui.add(egui::DragValue::new(&mut scene.end)).changed();
+                                });
+                                ui.label(egui::RichText::new(format!("{} {}", scene.objects.len(), crate::i18n::t("objet(s)"))).size(11.0).color(p.muted));
+                            }
+                            PropTab::World => {
+                                ui.add(egui::Slider::new(&mut self.look.env_strength, 0.0..=3.0).text(crate::i18n::t("intensité du ciel")));
+                                ui.add(egui::Slider::new(&mut self.look.exposure, -4.0..=4.0).text(crate::i18n::t("exposition (EV)")));
+                                ui.add(egui::Slider::new(&mut self.look.env_rot, -std::f32::consts::PI..=std::f32::consts::PI).text(crate::i18n::t("rotation du ciel")).show_value(false));
+                                ui.checkbox(&mut self.look.show_bg, crate::i18n::t("afficher le HDRI en fond"));
+                                ui.checkbox(&mut self.look.shadows, crate::i18n::t("ombres portées"));
+                                ui.label(egui::RichText::new(crate::i18n::t("Le reste de l'éclairage : menu « éclairage » de l'en-tête.")).size(10.0).color(p.muted));
+                            }
+                            _ => match self.scene_sel.and_then(|i| scene.objects.get_mut(i)) {
+                                None => {
+                                    ui.label(egui::RichText::new(crate::i18n::t("Choisis un objet dans la liste ou dans la vue.")).size(11.0).color(p.muted));
+                                }
+                                Some(o) => match tab {
+                                    PropTab::Object => {
+                                        let before = o.name.clone();
+                                        if ui.add(egui::TextEdit::singleline(&mut o.name).desired_width(f32::INFINITY)).changed() {
+                                            renamed = Some((before, o.name.clone()));
+                                            changed = true;
+                                        }
+                                        ui.horizontal(|ui| {
+                                            ui.label(egui::RichText::new(crate::i18n::t("parent")).size(11.0).color(p.muted));
+                                            let cur = if o.parent.is_empty() { crate::i18n::t("aucun") } else { o.parent.clone() };
+                                            egui::ComboBox::from_id_salt("scene-object-parent").selected_text(egui::RichText::new(cur).size(11.0)).width(130.0).show_ui(ui, |ui| {
+                                                if ui.selectable_label(o.parent.is_empty(), crate::i18n::t("aucun")).clicked() {
+                                                    o.parent.clear();
+                                                    changed = true;
+                                                }
+                                                for name in &parents {
+                                                    if ui.selectable_label(&o.parent == name, name).clicked() {
+                                                        o.parent = name.clone();
+                                                        changed = true;
+                                                    }
+                                                }
+                                            });
+                                        });
+
+                                        if crate::scene::kind(o) == crate::scene::Kind::Image {
+                                            ui.horizontal(|ui| {
+                                                ui.label(egui::RichText::new(crate::i18n::t("opacité")).size(11.0).color(p.muted));
+                                                changed |= ui.add(egui::Slider::new(&mut o.opacity, 0.0..=1.0).show_value(false)).changed();
+                                            });
+                                        }
+
+                                        if crate::scene::kind(o) == crate::scene::Kind::Model {
+                                            let on = self.mesh.is_some();
+                                            if ui.add(egui::Button::new(egui::RichText::new(crate::i18n::t(if on { "sortir du mode édition (Tab)" } else { "mode édition (Tab)" })).size(11.5).color(if on { p.on_accent } else { p.text })).fill(if on { p.accent } else { p.panel })).on_hover_text(crate::i18n::t("Modifier le maillage : sommets, extrusion, faces. Le maillage devient un fichier OBJ à côté de la scène ; le modèle d'origine n'est pas touché.")).clicked() {
+                                                self.mesh_toggle = true;
+                                            }
+                                        }
+
+                                        let mut row = |ui: &mut egui::Ui, label: &str, v: &mut [f32; 3], speed: f64, reset: [f32; 3]| {
+                                            ui.horizontal(|ui| {
+                                                if ui.add(egui::Button::new(egui::RichText::new(crate::i18n::t(label)).size(11.0).color(p.muted)).frame(false)).on_hover_text(crate::i18n::t("cliquer pour remettre à zéro")).clicked() {
+                                                    *v = reset;
+                                                    changed = true;
+                                                }
+                                            });
+                                            ui.horizontal(|ui| {
+                                                for (k, axis) in ["x", "y", "z"].iter().enumerate() {
+                                                    changed |= ui.add(egui::DragValue::new(&mut v[k]).speed(speed).prefix(format!("{axis} ")).max_decimals(3)).changed();
+                                                }
+                                            });
+                                        };
+                                        row(ui, "position", &mut o.pos, 0.01, [0.0; 3]);
+                                        row(ui, "rotation °", &mut o.rot, 0.5, [0.0; 3]);
+                                        row(ui, "échelle", &mut o.scale, 0.005, [1.0; 3]);
+                                        ui.horizontal(|ui| {
+                                            let mut uniform = o.scale[0];
+                                            if ui.add(egui::DragValue::new(&mut uniform).speed(0.005).prefix(format!("{} ", crate::i18n::t("uniforme")))).changed() {
+                                                o.scale = [uniform; 3];
+                                                changed = true;
+                                            }
+                                        });
+                                        ui.horizontal(|ui| {
+                                            let mut tinted = o.color.is_some();
+                                            if ui.checkbox(&mut tinted, crate::i18n::t("couleur")).changed() {
+                                                o.color = tinted.then_some([200, 200, 200]);
+                                                changed = true;
+                                            }
+                                            if let Some(c) = &mut o.color {
+                                                changed |= ui.color_edit_button_srgb(c).changed();
+                                            }
+                                        });
+
+                                    }
+                                    PropTab::Data => {
+                                        match crate::scene::kind(o) {
+                                            crate::scene::Kind::Light => {
+                                                ui.horizontal(|ui| {
+                                                    ui.label(egui::RichText::new(crate::i18n::t("force")).size(11.0).color(p.muted));
+                                                    changed |= ui.add(egui::Slider::new(&mut o.energy, 0.0..=5.0)).changed();
+                                                });
+                                                ui.horizontal(|ui| {
+                                                    changed |= ui.selectable_value(&mut o.point, false, egui::RichText::new(crate::i18n::t("soleil")).size(11.0)).on_hover_text(crate::i18n::t("Une direction : tourne-la pour changer d'où vient la lumière")).changed();
+                                                    changed |= ui.selectable_value(&mut o.point, true, egui::RichText::new(crate::i18n::t("ponctuelle")).size(11.0)).on_hover_text(crate::i18n::t("Elle éclaire autour d'elle : déplace-la")).changed();
+                                                });
+                                                if o.point {
+                                                    ui.horizontal(|ui| {
+                                                        ui.label(egui::RichText::new(crate::i18n::t("portée")).size(11.0).color(p.muted));
+                                                        changed |= ui.add(egui::DragValue::new(&mut o.range).speed(0.05).range(0.01..=10000.0)).changed();
+                                                    });
+                                                }
+                                                ui.label(egui::RichText::new(crate::i18n::t("Sa couleur se règle dans l'onglet objet.")).size(10.0).color(p.muted));
+                                            }
+                                            crate::scene::Kind::Camera => {
+                                                ui.horizontal(|ui| {
+                                                    if ui.button(crate::i18n::t("regarder par ici")).on_hover_text(crate::i18n::t("Aligne la vue sur cette caméra")).clicked() {
+                                                        look_through = self.scene_sel;
+                                                    }
+                                                    if ui.button(crate::i18n::t("poser sur la vue")).on_hover_text(crate::i18n::t("Enregistre la vue actuelle dans cette caméra")).clicked() {
+                                                        set_camera = self.scene_sel;
+                                                    }
+                                                });
+                                            }
+                                            _ => {}
+                                        }
+
+                                        if !matches!(crate::scene::kind(o), crate::scene::Kind::Light | crate::scene::Kind::Camera) {
+                                            ui.label(egui::RichText::new(&o.file).size(10.5).color(p.muted));
+                                        }
+                                    }
+                                    PropTab::Material => {
+                                        ui.label(egui::RichText::new(&o.file).size(10.0).color(p.muted));
+                                        // Matériau en nodes de l'objet
+                                        ui.horizontal(|ui| {
+                                            ui.label(egui::RichText::new(crate::i18n::t("matériau")).size(11.0).color(p.muted));
+                                            let cur = if o.material.is_empty() { crate::i18n::t("aucun") } else { crate::formats::strip(o.material.rsplit('/').next().unwrap_or(&o.material)).to_string() };
+                                            egui::ComboBox::from_id_salt("scene-object-material").selected_text(egui::RichText::new(cur).size(11.0)).width(110.0).show_ui(ui, |ui| {
+                                                if ui.selectable_label(o.material.is_empty(), crate::i18n::t("aucun")).clicked() {
+                                                    o.material.clear();
+                                                    changed = true;
+                                                }
+                                                for (name, mpath) in &self.mat_files {
+                                                    let rel = mpath.strip_prefix(&self.root).map(|r| r.to_string_lossy().replace('\\', "/")).unwrap_or_else(|_| mpath.to_string_lossy().to_string());
+                                                    if ui.selectable_label(o.material == rel, name).clicked() {
+                                                        o.material = rel;
+                                                        changed = true;
+                                                    }
+                                                }
+                                            });
+                                            if o.material.is_empty() {
+                                                if ui.small_button("＋").on_hover_text(crate::i18n::t("Créer un matériau en nodes pour cet objet")).clicked() && !self.root.is_empty() {
+                                                    let dir = std::path::Path::new(&self.root).join("nodes");
+                                                    let _ = std::fs::create_dir_all(&dir);
+                                                    let mut file = dir.join(format!("{}.{}", o.name, crate::formats::ext("mat")));
+                                                    let mut n = 2;
+                                                    while file.exists() {
+                                                        file = dir.join(format!("{} {n}.{}", o.name, crate::formats::ext("mat")));
+                                                        n += 1;
+                                                    }
+                                                    if crate::nodes::Graph::new_material().save(&file).is_ok() {
+                                                        o.material = file.strip_prefix(&self.root).map(|r| r.to_string_lossy().replace('\\', "/")).unwrap_or_default();
+                                                        self.mat_files.push((o.name.clone(), file.clone()));
+                                                        self.open_request = Some(file);
+                                                        changed = true;
+                                                    }
+                                                }
+                                            } else if ui.small_button("✎").on_hover_text(crate::i18n::t("Ouvrir ce matériau dans l'éditeur de nodes")).clicked() {
+                                                let raw = std::path::PathBuf::from(&o.material);
+                                                self.open_request = Some(if raw.is_absolute() { raw } else { std::path::Path::new(&self.root).join(raw) });
+                                            }
+                                        });
+
+                                    }
+                                    PropTab::Modifiers => {
+                                        // Pile de modificateurs de cet objet seulement
+                                        let mut req = None;
+                                        changed |= crate::modifiers::panel_with(ui, &mut o.mods, false, &mut req, false);
+                                    }
+                                    _ => {}
+                                },
+                            },
+                        }
+                    });
                 });
-            }
+            });
+            self.prop_tab = new_tab;
         });
         if let Some((lo, hi)) = self.scene_frame {
             let longest = (hi[0] - lo[0]).max(hi[1] - lo[1]).max(hi[2] - lo[2]).max(1e-9);
@@ -3286,8 +3381,14 @@ impl Viewer {
         // Les éléments viennent d'une liste : en ajouter un, c'est une ligne dans HEADER et un bras dans le match.
         let is_scene = crate::scene::is_scene(&self.path);
         let mut want_edit: Option<bool> = None;
-        egui::Frame::new().fill(p.bg).stroke(Stroke::new(1.0, p.line)).inner_margin(egui::Margin::symmetric(6, 3)).show(ui, |ui| {
-        ui.set_width(ui.available_width());
+        // L'en-tête flotte par-dessus le haut de la vue, comme dans Blender : la vue garde toute la hauteur
+        let vp = self.vp_rect.unwrap_or(ui.available_rect_before_wrap());
+        let hdr_area = egui::Area::new(egui::Id::unique(("hdr3d", self.path.to_string_lossy().to_string()))).order(egui::Order::Middle).fixed_pos(vp.min + egui::vec2(6.0, 6.0)).show(ui.ctx(), |ui| {
+        ui.set_max_width((vp.width() - 12.0).max(200.0));
+        // Compact, comme l'en-tête de Blender
+        ui.spacing_mut().button_padding = egui::vec2(5.0, 1.0);
+        ui.spacing_mut().interact_size.y = 20.0;
+        egui::Frame::new().fill(p.panel.gamma_multiply(0.94)).corner_radius(6).stroke(Stroke::new(1.0, p.line)).inner_margin(egui::Margin::symmetric(5, 3)).show(ui, |ui| {
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing.x = 3.0;
             for item in HEADER {
@@ -3578,6 +3679,8 @@ impl Viewer {
             }
         });
         });
+        });
+        self.hdr_h = hdr_area.response.rect.height();
         if let Some(on) = want_edit {
             let editing = on;
             if editing != self.edit.is_some() {
@@ -3815,6 +3918,39 @@ impl Viewer {
         }
         let avail = ui.available_size();
         let (rect, resp) = ui.allocate_exact_size(avail.max(egui::vec2(50.0, 50.0)), Sense::click_and_drag());
+        if self.vp_rect != Some(rect) {
+            self.vp_rect = Some(rect);
+            ui.ctx().request_repaint();
+        }
+        // Barre d'outils à gauche de la vue (scènes) : sélection, déplacer, tourner, taille, ajouter
+        if crate::scene::is_scene(&self.path) && self.edit.is_none() {
+            let top = rect.min + egui::vec2(6.0, self.hdr_h + 14.0);
+            egui::Area::new(egui::Id::unique(("tools3d", self.path.to_string_lossy().to_string()))).order(egui::Order::Middle).fixed_pos(top).show(ui.ctx(), |ui| {
+                egui::Frame::new().fill(p.panel.gamma_multiply(0.94)).corner_radius(6).stroke(Stroke::new(1.0, p.line)).inner_margin(3).show(ui, |ui| {
+                    ui.spacing_mut().item_spacing.y = 2.0;
+                    let tool = |ui: &mut egui::Ui, icon: &str, on: bool, tip: String| {
+                        let b = egui::Button::new(egui::RichText::new(icon).size(15.0).color(if on { p.on_accent } else { p.text })).fill(if on { p.accent } else { egui::Color32::TRANSPARENT }).min_size(egui::vec2(28.0, 28.0));
+                        ui.add(b).on_hover_text(tip).clicked()
+                    };
+                    if tool(ui, "⬚", self.box_sel.is_some(), format!("{} (B)", crate::i18n::t("sélection rectangle"))) {
+                        self.hdr_key = Some((Key::B, egui::Modifiers::NONE));
+                    }
+                    ui.separator();
+                    for (k, (icon, label, key)) in [("✥", "déplacer", "G"), ("⟳", "tourner", "R"), ("⤡", "taille", "S")].iter().enumerate() {
+                        if tool(ui, icon, self.gizmo_mode == k as u8, format!("{} ({key})", crate::i18n::t(label))) {
+                            self.gizmo_mode = k as u8;
+                        }
+                    }
+                    ui.separator();
+                    if tool(ui, "＋", self.add_popup.is_some(), format!("{} (Maj+A)", crate::i18n::t("ajouter"))) {
+                        self.add_popup = Some(top + egui::vec2(40.0, 120.0));
+                    }
+                    if tool(ui, "⌂", false, format!("{} (Origine)", crate::i18n::t("cadrer la scène"))) {
+                        self.cam = Camera { ortho: self.cam.ortho, ..Default::default() };
+                    }
+                });
+            });
+        }
         let painter = ui.painter_at(rect);
         painter.rect_filled(rect, 0.0, p.panel);
 
@@ -4493,7 +4629,7 @@ impl Viewer {
         }
         if self.mesh.is_some() {
             let g = painter.layout_no_wrap(crate::i18n::t("MODE ÉDITION"), egui::FontId::monospace(11.0), p.on_accent);
-            let r = egui::Rect::from_min_size(rect.left_top() + vec2(12.0, 12.0), g.size() + vec2(14.0, 8.0));
+            let r = egui::Rect::from_min_size(rect.right_top() + vec2(-g.size().x - 26.0, 56.0), g.size() + vec2(14.0, 8.0));
             painter.rect_filled(r, 4.0, p.accent);
             painter.galley(r.min + vec2(7.0, 4.0), g, p.on_accent);
         }
