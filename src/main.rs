@@ -4,6 +4,7 @@ mod cloud;
 mod dock;
 mod formats;
 mod gizmo;
+mod graph;
 mod untitled;
 mod meshedit;
 mod montage;

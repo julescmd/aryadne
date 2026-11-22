@@ -1707,6 +1707,9 @@ pub struct Viewer {
     mesh: Option<MeshEdit>,
     /// Demande d'entrer ou de sortir du mode édition (bouton du panneau)
     mesh_toggle: bool,
+    /// Éditeur de courbes à la place de la timeline
+    anim_graph: bool,
+    graph: crate::graph::Graph,
     /// Action d'un menu de l'en-tête, rejouée comme sa touche à l'image suivante (une seule logique pour les deux)
     hdr_key: Option<(Key, egui::Modifiers)>,
     /// Objet à ajouter depuis le menu « ajouter »
@@ -1795,6 +1798,8 @@ impl Viewer {
             box_sel: None,
             mesh: None,
             mesh_toggle: false,
+            anim_graph: false,
+            graph: Default::default(),
             hdr_key: None,
             hdr_add: None,
             stats_text: String::new(),
@@ -2350,7 +2355,10 @@ impl Viewer {
         } else {
             self.anim_last = None;
         }
-        egui::Panel::bottom("scene-timeline").exact_size(58.0).frame(egui::Frame::new().fill(p.panel).stroke(Stroke::new(1.0, p.line)).inner_margin(egui::Margin::symmetric(10, 4))).show(ui, |ui| {
+        // Timeline (une bande) ou éditeur de courbes (un panneau qu'on agrandit)
+        let tl_frame = egui::Frame::new().fill(p.panel).stroke(Stroke::new(1.0, p.line)).inner_margin(egui::Margin::symmetric(10, 4));
+        let tl_panel = if self.anim_graph { egui::Panel::bottom("scene-graph").resizable(true).default_size(300.0).min_size(160.0) } else { egui::Panel::bottom("scene-timeline").exact_size(58.0) };
+        tl_panel.frame(tl_frame).show(ui, |ui| {
             ui.horizontal(|ui| {
                 if ui.button(if self.anim_playing { "⏸" } else { "▶" }).on_hover_text(crate::i18n::t("lire / arrêter (Espace)")).clicked() {
                     self.anim_playing = !self.anim_playing;
@@ -2379,15 +2387,56 @@ impl Viewer {
                     }
                 }
                 if let Some(key) = sel.and_then(|k| scene.objects[k].keys.iter_mut().find(|x| x.frame == here)) {
-                    changed |= ui.checkbox(&mut key.ease, crate::i18n::t("en douceur")).on_hover_text(crate::i18n::t("Départ et arrivée en douceur jusqu'à la clé suivante")).changed();
+                    // Passage vers la clé suivante
+                    let cur = key.mode().to_string();
+                    egui::ComboBox::from_id_salt("key-interp").width(90.0).selected_text(crate::i18n::t(match cur.as_str() { "linear" => "linéaire", "constant" => "constant", _ => "Bézier" })).show_ui(ui, |ui| {
+                        for (m, l) in [("bezier", "Bézier"), ("linear", "linéaire"), ("constant", "constant")] {
+                            if ui.selectable_label(cur == m, crate::i18n::t(l)).clicked() {
+                                key.interp = m.to_string();
+                                changed = true;
+                            }
+                        }
+                    });
                 }
                 ui.toggle_value(&mut self.anim_auto, egui::RichText::new(crate::i18n::t("clé auto")).size(11.0)).on_hover_text(crate::i18n::t("Chaque déplacement pose une clé à l'image courante"));
+                ui.separator();
+                if ui.toggle_value(&mut self.anim_graph, egui::RichText::new(crate::i18n::t("courbes")).size(11.0)).on_hover_text(crate::i18n::t("Éditeur de courbes : clés et poignées de Bézier par canal (Maj+F6)")).changed() {
+                    self.graph.reset_view();
+                }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     changed |= ui.add(egui::DragValue::new(&mut scene.fps).range(1.0..=120.0).suffix(" i/s")).changed();
                     changed |= ui.add(egui::DragValue::new(&mut scene.end).prefix(format!("{} ", crate::i18n::t("fin")))).changed();
                     changed |= ui.add(egui::DragValue::new(&mut scene.start).prefix(format!("{} ", crate::i18n::t("début")))).changed();
                 });
             });
+            if self.anim_graph {
+                let sel = self.scene_sel.filter(|&k| k < scene.objects.len());
+                if self.graph.who != sel {
+                    self.graph.who = sel;
+                    self.graph.reset_view();
+                }
+                match sel {
+                    Some(k) => {
+                        let mut keys = std::mem::take(&mut scene.objects[k].keys);
+                        let out = self.graph.ui(ui, &mut keys, self.anim_frame, (scene.start, scene.end));
+                        scene.objects[k].keys = keys;
+                        if out.changed {
+                            // La pose suit la courbe à l'image courante
+                            if let Some((pos, rot, scale)) = scene.objects[k].pose_at(self.anim_frame) {
+                                (scene.objects[k].pos, scene.objects[k].rot, scene.objects[k].scale) = (pos, rot, scale);
+                            }
+                            changed = true;
+                        }
+                        if out.seek.is_some() {
+                            seek = out.seek;
+                        }
+                    }
+                    None => {
+                        ui.centered_and_justified(|ui| ui.label(egui::RichText::new(crate::i18n::t("choisis un objet pour voir ses courbes")).color(p.muted)));
+                    }
+                }
+                return;
+            }
             // La règle : un clic ou un glissement déplace la tête de lecture ; les losanges sont les clés de l'objet choisi
             let (r, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 20.0), egui::Sense::click_and_drag());
             let (a, b) = (scene.start as f32, scene.end.max(scene.start + 1) as f32);

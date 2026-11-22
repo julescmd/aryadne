@@ -747,7 +747,7 @@
  "ombres": "shadows",
  "opération": "operation",
  "pente": "slope",
- "position": "position",
+ "position": "location",
  "projection": "projection",
  "puissance": "power",
  "rayon": "radius",
@@ -1215,5 +1215,17 @@
  "les supprimer": "delete them",
  "non enregistré (Ctrl+S)": "not saved (Ctrl+S)",
  "enregistrer…  Ctrl+S": "save…  Ctrl+S",
- "texte brut": "plain text"
+ "texte brut": "plain text",
+ "passage": "interpolation",
+ "poignées": "handles",
+ "alignées": "aligned",
+ "libres": "free",
+ "vecteur": "vector",
+ "Éditeur de courbes : clés et poignées de Bézier par canal (Maj+F6)": "Graph editor: keys and Bézier handles per channel",
+ "choisis un objet pour voir ses courbes": "select an object to see its curves",
+ "pas encore de clé : I ou ◇ pour en poser une": "no keys yet: I or ◇ to add one",
+ "Bézier : courbe douce, réglable par les poignées": "Bézier: smooth curve, shaped by the handles",
+ "linéaire : vitesse constante": "linear: constant speed",
+ "constant : saute d'une clé à l'autre": "constant: jumps from key to key",
+ "constant": "constant"
 }

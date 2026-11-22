@@ -71,15 +71,136 @@ pub struct Object {
 }
 
 /// Une clé : la pose complète de l'objet à une image donnée.
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct Key {
     pub frame: i32,
     pub pos: [f32; 3],
     pub rot: [f32; 3],
     pub scale: [f32; 3],
-    /// Départ et arrivée en douceur vers la clé suivante (sinon vitesse constante)
+    /// Ancien réglage : départ et arrivée en douceur (sert quand `interp` est vide)
     #[serde(default = "yes")]
     pub ease: bool,
+    /// Passage vers la clé suivante : « bezier », « linear » ou « constant » (vide : d'après `ease`)
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub interp: String,
+    /// Type des poignées : 0 automatique, 1 alignées, 2 libres, 3 vecteur (comme dans Blender)
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub handle: u8,
+    /// Poignées de Bézier par canal (9 : position, rotation, taille ; X Y Z) :
+    /// [gauche Δimage, gauche Δvaleur, droite Δimage, droite Δvaleur]. Vide : automatiques.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub handles: Vec<[f32; 4]>,
+}
+
+fn is_zero(v: &u8) -> bool {
+    *v == 0
+}
+
+/// Les neuf canaux animables : (groupe, axe).
+pub const CHANNELS: [(&str, &str); 9] = [("position", "X"), ("position", "Y"), ("position", "Z"), ("rotation", "X"), ("rotation", "Y"), ("rotation", "Z"), ("taille", "X"), ("taille", "Y"), ("taille", "Z")];
+
+impl Key {
+    pub fn get(&self, c: usize) -> f32 {
+        match c {
+            0..=2 => self.pos[c],
+            3..=5 => self.rot[c - 3],
+            _ => self.scale[(c - 6).min(2)],
+        }
+    }
+
+    pub fn set(&mut self, c: usize, v: f32) {
+        match c {
+            0..=2 => self.pos[c] = v,
+            3..=5 => self.rot[c - 3] = v,
+            _ => self.scale[(c - 6).min(2)] = v,
+        }
+    }
+
+    /// Mode de passage vers la clé suivante
+    pub fn mode(&self) -> &str {
+        match self.interp.as_str() {
+            "" => if self.ease { "bezier" } else { "linear" },
+            m => m,
+        }
+    }
+}
+
+/// Poignées d'une clé sur un canal : (gauche, droite), en (Δimage, Δvaleur).
+/// Automatiques : pente des voisines, à plat sur un sommet ou un creux (comme « auto clamped » de Blender) ;
+/// vecteur : pointées vers les clés voisines.
+pub fn handles_of(keys: &[Key], i: usize, c: usize) -> ([f32; 2], [f32; 2]) {
+    let k = &keys[i];
+    let prev = (i > 0).then(|| &keys[i - 1]);
+    let next = keys.get(i + 1);
+    let (f, v) = (k.frame as f32, k.get(c));
+    let left_len = prev.map(|p| (f - p.frame as f32) / 3.0).unwrap_or(4.0);
+    let right_len = next.map(|n| (n.frame as f32 - f) / 3.0).unwrap_or(4.0);
+    if k.handle != 0 {
+        if let Some(h) = k.handles.get(c) {
+            return ([h[0], h[1]], [h[2], h[3]]);
+        }
+    }
+    if k.handle == 3 {
+        let l = prev.map(|p| [(p.frame as f32 - f) / 3.0, (p.get(c) - v) / 3.0]).unwrap_or([-left_len, 0.0]);
+        let r = next.map(|n| [(n.frame as f32 - f) / 3.0, (n.get(c) - v) / 3.0]).unwrap_or([right_len, 0.0]);
+        return (l, r);
+    }
+    let slope = match (prev, next) {
+        (Some(p), Some(n)) => {
+            let (a, b) = (p.get(c), n.get(c));
+            // Sommet ou creux : on garde la courbe à plat pour ne pas dépasser
+            if (v >= a && v >= b) || (v <= a && v <= b) {
+                0.0
+            } else {
+                (b - a) / ((n.frame - p.frame).max(1) as f32)
+            }
+        }
+        _ => 0.0,
+    };
+    ([-left_len, -slope * left_len], [right_len, slope * right_len])
+}
+
+/// Valeur du canal `c` à l'image `f`, d'après les clés (Bézier, linéaire ou constant).
+pub fn channel_at(keys: &[Key], c: usize, f: f32) -> f32 {
+    let (first, last) = (&keys[0], &keys[keys.len() - 1]);
+    if f <= first.frame as f32 {
+        return first.get(c);
+    }
+    if f >= last.frame as f32 {
+        return last.get(c);
+    }
+    let i = (0..keys.len() - 1).find(|&i| f < keys[i + 1].frame as f32).unwrap_or(0);
+    let (a, b) = (&keys[i], &keys[i + 1]);
+    let (fa, fb) = (a.frame as f32, b.frame as f32);
+    let (va, vb) = (a.get(c), b.get(c));
+    match a.mode() {
+        "constant" => va,
+        "linear" => va + (vb - va) * (f - fa) / (fb - fa).max(1e-6),
+        _ => {
+            let (_, r) = handles_of(keys, i, c);
+            let (l, _) = handles_of(keys, i + 1, c);
+            // Les poignées ne dépassent pas le segment : la courbe reste une fonction du temps
+            let span = (fb - fa).max(1e-6);
+            let x1 = fa + r[0].clamp(0.0, span);
+            let x2 = fb + l[0].clamp(-span, 0.0);
+            let (y1, y2) = (va + r[1] * if r[0] > span { span / r[0] } else { 1.0 }, vb + l[1] * if -l[0] > span { span / -l[0] } else { 1.0 });
+            let bez = |p0: f32, p1: f32, p2: f32, p3: f32, t: f32| {
+                let u = 1.0 - t;
+                u * u * u * p0 + 3.0 * u * u * t * p1 + 3.0 * u * t * t * p2 + t * t * t * p3
+            };
+            // x(t) = f par dichotomie (x croît avec t)
+            let (mut lo, mut hi) = (0.0f32, 1.0f32);
+            for _ in 0..30 {
+                let m = (lo + hi) / 2.0;
+                if bez(fa, x1, x2, fb, m) < f {
+                    lo = m;
+                } else {
+                    hi = m;
+                }
+            }
+            bez(va, y1, y2, vb, (lo + hi) / 2.0)
+        }
+    }
 }
 
 impl Object {
@@ -93,19 +214,19 @@ impl Object {
         if f >= last.frame as f32 {
             return Some((last.pos, last.rot, last.scale));
         }
-        let i = (0..k.len() - 1).find(|&i| f < k[i + 1].frame as f32)?;
-        let (a, b) = (&k[i], &k[i + 1]);
-        let t = (f - a.frame as f32) / (b.frame - a.frame).max(1) as f32;
-        let t = if a.ease { t * t * (3.0 - 2.0 * t) } else { t };
-        let mix = |x: [f32; 3], y: [f32; 3]| [x[0] + (y[0] - x[0]) * t, x[1] + (y[1] - x[1]) * t, x[2] + (y[2] - x[2]) * t];
-        Some((mix(a.pos, b.pos), mix(a.rot, b.rot), mix(a.scale, b.scale)))
+        let ch = |c: usize| channel_at(k, c, f);
+        Some(([ch(0), ch(1), ch(2)], [ch(3), ch(4), ch(5)], [ch(6), ch(7), ch(8)]))
     }
 
     /// Pose une clé à l'image `frame` avec la pose actuelle (ou remplace celle qui s'y trouve).
     pub fn set_key(&mut self, frame: i32) {
-        let key = Key { frame, pos: self.pos, rot: self.rot, scale: self.scale, ease: true };
+        let key = Key { frame, pos: self.pos, rot: self.rot, scale: self.scale, ease: true, interp: String::new(), handle: 0, handles: vec![] };
         match self.keys.iter().position(|k| k.frame == frame) {
-            Some(i) => self.keys[i] = Key { ease: self.keys[i].ease, ..key },
+            // Une clé qui existe garde son passage et ses poignées : seule la pose change
+            Some(i) => {
+                let old = self.keys[i].clone();
+                self.keys[i] = Key { ease: old.ease, interp: old.interp, handle: old.handle, handles: old.handles, ..key };
+            }
             None => {
                 self.keys.push(key);
                 self.keys.sort_by_key(|k| k.frame);
@@ -682,6 +803,30 @@ pub fn build_ranges(scene: &Scene, scene_path: &Path) -> (Result<crate::model3d:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn courbes() {
+        let k = |frame: i32, x: f32| Key { frame, pos: [x, 0.0, 0.0], rot: [0.0; 3], scale: [1.0; 3], ease: true, interp: String::new(), handle: 0, handles: vec![] };
+        let mut keys = vec![k(0, 0.0), k(10, 10.0), k(20, 0.0)];
+        // Passe par les clés, reste dans les bornes au sommet (poignées automatiques à plat)
+        assert!((channel_at(&keys, 0, 10.0) - 10.0).abs() < 1e-3);
+        assert!((0..=200).all(|i| channel_at(&keys, 0, i as f32 / 10.0) <= 10.0 + 1e-3));
+        // Linéaire : à mi-chemin, la moitié ; constant : la valeur de départ
+        keys[0].interp = "linear".into();
+        assert!((channel_at(&keys, 0, 5.0) - 5.0).abs() < 1e-3);
+        keys[0].interp = "constant".into();
+        assert!(channel_at(&keys, 0, 9.0).abs() < 1e-3);
+        // Poignées libres : une poignée qui monte fait monter la courbe au départ
+        keys[0].interp = "bezier".into();
+        keys[0].handle = 2;
+        keys[0].handles = vec![[-3.0, 0.0, 3.0, 9.0]; 9];
+        let free = channel_at(&keys, 0, 2.0);
+        keys[0].handle = 0;
+        assert!(free > channel_at(&keys, 0, 2.0));
+        // Ancien fichier sans « interp » : se relit
+        let old: Key = serde_json::from_str(r#"{"frame":3,"pos":[0,0,0],"rot":[0,0,0],"scale":[1,1,1],"ease":false}"#).unwrap();
+        assert_eq!(old.mode(), "linear");
+    }
 
     #[test]
     fn rotations() {
