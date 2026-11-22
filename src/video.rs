@@ -1112,7 +1112,7 @@ fn draw_line(painter: &egui::Painter, l: &Line, to_screen: &dyn Fn([f32; 2]) -> 
 }
 
 /// Épaisseur relative : effilée au début et à la fin, plus fine quand le geste est rapide.
-fn taper_widths(pts: &[[f32; 2]], taper: f32) -> Vec<f32> {
+pub fn taper_widths(pts: &[[f32; 2]], taper: f32) -> Vec<f32> {
     let n = pts.len();
     if n < 3 || taper <= 0.0 {
         return vec![];

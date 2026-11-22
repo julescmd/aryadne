@@ -2554,6 +2554,15 @@ impl App {
                 return;
             }
         }
+        // Du texte simple, sur un board : il devient une étiquette
+        if self.view() == View::Boards {
+            if let Ok(text) = cb.get_text() {
+                if !text.trim().is_empty() {
+                    self.board.paste_text(&text, at.to_pos2());
+                    return;
+                }
+            }
+        }
         self.toast("rien à coller : copie une image d'abord");
     }
 
@@ -2671,12 +2680,23 @@ impl App {
                     }
                     ui.separator();
                     // Outils
-                    for (tool, label, key) in [(board::Tool::Select, "sélection", "V"), (board::Tool::Pen, "dessin", "B"), (board::Tool::Eraser, "gomme", "E"), (board::Tool::Text, "texte", "T")] {
-                        if ui.selectable_label(self.board.tool == tool, label).on_hover_text(key).clicked() {
+                    // Outils : sélection et texte, puis les outils de dessin de l'annotation vidéo
+                    for (tool, label, key) in [(board::Tool::Select, "sélection", "V"), (board::Tool::Text, "texte", "T")] {
+                        if ui.selectable_label(self.board.tool == tool, crate::i18n::t(label)).on_hover_text(key).clicked() {
                             self.board.tool = tool;
                         }
                     }
-                    if matches!(self.board.tool, board::Tool::Pen) {
+                    ui.separator();
+                    for (tool, icon, label, key) in board::DRAW_TOOLS {
+                        let on = self.board.tool == tool;
+                        let b = egui::Button::new(RichText::new(icon).size(14.0).color(if on { p.on_accent } else { p.text })).fill(if on { p.accent } else { p.panel }).min_size(egui::vec2(26.0, 22.0));
+                        let key = if tool == board::Tool::Arrow { "Maj+A".to_string() } else { key.to_string() };
+                        if ui.add(b).on_hover_text(format!("{} ({key})", crate::i18n::t(label))).clicked() {
+                            self.board.tool = tool;
+                        }
+                    }
+                    let drawing = !matches!(self.board.tool, board::Tool::Select | board::Tool::Text | board::Tool::Eraser);
+                    if drawing {
                         ui.separator();
                         for c in [p.accent, egui::Color32::from_rgb(0x18, 0x18, 0x1b), egui::Color32::WHITE, egui::Color32::from_rgb(0x25, 0x63, 0xeb), egui::Color32::from_rgb(0x16, 0xa3, 0x4a), egui::Color32::from_rgb(0xea, 0xb3, 0x08)] {
                             let (r, resp) = ui.allocate_exact_size(egui::vec2(18.0, 18.0), egui::Sense::click());
@@ -2687,7 +2707,14 @@ impl App {
                             }
                         }
                         ui.color_edit_button_srgba(&mut self.board.pen_color);
-                        ui.add(egui::Slider::new(&mut self.board.pen_width, 1.0..=40.0).show_value(false)).on_hover_text(crate::i18n::t("épaisseur"));
+                        egui::containers::menu::MenuButton::new(crate::i18n::t("trait ▾")).ui(ui, |ui| {
+                            ui.set_min_width(240.0);
+                            ui.add(egui::Slider::new(&mut self.board.pen_width, 0.5..=60.0).logarithmic(true).text(crate::i18n::t("épaisseur")));
+                            ui.add(egui::Slider::new(&mut self.board.opacity, 0.05..=1.0).text(crate::i18n::t("opacité")));
+                            ui.add(egui::Slider::new(&mut self.board.stabilizer, 0.0..=0.95).text(crate::i18n::t("stabilisateur")));
+                            ui.add(egui::Slider::new(&mut self.board.taper, 0.0..=1.0).text(crate::i18n::t("effilé")));
+                            ui.label(RichText::new(crate::i18n::t("Maj : ligne droite, carré, cercle, angles de 15°")).size(10.5).color(p.muted));
+                        });
                     }
                     ui.separator();
                     if ui.add_enabled(self.board.can_undo(), egui::Button::new("↶")).on_hover_text(crate::i18n::t("annuler (Ctrl+Z)")).clicked() {

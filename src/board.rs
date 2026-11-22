@@ -30,6 +30,9 @@ pub enum Kind {
         points: Vec<[f32; 2]>,
         color: [u8; 4],
         width: f32,
+        /// Épaisseur relative à chaque point (trait effilé) ; vide = constante
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        widths: Vec<f32>,
     },
 }
 
@@ -84,7 +87,31 @@ pub enum Tool {
     Pen,
     Eraser,
     Text,
+    Line,
+    Rect,
+    Ellipse,
+    Arrow,
 }
+
+impl Tool {
+    /// Les outils qui tracent une forme entre deux coins
+    pub fn is_shape(self) -> bool {
+        matches!(self, Tool::Line | Tool::Rect | Tool::Ellipse | Tool::Arrow)
+    }
+}
+
+/// Les outils de dessin, dans l'ordre de la barre : (outil, icône, nom, touche).
+pub const DRAW_TOOLS: [(Tool, &str, &str, &str); 6] = [
+    (Tool::Pen, "✎", "pinceau", "B"),
+    (Tool::Eraser, "⌫", "gomme", "E"),
+    (Tool::Line, "╱", "ligne", "L"),
+    (Tool::Rect, "▭", "rectangle", "R"),
+    (Tool::Ellipse, "◯", "ellipse", "O"),
+    (Tool::Arrow, "➚", "flèche", "A"),
+];
+
+/// Ce qu'un board met dans le presse-papiers quand on copie des éléments.
+pub const CLIP_TAG: &str = "aryadne-board:";
 
 enum Drag {
     /// Déplacement de la sélection : positions de départ.
@@ -99,6 +126,7 @@ enum Drag {
 
 pub enum Event {
     Open(String),
+    /// Ctrl+V : coller ce qui est dans le presse-papiers (image, chemin, lien, texte) à cet endroit
     PasteImage(Pos2),
 }
 
@@ -115,6 +143,14 @@ pub struct Board {
     pub tool: Tool,
     pub pen_color: Color32,
     pub pen_width: f32,
+    /// Opacité, stabilisateur (0 : aucun) et effilé du pinceau, comme dans l'annotation des vidéos
+    pub opacity: f32,
+    pub stabilizer: f32,
+    pub taper: f32,
+    /// Premier coin d'une forme en cours (ligne, rectangle, ellipse, flèche)
+    shape_from: Option<Pos2>,
+    /// Le dernier clic a eu lieu dans le board : le clavier lui revient
+    focused: bool,
     stroke_pts: Vec<Pos2>,
     undo: Vec<Vec<Item>>,
     redo: Vec<Vec<Item>>,
@@ -136,6 +172,11 @@ impl Default for Board {
             tool: Tool::Select,
             pen_color: Color32::from_rgb(0xff, 0x4f, 0x1f),
             pen_width: 4.0,
+            opacity: 1.0,
+            stabilizer: 0.0,
+            taper: 0.5,
+            shape_from: None,
+            focused: false,
             stroke_pts: vec![],
             undo: vec![],
             redo: vec![],
@@ -488,15 +529,10 @@ impl Board {
                     let body = painter.layout(note_preview(rel), egui::FontId::monospace((12.0 * zoom).max(3.0)), p.muted, (r.width() - 24.0 * zoom).max(10.0));
                     clip.galley(r.min + vec2(12.0, 38.0) * zoom, body, p.muted);
                 }
-                Kind::Stroke { points, color, width } => {
+                Kind::Stroke { points, color, width, widths } => {
                     let col = Color32::from_rgba_unmultiplied(color[0], color[1], color[2], color[3]);
                     let pts: Vec<Pos2> = points.iter().map(|q| pos2(r.min.x + q[0] * r.width(), r.min.y + q[1] * r.height())).collect();
-                    let w = (width * zoom).max(0.5);
-                    if pts.len() == 1 {
-                        painter.circle_filled(pts[0], w / 2.0, col);
-                    } else {
-                        painter.add(Shape::line(pts, Stroke::new(w, col)));
-                    }
+                    paint_stroke(&painter, &pts, (width * zoom).max(0.5), widths, col);
                 }
             }
             if self.selection.contains(&i) {
@@ -522,7 +558,8 @@ impl Board {
         // Trait en cours
         if !self.stroke_pts.is_empty() {
             let pts: Vec<Pos2> = self.stroke_pts.iter().map(|w| to_screen(*w)).collect();
-            painter.add(Shape::line(pts, Stroke::new((self.pen_width * zoom).max(0.5), self.pen_color)));
+            let widths = self.stroke_widths(&self.stroke_pts);
+            paint_stroke(&painter, &pts, (self.pen_width * zoom).max(0.5), &widths, self.ink());
         }
         // Lasso
         if let (Some(Drag::Marquee(start)), Some(pt)) = (&self.drag, pointer_in) {
@@ -621,6 +658,11 @@ impl Board {
                     self.stroke_pts = vec![start_world];
                     Some(Drag::Draw)
                 }
+                Tool::Line | Tool::Rect | Tool::Ellipse | Tool::Arrow => {
+                    self.shape_from = Some(start_world);
+                    self.stroke_pts = vec![start_world];
+                    Some(Drag::Draw)
+                }
                 Tool::Eraser => {
                     self.checkpoint();
                     Some(Drag::Erase)
@@ -670,7 +712,30 @@ impl Board {
                             self.dirty_since = Some(Instant::now());
                         }
                     }
+                    Drag::Draw if self.tool.is_shape() => {
+                        if let Some(a) = self.shape_from {
+                            // Maj : carré, cercle, ou angle par pas de 15°
+                            let mut b = w;
+                            if mods.shift {
+                                let d = b - a;
+                                if self.tool == Tool::Rect || self.tool == Tool::Ellipse {
+                                    let s = d.x.abs().max(d.y.abs());
+                                    b = a + vec2(s * d.x.signum(), s * d.y.signum());
+                                } else {
+                                    let step = std::f32::consts::PI / 12.0;
+                                    let ang = (d.y.atan2(d.x) / step).round() * step;
+                                    b = a + Vec2::angled(ang) * d.length();
+                                }
+                            }
+                            self.stroke_pts = shape_points(self.tool, a, b);
+                        }
+                    }
                     Drag::Draw => {
+                        // Stabilisateur : le trait suit la souris avec un peu de retard, il tremble moins
+                        let w = match self.stroke_pts.last() {
+                            Some(l) if self.stabilizer > 0.0 && !mods.shift => *l + (w - *l) * (1.0 - self.stabilizer.min(0.95)),
+                            _ => w,
+                        };
                         if self.stroke_pts.last().is_none_or(|l| (*l - w).length() * zoom > 1.5) {
                             if mods.shift && !self.stroke_pts.is_empty() {
                                 // Maj : ligne droite
@@ -744,6 +809,7 @@ impl Board {
                         self.finish_stroke();
                     }
                 }
+                Tool::Line | Tool::Rect | Tool::Ellipse | Tool::Arrow => {}
                 Tool::Eraser => {
                     if let Some(i) = hit.filter(|&i| matches!(self.data.items[i].kind, Kind::Stroke { .. })) {
                         self.checkpoint();
@@ -789,7 +855,11 @@ impl Board {
 
         // ---------- clavier ----------
         let typing = self.editing.is_some() || ui.ctx().egui_wants_keyboard_input();
-        if !typing && (resp.hovered() || self.drag.is_some()) {
+        // Le clavier va au board tant que le dernier clic a eu lieu dedans (pas besoin d'y garder la souris)
+        if let Some(at) = ui.input(|i| if i.pointer.any_pressed() { i.pointer.interact_pos() } else { None }) {
+            self.focused = rect.contains(at);
+        }
+        if !typing && (resp.hovered() || self.drag.is_some() || self.focused) {
             let cmd = |k: Key| ui.input_mut(|i| i.consume_shortcut(&egui::KeyboardShortcut::new(Modifiers::COMMAND, k)));
             let cmd_shift = |k: Key| ui.input_mut(|i| i.consume_shortcut(&egui::KeyboardShortcut::new(Modifiers::COMMAND | Modifiers::SHIFT, k)));
             if cmd_shift(Key::Z) || cmd(Key::Y) {
@@ -803,11 +873,24 @@ impl Board {
             if cmd(Key::D) {
                 self.duplicate_selection();
             }
-            let pasted = ui.input(|i| {
-                i.events.iter().any(|e| matches!(e, egui::Event::Paste(_)) || matches!(e, egui::Event::Key { key: Key::V, pressed: true, modifiers, .. } if modifiers.command))
+            // Copier, couper : les éléments choisis vont dans le presse-papiers
+            let (copy, cut) = ui.input(|i| {
+                let c = i.events.iter().any(|e| matches!(e, egui::Event::Copy));
+                let x = i.events.iter().any(|e| matches!(e, egui::Event::Cut));
+                (c, x)
             });
-            if pasted {
-                event = Some(Event::PasteImage(world_ptr.unwrap_or(self.view_center.to_pos2())));
+            if (copy || cut) && self.copy_selection(ui.ctx()) && cut {
+                self.delete_selection();
+            }
+            // Coller : des éléments de board, sinon ce que l'application sait coller (image, chemin, lien, texte)
+            let at = world_ptr.filter(|_| resp.hovered()).unwrap_or(self.view_center.to_pos2());
+            let text = ui.input(|i| i.events.iter().find_map(|e| if let egui::Event::Paste(t) = e { Some(t.clone()) } else { None }));
+            let key_v = ui.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Key { key: Key::V, pressed: true, modifiers, .. } if modifiers.command)));
+            match text {
+                Some(t) if self.paste_items(&t, at) => {}
+                Some(_) => event = Some(Event::PasteImage(at)),
+                None if key_v => event = Some(Event::PasteImage(at)),
+                None => {}
             }
             let (del, esc, v, b, e, t) = ui.input(|i| {
                 let plain = !i.modifiers.command && !i.modifiers.alt;
@@ -820,6 +903,12 @@ impl Board {
                     plain && i.key_pressed(Key::T),
                 )
             });
+            // Formes : L ligne, R rectangle, O ellipse, Maj+A flèche (A seul reste « tout choisir » ailleurs)
+            for (k, tool, shift) in [(Key::L, Tool::Line, false), (Key::R, Tool::Rect, false), (Key::O, Tool::Ellipse, false), (Key::A, Tool::Arrow, true)] {
+                if ui.input(|i| !i.modifiers.command && !i.modifiers.alt && i.modifiers.shift == shift && i.key_pressed(k)) {
+                    self.tool = tool;
+                }
+            }
             if del {
                 self.delete_selection();
             }
@@ -959,7 +1048,7 @@ impl Board {
             ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
         } else if resp.hovered() {
             match self.tool {
-                Tool::Pen => ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair),
+                Tool::Pen | Tool::Line | Tool::Rect | Tool::Ellipse | Tool::Arrow => ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair),
                 Tool::Text => ui.ctx().set_cursor_icon(egui::CursorIcon::Text),
                 Tool::Eraser => ui.ctx().set_cursor_icon(egui::CursorIcon::NotAllowed),
                 Tool::Select if hit.is_some() => ui.ctx().set_cursor_icon(egui::CursorIcon::Grab),
@@ -989,6 +1078,75 @@ impl Board {
         event
     }
 
+    /// Couleur du trait, opacité comprise
+    fn ink(&self) -> Color32 {
+        let c = self.pen_color;
+        Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), (c.a() as f32 * self.opacity.clamp(0.05, 1.0)) as u8)
+    }
+
+    /// Épaisseurs relatives d'un trait de pinceau effilé (les formes gardent une épaisseur constante)
+    fn stroke_widths(&self, pts: &[Pos2]) -> Vec<f32> {
+        if self.tool != Tool::Pen || self.taper <= 0.0 || pts.len() < 3 {
+            return vec![];
+        }
+        // La fonction de l'annotation vidéo travaille en espace normalisé : on ramène le trait à sa taille
+        let mut bb = Rect::NOTHING;
+        for p in pts {
+            bb.extend_with(*p);
+        }
+        let s = bb.width().max(bb.height()).max(1.0);
+        let norm: Vec<[f32; 2]> = pts.iter().map(|p| [(p.x - bb.min.x) / s, (p.y - bb.min.y) / s]).collect();
+        crate::video::taper_widths(&norm, self.taper)
+    }
+
+    /// Copie la sélection dans le presse-papiers, sous une forme que n'importe quel board sait recoller.
+    pub fn copy_selection(&self, ctx: &egui::Context) -> bool {
+        let items: Vec<Item> = self.selection.iter().filter_map(|&i| self.data.items.get(i).cloned()).collect();
+        if items.is_empty() {
+            return false;
+        }
+        if let Ok(json) = serde_json::to_string(&items) {
+            ctx.copy_text(format!("{CLIP_TAG}{json}"));
+        }
+        true
+    }
+
+    /// Colle des éléments copiés d'un board, centrés sur `at`. Faux si le texte n'en contient pas.
+    pub fn paste_items(&mut self, text: &str, at: Pos2) -> bool {
+        let Some(json) = text.trim().strip_prefix(CLIP_TAG) else { return false };
+        let Ok(mut items) = serde_json::from_str::<Vec<Item>>(json) else { return false };
+        if items.is_empty() {
+            return false;
+        }
+        let mut bb = Rect::NOTHING;
+        for it in &items {
+            bb = bb.union(it.rect());
+        }
+        let d = at - bb.center();
+        self.checkpoint();
+        let first = self.data.items.len();
+        for it in &mut items {
+            it.x += d.x;
+            it.y += d.y;
+        }
+        self.data.items.extend(items);
+        self.selection = (first..self.data.items.len()).collect();
+        self.touch();
+        true
+    }
+
+    /// Colle du texte simple : il devient une étiquette sur le board.
+    pub fn paste_text(&mut self, text: &str, at: Pos2) {
+        let t = text.trim();
+        if t.is_empty() {
+            return;
+        }
+        let lines = t.lines().count().max(1) as f32;
+        let longest = t.lines().map(|l| l.chars().count()).max().unwrap_or(1) as f32;
+        let size = vec2((longest * 10.0 + 24.0).clamp(120.0, 640.0), lines * 24.0 + 16.0);
+        self.add(Kind::Text { text: t.to_string(), size: text_size() }, at.to_vec2(), size);
+    }
+
     fn finish_stroke(&mut self) {
         let pts = std::mem::take(&mut self.stroke_pts);
         if pts.is_empty() {
@@ -1001,16 +1159,65 @@ impl Board {
         // Évite un cadre de taille nulle (trait horizontal, vertical ou point).
         let bb = Rect::from_center_size(bb.center(), vec2(bb.width().max(1.0), bb.height().max(1.0)));
         let points = pts.iter().map(|p| [(p.x - bb.min.x) / bb.width(), (p.y - bb.min.y) / bb.height()]).collect();
-        let c = self.pen_color;
+        let c = self.ink();
+        let widths = self.stroke_widths(&pts);
+        let arrow = (self.tool == Tool::Arrow && pts.len() >= 2).then(|| (pts[0], pts[pts.len() - 1]));
+        self.shape_from = None;
         self.checkpoint();
         self.data.items.push(Item {
-            kind: Kind::Stroke { points, color: [c.r(), c.g(), c.b(), c.a()], width: self.pen_width },
+            kind: Kind::Stroke { points, color: [c.r(), c.g(), c.b(), c.a()], width: self.pen_width, widths },
             x: bb.min.x,
             y: bb.min.y,
             w: bb.width(),
             h: bb.height(),
         });
+        // Pointe de flèche : deux petits traits au bout
+        if let Some((a, b)) = arrow {
+            let d = b - a;
+            let s = (self.pen_width * 4.0 + 8.0).min(d.length() * 0.45);
+            for sgn in [-1.0f32, 1.0] {
+                let ang = d.y.atan2(d.x) + std::f32::consts::PI + sgn * 0.45;
+                let tip = b + Vec2::angled(ang) * s;
+                let bb = Rect::from_two_pos(b, tip);
+                let bb = Rect::from_center_size(bb.center(), vec2(bb.width().max(1.0), bb.height().max(1.0)));
+                let n = |q: Pos2| [(q.x - bb.min.x) / bb.width(), (q.y - bb.min.y) / bb.height()];
+                self.data.items.push(Item { kind: Kind::Stroke { points: vec![n(b), n(tip)], color: [c.r(), c.g(), c.b(), c.a()], width: self.pen_width, widths: vec![] }, x: bb.min.x, y: bb.min.y, w: bb.width(), h: bb.height() });
+            }
+        }
         self.touch();
+    }
+}
+
+/// Points d'une forme entre deux coins, dans l'espace du board.
+fn shape_points(tool: Tool, a: Pos2, b: Pos2) -> Vec<Pos2> {
+    match tool {
+        Tool::Rect => vec![a, pos2(b.x, a.y), b, pos2(a.x, b.y), a],
+        Tool::Ellipse => {
+            let (c, r) = (pos2((a.x + b.x) / 2.0, (a.y + b.y) / 2.0), vec2((b.x - a.x).abs() / 2.0, (b.y - a.y).abs() / 2.0));
+            (0..=72).map(|k| {
+                let t = k as f32 / 72.0 * std::f32::consts::TAU;
+                pos2(c.x + r.x * t.cos(), c.y + r.y * t.sin())
+            }).collect()
+        }
+        _ => vec![a, b],
+    }
+}
+
+/// Trace un trait, à épaisseur constante ou effilée.
+fn paint_stroke(painter: &egui::Painter, pts: &[Pos2], width: f32, widths: &[f32], col: Color32) {
+    if pts.len() == 1 {
+        painter.circle_filled(pts[0], width / 2.0, col);
+    } else if widths.len() == pts.len() {
+        for (i, w) in pts.windows(2).enumerate() {
+            let k = ((widths[i] + widths[i + 1]) * 0.5).max(0.05);
+            painter.line_segment([w[0], w[1]], Stroke::new((width * k).max(0.5), col));
+        }
+        // Joints arrondis : pas de cassures entre les segments
+        for (i, p) in pts.iter().enumerate().skip(1).take(pts.len().saturating_sub(2)) {
+            painter.circle_filled(*p, (width * widths[i]).max(0.5) / 2.0, col);
+        }
+    } else {
+        painter.add(Shape::line(pts.to_vec(), Stroke::new(width, col)));
     }
 }
 
@@ -1050,6 +1257,13 @@ mod tests {
         assert_eq!(b.selection, vec![2]);
         // Le trait horizontal se teste sur son tracé
         let s = b.data.items.iter().find(|i| matches!(i.kind, Kind::Stroke { .. })).unwrap().clone();
+        // Copier-coller d'éléments entre boards
+        let json = serde_json::to_string(&vec![s.clone()]).unwrap();
+        let n = b.data.items.len();
+        assert!(b.paste_items(&format!("{CLIP_TAG}{json}"), pos2(500.0, 500.0)));
+        assert_eq!(b.data.items.len(), n + 1);
+        assert!((b.data.items[n].rect().center() - pos2(500.0, 500.0)).length() < 0.01);
+        assert!(!b.paste_items("bonjour", pos2(0.0, 0.0)));
         assert!(b.hit(&s, pos2(5.0, 0.5), 2.0));
         assert!(!b.hit(&s, pos2(5.0, 30.0), 2.0));
         assert!(is_board("boards/Forêt.board.json"));

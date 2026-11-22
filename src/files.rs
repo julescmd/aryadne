@@ -14,6 +14,12 @@ pub struct FilesState {
     pub sort: u8,
     pub show_ext: bool,
     pub hide_recent: bool,
+    /// Section « récents » dépliée (repliée par défaut)
+    #[serde(default)]
+    pub recent_open: bool,
+    /// Section « épinglés » repliée
+    #[serde(default)]
+    pub pinned_closed: bool,
     /// Vue en grille avec miniatures (façon Unreal)
     #[serde(default)]
     pub grid: bool,
@@ -242,20 +248,32 @@ impl App {
                         // Épinglés et récents
                         let pinned: Vec<Entry> = self.files.pinned.iter().filter_map(|r| self.entries.iter().find(|e| e.rel == *r).cloned()).collect();
                         if !pinned.is_empty() {
-                            section(ui, &crate::i18n::t("épinglés"));
-                            for e in &pinned {
-                                self.row(ui, e, 0, true);
+                            let mut open = !self.files.pinned_closed;
+                            if fold_section(ui, &crate::i18n::t("épinglés"), pinned.len(), &mut open) {
+                                self.files.pinned_closed = !open;
+                                self.files.save();
                             }
-                            ui.add_space(6.0);
+                            if open {
+                                for e in &pinned {
+                                    self.row(ui, e, 0, true);
+                                }
+                                ui.add_space(6.0);
+                            }
                         }
                         if !self.files.hide_recent {
                             let recent: Vec<Entry> = self.files.recent.iter().filter(|r| !self.files.pinned.contains(r)).filter_map(|r| self.entries.iter().find(|e| e.rel == *r && !e.is_dir).cloned()).take(5).collect();
                             if !recent.is_empty() {
-                                section(ui, &crate::i18n::t("récents"));
-                                for e in &recent {
-                                    self.row(ui, e, 0, true);
+                                let mut open = self.files.recent_open;
+                                if fold_section(ui, &crate::i18n::t("récents"), recent.len(), &mut open) {
+                                    self.files.recent_open = open;
+                                    self.files.save();
                                 }
-                                ui.add_space(6.0);
+                                if open {
+                                    for e in &recent {
+                                        self.row(ui, e, 0, true);
+                                    }
+                                    ui.add_space(6.0);
+                                }
                             }
                         }
                         section(ui, &format!("coffre · {}", self.root().split(['/', '\\']).filter(|s| !s.is_empty()).last().unwrap_or("")));
@@ -724,6 +742,23 @@ impl App {
                 }
             }
     }
+}
+
+/// Titre de section qu'on replie d'un clic (▸ / ▾), avec le nombre d'éléments. Vrai si l'état a changé.
+fn fold_section(ui: &mut egui::Ui, title: &str, count: usize, open: &mut bool) -> bool {
+    let p = theme::pal();
+    ui.add_space(4.0);
+    let r = ui.horizontal(|ui| {
+        ui.add_space(8.0);
+        let text = format!("{} {}  {}", if *open { "▾" } else { "▸" }, title.to_uppercase(), count);
+        ui.add(egui::Label::new(RichText::new(text).size(10.0).color(p.muted).family(theme::bold())).sense(egui::Sense::click()))
+    });
+    ui.add_space(4.0);
+    let clicked = r.inner.on_hover_cursor(egui::CursorIcon::PointingHand).clicked();
+    if clicked {
+        *open = !*open;
+    }
+    clicked
 }
 
 fn section(ui: &mut egui::Ui, title: &str) {
