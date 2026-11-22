@@ -52,7 +52,8 @@ pub fn leftovers(root: &str) -> Vec<String> {
     for d in dirs.flatten() {
         if let Ok(files) = std::fs::read_dir(d.path()) {
             for f in files.flatten() {
-                if f.path().is_file() {
+                // Seul le fichier principal compte (pas ses fichiers voisins : maillages, graphes…)
+                if f.path().is_file() && f.file_name().to_string_lossy().starts_with("untitled") {
                     if let (Some(dn), Some(fname)) = (d.file_name().to_str(), f.file_name().to_str()) {
                         out.push(format!("{DIR}/{dn}/{fname}"));
                     }
@@ -79,10 +80,55 @@ pub fn save_to(root: &str, rel: &str, dest: &Path) -> Result<(), String> {
     if let Some(d) = dest.parent() {
         std::fs::create_dir_all(d).map_err(|e| e.to_string())?;
     }
-    if std::fs::rename(&src, dest).is_err() {
-        std::fs::copy(&src, dest).map_err(|e| e.to_string())?;
+    // Les fichiers posés à côté (maillage d'un objet modifié, graphe d'étalonnage…) suivent le fichier :
+    // le fichier les cite par leur nom, renommé si la place est prise.
+    let mut text = std::fs::read(&src).map_err(|e| e.to_string())?;
+    if let (Some(from), Some(to)) = (src.parent(), dest.parent()) {
+        if let Ok(rd) = std::fs::read_dir(from) {
+            for f in rd.flatten() {
+                let p = f.path();
+                if p == src {
+                    continue;
+                }
+                let name = f.file_name().to_string_lossy().to_string();
+                let mut target = to.join(&name);
+                if p.is_dir() {
+                    let _ = copy_dir(&p, &target);
+                    continue;
+                }
+                let (stem, ext) = match name.rsplit_once('.') {
+                    Some((s, e)) => (s.to_string(), format!(".{e}")),
+                    None => (name.clone(), String::new()),
+                };
+                let mut n = 2;
+                while target.exists() {
+                    target = to.join(format!("{stem} {n}{ext}"));
+                    n += 1;
+                }
+                std::fs::copy(&p, &target).map_err(|e| e.to_string())?;
+                let new_name = target.file_name().map(|x| x.to_string_lossy().to_string()).unwrap_or_default();
+                if new_name != name {
+                    let s = String::from_utf8_lossy(&text).replace(&format!("\"{name}\""), &format!("\"{new_name}\""));
+                    text = s.into_bytes();
+                }
+            }
+        }
     }
+    std::fs::write(dest, &text).map_err(|e| e.to_string())?;
     discard(root, rel);
+    Ok(())
+}
+
+fn copy_dir(from: &Path, to: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(to)?;
+    for f in std::fs::read_dir(from)?.flatten() {
+        let t = to.join(f.file_name());
+        if f.path().is_dir() {
+            copy_dir(&f.path(), &t)?;
+        } else if !t.exists() {
+            std::fs::copy(f.path(), t)?;
+        }
+    }
     Ok(())
 }
 
@@ -108,6 +154,19 @@ mod tests {
         let dest = root.join("nodes/Bois.arymat");
         save_to(&r, &a, &dest).unwrap();
         assert!(dest.exists() && leftovers(&r).is_empty());
+        // Une scène qui cite un maillage posé à côté : le maillage suit, renommé si un autre porte son nom
+        let s = new_rel(&r, "aryscene");
+        let dir = root.join(&s).parent().unwrap().to_path_buf();
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(root.join(&s), r#"{"objects":[{"file":"cube.obj"}]}"#).unwrap();
+        std::fs::write(dir.join("cube.obj"), "v 0 0 0").unwrap();
+        assert_eq!(leftovers(&r), vec![s.clone()]);
+        std::fs::create_dir_all(root.join("3d")).unwrap();
+        std::fs::write(root.join("3d/cube.obj"), "autre").unwrap();
+        let dest = root.join("3d/Scène.aryscene");
+        save_to(&r, &s, &dest).unwrap();
+        assert_eq!(std::fs::read_to_string(&dest).unwrap(), r#"{"objects":[{"file":"cube 2.obj"}]}"#);
+        assert_eq!(std::fs::read_to_string(root.join("3d/cube 2.obj")).unwrap(), "v 0 0 0");
         let _ = std::fs::remove_dir_all(&root);
     }
 }
