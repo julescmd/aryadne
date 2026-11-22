@@ -61,11 +61,13 @@ pub struct Options {
     /// Touches de densité peintes : centre x y z, rayon, facteur (2 : quads deux fois plus
     /// petits ; 0,5 : deux fois plus grands)
     pub density: Vec<[f32; 5]>,
+    /// Toujours subdiviser chaque face en quads (usage interne : seconde passe à quart de cible)
+    pub force_split: bool,
 }
 
 impl Default for Options {
     fn default() -> Self {
-        Options { faces: 1500, iterations: 160, guide_radius: 1.2, pure_quads: true, adaptive: 1.0, curvature: 1.0, sharp_angle: 35.0, symmetry: 0, density: vec![] }
+        Options { faces: 1500, iterations: 160, guide_radius: 1.2, pure_quads: true, adaptive: 1.0, curvature: 1.0, sharp_angle: 35.0, symmetry: 0, density: vec![], force_split: false }
     }
 }
 
@@ -79,6 +81,8 @@ pub struct Stats {
     pub flips: usize,
     /// Sommets intérieurs dont la valence n'est pas 4, dans le résultat
     pub poles: usize,
+    /// L'extraction contenait d'autres faces que des quads : tout a été subdivisé (×4)
+    pub split: bool,
 }
 
 pub struct Result {
@@ -1303,7 +1307,55 @@ fn regauge(g: &mut Graph, u: &mut [[f64; 2]]) {
 /// part des faces proportionnelle à sa surface. Sinon les pièces qui se touchent ou se
 /// traversent se mélangent (trous, aileron, pôles énormes).
 pub fn remesh(pos: &[V3], tris: &[[u32; 3]], guides: &[Vec<V3>], opt: &Options, progress: &dyn Fn(f32)) -> Result {
-    let (pos, tris) = weld(pos, tris);
+    let (pos, mut tris) = weld(pos, tris);
+    // Arêtes partagées par plus de deux faces (une paroi intérieure qui rejoint la surface, comme
+    // le bord d'un chapeau collé à sa calotte) : on garde les deux faces qui continuent le mieux
+    // la surface et on détache les autres. Sinon le flux et la grille s'emmêlent à la jonction.
+    for _ in 0..4 {
+        let mut ef: HashMap<(u32, u32), Vec<usize>> = HashMap::new();
+        for (i, t) in tris.iter().enumerate() {
+            for k in 0..3 {
+                let (a, b) = (t[k], t[(k + 1) % 3]);
+                ef.entry((a.min(b), a.max(b))).or_default().push(i);
+            }
+        }
+        let fnrm = |i: usize| {
+            let t = tris[i];
+            norm(cross(sub(pos[t[1] as usize], pos[t[0] as usize]), sub(pos[t[2] as usize], pos[t[0] as usize])))
+        };
+        let mut drop = vec![false; tris.len()];
+        let mut any = false;
+        for l in ef.values() {
+            let live: Vec<usize> = l.iter().copied().filter(|&f| !drop[f]).collect();
+            if live.len() <= 2 {
+                continue;
+            }
+            let mut best = (f32::MIN, 0, 1);
+            for x in 0..live.len() {
+                for y in x + 1..live.len() {
+                    let d = dot(fnrm(live[x]), fnrm(live[y]));
+                    if d > best.0 {
+                        best = (d, x, y);
+                    }
+                }
+            }
+            for (k, &f) in live.iter().enumerate() {
+                if k != best.1 && k != best.2 {
+                    drop[f] = true;
+                    any = true;
+                }
+            }
+        }
+        if !any {
+            break;
+        }
+        let mut i = 0;
+        tris.retain(|_| {
+            i += 1;
+            !drop[i - 1]
+        });
+    }
+    let tris = tris;
     // Pièces : composantes reliées par les arêtes
     let mut uf = Uf((0..pos.len() as u32).collect());
     for t in &tris {
@@ -1321,7 +1373,7 @@ pub fn remesh(pos: &[V3], tris: &[[u32; 3]], guides: &[Vec<V3>], opt: &Options, 
         pieces[k].push(*t);
     }
     if pieces.len() <= 1 {
-        return remesh_one(&pos, &tris, guides, opt, progress);
+        return remesh_piece(&pos, &tris, guides, opt, progress);
     }
     let area = |ts: &[[u32; 3]]| -> f32 { ts.iter().map(|t| len(cross(sub(pos[t[1] as usize], pos[t[0] as usize]), sub(pos[t[2] as usize], pos[t[0] as usize]))) * 0.5).sum() };
     let areas: Vec<f32> = pieces.iter().map(|p| area(p)).collect();
@@ -1356,7 +1408,19 @@ pub fn remesh(pos: &[V3], tris: &[[u32; 3]], guides: &[Vec<V3>], opt: &Options, 
                 let vol: f32 = t2.iter().map(|t| dot(p[t[0] as usize], cross(p[t[1] as usize], p[t[2] as usize])) / 6.0).sum::<f32>().abs();
                 let rho = 3.0 * vol / a.max(1e-12);
                 let share = opt.faces as f32 * a / total;
-                let need = if rho > 1e-9 { a * 4.0 / (rho * rho) } else { 0.0 };
+                // (seulement pour une pièce fermée : une paroi ouverte n'a pas de volume)
+                let closed = {
+                    let mut c: HashMap<(u32, u32), u8> = HashMap::new();
+                    for t in &t2 {
+                        for k in 0..3 {
+                            let (x, y) = (t[k], t[(k + 1) % 3]);
+                            let e = c.entry((x.min(y), x.max(y))).or_default();
+                            *e = e.saturating_add(1);
+                        }
+                    }
+                    c.values().filter(|&&n| n == 1).count() * 50 < c.len()
+                };
+                let need = if closed && rho > 1e-9 { a * 4.0 / (rho * rho) } else { 0.0 };
                 o.faces = (share.max(need.min(opt.faces as f32 * 0.4)).round() as usize).max(24);
                 // La symétrie ne vaut que pour une pièce qui traverse le plan
                 if let Some(ax) = sym {
@@ -1367,8 +1431,11 @@ pub fn remesh(pos: &[V3], tris: &[[u32; 3]], guides: &[Vec<V3>], opt: &Options, 
                     }
                 }
                 let k0 = done.load(std::sync::atomic::Ordering::Relaxed) as f32;
-                let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| remesh_one(&p, &t2, guides, &o, &|f| progress((k0 + f) / n as f32)))).ok();
+                let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| remesh_piece(&p, &t2, guides, &o, &|f| progress((k0 + f) / n as f32)))).ok();
                 done.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if std::env::var("RETOPO_DEBUG_PIECES").is_ok() {
+                    eprintln!("pièce : {} triangles, aire {:.1} %, fermée {closed}, rho {rho:.4}, visé {} → {} faces", t2.len(), a / total * 100.0, o.faces, r.as_ref().map(|r| r.faces.len()).unwrap_or(0));
+                }
                 r
             })
             .collect()
@@ -1388,7 +1455,183 @@ pub fn remesh(pos: &[V3], tris: &[[u32; 3]], guides: &[Vec<V3>], opt: &Options, 
     out
 }
 
+/// Une pièce. Ses parties minces (bord de chapeau, parois, vêtement, feuille) sont d'abord
+/// gonflées à l'épaisseur de deux quads : une grille ordinaire ne confond plus leurs deux côtés.
+/// La retopologie se fait sur la version gonflée, puis chaque sommet revient sur la vraie surface
+/// au même endroit relatif. Comme à la main, le rebord d'une paroi fine garde ainsi une ou deux
+/// boucles, et le dessus et le dessous ont la même grille.
+fn remesh_piece(pos: &[V3], tris: &[[u32; 3]], guides: &[Vec<V3>], opt: &Options, progress: &dyn Fn(f32)) -> Result {
+    let debug = std::env::var("RETOPO_DEBUG").is_ok();
+    let n = pos.len();
+    if std::env::var("RETOPO_NO_SHELL").is_ok() || tris.len() < 32 {
+        return remesh_one(pos, tris, guides, opt, progress);
+    }
+    let area: f32 = tris.iter().map(|t| len(cross(sub(pos[t[1] as usize], pos[t[0] as usize]), sub(pos[t[2] as usize], pos[t[0] as usize]))) * 0.5).sum();
+    let h = (area / opt.faces.max(1) as f32).sqrt();
+    let want = std::env::var("RETOPO_WANT").ok().and_then(|x| x.parse::<f32>().ok()).unwrap_or(2.0) * h;
+    let fnrm: Vec<V3> = tris.iter().map(|t| norm(cross(sub(pos[t[1] as usize], pos[t[0] as usize]), sub(pos[t[2] as usize], pos[t[0] as usize])))).collect();
+    let mut vn = vec![[0.0f32; 3]; n];
+    for (i, t) in tris.iter().enumerate() {
+        let w = cross(sub(pos[t[1] as usize], pos[t[0] as usize]), sub(pos[t[2] as usize], pos[t[0] as usize]));
+        for &v in t {
+            vn[v as usize] = add(vn[v as usize], w);
+        }
+        let _ = i;
+    }
+    let vn: Vec<V3> = vn.into_iter().map(norm).collect();
+    let bvh = crate::bvh::Bvh::new(pos, tris);
+    // Épaisseur sous chaque sommet : la paroi d'en face (normale opposée)
+    let thick: Vec<f32> = {
+        use rayon::prelude::*;
+        (0..n)
+            .into_par_iter()
+            .map(|i| {
+                let nn = vn[i];
+                let mut t0 = h * 1e-3;
+                for _ in 0..4 {
+                    match bvh.closest(pos[i], mul(nn, -1.0), t0, want) {
+                        Some(hit) if dot(fnrm[hit.tri as usize], nn) < -0.6 => return hit.t,
+                        Some(hit) => t0 = hit.t + h * 1e-3,
+                        None => break,
+                    }
+                }
+                f32::MAX
+            })
+            .collect()
+    };
+    let mut push: Vec<f32> = thick.iter().map(|&t| if t < want { (want - t) * 0.5 } else { 0.0 }).collect();
+    let n_thin = push.iter().filter(|&&d| d > 0.0).count();
+    if debug {
+        eprintln!("parois minces : {n_thin} sommets sur {n}");
+    }
+    if n_thin < n / 50 {
+        return remesh_one(pos, tris, guides, opt, progress);
+    }
+    // Le rebord suit : chaque sommet prend au moins une part du gonflement de ses voisins
+    let mut nb: Vec<Vec<u32>> = vec![vec![]; n];
+    for t in tris {
+        for k in 0..3 {
+            let (a, b) = (t[k], t[(k + 1) % 3]);
+            nb[a as usize].push(b);
+            nb[b as usize].push(a);
+        }
+    }
+    for _ in 0..6 {
+        let prev = push.clone();
+        for i in 0..n {
+            let m = nb[i].iter().map(|&j| prev[j as usize]).fold(0.0f32, f32::max);
+            let avg = (prev[i] + nb[i].iter().map(|&j| prev[j as usize]).sum::<f32>()) / (1 + nb[i].len()) as f32;
+            push[i] = prev[i].max(avg).max(m * 0.5);
+        }
+    }
+    let inflated: Vec<V3> = (0..n).map(|i| add(pos[i], mul(vn[i], push[i]))).collect();
+    let r = remesh_one(&inflated, tris, guides, opt, progress);
+    // Retour sur la vraie surface : le point le plus proche sur la version gonflée, même place
+    // relative (coordonnées barycentriques) sur l'originale
+    let cell = h.max(1e-6);
+    let key3 = |p: V3| [(p[0] / cell).floor() as i64, (p[1] / cell).floor() as i64, (p[2] / cell).floor() as i64];
+    let mut grid: HashMap<[i64; 3], Vec<u32>> = HashMap::new();
+    for (i, t) in tris.iter().enumerate() {
+        let c = mul(add(add(inflated[t[0] as usize], inflated[t[1] as usize]), inflated[t[2] as usize]), 1.0 / 3.0);
+        grid.entry(key3(c)).or_default().push(i as u32);
+    }
+    let back = |x: V3| -> V3 {
+        let k = key3(x);
+        let mut best: Option<(f32, usize, [f32; 3])> = None;
+        for ring in 1..=3i64 {
+            for dx in -ring..=ring {
+                for dy in -ring..=ring {
+                    for dz in -ring..=ring {
+                        if let Some(l) = grid.get(&[k[0] + dx, k[1] + dy, k[2] + dz]) {
+                            for &ti in l {
+                                let t = tris[ti as usize];
+                                let (bc, d) = closest_bary(x, inflated[t[0] as usize], inflated[t[1] as usize], inflated[t[2] as usize]);
+                                if best.is_none_or(|b| d < b.0) {
+                                    best = Some((d, ti as usize, bc));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if best.is_some() {
+                break;
+            }
+        }
+        match best {
+            Some((_, ti, bc)) => {
+                let t = tris[ti];
+                add(add(mul(pos[t[0] as usize], bc[0]), mul(pos[t[1] as usize], bc[1])), mul(pos[t[2] as usize], bc[2]))
+            }
+            None => x,
+        }
+    };
+    let out: Vec<V3> = {
+        use rayon::prelude::*;
+        r.pos.par_iter().map(|&x| back(x)).collect()
+    };
+    Result { pos: out, faces: r.faces, stats: r.stats }
+}
+
+/// Point du triangle (a, b, c) le plus proche de p : coordonnées barycentriques et distance.
+fn closest_bary(p: V3, a: V3, b: V3, c: V3) -> ([f32; 3], f32) {
+    let (ab, ac, ap) = (sub(b, a), sub(c, a), sub(p, a));
+    let (d1, d2) = (dot(ab, ap), dot(ac, ap));
+    let bary = if d1 <= 0.0 && d2 <= 0.0 {
+        [1.0, 0.0, 0.0]
+    } else {
+        let bp = sub(p, b);
+        let (d3, d4) = (dot(ab, bp), dot(ac, bp));
+        if d3 >= 0.0 && d4 <= d3 {
+            [0.0, 1.0, 0.0]
+        } else {
+            let cp = sub(p, c);
+            let (d5, d6) = (dot(ab, cp), dot(ac, cp));
+            if d6 >= 0.0 && d5 <= d6 {
+                [0.0, 0.0, 1.0]
+            } else {
+                let vc = d1 * d4 - d3 * d2;
+                let vb = d5 * d2 - d1 * d6;
+                let va = d3 * d6 - d5 * d4;
+                if vc <= 0.0 && d1 >= 0.0 && d3 <= 0.0 {
+                    let v = d1 / (d1 - d3);
+                    [1.0 - v, v, 0.0]
+                } else if vb <= 0.0 && d2 >= 0.0 && d6 <= 0.0 {
+                    let w = d2 / (d2 - d6);
+                    [1.0 - w, 0.0, w]
+                } else if va <= 0.0 && (d4 - d3) >= 0.0 && (d5 - d6) >= 0.0 {
+                    let w = (d4 - d3) / ((d4 - d3) + (d5 - d6));
+                    [0.0, 1.0 - w, w]
+                } else {
+                    let den = 1.0 / (va + vb + vc);
+                    let (v, w) = (vb * den, vc * den);
+                    [1.0 - v - w, v, w]
+                }
+            }
+        }
+    };
+    let q = add(add(mul(a, bary[0]), mul(b, bary[1])), mul(c, bary[2]));
+    (bary, len(sub(p, q)))
+}
+
+/// Retopologie d'une surface, au nombre de faces visé : si l'extraction a dû tout subdiviser
+/// pour n'avoir que des quads (×4), on recommence au quart de la cible.
 fn remesh_one(pos: &[V3], tris: &[[u32; 3]], guides: &[Vec<V3>], opt: &Options, progress: &dyn Fn(f32)) -> Result {
+    let r = remesh_core(pos, tris, guides, opt, &|f| progress(f * 0.5));
+    if !(opt.pure_quads && r.stats.split && !opt.force_split && opt.faces >= 64) {
+        progress(1.0);
+        return r;
+    }
+    let mut o = opt.clone();
+    o.faces = (opt.faces / 4).max(16);
+    o.force_split = true;
+    let r2 = remesh_core(pos, tris, guides, &o, &|f| progress(0.5 + f * 0.5));
+    let t = opt.faces as f32;
+    let err = |n: usize| (n as f32 / t).ln().abs();
+    if err(r2.faces.len()) < err(r.faces.len()) { r2 } else { r }
+}
+
+fn remesh_core(pos: &[V3], tris: &[[u32; 3]], guides: &[Vec<V3>], opt: &Options, progress: &dyn Fn(f32)) -> Result {
     let mut stats = Stats::default();
     let t0 = std::time::Instant::now();
     let debug = std::env::var("RETOPO_DEBUG").is_ok();
@@ -1807,7 +2050,8 @@ fn remesh_one(pos: &[V3], tris: &[[u32; 3]], guides: &[Vec<V3>], opt: &Options, 
     let segs: Vec<(V3, V3)> = ft.edges.iter().map(|&(a, b)| (v[a as usize], v[b as usize])).collect();
     let mut res = Result { pos: pos2, faces, stats };
     relax(&mut res, &orig_v, &orig_f, 3, &flags, &segs, 0.4 * h);
-    if opt.pure_quads && !all_quads {
+    if opt.pure_quads && (!all_quads || opt.force_split) {
+        res.stats.split = true;
         res = split_quads(&res);
         flags.resize(res.pos.len(), 0);
         relax(&mut res, &orig_v, &orig_f, 2, &flags, &segs, 0.4 * h);
