@@ -1705,18 +1705,62 @@ pub struct Edit {
     pub bake_rays: u32,
     /// Modèle haute définition dont on reporte les détails dans la normale (chemin, vide si aucun)
     pub bake_high: String,
+    /// Annuler / rétablir : l'état enregistré avant chaque action terminée
+    pending: std::cell::Cell<bool>,
+    last: Option<EditData>,
+    undo: Vec<EditData>,
+    redo: Vec<EditData>,
 }
 
 impl Edit {
+    /// Une action vient de finir (souris relâchée) : l'état d'avant entre dans l'historique.
+    pub fn track(&mut self, ui: &egui::Ui) {
+        if self.last.is_none() {
+            self.last = Some(self.data.clone());
+        }
+        if self.pending.get() && !ui.input(|i| i.pointer.any_down()) {
+            self.pending.set(false);
+            if let Some(prev) = self.last.replace(self.data.clone()) {
+                self.undo.push(prev);
+                if self.undo.len() > 40 {
+                    self.undo.remove(0);
+                }
+                self.redo.clear();
+            }
+        }
+        let typing = ui.ctx().egui_wants_keyboard_input();
+        let (z, y) = ui.input(|i| (i.modifiers.command && !i.modifiers.shift && i.key_pressed(egui::Key::Z), i.modifiers.command && (i.modifiers.shift && i.key_pressed(egui::Key::Z) || i.key_pressed(egui::Key::Y))));
+        if !typing && (z || y) {
+            self.step(y);
+        }
+    }
+
+    /// Revient un pas en arrière (ou en avant avec `forward`).
+    pub fn step(&mut self, forward: bool) {
+        let (from, to) = if forward { (&mut self.redo, &mut self.undo) } else { (&mut self.undo, &mut self.redo) };
+        if let Some(d) = from.pop() {
+            to.push(std::mem::replace(&mut self.data, d));
+            self.last = Some(self.data.clone());
+            self.pending.set(false);
+            self.version += 1;
+            self.write();
+        }
+    }
+
     pub fn open(mesh: &crate::modifiers::Mesh, file: PathBuf, scale: f32) -> Edit {
         let topo = Topo::new(&mesh.pos, &mesh.tris, &mesh.edges);
         let data = std::fs::read_to_string(&file).ok().and_then(|t| serde_json::from_str::<EditData>(&t).ok()).filter(|d| d.fits(&topo)).unwrap_or_else(|| EditData::fresh(&topo));
         let n = topo.polys.len();
         let checker = data.has_uv();
-        Edit { topo, data, sel: BTreeSet::new(), tool: Tool::Faces, tab: 0, version: 1, seam_angle: 45.0, smart_angle: 66.0, min_faces: (n / 400).clamp(4, 300), optimize: true, rotate: true, density_target: 1024.0, file, scale, message: None, owner: vec![], uv_view: Rect::NOTHING, uv_drag: false, checker, auto: AutoOptions::default(), retopo_opt: crate::retopo::Options { faces: (n * 2).clamp(200, 8000) / 100 * 100, ..Default::default() }, retopo: None, retopo_job: None, retopo_export: false, retopo_show: true, guide_now: vec![], mat_request: None, tri_mat: vec![], bake_request: false, bake_size: 1024, bake_rays: 24, bake_high: String::new() }
+        Edit { topo, data, sel: BTreeSet::new(), tool: Tool::Faces, tab: 0, version: 1, seam_angle: 45.0, smart_angle: 66.0, min_faces: (n / 400).clamp(4, 300), optimize: true, rotate: true, density_target: 1024.0, file, scale, message: None, owner: vec![], uv_view: Rect::NOTHING, uv_drag: false, checker, auto: AutoOptions::default(), retopo_opt: crate::retopo::Options { faces: (n * 2).clamp(200, 8000) / 100 * 100, ..Default::default() }, retopo: None, retopo_job: None, retopo_export: false, retopo_show: true, guide_now: vec![], mat_request: None, tri_mat: vec![], bake_request: false, bake_size: 1024, bake_rays: 24, bake_high: String::new(), pending: Default::default(), last: None, undo: vec![], redo: vec![] }
     }
 
     pub fn save(&self) {
+        self.pending.set(true);
+        self.write();
+    }
+
+    fn write(&self) {
         if let Some(d) = self.file.parent() {
             let _ = std::fs::create_dir_all(d);
         }
@@ -1821,6 +1865,7 @@ impl Edit {
     /// Panneau de droite. Retourne vrai si l'affichage doit être recalculé.
     pub fn panel(&mut self, ui: &mut egui::Ui) -> bool {
         let p = crate::theme::pal();
+        self.track(ui);
         let v0 = self.version;
         ui.horizontal(|ui| {
             for (k, l) in ["matériaux", "coutures", "UV", "retopo"].iter().enumerate() {

@@ -1574,6 +1574,7 @@ struct MeshEdit {
     mesh: crate::meshedit::EMesh,
     sel: Vec<bool>,
     hist: Vec<(crate::meshedit::EMesh, Vec<bool>)>,
+    redo: Vec<(crate::meshedit::EMesh, Vec<bool>)>,
     /// Transformation en cours : genre (0 déplacer, 1 tourner, 2 taille), axe imposé dans la scène, sommets de départ, souris de départ
     modal: Option<(u8, Option<V3>, Vec<V3>, Pos2)>,
     boxing: Option<Option<Pos2>>,
@@ -1775,6 +1776,10 @@ pub struct Viewer {
     /// Pile de modificateurs (enregistrée dans .app/modifiers/ du coffre)
     stack: Vec<crate::modifiers::Modifier>,
     stack_loaded: bool,
+    /// Annuler / rétablir dans la pile de modificateurs
+    stack_saved: Option<Vec<crate::modifiers::Modifier>>,
+    stack_hist: Vec<Vec<crate::modifiers::Modifier>>,
+    stack_redo: Vec<Vec<crate::modifiers::Modifier>>,
     /// Maillage de base après « appliquer » (remplace celui du fichier, gardé dans .app/modifiers/)
     applied: Option<std::sync::Arc<crate::modifiers::Mesh>>,
     applied_ver: u64,
@@ -1888,6 +1893,9 @@ impl Viewer {
             env_error: None,
             stack: vec![],
             stack_loaded: false,
+            stack_saved: None,
+            stack_hist: vec![],
+            stack_redo: vec![],
             applied: None,
             applied_ver: 0,
             scene: None,
@@ -2164,7 +2172,7 @@ impl Viewer {
             (f, mesh)
         };
         let n = mesh.pos.len();
-        self.mesh = Some(MeshEdit { obj: k, file, mesh, sel: vec![false; n], hist: vec![], modal: None, boxing: None, skip_click: false, mode: 0, active: None });
+        self.mesh = Some(MeshEdit { obj: k, file, mesh, sel: vec![false; n], hist: vec![], redo: vec![], modal: None, boxing: None, skip_click: false, mode: 0, active: None });
         self.scene_multi.clear();
         self.capture_msg = None;
     }
@@ -2228,6 +2236,7 @@ impl Viewer {
         let key = |k: Key| !typing && ui.input(|i| i.key_pressed(k) && !i.modifiers.any());
         let snapshot = |me: &mut MeshEdit| {
             me.hist.push((me.mesh.clone(), me.sel.clone()));
+            me.redo.clear();
             if me.hist.len() > 100 {
                 me.hist.remove(0);
             }
@@ -2429,10 +2438,12 @@ impl Viewer {
             if key(Key::B) {
                 me.boxing = Some(None);
             }
-            if !typing && ui.input(|i| i.modifiers.command && i.key_pressed(Key::Z)) {
-                if let Some((m, s)) = me.hist.pop() {
-                    me.mesh = m;
-                    me.sel = s;
+            // Ctrl+Z annuler, Ctrl+Maj+Z ou Ctrl+Y rétablir
+            let (z, y) = ui.input(|i| (i.modifiers.command && !i.modifiers.shift && i.key_pressed(Key::Z), i.modifiers.command && (i.modifiers.shift && i.key_pressed(Key::Z) || i.key_pressed(Key::Y))));
+            if !typing && me.modal.is_none() && (z || y) {
+                let (from, to) = if y { (&mut me.redo, &mut me.hist) } else { (&mut me.hist, &mut me.redo) };
+                if let Some((m, s)) = from.pop() {
+                    to.push((std::mem::replace(&mut me.mesh, m), std::mem::replace(&mut me.sel, s)));
                     dirty = true;
                 }
             }
@@ -3402,7 +3413,7 @@ impl Viewer {
                 self.scene_redo.clear();
             }
         }
-        if !ui.ctx().egui_wants_keyboard_input() && self.edit.is_none() && self.modal.is_none() && (undo || redo) {
+        if !ui.ctx().egui_wants_keyboard_input() && self.edit.is_none() && self.mesh.is_none() && self.modal.is_none() && (undo || redo) {
             let (from, to) = if redo { (&mut self.scene_redo, &mut self.scene_hist) } else { (&mut self.scene_hist, &mut self.scene_redo) };
             if let Some(prev) = from.pop() {
                 to.push(std::mem::replace(scene, prev));
@@ -4069,6 +4080,34 @@ impl Viewer {
                 let _ = std::fs::write(f, serde_json::to_string(&self.stack).unwrap_or_default());
             }
         }
+        // Annuler / rétablir dans la pile (hors édition des UV, qui a son propre historique)
+        if self.stack_loaded && self.edit.is_none() {
+            let (z, y, down) = ui.input(|i| (i.modifiers.command && !i.modifiers.shift && i.key_pressed(Key::Z), i.modifiers.command && (i.modifiers.shift && i.key_pressed(Key::Z) || i.key_pressed(Key::Y)), i.pointer.any_down()));
+            if self.stack_saved.is_none() {
+                self.stack_saved = Some(self.stack.clone());
+            }
+            if !down && self.stack_saved.as_ref() != Some(&self.stack) {
+                if let Some(prev) = self.stack_saved.replace(self.stack.clone()) {
+                    self.stack_hist.push(prev);
+                    if self.stack_hist.len() > 100 {
+                        self.stack_hist.remove(0);
+                    }
+                    self.stack_redo.clear();
+                }
+            }
+            if !ui.ctx().egui_wants_keyboard_input() && (z || y) {
+                let (from, to) = if y { (&mut self.stack_redo, &mut self.stack_hist) } else { (&mut self.stack_hist, &mut self.stack_redo) };
+                if let Some(prev) = from.pop() {
+                    to.push(std::mem::replace(&mut self.stack, prev));
+                    self.stack_saved = Some(self.stack.clone());
+                    if !self.root.is_empty() {
+                        let f = self.mods_file();
+                        let _ = std::fs::create_dir_all(f.parent().unwrap());
+                        let _ = std::fs::write(f, serde_json::to_string(&self.stack).unwrap_or_default());
+                    }
+                }
+            }
+        }
         if let Some(e) = &mut self.edit {
             e.retopo_poll();
         }
@@ -4554,6 +4593,7 @@ impl Viewer {
                                 if let Some(at) = ui.input(|i| i.pointer.press_origin()) {
                                     if let Some(h) = l.hit(mode, at) {
                                         me.hist.push((me.mesh.clone(), me.sel.clone()));
+                                        me.redo.clear();
                                         self.gizmo_hold = Some((h, at, at, if mode == crate::gizmo::Mode::Scale { [1.0; 3] } else { [0.0; 3] }));
                                     }
                                 }
