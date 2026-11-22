@@ -165,6 +165,10 @@ pub struct Viewer {
     strip_tex: HashMap<usize, TextureHandle>,
     strip_lru: VecDeque<usize>,
     strip_follow: bool,
+    /// En « 2s, 3s… », montrer aussi les images sautées (estompées) dans la bande
+    pub show_skipped: bool,
+    /// Signets : image → nom (peut être vide), gardés à côté des dessins
+    pub marks: BTreeMap<usize, String>,
     pub zoom: crate::zoomview::Zoom,
 }
 
@@ -176,6 +180,7 @@ impl Viewer {
         let duration = info.as_ref().map(|i| i.duration).unwrap_or(0.0);
         let preview_fps = if duration * fps > MAX_PREVIEW_FRAMES { (MAX_PREVIEW_FRAMES / duration.max(1.0)).max(1.0) } else { fps };
         let lines = std::fs::read_to_string(&notes_path).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
+        let marks = std::fs::read_to_string(marks_path(&notes_path)).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
         let mut v = Self {
             dir: cache_dir(&path),
             path,
@@ -221,6 +226,8 @@ impl Viewer {
             strip_tex: HashMap::new(),
             strip_lru: VecDeque::new(),
             strip_follow: true,
+            show_skipped: false,
+            marks,
             zoom: Default::default(),
         };
         if v.info.is_ok() {
@@ -337,6 +344,9 @@ impl Viewer {
                 ui.spacing_mut().slider_width = 90.0;
                 ui.add(egui::Slider::new(&mut self.strip_h, 28.0..=140.0).show_value(false).text(RichText::new(crate::i18n::t("taille")).size(10.5)));
                 ui.checkbox(&mut self.strip_follow, RichText::new(crate::i18n::t("suivre la lecture")).size(11.0));
+                if self.on > 1 {
+                    ui.checkbox(&mut self.show_skipped, RichText::new(crate::i18n::t("images sautées")).size(11.0)).on_hover_text(crate::i18n::t("en 2s, 3s… : montrer aussi les images qui ne sont pas lues, à 50 %"));
+                }
             }
         });
         if !self.show_strip || frames == 0 {
@@ -344,7 +354,11 @@ impl Viewer {
         }
         let h = self.strip_h;
         let w = (h * aspect).clamp(16.0, 400.0);
-        let total_w = frames as f32 * (w + 2.0);
+        let on = self.on.max(1);
+        // Cases de la bande : toutes les images, ou seulement celles lues en « Ns »
+        let step = if self.show_skipped { 1 } else { on };
+        let slots = frames.div_ceil(step);
+        let total_w = slots as f32 * (w + 2.0);
         let mut budget = 8usize;
         let id = ui.make_persistent_id(("filmstrip", &self.path));
         let mut sa = egui::ScrollArea::horizontal().id_salt(id).max_height(h + 24.0).auto_shrink([false, true]);
@@ -352,7 +366,7 @@ impl Viewer {
             // Garde l'image courante visible (centrée)
             let off: f32 = ui.data(|d| d.get_temp(id.with("off")).unwrap_or(0.0));
             let view_w = ui.available_width();
-            let x = held as f32 * (w + 2.0);
+            let x = (held / step) as f32 * (w + 2.0);
             if x < off || x + w > off + view_w {
                 sa = sa.horizontal_scroll_offset((x - view_w / 2.0).max(0.0));
             }
@@ -361,17 +375,30 @@ impl Viewer {
             let (rect, resp) = ui.allocate_exact_size(vec2(total_w, h + 18.0), Sense::click_and_drag());
             let painter = ui.painter_at(rect);
             let first = (vp.left() / (w + 2.0)).floor().max(0.0) as usize;
-            let last = ((vp.right() / (w + 2.0)).ceil() as usize + 1).min(frames);
+            let last = ((vp.right() / (w + 2.0)).ceil() as usize + 1).min(slots);
             let loop_r = (self.loop_in.unwrap_or(0), self.loop_out.unwrap_or(frames.saturating_sub(1)));
             let has_loop = self.loop_in.is_some() || self.loop_out.is_some();
-            for i in first..last {
-                let r = Rect::from_min_size(pos2(rect.left() + i as f32 * (w + 2.0), rect.top()), vec2(w, h));
+            for slot in first..last {
+                let i = slot * step;
+                let r = Rect::from_min_size(pos2(rect.left() + slot as f32 * (w + 2.0), rect.top()), vec2(w, h));
+                // Image sautée (pas lue en « Ns ») : 50 %
+                let skipped = on > 1 && i % on != 0;
+                let tint = if skipped { Color32::from_white_alpha(128) } else { Color32::WHITE };
                 match self.strip_thumb(&ctx, i, (h * 1.5) as u32, &mut budget) {
                     Some(t) => {
-                        painter.image(t.id(), r, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+                        painter.image(t.id(), r, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), tint);
                     }
                     None => {
-                        painter.rect_filled(r, 0.0, Color32::from_gray(45));
+                        painter.rect_filled(r, 0.0, Color32::from_gray(if skipped { 32 } else { 45 }));
+                    }
+                }
+                if let Some(name) = self.marks.get(&i) {
+                    bookmark_glyph(&painter, pos2(r.right() - 9.0, r.top()), MARK);
+                    if !name.is_empty() && w > 40.0 {
+                        let g = painter.layout(name.clone(), egui::FontId::proportional(10.0), Color32::WHITE, w - 18.0);
+                        let tr = Rect::from_min_size(r.left_top() + vec2(2.0, 2.0), g.size() + vec2(4.0, 2.0));
+                        painter.rect_filled(tr, 2.0, Color32::from_black_alpha(160));
+                        painter.galley(tr.min + vec2(2.0, 1.0), g, Color32::WHITE);
                     }
                 }
                 if has_loop && (i < loop_r.0 || i > loop_r.1) {
@@ -382,19 +409,56 @@ impl Viewer {
                 }
                 if i == held {
                     painter.rect_stroke(r, 0.0, Stroke::new(2.5, p.accent), egui::StrokeKind::Inside);
+                } else if skipped && held == i - i % on {
+                    painter.rect_stroke(r, 0.0, Stroke::new(1.0, p.accent.gamma_multiply(0.5)), egui::StrokeKind::Inside);
                 }
-                if i % 5 == 0 || i == held || w > 60.0 {
+                if slot % 5 == 0 || i == held || w > 60.0 {
                     let col = if i == held { p.accent } else { p.muted };
                     painter.text(pos2(r.left() + 2.0, r.bottom() + 2.0), egui::Align2::LEFT_TOP, (i + 1).to_string(), egui::FontId::monospace(10.0), col);
                 }
             }
+            let slot_at = |x: f32| ((((x - rect.left()) / (w + 2.0)).floor().max(0.0) as usize).min(slots - 1) * step).min(frames - 1);
             if resp.clicked() || resp.dragged_by(egui::PointerButton::Primary) {
                 if let Some(pp) = resp.interact_pointer_pos() {
-                    self.cur = (((pp.x - rect.left()) / (w + 2.0)).floor().max(0.0) as usize).min(frames - 1);
+                    self.cur = slot_at(pp.x);
                     self.playing = false;
                     self.strip_follow = false;
                 }
             }
+            if resp.double_clicked() {
+                self.toggle_mark(self.cur);
+            }
+            if resp.secondary_clicked() {
+                if let Some(pp) = resp.interact_pointer_pos() {
+                    let f = slot_at(pp.x);
+                    ui.data_mut(|d| d.insert_temp(id.with("menu"), f));
+                }
+            }
+            resp.context_menu(|ui| {
+                let f: usize = ui.data(|d| d.get_temp(id.with("menu"))).unwrap_or(self.cur);
+                ui.label(RichText::new(format!("{} {}", crate::i18n::t("image"), f + 1)).strong());
+                if self.marks.contains_key(&f) {
+                    let mut name = self.marks.get(&f).cloned().unwrap_or_default();
+                    ui.horizontal(|ui| {
+                        ui.label(crate::i18n::t("nom"));
+                        if ui.text_edit_singleline(&mut name).changed() {
+                            self.marks.insert(f, name.clone());
+                            self.save_marks();
+                        }
+                    });
+                    if ui.button(crate::i18n::t("enlever le signet")).clicked() {
+                        self.toggle_mark(f);
+                        ui.close();
+                    }
+                } else if ui.button(crate::i18n::t("ajouter un signet (M)")).clicked() {
+                    self.toggle_mark(f);
+                }
+                if ui.button(crate::i18n::t("aller à cette image")).clicked() {
+                    self.cur = f;
+                    self.playing = false;
+                    ui.close();
+                }
+            });
             if budget == 0 {
                 ctx.request_repaint();
             }
@@ -402,6 +466,30 @@ impl Viewer {
         ui.data_mut(|d| d.insert_temp(id.with("off"), out.state.clamped_offset().x));
         if self.playing {
             self.strip_follow = true;
+        }
+    }
+
+    fn save_marks(&self) {
+        if let Some(d) = self.notes_path.parent() {
+            let _ = std::fs::create_dir_all(d);
+        }
+        let _ = std::fs::write(marks_path(&self.notes_path), serde_json::to_string(&self.marks).unwrap_or_default());
+    }
+
+    /// Ajoute ou enlève un signet sur l'image donnée
+    fn toggle_mark(&mut self, f: usize) {
+        if self.marks.remove(&f).is_none() {
+            self.marks.insert(f, String::new());
+        }
+        self.save_marks();
+    }
+
+    fn jump_mark(&mut self, fwd: bool) {
+        let c = self.cur;
+        let next = if fwd { self.marks.keys().find(|k| **k > c).or(self.marks.keys().next()) } else { self.marks.keys().rev().find(|k| **k < c).or(self.marks.keys().next_back()) };
+        if let Some(&k) = next {
+            self.cur = k;
+            self.playing = false;
         }
     }
 
@@ -488,12 +576,39 @@ impl Viewer {
             }
             ui.separator();
             ui.label(crate::i18n::t("en"));
-            for n in [1usize, 2, 3, 4] {
+            for n in [1usize, 2, 3, 4, 8] {
                 if ui.selectable_label(self.on == n, format!("{n}s")).on_hover_text(format!("chaque image tenue {n} fois (animation « en {n} »)")).clicked() {
                     self.on = n;
                 }
             }
             ui.add(egui::DragValue::new(&mut self.on).range(1..=100000).speed(0.1).suffix("s")).on_hover_text(crate::i18n::t("n'importe quelle valeur : glisse ou double-clique pour taper"));
+            ui.separator();
+            let marked = self.marks.contains_key(&self.cur);
+            let mb = ui.selectable_label(marked, "    ");
+            bookmark_glyph(ui.painter(), pos2(mb.rect.center().x, mb.rect.top() + 5.0), if marked { MARK } else { theme::pal().muted });
+            if mb.on_hover_text(crate::i18n::t("signet sur cette image (M) · Alt+← / → : signet précédent / suivant")).clicked() {
+                let c = self.cur;
+                self.toggle_mark(c);
+            }
+            if !self.marks.is_empty() {
+                if ui.small_button("⏮").on_hover_text(crate::i18n::t("signet précédent (Alt+←)")).clicked() {
+                    self.jump_mark(false);
+                }
+                if ui.small_button("⏭").on_hover_text(crate::i18n::t("signet suivant (Alt+→)")).clicked() {
+                    self.jump_mark(true);
+                }
+                let marks: Vec<(usize, String)> = self.marks.iter().map(|(k, v)| (*k, v.clone())).collect();
+                ui.menu_button(format!("{} ▾", marks.len()), |ui| {
+                    for (k, name) in marks {
+                        let txt = if name.is_empty() { format!("{}", k + 1) } else { format!("{}  {name}", k + 1) };
+                        if ui.selectable_label(self.cur == k, txt).clicked() {
+                            self.cur = k;
+                            self.playing = false;
+                            ui.close();
+                        }
+                    }
+                });
+            }
             ui.separator();
             if ui.small_button("[").on_hover_text(crate::i18n::t("début de la boucle ici (I)")).clicked() {
                 self.loop_in = Some(self.cur);
@@ -806,7 +921,14 @@ impl Viewer {
                     self.playing = false;
                 }
             }
-            let (left, right, space) = ui.input(|i| (i.key_pressed(Key::ArrowLeft) && !i.modifiers.shift, i.key_pressed(Key::ArrowRight) && !i.modifiers.shift, i.key_pressed(Key::Space)));
+            let (ml, mr) = ui.input(|i| (i.modifiers.alt && i.key_pressed(Key::ArrowLeft), i.modifiers.alt && i.key_pressed(Key::ArrowRight)));
+            if ml || mr {
+                self.jump_mark(mr);
+            }
+            if ui.input(|i| i.key_pressed(Key::M) && !i.modifiers.any()) {
+                self.toggle_mark(held);
+            }
+            let (left, right, space) = ui.input(|i| (i.key_pressed(Key::ArrowLeft) && !i.modifiers.shift && !i.modifiers.alt, i.key_pressed(Key::ArrowRight) && !i.modifiers.shift && !i.modifiers.alt, i.key_pressed(Key::Space)));
             if ui.input(|i| i.key_pressed(Key::I)) {
                 self.loop_in = Some(self.cur);
             }
@@ -845,6 +967,9 @@ impl Viewer {
         for &k in self.lines.keys() {
             let x = x_of(k as f32);
             pt.line_segment([pos2(x, tl.top()), pos2(x, tl.top() + 10.0)], Stroke::new(2.0, p.accent));
+        }
+        for &k in self.marks.keys() {
+            bookmark_glyph(&pt, pos2(x_of(k as f32), tl.bottom() - 12.0), MARK);
         }
         let last = frames.saturating_sub(1);
         let (a, b) = (self.loop_in.unwrap_or(0), self.loop_out.unwrap_or(last));
@@ -934,7 +1059,7 @@ impl Viewer {
                 ui.label(crate::i18n::t("cadence"));
                 ui.add(egui::DragValue::new(&mut ex.fps).range(1.0..=1000.0).speed(0.2).suffix(" i/s"));
                 ui.label(crate::i18n::t("en"));
-                for n in [1usize, 2, 3, 4] {
+                for n in [1usize, 2, 3, 4, 8] {
                     if ui.selectable_label(ex.every == n, format!("{n}s")).clicked() {
                         ex.every = n;
                     }
@@ -1228,4 +1353,18 @@ mod tests {
         let first = image::open(out.join("test_0001.png")).unwrap().to_rgba8();
         assert_eq!(first.get_pixel(160, 120).0[..3], [255, 0, 0], "le dessin est incrusté dans la première image");
     }
+}
+
+/// Couleur des signets (dorée, distincte de l'accent des dessins)
+const MARK: Color32 = Color32::from_rgb(0xf2, 0xc1, 0x4e);
+
+fn marks_path(notes: &Path) -> PathBuf {
+    notes.with_extension("marks.json")
+}
+
+/// Petit signet (ruban à encoche) centré horizontalement sur `top`
+fn bookmark_glyph(painter: &egui::Painter, top: Pos2, col: Color32) {
+    let (w, h) = (4.0, 11.0);
+    let pts = vec![pos2(top.x - w, top.y), pos2(top.x + w, top.y), pos2(top.x + w, top.y + h), pos2(top.x, top.y + h - 4.0), pos2(top.x - w, top.y + h)];
+    painter.add(egui::Shape::convex_polygon(pts, col, Stroke::new(1.0, Color32::from_black_alpha(160))));
 }

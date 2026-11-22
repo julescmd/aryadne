@@ -1466,5 +1466,13 @@
  "effacer la densité": "clear density",
  "densité": "density",
  "redresser en grille (quads)": "straighten as grid (quads)",
- "souder (même sommet)": "weld (same vertex)"
+ "souder (même sommet)": "weld (same vertex)",
+ "images sautées": "skipped frames",
+ "en 2s, 3s… : montrer aussi les images qui ne sont pas lues, à 50 %": "on 2s, 3s…: also show the frames that are not played, at 50%",
+ "enlever le signet": "remove bookmark",
+ "ajouter un signet (M)": "add bookmark (M)",
+ "aller à cette image": "go to this frame",
+ "signet sur cette image (M) · Alt+← / → : signet précédent / suivant": "bookmark this frame (M) · Alt+← / →: previous / next bookmark",
+ "signet précédent (Alt+←)": "previous bookmark (Alt+←)",
+ "signet suivant (Alt+→)": "next bookmark (Alt+→)"
 }
