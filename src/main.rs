@@ -292,6 +292,9 @@ struct App {
     ws_started: bool,
     /// On change d'espace pour ouvrir un fichier : pas de scène ouverte d'office
     ws_routing: bool,
+    /// Zones de l'interface (image précédente) : la barre du bas montre les raccourcis de celle sous la souris
+    zones_last: Vec<(&'static str, egui::Rect)>,
+    zones_next: Vec<(&'static str, egui::Rect)>,
     ws_name: String,
     /// Nom tapé dans l'écran d'accueil (nouveau fichier de code)
     landing_name: String,
@@ -742,10 +745,22 @@ impl App {
             View::Chat => "chat",
             View::Search => "search",
         };
-        // Une vue qui n'appartient pas à l'espace (raccourci, ancienne disposition) : on revient à sa première page
-        if !pages.iter().any(|(_, v)| *v == view_id(self.view())) {
-            self.view = Some(view_of(pages[0].1));
+        // Une vue qui n'appartient pas à l'espace (raccourci comme Ctrl+G) : on passe à l'espace qui l'a,
+        // sinon on revient à la première page
+        let want = view_id(self.view());
+        if !pages.iter().any(|(_, v)| *v == want) {
+            let ctx = ui.ctx().clone();
+            match self.ws.list.iter().position(|w| workspace::KINDS.contains(&w.kind.as_str()) && workspace::pages(&w.kind).iter().any(|(_, v)| *v == want)) {
+                Some(i) => {
+                    let v = self.view();
+                    self.ws_switch(i, &ctx);
+                    self.view = Some(v);
+                }
+                None => self.view = Some(view_of(pages[0].1)),
+            }
         }
+        let kind = self.ws.cur().kind.clone();
+        let pages = workspace::pages(&kind);
         let accent = self.ws.cur().accent.map(|c| egui::Color32::from_rgb(c[0], c[1], c[2])).unwrap_or(p.accent);
         egui::Panel::top("workspaces").exact_size(28.0).frame(egui::Frame::new().fill(p.panel).stroke(egui::Stroke::new(1.0, p.line)).inner_margin(egui::Margin::symmetric(12, 0))).show(ui, |ui| {
             ui.horizontal_centered(|ui| {
@@ -1221,23 +1236,60 @@ impl App {
 
     // ---------- clavier ----------
 
-    /// Les raccourcis disponibles à l'endroit où l'on travaille, pour la barre du bas.
+    /// Les raccourcis disponibles là où se trouve la souris, ou là où l'on travaille, pour la barre du bas
+    /// (comme la barre d'état de Blender) : dialogues, zones de l'interface, puis la page et le fichier ouverts.
     fn key_hints(&self) -> String {
         let t = crate::i18n::t;
-        if self.explorer_focus {
-            return t("F2 renommer · Suppr supprimer · Ctrl+clic et Maj+clic : plusieurs · Ctrl+A tout · Ctrl+Z annuler · glisser : déplacer");
+        if self.palette.is_some() {
+            return t("↑ ↓ choisir · Entrée lancer · Échap fermer");
         }
-        if self.view() != View::Files {
-            return t("^P ouvrir · ^⇧P commandes");
+        if self.switcher.is_some() {
+            return t("tape un nom · ↑ ↓ choisir · Entrée ouvrir · Échap fermer");
+        }
+        if self.new_file.is_some() {
+            return t("clic : genre de fichier · tape le nom · Entrée créer · Échap annuler");
+        }
+        if self.dialog.is_some() || self.history_dlg.is_some() {
+            return t("Échap fermer");
+        }
+        let at = self.ctx.as_ref().and_then(|c| c.input(|i| i.pointer.hover_pos()));
+        let zone = at.and_then(|p| self.zones_last.iter().rev().find(|(_, r)| r.contains(p)).map(|z| z.0));
+        let pages = workspace::pages(&self.ws.cur().kind).len();
+        match zone {
+            Some("top") => return t("clic : changer d'espace · clic droit sur un espace : nom, couleur, dupliquer · ＋ nouvel espace · Ctrl+PgPréc / PgSuiv : espace voisin · Ctrl+Maj+P commandes"),
+            Some("pages") => return format!("{} · Ctrl+1…{pages}", t("clic : changer de page")),
+            Some("tabs") => return t("clic : afficher · clic du milieu : fermer · glisser hors de la barre : panneau à part · Ctrl+Tab onglet suivant · Ctrl+W fermer"),
+            Some("explorer") => {}
+            Some("assistant") => return t("Entrée envoyer · Maj+Entrée nouvelle ligne · Ctrl+L fermer l'assistant"),
+            Some("side") => return t("clic : aller au titre, ou ouvrir la note liée"),
+            Some("status") => return t("clic sur la version : mises à jour · minuteur : clic pour lancer"),
+            _ => {}
+        }
+        if self.explorer_focus || zone == Some("explorer") {
+            return t("double-clic ou Entrée : ouvrir · F2 renommer · Suppr supprimer · Ctrl+clic, Maj+clic : plusieurs · Ctrl+A tout · Ctrl+Z annuler · glisser : déplacer · clic droit : menu");
+        }
+        match self.view() {
+            View::Brain => return t("molette : zoom · glisser : déplacer · clic : ouvrir · Ctrl+G revenir aux fichiers"),
+            View::Refs => return t("Ctrl+V coller une image ou un lien · double-clic : ouvrir · glisser vers un board · molette : défiler"),
+            View::Boards => return t("V sélection · T texte · B pinceau · E gomme · L ligne · R rectangle · O ellipse · Maj+A flèche · Ctrl+C / X / V · Ctrl+D dupliquer · Suppr · Ctrl+Z · Espace+glisser : déplacer la vue"),
+            View::Tasks => return t("Entrée ajouter une tâche · clic sur la case : faite · clic sur le texte : ouvrir la note"),
+            View::Chat => return t("Entrée envoyer · Maj+Entrée nouvelle ligne · @ citer un fichier · Ctrl+L assistant à côté"),
+            View::Search => return t("tape au moins 2 caractères · Entrée ouvrir le premier · clic : ouvrir à la ligne"),
+            View::Files => {}
         }
         match self.current().map(|d| &d.content) {
             Some(Content::Model(v)) if v.is_mesh_edit() => t("MODE ÉDITION · Tab sortir · clic, Maj+clic, A, B : sommets · G R S (X Y Z : axe) · E extruder · F face · X supprimer · Ctrl+Z annuler"),
-            Some(Content::Model(v)) if v.is_scene() => t("G R S : déplacer, tourner, taille (X Y Z : axe) · Maj+clic, A, B : sélection · Maj+A ajouter · X supprimer · Maj+D dupliquer · P parent · H cacher · I clé · Ctrl+Z annuler"),
+            Some(Content::Model(v)) if v.is_scene() => t("G R S : déplacer, tourner, taille (X Y Z : axe) · Maj+clic, A, B : sélection · Maj+A ajouter · X supprimer · Maj+D dupliquer · P parent · H cacher · I clé · Tab édition · Espace lecture · Ctrl+Z annuler"),
             Some(Content::Model(_)) => t("glisser : tourner · Maj+glisser : déplacer · molette : zoom · 1 3 7 : vues · 5 : perspective · L + glisser : lumière · H + glisser : HDRI · F2 renommer le fichier"),
             Some(Content::Montage(_)) => t("Espace lire · S couper · Suppr supprimer · glisser les bords : raccourcir · Ctrl+molette : zoom · Ctrl+Z annuler"),
             Some(Content::Nodes(_)) => t("clic droit : ajouter · Q aligner · Suppr supprimer · F2 renommer la node · molette : zoom · Ctrl+Z annuler"),
-            Some(Content::Text(_)) => t("Ctrl+F chercher · Ctrl+Z annuler · F2 renommer le fichier · ^P ouvrir · ^⇧P commandes"),
-            _ => t("F2 renommer le fichier · ^P ouvrir · ^⇧P commandes"),
+            Some(Content::Video(_)) => t("Espace lire · ← → image par image · Maj+← → seconde · I O : entrée, sortie · B pinceau · E gomme"),
+            Some(Content::Image) => t("molette : zoom · glisser : déplacer · double-clic : 100 % / ajuster · F2 renommer le fichier"),
+            Some(Content::Office(_)) => t("molette : défiler · Ctrl+molette : zoom · F2 renommer le fichier"),
+            Some(Content::Text(_)) if self.current().is_some_and(|d| vault::is_md(&d.rel)) => t("Ctrl+E lire / éditer · [[ lien vers une note · Ctrl+F chercher · Ctrl+Z annuler · Ctrl+S enregistrer · F2 renommer"),
+            Some(Content::Text(_)) => t("Ctrl+F chercher · Ctrl+G aller à la ligne · Ctrl+Maj+O symboles · F12 définition · Alt+Maj+F formater · F5 exécuter · Ctrl+` terminal"),
+            Some(_) => t("F2 renommer le fichier · Ctrl+P ouvrir · Ctrl+Maj+P commandes"),
+            None => t("Ctrl+N nouvelle note · Ctrl+P ouvrir un fichier · glisse des fichiers pour les importer · Ctrl+Maj+P commandes"),
         }
     }
 
@@ -1319,9 +1371,33 @@ impl App {
         } else if pressed(Modifiers::COMMAND, Key::G) {
             self.view = Some(if self.view() == View::Brain { View::Files } else { View::Brain });
         }
-        for (k, v) in [(Key::Num1, View::Files), (Key::Num2, View::Brain), (Key::Num3, View::Refs), (Key::Num4, View::Boards), (Key::Num5, View::Tasks), (Key::Num6, View::Chat)] {
+        // Ctrl+1, 2, 3… : les pages de l'espace en cours, dans l'ordre de la deuxième rangée
+        let pages = workspace::pages(&self.ws.cur().kind);
+        for (n, k) in [Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5, Key::Num6].into_iter().enumerate() {
             if pressed(Modifiers::COMMAND, k) {
-                self.view = Some(v);
+                if let Some((_, v)) = pages.get(n) {
+                    self.view = Some(view_of(v));
+                }
+            }
+        }
+        // Ctrl+Page précédente / suivante : espace voisin (comme dans Blender)
+        let n_ws = self.ws.list.len();
+        if n_ws > 1 {
+            if pressed(Modifiers::COMMAND, Key::PageDown) {
+                let i = (self.ws.current + 1) % n_ws;
+                self.ws_switch(i, ctx);
+            } else if pressed(Modifiers::COMMAND, Key::PageUp) {
+                let i = (self.ws.current + n_ws - 1) % n_ws;
+                self.ws_switch(i, ctx);
+            }
+        }
+        // Ctrl+Tab / Ctrl+Maj+Tab : onglet suivant / précédent
+        if !self.docs.is_empty() {
+            let n = self.docs.len();
+            if pressed(Modifiers::COMMAND | Modifiers::SHIFT, Key::Tab) {
+                self.active = Some((self.active.unwrap_or(0) + n - 1) % n);
+            } else if pressed(Modifiers::COMMAND, Key::Tab) {
+                self.active = Some((self.active.unwrap_or(0) + 1) % n);
             }
         }
         if pressed(Modifiers::COMMAND, Key::E) {
@@ -1774,7 +1850,10 @@ impl App {
                 self.landing(ui);
                 return;
             }
+            let y0 = ui.cursor().min.y;
             self.tabs(ui);
+            let tab_rect = egui::Rect::from_min_max(egui::pos2(ui.max_rect().left(), y0), egui::pos2(ui.max_rect().right(), ui.cursor().min.y));
+            self.zones_next.push(("tabs", tab_rect));
             let Some(i) = self.active else { return };
             let root = self.root();
             let dark = theme::is_dark();
@@ -4214,17 +4293,31 @@ impl eframe::App for App {
             if self.compact {
                 self.compact_bar(ui);
             } else {
+                self.zones_last = std::mem::take(&mut self.zones_next);
                 self.ws_start(ui);
+                let a = ui.available_rect_before_wrap();
                 self.topbar(ui);
+                let b = ui.available_rect_before_wrap();
                 self.ws_bar(ui);
+                let c = ui.available_rect_before_wrap();
                 self.statusbar(ui);
+                let d = ui.available_rect_before_wrap();
+                self.zones_next.push(("top", egui::Rect::from_min_max(a.min, egui::pos2(a.max.x, b.min.y))));
+                self.zones_next.push(("pages", egui::Rect::from_min_max(b.min, egui::pos2(b.max.x, c.min.y))));
+                self.zones_next.push(("status", egui::Rect::from_min_max(egui::pos2(c.min.x, d.max.y), c.max)));
                 self.explorer(ui);
+                if let Some(r) = self.explorer_rect {
+                    self.zones_next.push(("explorer", r));
+                }
             }
             if self.terminal.is_some() {
                 self.terminal_panel(ui);
             }
             if self.assistant_open {
+                let a = ui.available_rect_before_wrap();
                 self.assistant_panel(ui);
+                let b = ui.available_rect_before_wrap();
+                self.zones_next.push(("assistant", egui::Rect::from_min_max(egui::pos2(b.max.x, a.min.y), a.max)));
             }
             match self.view() {
                 View::Files => {
@@ -4232,7 +4325,10 @@ impl eframe::App for App {
                     // et les documents gardent toute la largeur.
                     let text = self.current().is_none_or(|d| matches!(d.content, Content::Text(_)));
                     if !self.compact && !self.assistant_open && text && self.split.is_none() {
+                        let a = ui.available_rect_before_wrap();
                         self.side_panel(ui);
+                        let b = ui.available_rect_before_wrap();
+                        self.zones_next.push(("side", egui::Rect::from_min_max(egui::pos2(b.max.x, a.min.y), a.max)));
                     }
                     self.editor(ui);
                 }
