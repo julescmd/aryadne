@@ -748,7 +748,7 @@ impl Editor {
 
         let panel_frame = egui::Frame::new().fill(p.panel).stroke(Stroke::new(1.0, p.line));
         let full_h = ui.available_height();
-        egui::Panel::bottom("montage-lower").resizable(true).default_size((full_h * 0.46).max(220.0)).min_size(180.0).frame(egui::Frame::new()).show(ui, |ui| {
+        egui::Panel::bottom("montage-lower").resizable(true).default_size((full_h * 0.46).max(220.0)).min_size(180.0).max_size((full_h * 0.75).max(200.0)).frame(egui::Frame::new()).show(ui, |ui| {
             egui::Panel::left("montage-bin").resizable(true).default_size(260.0).min_size(180.0).max_size(520.0).frame(panel_frame.inner_margin(6)).show(ui, |ui| self.bin_panel(ui));
             egui::Panel::left("montage-tools").exact_size(36.0).resizable(false).frame(egui::Frame::new().fill(p.panel).stroke(Stroke::new(1.0, p.line)).inner_margin(egui::Margin::symmetric(3, 8))).show(ui, |ui| self.tools_panel(ui));
             egui::CentralPanel::default().frame(egui::Frame::new().fill(p.bg)).show(ui, |ui| self.timeline_panel(ui));

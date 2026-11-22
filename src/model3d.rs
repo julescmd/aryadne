@@ -1448,6 +1448,91 @@ enum Hdr {
 
 const HEADER: [Hdr; 11] = [Hdr::Mode, Hdr::View, Hdr::Select, Hdr::Add, Hdr::Object, Hdr::Fill, Hdr::Shading, Hdr::Overlays, Hdr::Light, Hdr::Modifiers, Hdr::Busy];
 
+/// Superpositions de la vue (ombrage lisse, fil de fer) : menu de l'en-tête, ou onglet Scène des propriétés.
+fn overlays_ui(look: &mut Look, ui: &mut egui::Ui) {
+    let p = crate::theme::pal();
+
+
+                    ui.checkbox(&mut look.smooth, crate::i18n::t("ombrage lisse"));
+                    ui.label(egui::RichText::new(crate::i18n::t("subdivision, miroir, torsion… : bouton « modificateurs »")).color(p.muted).size(10.5));
+                    ui.separator();
+                    ui.label(egui::RichText::new(crate::i18n::t("fil de fer")).color(p.muted).size(11.0));
+                    ui.add(egui::Slider::new(&mut look.wire, 0.0..=1.0).text(crate::i18n::t("opacité")));
+                    ui.horizontal(|ui| {
+                        for (c, l) in [([0.02, 0.02, 0.02], "noir"), ([1.0, 1.0, 1.0], "blanc"), (lin_accent(p.accent), "accent")] {
+                            if ui.selectable_label(look.wire_color == c, l).clicked() {
+                                look.wire_color = c;
+                                if look.wire == 0.0 {
+                                    look.wire = 0.6;
+                                }
+                            }
+                        }
+                    });
+                    ui.checkbox(&mut look.wire_only, crate::i18n::t("fil de fer seul"));
+                    
+}
+
+/// Éclairage de la vue (ombres, HDRI, lumière) : menu de l'en-tête, ou onglet Monde des propriétés.
+fn lighting_ui(look: &mut Look, hdr_files: &[(String, std::path::PathBuf)], loading: bool, env_error: &Option<String>, pending: &mut Option<std::path::PathBuf>, ui: &mut egui::Ui) {
+    let p = crate::theme::pal();
+
+                    ui.checkbox(&mut look.shadows, crate::i18n::t("ombres portées")).on_hover_text(crate::i18n::t("Chaque lumière projette l'ombre des objets. Plus lent sur les gros modèles."));
+                    if look.shadows {
+                        ui.horizontal(|ui| {
+                            ui.label(egui::RichText::new(crate::i18n::t("douceur")).color(p.muted).size(11.0));
+                            ui.add(egui::Slider::new(&mut look.shadow_soft, 0.0..=1.0).show_value(false)).on_hover_text(crate::i18n::t("0 : bord net. Plus haut : pénombre large, calculée avec plusieurs rayons."));
+                        });
+                    }
+                    ui.separator();
+                    ui.label(egui::RichText::new(crate::i18n::t("environnement (HDRI)")).color(p.muted).size(11.0));
+                    for (i, name) in PRESETS.iter().enumerate() {
+                        if ui.selectable_label(look.env.name == *name, *name).clicked() {
+                            look.env = Env::preset(i);
+                        }
+                    }
+                    for (name, path) in hdr_files.to_vec() {
+                        if ui.selectable_label(look.env.name == std::path::Path::new(&path).file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default(), format!("{name}")).clicked() {
+                            *pending = Some(path);
+                        }
+                    }
+                    if ui.button(crate::i18n::t("charger un .hdr / .exr…")).clicked() {
+                        *pending = rfd::FileDialog::new().add_filter("HDRI", &["hdr", "exr"]).pick_file();
+                    }
+                    if loading {
+                        ui.horizontal(|ui| {
+                            ui.spinner();
+                            ui.label(crate::i18n::t("chargement du HDRI…"));
+                        });
+                    }
+                    if let Some(e) = env_error {
+                        ui.label(egui::RichText::new(e).color(p.missing).size(11.0));
+                    }
+                    ui.add(egui::Slider::new(&mut look.env_rot, -std::f32::consts::PI..=std::f32::consts::PI).text(crate::i18n::t("rotation (H + glisser)")).show_value(false));
+                    ui.add(egui::Slider::new(&mut look.env_strength, 0.0..=3.0).text(crate::i18n::t("intensité")));
+                    ui.add(egui::Slider::new(&mut look.exposure, -4.0..=4.0).text(crate::i18n::t("exposition (EV)")));
+                    ui.checkbox(&mut look.show_bg, crate::i18n::t("afficher le HDRI en fond"));
+                    ui.add_enabled(look.show_bg, egui::Checkbox::new(&mut look.blur_bg, "fond flou"));
+                    ui.separator();
+                    ui.label(egui::RichText::new(crate::i18n::t("lumière directionnelle (L + glisser)")).color(p.muted).size(11.0));
+                    ui.add(egui::Slider::new(&mut look.light.intensity, 0.0..=5.0).text(crate::i18n::t("intensité")));
+                    ui.add(egui::Slider::new(&mut look.light.azimuth, -std::f32::consts::PI..=std::f32::consts::PI).text(crate::i18n::t("direction")).show_value(false));
+                    ui.add(egui::Slider::new(&mut look.light.elevation, -1.5..=1.5).text(crate::i18n::t("hauteur")).show_value(false));
+                    ui.horizontal(|ui| {
+                        ui.label(crate::i18n::t("couleur"));
+                        let mut c = look.light.color;
+                        if ui.color_edit_button_rgb(&mut c).changed() {
+                            look.light.color = c;
+                        }
+                    });
+                    if ui.button(crate::i18n::t("réinitialiser l'éclairage")).clicked() {
+                        let mat = look.material;
+                        let (wire, wc) = (look.wire, look.wire_color);
+                        *look = Look { material: mat, wire, wire_color: wc, ..Default::default() };
+                    }
+                
+}
+
+
 /// Rend chaque image d'une scène (début → fin) et les envoie à ffmpeg, qui écrit la vidéo `out`.
 /// La caméra de la scène sert de point de vue ; sans caméra, `view_cam`.
 #[allow(clippy::too_many_arguments)]
@@ -1785,6 +1870,8 @@ pub struct Viewer {
     applied_ver: u64,
     /// Scène `.arya3` ouverte : ses objets, celui qui est sélectionné, les erreurs de chargement
     scene: Option<crate::scene::Scene>,
+    /// HDRI choisi depuis l'onglet Monde, chargé par la vue
+    pending_hdr: Option<std::path::PathBuf>,
     scene_sel: Option<usize>,
     scene_errors: Vec<Option<String>>,
     scene_rx: Option<Receiver<(Result<Model, String>, Vec<Option<String>>, Vec<(usize, usize, usize)>)>>,
@@ -1899,6 +1986,7 @@ impl Viewer {
             applied: None,
             applied_ver: 0,
             scene: None,
+            pending_hdr: None,
             scene_sel: None,
             scene_errors: vec![],
             scene_rx: None,
@@ -2676,7 +2764,7 @@ impl Viewer {
         }
         // Timeline (une bande) ou éditeur de courbes (un panneau qu'on agrandit)
         let tl_frame = egui::Frame::new().fill(p.panel).stroke(Stroke::new(1.0, p.line)).inner_margin(egui::Margin::symmetric(10, 4));
-        let tl_panel = if self.anim_graph { egui::Panel::bottom("scene-graph").resizable(true).default_size(300.0).min_size(160.0) } else { egui::Panel::bottom("scene-timeline").exact_size(58.0) };
+        let tl_panel = if self.anim_graph { egui::Panel::bottom("scene-graph").resizable(true).default_size(300.0).min_size(160.0).max_size((ui.available_height() * 0.7).max(180.0)) } else { egui::Panel::bottom("scene-timeline").exact_size(58.0) };
         tl_panel.frame(tl_frame).show(ui, |ui| {
             ui.horizontal(|ui| {
                 if ui.button(if self.anim_playing { "⏸" } else { "▶" }).on_hover_text(crate::i18n::t("lire / arrêter (Espace)")).clicked() {
@@ -2985,7 +3073,7 @@ impl Viewer {
                 changed = true;
             }
         }
-        egui::Panel::right("scene-outliner").resizable(true).default_size(270.0).min_size(200.0).frame(egui::Frame::new().fill(p.panel).stroke(Stroke::new(1.0, p.line)).inner_margin(8)).show(ui, |ui| {
+        egui::Panel::right("scene-outliner").resizable(true).default_size(270.0).min_size(220.0).max_size((ui.available_width() * 0.45).max(240.0)).frame(egui::Frame::new().fill(p.panel).stroke(Stroke::new(1.0, p.line)).inner_margin(8)).show(ui, |ui| {
             ui.spacing_mut().slider_width = 80.0;
             ui.horizontal(|ui| {
                 ui.label(egui::RichText::new(crate::i18n::t("SCÈNE")).size(10.5).color(p.muted).family(theme::bold()));
@@ -3175,14 +3263,12 @@ impl Viewer {
                                     changed |= ui.add(egui::DragValue::new(&mut scene.end)).changed();
                                 });
                                 ui.label(egui::RichText::new(format!("{} {}", scene.objects.len(), crate::i18n::t("objet(s)"))).size(11.0).color(p.muted));
+                                ui.separator();
+                                ui.label(egui::RichText::new(crate::i18n::t("SUPERPOSITIONS")).size(10.5).color(p.muted));
+                                overlays_ui(&mut self.look, ui);
                             }
                             PropTab::World => {
-                                ui.add(egui::Slider::new(&mut self.look.env_strength, 0.0..=3.0).text(crate::i18n::t("intensité du ciel")));
-                                ui.add(egui::Slider::new(&mut self.look.exposure, -4.0..=4.0).text(crate::i18n::t("exposition (EV)")));
-                                ui.add(egui::Slider::new(&mut self.look.env_rot, -std::f32::consts::PI..=std::f32::consts::PI).text(crate::i18n::t("rotation du ciel")).show_value(false));
-                                ui.checkbox(&mut self.look.show_bg, crate::i18n::t("afficher le HDRI en fond"));
-                                ui.checkbox(&mut self.look.shadows, crate::i18n::t("ombres portées"));
-                                ui.label(egui::RichText::new(crate::i18n::t("Le reste de l'éclairage : menu « éclairage » de l'en-tête.")).size(10.0).color(p.muted));
+                                lighting_ui(&mut self.look, &self.hdr_files, self.env_loading.is_some(), &self.env_error, &mut self.pending_hdr, ui);
                             }
                             _ => match self.scene_sel.and_then(|i| scene.objects.get_mut(i)) {
                                 None => {
@@ -3670,7 +3756,7 @@ impl Viewer {
         }
         let shown_tris = self.prepared.as_ref().map(|p| p.2.tri_count()).unwrap_or(0);
         let ctx = ui.ctx().clone();
-        let mut pick_hdr: Option<std::path::PathBuf> = None;
+        let pick_hdr: Option<std::path::PathBuf> = None;
         let mut do_capture = false;
         let mut export: Option<(&'static str, std::path::PathBuf)> = None;
         let mut ask_export: Option<&'static str> = None;
@@ -3691,7 +3777,7 @@ impl Viewer {
         ui.spacing_mut().button_padding = egui::vec2(5.0, 1.0);
         ui.spacing_mut().interact_size.y = 20.0;
         egui::Frame::new().fill(p.panel.gamma_multiply(0.94)).corner_radius(6).stroke(Stroke::new(1.0, p.line)).inner_margin(egui::Margin::symmetric(5, 3)).show(ui, |ui| {
-        ui.horizontal_wrapped(|ui| {
+        egui::ScrollArea::horizontal().id_salt("hdr3d-scroll").scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden).max_width((vp.width() - 12.0).max(120.0)).show(ui, |ui| ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 3.0;
             for item in HEADER {
                 match item {
@@ -3897,85 +3983,22 @@ impl Viewer {
                         });
                     }
                     Hdr::Overlays => {
-                        egui::containers::menu::MenuButton::new(crate::i18n::t("superpositions")).config(stay.clone()).ui(ui, |ui| {
-                            ui.set_min_width(240.0);
-
-                        ui.checkbox(&mut self.look.smooth, crate::i18n::t("ombrage lisse"));
-                        ui.label(egui::RichText::new(crate::i18n::t("subdivision, miroir, torsion… : bouton « modificateurs »")).color(p.muted).size(10.5));
-                        ui.separator();
-                        ui.label(egui::RichText::new(crate::i18n::t("fil de fer")).color(p.muted).size(11.0));
-                        ui.add(egui::Slider::new(&mut self.look.wire, 0.0..=1.0).text(crate::i18n::t("opacité")));
-                        ui.horizontal(|ui| {
-                            for (c, l) in [([0.02, 0.02, 0.02], "noir"), ([1.0, 1.0, 1.0], "blanc"), (lin_accent(p.accent), "accent")] {
-                                if ui.selectable_label(self.look.wire_color == c, l).clicked() {
-                                    self.look.wire_color = c;
-                                    if self.look.wire == 0.0 {
-                                        self.look.wire = 0.6;
-                                    }
-                                }
-                            }
-                        });
-                        ui.checkbox(&mut self.look.wire_only, crate::i18n::t("fil de fer seul"));
-                        });
+                        if !self.is_scene() {
+                            egui::containers::menu::MenuButton::new(crate::i18n::t("superpositions")).config(stay.clone()).ui(ui, |ui| {
+                                ui.set_min_width(240.0);
+                                overlays_ui(&mut self.look, ui);
+                            });
+                        }
                     }
                     Hdr::Light => {
-                    egui::containers::menu::MenuButton::new(crate::i18n::t("éclairage")).config(stay.clone()).ui(ui, |ui| {
-                        ui.set_min_width(280.0);
-                        ui.checkbox(&mut self.look.shadows, crate::i18n::t("ombres portées")).on_hover_text(crate::i18n::t("Chaque lumière projette l'ombre des objets. Plus lent sur les gros modèles."));
-                        if self.look.shadows {
-                            ui.horizontal(|ui| {
-                                ui.label(egui::RichText::new(crate::i18n::t("douceur")).color(p.muted).size(11.0));
-                                ui.add(egui::Slider::new(&mut self.look.shadow_soft, 0.0..=1.0).show_value(false)).on_hover_text(crate::i18n::t("0 : bord net. Plus haut : pénombre large, calculée avec plusieurs rayons."));
+                        if !self.is_scene() {
+                            egui::containers::menu::MenuButton::new(crate::i18n::t("éclairage")).config(stay.clone()).ui(ui, |ui| {
+                                ui.set_min_width(280.0);
+                                lighting_ui(&mut self.look, &self.hdr_files, self.env_loading.is_some(), &self.env_error, &mut self.pending_hdr, ui);
                             });
                         }
-                        ui.separator();
-                        ui.label(egui::RichText::new(crate::i18n::t("environnement (HDRI)")).color(p.muted).size(11.0));
-                        for (i, name) in PRESETS.iter().enumerate() {
-                            if ui.selectable_label(self.look.env.name == *name, *name).clicked() {
-                                self.look.env = Env::preset(i);
-                            }
-                        }
-                        for (name, path) in self.hdr_files.clone() {
-                            if ui.selectable_label(self.look.env.name == std::path::Path::new(&path).file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default(), format!("{name}")).clicked() {
-                                pick_hdr = Some(path);
-                            }
-                        }
-                        if ui.button(crate::i18n::t("charger un .hdr / .exr…")).clicked() {
-                            pick_hdr = rfd::FileDialog::new().add_filter("HDRI", &["hdr", "exr"]).pick_file();
-                        }
-                        if self.env_loading.is_some() {
-                            ui.horizontal(|ui| {
-                                ui.spinner();
-                                ui.label(crate::i18n::t("chargement du HDRI…"));
-                            });
-                        }
-                        if let Some(e) = &self.env_error {
-                            ui.label(egui::RichText::new(e).color(p.missing).size(11.0));
-                        }
-                        ui.add(egui::Slider::new(&mut self.look.env_rot, -std::f32::consts::PI..=std::f32::consts::PI).text(crate::i18n::t("rotation (H + glisser)")).show_value(false));
-                        ui.add(egui::Slider::new(&mut self.look.env_strength, 0.0..=3.0).text(crate::i18n::t("intensité")));
-                        ui.add(egui::Slider::new(&mut self.look.exposure, -4.0..=4.0).text(crate::i18n::t("exposition (EV)")));
-                        ui.checkbox(&mut self.look.show_bg, crate::i18n::t("afficher le HDRI en fond"));
-                        ui.add_enabled(self.look.show_bg, egui::Checkbox::new(&mut self.look.blur_bg, "fond flou"));
-                        ui.separator();
-                        ui.label(egui::RichText::new(crate::i18n::t("lumière directionnelle (L + glisser)")).color(p.muted).size(11.0));
-                        ui.add(egui::Slider::new(&mut self.look.light.intensity, 0.0..=5.0).text(crate::i18n::t("intensité")));
-                        ui.add(egui::Slider::new(&mut self.look.light.azimuth, -std::f32::consts::PI..=std::f32::consts::PI).text(crate::i18n::t("direction")).show_value(false));
-                        ui.add(egui::Slider::new(&mut self.look.light.elevation, -1.5..=1.5).text(crate::i18n::t("hauteur")).show_value(false));
-                        ui.horizontal(|ui| {
-                            ui.label(crate::i18n::t("couleur"));
-                            let mut c = self.look.light.color;
-                            if ui.color_edit_button_rgb(&mut c).changed() {
-                                self.look.light.color = c;
-                            }
-                        });
-                        if ui.button(crate::i18n::t("réinitialiser l'éclairage")).clicked() {
-                            let mat = self.look.material;
-                            let (wire, wc) = (self.look.wire, self.look.wire_color);
-                            self.look = Look { material: mat, wire, wire_color: wc, ..Default::default() };
-                        }
-                    });
                     }
+                    Hdr::Modifiers if self.is_scene() => {}
                     Hdr::Modifiers => {
                         let n_mods = self.stack.iter().filter(|m| m.on).count();
                         let label = if n_mods > 0 { format!("{} ({n_mods})", crate::i18n::t("modificateurs")) } else { crate::i18n::t("modificateurs") };
@@ -3992,7 +4015,7 @@ impl Viewer {
                     _ => {}
                 }
             }
-        });
+        }));
         });
         });
         self.hdr_h = hdr_area.response.rect.height();
@@ -4019,7 +4042,7 @@ impl Viewer {
             format!("{} triangles{shown} · {} sommets · {:.2} × {:.2} × {:.2}", fmt_n(model.total_tris), fmt_n(model.total_vertices), s[0], s[1], s[2])
         };
         self.stats_text = stats;
-        if let Some(path) = pick_hdr {
+        if let Some(path) = pick_hdr.or(self.pending_hdr.take()) {
             self.load_env(path, &ctx);
         }
         if do_capture {
@@ -4050,7 +4073,7 @@ impl Viewer {
         // Panneaux de droite : de vrais panneaux qui prennent leur place, la vue occupe ce qui reste
         let side_frame = egui::Frame::new().fill(p.panel).stroke(Stroke::new(1.0, p.line)).inner_margin(8);
         if let Some(e) = &mut self.edit {
-            egui::Panel::right("model-edit-panel").resizable(true).default_size(430.0).min_size(300.0).frame(side_frame).show(ui, |ui| {
+            egui::Panel::right("model-edit-panel").resizable(true).default_size(430.0).min_size(300.0).max_size((ui.available_width() * 0.5).max(320.0)).frame(side_frame).show(ui, |ui| {
                 egui::ScrollArea::vertical().id_salt("edit-panel").show(ui, |ui| {
                     e.panel(ui);
                 });
@@ -4059,7 +4082,7 @@ impl Viewer {
         if self.show_mods {
             let mut changed = false;
             {
-                egui::Panel::right("model-mods-panel").resizable(true).default_size(290.0).min_size(240.0).frame(side_frame).show(ui, |ui| {
+                egui::Panel::right("model-mods-panel").resizable(true).default_size(290.0).min_size(240.0).max_size((ui.available_width() * 0.45).max(260.0)).frame(side_frame).show(ui, |ui| {
                     egui::ScrollArea::vertical().id_salt("mods").show(ui, |ui| {
                         changed = crate::modifiers::panel(ui, &mut self.stack, self.applied.is_some(), &mut mod_request);
                         ui.add_space(8.0);

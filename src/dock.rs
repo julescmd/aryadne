@@ -78,6 +78,16 @@ fn place(id: &str, default: Side, size: f32) -> Place {
     with(|m| *m.entry(id.to_string()).or_insert(Place { side: default, pos: [200.0, 120.0], size: [size.max(260.0), 420.0] }))
 }
 
+/// Taille d'un panneau flottant ramenée dans des bornes raisonnables pour l'écran.
+fn float_size(screen: Rect, size: [f32; 2], min: f32) -> egui::Vec2 {
+    vec2(size[0].clamp(min.max(180.0), (screen.width() * 0.8).max(min.max(180.0))), size[1].clamp(140.0, (screen.height() * 0.8).max(140.0)))
+}
+
+/// Largeur maximale d'un panneau ancré sur un côté : la zone centrale garde toujours de la place.
+pub fn max_side(screen: Rect, min: f32) -> f32 {
+    (screen.width() * 0.4).max(min + 40.0)
+}
+
 fn set(id: &str, p: Place) {
     with(|m| m.insert(id.to_string(), p));
     save();
@@ -191,7 +201,7 @@ fn header(ui: &mut Ui, id: &str, title: &str, mut pl: Place, closable: bool, pan
                 }
             }
             let z = match target {
-                Side::Float if pl.side != Side::Float => Rect::from_min_size(at - off, vec2(pl.size[0], pl.size[1])),
+                Side::Float if pl.side != Side::Float => Rect::from_min_size(at - vec2(off.x.min(60.0), off.y.min(11.0)), float_size(screen, pl.size, 180.0)),
                 Side::Float | Side::Window => Rect::NOTHING,
                 s => zone(screen, s),
             };
@@ -217,7 +227,11 @@ fn header(ui: &mut Ui, id: &str, title: &str, mut pl: Place, closable: bool, pan
         if let Some(at) = ui.ctx().pointer_latest_pos() {
             let target = drop_side(screen, at);
             if target == Side::Float {
+                // Attrapé ancré (décalage énorme) : le panneau flottant arrive sous le pointeur
+                let off = if pl.side == Side::Float { off } else { vec2(off.x.min(60.0), off.y.min(11.0)) };
                 pl.pos = [at.x - off.x, at.y - off.y];
+                let s = float_size(screen, pl.size, 180.0);
+                pl.size = [s.x, s.y];
             }
             pl.side = target;
             set(id, pl);
@@ -269,7 +283,8 @@ pub fn show_ex<R>(ui: &mut Ui, id: &str, title: &str, default: Side, size: f32, 
     // Flottant : le contenu reste dans le cadre du panneau (un board ou un graphe y prend toute la place sans déborder)
     let screen = ui.ctx().content_rect();
     let float_pos = pos2(pl.pos[0].clamp(screen.left(), screen.right() - 80.0), pl.pos[1].clamp(screen.top(), screen.bottom() - 40.0));
-    let float_rect = (pl.side == Side::Float).then(|| Rect::from_min_size(float_pos, vec2(pl.size[0], pl.size[1])));
+    let fsize = float_size(screen, pl.size, min);
+    let float_rect = (pl.side == Side::Float).then(|| Rect::from_min_size(float_pos, fsize));
     let body = |ui: &mut Ui| {
         let top = ui.max_rect().min;
         if let Some(r) = float_rect {
@@ -284,9 +299,9 @@ pub fn show_ex<R>(ui: &mut Ui, id: &str, title: &str, default: Side, size: f32, 
         }).inner
     };
     match pl.side {
-        Side::Left => Some(egui::Panel::left(id.to_string()).resizable(true).default_size(size).min_size(min).frame(frame).show(ui, body).inner),
-        Side::Right => Some(egui::Panel::right(id.to_string()).resizable(true).default_size(size).min_size(min).frame(frame).show(ui, body).inner),
-        Side::Bottom => Some(egui::Panel::bottom(id.to_string()).resizable(true).default_size(220.0).min_size(90.0).frame(frame).show(ui, body).inner),
+        Side::Left => Some(egui::Panel::left(id.to_string()).resizable(true).default_size(size).min_size(min).max_size(max_side(screen, min)).frame(frame).show(ui, body).inner),
+        Side::Right => Some(egui::Panel::right(id.to_string()).resizable(true).default_size(size).min_size(min).max_size(max_side(screen, min)).frame(frame).show(ui, body).inner),
+        Side::Bottom => Some(egui::Panel::bottom(id.to_string()).resizable(true).default_size(220.0).min_size(90.0).max_size((screen.height() * 0.6).max(140.0)).frame(frame).show(ui, body).inner),
         Side::Window => {
             let ctx = ui.ctx().clone();
             let mut body = Some(body);
@@ -315,21 +330,24 @@ pub fn show_ex<R>(ui: &mut Ui, id: &str, title: &str, default: Side, size: f32, 
                 .movable(false)
                 .resizable(true)
                 .current_pos(pos)
-                .default_size(vec2(pl.size[0], pl.size[1]))
-                .min_size(vec2(min, 120.0))
+                .default_size(fsize)
+                .min_size(vec2(min.max(180.0), 140.0))
+                .max_size(vec2(screen.width() * 0.8, screen.height() * 0.8))
                 .frame(frame.shadow(ctx.global_style().visuals.window_shadow).corner_radius(8))
                 .show(&ctx, body)?;
             // Garder la taille choisie pour la prochaine fois
+            // (seulement quand on la redimensionne à la main : le contenu ne la fait pas grandir)
             let sz = r.response.rect.size();
-            if (sz.x - pl.size[0]).abs() > 2.0 || (sz.y - pl.size[1]).abs() > 2.0 {
+            let resizing = ctx.input(|i| i.pointer.any_down()) && HELD.lock().ok().is_some_and(|g| g.is_none());
+            if resizing && ((sz.x - pl.size[0]).abs() > 2.0 || (sz.y - pl.size[1]).abs() > 2.0) {
                 with(|m| {
                     if let Some(p) = m.get_mut(id) {
                         p.size = [sz.x, sz.y];
                     }
                 });
-                if !ctx.input(|i| i.pointer.any_down()) {
-                    save();
-                }
+            }
+            if ctx.input(|i| i.pointer.any_released()) {
+                save();
             }
             r.inner
         }

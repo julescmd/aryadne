@@ -3287,7 +3287,7 @@ impl App {
 
         // Panneau de détails
         if let Some(sel) = self.refs.selected.clone() {
-            egui::Panel::right("ref-detail").resizable(true).default_size(320.0).min_size(240.0)
+            egui::Panel::right("ref-detail").resizable(true).default_size(320.0).min_size(240.0).max_size((ui.available_width() * 0.5).max(260.0))
                 .frame(egui::Frame::new().fill(p.panel).stroke(egui::Stroke::new(1.0, p.line)).inner_margin(12))
                 .show(ui, |ui| {
                     ui.label(caps(&crate::i18n::t("référence")));
