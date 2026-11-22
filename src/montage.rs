@@ -615,6 +615,104 @@ pub fn frame(p: &Project, project: &Path, t: f32, w: u32) -> Result<image::RgbaI
     image::load_from_memory(&o.stdout).map(|i| i.to_rgba8()).map_err(|_| format!("aperçu impossible : {}", String::from_utf8_lossy(&o.stderr).lines().last().unwrap_or("?")))
 }
 
+/// Vignettes et formes d'onde des clips, calculées en arrière-plan par ffmpeg et gardées en mémoire.
+#[derive(Default)]
+struct Strips {
+    /// (fichier, temps en dixièmes de seconde) → vignette
+    thumbs: std::collections::HashMap<(PathBuf, i64), Option<egui::TextureHandle>>,
+    /// fichier → pics (0..1), 50 par seconde
+    waves: std::collections::HashMap<PathBuf, Option<std::sync::Arc<Vec<f32>>>>,
+    tx: Option<std::sync::mpsc::Sender<StripMsg>>,
+    rx: Option<Receiver<StripMsg>>,
+    busy: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+enum StripMsg {
+    Thumb((PathBuf, i64), Option<egui::ColorImage>),
+    Wave(PathBuf, Option<Vec<f32>>),
+}
+
+const WAVE_RATE: f32 = 50.0;
+
+impl Strips {
+    fn channel(&mut self) -> std::sync::mpsc::Sender<StripMsg> {
+        if self.tx.is_none() {
+            let (tx, rx) = std::sync::mpsc::channel();
+            self.tx = Some(tx);
+            self.rx = Some(rx);
+        }
+        self.tx.clone().unwrap()
+    }
+
+    fn poll(&mut self, ctx: &egui::Context) {
+        let Some(rx) = &self.rx else { return };
+        while let Ok(m) = rx.try_recv() {
+            match m {
+                StripMsg::Thumb(k, img) => {
+                    let tex = img.map(|i| ctx.load_texture(format!("strip-{}-{}", k.0.to_string_lossy(), k.1), i, egui::TextureOptions::LINEAR));
+                    self.thumbs.insert(k, tex);
+                }
+                StripMsg::Wave(f, w) => {
+                    self.waves.insert(f, w.map(std::sync::Arc::new));
+                }
+            }
+        }
+    }
+
+    /// Vignette d'un média à un instant (arrondi au dixième de seconde) ; lancée si besoin
+    fn thumb(&mut self, file: &Path, t: f32, ctx: &egui::Context) -> Option<egui::TextureId> {
+        let key = (file.to_path_buf(), (t * 10.0).round() as i64);
+        if let Some(v) = self.thumbs.get(&key) {
+            return v.as_ref().map(|t| t.id());
+        }
+        // Pas plus de trois ffmpeg à la fois
+        if self.busy.load(std::sync::atomic::Ordering::Relaxed) >= 3 {
+            ctx.request_repaint_after(std::time::Duration::from_millis(120));
+            return None;
+        }
+        let Some(ff) = ffmpeg::find("ffmpeg") else { return None };
+        self.thumbs.insert(key.clone(), None);
+        let (tx, busy, c2) = (self.channel(), self.busy.clone(), ctx.clone());
+        busy.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        std::thread::spawn(move || {
+            let o = ffmpeg::command(ff).args(["-v", "error", "-ss", &format!("{:.2}", key.1 as f32 / 10.0), "-i"]).arg(&key.0).args(["-frames:v", "1", "-vf", "scale=-2:64", "-f", "image2pipe", "-vcodec", "png", "-"]).output();
+            let img = o.ok().and_then(|o| image::load_from_memory(&o.stdout).ok()).map(|i| {
+                let i = i.to_rgba8();
+                egui::ColorImage::from_rgba_unmultiplied([i.width() as usize, i.height() as usize], i.as_raw())
+            });
+            let _ = tx.send(StripMsg::Thumb(key, img));
+            busy.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+            c2.request_repaint();
+        });
+        None
+    }
+
+    /// Forme d'onde d'un média (pics par 1/50 s) ; lancée si besoin
+    fn wave(&mut self, file: &Path, ctx: &egui::Context) -> Option<std::sync::Arc<Vec<f32>>> {
+        if let Some(v) = self.waves.get(file) {
+            return v.clone();
+        }
+        let ff = ffmpeg::find("ffmpeg")?;
+        self.waves.insert(file.to_path_buf(), None);
+        let (tx, c2, f) = (self.channel(), ctx.clone(), file.to_path_buf());
+        std::thread::spawn(move || {
+            // Son mono à 4 kHz, puis le pic de chaque tranche de 1/50 s
+            let o = ffmpeg::command(ff).args(["-v", "error", "-i"]).arg(&f).args(["-vn", "-ac", "1", "-ar", "4000", "-f", "s16le", "-"]).output();
+            let w = o.ok().filter(|o| !o.stdout.is_empty()).map(|o| {
+                let per = (4000.0 / WAVE_RATE) as usize;
+                let samples: Vec<f32> = o.stdout.chunks_exact(2).map(|b| (i16::from_le_bytes([b[0], b[1]]) as f32 / 32768.0).abs()).collect();
+let peaks: Vec<f32> = samples.chunks(per).map(|c| c.iter().copied().fold(0.0, f32::max)).collect();
+                // Ramenée au pic du fichier : un son discret reste lisible
+                let top = peaks.iter().copied().fold(0.0f32, f32::max).max(1e-4);
+                peaks.into_iter().map(|v| (v / top).sqrt()).collect::<Vec<f32>>()
+            });
+            let _ = tx.send(StripMsg::Wave(f, w));
+            c2.request_repaint();
+        });
+        None
+    }
+}
+
 #[derive(Clone, Copy, PartialEq)]
 enum Drag {
     Move,
@@ -651,6 +749,7 @@ pub struct Editor {
     pub add: Vec<PathBuf>,
     /// Dossier du coffre (pour les images des graphes d'étalonnage)
     root: String,
+    strips: Strips,
     /// Graphe d'étalonnage à ouvrir dans l'éditeur de nodes
     pub open_request: Option<PathBuf>,
     /// Annuler / rétablir : états précédents du montage
@@ -677,7 +776,7 @@ impl Editor {
         if error.is_none() && project.settle_all() {
             let _ = project.write(&path);
         }
-        Editor { path, error, playhead: 0.0, selected: None, zoom: 60.0, scroll: 0.0, drag: None, tex: None, preview_rx: None, shown: None, rev: 0, play: None, export_rx: None, message: None, add: vec![], root: root.to_string(), open_request: None, saved: project.clone(), history: vec![], redo: vec![], last_head: 0.0, project }
+        Editor { path, error, playhead: 0.0, selected: None, zoom: 60.0, scroll: 0.0, drag: None, tex: None, preview_rx: None, shown: None, rev: 0, play: None, export_rx: None, message: None, add: vec![], root: root.to_string(), strips: Strips::default(), open_request: None, saved: project.clone(), history: vec![], redo: vec![], last_head: 0.0, project }
     }
 
     fn changed(&mut self) {
@@ -1136,6 +1235,7 @@ impl Editor {
 
     fn timeline(&mut self, ui: &mut egui::Ui) {
         let p = crate::theme::pal();
+        self.strips.poll(ui.ctx());
         let (full, _) = ui.allocate_exact_size(ui.available_size(), Sense::hover());
         // Colonne des pistes à gauche, comme dans Premiere : V1, V2… (la plus haute passe devant)
         let head_w = 46.0;
@@ -1281,6 +1381,41 @@ impl Editor {
             };
             let on = self.selected == Some(i);
             painter.rect_filled(r, 4.0, if on { base } else { base.linear_multiply(0.7) });
+            // Vignettes (vidéo, image) le long du clip, et forme d'onde du son en bas
+            let file = resolve(&self.path, &c.file);
+            let inner = r.shrink(1.0);
+            let clip_p = painter.with_clip_rect(inner.intersect(area));
+            if matches!(c.kind.as_str(), "video" | "image") && !c.file.is_empty() {
+                let th = inner.height();
+                let tw = th * 16.0 / 9.0;
+                let mut x = inner.left().max(area.left() - tw);
+                // On cale les vignettes sur la timeline : elles ne glissent pas quand on fait défiler
+                x = inner.left() + ((x - inner.left()) / tw).floor() * tw;
+                let ctx = ui.ctx().clone();
+                while x < inner.right().min(area.right()) {
+                    let t_src = if c.kind == "image" { 0.0 } else { c.src_in + (x - inner.left()) / zoom * c.speed };
+                    if let Some(tex) = self.strips.thumb(&file, t_src, &ctx) {
+                        clip_p.image(tex, Rect::from_min_size(pos2(x, inner.top()), vec2(tw, th)), Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::from_white_alpha(if on { 235 } else { 190 }));
+                    }
+                    x += tw;
+                }
+            }
+            if (c.kind == "audio" || c.has_audio) && !c.file.is_empty() {
+                let ctx = ui.ctx().clone();
+                if let Some(w) = self.strips.wave(&file, &ctx) {
+                    let band = if c.kind == "audio" { inner } else { Rect::from_min_max(pos2(inner.left(), inner.center().y + 2.0), inner.max) };
+                    let mid = band.center().y;
+                    let col = Color32::from_white_alpha(if c.kind == "audio" { 170 } else { 120 });
+                    let mut x = band.left().max(area.left());
+                    while x < band.right().min(area.right()) {
+                        let t_src = c.src_in + (x - inner.left()) / zoom * c.speed;
+                        let v = w.get((t_src * WAVE_RATE) as usize).copied().unwrap_or(0.0) * c.volume.min(2.0);
+                        let hh = (v * band.height() * 0.5).min(band.height() * 0.5);
+                        clip_p.line_segment([pos2(x, mid - hh), pos2(x, mid + hh)], Stroke::new(1.0, col));
+                        x += 2.0;
+                    }
+                }
+            }
             painter.rect_stroke(r, 4.0, Stroke::new(if on { 2.0 } else { 1.0 }, if on { p.accent } else { p.line }), egui::StrokeKind::Inside);
             // Fondus : un coin plus sombre à l'entrée et à la sortie
             for (len, left) in [(c.fade_in, true), (c.fade_out, false)] {
@@ -1290,7 +1425,12 @@ impl Editor {
                     painter.add(egui::Shape::convex_polygon(pts, Color32::from_black_alpha(90), Stroke::NONE));
                 }
             }
-            painter.with_clip_rect(r.shrink(3.0)).text(r.left_center() + vec2(6.0, 0.0), egui::Align2::LEFT_CENTER, &c.name, egui::FontId::proportional(11.5), Color32::WHITE);
+            // Le nom, sur une pastille sombre pour rester lisible par-dessus les vignettes
+            let np = painter.with_clip_rect(r.shrink(3.0).intersect(area));
+            let g = np.layout_no_wrap(c.name.clone(), egui::FontId::proportional(11.0), Color32::WHITE);
+            let nr = Rect::from_min_size(pos2(r.left() + 4.0, r.top() + 3.0), g.size() + vec2(8.0, 2.0));
+            np.rect_filled(nr, 3.0, Color32::from_black_alpha(120));
+            np.galley(nr.min + vec2(4.0, 1.0), g, Color32::WHITE);
         }
         // Tête de lecture
         let x = x_of(self.playhead);
