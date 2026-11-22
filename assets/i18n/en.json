@@ -1131,5 +1131,7 @@
  "MODE ÉDITION · Tab sortir · clic, Maj+clic, A, B : sommets · G R S (X Y Z : axe) · E extruder · F face · X supprimer · Ctrl+Z annuler": "EDIT MODE · Tab exit · click, Shift+click, A, B: vertices · G R S (X Y Z: axis) · E extrude · F face · X delete · Ctrl+Z undo",
  "mode édition (Tab)": "edit mode (Tab)",
  "sortir du mode édition (Tab)": "leave edit mode (Tab)",
- "Modifier le maillage : sommets, extrusion, faces. Le maillage devient un fichier OBJ à côté de la scène ; le modèle d'origine n'est pas touché.": "Edit the mesh: vertices, extrusion, faces. The mesh becomes an OBJ file next to the scene; the original model is untouched."
+ "Modifier le maillage : sommets, extrusion, faces. Le maillage devient un fichier OBJ à côté de la scène ; le modèle d'origine n'est pas touché.": "Edit the mesh: vertices, extrusion, faces. The mesh becomes an OBJ file next to the scene; the original model is untouched.",
+ "glisser : tourner · Maj+glisser : déplacer · molette : zoom · 1 3 7 : vues · 5 : perspective · L + glisser : lumière · H + glisser : HDRI · F2 renommer le fichier": "drag: orbit · Shift+drag: pan · wheel: zoom · 1 3 7: views · 5: perspective · L + drag: light · H + drag: HDRI · F2 rename file",
+ "MODE ÉDITION": "EDIT MODE"
 }

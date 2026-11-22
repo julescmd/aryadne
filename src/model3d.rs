@@ -1401,6 +1401,49 @@ pub fn render(m: &Prepared, cam: &Camera, look: &Look, w: usize, h: usize) -> Fr
     Frame { w, h, rgba, ids, depth }
 }
 
+fn add3(a: V3, b: V3) -> V3 {
+    [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
+}
+
+/// Projection de l'espace normalisé de la vue vers l'écran.
+fn projector(cam: Camera, rect: egui::Rect) -> impl Fn(V3) -> Option<Pos2> {
+    let focal = rect.height().min(rect.width()) * 1.2;
+    let rc = rect.center();
+    move |v: V3| {
+        let q = cam.view(v);
+        if cam.ortho {
+            Some(pos2(rc.x + q[0] * focal / cam.dist, rc.y - q[1] * focal / cam.dist))
+        } else {
+            (q[2] < -0.05).then(|| pos2(rc.x + q[0] / -q[2] * focal, rc.y - q[1] / -q[2] * focal))
+        }
+    }
+}
+
+/// Pour une poignée posée en `origin` : direction de la caméra, droite et haut de la vue, unités par pixel.
+fn gizmo_basis(cam: &Camera, origin: V3, focal: f32) -> (V3, V3, V3, f32) {
+    let (right, up) = (cam.unrotate([1.0, 0.0, 0.0]), cam.unrotate([0.0, 1.0, 0.0]));
+    if cam.ortho {
+        (cam.unrotate([0.0, 0.0, 1.0]), right, up, cam.dist / focal)
+    } else {
+        let eye = cam.unrotate([-cam.pan[0], -cam.pan[1], cam.dist]);
+        let toward = norm(sub(eye, origin));
+        let depth = (-cam.view(origin)[2]).max(0.05);
+        (toward, right, up, depth / focal)
+    }
+}
+
+/// Axes propres d'un objet dans la scène (rotation et parents compris), unitaires, et leur échelle.
+fn scene_world_axes(scene: &crate::scene::Scene, k: usize) -> [(V3, f32); 3] {
+    let o = scene.world(k, [0.0; 3]);
+    [0, 1, 2].map(|i| {
+        let mut e = [0.0f32; 3];
+        e[i] = 1.0;
+        let d = sub(scene.world(k, e), o);
+        let l = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt().max(1e-9);
+        ([d[0] / l, d[1] / l, d[2] / l], l)
+    })
+}
+
 /// Mode édition d'un objet de scène.
 struct MeshEdit {
     obj: usize,
@@ -1616,7 +1659,9 @@ pub struct Viewer {
     /// Triangles de chaque objet dans le modèle réuni (objet, début, fin)
     scene_ranges: Vec<(usize, usize, usize)>,
     /// Axe de la poignée de déplacement en cours de glissement
-    gizmo_axis: Option<usize>,
+    /// Poignée tenue : laquelle, position précédente, point de départ, valeur cumulée
+    gizmo_hold: Option<(crate::gizmo::Handle, Pos2, Pos2, [f32; 3])>,
+    gizmo_hot: Option<crate::gizmo::Handle>,
     /// Ce que fait la poignée : 0 déplacer, 1 tourner, 2 redimensionner
     gizmo_mode: u8,
     /// Images de référence de la scène, chargées une fois (texture et rapport largeur / hauteur)
@@ -1708,7 +1753,8 @@ impl Viewer {
             scene_errors: vec![],
             scene_rx: None,
             scene_ranges: vec![],
-            gizmo_axis: None,
+            gizmo_hold: None,
+            gizmo_hot: None,
             gizmo_mode: 0,
             ref_tex: Default::default(),
             anim_frame: 0.0,
@@ -3144,7 +3190,7 @@ impl Viewer {
 
         // ---------- barre d'outils : trois menus et quelques boutons ----------
         let stay = egui::containers::menu::MenuConfig::new().close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             egui::containers::menu::MenuButton::new(crate::i18n::t("affichage ▾")).config(stay.clone()).ui(ui, |ui| {
                 ui.set_min_width(240.0);
                 ui.label(egui::RichText::new(crate::i18n::t("matériau")).color(p.muted).size(11.0));
@@ -3338,25 +3384,19 @@ impl Viewer {
             self.turntable_gif();
         }
 
+        // Panneaux de droite : de vrais panneaux qui prennent leur place, la vue occupe ce qui reste
+        let side_frame = egui::Frame::new().fill(p.panel).stroke(Stroke::new(1.0, p.line)).inner_margin(8);
         if let Some(e) = &mut self.edit {
-            let avail = ui.available_rect_before_wrap();
-            let pr = egui::Rect::from_min_max(egui::pos2(avail.right() - 440.0, avail.top()), avail.max);
-            let ui = &mut ui.new_child(egui::UiBuilder::new().max_rect(pr));
-            egui::Frame::new().fill(p.panel).stroke(Stroke::new(1.0, p.line)).inner_margin(8).show(ui, |ui| {
-                ui.set_min_size(pr.size() - egui::vec2(16.0, 16.0));
+            egui::Panel::right("model-edit-panel").resizable(true).default_size(430.0).min_size(300.0).frame(side_frame).show(ui, |ui| {
                 egui::ScrollArea::vertical().id_salt("edit-panel").show(ui, |ui| {
                     e.panel(ui);
                 });
             });
         }
         if self.show_mods {
-            let avail = ui.available_rect_before_wrap();
-            let pr = egui::Rect::from_min_max(egui::pos2(avail.right() - 280.0, avail.top()), avail.max);
             let mut changed = false;
             {
-                let ui = &mut ui.new_child(egui::UiBuilder::new().max_rect(pr));
-                egui::Frame::new().fill(p.panel).stroke(Stroke::new(1.0, p.line)).inner_margin(8).show(ui, |ui| {
-                    ui.set_min_size(pr.size() - egui::vec2(16.0, 16.0));
+                egui::Panel::right("model-mods-panel").resizable(true).default_size(290.0).min_size(240.0).frame(side_frame).show(ui, |ui| {
                     egui::ScrollArea::vertical().id_salt("mods").show(ui, |ui| {
                         changed = crate::modifiers::panel(ui, &mut self.stack, self.applied.is_some(), &mut mod_request);
                         ui.add_space(8.0);
@@ -3546,7 +3586,7 @@ impl Viewer {
                 Err(e) => format!("export impossible : {e}"),
             });
         }
-        let avail = ui.available_size() - if self.edit.is_some() { egui::vec2(448.0, 0.0) } else if self.show_mods { egui::vec2(288.0, 0.0) } else { egui::Vec2::ZERO };
+        let avail = ui.available_size();
         let (rect, resp) = ui.allocate_exact_size(avail.max(egui::vec2(50.0, 50.0)), Sense::click_and_drag());
         let painter = ui.painter_at(rect);
         painter.rect_filled(rect, 0.0, p.panel);
@@ -3569,7 +3609,7 @@ impl Viewer {
             }
         }
         // Scène : poignée de déplacement de l'objet choisi (trois axes à attraper)
-        let mut gizmo: Option<(Pos2, [Option<Pos2>; 3])> = None;
+        let mut gizmo: Option<([f32; 3], [[f32; 3]; 3])> = None;
         // Le clic qui valide une transformation au clavier ne doit pas aussi choisir un autre objet
         let mut modal_ended = false;
         let mut marker_pick: Option<usize> = None;
@@ -3676,6 +3716,7 @@ impl Viewer {
                     });
                     (base, axes)
                 });
+                let own_axes = (sel < scene.objects.len()).then(|| scene_world_axes(scene, sel).map(|(d, _)| d));
                 let shown = sel < scene.objects.len() && scene.shown(sel);
                 if let (Some(o), Some((base, axes))) = (scene.objects.get_mut(sel).filter(|_| shown), placed) {
                     let longest = (hi[0] - lo[0]).max(hi[1] - lo[1]).max(hi[2] - lo[2]).max(1e-9);
@@ -3692,62 +3733,65 @@ impl Viewer {
                             (q[2] < -0.05).then(|| pos2(rc.x + q[0] / -q[2] * focal, rc.y - q[1] / -q[2] * focal))
                         }
                     };
-                    let len = 0.16 * dist / 2.2;
-                    if let Some(po) = project(origin) {
-                        let ends = [0, 1, 2].map(|k| {
-                            let a = axes[k].0;
-                            project([origin[0] + a[0] * len, origin[1] + a[1] * len, origin[2] + a[2] * len])
-                        });
-                        if resp.drag_started_by(egui::PointerButton::Primary) {
-                            let at = ui.input(|i| i.pointer.press_origin()).unwrap_or(po);
-                            // Distance du curseur à chaque axe, à l'écran
-                            let seg = |a: Pos2, b: Pos2| {
-                                let ab = b - a;
-                                let t = ((at - a).dot(ab) / ab.length_sq().max(1e-6)).clamp(0.0, 1.0);
-                                (a + ab * t - at).length()
-                            };
-                            self.gizmo_axis = ends.iter().enumerate().filter_map(|(k, e)| e.map(|e| (k, seg(po, e)))).filter(|x| x.1 < 10.0).min_by(|a, b| a.1.total_cmp(&b.1)).map(|x| x.0);
-                            // Le centre : taille uniforme, en mode taille
-                            if self.gizmo_mode == 2 && (at - po).length() < 9.0 {
-                                self.gizmo_axis = Some(3);
+                    let _ = (ortho, rc);
+                    let mode = crate::gizmo::Mode::from_u8(self.gizmo_mode);
+                    // Taille : selon les axes propres de l'objet ; déplacer et tourner : selon ceux de son parent
+                    let gaxes = if mode == crate::gizmo::Mode::Scale {
+                        own_axes.unwrap_or([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]])
+                    } else {
+                        axes.map(|x| x.0)
+                    };
+                    let (toward, right, up, per_px) = gizmo_basis(cam, origin, focal);
+                    let rig = crate::gizmo::Rig { origin, axes: gaxes, len: per_px * 92.0, toward, right, up, per_px, project: &project };
+                    if let Some(l) = rig.layout(mode) {
+                        let pointer = ui.input(|i| i.pointer.hover_pos());
+                        if self.gizmo_hold.is_none() {
+                            self.gizmo_hot = if self.modal.is_none() && resp.hovered() { pointer.and_then(|p| l.hit(mode, p)) } else { None };
+                        }
+                        if resp.drag_started_by(egui::PointerButton::Primary) && self.modal.is_none() {
+                            if let Some(at) = ui.input(|i| i.pointer.press_origin()) {
+                                if let Some(h) = l.hit(mode, at) {
+                                    self.gizmo_hold = Some((h, at, at, [0.0; 3]));
+                                }
                             }
                         }
-                        if let (Some(k), true) = (self.gizmo_axis, resp.dragged_by(egui::PointerButton::Primary)) {
-                            let d = resp.drag_delta();
-                            if k == 3 {
-                                if d.x != 0.0 || d.y != 0.0 {
-                                    let f = (1.0 + (d.x - d.y) * 0.006).max(0.05);
-                                    o.scale = [o.scale[0] * f, o.scale[1] * f, o.scale[2] * f];
+                        if let (Some((h, prev, start, mut acc)), true, Some(cur)) = (self.gizmo_hold, resp.dragged_by(egui::PointerButton::Primary), pointer) {
+                            match crate::gizmo::drag(&rig, &l, mode, h, prev, cur) {
+                                Some(crate::gizmo::Delta::Move(m)) => {
+                                    let w = [m[0] * longest, m[1] * longest, m[2] * longest];
+                                    for k in 0..3 {
+                                        let dk = (w[0] * axes[k].0[0] + w[1] * axes[k].0[1] + w[2] * axes[k].0[2]) / axes[k].1;
+                                        o.pos[k] += dk;
+                                        acc[k] += dk;
+                                    }
                                     self.scene_dirty = true;
                                 }
-                            } else if let Some(e) = ends[k] {
-                                let dir = e - po;
-                                // Le long de l'axe à l'écran (déplacer, taille) ou en travers (tourner)
-                                let along = d.dot(dir) / dir.length_sq().max(1e-6);
-                                let across = (d.x * dir.y - d.y * dir.x) / dir.length().max(1e-3);
-                                match self.gizmo_mode {
-                                    1 if across != 0.0 => {
-                                        o.rot[k] = (o.rot[k] + across * 0.6 + 180.0).rem_euclid(360.0) - 180.0;
-                                        self.scene_dirty = true;
-                                    }
-                                    2 if along != 0.0 => {
-                                        o.scale[k] = (o.scale[k] * (1.0 + along)).max(0.001);
-                                        self.scene_dirty = true;
-                                    }
-                                    0 if along != 0.0 => {
-                                        o.pos[k] += along * len * longest / axes[k].1;
-                                        self.scene_dirty = true;
-                                    }
-                                    _ => {}
+                                Some(crate::gizmo::Delta::Rotate(ax, t)) => {
+                                    let pa = [0, 1, 2].map(|k| ax[0] * axes[k].0[0] + ax[1] * axes[k].0[1] + ax[2] * axes[k].0[2]);
+                                    crate::scene::rotate_by(o, pa, t);
+                                    acc[0] += t;
+                                    self.scene_dirty = true;
                                 }
+                                Some(crate::gizmo::Delta::Scale(f)) => {
+                                    if acc == [0.0; 3] {
+                                        acc = [1.0; 3];
+                                    }
+                                    for k in 0..3 {
+                                        o.scale[k] = (o.scale[k] * f[k]).max(0.0005);
+                                        acc[k] *= f[k];
+                                    }
+                                    self.scene_dirty = true;
+                                }
+                                None => {}
                             }
+                            self.gizmo_hold = Some((h, cur, start, acc));
                         }
-                        gizmo = Some((po, ends));
+                        gizmo = Some((origin, gaxes));
                     }
                 }
             }
-            if self.gizmo_axis.is_some() && (resp.drag_stopped() || !ui.input(|i| i.pointer.primary_down())) {
-                self.gizmo_axis = None;
+            if self.gizmo_hold.is_some() && (resp.drag_stopped() || !ui.input(|i| i.pointer.primary_down())) {
+                self.gizmo_hold = None;
                 if let Some(scene) = &mut self.scene {
                     if self.anim_auto {
                         if let Some(o) = self.scene_sel.and_then(|k| scene.objects.get_mut(k)) {
@@ -3790,7 +3834,91 @@ impl Viewer {
                 }
             }
         }
-        let dragging = self.gizmo_axis.is_none() && self.modal.is_none() && self.box_sel.is_none() && self.mesh.as_ref().is_none_or(|m| m.modal.is_none() && m.boxing.is_none()) && (resp.dragged_by(egui::PointerButton::Middle) || (!guiding && resp.dragged_by(egui::PointerButton::Primary)) || resp.dragged_by(egui::PointerButton::Secondary));
+        // Mode édition : la même poignée, posée au centre des sommets choisis, selon les axes de la scène
+        if self.edit.is_none() && crate::scene::is_scene(&self.path) {
+            if let (Some(me), Some((lo, hi)), Some(scene)) = (self.mesh.as_mut(), self.scene_frame, self.scene.as_ref()) {
+                let obj = me.obj;
+                if me.modal.is_none() && me.boxing.is_none() && obj < scene.objects.len() && me.sel.iter().any(|s| *s) {
+                    let o0 = scene.world(obj, [0.0; 3]);
+                    let cols = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]].map(|e| sub(scene.world(obj, e), o0));
+                    if let Some(inv) = crate::meshedit::inverse(cols) {
+                        let to_world = |v: V3| add3(crate::meshedit::apply(&cols, v), o0);
+                        let to_local = |w: V3| crate::meshedit::apply(&inv, sub(w, o0));
+                        let longest = (hi[0] - lo[0]).max(hi[1] - lo[1]).max(hi[2] - lo[2]).max(1e-9);
+                        let c = [(lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0, (lo[2] + hi[2]) / 2.0];
+                        let chosen: Vec<usize> = (0..me.mesh.pos.len()).filter(|&i| me.sel.get(i).copied().unwrap_or(false)).collect();
+                        let n = chosen.len() as f32;
+                        let cen = chosen.iter().fold([0.0f32; 3], |a, &i| add3(a, to_world(me.mesh.pos[i]).map(|x| x / n)));
+                        let origin = [(cen[0] - c[0]) / longest, (cen[1] - c[1]) / longest, (cen[2] - c[2]) / longest];
+                        let focal = rect.height().min(rect.width()) * 1.2;
+                        let project = projector(self.cam, rect);
+                        let (toward, right, up, per_px) = gizmo_basis(&self.cam, origin, focal);
+                        let axes = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+                        let mode = crate::gizmo::Mode::from_u8(self.gizmo_mode);
+                        let rig = crate::gizmo::Rig { origin, axes, len: per_px * 92.0, toward, right, up, per_px, project: &project };
+                        if let Some(l) = rig.layout(mode) {
+                            let pointer = ui.input(|i| i.pointer.hover_pos());
+                            if self.gizmo_hold.is_none() {
+                                self.gizmo_hot = if resp.hovered() { pointer.and_then(|p| l.hit(mode, p)) } else { None };
+                            }
+                            if resp.drag_started_by(egui::PointerButton::Primary) {
+                                if let Some(at) = ui.input(|i| i.pointer.press_origin()) {
+                                    if let Some(h) = l.hit(mode, at) {
+                                        me.hist.push((me.mesh.clone(), me.sel.clone()));
+                                        self.gizmo_hold = Some((h, at, at, if mode == crate::gizmo::Mode::Scale { [1.0; 3] } else { [0.0; 3] }));
+                                    }
+                                }
+                            }
+                            if let (Some((h, prev, start, mut acc)), true, Some(cur)) = (self.gizmo_hold, resp.dragged_by(egui::PointerButton::Primary), pointer) {
+                                let moved = match crate::gizmo::drag(&rig, &l, mode, h, prev, cur) {
+                                    Some(crate::gizmo::Delta::Move(m)) => {
+                                        let w = m.map(|x| x * longest);
+                                        acc = add3(acc, w);
+                                        for &i in &chosen {
+                                            me.mesh.pos[i] = to_local(add3(to_world(me.mesh.pos[i]), w));
+                                        }
+                                        true
+                                    }
+                                    Some(crate::gizmo::Delta::Rotate(a, t)) => {
+                                        acc[0] += t;
+                                        let (s, co) = t.sin_cos();
+                                        for &i in &chosen {
+                                            let v = sub(to_world(me.mesh.pos[i]), cen);
+                                            let (kxv, kdv) = (cross(a, v), dot(a, v));
+                                            let r = [0, 1, 2].map(|k| cen[k] + v[k] * co + kxv[k] * s + a[k] * kdv * (1.0 - co));
+                                            me.mesh.pos[i] = to_local(r);
+                                        }
+                                        true
+                                    }
+                                    Some(crate::gizmo::Delta::Scale(f)) => {
+                                        for k in 0..3 {
+                                            acc[k] *= f[k];
+                                        }
+                                        for &i in &chosen {
+                                            let v = sub(to_world(me.mesh.pos[i]), cen);
+                                            me.mesh.pos[i] = to_local([cen[0] + v[0] * f[0], cen[1] + v[1] * f[1], cen[2] + v[2] * f[2]]);
+                                        }
+                                        true
+                                    }
+                                    None => false,
+                                };
+                                if moved {
+                                    let _ = me.mesh.write_obj(&me.file);
+                                    self.scene_dirty = true;
+                                }
+                                self.gizmo_hold = Some((h, cur, start, acc));
+                            }
+                            gizmo = Some((origin, axes));
+                        }
+                    }
+                }
+                if self.gizmo_hold.is_some() && (resp.drag_stopped() || !ui.input(|i| i.pointer.primary_down())) {
+                    self.gizmo_hold = None;
+                    me.skip_click = true;
+                }
+            }
+        }
+        let dragging = self.gizmo_hold.is_none() && self.modal.is_none() && self.box_sel.is_none() && self.mesh.as_ref().is_none_or(|m| m.modal.is_none() && m.boxing.is_none()) && (resp.dragged_by(egui::PointerButton::Middle) || (!guiding && resp.dragged_by(egui::PointerButton::Primary)) || resp.dragged_by(egui::PointerButton::Secondary));
         if resp.clicked() {
             if let (Some(e), Some((_, _, prep)), Some(pt)) = (&mut self.edit, &self.prepared, resp.interact_pointer_pos()) {
                 if let Some((tri, bary)) = pick(prep, &self.cam, rect.width(), rect.height(), pt.x - rect.left(), pt.y - rect.top()) {
@@ -4010,28 +4138,31 @@ impl Viewer {
             self.scene_multi = if list.len() > 1 { list } else { vec![] };
             self.multi_follow = None;
         }
-        if let Some((po, ends)) = gizmo {
-            let over = ui.painter_at(rect);
-            for (k, col) in [Color32::from_rgb(235, 70, 80), Color32::from_rgb(110, 200, 60), Color32::from_rgb(60, 130, 240)].into_iter().enumerate() {
-                if let Some(e) = ends[k] {
-                    let on = self.gizmo_axis == Some(k);
-                    over.line_segment([po, e], Stroke::new(if on { 4.0 } else { 2.5 }, col));
-                    let r = if on { 6.5 } else { 5.0 };
-                    match self.gizmo_mode {
-                        1 => {
-                            over.circle_stroke(e, r + 1.5, Stroke::new(2.5, col));
-                        }
-                        2 => {
-                            over.rect_filled(egui::Rect::from_center_size(e, egui::vec2(r * 2.0, r * 2.0)), 1.0, col);
-                        }
-                        _ => {
-                            over.circle_filled(e, r, col);
-                        }
-                    }
+        if let (Some((origin, gaxes)), Some((lo, hi))) = (gizmo, self.scene_frame) {
+            let _ = (lo, hi);
+            let focal = rect.height().min(rect.width()) * 1.2;
+            let project = projector(self.cam, rect);
+            let (toward, right, up, per_px) = gizmo_basis(&self.cam, origin, focal);
+            let mode = crate::gizmo::Mode::from_u8(self.gizmo_mode);
+            let rig = crate::gizmo::Rig { origin, axes: gaxes, len: per_px * 92.0, toward, right, up, per_px, project: &project };
+            if let Some(l) = rig.layout(mode) {
+                let over = ui.painter_at(rect);
+                let hold = self.gizmo_hold;
+                let swept = hold.filter(|_| mode == crate::gizmo::Mode::Rotate).map(|(_, _, start, acc)| (acc[0], start));
+                crate::gizmo::draw(&over, &rig, &l, mode, self.gizmo_hot, hold.map(|x| x.0), swept);
+                // Valeur en cours, près du pointeur
+                if let (Some((_, cur, _, acc)), true) = (hold, mode != crate::gizmo::Mode::Rotate) {
+                    let text = if mode == crate::gizmo::Mode::Move { format!("Δ {:+.2}  {:+.2}  {:+.2}", acc[0], acc[1], acc[2]) } else { format!("× {:.2}  {:.2}  {:.2}", acc[0], acc[1], acc[2]) };
+                    let mut sh = vec![];
+                    crate::gizmo::text_tag(&mut sh, &over, cur + egui::vec2(18.0, 22.0), &text, Color32::WHITE);
+                    over.extend(sh);
+                }
+                if self.gizmo_hold.is_some() {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+                } else if self.gizmo_hot.is_some() {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
                 }
             }
-            over.circle_filled(po, 3.5, Color32::WHITE);
-            over.circle_stroke(po, 3.5, Stroke::new(1.0, Color32::from_gray(40)));
         }
         // Coutures (mode édition), en rouge par-dessus le modèle
         if let (Some(e), Some((_, _, prep))) = (&self.edit, &self.prepared) {
@@ -4121,8 +4252,19 @@ impl Viewer {
             painter.line_segment([o, end], Stroke::new(2.0, col));
             painter.text(end, egui::Align2::CENTER_CENTER, label, egui::FontId::monospace(10.0), col);
         }
-        let hint = self.capture_msg.clone().unwrap_or_else(|| if self.modal.is_some() || self.mesh.as_ref().is_some_and(|m| m.modal.is_some()) { String::new() } else if self.mesh.is_some() { crate::i18n::t("MODE ÉDITION · Tab : sortir · clic, Maj+clic, A, B : sommets · G R S · E extruder · F face · X supprimer · Ctrl+Z") } else if crate::scene::is_scene(&self.path) { crate::i18n::t("G R S : déplacer, tourner, taille · Maj+A : ajouter · X : supprimer · Maj+D : dupliquer · H : cacher · I : clé · 1 3 7 : vues") } else { "glisser : tourner · Maj / clic droit : déplacer · molette : zoom · L : lumière · H : HDRI · 1 3 7 : vues".into() });
-        painter.text(rect.right_bottom() + vec2(-12.0, -10.0), egui::Align2::RIGHT_BOTTOM, hint, egui::FontId::monospace(10.5), if self.look.show_bg { Color32::from_gray(220) } else { p.muted });
+        // Les raccourcis sont dans la barre du bas ; la vue ne garde que les messages et le mode en cours
+        if let Some(msg) = &self.capture_msg {
+            let g = painter.layout(msg.clone(), egui::FontId::monospace(11.0), p.text, rect.width() - 40.0);
+            let r = egui::Rect::from_min_size(pos2(rect.left() + 12.0, rect.bottom() - g.size().y - 18.0), g.size() + vec2(12.0, 6.0));
+            painter.rect_filled(r, 4.0, p.panel.gamma_multiply(0.92));
+            painter.galley(r.min + vec2(6.0, 3.0), g, p.text);
+        }
+        if self.mesh.is_some() {
+            let g = painter.layout_no_wrap(crate::i18n::t("MODE ÉDITION"), egui::FontId::monospace(11.0), p.on_accent);
+            let r = egui::Rect::from_min_size(rect.left_top() + vec2(12.0, 12.0), g.size() + vec2(14.0, 8.0));
+            painter.rect_filled(r, 4.0, p.accent);
+            painter.galley(r.min + vec2(7.0, 4.0), g, p.on_accent);
+        }
     }
 }
 

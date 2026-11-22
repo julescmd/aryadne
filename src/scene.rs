@@ -510,6 +510,53 @@ pub fn resolve(scene_path: &Path, file: &str) -> PathBuf {
     if p.is_absolute() { p.to_path_buf() } else { scene_path.parent().unwrap_or(Path::new("")).join(p) }
 }
 
+/// Matrice de rotation d'un objet (X, puis Y, puis Z, en degrés), lignes par lignes.
+pub fn rot_matrix(rot: [f32; 3]) -> [[f32; 3]; 3] {
+    let col = |e: [f32; 3]| {
+        let o = Object { rot, scale: [1.0; 3], pos: [0.0; 3], ..Object::new(String::new(), String::new()) };
+        transform(&o, e)
+    };
+    let (x, y, z) = (col([1.0, 0.0, 0.0]), col([0.0, 1.0, 0.0]), col([0.0, 0.0, 1.0]));
+    [[x[0], y[0], z[0]], [x[1], y[1], z[1]], [x[2], y[2], z[2]]]
+}
+
+/// Angles X Y Z (degrés) d'une matrice de rotation, dans l'ordre de `transform`.
+pub fn rot_euler(m: [[f32; 3]; 3]) -> [f32; 3] {
+    let sy = (-m[2][0]).clamp(-1.0, 1.0);
+    let b = sy.asin();
+    let (a, c) = if sy.abs() < 0.9999 {
+        (m[2][1].atan2(m[2][2]), m[1][0].atan2(m[0][0]))
+    } else {
+        // Blocage de cardan : seule la somme compte, Z prend tout
+        (0.0, (-m[0][1]).atan2(m[1][1]))
+    };
+    [a.to_degrees(), b.to_degrees(), c.to_degrees()]
+}
+
+/// Tourne un objet d'un angle (radians) autour d'un axe exprimé dans l'espace de son parent.
+pub fn rotate_by(o: &mut Object, axis: [f32; 3], angle: f32) {
+    let l = (axis[0] * axis[0] + axis[1] * axis[1] + axis[2] * axis[2]).sqrt();
+    if l < 1e-9 {
+        return;
+    }
+    let k = [axis[0] / l, axis[1] / l, axis[2] / l];
+    let (s, c) = angle.sin_cos();
+    let t = 1.0 - c;
+    let r = [
+        [c + k[0] * k[0] * t, k[0] * k[1] * t - k[2] * s, k[0] * k[2] * t + k[1] * s],
+        [k[1] * k[0] * t + k[2] * s, c + k[1] * k[1] * t, k[1] * k[2] * t - k[0] * s],
+        [k[2] * k[0] * t - k[1] * s, k[2] * k[1] * t + k[0] * s, c + k[2] * k[2] * t],
+    ];
+    let m = rot_matrix(o.rot);
+    let mut out = [[0.0f32; 3]; 3];
+    for i in 0..3 {
+        for j in 0..3 {
+            out[i][j] = (0..3).map(|n| r[i][n] * m[n][j]).sum();
+        }
+    }
+    o.rot = rot_euler(out);
+}
+
 /// Place un point de l'objet dans la scène : échelle, rotation X Y Z, puis position.
 pub fn transform(o: &Object, p: [f32; 3]) -> [f32; 3] {
     let p = [p[0] * o.scale[0], p[1] * o.scale[1], p[2] * o.scale[2]];
@@ -635,6 +682,22 @@ pub fn build_ranges(scene: &Scene, scene_path: &Path) -> (Result<crate::model3d:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rotations() {
+        for rot in [[0.0, 0.0, 0.0], [30.0, -40.0, 120.0], [-170.0, 10.0, 5.0]] {
+            let back = rot_euler(rot_matrix(rot));
+            let (a, b) = (rot_matrix(rot), rot_matrix(back));
+            for i in 0..3 {
+                for j in 0..3 {
+                    assert!((a[i][j] - b[i][j]).abs() < 1e-4, "{rot:?} -> {back:?}");
+                }
+            }
+        }
+        let mut o = Object::new("a".into(), "@cube".into());
+        rotate_by(&mut o, [0.0, 1.0, 0.0], std::f32::consts::FRAC_PI_2);
+        assert!((o.rot[1] - 90.0).abs() < 1e-3);
+    }
 
     #[test]
     fn scene_aller_retour_et_fusion() {

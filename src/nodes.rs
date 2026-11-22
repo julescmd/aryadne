@@ -2327,7 +2327,7 @@ impl Editor {
     pub fn open(path: PathBuf, root: &str) -> Result<Editor, String> {
         let graph = Graph::load(&path)?;
         let program = Program::compile(&graph.effective(), root, 1024);
-        Ok(Editor {
+        let mut ed = Editor {
             path,
             root: root.to_string(),
             last: graph.clone(),
@@ -2358,7 +2358,12 @@ impl Editor {
             frame_sel: false,
             frame_rename: None,
             frame_sel_request: false, pv_yaw: 0.4, pv_pitch: 0.25, pv_dist: 2.0, pv_env: 0, pv_model: None, pv_key: 0, solo: None,
-        })
+        };
+        // Un graphe dont des nodes se chevauchent (fichier écrit à la main, ancienne version) est rangé à l'ouverture
+        if ed.overlaps() {
+            ed.arrange();
+        }
+        Ok(ed)
     }
 
     fn changed(&mut self) {
@@ -2457,6 +2462,12 @@ impl Editor {
             }
         }
         self.changed();
+    }
+
+    /// Deux nodes se recouvrent-ils ?
+    fn overlaps(&self) -> bool {
+        let rects: Vec<Rect> = self.graph.nodes.iter().filter_map(|n| def(&n.op).map(|d| Rect::from_min_size(pos2(n.pos[0], n.pos[1]), vec2(NW, Self::node_size(n, d))).shrink(4.0))).collect();
+        rects.iter().enumerate().any(|(i, a)| rects[i + 1..].iter().any(|b| a.intersects(*b)))
     }
 
     fn is_output(&self, id: u32) -> bool {

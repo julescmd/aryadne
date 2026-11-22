@@ -3,6 +3,7 @@
 mod cloud;
 mod dock;
 mod formats;
+mod gizmo;
 mod meshedit;
 mod montage;
 mod scene;
@@ -1166,7 +1167,7 @@ impl App {
         match self.current().map(|d| &d.content) {
             Some(Content::Model(v)) if v.is_mesh_edit() => t("MODE ÉDITION · Tab sortir · clic, Maj+clic, A, B : sommets · G R S (X Y Z : axe) · E extruder · F face · X supprimer · Ctrl+Z annuler"),
             Some(Content::Model(v)) if v.is_scene() => t("G R S : déplacer, tourner, taille (X Y Z : axe) · Maj+clic, A, B : sélection · Maj+A ajouter · X supprimer · Maj+D dupliquer · P parent · H cacher · I clé · Ctrl+Z annuler"),
-            Some(Content::Model(_)) => t("glisser : tourner · Maj+glisser : déplacer · molette : zoom · 1 3 7 : vues · 5 : perspective · F2 renommer le fichier"),
+            Some(Content::Model(_)) => t("glisser : tourner · Maj+glisser : déplacer · molette : zoom · 1 3 7 : vues · 5 : perspective · L + glisser : lumière · H + glisser : HDRI · F2 renommer le fichier"),
             Some(Content::Montage(_)) => t("Espace lire · S couper · Suppr supprimer · glisser les bords : raccourcir · Ctrl+molette : zoom · Ctrl+Z annuler"),
             Some(Content::Nodes(_)) => t("clic droit : ajouter · Q aligner · Suppr supprimer · F2 renommer la node · molette : zoom · Ctrl+Z annuler"),
             Some(Content::Text(_)) => t("Ctrl+F chercher · Ctrl+Z annuler · F2 renommer le fichier · ^P ouvrir · ^⇧P commandes"),
@@ -1458,14 +1459,16 @@ impl App {
                         if ui.add(egui::Button::new(RichText::new(format!("v{}", updater::CURRENT)).color(p.muted).size(11.0)).frame(false)).on_hover_text(crate::i18n::t("Mises à jour")).clicked() {
                             self.dialog = Some(Dialog::Update);
                         }
-                        // Les touches utiles là où on se trouve, comme la barre d'état de Blender
-                        ui.label(RichText::new(self.key_hints()).color(p.muted).size(11.0));
+                        self.timer_widget(ui);
                         self.cloud_widget(ui);
                         if self.backup_rx.is_some() {
                             ui.add(egui::Spinner::new().size(10.0));
                             ui.label(RichText::new(crate::i18n::t("sauvegarde…")).color(p.muted).size(11.0));
                         }
-                        self.timer_widget(ui);
+                        // Les touches utiles là où on se trouve, comme la barre d'état de Blender :
+                        // elles prennent la place qui reste et se coupent proprement au besoin (survol : tout le texte)
+                        let hints = self.key_hints();
+                        ui.add(egui::Label::new(RichText::new(&hints).color(p.muted).size(11.0)).truncate()).on_hover_text(hints.replace(" · ", "\n"));
                     });
                 });
             });
@@ -1733,15 +1736,6 @@ impl App {
             egui::Frame::new().inner_margin(egui::Margin::symmetric(16, 6)).stroke(egui::Stroke::new(1.0, p.line)).show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 ui.horizontal(|ui| {
-                    let shown = vault::display_rel(&rel);
-                    let parts: Vec<&str> = shown.split('/').collect();
-                    for (k, part) in parts.iter().enumerate() {
-                        let last = k == parts.len() - 1;
-                        ui.label(RichText::new(*part).color(if last { p.text } else { p.muted }).size(12.0));
-                        if !last {
-                            ui.label(RichText::new("/").color(p.line).size(12.0));
-                        }
-                    }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         // « ouvrir ▾ » : application par défaut, au choix, ou dans le dossier
                         let ext_label = if rel.to_lowercase().ends_with(".blend") { "dans Blender" } else { "avec l'app par défaut" };
@@ -1842,6 +1836,20 @@ impl App {
                                 d.preview = !d.preview;
                             }
                         }
+                        // Le chemin prend la place qui reste, à gauche, et se coupe au besoin : il ne passe plus sous les boutons
+                        ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                            let shown = vault::display_rel(&rel);
+                            let mut job = egui::text::LayoutJob::default();
+                            let parts: Vec<&str> = shown.split('/').collect();
+                            for (k, part) in parts.iter().enumerate() {
+                                let last = k == parts.len() - 1;
+                                job.append(part, 0.0, egui::TextFormat { font_id: egui::FontId::monospace(12.0), color: if last { p.text } else { p.muted }, ..Default::default() });
+                                if !last {
+                                    job.append(" / ", 0.0, egui::TextFormat { font_id: egui::FontId::monospace(12.0), color: p.line, ..Default::default() });
+                                }
+                            }
+                            ui.add(egui::Label::new(job).truncate()).on_hover_text(&shown);
+                        });
                     });
                 });
             });
@@ -3052,13 +3060,14 @@ impl App {
             .frame(egui::Frame::new().fill(p.panel).stroke(egui::Stroke::new(1.0, p.line)).inner_margin(12))
             .show(ui, |ui| {
                 let open_name = self.current().map(|d| d.rel.clone());
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     let label = match &open_name {
                         Some(n) => format!("inclure le fichier ouvert ({n})"),
                         None => "inclure le fichier ouvert".into(),
                     };
                     ui.add_enabled(open_name.is_some(), egui::Checkbox::new(&mut self.chat.include_open, RichText::new(label).size(11.5)));
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    // Les boutons passent à la ligne plutôt que de recouvrir la case à cocher
+                    ui.scope(|ui| {
                         if ui.button(crate::i18n::t("nouvelle")).clicked() && !self.chat.busy() {
                             self.chat.new_conversation();
                         }

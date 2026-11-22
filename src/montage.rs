@@ -333,6 +333,47 @@ impl Project {
         true
     }
 
+    /// Le clip `i` en chevauche-t-il un autre sur sa piste (au-delà d'un fondu enchaîné voulu) ?
+    fn collides(&self, i: usize, track: usize) -> bool {
+        let c = &self.clips[i];
+        self.clips.iter().enumerate().any(|(k, o)| {
+            if k == i || o.track != track {
+                return false;
+            }
+            let over = c.end().min(o.end()) - c.start.max(o.start);
+            // Le clip qui commence le second porte le fondu
+            let allowed = if c.start >= o.start { c.xfade } else { o.xfade };
+            over > allowed + 1e-3
+        })
+    }
+
+    /// Si le clip `i` en recouvre un autre, il monte sur la première piste libre (au besoin une nouvelle) :
+    /// deux clips ne se cachent jamais l'un l'autre sur une même piste.
+    pub fn settle(&mut self, i: usize) -> bool {
+        if i >= self.clips.len() || !self.collides(i, self.clips[i].track) {
+            return false;
+        }
+        let from = self.clips[i].track;
+        let mut t = from + 1;
+        while t < self.tracks && self.collides(i, t) {
+            t += 1;
+        }
+        if t >= self.tracks {
+            self.tracks = t + 1;
+        }
+        self.clips[i].track = t;
+        true
+    }
+
+    /// Range tous les clips qui se recouvrent (projets plus anciens).
+    pub fn settle_all(&mut self) -> bool {
+        let mut moved = false;
+        for i in 0..self.clips.len() {
+            moved |= self.settle(i);
+        }
+        moved
+    }
+
     /// Ajoute un titre de quatre secondes sur la piste du haut, à l'instant `t`.
     pub fn add_text(&mut self, t: f32) -> usize {
         self.clips.push(Clip {
@@ -631,6 +672,11 @@ impl Editor {
             Ok(p) => (p, None),
             Err(e) => (Project::default(), Some(e)),
         };
+        let mut project = project;
+        // Des clips qui se recouvrent sur une piste : on les sépare dès l'ouverture
+        if error.is_none() && project.settle_all() {
+            let _ = project.write(&path);
+        }
         Editor { path, error, playhead: 0.0, selected: None, zoom: 60.0, scroll: 0.0, drag: None, tex: None, preview_rx: None, shown: None, rev: 0, play: None, export_rx: None, message: None, add: vec![], root: root.to_string(), open_request: None, saved: project.clone(), history: vec![], redo: vec![], last_head: 0.0, project }
     }
 
@@ -795,7 +841,7 @@ impl Editor {
         let mut split = false;
         let mut delete = false;
         let mut undo: Option<bool> = None;
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             if ui.button(if self.play.is_some() { "⏸" } else { "▶" }).on_hover_text(crate::i18n::t("lire / arrêter (Espace)")).clicked() {
                 toggle_play = true;
             }
@@ -812,6 +858,7 @@ impl Editor {
             }
             if ui.button(crate::i18n::t("＋ texte")).on_hover_text(crate::i18n::t("Ajoute un titre à la tête de lecture")).clicked() {
                 let k = self.project.add_text(self.playhead);
+                self.project.settle(k);
                 self.selected = Some(k);
                 self.changed();
             }
@@ -840,7 +887,8 @@ impl Editor {
             if ch {
                 self.changed();
             }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.separator();
+            ui.scope(|ui| {
                 if self.export_rx.is_some() {
                     ui.spinner();
                     ui.label(RichText::new(crate::i18n::t("export en cours…")).color(p.muted));
@@ -1088,9 +1136,25 @@ impl Editor {
 
     fn timeline(&mut self, ui: &mut egui::Ui) {
         let p = crate::theme::pal();
-        let (area, resp) = ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
+        let (full, _) = ui.allocate_exact_size(ui.available_size(), Sense::hover());
+        // Colonne des pistes à gauche, comme dans Premiere : V1, V2… (la plus haute passe devant)
+        let head_w = 46.0;
+        let area = Rect::from_min_max(pos2(full.left() + head_w, full.top()), full.max);
+        let resp = ui.interact(area, ui.scope_id().with("timeline-area"), Sense::click_and_drag());
         let painter = ui.painter_at(area);
         let (ruler_h, row_h) = (24.0, 36.0);
+        {
+            let hp = ui.painter_at(Rect::from_min_max(full.min, pos2(area.left(), full.bottom())));
+            hp.rect_filled(Rect::from_min_max(full.min, pos2(area.left(), full.bottom())), 0.0, p.bg);
+            let tracks = self.project.tracks.max(1);
+            for k in 0..tracks {
+                let y = full.top() + ruler_h + (tracks - 1 - k) as f32 * row_h;
+                let r = Rect::from_min_size(pos2(full.left(), y), vec2(head_w - 1.0, row_h));
+                hp.rect_filled(r.shrink(2.0), 3.0, p.panel);
+                hp.text(r.center(), egui::Align2::CENTER_CENTER, format!("V{}", k + 1), egui::FontId::monospace(11.0), p.muted);
+            }
+            hp.line_segment([pos2(area.left() - 0.5, full.top()), pos2(area.left() - 0.5, full.bottom())], Stroke::new(1.0, p.line));
+        }
         let tracks = self.project.tracks.max(1);
         // Molette : défiler ; Ctrl + molette : zoomer autour du curseur
         if resp.hovered() {
@@ -1194,7 +1258,10 @@ impl Editor {
             }
         }
         if resp.drag_stopped() {
-            if self.drag.take().is_some() {
+            if let Some((i, mode, _, _)) = self.drag.take() {
+                if matches!(mode, Drag::Move) {
+                    self.project.settle(i);
+                }
                 self.changed();
             }
         } else if dirty {
@@ -1262,6 +1329,15 @@ mod tests {
         assert!(audio && (total - 3.5).abs() < 1e-3);
         assert!(args.windows(2).any(|w| w[0] == "-ss" && w[1] == "2.000"), "{args:?}");
         assert!(filter.contains("overlay") && filter.ends_with("[vout]"));
+        // Un titre posé sur un clip de la même piste monte sur une piste libre
+        let mut q = Project::default();
+        q.clips.push(p.clips[0].clone());
+        let t = q.add_text(q.clips[0].start + 0.5);
+        q.clips[t].track = q.clips[0].track;
+        assert!(q.settle(t));
+        assert_ne!(q.clips[t].track, q.clips[0].track);
+        assert!(q.tracks > q.clips[t].track);
+        assert!(!q.settle_all());
         // Clés : à mi-chemin entre deux clés, la pose est entre les deux ; l'expression ffmpeg suit les mêmes points
         let c = &mut p.clips[0];
         c.set_key(2.0);
