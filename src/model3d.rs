@@ -1963,6 +1963,7 @@ pub struct Viewer {
     render_dialog: Option<(usize, usize, u32)>,
     final_job: Option<pathtrace::Job>,
     final_tex: Option<egui::TextureHandle>,
+    oidn_install: Option<std::sync::Arc<std::sync::Mutex<crate::ffmpeg::InstallState>>>,
     capture_msg: Option<String>,
 }
 
@@ -2057,6 +2058,7 @@ impl Viewer {
             render_dialog: None,
             final_job: None,
             final_tex: None,
+            oidn_install: None,
             capture_msg: None,
         }
     }
@@ -4089,6 +4091,32 @@ impl Viewer {
                                 ch |= ui.add_enabled(self.trace_set.floor, egui::Checkbox::new(&mut self.trace_set.floor_visible, crate::i18n::t("sol visible"))).changed();
                                 ch |= ui.add(egui::Slider::new(&mut self.trace_set.clamp, 1.0..=100.0).logarithmic(true).text(crate::i18n::t("limite des points brillants"))).changed();
                                 ch |= ui.checkbox(&mut self.trace_set.denoise, crate::i18n::t("débruitage")).changed();
+                                // Débruiteur par IA (Intel Open Image Denoise), téléchargé une fois
+                                if crate::oidn::installed() {
+                                    ui.label(egui::RichText::new(crate::i18n::t("débruiteur IA : Intel Open Image Denoise")).size(10.5).color(p.muted));
+                                } else {
+                                    match &self.oidn_install {
+                                        None => {
+                                            if ui.button(crate::i18n::t("installer le débruiteur IA (~65 Mo)")).on_hover_text(crate::i18n::t("Intel Open Image Denoise, le débruiteur de Cycles, Arnold et V-Ray. Sans droits admin.")).clicked() {
+                                                self.oidn_install = Some(crate::oidn::install(ui.ctx().clone()));
+                                            }
+                                        }
+                                        Some(j) => {
+                                            let st = j.lock().map(|s| s.clone()).unwrap_or_default();
+                                            if let Some(e) = &st.error {
+                                                ui.label(egui::RichText::new(e).color(p.missing).size(10.5));
+                                            } else if st.done {
+                                                self.oidn_install = None;
+                                                ch = true;
+                                            } else {
+                                                ui.horizontal(|ui| {
+                                                    ui.spinner();
+                                                    ui.label(egui::RichText::new(&st.message).size(10.5));
+                                                });
+                                            }
+                                        }
+                                    }
+                                }
                                 if ch {
                                     self.trace = None;
                                 }
@@ -4957,7 +4985,9 @@ impl Viewer {
                         while acc.spp < self.trace_max && (acc.spp == 0 || t0.elapsed().as_millis() < 40) {
                             pathtrace::pass(&prepared.2, &self.cam, &look, &self.trace_set, acc);
                         }
-                        let img = egui::ColorImage::from_rgba_unmultiplied([acc.w, acc.h], &acc.image(look.exposure, self.trace_set.denoise));
+                        // L'IA (plus lente) passe quand l'image est finie et toutes les 16 passes ; le filtre rapide entre-temps
+                        let ai = acc.spp >= self.trace_max || acc.spp % 16 == 0;
+                        let img = egui::ColorImage::from_rgba_unmultiplied([acc.w, acc.h], &acc.image_ex(look.exposure, self.trace_set.denoise, ai));
                         match &mut self.tex {
                             Some(t) => t.set(img, egui::TextureOptions::LINEAR),
                             None => self.tex = Some(ui.ctx().load_texture("model3d", img, egui::TextureOptions::LINEAR)),

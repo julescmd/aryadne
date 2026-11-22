@@ -98,9 +98,28 @@ impl Accum {
         (col, cover)
     }
 
-    /// Image finale en 8 bits (RGBA), avec ou sans débruitage.
+    /// Débruitage par IA (Intel Open Image Denoise), s'il est installé.
+    fn denoised_ai(&self) -> Option<(Vec<[f32; 3]>, Vec<f32>)> {
+        let (col, cover) = self.mean();
+        let n = self.spp.max(1) as f32;
+        let nrm: Vec<V3> = self.nrm.iter().map(|v| { let l = dot(*v, *v).sqrt(); if l > 1e-6 { scale(*v, 1.0 / l) } else { [0.0; 3] } }).collect();
+        let alb: Vec<V3> = self.alb.iter().map(|a| { let a = scale(*a, 1.0 / n); [a[0].clamp(0.0, 1.0), a[1].clamp(0.0, 1.0), a[2].clamp(0.0, 1.0)] }).collect();
+        crate::oidn::denoise(&col, &alb, &nrm, self.w, self.h).ok().map(|c| (c, cover))
+    }
+
+    /// Image finale en 8 bits (RGBA), avec ou sans débruitage (l'IA si `ai` et qu'elle est là).
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn image(&self, exposure: f32, denoise: bool) -> Vec<u8> {
-        let (col, cover) = if denoise && self.spp >= 2 { self.denoised() } else { self.mean() };
+        self.image_ex(exposure, denoise, false)
+    }
+
+    pub fn image_ex(&self, exposure: f32, denoise: bool, ai: bool) -> Vec<u8> {
+        let ai_out = if denoise && ai && self.spp >= 1 { self.denoised_ai() } else { None };
+        let (col, cover) = match ai_out {
+            Some(x) => x,
+            None if denoise && self.spp >= 2 => self.denoised(),
+            None => self.mean(),
+        };
         let e = 2f32.powf(exposure);
         let mut out = vec![0u8; self.w * self.h * 4];
         out.par_chunks_mut(4).enumerate().for_each(|(i, o)| {
@@ -142,7 +161,7 @@ impl Job {
                 // Une image intermédiaire par seconde environ, et la dernière
                 if acc.spp == 1 || acc.spp == target || last.elapsed().as_secs_f32() > 1.0 {
                     last = std::time::Instant::now();
-                    if tx.send((acc.spp, acc.image(look.exposure, set.denoise))).is_err() {
+                    if tx.send((acc.spp, acc.image_ex(look.exposure, set.denoise, true))).is_err() {
                         return;
                     }
                     ctx.request_repaint();
@@ -515,9 +534,10 @@ mod look_test {
         let f = render(&prep, &cam, &look, 320, 240);
         image::RgbaImage::from_raw(320, 240, f.rgba).unwrap().save("/tmp/raster.png").unwrap();
         let mut acc = Accum::new(320, 240);
-        for _ in 0..16 {
+        for _ in 0..4 {
             pass(&prep, &cam, &look, &Settings::default(), &mut acc);
         }
+        image::RgbaImage::from_raw(320, 240, acc.image_ex(0.0, true, true)).unwrap().save("/tmp/trace_ai.png").unwrap();
         image::RgbaImage::from_raw(320, 240, acc.image(0.0, false)).unwrap().save("/tmp/trace.png").unwrap();
         image::RgbaImage::from_raw(320, 240, acc.image(0.0, true)).unwrap().save("/tmp/trace_dn.png").unwrap();
     }

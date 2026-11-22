@@ -3,6 +3,7 @@
 mod cloud;
 mod bridge;
 mod layout;
+mod oidn;
 mod dock;
 mod formats;
 mod boardlive;
