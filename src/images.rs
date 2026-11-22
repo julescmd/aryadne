@@ -18,7 +18,7 @@ pub fn is_image(rel: &str) -> bool {
 
 /// A une miniature affichable (image, .blend, modèle 3D, document Office).
 pub fn has_preview(rel: &str) -> bool {
-    is_image(rel) || crate::model3d::is_model(rel) || crate::office::is_office(rel) || crate::video::is_video(rel)
+    is_image(rel) || crate::bridge::is_layered(rel) || crate::model3d::is_model(rel) || crate::office::is_office(rel) || crate::video::is_video(rel)
 }
 
 /// Fichier dont la miniature est calculée (pas une image) : une seule taille suffit.
@@ -86,7 +86,7 @@ impl Images {
         if let Some(v) = map.get(&path) {
             return *v;
         }
-        let v = image::image_dimensions(&path).ok().map(|(w, h)| [w, h]);
+        let v = if crate::bridge::is_layered(rel) { crate::bridge::dims(&path) } else { image::image_dimensions(&path).ok().map(|(w, h)| [w, h]) };
         map.insert(path, v);
         v
     }
@@ -182,6 +182,10 @@ fn load(ctx: &egui::Context, path: &Path, rel: &str, size: Size) -> Result<Loade
     if crate::office::is_office(&lower) {
         let img = crate::office::thumbnail(path)?;
         return finish(ctx, img, rel, Size::Full);
+    }
+    // Image à calques : ses calques aplatis
+    if crate::bridge::is_layered(&lower) {
+        return finish(ctx, crate::bridge::image(path)?, rel, size);
     }
     let reader = image::ImageReader::open(path).map_err(|e| e.to_string())?.with_guessed_format().map_err(|e| e.to_string())?;
     let mut reader = reader;

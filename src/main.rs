@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod cloud;
+mod bridge;
 mod dock;
 mod formats;
 mod boardlive;
@@ -10,6 +11,7 @@ mod graph;
 mod untitled;
 mod meshedit;
 mod montage;
+mod montage_ui;
 mod scene;
 mod workspace;
 mod retopo;
@@ -1616,7 +1618,7 @@ impl App {
             Some(Content::Model(v)) if v.is_mesh_edit() => t("MODE ÉDITION · 1 2 3 : sommets, arêtes, faces · glisser : rectangle (Maj ajoute, Ctrl retire) · Ctrl+clic : chemin · Alt+clic : boucle · Ctrl+plus / moins · Ctrl+I inverser · G R S · E extruder · I incruster · M fusionner · L pièce liée · X supprimer · Ctrl+Z"),
             Some(Content::Model(v)) if v.is_scene() => t("molette enfoncée : tourner (Maj : déplacer) · glisser : rectangle · G R S : déplacer, tourner, taille (X Y Z : axe) · Maj+clic, A, B : sélection · Maj+A ajouter · X supprimer · Maj+D dupliquer · P parent · H cacher · I clé · Tab édition · Espace lecture · Ctrl+Z annuler"),
             Some(Content::Model(_)) => t("glisser : tourner · Maj+glisser : déplacer · molette : zoom · 1 3 7 : vues · 5 : perspective · L + glisser : lumière · H + glisser : HDRI · F2 renommer le fichier"),
-            Some(Content::Montage(_)) => t("Espace lire · S couper · Suppr supprimer · glisser les bords : raccourcir · Ctrl+molette : zoom · Ctrl+Z annuler"),
+            Some(Content::Montage(_)) => t("Espace / J K L lecture · V C B N R Y H Z T outils · I O entrée sortie · , insérer · . recouvrir · Ctrl+K couper · Maj+Suppr supprimer et refermer · Q W propager · M repère · S magnétisme · Alt+molette : zoom"),
             Some(Content::Nodes(_)) => t("clic droit : ajouter · Q aligner · Suppr supprimer · F2 renommer la node · molette : zoom · Ctrl+Z annuler"),
             Some(Content::Paint(_)) => t("B pinceau · E gomme · G pot · I pipette · M sélection · V déplacer · [ ] taille · Ctrl+A / Ctrl+D sélection · Ctrl+J dupliquer · Ctrl+E fusionner · Ctrl+Z annuler · Espace+glisser : déplacer la vue"),
             Some(Content::Video(_)) => t("Espace lire · ← → image par image · Maj+← → seconde · I O : entrée, sortie · B pinceau · E gomme"),
