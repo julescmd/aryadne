@@ -2,6 +2,7 @@
 
 mod cloud;
 mod bridge;
+mod layout;
 mod dock;
 mod formats;
 mod boardlive;
@@ -352,6 +353,10 @@ struct App {
     /// L'explorateur a reçu le dernier clic : F2, Suppr et Ctrl+Z s'adressent à lui
     explorer_focus: bool,
     explorer_rect: Option<egui::Rect>,
+    /// Disposition en cases de l'espace en cours
+    tree: Option<layout::Layout>,
+    /// Demandé depuis le menu d'un onglet
+    reset_layout: bool,
     /// Éléments affichés dans l'explorateur, dans l'ordre (image en cours, image précédente)
     explorer_order: Vec<String>,
     explorer_prev: Vec<String>,
@@ -411,6 +416,7 @@ impl App {
         w.assistant = self.assistant_open;
         w.explorer = self.explorer_open;
         w.views = self.view_panels.clone();
+        w.layout = self.tree.clone();
     }
 
     /// Met en place l'espace en cours : panneaux, couleur, onglets, vue.
@@ -419,6 +425,7 @@ impl App {
         dock::import(w.places);
         self.explorer_open = w.explorer;
         self.view_panels = w.views.clone();
+        self.tree = w.layout.clone();
         theme::set_workspace_accent(w.accent);
         theme::apply(ctx, self.prefs.dark);
         if !tabs {
@@ -971,8 +978,10 @@ impl App {
         }
         if let Some(i) = reset {
             self.ws.list[i].places.clear();
+            self.ws.list[i].layout = None;
             if i == self.ws.current {
                 dock::reset();
+                self.tree = None;
             }
             changed = true;
         }
@@ -1072,28 +1081,128 @@ impl App {
     }
 
     /// Les fenêtres de pages ajoutées par le menu « fenêtre » : chacune est un panneau qu'on place où on veut.
-    fn view_windows(&mut self, ui: &mut egui::Ui) {
-        let p = theme::pal();
-        for id in self.view_panels.clone() {
-            let kind = id.split('#').next().unwrap_or("").to_string();
-            let Some((label, _)) = VIEW_WINDOWS.iter().find(|(_, k)| *k == kind) else { continue };
-            let n = id.split('#').nth(1).unwrap_or("1");
-            let title = if n == "1" { crate::i18n::t(label) } else { format!("{} {n}", crate::i18n::t(label)) };
-            let pid = format!("view:{id}");
-            dock::show_ex(ui, &pid, &title, dock::Side::Float, 720.0, 260.0, egui::Frame::new().fill(p.bg).stroke(egui::Stroke::new(1.0, p.line)), true, |ui| {
-                ui.push_id(&pid, |ui| match kind.as_str() {
-                    "brain" => self.brain_view(ui),
-                    "refs" => self.refs_view(ui),
-                    "boards" => self.boards_view(ui),
-                    "tasks" => self.tasks_view(ui),
-                    "chat" => self.chat_view(ui),
-                    _ => self.search_view(ui),
-                });
-            });
-            if dock::closed(&pid) {
-                self.view_panels.retain(|x| *x != id);
+    /// Le contenu du centre : le document ouvert ou la page de l'espace.
+    fn main_view(&mut self, ui: &mut egui::Ui) {
+        match self.view() {
+            View::Files => self.editor(ui),
+            View::Search => self.search_view(ui),
+            View::Brain => self.brain_view(ui),
+            View::Refs => self.refs_view(ui),
+            View::Boards => self.boards_view(ui),
+            View::Chat => self.chat_view(ui),
+            View::Tasks => self.tasks_view(ui),
+        }
+    }
+
+    /// Le panneau structure n'a de sens que pour un texte.
+    fn side_wanted(&self) -> bool {
+        self.view() == View::Files && self.current().is_none_or(|d| matches!(d.content, Content::Text(_))) && self.split.is_none() && !self.side_hidden
+    }
+
+    /// Un panneau de la disposition est-il ouvert ?
+    fn pane_open(&self, id: &str) -> bool {
+        match id {
+            layout::MAIN => true,
+            "explorer" => self.explorer_open,
+            "terminal" => self.terminal.is_some(),
+            "assistant" => self.assistant_open,
+            "side" => self.side_wanted(),
+            v => v.strip_prefix("view:").is_some_and(|k| self.view_panels.iter().any(|x| x == k)),
+        }
+    }
+
+    fn pane_title(id: &str) -> String {
+        match id {
+            layout::MAIN => crate::i18n::t("document"),
+            "explorer" => crate::i18n::t("fichiers"),
+            "terminal" => "terminal".into(),
+            "assistant" => crate::i18n::t("assistant"),
+            "side" => crate::i18n::t("structure"),
+            v => {
+                let id = v.strip_prefix("view:").unwrap_or(v);
+                let kind = id.split('#').next().unwrap_or("");
+                let n = id.split('#').nth(1).unwrap_or("1");
+                let label = VIEW_WINDOWS.iter().find(|(_, k)| *k == kind).map(|(l, _)| crate::i18n::t(l)).unwrap_or_else(|| kind.to_string());
+                if n == "1" { label } else { format!("{label} {n}") }
             }
         }
+    }
+
+    /// Dessine un panneau (dans sa case, ou dans sa propre fenêtre s'il en est sorti).
+    fn pane_body(&mut self, ui: &mut egui::Ui, id: &str) {
+        match id {
+            layout::MAIN => self.main_view(ui),
+            "explorer" => {
+                self.explorer(ui);
+                if crate::dock::closed("explorer") {
+                    self.explorer_open = false;
+                }
+            }
+            "terminal" => self.terminal_panel(ui),
+            "assistant" => self.assistant_panel(ui),
+            "side" => self.side_panel(ui),
+            v => {
+                let id = v.strip_prefix("view:").unwrap_or(v).to_string();
+                let kind = id.split('#').next().unwrap_or("").to_string();
+                let p = theme::pal();
+                let title = Self::pane_title(v);
+                dock::show_ex(ui, v, &title, dock::Side::Float, 720.0, 260.0, egui::Frame::new().fill(p.bg).stroke(egui::Stroke::new(1.0, p.line)), true, |ui| {
+                    ui.push_id(v, |ui| match kind.as_str() {
+                        "brain" => self.brain_view(ui),
+                        "refs" => self.refs_view(ui),
+                        "boards" => self.boards_view(ui),
+                        "tasks" => self.tasks_view(ui),
+                        "chat" => self.chat_view(ui),
+                        _ => self.search_view(ui),
+                    });
+                });
+                if dock::closed(v) {
+                    self.view_panels.retain(|x| *x != id);
+                }
+            }
+        }
+    }
+
+    /// La disposition en cases : chaque panneau dans sa case, les panneaux sortis dans leur fenêtre.
+    fn tiles(&mut self, ui: &mut egui::Ui) {
+        let mut tree = self.tree.take().unwrap_or_else(|| layout::default_layout(true));
+        // Les pages ajoutées par le menu « fenêtre » ont leur case ; celles qu'on a fermées la perdent
+        for v in self.view_panels.clone() {
+            layout::add(&mut tree, &format!("view:{v}"), "side");
+        }
+        for p in layout::panes(&tree) {
+            if let Some(k) = p.strip_prefix("view:") {
+                if !self.view_panels.iter().any(|x| x == k) {
+                    layout::remove(&mut tree, &p);
+                }
+            }
+        }
+        for p in ["explorer", layout::MAIN, "terminal", "side", "assistant"] {
+            if layout::find(&tree, p).is_none() {
+                layout::add(&mut tree, p, layout::MAIN);
+            }
+        }
+        // Sortis dans leur propre fenêtre du système : dessinés à part
+        let panes = layout::panes(&tree);
+        let outside: Vec<String> = panes.iter().filter(|p| dock::side_of(p) == Some(dock::Side::Window)).cloned().collect();
+        dock::set_managed(panes.iter().filter(|p| !outside.contains(p)).cloned().collect());
+        layout::set_visibility(&mut tree, &|p| !outside.iter().any(|o| o == p) && self.pane_open(p));
+        for o in &outside {
+            if self.pane_open(o) && o != layout::MAIN {
+                self.pane_body(ui, o);
+            }
+        }
+        let p = theme::pal();
+        egui::CentralPanel::default().frame(egui::Frame::new().fill(p.panel)).show(ui, |ui| {
+            let mut b = Panes { app: self };
+            tree.ui(&mut b, ui);
+        });
+        for (zone, id) in [("explorer", "explorer"), ("side", "side"), ("assistant", "assistant")] {
+            if let Some(r) = layout::find(&tree, id).filter(|t| tree.tiles.is_visible(*t)).and_then(|t| tree.tiles.rect(t)) {
+                self.zones_next.push((zone, r));
+            }
+        }
+        self.tree = Some(tree);
     }
 
     fn report<T>(&mut self, r: Result<T, String>) -> Option<T> {
@@ -1872,6 +1981,7 @@ impl App {
                             }
                             if ui.button(crate::i18n::t("réinitialiser la disposition")).clicked() {
                                 dock::reset();
+                                self.reset_layout = true;
                                 self.view_panels.clear();
                                 self.explorer_open = true;
                                 self.side_hidden = false;
@@ -4715,45 +4825,21 @@ impl eframe::App for App {
                 self.zones_next.push(("pages", egui::Rect::from_min_max(b.min, egui::pos2(b.max.x, c.min.y))));
                 self.zones_next.push(("status", egui::Rect::from_min_max(egui::pos2(c.min.x, d.max.y), c.max)));
                 self.explorer_rect = None;
-                if self.explorer_open {
-                    self.explorer(ui);
-                    if crate::dock::closed("explorer") {
-                        self.explorer_open = false;
-                    }
+                if std::mem::take(&mut self.reset_layout) {
+                    self.tree = None;
+                    dock::reset();
                 }
-                if let Some(r) = self.explorer_rect {
-                    self.zones_next.push(("explorer", r));
+                self.tiles(ui);
+            }
+            if self.compact {
+                // Mode compact : pas de disposition, juste le document
+                if self.terminal.is_some() {
+                    self.terminal_panel(ui);
                 }
-                self.view_windows(ui);
-            }
-            if self.terminal.is_some() {
-                self.terminal_panel(ui);
-            }
-            if self.assistant_open {
-                let a = ui.available_rect_before_wrap();
-                self.assistant_panel(ui);
-                let b = ui.available_rect_before_wrap();
-                self.zones_next.push(("assistant", egui::Rect::from_min_max(egui::pos2(b.max.x, a.min.y), a.max)));
-            }
-            match self.view() {
-                View::Files => {
-                    // Le panneau de droite (liens, résumé) sert aux textes ; la 3D, les vidéos
-                    // et les documents gardent toute la largeur.
-                    let text = self.current().is_none_or(|d| matches!(d.content, Content::Text(_)));
-                    if !self.compact && !self.assistant_open && text && self.split.is_none() && !self.side_hidden {
-                        let a = ui.available_rect_before_wrap();
-                        self.side_panel(ui);
-                        let b = ui.available_rect_before_wrap();
-                        self.zones_next.push(("side", egui::Rect::from_min_max(egui::pos2(b.max.x, a.min.y), a.max)));
-                    }
-                    self.editor(ui);
+                if self.assistant_open {
+                    self.assistant_panel(ui);
                 }
-                View::Search => self.search_view(ui),
-                View::Brain => self.brain_view(ui),
-                View::Refs => self.refs_view(ui),
-                View::Boards => self.boards_view(ui),
-                View::Chat => self.chat_view(ui),
-                View::Tasks => self.tasks_view(ui),
+                self.main_view(ui);
             }
             if let Some((msg, t)) = self.toast.clone() {
                 if t.elapsed() < Duration::from_secs(3) {
@@ -5041,4 +5127,93 @@ fn parse_moves(t: &str) -> Result<Vec<OrganizeMove>, String> {
         m.from = m.from.trim_start_matches('/').to_string();
         m
     }).collect())
+}
+
+
+/// Ce que la disposition en cases demande à l'application : le contenu et le titre de chaque case.
+struct Panes<'a> {
+    app: &'a mut App,
+}
+
+impl egui_tiles::Behavior<String> for Panes<'_> {
+    fn pane_ui(&mut self, ui: &mut egui::Ui, _tile: egui_tiles::TileId, pane: &mut String) -> egui_tiles::UiResponse {
+        let id = pane.clone();
+        ui.push_id(("pane", &id), |ui| {
+            let rect = ui.max_rect();
+            ui.set_clip_rect(ui.clip_rect().intersect(rect));
+            let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect).layout(egui::Layout::top_down(egui::Align::Min)));
+            dock::inline(&id, || self.app.pane_body(&mut child, &id));
+        });
+        egui_tiles::UiResponse::None
+    }
+
+    fn tab_title_for_pane(&mut self, pane: &String) -> egui::WidgetText {
+        App::pane_title(pane).into()
+    }
+
+    fn is_tab_closable(&self, tiles: &egui_tiles::Tiles<String>, tile: egui_tiles::TileId) -> bool {
+        tiles.get_pane(&tile).is_some_and(|p| p != layout::MAIN)
+    }
+
+    fn on_tab_close(&mut self, tiles: &mut egui_tiles::Tiles<String>, tile: egui_tiles::TileId) -> bool {
+        let Some(p) = tiles.get_pane(&tile).cloned() else { return false };
+        match p.as_str() {
+            "explorer" => self.app.explorer_open = false,
+            "terminal" => self.app.terminal = None,
+            "assistant" => self.app.assistant_open = false,
+            "side" => self.app.side_hidden = true,
+            v => {
+                if let Some(k) = v.strip_prefix("view:") {
+                    self.app.view_panels.retain(|x| x != k);
+                    return true;
+                }
+            }
+        }
+        // Les panneaux de base gardent leur case (cachée) : ils reviennent au même endroit
+        false
+    }
+
+    fn on_tab_button(&mut self, tiles: &mut egui_tiles::Tiles<String>, tile: egui_tiles::TileId, button: egui::Response) -> egui::Response {
+        if let Some(p) = tiles.get_pane(&tile).cloned() {
+            button.context_menu(|ui| {
+                if p != layout::MAIN && ui.button(crate::i18n::t("sortir dans sa propre fenêtre")).clicked() {
+                    dock::set_side(&p, dock::Side::Window);
+                    ui.close();
+                }
+                if ui.button(crate::i18n::t("réinitialiser la disposition")).clicked() {
+                    self.app.reset_layout = true;
+                    ui.close();
+                }
+            });
+        }
+        button
+    }
+
+    fn tab_bar_height(&self, _style: &egui::Style) -> f32 {
+        26.0
+    }
+
+    fn gap_width(&self, _style: &egui::Style) -> f32 {
+        3.0
+    }
+
+    fn min_size(&self) -> f32 {
+        140.0
+    }
+
+    fn tab_bar_color(&self, _visuals: &egui::Visuals) -> egui::Color32 {
+        theme::pal().panel
+    }
+
+    fn tab_bg_color(&self, _visuals: &egui::Visuals, _tiles: &egui_tiles::Tiles<String>, _tile: egui_tiles::TileId, state: &egui_tiles::TabState) -> egui::Color32 {
+        if state.active { theme::pal().bg } else { theme::pal().panel }
+    }
+
+    fn tab_text_color(&self, _visuals: &egui::Visuals, _tiles: &egui_tiles::Tiles<String>, _tile: egui_tiles::TileId, state: &egui_tiles::TabState) -> egui::Color32 {
+        if state.active { theme::pal().text } else { theme::pal().muted }
+    }
+
+    fn simplification_options(&self) -> egui_tiles::SimplificationOptions {
+        egui_tiles::SimplificationOptions { all_panes_must_have_tabs: true, ..Default::default() }
+    }
 }

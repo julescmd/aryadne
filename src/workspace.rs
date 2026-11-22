@@ -36,6 +36,9 @@ pub struct Workspace {
     /// Ce à quoi sert l'espace : notes, 3d, 2d, video, code, ai, refs, mat. Décide de l'écran d'accueil.
     #[serde(default)]
     pub kind: String,
+    /// Disposition en cases de l'espace (None : celle de départ)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layout: Option<crate::layout::Layout>,
 }
 
 fn yes() -> bool {

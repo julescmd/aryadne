@@ -4,6 +4,7 @@ Tout ce qui reste à faire pour un logiciel complet. Classé par domaine, puis d
 Légende : **[P1]** prochain, **[P2]** ensuite, **[P3]** plus tard.
 
 ## 0. Bugs connus et dettes
+- [P1] Fait : disposition en cases (fichiers, document, structure, assistant, terminal, pages) : glisser un onglet pour diviser, empiler ou déplacer ; propre à chaque espace ; clic droit sur un onglet pour le sortir dans sa fenêtre.
 - [P1] Interface entièrement modulable : n'importe quel panneau de n'importe quel espace (outliner, propriétés, timeline 3D, moniteurs du montage, calques de la retouche, panneau Projet…) devient un panneau ancrable comme l'explorateur, avec ses bornes min/max.
 - [P1] Découpage libre façon Blender : diviser une zone en deux (glisser un coin), fusionner, échanger deux zones, changer le type d'éditeur d'une zone.
 - [P1] Onglets de panneaux : empiler plusieurs panneaux dans une même zone (comme Premiere et Unreal).
@@ -37,7 +38,15 @@ Légende : **[P1]** prochain, **[P2]** ensuite, **[P3]** plus tard.
 - [P2] Dope sheet, NLA (pistes d'actions), pilotes (drivers), contraintes (suivre, viser, copier).
 - [P2] Shape keys (morphes), onion skin, enregistrement de mouvement à la souris.
 - [P3] Physique : corps rigides, tissus, particules, cheveux, fluides simples.
-### Matériaux et textures
+### Matériaux et textures : un atelier Painter + Designer
+Ouvrir un .arymat, c'est la vue Painter ; double-cliquer un calque, c'est entrer dans sa vue Designer. Les deux sont deux vues du même graphe.
+- [P1] **Vue Painter** : modèle 3D au centre, vue UV à côté, pile de calques à droite. Chaque calque est une *instance* d'un matériau intelligent, avec un masque, et se mélange canal par canal (couleur, rugosité, métal, normales, hauteur).
+- [P1] **Instances** : un graphe de nodes (le *master*) expose des paramètres (couleur, échelle, usure…). Le calque les règle par curseurs sans ouvrir les nodes ; corriger le master met à jour toutes les instances.
+- [P1] **Entrer dans un calque** : double-clic, on est dans le graphe Designer du master, le modèle reste visible et se met à jour en direct, fil d'Ariane pour remonter.
+- [P1] **Masques** : peints sur le modèle (pinceau, remplissage par face ou îlot UV, symétrie) ou générés (arêtes usées, saleté dans les creux, coulures, poussière sur le dessus, bruit 3D sans coutures). Un masque peut être un petit graphe.
+- [P2] **Peindre les paramètres** : peindre l'intensité d'un paramètre d'instance (plus de rouille ici), carte reçue comme entrée du graphe.
+- [P2] **Pile = graphe** : la pile entière s'ouvre comme un graphe (calques et masques en nodes), une touche passe d'une vue à l'autre.
+- [P2] Projection d'une photo ou d'un .aryimg sur le modèle comme calque, bibliothèque de matériaux intelligents du coffre, export des textures pour Unreal, Blender, Maya.
 - [P1] Matériaux PBR complets liés aux nodes (.arymat) dans les trois moteurs.
 - [P2] Peinture de texture directement sur le modèle (comme Substance Painter) : calques, masques, générateurs (usure, saleté, bords), projection, export vers les moteurs de jeu.
 - [P2] Cuisson (bake) : normales, AO, courbure, ID, depuis un modèle haute définition.

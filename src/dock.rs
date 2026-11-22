@@ -27,6 +27,38 @@ pub struct Place {
 
 static STATE: Mutex<Option<HashMap<String, Place>>> = Mutex::new(None);
 
+thread_local! {
+    /// Panneau dessiné en ce moment dans une case de la disposition (il remplit la case, sans en-tête)
+    static INLINE: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+    /// Panneaux rangés dans la disposition en cases : ils ne se dessinent que dans leur case
+    static MANAGED: std::cell::RefCell<std::collections::HashSet<String>> = std::cell::RefCell::new(Default::default());
+}
+
+/// Dessine `f` comme le contenu de la case du panneau `id`.
+pub fn inline<R>(id: &str, f: impl FnOnce() -> R) -> R {
+    INLINE.with(|c| *c.borrow_mut() = Some(id.to_string()));
+    let r = f();
+    INLINE.with(|c| *c.borrow_mut() = None);
+    r
+}
+
+/// Les panneaux que la disposition en cases dessine elle-même.
+pub fn set_managed(ids: std::collections::HashSet<String>) {
+    MANAGED.with(|m| *m.borrow_mut() = ids);
+}
+
+/// Où se trouve un panneau (None : jamais placé).
+pub fn side_of(id: &str) -> Option<Side> {
+    with(|m| m.get(id).map(|p| p.side))
+}
+
+/// Change la place d'un panneau (par exemple : le sortir dans sa propre fenêtre).
+pub fn set_side(id: &str, side: Side) {
+    let mut p = place(id, side, 300.0);
+    p.side = side;
+    set(id, p);
+}
+
 fn path() -> Option<std::path::PathBuf> {
     dirs::config_dir().map(|d| d.join("aryadne").join("dock.json"))
 }
@@ -276,6 +308,17 @@ pub fn show<R>(ui: &mut Ui, id: &str, title: &str, default: Side, size: f32, min
 /// Comme `show`, avec un bouton × : `closed(id)` dit ensuite si on l'a fermé.
 #[allow(clippy::too_many_arguments)]
 pub fn show_ex<R>(ui: &mut Ui, id: &str, title: &str, default: Side, size: f32, min: f32, frame: egui::Frame, closable: bool, add: impl FnOnce(&mut Ui) -> R) -> Option<R> {
+    if INLINE.with(|c| c.borrow().as_deref() == Some(id)) {
+        // Dans sa case : le titre et la fermeture sont dans l'onglet
+        let r = frame.stroke(Stroke::NONE).show(ui, |ui| {
+            ui.set_min_size(ui.available_size());
+            add(ui)
+        });
+        return Some(r.inner);
+    }
+    if MANAGED.with(|m| m.borrow().contains(id)) {
+        return None;
+    }
     let pl = place(id, default, size);
     // L'en-tête prend toute la largeur, collé en haut : le cadre intérieur ne s'applique qu'au contenu
     let inner = frame.inner_margin;
