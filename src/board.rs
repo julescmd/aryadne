@@ -707,7 +707,7 @@ impl Board {
                 continue;
             }
             let r = screen_rect(it.rect());
-            if r.width() < 70.0 || !rect.intersects(r) {
+            if r.width() < 48.0 || !rect.intersects(r) {
                 continue;
             }
             let near = pointer_in.is_some_and(|q| r.contains(q)) || self.selection.contains(&i);
@@ -745,8 +745,12 @@ impl Board {
         if let Some((rel, aspect)) = toggle_play {
             if self.live.players.remove(&rel).is_none() {
                 let looping = self.live.looping.get(&rel).copied().unwrap_or(true);
-                if let Some(pl) = crate::boardlive::Player::start(&root, &rel, aspect, looping, &ctx) {
-                    self.live.players.insert(rel, pl);
+                match crate::boardlive::Player::start(&root, &rel, aspect, looping, &ctx) {
+                    Some(pl) => {
+                        self.live.players.insert(rel, pl);
+                    }
+                    None if crate::ffmpeg::find("ffmpeg").is_none() => crate::notify(crate::i18n::t("lecture impossible : ffmpeg manque (ouvre la vidéo et clique « installer ffmpeg »)")),
+                    None => crate::notify(crate::i18n::t("lecture impossible : vidéo illisible")),
                 }
             }
         }
@@ -1272,7 +1276,7 @@ impl Board {
         });
 
         // ---------- glisser-déposer depuis l'explorateur ou les refs ----------
-        if let Some(rel) = resp.dnd_release_payload::<String>() {
+        if let Some(rel) = crate::drop_of::<String>(&resp) {
             if let Some(w) = world_ptr {
                 self.drop_file(&rel, w.to_vec2(), images);
             }
@@ -1318,7 +1322,7 @@ impl Board {
                                 }
                             }
                         });
-                        ui.add(egui::DragValue::new(&mut size).range(6.0..=400.0).speed(0.3).suffix(" px"));
+                        ui.add(egui::DragValue::new(&mut size).range(1.0..=4000.0).speed(0.3).suffix(" px"));
                         let mut col = look.color.map(|c| Color32::from_rgba_unmultiplied(c[0], c[1], c[2], c[3])).unwrap_or(p.text);
                         if ui.color_edit_button_srgba(&mut col).on_hover_text(crate::i18n::t("couleur du texte")).changed() {
                             look.color = Some(col.to_array());

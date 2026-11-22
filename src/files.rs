@@ -280,7 +280,7 @@ impl App {
                     }
                     // Zone vide en bas : déposer ici = racine du coffre ; clic droit = menu racine.
                     let (rect, bg) = ui.allocate_exact_size(egui::vec2(ui.available_width(), ui.available_height().max(40.0)), egui::Sense::click());
-                    if let Some(from) = bg.dnd_release_payload::<String>() {
+                    if let Some(from) = crate::drop_of::<String>(&bg) {
                         self.actions.push(Action::Move((*from).clone(), String::new()));
                     }
                     if bg.dnd_hover_payload::<String>().is_some() {
@@ -459,7 +459,7 @@ impl App {
             egui::DragAndDrop::set_payload(ui.ctx(), e.rel.clone());
         }
         if e.is_dir {
-            if let Some(from) = resp.dnd_release_payload::<String>() {
+            if let Some(from) = crate::drop_of::<String>(&resp) {
                 if *from != e.rel {
                     self.actions.push(Action::Move((*from).clone(), e.rel.clone()));
                 }
@@ -619,7 +619,7 @@ impl App {
             }
         }
         if e.is_dir {
-            if let Some(from) = resp.dnd_release_payload::<String>() {
+            if let Some(from) = crate::drop_of::<String>(&resp) {
                 if *from != e.rel {
                     self.actions.push(Action::Move((*from).clone(), e.rel.clone()));
                 }

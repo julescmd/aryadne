@@ -37,11 +37,13 @@ pub struct Settings {
     pub focus: f32,
     /// Rendu des couleurs AgX (comme Blender), sinon filmique
     pub agx: bool,
+    /// Garder le tracé de chemins pendant qu'on bouge la vue (sinon l'aperçu rapide prend le relais)
+    pub live: bool,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { bounces: 6, floor: true, clamp: 12.0, floor_visible: false, denoise: true, gpu: true, aperture: 0.0, focus: 0.0, agx: true }
+        Settings { bounces: 6, floor: false, clamp: 12.0, floor_visible: false, denoise: true, gpu: true, aperture: 0.0, focus: 0.0, agx: true, live: true }
     }
 }
 
@@ -515,15 +517,7 @@ fn radiance(m: &Prepared, bvh: &crate::bvh::Bvh, look: &Look, lamps: &[Lamp], se
                 let p = add(add(o, scale(d, ft)), [0.0, 1e-3, 0.0]);
                 let (mut dark, mut total) = (0.0f32, 0.0f32);
                 for lamp in lamps {
-                    let (dir, reach, fall) = if lamp.point {
-                        let to = sub(lamp.at, p);
-                        let dd = dot(to, to).sqrt().max(1e-6);
-                        (scale(to, 1.0 / dd), dd, (1.0 - (dd / lamp.range.max(1e-6)).min(1.0).powi(2)).powi(2))
-                    } else {
-                        let (t1, t2) = basis(lamp.at);
-                        let (a, rr) = (r.f() * std::f32::consts::TAU, r.f().sqrt() * 0.03);
-                        (norm(add(lamp.at, add(scale(t1, a.cos() * rr), scale(t2, a.sin() * rr)))), 1e6, 1.0)
-                    };
+                    let (dir, reach, fall) = lamp.sample(p, [r.f(), r.f()]);
                     let e = lamp.intensity * fall * dir[1].max(0.0);
                     if e > 0.0 {
                         total += e;
@@ -567,16 +561,8 @@ fn radiance(m: &Prepared, bvh: &crate::bvh::Bvh, look: &Look, lamps: &[Lamp], se
         // Lumières de la scène : un rayon d'ombre vers chacune
         let po = add(p, scale(s.n, 1e-3));
         for lamp in lamps {
-            let (dir, reach, fall) = if lamp.point {
-                let to = sub(lamp.at, p);
-                let dd = dot(to, to).sqrt().max(1e-6);
-                (scale(to, 1.0 / dd), dd, (1.0 - (dd / lamp.range.max(1e-6)).min(1.0).powi(2)).powi(2))
-            } else {
-                // Soleil un peu large : ombres douces
-                let (t1, t2) = basis(lamp.at);
-                let (a, rr) = (r.f() * std::f32::consts::TAU, r.f().sqrt() * 0.03);
-                (norm(add(lamp.at, add(scale(t1, a.cos() * rr), scale(t2, a.sin() * rr)))), 1e6, 1.0)
-            };
+            // Soleil un peu large, rectangle tiré au hasard : ombres douces
+            let (dir, reach, fall) = lamp.sample(p, [r.f(), r.f()]);
             if fall <= 0.0 || dot(s.n, dir) <= 0.0 || bvh.occluded(po, dir, 1e-4, reach) {
                 continue;
             }
@@ -641,7 +627,7 @@ fn radiance(m: &Prepared, bvh: &crate::bvh::Bvh, look: &Look, lamps: &[Lamp], se
 pub fn pass(m: &Prepared, cam: &Camera, look: &Look, set: &Settings, acc: &mut Accum) {
     let (w, h) = (acc.w, acc.h);
     let bvh = m.bvh.get_or_init(|| crate::bvh::Bvh::new(&m.pos, &m.tris));
-    let lamps: Vec<Lamp> = if look.lamps.is_empty() { vec![Lamp { point: false, at: look.light.dir(), color: look.light.color, intensity: look.light.intensity, range: 0.0 }] } else { look.lamps.clone() };
+    let lamps: Vec<Lamp> = if look.lamps.is_empty() { vec![Lamp::simple(false, look.light.dir(), look.light.color, look.light.intensity, 0.0)] } else { look.lamps.clone() };
     let focal = w.min(h) as f32 * 1.2;
     let ortho_scale = focal / cam.dist;
     let (cx, cy) = (w as f32 / 2.0, h as f32 / 2.0);

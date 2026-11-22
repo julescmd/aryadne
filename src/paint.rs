@@ -626,7 +626,7 @@ impl Editor {
             }
             match self.tool {
                 Tool::Brush | Tool::Eraser => {
-                    ui.add(egui::DragValue::new(&mut self.size).range(1.0..=500.0).speed(0.5).prefix(format!("{} ", crate::i18n::t("diamètre")))).on_hover_text("[ ]");
+                    ui.add(egui::DragValue::new(&mut self.size).range(0.1..=10000.0).speed(0.5).prefix(format!("{} ", crate::i18n::t("diamètre")))).on_hover_text("[ ]");
                     ui.add(egui::Slider::new(&mut self.hardness, 0.0..=1.0).text(crate::i18n::t("dureté")).show_value(false));
                     ui.add(egui::Slider::new(&mut self.flow, 0.05..=1.0).text(crate::i18n::t("opacité")).show_value(false));
                 }
@@ -660,7 +660,7 @@ impl Editor {
             egui::Window::new(crate::i18n::t(if kind == Adjust::BrightContrast { "luminosité et contraste" } else { "teinte et saturation" })).collapsible(false).resizable(false).show(&ctx, |ui| {
                 let (a, b) = if kind == Adjust::BrightContrast { ("luminosité", "contraste") } else { ("teinte", "saturation") };
                 let r1 = if kind == Adjust::HueSat { -0.5..=0.5 } else { -1.0..=1.0 };
-                let mut ch = ui.add(egui::Slider::new(&mut v[0], r1).text(crate::i18n::t(a))).changed();
+                let mut ch = ui.add(egui::Slider::new(&mut v[0], r1).clamping(egui::SliderClamping::Never).text(crate::i18n::t(a))).changed();
                 ch |= ui.add(egui::Slider::new(&mut v[1], -1.0..=1.0).text(crate::i18n::t(b))).changed();
                 if ch {
                     if let Some(x) = &mut self.adjust {

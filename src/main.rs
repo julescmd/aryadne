@@ -1268,11 +1268,32 @@ impl App {
                 self.pane_body(ui, o);
             }
         }
-        let p = theme::pal();
-        egui::CentralPanel::default().frame(egui::Frame::new().fill(p.panel)).show(ui, |ui| {
-            let mut b = Panes { app: self };
-            tree.ui(&mut b, ui);
-        });
+        let ctx = ui.ctx().clone();
+        let dragged = tree.dragged_id(&ctx).and_then(|t| tree.tiles.get_pane(&t).cloned()).filter(|p| p != layout::MAIN);
+        let area = egui::CentralPanel::default()
+            .frame(egui::Frame::new().fill(theme::gutter()).inner_margin(3))
+            .show(ui, |ui| {
+                let mut b = Panes { app: self };
+                tree.ui(&mut b, ui);
+            })
+            .response
+            .rect;
+        // Un onglet tiré hors de la disposition (barres du haut, ou hors de l'application) devient une vraie fenêtre
+        if let Some(pane) = dragged {
+            let at = ctx.input(|i| i.pointer.latest_pos());
+            let out = at.is_none_or(|a| !area.shrink(2.0).contains(a));
+            if out {
+                if let Some(a) = at {
+                    let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::unique("tile-out")));
+                    painter.text(a + egui::vec2(16.0, 18.0), egui::Align2::LEFT_TOP, crate::i18n::t("lâcher : fenêtre à part"), egui::FontId::proportional(11.0), theme::pal().accent);
+                }
+                if ctx.input(|i| i.pointer.any_released()) {
+                    let a = at.unwrap_or(area.center());
+                    dock::put(&pane, dock::Side::Window, [a.x - 40.0, a.y - 12.0], [560.0, 440.0]);
+                    ctx.request_repaint();
+                }
+            }
+        }
         for (zone, id) in [("explorer", "explorer"), ("side", "side"), ("assistant", "assistant")] {
             if let Some(r) = layout::find(&tree, id).filter(|t| tree.tiles.is_visible(*t)).and_then(|t| tree.tiles.rect(t)) {
                 self.zones_next.push((zone, r));
@@ -3410,7 +3431,7 @@ impl App {
                         ui.color_edit_button_srgba(&mut self.board.pen_color);
                         egui::containers::menu::MenuButton::new(crate::i18n::t("trait ▾")).ui(ui, |ui| {
                             ui.set_min_width(240.0);
-                            ui.add(egui::Slider::new(&mut self.board.pen_width, 0.5..=60.0).logarithmic(true).text(crate::i18n::t("épaisseur")));
+                            ui.add(egui::Slider::new(&mut self.board.pen_width, 0.5..=60.0).clamping(egui::SliderClamping::Never).logarithmic(true).text(crate::i18n::t("épaisseur")));
                             ui.add(egui::Slider::new(&mut self.board.opacity, 0.05..=1.0).text(crate::i18n::t("opacité")));
                             ui.add(egui::Slider::new(&mut self.board.stabilizer, 0.0..=0.95).text(crate::i18n::t("stabilisateur")));
                             ui.add(egui::Slider::new(&mut self.board.taper, 0.0..=1.0).text(crate::i18n::t("effilé")));
@@ -4717,6 +4738,45 @@ impl App {
         }
     }
 
+    /// Un fichier de l'explorateur lâché ailleurs que sur une zone qui le prend déjà
+    /// (board, timeline, dossier) : la scène ou le montage ouverts le reçoivent, sinon il s'ouvre.
+    /// Pendant le glissement, son nom suit le pointeur.
+    fn internal_drop(&mut self, ctx: &egui::Context) {
+        let Some(rel) = egui::DragAndDrop::payload::<String>(ctx) else { return };
+        let Some(at) = ctx.input(|i| i.pointer.latest_pos()) else { return };
+        let p = theme::pal();
+        let name = rel.rsplit('/').next().unwrap_or(&rel).to_string();
+        let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::unique("dnd-tag")));
+        let g = painter.layout_no_wrap(name, egui::FontId::proportional(12.0), p.text);
+        let r = egui::Rect::from_min_size(at + egui::vec2(14.0, 10.0), g.size() + egui::vec2(12.0, 6.0));
+        painter.rect_filled(r, 3.0, p.panel);
+        painter.rect_stroke(r, 3.0, egui::Stroke::new(1.0, p.accent), egui::StrokeKind::Inside);
+        painter.galley(r.min + egui::vec2(6.0, 3.0), g, p.text);
+        if !ctx.input(|i| i.pointer.any_released()) || self.explorer_rect.is_some_and(|r| r.contains(at)) {
+            return;
+        }
+        let Some(rel) = egui::DragAndDrop::take_payload::<String>(ctx) else { return };
+        let rel = (*rel).clone();
+        let abs = std::path::Path::new(&self.root()).join(&rel);
+        if self.view() == View::Files {
+            match self.active.and_then(|i| self.docs.get_mut(i)).map(|d| &mut d.content) {
+                Some(Content::Montage(m)) if video::is_video(&rel) || images::has_preview(&rel) || [".mp3", ".wav", ".flac", ".ogg", ".m4a", ".aac", ".opus"].iter().any(|e| rel.to_lowercase().ends_with(e)) => {
+                    m.add.push(abs);
+                    return;
+                }
+                Some(Content::Model(v)) if v.is_scene() => {
+                    let n = rel.to_lowercase();
+                    if model3d::is_model(&n) || [".png", ".jpg", ".jpeg", ".webp", ".aryimg"].iter().any(|e| n.ends_with(e)) {
+                        v.scene_add.push(abs);
+                        return;
+                    }
+                }
+                _ => {}
+            }
+        }
+        self.actions.push(Action::Open(rel));
+    }
+
     fn handle_dropped_files(&mut self, ctx: &egui::Context) {
         let p = theme::pal();
         let (hovering, dropped) = ctx.input(|i| (!i.raw.hovered_files.is_empty(), i.raw.dropped_files.clone()));
@@ -4858,9 +4918,27 @@ impl App {
     }
 }
 
+/// Ce qui est lâché sur `r`, s'il est du bon type. `dnd_release_payload` d'egui vide le
+/// glissement même quand le type ne correspond pas : la première zone de dépôt qui attend un
+/// autre type avalait alors le fichier venu de l'explorateur.
+/// Message bref pour l'utilisateur, depuis n'importe quel éditeur (affiché en bas de l'écran).
+static NOTICES: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+pub fn notify(msg: impl Into<String>) {
+    NOTICES.lock().unwrap_or_else(|e| e.into_inner()).push(msg.into());
+}
+
+pub fn drop_of<T: std::any::Any + Send + Sync>(r: &egui::Response) -> Option<std::sync::Arc<T>> {
+    if egui::DragAndDrop::has_payload_of_type::<T>(&r.ctx) {
+        r.dnd_release_payload::<T>()
+    } else {
+        None
+    }
+}
+
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        settings::set_unit(&self.prefs.unit);
         self.shortcuts(&ctx);
         self.cloud_tick();
 
@@ -4947,6 +5025,10 @@ impl eframe::App for App {
                     dock::reset();
                 }
                 self.tiles(ui);
+            }
+            self.internal_drop(&ctx);
+            if let Some(m) = NOTICES.lock().unwrap_or_else(|e| e.into_inner()).drain(..).last() {
+                self.toast(m);
             }
             if self.compact {
                 // Mode compact : pas de disposition, juste le document
@@ -5265,6 +5347,7 @@ impl egui_tiles::Behavior<String> for Panes<'_> {
         }
         ui.push_id(("pane", &id), |ui| {
             let rect = ui.max_rect();
+            ui.painter().rect_filled(rect, 0.0, theme::pal().panel);
             ui.set_clip_rect(ui.clip_rect().intersect(rect));
             let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect).layout(egui::Layout::top_down(egui::Align::Min)));
             dock::inline(&id, || self.app.pane_body(&mut child, &id));
@@ -5324,6 +5407,20 @@ impl egui_tiles::Behavior<String> for Panes<'_> {
 
     fn gap_width(&self, _style: &egui::Style) -> f32 {
         3.0
+    }
+
+    /// Les interstices restent sombres ; ils s'allument au survol pour montrer qu'on peut les tirer.
+    fn resize_stroke(&self, _style: &egui::Style, state: egui_tiles::ResizeState) -> egui::Stroke {
+        match state {
+            egui_tiles::ResizeState::Idle => egui::Stroke::new(3.0, theme::gutter()),
+            egui_tiles::ResizeState::Hovering => egui::Stroke::new(3.0, theme::pal().muted),
+            egui_tiles::ResizeState::Dragging => egui::Stroke::new(3.0, theme::pal().accent),
+        }
+    }
+
+    /// Coins arrondis : un trait de la couleur des interstices autour de chaque case.
+    fn paint_on_top_of_tile(&self, painter: &egui::Painter, _style: &egui::Style, _tile: egui_tiles::TileId, rect: egui::Rect) {
+        painter.rect_stroke(rect, 5.0, egui::Stroke::new(3.0, theme::gutter()), egui::StrokeKind::Outside);
     }
 
     fn min_size(&self) -> f32 {

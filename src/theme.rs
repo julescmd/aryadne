@@ -19,6 +19,13 @@ pub struct Palette {
     pub field: Color32,
 }
 
+/// Couleur des interstices entre les panneaux (comme Blender : des zones arrondies sur fond sombre).
+pub fn gutter() -> Color32 {
+    let p = pal();
+    let k = |c: Color32, f: f32| Color32::from_rgb((c.r() as f32 * f) as u8, (c.g() as f32 * f) as u8, (c.b() as f32 * f) as u8);
+    if p.bg.r() < 128 { k(p.panel, 0.42) } else { k(p.line, 0.82) }
+}
+
 const fn rgb(hex: u32) -> Color32 {
     Color32::from_rgb((hex >> 16) as u8, (hex >> 8) as u8, hex as u8)
 }
@@ -312,7 +319,10 @@ pub fn apply(ctx: &egui::Context, dark: bool) {
             w.expansion = 0.0;
             w.fg_stroke.color = p.text;
         }
-        v.widgets.noninteractive.bg_stroke = Stroke::new(1.0, p.line);
+        // Comme Blender : les panneaux d'un éditeur sont séparés par un sillon sombre
+        let k = |c: Color32, f: f32| Color32::from_rgb((c.r() as f32 * f) as u8, (c.g() as f32 * f) as u8, (c.b() as f32 * f) as u8);
+        let groove = if p.bg.r() < 128 { k(p.panel, 0.42) } else { k(p.line, 0.82) };
+        v.widgets.noninteractive.bg_stroke = Stroke::new(3.0, groove);
         v.widgets.noninteractive.fg_stroke.color = p.text;
         // Boutons secondaires et champs : un fond plein un cran sous le panneau, sans contour ;
         // le survol éclaircit, l'appui souligne à la couleur de l'espace

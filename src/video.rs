@@ -476,7 +476,7 @@ impl Viewer {
             ui.separator();
             ui.label(crate::i18n::t("cadence"));
             let mut fps = self.play_fps;
-            if ui.add(egui::DragValue::new(&mut fps).range(1.0..=120.0).speed(0.2).suffix(" i/s")).changed() {
+            if ui.add(egui::DragValue::new(&mut fps).range(1.0..=1000.0).speed(0.2).suffix(" i/s")).changed() {
                 self.play_fps = fps;
                 self.clock = None;
             }
@@ -493,7 +493,7 @@ impl Viewer {
                     self.on = n;
                 }
             }
-            ui.add(egui::DragValue::new(&mut self.on).range(1..=240).speed(0.1).suffix("s")).on_hover_text(crate::i18n::t("n'importe quelle valeur : glisse ou double-clique pour taper"));
+            ui.add(egui::DragValue::new(&mut self.on).range(1..=100000).speed(0.1).suffix("s")).on_hover_text(crate::i18n::t("n'importe quelle valeur : glisse ou double-clique pour taper"));
             ui.separator();
             if ui.small_button("[").on_hover_text(crate::i18n::t("début de la boucle ici (I)")).clicked() {
                 self.loop_in = Some(self.cur);
@@ -516,8 +516,8 @@ impl Viewer {
             egui::containers::menu::MenuButton::new("▾").config(stay.clone()).ui(ui, |ui| {
                 ui.set_min_width(230.0);
                 ui.label(RichText::new(crate::i18n::t("pelures d'oignon")).color(p.muted).size(11.0));
-                ui.add(egui::Slider::new(&mut self.onion_before, 0..=6).text(crate::i18n::t("images avant")));
-                ui.add(egui::Slider::new(&mut self.onion_after, 0..=6).text(crate::i18n::t("images après")));
+                ui.add(egui::Slider::new(&mut self.onion_before, 0..=6).clamping(egui::SliderClamping::Never).text(crate::i18n::t("images avant")));
+                ui.add(egui::Slider::new(&mut self.onion_after, 0..=6).clamping(egui::SliderClamping::Never).text(crate::i18n::t("images après")));
                 ui.add(egui::Slider::new(&mut self.onion_opacity, 0.05..=1.0).text(crate::i18n::t("opacité")));
                 ui.checkbox(&mut self.onion_tint, crate::i18n::t("teinter (avant rouge, après vert)"));
                 ui.checkbox(&mut self.onion_drawings, crate::i18n::t("inclure les dessins"));
@@ -550,7 +550,7 @@ impl Viewer {
                     }
                 }
                 egui::containers::menu::MenuButton::new(crate::i18n::t("trait ▾")).ui(ui, |ui| {
-                    ui.add(egui::Slider::new(&mut self.pen_width, 0.5..=40.0).logarithmic(true).text(crate::i18n::t("épaisseur")));
+                    ui.add(egui::Slider::new(&mut self.pen_width, 0.5..=40.0).clamping(egui::SliderClamping::Never).logarithmic(true).text(crate::i18n::t("épaisseur")));
                     ui.add(egui::Slider::new(&mut self.opacity, 0.05..=1.0).text(crate::i18n::t("opacité")));
                     ui.add(egui::Slider::new(&mut self.stabilizer, 0.0..=0.95).text(crate::i18n::t("stabilisateur")));
                     ui.add(egui::Slider::new(&mut self.taper, 0.0..=1.0).text(crate::i18n::t("effilé")));
@@ -932,14 +932,14 @@ impl Viewer {
                     }
                 }
                 ui.label(crate::i18n::t("cadence"));
-                ui.add(egui::DragValue::new(&mut ex.fps).range(1.0..=120.0).speed(0.2).suffix(" i/s"));
+                ui.add(egui::DragValue::new(&mut ex.fps).range(1.0..=1000.0).speed(0.2).suffix(" i/s"));
                 ui.label(crate::i18n::t("en"));
                 for n in [1usize, 2, 3, 4] {
                     if ui.selectable_label(ex.every == n, format!("{n}s")).clicked() {
                         ex.every = n;
                     }
                 }
-                ui.add(egui::DragValue::new(&mut ex.every).range(1..=240).speed(0.1).suffix("s"));
+                ui.add(egui::DragValue::new(&mut ex.every).range(1..=100000).speed(0.1).suffix("s"));
                 ui.label(crate::i18n::t("hauteur"));
                 for (h, l) in [(0u32, "originale"), (1080, "1080"), (720, "720")] {
                     if ui.selectable_label(ex.height == h, l).clicked() {

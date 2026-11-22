@@ -946,6 +946,68 @@ pub struct Lamp {
     pub intensity: f32,
     /// Portée d'une ponctuelle : au-delà, elle n'éclaire plus
     pub range: f32,
+    /// Forme : 0 soleil, 1 ponctuelle, 2 spot, 3 rectangle
+    pub shape: u8,
+    /// Spot et rectangle : direction dans laquelle ils éclairent
+    pub axis: V3,
+    /// Spot : cosinus du bord du cône et du début du fondu
+    pub cone: [f32; 2],
+    /// Rectangle : demi-côtés (vecteurs dans la scène)
+    pub half: [V3; 2],
+}
+
+fn sc3(a: V3, k: f32) -> V3 {
+    [a[0] * k, a[1] * k, a[2] * k]
+}
+
+/// Une lumière de la scène, dans l'espace normalisé de la vue (centrée sur `c`, taille 1).
+pub fn lamp_of(l: &crate::scene::SceneLight, c: V3, longest: f32) -> Lamp {
+    let k = 1.0 / longest.max(1e-9);
+    Lamp {
+        point: l.point,
+        at: if l.point { [(l.at[0] - c[0]) * k, (l.at[1] - c[1]) * k, (l.at[2] - c[2]) * k] } else { l.at },
+        color: l.color,
+        intensity: l.energy,
+        range: l.range * k,
+        shape: l.shape,
+        axis: l.axis,
+        cone: l.cone,
+        half: [sc3(l.half[0], k), sc3(l.half[1], k)],
+    }
+}
+
+impl Lamp {
+    pub fn simple(point: bool, at: V3, color: [f32; 3], intensity: f32, range: f32) -> Lamp {
+        Lamp { point, at, color, intensity, range, shape: if point { 1 } else { 0 }, axis: [0.0, -1.0, 0.0], cone: [0.7, 0.8], half: [[0.0; 3]; 2] }
+    }
+
+    /// Direction vers la lumière depuis `p`, distance, et part de lumière reçue (portée, cône,
+    /// inclinaison du rectangle). `u` choisit le point tiré sur la source (soleil élargi, rectangle).
+    pub fn sample(&self, p: V3, u: [f32; 2]) -> (V3, f32, f32) {
+        if self.shape == 0 && !self.point {
+            let n = self.at;
+            let a = if n[0].abs() < 0.9 { [1.0, 0.0, 0.0] } else { [0.0, 1.0, 0.0] };
+            let t1 = norm(cross(n, a));
+            let t2 = cross(n, t1);
+            let (ang, rr) = (u[0] * std::f32::consts::TAU, u[1].sqrt() * 0.03);
+            return (norm(add3(n, add3(sc3(t1, ang.cos() * rr), sc3(t2, ang.sin() * rr)))), 1e6, 1.0);
+        }
+        let src = if self.shape == 3 { add3(self.at, add3(sc3(self.half[0], 2.0 * u[0] - 1.0), sc3(self.half[1], 2.0 * u[1] - 1.0))) } else { self.at };
+        let to = sub(src, p);
+        let d = dot(to, to).sqrt().max(1e-6);
+        let dir = sc3(to, 1.0 / d);
+        let mut k = (1.0 - (d / self.range.max(1e-6)).min(1.0).powi(2)).powi(2);
+        let facing = -dot(dir, self.axis);
+        match self.shape {
+            2 => {
+                let t = ((facing - self.cone[0]) / (self.cone[1] - self.cone[0]).max(1e-4)).clamp(0.0, 1.0);
+                k *= t * t * (3.0 - 2.0 * t);
+            }
+            3 => k *= facing.max(0.0),
+            _ => {}
+        }
+        (dir, d, k)
+    }
 }
 
 pub struct Frame {
@@ -1066,7 +1128,7 @@ pub fn render(m: &Prepared, cam: &Camera, look: &Look, w: usize, h: usize) -> Fr
     let env = &look.env;
     let ld = look.light.dir();
     // Les lumières à calculer : celles de la scène, sinon la lumière de la vue
-    let lamps: Vec<Lamp> = if look.lamps.is_empty() { vec![Lamp { point: false, at: ld, color: look.light.color, intensity: look.light.intensity, range: 0.0 }] } else { look.lamps.clone() };
+    let lamps: Vec<Lamp> = if look.lamps.is_empty() { vec![Lamp::simple(false, ld, look.light.color, look.light.intensity, 0.0)] } else { look.lamps.clone() };
     let bvh = look.shadows.then(|| m.bvh.get_or_init(|| crate::bvh::Bvh::new(&m.pos, &m.tris)));
     // Part de lumière qui arrive en `o` : plusieurs rayons légèrement écartés donnent un bord d'ombre doux.
     // Le motif d'écart tourne d'un pixel à l'autre, ce qui change les marches d'escalier en grain fin.
@@ -1173,13 +1235,7 @@ pub fn render(m: &Prepared, cam: &Camera, look: &Look, w: usize, h: usize) -> Fr
                             let hit = [eye[0] + ray[0] * tt, m.floor + 1e-3, eye[2] + ray[2] * tt];
                             let (mut dark, mut total) = (0.0f32, 0.0f32);
                             for lamp in &lamps {
-                                let (dir, reach, fall) = if lamp.point {
-                                    let to = sub(lamp.at, hit);
-                                    let d = dot(to, to).sqrt().max(1e-6);
-                                    ([to[0] / d, to[1] / d, to[2] / d], d, (1.0 - (d / lamp.range.max(1e-6)).min(1.0).powi(2)).powi(2))
-                                } else {
-                                    (lamp.at, 1e6, 1.0)
-                                };
+                                let (dir, reach, fall) = if lamp.point { lamp.sample(hit, [0.5, 0.5]) } else { (lamp.at, 1e6, 1.0) };
                                 let e = lamp.intensity * fall * dir[1].max(0.0);
                                 if e <= 0.0 {
                                     continue;
@@ -1298,14 +1354,7 @@ pub fn render(m: &Prepared, cam: &Camera, look: &Look, w: usize, h: usize) -> Fr
                 let (mut l_diff, mut l_spec, mut l_wrap) = ([0.0f32; 3], [0.0f32; 3], [0.0f32; 3]);
                 let here = [pa[0] * w0 + pb[0] * w1 + pc[0] * w2, pa[1] * w0 + pb[1] * w1 + pc[1] * w2, pa[2] * w0 + pb[2] * w1 + pc[2] * w2];
                 for lamp in &lamps {
-                    let (dir, reach, fall) = if lamp.point {
-                        let to = sub(lamp.at, here);
-                        let d = dot(to, to).sqrt().max(1e-6);
-                        let k = (1.0 - (d / lamp.range.max(1e-6)).min(1.0).powi(2)).powi(2);
-                        ([to[0] / d, to[1] / d, to[2] / d], d, k)
-                    } else {
-                        (lamp.at, f32::MAX, 1.0)
-                    };
+                    let (dir, reach, fall) = if lamp.point { lamp.sample(here, [0.5, 0.5]) } else { (lamp.at, f32::MAX, 1.0) };
                     if fall <= 0.0 || lamp.intensity <= 0.0 {
                         continue;
                     }
@@ -1527,13 +1576,13 @@ fn lighting_ui(look: &mut Look, hdr_files: &[(String, std::path::PathBuf)], load
                         ui.label(egui::RichText::new(e).color(p.missing).size(11.0));
                     }
                     ui.add(egui::Slider::new(&mut look.env_rot, -std::f32::consts::PI..=std::f32::consts::PI).text(crate::i18n::t("rotation (H + glisser)")).show_value(false));
-                    ui.add(egui::Slider::new(&mut look.env_strength, 0.0..=3.0).text(crate::i18n::t("intensité")));
-                    ui.add(egui::Slider::new(&mut look.exposure, -4.0..=4.0).text(crate::i18n::t("exposition (EV)")));
+                    ui.add(egui::Slider::new(&mut look.env_strength, 0.0..=3.0).clamping(egui::SliderClamping::Never).text(crate::i18n::t("intensité")));
+                    ui.add(egui::Slider::new(&mut look.exposure, -4.0..=4.0).clamping(egui::SliderClamping::Never).text(crate::i18n::t("exposition (EV)")));
                     ui.checkbox(&mut look.show_bg, crate::i18n::t("afficher le HDRI en fond"));
                     ui.add_enabled(look.show_bg, egui::Checkbox::new(&mut look.blur_bg, "fond flou"));
                     ui.separator();
                     ui.label(egui::RichText::new(crate::i18n::t("lumière directionnelle (L + glisser)")).color(p.muted).size(11.0));
-                    ui.add(egui::Slider::new(&mut look.light.intensity, 0.0..=5.0).text(crate::i18n::t("intensité")));
+                    ui.add(egui::Slider::new(&mut look.light.intensity, 0.0..=5.0).clamping(egui::SliderClamping::Never).text(crate::i18n::t("intensité")));
                     ui.add(egui::Slider::new(&mut look.light.azimuth, -std::f32::consts::PI..=std::f32::consts::PI).text(crate::i18n::t("direction")).show_value(false));
                     ui.add(egui::Slider::new(&mut look.light.elevation, -1.5..=1.5).text(crate::i18n::t("hauteur")).show_value(false));
                     ui.horizontal(|ui| {
@@ -1593,7 +1642,7 @@ fn encode_animation(ff: std::path::PathBuf, scene: crate::scene::Scene, path: &s
         }
         // Lumières de la scène à cette image
         let mut lk = look.clone();
-        lk.lamps = sc.lights().into_iter().map(|l| Lamp { point: l.point, at: if l.point { [(l.at[0] - c[0]) / longest, (l.at[1] - c[1]) / longest, (l.at[2] - c[2]) / longest] } else { l.at }, color: l.color, intensity: l.energy, range: l.range / longest }).collect();
+        lk.lamps = sc.lights().into_iter().map(|l| lamp_of(&l, c, longest)).collect();
         // Le point de vue : la caméra de la scène si elle existe
         let mut cam = view_cam;
         if let Some(k) = cam_obj {
@@ -1967,6 +2016,10 @@ pub struct Viewer {
     edit_seen: u64,
     /// Triangle visible par pixel de la dernière image (pour cacher les coutures masquées)
     ids: Option<(usize, usize, Vec<u32>)>,
+    /// Version de `ids` (change à chaque nouvelle image)
+    ids_rev: u64,
+    /// Contour orange de la sélection, par-dessus l'image
+    outline: Option<(u64, egui::TextureHandle)>,
     /// Calcul en cours : (clé, résultat)
     job: Option<(u64, Receiver<Prepared>)>,
     turntable: bool,
@@ -2025,6 +2078,8 @@ impl Viewer {
             applied_ver: 0,
             scene: None,
             pending_hdr: None,
+            ids_rev: 0,
+            outline: None,
             scene_sel: None,
             scene_errors: vec![],
             scene_rx: None,
@@ -2129,7 +2184,7 @@ impl Viewer {
             look.lamps = scene
                 .lights()
                 .into_iter()
-                .map(|l| Lamp { point: l.point, at: if l.point { [(l.at[0] - c[0]) / longest, (l.at[1] - c[1]) / longest, (l.at[2] - c[2]) / longest] } else { l.at }, color: l.color, intensity: l.energy, range: l.range / longest })
+                .map(|l| lamp_of(&l, c, longest))
                 .collect();
             let nrm = |v: V3| [(v[0] - c[0]) / longest, (v[1] - c[1]) / longest, (v[2] - c[2]) / longest];
             let mut hsh = std::collections::hash_map::DefaultHasher::new();
@@ -2252,6 +2307,68 @@ impl Viewer {
             Ok(()) => format!("turntable : {}", out.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()),
             Err(e) => format!("GIF impossible : {e}"),
         });
+    }
+
+    /// Contour de la sélection, comme Blender : orange clair pour l'objet actif, plus foncé pour
+    /// les autres. Calculé sur l'image des triangles visibles, seulement quand elle ou la sélection change.
+    fn draw_outline(&mut self, ui: &egui::Ui, painter: &egui::Painter, rect: egui::Rect) {
+        let active = self.scene_sel;
+        if self.scene.is_none() || self.edit.is_some() || self.mesh.is_some() || (active.is_none() && self.scene_multi.is_empty()) {
+            return;
+        }
+        let Some((w, h, ids)) = &self.ids else { return };
+        let (w, h) = (*w, *h);
+        use std::hash::{Hash, Hasher};
+        let mut hs = std::collections::hash_map::DefaultHasher::new();
+        (self.ids_rev, active, &self.scene_multi).hash(&mut hs);
+        let key = hs.finish();
+        if self.outline.as_ref().map(|o| o.0) != Some(key) {
+            let total = self.scene_ranges.last().map(|r| r.2).unwrap_or(0);
+            let mut tri_sel = vec![0u8; total];
+            for &(k, a, b) in &self.scene_ranges {
+                let v = if Some(k) == active { 2 } else if self.scene_multi.contains(&k) { 1 } else { 0 };
+                if v > 0 {
+                    tri_sel[a..b.min(total)].fill(v);
+                }
+            }
+            let sel: Vec<u8> = ids.iter().map(|&t| tri_sel.get(t as usize).copied().unwrap_or(0)).collect();
+            // Épaisseur : 2 points d'écran, quelle que soit la résolution de l'image
+            let r = ((w as f32 / rect.width().max(1.0)) * 2.0).round().clamp(1.0, 4.0) as i32;
+            // Dilatation séparable (max sur les lignes puis les colonnes) : rapide même en mouvement
+            let r = r as usize;
+            let mut row = vec![0u8; w * h];
+            for y in 0..h {
+                let line = &sel[y * w..(y + 1) * w];
+                for x in 0..w {
+                    let (lo, hi) = (x.saturating_sub(r), (x + r).min(w - 1));
+                    row[y * w + x] = line[lo..=hi].iter().copied().max().unwrap_or(0);
+                }
+            }
+            let mut px = vec![0u8; w * h * 4];
+            let (hot, warm) = ([255u8, 170, 64], [235u8, 110, 20]);
+            for x in 0..w {
+                for y in 0..h {
+                    let (lo, hi) = (y.saturating_sub(r), (y + r).min(h - 1));
+                    let best = (lo..=hi).map(|yy| row[yy * w + x]).max().unwrap_or(0);
+                    if best > sel[y * w + x] {
+                        let c = if best == 2 { hot } else { warm };
+                        let i = (y * w + x) * 4;
+                        px[i..i + 4].copy_from_slice(&[c[0], c[1], c[2], 255]);
+                    }
+                }
+            }
+            let img = egui::ColorImage::from_rgba_unmultiplied([w, h], &px);
+            match &mut self.outline {
+                Some((k, t)) => {
+                    t.set(img, egui::TextureOptions::LINEAR);
+                    *k = key;
+                }
+                None => self.outline = Some((key, ui.ctx().load_texture("model3d-outline", img, egui::TextureOptions::LINEAR))),
+            }
+        }
+        if let Some((_, t)) = &self.outline {
+            painter.image(t.id(), rect, egui::Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+        }
     }
 
     pub fn is_mesh_edit(&self) -> bool {
@@ -2380,7 +2497,7 @@ impl Viewer {
         // ---- Transformation en cours
         if let Some((kind, axis, orig, from)) = me.modal.take() {
             let mut axis = axis;
-            for (k, kk) in [Key::X, Key::Y, Key::Z].into_iter().enumerate() {
+            for (kk, k) in [(Key::X, 0usize), (Key::Y, 2), (Key::Z, 1)] {
                 if ui.input(|i| i.key_pressed(kk)) {
                     let mut e = [0.0f32; 3];
                     e[k] = 1.0;
@@ -2761,9 +2878,9 @@ impl Viewer {
             let mut close = false;
             egui::Window::new(crate::i18n::t("rendu final")).collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]).show(ctx, |ui| {
                 ui.horizontal(|ui| {
-                    ui.add(egui::DragValue::new(&mut w).range(16..=8192).suffix(" px"));
+                    ui.add(egui::DragValue::new(&mut w).range(16..=32768).suffix(" px"));
                     ui.label("×");
-                    ui.add(egui::DragValue::new(&mut h).range(16..=8192).suffix(" px"));
+                    ui.add(egui::DragValue::new(&mut h).range(16..=32768).suffix(" px"));
                 });
                 ui.horizontal_wrapped(|ui| {
                     for (a, b, l) in [(1280, 720, "720p"), (1920, 1080, "1080p"), (3840, 2160, "4K"), (1080, 1350, "portrait"), (2048, 2048, "carré")] {
@@ -2772,7 +2889,7 @@ impl Viewer {
                         }
                     }
                 });
-                ui.add(egui::Slider::new(&mut spp, 8..=4096).logarithmic(true).text(crate::i18n::t("échantillons")));
+                ui.add(egui::Slider::new(&mut spp, 8..=4096).clamping(egui::SliderClamping::Never).logarithmic(true).text(crate::i18n::t("échantillons")));
                 ui.checkbox(&mut self.trace_set.denoise, crate::i18n::t("débruitage"));
                 ui.label(egui::RichText::new(crate::i18n::t("Le point de vue est celui de la vue 3D ; rebonds et sol comme dans le menu « rendu ».")).size(10.5).color(p.muted));
                 ui.horizontal(|ui| {
@@ -3042,7 +3159,7 @@ impl Viewer {
                     self.graph.reset_view();
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    changed |= ui.add(egui::DragValue::new(&mut scene.fps).range(1.0..=120.0).suffix(" i/s")).changed();
+                    changed |= ui.add(egui::DragValue::new(&mut scene.fps).range(1.0..=1000.0).suffix(" i/s")).changed();
                     changed |= ui.add(egui::DragValue::new(&mut scene.end).prefix(format!("{} ", crate::i18n::t("fin")))).changed();
                     changed |= ui.add(egui::DragValue::new(&mut scene.start).prefix(format!("{} ", crate::i18n::t("début")))).changed();
                 });
@@ -3114,6 +3231,20 @@ impl Viewer {
                 "light" => {
                     let k = scene.add_role("soleil", "light");
                     (scene.objects[k].pos, scene.objects[k].rot) = ([0.0, 3.0, 0.0], [35.0, 0.0, -35.0]);
+                    k
+                }
+                "light-point" | "light-spot" | "light-area" => {
+                    let (name, shape) = match id {
+                        "light-point" => ("ponctuelle", 1),
+                        "light-spot" => ("spot", 2),
+                        _ => ("rectangle", 3),
+                    };
+                    let k = scene.add_role(name, "light");
+                    let o = &mut scene.objects[k];
+                    o.shape = shape;
+                    o.point = true;
+                    o.pos = [0.0, 3.0, 0.0];
+                    o.energy = 2.0;
                     k
                 }
                 "camera" => scene.add_role("caméra", "camera"),
@@ -3490,7 +3621,7 @@ impl Viewer {
                             PropTab::Scene => {
                                 ui.horizontal(|ui| {
                                     ui.label(egui::RichText::new(crate::i18n::t("images/s")).size(11.0).color(p.muted));
-                                    changed |= ui.add(egui::DragValue::new(&mut scene.fps).range(1.0..=120.0)).changed();
+                                    changed |= ui.add(egui::DragValue::new(&mut scene.fps).range(1.0..=1000.0)).changed();
                                 });
                                 ui.horizontal(|ui| {
                                     ui.label(egui::RichText::new(crate::i18n::t("début")).size(11.0).color(p.muted));
@@ -3555,9 +3686,19 @@ impl Viewer {
                                                     changed = true;
                                                 }
                                             });
+                                            // Montrés avec Z vers le haut ; l'échelle n'a pas de sens
+                                            let signed = reset != [1.0; 3];
                                             ui.horizontal(|ui| {
-                                                for (k, axis) in ["x", "y", "z"].iter().enumerate() {
-                                                    changed |= ui.add(egui::DragValue::new(&mut v[k]).speed(speed).prefix(format!("{axis} ")).max_decimals(3)).changed();
+                                                for (shown, axis) in ["x", "y", "z"].iter().enumerate() {
+                                                    let (k, sign) = crate::gizmo::SHOWN[shown];
+                                                    let sign = if signed { sign } else { 1.0 };
+                                                    // Position : dans l'unité choisie (la scène est en mètres)
+                                                    let (uname, uf) = if label == "position" { crate::settings::unit() } else { ("", 1.0) };
+                                                    let mut val = v[k] * sign * uf;
+                                                    if ui.add(egui::DragValue::new(&mut val).speed(speed * uf as f64).prefix(format!("{axis} ")).suffix(if uname.is_empty() { String::new() } else { format!(" {uname}") }).max_decimals(3)).changed() {
+                                                        v[k] = val * sign / uf;
+                                                        changed = true;
+                                                    }
                                                 }
                                             });
                                         };
@@ -3588,16 +3729,45 @@ impl Viewer {
                                             crate::scene::Kind::Light => {
                                                 ui.horizontal(|ui| {
                                                     ui.label(egui::RichText::new(crate::i18n::t("force")).size(11.0).color(p.muted));
-                                                    changed |= ui.add(egui::Slider::new(&mut o.energy, 0.0..=5.0)).changed();
+                                                    changed |= ui.add(egui::Slider::new(&mut o.energy, 0.0..=5.0).clamping(egui::SliderClamping::Never)).changed();
                                                 });
-                                                ui.horizontal(|ui| {
-                                                    changed |= ui.selectable_value(&mut o.point, false, egui::RichText::new(crate::i18n::t("soleil")).size(11.0)).on_hover_text(crate::i18n::t("Une direction : tourne-la pour changer d'où vient la lumière")).changed();
-                                                    changed |= ui.selectable_value(&mut o.point, true, egui::RichText::new(crate::i18n::t("ponctuelle")).size(11.0)).on_hover_text(crate::i18n::t("Elle éclaire autour d'elle : déplace-la")).changed();
+                                                ui.horizontal_wrapped(|ui| {
+                                                    let cur = crate::scene::light_shape(o);
+                                                    for (k, name, tip) in [
+                                                        (0u8, "soleil", "Une direction : tourne-la pour changer d'où vient la lumière"),
+                                                        (1, "ponctuelle", "Elle éclaire autour d'elle : déplace-la"),
+                                                        (2, "spot", "Un cône de lumière, vers le bas de son axe Y : tourne-le pour viser"),
+                                                        (3, "rectangle", "Un panneau lumineux (comme une boîte à lumière) : ombres douces"),
+                                                    ] {
+                                                        if ui.selectable_label(cur == k, egui::RichText::new(crate::i18n::t(name)).size(11.0)).on_hover_text(crate::i18n::t(tip)).clicked() && cur != k {
+                                                            o.shape = k;
+                                                            o.point = k != 0;
+                                                            changed = true;
+                                                        }
+                                                    }
                                                 });
+                                                match crate::scene::light_shape(o) {
+                                                    2 => {
+                                                        ui.horizontal(|ui| {
+                                                            ui.label(egui::RichText::new(crate::i18n::t("ouverture °")).size(11.0).color(p.muted));
+                                                            changed |= ui.add(egui::DragValue::new(&mut o.spot).speed(0.5).range(1.0..=179.0)).changed();
+                                                            ui.label(egui::RichText::new(crate::i18n::t("fondu")).size(11.0).color(p.muted));
+                                                            changed |= ui.add(egui::DragValue::new(&mut o.blend).speed(0.01).range(0.0..=1.0)).changed();
+                                                        });
+                                                    }
+                                                    3 => {
+                                                        ui.horizontal(|ui| {
+                                                            ui.label(egui::RichText::new(crate::i18n::t("taille")).size(11.0).color(p.muted));
+                                                            changed |= ui.add(egui::DragValue::new(&mut o.size[0]).speed(0.02).range(0.001..=f32::MAX).prefix("x ")).changed();
+                                                            changed |= ui.add(egui::DragValue::new(&mut o.size[1]).speed(0.02).range(0.001..=f32::MAX).prefix("y ")).changed();
+                                                        });
+                                                    }
+                                                    _ => {}
+                                                }
                                                 if o.point {
                                                     ui.horizontal(|ui| {
                                                         ui.label(egui::RichText::new(crate::i18n::t("portée")).size(11.0).color(p.muted));
-                                                        changed |= ui.add(egui::DragValue::new(&mut o.range).speed(0.05).range(0.01..=10000.0)).changed();
+                                                        changed |= ui.add(egui::DragValue::new(&mut o.range).speed(0.05).range(0.01..=f32::MAX)).changed();
                                                     });
                                                 }
                                                 ui.label(egui::RichText::new(crate::i18n::t("Sa couleur se règle dans l'onglet objet.")).size(10.0).color(p.muted));
@@ -4101,7 +4271,7 @@ impl Viewer {
                                 }
                             }
                             ui.separator();
-                            for (label, id) in [("lumière", "light"), ("caméra", "camera"), ("groupe vide", "empty")] {
+                            for (label, id) in [("lumière soleil", "light"), ("lumière ponctuelle", "light-point"), ("spot", "light-spot"), ("lumière rectangle", "light-area"), ("caméra", "camera"), ("groupe vide", "empty")] {
                                 if ui.button(crate::i18n::t(label)).clicked() {
                                     self.hdr_add = Some(id);
                                     ui.close();
@@ -4195,16 +4365,17 @@ impl Viewer {
                             if self.engine == 1 {
                                 ui.separator();
                                 let mut ch = false;
-                                ch |= ui.add(egui::Slider::new(&mut self.trace_set.bounces, 1..=16).text(crate::i18n::t("rebonds"))).changed();
-                                ch |= ui.add(egui::Slider::new(&mut self.trace_max, 16..=4096).logarithmic(true).text(crate::i18n::t("échantillons"))).changed();
+                                ch |= ui.add(egui::Slider::new(&mut self.trace_set.bounces, 1..=16).clamping(egui::SliderClamping::Never).text(crate::i18n::t("rebonds"))).changed();
+                                ch |= ui.add(egui::Slider::new(&mut self.trace_max, 16..=4096).clamping(egui::SliderClamping::Never).logarithmic(true).text(crate::i18n::t("échantillons"))).changed();
                                 ch |= ui.checkbox(&mut self.trace_set.floor, crate::i18n::t("sol (ombres et rebonds)")).changed();
                                 ch |= ui.add_enabled(self.trace_set.floor, egui::Checkbox::new(&mut self.trace_set.floor_visible, crate::i18n::t("sol visible"))).changed();
-                                ch |= ui.add(egui::Slider::new(&mut self.trace_set.clamp, 1.0..=100.0).logarithmic(true).text(crate::i18n::t("limite des points brillants"))).changed();
+                                ch |= ui.add(egui::Slider::new(&mut self.trace_set.clamp, 1.0..=100.0).clamping(egui::SliderClamping::Never).logarithmic(true).text(crate::i18n::t("limite des points brillants"))).changed();
                                 ch |= ui.checkbox(&mut self.trace_set.denoise, crate::i18n::t("débruitage")).changed();
+                                ui.checkbox(&mut self.trace_set.live, crate::i18n::t("tracé de chemins pendant le mouvement")).on_hover_text(crate::i18n::t("Décoché : l'aperçu rapide prend le relais quand on tourne autour de la scène."));
                                 ch |= ui.add(egui::Slider::new(&mut self.trace_set.aperture, 0.0..=0.2).text(crate::i18n::t("flou de profondeur"))).on_hover_text(crate::i18n::t("Ouverture de l'objectif : 0 tout est net")).changed();
                                 if self.trace_set.aperture > 0.0 {
                                     let mut f = if self.trace_set.focus > 0.0 { self.trace_set.focus } else { self.cam.dist };
-                                    if ui.add(egui::Slider::new(&mut f, 0.05..=10.0).logarithmic(true).text(crate::i18n::t("distance nette"))).changed() {
+                                    if ui.add(egui::Slider::new(&mut f, 0.05..=10.0).clamping(egui::SliderClamping::Never).logarithmic(true).text(crate::i18n::t("distance nette"))).changed() {
                                         self.trace_set.focus = f;
                                         ch = true;
                                     }
@@ -4357,7 +4528,13 @@ impl Viewer {
         let stats = {
             let s = model.size();
             let shown = if shown_tris != model.total_tris { format!(" · affiché : {}", fmt_n(shown_tris)) } else { String::new() };
-            format!("{} triangles{shown} · {} sommets · {:.2} × {:.2} × {:.2}", fmt_n(model.total_tris), fmt_n(model.total_vertices), s[0], s[1], s[2])
+            if model.total_vertices <= 2 {
+                crate::i18n::t("scène vide")
+            } else {
+                // Dimensions avec Z vers le haut, dans l'unité choisie
+                let (un, uf) = crate::settings::unit();
+                format!("{} triangles{shown} · {} sommets · {:.2} × {:.2} × {:.2} {un}", fmt_n(model.total_tris), fmt_n(model.total_vertices), s[0] * uf, s[2] * uf, s[1] * uf)
+            }
         };
         self.stats_text = stats;
         if let Some(path) = pick_hdr.or(self.pending_hdr.take()) {
@@ -4704,7 +4881,8 @@ impl Viewer {
                 let cam = self.cam;
                 // X, Y, Z imposent un axe (le même une seconde fois le libère)
                 let mut axis = axis;
-                for (k, key) in [Key::X, Key::Y, Key::Z].into_iter().enumerate() {
+                // (Z est l'axe qui monte : l'axe interne 1)
+                for (key, k) in [(Key::X, 0usize), (Key::Y, 2), (Key::Z, 1)] {
                     if ui.input(|i| i.key_pressed(key)) {
                         axis = if axis == Some(k) { None } else { Some(k) };
                     }
@@ -4771,7 +4949,7 @@ impl Viewer {
                 }
                 // Rappel des touches, en bas de la vue
                 let what = [crate::i18n::t("déplacer"), crate::i18n::t("tourner"), crate::i18n::t("taille")][kind.min(2) as usize].clone();
-                let ax = axis.map(|k| format!(" · {} {}", crate::i18n::t("axe"), ["X", "Y", "Z"][k])).unwrap_or_default();
+                let ax = axis.map(|k| format!(" · {} {}", crate::i18n::t("axe"), crate::gizmo::LETTER[k])).unwrap_or_default();
                 ui.painter_at(rect).text(rect.left_bottom() + egui::vec2(12.0, -10.0), egui::Align2::LEFT_BOTTOM, format!("{what}{ax}   ·   X Y Z : {}   ·   {}   ·   {}", crate::i18n::t("imposer un axe"), crate::i18n::t("clic : valider"), crate::i18n::t("Échap : annuler")), egui::FontId::monospace(11.5), p.accent);
             }
             if let (Some(sel), Some((lo, hi)), Some(scene)) = (self.scene_sel, self.scene_frame, self.scene.as_mut()) {
@@ -5092,6 +5270,7 @@ impl Viewer {
             draw_refs(&mut frame, &self.cam, &refs);
             let img = egui::ColorImage::from_rgba_unmultiplied([frame.w, frame.h], &frame.rgba);
             self.ids = Some((frame.w, frame.h, frame.ids));
+            self.ids_rev += 1;
             match &mut self.tex {
                 Some(t) => t.set(img, egui::TextureOptions::LINEAR),
                 None => self.tex = Some(ui.ctx().load_texture("model3d", img, egui::TextureOptions::LINEAR)),
@@ -5103,13 +5282,15 @@ impl Viewer {
         }
         self.final_render_ui(ui.ctx(), &look);
         // Tracé de chemins : à l'arrêt, l'image s'affine passe après passe (l'aperçu sert pendant le mouvement)
-        if self.engine == 1 && !interacting && self.mesh.is_none() {
+        if self.engine == 1 && (!interacting || self.trace_set.live) && self.mesh.is_none() {
             if let Some(prepared) = self.prepared.as_ref() {
                 let use_gpu = self.trace_set.gpu && gputrace::hardware();
                 let mut fresh = false;
                 if self.trace.as_ref().is_none_or(|t| t.0 != trace_key) {
                     // Sur la carte graphique : pleine résolution ; sur le processeur : environ 0,4 mégapixel
-                    let f = if use_gpu { 1.0 } else { (400_000.0 / (size[0] * size[1]) as f32).sqrt().min(1.0) };
+                    // (moins pendant le mouvement, pour que la vue suive)
+                    let budget = if interacting { 120_000.0 } else { 400_000.0 };
+                    let f = if use_gpu { if interacting { 0.6 } else { 1.0 } } else { (budget / (size[0] * size[1]) as f32).sqrt().min(1.0) };
                     let (tw, th) = (((size[0] as f32 * f) as usize).max(8), ((size[1] as f32 * f) as usize).max(8));
                     self.trace = Some((trace_key.clone(), pathtrace::Accum::new(tw, th)));
                     fresh = true;
@@ -5137,7 +5318,7 @@ impl Viewer {
                             self.gpu_batch = if ms < 20 { (self.gpu_batch * 2).min(64) } else if ms > 45 { (self.gpu_batch / 2).max(1) } else { self.gpu_batch };
                         } else {
                             // Autant de passes qu'il en tient dans ~40 ms
-                            while acc.spp < self.trace_max && (acc.spp == 0 || t0.elapsed().as_millis() < 40) {
+                            while acc.spp < self.trace_max && (acc.spp == 0 || (!interacting && t0.elapsed().as_millis() < 40)) {
                                 pathtrace::pass(&prepared.2, &self.cam, &look, &self.trace_set, acc);
                             }
                         }
@@ -5187,6 +5368,7 @@ impl Viewer {
         if let Some(t) = &self.tex {
             painter.image(t.id(), rect, egui::Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
         }
+        self.draw_outline(ui, &painter, rect);
         self.mesh_edit_ui(ui, rect, &resp);
         // Repères des lumières et des caméras de la scène
         if let (Some(scene), Some((lo, hi)), true) = (self.scene.as_ref(), self.scene_frame, self.edit.is_none()) {
@@ -5253,9 +5435,53 @@ impl Viewer {
                 let reach = longest * 0.12;
                 if let Some(tip) = project([a[0] + d[0] / l * reach, a[1] + d[1] / l * reach, a[2] + d[2] / l * reach]) {
                     // Une ponctuelle éclaire partout : pas de sens à montrer
-                    if !(kind == crate::scene::Kind::Light && o.point) {
+                    if !(kind == crate::scene::Kind::Light && crate::scene::light_shape(o) == 1) {
                         over.line_segment([at, tip], Stroke::new(1.5, col));
                         over.circle_filled(tip, 2.5, col);
+                    }
+                }
+                if kind == crate::scene::Kind::Light {
+                    let thin = Stroke::new(1.0, col.gamma_multiply(0.8));
+                    match crate::scene::light_shape(o) {
+                        // Spot : le cône, jusqu'à un cercle au bout du trait
+                        2 => {
+                            let half = (o.spot.clamp(1.0, 179.0) * 0.5).to_radians();
+                            let (dl, rad) = (reach * 1.6, (reach * 1.6) * half.tan().min(4.0));
+                            let dir = [d[0] / l, d[1] / l, d[2] / l];
+                            let ax = scene.world(k, [1.0, 0.0, 0.0]);
+                            let u0 = [ax[0] - a[0], ax[1] - a[1], ax[2] - a[2]];
+                            let ul = (u0[0] * u0[0] + u0[1] * u0[1] + u0[2] * u0[2]).sqrt().max(1e-9);
+                            let u = [u0[0] / ul, u0[1] / ul, u0[2] / ul];
+                            let v = cross(dir, u);
+                            let ring: Vec<Option<Pos2>> = (0..=24)
+                                .map(|i| {
+                                    let t = i as f32 / 24.0 * std::f32::consts::TAU;
+                                    let (c, s) = (t.cos() * rad, t.sin() * rad);
+                                    project([a[0] + dir[0] * dl + u[0] * c + v[0] * s, a[1] + dir[1] * dl + u[1] * c + v[1] * s, a[2] + dir[2] * dl + u[2] * c + v[2] * s])
+                                })
+                                .collect();
+                            for w in ring.windows(2) {
+                                if let (Some(p0), Some(p1)) = (w[0], w[1]) {
+                                    over.line_segment([p0, p1], thin);
+                                }
+                            }
+                            for i in [0, 6, 12, 18] {
+                                if let Some(q) = ring[i] {
+                                    over.line_segment([at, q], thin);
+                                }
+                            }
+                        }
+                        // Rectangle : son contour
+                        3 => {
+                            let (hx, hz) = (o.size[0] * 0.5, o.size[1] * 0.5);
+                            let corners: Vec<Option<Pos2>> = [[-hx, 0.0, -hz], [hx, 0.0, -hz], [hx, 0.0, hz], [-hx, 0.0, hz], [-hx, 0.0, -hz]].iter().map(|c| project(scene.world(k, *c))).collect();
+                            for w in corners.windows(2) {
+                                if let (Some(p0), Some(p1)) = (w[0], w[1]) {
+                                    over.line_segment([p0, p1], Stroke::new(1.5, col));
+                                }
+                            }
+                        }
+                        _ => {}
                     }
                 }
                 if kind == crate::scene::Kind::Light {
@@ -5405,7 +5631,7 @@ impl Viewer {
         // Repère des axes (en bas à gauche)
         let o = rect.left_bottom() + vec2(36.0, -40.0);
         painter.circle_filled(o, 30.0, p.panel.gamma_multiply(0.6));
-        for (axis, col, label) in [([1.0, 0.0, 0.0], Color32::from_rgb(230, 70, 70), "X"), ([0.0, 1.0, 0.0], Color32::from_rgb(110, 200, 80), if z_up { "Z" } else { "Y" }), ([0.0, 0.0, 1.0], Color32::from_rgb(80, 140, 240), if z_up { "-Y" } else { "Z" })] {
+        for (axis, col, label) in [([1.0, 0.0, 0.0], crate::gizmo::AXIS[0], "X"), ([0.0, 0.0, -1.0], crate::gizmo::AXIS[2], "Y"), ([0.0, 1.0, 0.0], crate::gizmo::AXIS[1], "Z")] {
             let r = self.cam.rotate(axis);
             let end = o + vec2(r[0], -r[1]) * 22.0;
             painter.line_segment([o, end], Stroke::new(2.0, col));
@@ -5456,6 +5682,26 @@ pub fn fmt_n(n: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn formes_de_lumiere() {
+        let mut spot = Lamp::simple(true, [0.0, 2.0, 0.0], [1.0; 3], 1.0, 100.0);
+        spot.shape = 2;
+        spot.axis = [0.0, -1.0, 0.0];
+        spot.cone = [(20f32).to_radians().cos(), (15f32).to_radians().cos()];
+        // Juste dessous : éclairé ; loin sur le côté : hors du cône
+        assert!(spot.sample([0.0, 0.0, 0.0], [0.5, 0.5]).2 > 0.9);
+        assert_eq!(spot.sample([3.0, 0.0, 0.0], [0.5, 0.5]).2, 0.0);
+        let mut rect = Lamp::simple(true, [0.0, 2.0, 0.0], [1.0; 3], 1.0, 100.0);
+        rect.shape = 3;
+        rect.axis = [0.0, -1.0, 0.0];
+        rect.half = [[0.5, 0.0, 0.0], [0.0, 0.0, 0.5]];
+        // Dessous : éclairé ; au-dessus (derrière le panneau) : rien
+        assert!(rect.sample([0.0, 0.0, 0.0], [0.5, 0.5]).2 > 0.9);
+        assert_eq!(rect.sample([0.0, 4.0, 0.0], [0.5, 0.5]).2, 0.0);
+        // Deux tirages sur le panneau : deux directions (ombres douces)
+        assert!(rect.sample([0.0, 0.0, 0.0], [0.0, 0.0]).0 != rect.sample([0.0, 0.0, 0.0], [1.0, 1.0]).0);
+    }
 
     #[test]
     fn animation_en_video() {
@@ -5869,7 +6115,7 @@ mod ombres {
         let cam = Camera { yaw: 0.0, pitch: 1.2, dist: 2.0, ..Default::default() };
         let mut look = Look::default();
         look.env_strength = 0.05;
-        look.lamps = vec![Lamp { point: false, at: [0.0, 1.0, 0.0], color: [1.0; 3], intensity: 2.0, range: 0.0 }];
+        look.lamps = vec![Lamp::simple(false, [0.0, 1.0, 0.0], [1.0; 3], 2.0, 0.0)];
         let lum = |f: &Frame| f.rgba.chunks(4).map(|p| p[0] as u64).sum::<u64>();
         let open = render(&prep, &cam, &look, 160, 160);
         look.shadows = true;
@@ -5879,7 +6125,7 @@ mod ombres {
         assert!(lum(&shaded) < lum(&open));
         // Ponctuelle : près du centre, elle éclaire plus le milieu du sol que ses coins, et rien hors de portée
         look.shadows = false;
-        look.lamps = vec![Lamp { point: true, at: [0.4, 0.05, 0.4], color: [1.0; 3], intensity: 3.0, range: 0.5 }];
+        look.lamps = vec![Lamp::simple(true, [0.4, 0.05, 0.4], [1.0; 3], 3.0, 0.5)];
         let near = render(&prep, &cam, &look, 160, 160);
         look.lamps[0].at = [5.0, 5.0, 5.0];
         let far = render(&prep, &cam, &look, 160, 160);

@@ -199,11 +199,12 @@ fn header(ui: &mut Ui, id: &str, title: &str, mut pl: Place, closable: bool, pan
     // ▾ : la place du panneau, comme le clic droit
     let mr = Rect::from_min_max(pos2(bx - 20.0, r.top() + 1.0), pos2(bx, r.bottom() - 1.0));
     let screen = ui.ctx().content_rect();
-    if pl.side == Side::Window {
+    if matches!(pl.side, Side::Window | Side::Float) {
         // Dans sa propre fenêtre : un clic sur l'en-tête la ramène dans l'application
         if resp.on_hover_text(crate::i18n::t("cliquer pour rattacher à la fenêtre principale")).clicked() {
-            pl.side = Side::Float;
+            pl.side = Side::Right;
             set(id, pl);
+            save();
         }
         return;
     }
@@ -326,8 +327,9 @@ pub fn show_ex<R>(ui: &mut Ui, id: &str, title: &str, default: Side, size: f32, 
     // Flottant : le contenu reste dans le cadre du panneau (un board ou un graphe y prend toute la place sans déborder)
     let screen = ui.ctx().content_rect();
     let float_pos = pos2(pl.pos[0].clamp(screen.left(), screen.right() - 80.0), pl.pos[1].clamp(screen.top(), screen.bottom() - 40.0));
-    let fsize = float_size(screen, pl.size, min);
-    let float_rect = (pl.side == Side::Float).then(|| Rect::from_min_size(float_pos, fsize));
+    // Les flottants sont de vraies fenêtres : leur contenu n'est plus borné par l'application
+    let float_rect: Option<Rect> = None;
+    let _ = float_pos;
     let body = |ui: &mut Ui| {
         let top = ui.max_rect().min;
         if let Some(r) = float_rect {
@@ -345,54 +347,57 @@ pub fn show_ex<R>(ui: &mut Ui, id: &str, title: &str, default: Side, size: f32, 
         Side::Left => Some(egui::Panel::left(id.to_string()).resizable(true).default_size(size).min_size(min).max_size(max_side(screen, min)).frame(frame).show(ui, body).inner),
         Side::Right => Some(egui::Panel::right(id.to_string()).resizable(true).default_size(size).min_size(min).max_size(max_side(screen, min)).frame(frame).show(ui, body).inner),
         Side::Bottom => Some(egui::Panel::bottom(id.to_string()).resizable(true).default_size(220.0).min_size(90.0).max_size((screen.height() * 0.6).max(140.0)).frame(frame).show(ui, body).inner),
-        Side::Window => {
+        // Flottant ou à part : une vraie fenêtre du système, qui peut sortir de l'application
+        Side::Window | Side::Float => {
             let ctx = ui.ctx().clone();
             let mut body = Some(body);
             let mut back = false;
-            let vp = egui::ViewportBuilder::default().with_title(format!("{title} · Aryadne")).with_inner_size(vec2(pl.size[0].max(min), pl.size[1].max(240.0)));
+            let main = ctx.input(|i| i.viewport().outer_rect).map(|r| r.min).unwrap_or(Pos2::ZERO);
+            let fsize = float_size(screen, pl.size, min.max(180.0));
+            let vp = egui::ViewportBuilder::default()
+                .with_title(format!("{title} · Aryadne"))
+                .with_inner_size(fsize)
+                .with_min_inner_size(vec2(min.max(180.0), 140.0))
+                .with_position(main + vec2(pl.pos[0], pl.pos[1]));
+            let mut moved: Option<([f32; 2], [f32; 2])> = None;
             let out = ctx.show_viewport_immediate(egui::ViewportId::from_hash_of(("dock", id)), vp, |ui, _class| {
-                if ui.ctx().input(|i| i.viewport().close_requested()) {
+                let (close, outer, inner) = ui.ctx().input(|i| (i.viewport().close_requested(), i.viewport().outer_rect, i.viewport().inner_rect));
+                if close {
                     back = true;
+                }
+                // La fenêtre déplacée ou redimensionnée par le système : on retient sa place
+                if let (Some(o), Some(r)) = (outer, inner) {
+                    moved = Some(([o.min.x - main.x, o.min.y - main.y], [r.width(), r.height()]));
                 }
                 let body = body.take()?;
                 Some(egui::CentralPanel::default().frame(frame.stroke(Stroke::NONE)).show(ui, body).inner)
             });
+            if let Some((pos, size)) = moved {
+                if (pos[0] - pl.pos[0]).abs() > 1.0 || (pos[1] - pl.pos[1]).abs() > 1.0 || (size[0] - pl.size[0]).abs() > 1.0 || (size[1] - pl.size[1]).abs() > 1.0 {
+                    with(|m| {
+                        if let Some(p) = m.get_mut(id) {
+                            p.pos = pos;
+                            p.size = size;
+                        }
+                    });
+                }
+            }
             if back {
-                // Fermer la fenêtre détachée ramène le panneau à sa place d'origine
-                set(id, Place { side: default, ..pl });
+                if matches!(default, Side::Float | Side::Window) {
+                    // Un panneau né flottant se ferme avec sa fenêtre
+                    if closable {
+                        CLOSED.lock().unwrap_or_else(|e| e.into_inner()).push(id.to_string());
+                    } else {
+                        set(id, Place { side: Side::Right, ..pl });
+                    }
+                } else {
+                    // Fermer la fenêtre détachée ramène le panneau à sa place d'origine
+                    set(id, Place { side: default, ..pl });
+                }
+                save();
                 ctx.request_repaint();
             }
             out
-        }
-        Side::Float => {
-            let ctx = ui.ctx().clone();
-            let pos = float_pos;
-            let r = egui::Window::new(title)
-                .id(egui::Id::unique(("dock", id)))
-                .title_bar(false)
-                .movable(false)
-                .resizable(true)
-                .current_pos(pos)
-                .default_size(fsize)
-                .min_size(vec2(min.max(180.0), 140.0))
-                .max_size(vec2(screen.width() * 0.8, screen.height() * 0.8))
-                .frame(frame.shadow(ctx.global_style().visuals.window_shadow).corner_radius(8))
-                .show(&ctx, body)?;
-            // Garder la taille choisie pour la prochaine fois
-            // (seulement quand on la redimensionne à la main : le contenu ne la fait pas grandir)
-            let sz = r.response.rect.size();
-            let resizing = ctx.input(|i| i.pointer.any_down()) && HELD.lock().ok().is_some_and(|g| g.is_none());
-            if resizing && ((sz.x - pl.size[0]).abs() > 2.0 || (sz.y - pl.size[1]).abs() > 2.0) {
-                with(|m| {
-                    if let Some(p) = m.get_mut(id) {
-                        p.size = [sz.x, sz.y];
-                    }
-                });
-            }
-            if ctx.input(|i| i.pointer.any_released()) {
-                save();
-            }
-            r.inner
         }
     }
 }

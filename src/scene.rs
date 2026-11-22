@@ -20,6 +20,15 @@ fn half() -> f32 {
 fn energy() -> f32 {
     1.2
 }
+fn spot_deg() -> f32 {
+    45.0
+}
+fn spot_blend() -> f32 {
+    0.15
+}
+fn area_size() -> [f32; 2] {
+    [1.0, 1.0]
+}
 fn range() -> f32 {
     8.0
 }
@@ -65,6 +74,17 @@ pub struct Object {
     /// Portée d'une lumière ponctuelle, dans les unités de la scène
     #[serde(default = "range")]
     pub range: f32,
+    /// Forme d'une lumière : 0 selon `point` (soleil ou ponctuelle), 1 ponctuelle, 2 spot, 3 rectangle
+    #[serde(default)]
+    pub shape: u8,
+    /// Spot : ouverture du cône (degrés) et part du bord en fondu
+    #[serde(default = "spot_deg")]
+    pub spot: f32,
+    #[serde(default = "spot_blend")]
+    pub blend: f32,
+    /// Rectangle : largeur et hauteur
+    #[serde(default = "area_size")]
+    pub size: [f32; 2],
     /// Clés d'animation, triées par image
     #[serde(default)]
     pub keys: Vec<Key>,
@@ -235,19 +255,30 @@ impl Object {
     }
 
     pub fn new(name: String, file: String) -> Object {
-        Object { name, file, pos: [0.0; 3], rot: [0.0; 3], scale: [1.0; 3], visible: true, color: None, mods: vec![], material: String::new(), parent: String::new(), opacity: 0.5, role: String::new(), energy: 1.2, point: false, range: 8.0, keys: vec![] }
+        Object { name, file, pos: [0.0; 3], rot: [0.0; 3], scale: [1.0; 3], visible: true, color: None, mods: vec![], material: String::new(), parent: String::new(), opacity: 0.5, role: String::new(), energy: 1.2, point: false, range: 8.0, shape: 0, spot: spot_deg(), blend: spot_blend(), size: area_size(), keys: vec![] }
     }
 }
 
 /// Une lumière de la scène, prête pour le rendu.
 #[derive(Clone, Copy, Debug)]
 pub struct SceneLight {
+    /// 0 soleil, 1 ponctuelle, 2 spot, 3 rectangle
+    pub shape: u8,
+    /// Spot et rectangle : direction éclairée ; cône du spot (cosinus) ; demi-côtés du rectangle
+    pub axis: [f32; 3],
+    pub cone: [f32; 2],
+    pub half: [[f32; 3]; 2],
     pub point: bool,
     /// Soleil : direction vers la lumière. Ponctuelle : sa position dans la scène.
     pub at: [f32; 3],
     pub color: [f32; 3],
     pub energy: f32,
     pub range: f32,
+}
+
+/// Forme effective d'une lumière (les anciennes scènes n'ont que `point`).
+pub fn light_shape(o: &Object) -> u8 {
+    if o.shape > 0 { o.shape.min(3) } else if o.point { 1 } else { 0 }
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -411,15 +442,28 @@ impl Scene {
             }
             let color = o.color.map(|c| [c[0] as f32 / 255.0, c[1] as f32 / 255.0, c[2] as f32 / 255.0]).unwrap_or([1.0, 0.97, 0.92]);
             let a = self.world(k, [0.0; 3]);
-            if o.point {
-                out.push(SceneLight { point: true, at: a, color, energy: o.energy.max(0.0), range: o.range.max(1e-3) });
+            let rel = |v: [f32; 3]| {
+                let b = self.world(k, v);
+                [b[0] - a[0], b[1] - a[1], b[2] - a[2]]
+            };
+            let unit = |d: [f32; 3]| {
+                let l = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt().max(1e-9);
+                [d[0] / l, d[1] / l, d[2] / l]
+            };
+            let shape = light_shape(o);
+            // Spot et rectangle éclairent vers le bas de leur axe Y, comme le soleil
+            let down = unit(rel([0.0, -1.0, 0.0]));
+            let half_a = (o.spot.clamp(1.0, 179.0) * 0.5).to_radians();
+            let inner = half_a * (1.0 - o.blend.clamp(0.0, 1.0));
+            let base = SceneLight { shape, axis: down, cone: [half_a.cos(), inner.cos()], half: [rel([o.size[0] * 0.5, 0.0, 0.0]), rel([0.0, 0.0, o.size[1] * 0.5])], point: true, at: a, color, energy: o.energy.max(0.0), range: o.range.max(1e-3) };
+            if shape != 0 {
+                out.push(base);
                 continue;
             }
-            let b = self.world(k, [0.0, 1.0, 0.0]);
-            let d = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+            let d = rel([0.0, 1.0, 0.0]);
             let l = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
             if l > 1e-9 {
-                out.push(SceneLight { point: false, at: [d[0] / l, d[1] / l, d[2] / l], color, energy: o.energy.max(0.0), range: 0.0 });
+                out.push(SceneLight { point: false, at: [d[0] / l, d[1] / l, d[2] / l], range: 0.0, ..base });
             }
         }
         out
@@ -785,9 +829,8 @@ pub fn build_ranges(scene: &Scene, scene_path: &Path) -> (Result<crate::model3d:
         // Rien que des images, des lumières, des caméras ou des groupes : la scène s'ouvre quand même,
         // avec un cadre autour d'eux (et un triangle sans surface, que le rendu ignore)
         let others: Vec<[f32; 3]> = (0..scene.objects.len()).filter(|&k| scene.shown(k) && kind(&scene.objects[k]) != Kind::Model && errors[k].is_none()).map(|k| scene.world(k, [0.0; 3])).collect();
-        if others.is_empty() {
-            return (Err("Scène vide : glisse des modèles ici ou ajoute-en depuis le panneau.".into()), errors, ranges);
-        }
+        // Scène vide : une scène vide qu'on peut quand même parcourir (grille, caméra)
+        let others = if others.is_empty() { vec![[0.0; 3]] } else { others };
         let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
         for p in &others {
             for a in 0..3 {
@@ -955,6 +998,6 @@ mod tests {
         s.objects[0].visible = false;
         s.objects[1].file = "absent.obj".into();
         let (m, errs) = build(&s, &file);
-        assert!(m.is_err() && errs[1].is_some());
+        assert!(m.is_ok() && errs[1].is_some());
     }
 }

@@ -3597,6 +3597,9 @@ impl Editor {
                         }
                     }
                     (ParamDef::Text(_), Param::S(code)) => {
+                        // Les uns sous les autres : exemples, demande à l'IA, puis le code sur toute la largeur
+                        let mut child = child.new_child(egui::UiBuilder::new().max_rect(row).layout(egui::Layout::top_down(egui::Align::Min)));
+                        child.set_clip_rect(child.clip_rect().intersect(row));
                         let mut pick = None;
                         egui::ComboBox::from_id_salt(("snip", *id)).selected_text(RichText::new(crate::i18n::t("exemples")).size(10.5)).width(NW - 24.0).show_ui(&mut child, |ui| {
                             for (name, c) in SHADER_EXAMPLES {
@@ -4118,7 +4121,7 @@ impl Editor {
                 if l.mask.kind != "plein" {
                     changed |= ui.add(egui::Slider::new(&mut l.mask.amount, 0.0..=1.0).text(crate::i18n::t("quantité"))).changed();
                     changed |= ui.add(egui::Slider::new(&mut l.mask.contrast, 0.0..=1.0).text(crate::i18n::t("contraste"))).changed();
-                    changed |= ui.add(egui::Slider::new(&mut l.mask.scale, 0.5..=40.0).logarithmic(true).text(crate::i18n::t("échelle"))).changed();
+                    changed |= ui.add(egui::Slider::new(&mut l.mask.scale, 0.5..=40.0).clamping(egui::SliderClamping::Never).logarithmic(true).text(crate::i18n::t("échelle"))).changed();
                     changed |= ui.checkbox(&mut l.mask.invert, crate::i18n::t("inverser")).changed();
                 }
             });

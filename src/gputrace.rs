@@ -7,7 +7,7 @@ use super::*;
 use std::sync::{Mutex, OnceLock};
 
 const SHADER: &str = r#"
-struct Lamp { at: vec4<f32>, color: vec4<f32>, extra: vec4<f32> };
+struct Lamp { at: vec4<f32>, color: vec4<f32>, extra: vec4<f32>, axis: vec4<f32>, h0: vec4<f32>, h1: vec4<f32> };
 struct Params {
   size: vec4<u32>,
   flags: vec4<u32>,
@@ -243,28 +243,37 @@ fn surface(h: Hit, view: vec3<f32>) -> Surf {
   return Surf(al.xyz, clamp(al.w, 0.04, 1.0), clamp(me.w, 0.0, 1.0), me.xyz, n, clamp(tr.x, 0.0, 1.0), max(tr.y, 1.0), true);
 }
 
+var<private> g_fall: f32;
+
+// Direction vers la lumière et distance ; la part reçue (portée, cône, inclinaison) va dans g_fall.
+// extra : portée, forme (0 soleil, 1 ponctuelle, 2 spot, 3 rectangle), cône (cosinus extérieur, intérieur)
 fn lamp_dir(i: u32, p: vec3<f32>) -> vec4<f32> {
   let L = P.lamps[i];
   if (L.at.w > 0.5) {
-    let to = L.at.xyz - p;
+    var src = L.at.xyz;
+    let shape = u32(L.extra.y + 0.5);
+    if (shape == 3u) {
+      src = src + L.h0.xyz * (2.0 * rnd() - 1.0) + L.h1.xyz * (2.0 * rnd() - 1.0);
+    }
+    let to = src - p;
     let d = max(length(to), 1e-6);
+    let dir = to / d;
     let x = min(d / max(L.extra.x, 1e-6), 1.0);
-    let fall = (1.0 - x * x) * (1.0 - x * x);
-    return vec4<f32>(to / d, d * select(0.0, 1.0, fall > 0.0) + select(-1.0, 0.0, fall > 0.0));
+    var fall = (1.0 - x * x) * (1.0 - x * x);
+    let facing = -dot(dir, L.axis.xyz);
+    if (shape == 2u) {
+      fall = fall * smoothstep(L.extra.z, max(L.extra.w, L.extra.z + 1e-4), facing);
+    } else if (shape == 3u) {
+      fall = fall * max(facing, 0.0);
+    }
+    g_fall = fall;
+    return vec4<f32>(dir, select(-1.0, d, fall > 0.0));
   }
+  g_fall = 1.0;
   let B = basis(L.at.xyz);
   let a = rnd() * 2.0 * PI;
   let rr = sqrt(rnd()) * 0.03;
   return vec4<f32>(normalize(L.at.xyz + B[0] * cos(a) * rr + B[1] * sin(a) * rr), 1e6);
-}
-
-fn lamp_fall(i: u32, d: f32) -> f32 {
-  let L = P.lamps[i];
-  if (L.at.w > 0.5) {
-    let x = min(d / max(L.extra.x, 1e-6), 1.0);
-    return (1.0 - x * x) * (1.0 - x * x);
-  }
-  return 1.0;
 }
 
 @compute @workgroup_size(8, 8)
@@ -333,7 +342,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         for (var i = 0u; i < P.env.z; i = i + 1u) {
           let ld = lamp_dir(i, q);
           if (ld.w < 0.0) { continue; }
-          let e = P.lamps[i].color.w * lamp_fall(i, ld.w) * max(ld.y, 0.0);
+          let e = P.lamps[i].color.w * g_fall * max(ld.y, 0.0);
           if (e > 0.0) {
             total = total + e;
             if (trace(q, ld.xyz, ld.w, true).t > 0.0) { dark = dark + e; }
@@ -371,7 +380,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
       if (ld.w < 0.0 || dot(s.n, ld.xyz) <= 0.0) { continue; }
       if (trace(po, ld.xyz, ld.w, true).t > 0.0) { continue; }
       let Lp = P.lamps[i];
-      let e = Lp.color.xyz * Lp.color.w * lamp_fall(i, ld.w) * PI * (1.0 - s.trans);
+      let e = Lp.color.xyz * Lp.color.w * g_fall * PI * (1.0 - s.trans);
       L = L + through * brdf_cos(s, wo, ld.xyz) * e;
     }
     // Le ciel tiré selon sa lumière, pondéré (MIS)
@@ -573,6 +582,9 @@ struct GLamp {
     at: [f32; 4],
     color: [f32; 4],
     extra: [f32; 4],
+    axis: [f32; 4],
+    h0: [f32; 4],
+    h1: [f32; 4],
 }
 
 #[repr(C)]
@@ -603,10 +615,11 @@ pub fn reset(s: &mut Scene) {
 pub fn passes(s: &mut Scene, m: &Prepared, cam: &Camera, look: &Look, set: &Settings, n: u32, out: &mut Accum) {
     let Some(g) = gpu() else { return };
     let (w, h) = (s.w, s.h);
-    let lamps: Vec<Lamp> = if look.lamps.is_empty() { vec![Lamp { point: false, at: look.light.dir(), color: look.light.color, intensity: look.light.intensity, range: 0.0 }] } else { look.lamps.clone() };
-    let mut gl = [GLamp { at: [0.0; 4], color: [0.0; 4], extra: [0.0; 4] }; 16];
+    let lamps: Vec<Lamp> = if look.lamps.is_empty() { vec![Lamp::simple(false, look.light.dir(), look.light.color, look.light.intensity, 0.0)] } else { look.lamps.clone() };
+    let mut gl = [GLamp { at: [0.0; 4], color: [0.0; 4], extra: [0.0; 4], axis: [0.0; 4], h0: [0.0; 4], h1: [0.0; 4] }; 16];
     for (k, l) in lamps.iter().take(16).enumerate() {
-        gl[k] = GLamp { at: [l.at[0], l.at[1], l.at[2], if l.point { 1.0 } else { 0.0 }], color: [l.color[0], l.color[1], l.color[2], l.intensity], extra: [l.range, 0.0, 0.0, 0.0] };
+        let v4 = |v: [f32; 3]| [v[0], v[1], v[2], 0.0];
+        gl[k] = GLamp { at: [l.at[0], l.at[1], l.at[2], if l.point { 1.0 } else { 0.0 }], color: [l.color[0], l.color[1], l.color[2], l.intensity], extra: [l.range, if l.point { l.shape.max(1) as f32 } else { 0.0 }, l.cone[0], l.cone[1]], axis: v4(l.axis), h0: v4(l.half[0]), h1: v4(l.half[1]) };
     }
     let focal = w.min(h) as f32 * 1.2;
     let col = |v: V3| {

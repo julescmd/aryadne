@@ -2011,16 +2011,16 @@ impl Edit {
         ui.add_space(6.0);
         ui.label(RichText::new(crate::i18n::t("autres méthodes")).size(11.0).strong());
         ui.horizontal(|ui| {
-            ui.add(egui::Slider::new(&mut self.smart_angle, 15.0..=89.0).text(crate::i18n::t("angle")));
+            ui.add(egui::Slider::new(&mut self.smart_angle, 15.0..=89.0).clamping(egui::SliderClamping::Never).text(crate::i18n::t("angle")));
         });
-        ui.add(egui::Slider::new(&mut self.min_faces, 1..=2000).logarithmic(true).text(crate::i18n::t("taille min. d'îlot")));
+        ui.add(egui::Slider::new(&mut self.min_faces, 1..=2000).clamping(egui::SliderClamping::Never).logarithmic(true).text(crate::i18n::t("taille min. d'îlot")));
         if ui.button(crate::i18n::t("coutures intelligentes")).on_hover_text(crate::i18n::t("Regroupe les faces en îlots presque plats (comme Smart UV Project), en partant des grandes surfaces, puis place les coutures sur leurs bords")).clicked() {
             self.data.seams = smart_seams(&self.topo, self.smart_angle, self.min_faces);
             self.message = Some(format!("{} coutures", self.data.seams.len()));
             self.changed();
         }
         ui.add_space(4.0);
-        ui.add(egui::Slider::new(&mut self.seam_angle, 5.0..=150.0).text(crate::i18n::t("angle vif")));
+        ui.add(egui::Slider::new(&mut self.seam_angle, 5.0..=150.0).clamping(egui::SliderClamping::Never).text(crate::i18n::t("angle vif")));
         ui.horizontal(|ui| {
             if ui.button(crate::i18n::t("sur les arêtes vives")).clicked() {
                 self.data.seams = seams_by_angle(&self.topo, self.seam_angle);
@@ -2065,7 +2065,7 @@ impl Edit {
             }
             ui.label(RichText::new(crate::i18n::t("moins d'étirement")).size(10.5).color(p.muted));
         });
-        ui.add(egui::Slider::new(&mut self.auto.hard_angle, 30.0..=150.0).text(crate::i18n::t("coupe toujours au-delà de (°)")));
+        ui.add(egui::Slider::new(&mut self.auto.hard_angle, 30.0..=150.0).clamping(egui::SliderClamping::Never).text(crate::i18n::t("coupe toujours au-delà de (°)")));
         ui.checkbox(&mut self.auto.split_materials, crate::i18n::t("séparer les matériaux"));
         ui.checkbox(&mut self.auto.hide_seams, crate::i18n::t("cacher les coutures (creux, dessous)"));
     }
@@ -2151,7 +2151,7 @@ impl Edit {
         ui.separator();
         ui.horizontal(|ui| {
             ui.label(crate::i18n::t("faces visées"));
-            ui.add(egui::DragValue::new(&mut self.retopo_opt.faces).range(50..=60_000).speed(20.0));
+            ui.add(egui::DragValue::new(&mut self.retopo_opt.faces).range(50..=10_000_000).speed(20.0));
         });
         ui.horizontal(|ui| {
             let mut on = self.retopo_opt.symmetry != 0;
@@ -2164,10 +2164,10 @@ impl Edit {
                 }
             }
         });
-        ui.add(egui::Slider::new(&mut self.retopo_opt.curvature, 0.0..=2.0).text(crate::i18n::t("suivre les courbures"))).on_hover_text(crate::i18n::t("0 : flux le plus régulier possible. Plus haut : les boucles suivent les formes (membres, plis), au prix de quelques pôles en plus."));
+        ui.add(egui::Slider::new(&mut self.retopo_opt.curvature, 0.0..=2.0).clamping(egui::SliderClamping::Never).text(crate::i18n::t("suivre les courbures"))).on_hover_text(crate::i18n::t("0 : flux le plus régulier possible. Plus haut : les boucles suivent les formes (membres, plis), au prix de quelques pôles en plus."));
         ui.add(egui::Slider::new(&mut self.retopo_opt.adaptive, 0.0..=1.0).text(crate::i18n::t("taille adaptative"))).on_hover_text(crate::i18n::t("Les quads rétrécissent là où les boucles se resserrent au lieu de se déformer."));
-        ui.add(egui::Slider::new(&mut self.retopo_opt.sharp_angle, 0.0..=90.0).suffix("°").text(crate::i18n::t("arêtes vives"))).on_hover_text(crate::i18n::t("Au-delà de cet angle, une arête devient une boucle nette du maillage (0 : désactivé). Les bords ouverts sont toujours suivis."));
-        ui.add(egui::Slider::new(&mut self.retopo_opt.guide_radius, 0.5..=4.0).text(crate::i18n::t("portée des guides")));
+        ui.add(egui::Slider::new(&mut self.retopo_opt.sharp_angle, 0.0..=90.0).clamping(egui::SliderClamping::Never).suffix("°").text(crate::i18n::t("arêtes vives"))).on_hover_text(crate::i18n::t("Au-delà de cet angle, une arête devient une boucle nette du maillage (0 : désactivé). Les bords ouverts sont toujours suivis."));
+        ui.add(egui::Slider::new(&mut self.retopo_opt.guide_radius, 0.5..=4.0).clamping(egui::SliderClamping::Never).text(crate::i18n::t("portée des guides")));
         ui.add_space(6.0);
         let mut cancel = false;
         if let Some(j) = &self.retopo_job {
@@ -2508,7 +2508,7 @@ impl Edit {
                 }
             });
             ui.label(RichText::new(crate::i18n::t("marge")).size(11.0));
-            ui.add(egui::DragValue::new(&mut self.data.margin_px).range(0.0..=64.0).suffix(" px"));
+            ui.add(egui::DragValue::new(&mut self.data.margin_px).range(0.0..=4096.0).suffix(" px"));
         });
         if !self.data.has_uv() {
             ui.label(RichText::new(crate::i18n::t("Pas encore d'UV : « déplier » pose des coutures automatiques si besoin, déplie (LSCM) et range les îlots.")).color(p.muted).size(10.5));

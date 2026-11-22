@@ -558,12 +558,21 @@ fn apply_more(k: Kind, mut m: Mesh, origin: V3, lo: V3, hi: V3) -> Mesh {
             }
         }
         Kind::Subdivision { levels, optimal, simple } => {
+            // Autant de niveaux qu'on veut, tant que la mémoire suit (chaque niveau multiplie par 4)
+            let mut safe = 0;
+            while safe < levels && m.tris.len().saturating_mul(4usize.saturating_pow(safe as u32 + 1)) <= 40_000_000 {
+                safe += 1;
+            }
+            if safe < levels {
+                crate::notify(format!("{} {safe} {}", crate::i18n::t("subdivision limitée à"), crate::i18n::t("niveaux : au-delà, plus de 40 millions de triangles")));
+            }
+            let levels = safe;
             if simple {
                 // « Simple » : densifie sans lisser (comme Blender)
-                let (p, t, c, e) = crate::model3d::split_flat(&m.pos, &m.tris, &m.colors, &m.edges, levels.min(5), optimal);
+                let (p, t, c, e) = crate::model3d::split_flat(&m.pos, &m.tris, &m.colors, &m.edges, levels, optimal);
                 m = Mesh { pos: p, tris: t, colors: c, edges: e };
             } else {
-                let (p, t, c, e) = crate::model3d::catmull_clark(&m.pos, &m.tris, &m.colors, &m.edges, levels.min(5), optimal);
+                let (p, t, c, e) = crate::model3d::catmull_clark(&m.pos, &m.tris, &m.colors, &m.edges, levels, optimal);
                 m = Mesh { pos: p, tris: t, colors: c, edges: e };
             }
         }
@@ -1468,7 +1477,7 @@ fn params(ui: &mut egui::Ui, k: &mut Kind) -> bool {
             c |= ui.checkbox(bisect, crate::i18n::t("couper avant (bisect)")).changed();
         }
         Kind::Array { count, axis, offset, constant, rotate, scale } => {
-            c |= ui.add(egui::Slider::new(count, 1..=256).text(crate::i18n::t("copies")).logarithmic(true)).changed();
+            c |= ui.add(egui::Slider::new(count, 1..=256).clamping(egui::SliderClamping::Never).text(crate::i18n::t("copies")).logarithmic(true)).changed();
             c |= axis_ui(ui, axis);
             s!(ui, offset, -3.0..=3.0, "écart (× taille)");
             c |= vec3_ui(ui, constant, "décalage", 0.01);
@@ -1476,7 +1485,7 @@ fn params(ui: &mut egui::Ui, k: &mut Kind) -> bool {
             s!(ui, scale, 0.5..=1.5, "échelle par copie");
         }
         Kind::Subdivision { levels, optimal, simple } => {
-            c |= ui.add(egui::Slider::new(levels, 0..=5).text(crate::i18n::t("niveaux"))).changed();
+            c |= ui.add(egui::Slider::new(levels, 0..=5).clamping(egui::SliderClamping::Never).text(crate::i18n::t("niveaux"))).changed();
             ui.horizontal(|ui| {
                 c |= ui.selectable_value(simple, false, crate::i18n::t("Catmull-Clark")).changed();
                 c |= ui.selectable_value(simple, true, crate::i18n::t("simple")).changed();
@@ -1485,7 +1494,7 @@ fn params(ui: &mut egui::Ui, k: &mut Kind) -> bool {
         }
         Kind::Decimate { ratio } => s!(ui, ratio, 0.01..=1.0, "proportion gardée"),
         Kind::Smooth { iterations, factor, preserve_volume, axes } => {
-            c |= ui.add(egui::Slider::new(iterations, 1..=100).text(crate::i18n::t("passes"))).changed();
+            c |= ui.add(egui::Slider::new(iterations, 1..=100).clamping(egui::SliderClamping::Never).text(crate::i18n::t("passes"))).changed();
             s!(ui, factor, -1.0..=1.0, "force");
             c |= ui.checkbox(preserve_volume, crate::i18n::t("garder le volume (Taubin)")).changed();
             c |= bool3_ui(ui, axes, "axes");
@@ -1493,7 +1502,7 @@ fn params(ui: &mut egui::Ui, k: &mut Kind) -> bool {
         Kind::Displace { strength, scale, seed, octaves, roughness, direction, midlevel } => {
             s!(ui, strength, -0.5..=0.5, "force");
             s!(ui, scale, 0.1..=40.0, "échelle");
-            c |= ui.add(egui::Slider::new(octaves, 1..=10).text(crate::i18n::t("octaves"))).changed();
+            c |= ui.add(egui::Slider::new(octaves, 1..=10).clamping(egui::SliderClamping::Never).text(crate::i18n::t("octaves"))).changed();
             s!(ui, roughness, 0.05..=0.95, "rugosité");
             s!(ui, midlevel, 0.0..=1.0, "niveau neutre");
             s!(ui, seed, 0.0..=100.0, "graine");
@@ -1600,7 +1609,7 @@ fn params(ui: &mut egui::Ui, k: &mut Kind) -> bool {
         }
         Kind::Screw { angle, steps, height, axis } => {
             s!(ui, angle, -1440.0..=1440.0, "angle total °");
-            c |= ui.add(egui::Slider::new(steps, 1..=256).text(crate::i18n::t("étapes")).logarithmic(true)).changed();
+            c |= ui.add(egui::Slider::new(steps, 1..=256).clamping(egui::SliderClamping::Never).text(crate::i18n::t("étapes")).logarithmic(true)).changed();
             s!(ui, height, -2.0..=2.0, "hauteur");
             c |= axis_ui(ui, axis);
         }

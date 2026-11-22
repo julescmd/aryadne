@@ -205,7 +205,7 @@ impl Editor {
         });
         // Fichiers glissés depuis l'explorateur du coffre : ajoutés au projet
         let drop_zone = ui.interact(bg.inner_rect, ui.scope_id().with("bin-drop"), Sense::hover());
-        if let Some(rel) = drop_zone.dnd_release_payload::<String>() {
+        if let Some(rel) = crate::drop_of::<String>(&drop_zone) {
             let abs = Path::new(&self.root).join(rel.as_str());
             if let Ok(c) = import(&self.path, &abs, 0, 0.0) {
                 if !self.project.bin.contains(&c.file) {
@@ -756,11 +756,11 @@ impl Editor {
                 ui.menu_button(RichText::new(format!("{}×{} · {} i/s", self.project.width, self.project.height, self.project.fps)).size(11.0).color(p.muted), |ui| {
                     ui.label(RichText::new(crate::i18n::t("Paramètres de séquence")).family(crate::theme::bold()));
                     ui.horizontal(|ui| {
-                        ch |= ui.add(egui::DragValue::new(&mut self.project.width).range(16..=7680).suffix(" px")).changed();
+                        ch |= ui.add(egui::DragValue::new(&mut self.project.width).range(16..=32768).suffix(" px")).changed();
                         ui.label("×");
-                        ch |= ui.add(egui::DragValue::new(&mut self.project.height).range(16..=4320).suffix(" px")).changed();
+                        ch |= ui.add(egui::DragValue::new(&mut self.project.height).range(16..=32768).suffix(" px")).changed();
                     });
-                    ch |= ui.add(egui::DragValue::new(&mut self.project.fps).range(1.0..=120.0).suffix(" i/s")).changed();
+                    ch |= ui.add(egui::DragValue::new(&mut self.project.fps).range(1.0..=1000.0).suffix(" i/s")).changed();
                     for (w, h, label) in [(1920, 1080, "HD 1080p"), (3840, 2160, "4K UHD"), (1080, 1920, "vertical 9:16"), (1080, 1080, "carré")] {
                         if ui.button(label).clicked() {
                             (self.project.width, self.project.height) = (w, h);
@@ -1757,7 +1757,7 @@ impl Editor {
                 }
             }
         }
-        if let Some(pl) = resp.dnd_release_payload::<Payload>() {
+        if let Some(pl) = crate::drop_of::<Payload>(&resp) {
             match &*pl {
                 Payload::Media(f) => {
                     let path = self.media_path(f);
@@ -1778,11 +1778,17 @@ impl Editor {
             }
         }
         // Depuis l'explorateur du coffre (chemin relatif au coffre)
-        if resp.dnd_hover_payload::<String>().is_some() {
+        if let Some(rel) = resp.dnd_hover_payload::<String>() {
             painter.rect_stroke(g.area.shrink(1.0), 0.0, Stroke::new(2.0, p.accent), egui::StrokeKind::Inside);
-            painter.line_segment([pos2(at.x, g.v_top), pos2(at.x, g.area.bottom())], Stroke::new(1.0, p.accent));
+            let abs = Path::new(&self.root).join(rel.as_str());
+            match self.media_clips_cached(&abs, vt, at_track) {
+                Some(clips) => ghost(self, &fix_tracks(clips)),
+                None => {
+                    painter.line_segment([pos2(at.x, g.v_top), pos2(at.x, g.area.bottom())], Stroke::new(1.0, p.accent));
+                }
+            }
         }
-        if let Some(rel) = resp.dnd_release_payload::<String>() {
+        if let Some(rel) = crate::drop_of::<String>(&resp) {
             let abs = Path::new(&self.root).join(rel.as_str());
             if let Some(clips) = self.media_clips(&abs, vt, at_track) {
                 place(self, fix_tracks(clips));

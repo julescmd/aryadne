@@ -223,7 +223,7 @@ impl Dlg {
                                     self.fps = v;
                                 }
                             }
-                            ui.add(egui::DragValue::new(&mut self.fps).range(0.0..=240.0).speed(0.5).suffix(" i/s"));
+                            ui.add(egui::DragValue::new(&mut self.fps).range(0.0..=1000.0).speed(0.5).suffix(" i/s"));
                         });
                         if self.fmt != "gif" {
                             ui.checkbox(&mut self.keep_audio, crate::i18n::t("garder le son"));

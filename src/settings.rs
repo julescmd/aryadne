@@ -33,6 +33,21 @@ pub struct Prefs {
     pub ui_font: String,
     pub mono_font: String,
     pub notes_font: String,
+    /// Unité de longueur affichée en 3D (« m », « cm », « mm », « km », « in », « ft ») ; la scène reste en mètres
+    pub unit: String,
+}
+
+/// Unités de longueur proposées : nom et nombre d'unités dans un mètre.
+pub const UNITS: [(&str, f32); 6] = [("m", 1.0), ("cm", 100.0), ("mm", 1000.0), ("km", 0.001), ("in", 39.370_08), ("ft", 3.280_84)];
+static UNIT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// L'unité choisie : nom et facteur (valeur affichée = mètres × facteur).
+pub fn unit() -> (&'static str, f32) {
+    UNITS[UNIT.load(std::sync::atomic::Ordering::Relaxed).min(UNITS.len() - 1)]
+}
+
+pub fn set_unit(name: &str) {
+    UNIT.store(UNITS.iter().position(|u| u.0 == name).unwrap_or(0), std::sync::atomic::Ordering::Relaxed);
 }
 
 impl Prefs {
@@ -64,6 +79,7 @@ impl Default for Prefs {
             ui_font: String::new(),
             mono_font: String::new(),
             notes_font: String::new(),
+            unit: "m".into(),
         }
     }
 }
@@ -264,6 +280,16 @@ impl App {
             ui.end_row();
         });
         (self.prefs.ui_font, self.prefs.mono_font, self.prefs.notes_font) = (a, b, c);
+        ui.add_space(14.0);
+        ui.label(caps(&crate::i18n::t("unités (3D)")));
+        ui.horizontal_wrapped(|ui| {
+            for (name, _) in UNITS {
+                if ui.selectable_label(self.prefs.unit == name, name).clicked() {
+                    self.prefs.unit = name.to_string();
+                }
+            }
+        });
+        ui.label(egui::RichText::new(crate::i18n::t("Les positions, distances et tailles s'affichent dans cette unité ; les fichiers restent en mètres.")).size(11.0).color(p.muted));
         ui.add_space(14.0);
         ui.label(caps(&crate::i18n::t("taille de l'interface")));
         ui.horizontal(|ui| {

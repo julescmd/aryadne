@@ -18,7 +18,13 @@ fn mul(a: V3, s: f32) -> V3 {
     [a[0] * s, a[1] * s, a[2] * s]
 }
 
-pub const AXIS: [Color32; 3] = [Color32::from_rgb(237, 72, 88), Color32::from_rgb(132, 204, 52), Color32::from_rgb(64, 138, 245)];
+/// Couleurs des axes internes. L'interface montre Z vers le haut (comme Blender) : l'axe
+/// interne 1 (qui monte) est le Z bleu, l'axe interne 2 est le Y vert (dans l'autre sens).
+pub const AXIS: [Color32; 3] = [Color32::from_rgb(237, 72, 88), Color32::from_rgb(64, 138, 245), Color32::from_rgb(132, 204, 52)];
+/// Lettre affichée pour chaque axe interne
+pub const LETTER: [&str; 3] = ["X", "Z", "Y"];
+/// Axe affiché (X, Y, Z) → axe interne et sens
+pub const SHOWN: [(usize, f32); 3] = [(0, 1.0), (2, -1.0), (1, 1.0)];
 const HOT: Color32 = Color32::from_rgb(255, 214, 92);
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -172,10 +178,14 @@ impl Layout {
                 if let Some(b) = best {
                     return Some(b.0);
                 }
-                ((to_center - self.view_r).abs() < 7.0).then_some(Handle::View)
+                if (to_center - self.view_r).abs() < 7.0 {
+                    return Some(Handle::View);
+                }
+                // Au milieu, hors des anneaux : rotation libre (boule de commande, comme Blender)
+                (to_center < self.view_r * 0.7).then_some(Handle::Center)
             }
             _ => {
-                if to_center < 11.0 {
+                if to_center < 16.0 {
                     return Some(Handle::Center);
                 }
                 let mut best: Option<(usize, f32)> = None;
@@ -239,6 +249,12 @@ pub fn drag(rig: &Rig, l: &Layout, mode: Mode, h: Handle, prev: Pos2, cur: Pos2)
                 s[k] = 1.0;
             }
             Some(Delta::Scale(s))
+        }
+        (Mode::Rotate, Handle::Center) => {
+            // Boule de commande : on fait rouler l'objet dans le sens du glisser
+            let axis = add(mul(rig.up, d.x), mul(rig.right, d.y));
+            let n = dot(axis, axis).sqrt();
+            (n > 1e-6).then(|| Delta::Rotate(mul(axis, 1.0 / n), d.length() * 0.012))
         }
         (Mode::Rotate, Handle::Ring(_)) | (Mode::Rotate, Handle::View) => {
             let axis = match h {

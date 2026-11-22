@@ -1396,5 +1396,20 @@
  "bruit": "noise",
  "matériau à calques (atelier)": "layered material (workshop)",
  "nouveau matériau à calques (atelier)": "new layered material (workshop)",
- "Paramètre exposé": "Exposed parameter"
+ "Paramètre exposé": "Exposed parameter",
+ "tracé de chemins pendant le mouvement": "path tracing while moving",
+ "Décoché : l'aperçu rapide prend le relais quand on tourne autour de la scène.": "Unchecked: the fast preview takes over while you orbit the scene.",
+ "spot": "spot",
+ "Un cône de lumière, vers le bas de son axe Y : tourne-le pour viser": "A cone of light, down its axis: rotate it to aim",
+ "Un panneau lumineux (comme une boîte à lumière) : ombres douces": "A glowing panel (like a softbox): soft shadows",
+ "ouverture °": "angle °",
+ "lumière soleil": "sun light",
+ "lumière ponctuelle": "point light",
+ "lumière rectangle": "area light",
+ "lecture impossible : ffmpeg manque (ouvre la vidéo et clique « installer ffmpeg »)": "cannot play: ffmpeg is missing (open the video and click « install ffmpeg »)",
+ "lecture impossible : vidéo illisible": "cannot play: unreadable video",
+ "subdivision limitée à": "subdivision limited to",
+ "niveaux : au-delà, plus de 40 millions de triangles": "levels: beyond that, more than 40 million triangles",
+ "unités (3D)": "units (3D)",
+ "Les positions, distances et tailles s'affichent dans cette unité ; les fichiers restent en mètres.": "Positions, distances and sizes are shown in this unit; files stay in meters."
 }
