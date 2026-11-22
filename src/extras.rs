@@ -1624,7 +1624,11 @@ impl App {
         let Some(t) = &mut self.terminal else { return };
         let mut close = false;
         let bg = egui::Color32::from_gray(20);
-        crate::dock::show(ui, "terminal", "terminal", crate::dock::Side::Bottom, 420.0, 200.0, egui::Frame::new().fill(bg).inner_margin(8), |ui| {
+        if crate::dock::closed("terminal") {
+            self.terminal = None;
+            return;
+        }
+        crate::dock::show_ex(ui, "terminal", "terminal", crate::dock::Side::Bottom, 420.0, 200.0, egui::Frame::new().fill(bg).inner_margin(8), true, |ui| {
             ui.horizontal(|ui| {
                 ui.label(RichText::new(format!("terminal · {}", t.cwd.display())).color(egui::Color32::from_gray(160)).size(11.0));
                 if t.busy() {

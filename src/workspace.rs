@@ -27,9 +27,19 @@ pub struct Workspace {
     pub view: String,
     #[serde(default)]
     pub assistant: bool,
+    /// Explorateur de fichiers ouvert (Ctrl+B)
+    #[serde(default = "yes")]
+    pub explorer: bool,
+    /// Fenêtres de pages ajoutées par le menu « fenêtre » (cerveau#1, refs#2…)
+    #[serde(default)]
+    pub views: Vec<String>,
     /// Ce à quoi sert l'espace : notes, 3d, 2d, video, code, ai, refs, mat. Décide de l'écran d'accueil.
     #[serde(default)]
     pub kind: String,
+}
+
+fn yes() -> bool {
+    true
 }
 
 #[derive(Serialize, Deserialize)]
@@ -103,7 +113,7 @@ pub fn accepts(kind: &str, rel: &str) -> bool {
 
 pub fn preset(i: usize) -> Workspace {
     let (name, accent, view, assistant, kind) = PRESETS[i];
-    Workspace { name: name.to_string(), accent, view: view.to_string(), assistant, kind: kind.to_string(), ..Default::default() }
+    Workspace { name: name.to_string(), accent, view: view.to_string(), assistant, kind: kind.to_string(), explorer: true, ..Default::default() }
 }
 
 impl Default for Set {

@@ -110,12 +110,11 @@ impl App {
                 self.files.reveal(&d);
             }
         }
-        crate::dock::show(ui, "explorer", &crate::i18n::t("fichiers"), crate::dock::Side::Left, 260.0, 180.0, egui::Frame::new().fill(p.panel).stroke(egui::Stroke::new(1.0, p.line)).inner_margin(egui::Margin::symmetric(0, 8)), |ui| {
+        crate::dock::show_ex(ui, "explorer", &crate::i18n::t("fichiers"), crate::dock::Side::Left, 260.0, 180.0, egui::Frame::new().fill(p.panel).stroke(egui::Stroke::new(1.0, p.line)).inner_margin(egui::Margin::symmetric(0, 8)), true, |ui| {
                 self.explorer_rect = Some(ui.max_rect().expand(8.0));
                 // En-tête : titre, « + » (créer / importer) et « ⋯ » (affichage)
+                // Le titre est dans l'en-tête du panneau : ici, juste les boutons
                 ui.horizontal(|ui| {
-                    ui.add_space(12.0);
-                    ui.label(caps(&crate::i18n::t("fichiers")));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.add_space(8.0);
                         let g = self.files.grid;

@@ -109,76 +109,179 @@ fn zone(screen: Rect, s: Side) -> Rect {
     }
 }
 
-/// Poignée « ⠿ » : glisser pour déplacer le panneau, clic droit pour choisir sa place.
-fn grip(ui: &mut Ui, id: &str, title: &str, mut pl: Place) {
-    let p = crate::theme::pal();
-    let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 14.0), Sense::click_and_drag());
-    let hot = resp.hovered() || resp.dragged();
-    ui.painter().text(pos2(r.left() + 4.0, r.center().y), egui::Align2::LEFT_CENTER, "⠿", egui::FontId::proportional(12.0), if hot { p.accent } else { p.muted });
-    if hot {
-        ui.painter().text(pos2(r.left() + 18.0, r.center().y), egui::Align2::LEFT_CENTER, crate::i18n::t("glisser pour déplacer"), egui::FontId::proportional(10.0), p.muted);
-        ui.ctx().set_cursor_icon(if resp.dragged() { egui::CursorIcon::Grabbing } else { egui::CursorIcon::Grab });
+/// Panneaux fermés par leur bouton × depuis la dernière lecture (l'appelant décide quoi en faire).
+static CLOSED: Mutex<Vec<String>> = Mutex::new(Vec::new());
+/// Panneau qu'on tient par son en-tête : identifiant et décalage entre le pointeur et le coin du panneau.
+static HELD: Mutex<Option<(String, egui::Vec2)>> = Mutex::new(None);
+
+/// Le panneau `id` a-t-il été fermé par son bouton × ? (vrai une seule fois)
+pub fn closed(id: &str) -> bool {
+    let mut g = CLOSED.lock().unwrap_or_else(|e| e.into_inner());
+    match g.iter().position(|x| x == id) {
+        Some(i) => {
+            g.remove(i);
+            true
+        }
+        None => false,
     }
+}
+
+/// En-tête d'un panneau : son nom, de quoi le déplacer (on l'attrape n'importe où sur l'en-tête),
+/// un menu ▾ pour choisir sa place, et × pour le fermer.
+fn header(ui: &mut Ui, id: &str, title: &str, mut pl: Place, closable: bool, panel_min: Pos2) {
+    let p = crate::theme::pal();
+    let h = 22.0;
+    let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), h), Sense::click_and_drag());
+    let held_me = HELD.lock().ok().and_then(|g| g.as_ref().map(|x| x.0 == id)).unwrap_or(false);
+    let hot = resp.hovered() || held_me;
+    let painter = ui.painter_at(r);
+    painter.rect_filled(r, 0.0, if hot { p.accent.gamma_multiply(0.10) } else { p.bg.gamma_multiply(0.6) });
+    painter.line_segment([r.left_bottom(), r.right_bottom()], Stroke::new(1.0, p.line));
+    painter.text(pos2(r.left() + 8.0, r.center().y), egui::Align2::LEFT_CENTER, "⠿", egui::FontId::proportional(12.0), if hot { p.accent } else { p.muted });
+    painter.text(pos2(r.left() + 22.0, r.center().y), egui::Align2::LEFT_CENTER, title.to_uppercase(), egui::FontId::new(10.5, crate::theme::bold()), if hot { p.text } else { p.muted });
+    // Boutons à droite : × fermer, ▾ place
+    let mut bx = r.right() - 4.0;
+    let mut button = |glyph: &str, tip: &str| -> bool {
+        let br = Rect::from_min_max(pos2(bx - 20.0, r.top() + 1.0), pos2(bx, r.bottom() - 1.0));
+        bx -= 22.0;
+        let b = ui.interact(br, ui.scope_id().with((id, glyph)), Sense::click());
+        if b.hovered() {
+            ui.painter().rect_filled(br, 3.0, p.line);
+        }
+        ui.painter().text(br.center(), egui::Align2::CENTER_CENTER, glyph, egui::FontId::proportional(12.0), if b.hovered() { p.text } else { p.muted });
+        b.on_hover_text(crate::i18n::t(tip)).clicked()
+    };
+    if closable && button("×", "fermer ce panneau") {
+        CLOSED.lock().unwrap_or_else(|e| e.into_inner()).push(id.to_string());
+    }
+    // ▾ : la place du panneau, comme le clic droit
+    let mr = Rect::from_min_max(pos2(bx - 20.0, r.top() + 1.0), pos2(bx, r.bottom() - 1.0));
     let screen = ui.ctx().content_rect();
     if pl.side == Side::Window {
-        // Dans sa propre fenêtre : un clic la ramène dans l'application
+        // Dans sa propre fenêtre : un clic sur l'en-tête la ramène dans l'application
         if resp.on_hover_text(crate::i18n::t("cliquer pour rattacher à la fenêtre principale")).clicked() {
             pl.side = Side::Float;
             set(id, pl);
         }
         return;
     }
-    if resp.dragged() {
-        if let Some(at) = resp.interact_pointer_pos() {
+    if resp.hovered() && !held_me {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
+    }
+    if resp.drag_started() {
+        let at = ui.input(|i| i.pointer.press_origin()).unwrap_or(r.left_top());
+        *HELD.lock().unwrap_or_else(|e| e.into_inner()) = Some((id.to_string(), at - panel_min));
+    }
+    if held_me && resp.dragged() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+        if let Some(at) = ui.ctx().pointer_latest_pos() {
+            let off = HELD.lock().ok().and_then(|g| g.as_ref().map(|x| x.1)).unwrap_or(vec2(20.0, 8.0));
             if pl.side == Side::Float {
-                let d = resp.drag_delta();
-                pl.pos = [pl.pos[0] + d.x, pl.pos[1] + d.y];
+                // Le panneau suit le pointeur là où on l'a attrapé
+                pl.pos = [at.x - off.x, at.y - off.y];
                 with(|m| m.insert(id.to_string(), pl));
             }
-            // Aperçu de la zone d'arrivée
+            // Les zones d'arrivée : faibles partout, vives sous le pointeur
             let target = drop_side(screen, at);
             let painter = ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::unique("dock-preview")));
-            let z = if target == Side::Float && pl.side != Side::Float { Rect::from_min_size(at - vec2(20.0, 8.0), vec2(pl.size[0], pl.size[1])) } else { zone(screen, target) };
+            for s in [Side::Left, Side::Right, Side::Bottom] {
+                let z = zone(screen, s);
+                if s != target {
+                    painter.rect_stroke(z.shrink(6.0), 6.0, Stroke::new(1.0, p.accent.gamma_multiply(0.35)), egui::StrokeKind::Inside);
+                }
+            }
+            let z = match target {
+                Side::Float if pl.side != Side::Float => Rect::from_min_size(at - off, vec2(pl.size[0], pl.size[1])),
+                Side::Float | Side::Window => Rect::NOTHING,
+                s => zone(screen, s),
+            };
             if z.is_positive() {
                 painter.rect_filled(z, 6.0, p.accent.linear_multiply(0.15));
                 painter.rect_stroke(z, 6.0, Stroke::new(2.0, p.accent), egui::StrokeKind::Inside);
                 painter.text(z.center(), egui::Align2::CENTER_CENTER, title, egui::FontId::proportional(14.0), p.accent);
             }
+            let hint = match target {
+                Side::Left => "lâcher : ancrer à gauche",
+                Side::Right => "lâcher : ancrer à droite",
+                Side::Bottom => "lâcher : ancrer en bas",
+                Side::Float => "lâcher : panneau flottant",
+                Side::Window => "lâcher : fenêtre à part",
+            };
+            painter.text(at + vec2(16.0, 18.0), egui::Align2::LEFT_TOP, crate::i18n::t(hint), egui::FontId::proportional(11.0), p.accent);
         }
+        ui.ctx().request_repaint();
     }
     if resp.drag_stopped() {
+        let off = HELD.lock().ok().and_then(|g| g.as_ref().map(|x| x.1)).unwrap_or(vec2(20.0, 8.0));
+        *HELD.lock().unwrap_or_else(|e| e.into_inner()) = None;
         if let Some(at) = ui.ctx().pointer_latest_pos() {
             let target = drop_side(screen, at);
-            if target == Side::Float && pl.side != Side::Float {
-                pl.pos = [at.x - 20.0, at.y - 8.0];
+            if target == Side::Float {
+                pl.pos = [at.x - off.x, at.y - off.y];
             }
             pl.side = target;
             set(id, pl);
         }
     }
-    resp.context_menu(|ui| {
-        for (s, l) in [(Side::Left, "ancrer à gauche"), (Side::Right, "ancrer à droite"), (Side::Bottom, "ancrer en bas"), (Side::Float, "fenêtre flottante"), (Side::Window, "détacher hors de l'application")] {
+    // Menu de place : par le bouton ▾ ou le clic droit sur l'en-tête
+    let place_menu = |ui: &mut Ui, pl: &mut Place| {
+        for (s, l) in [(Side::Left, "ancrer à gauche"), (Side::Right, "ancrer à droite"), (Side::Bottom, "ancrer en bas"), (Side::Float, "panneau flottant"), (Side::Window, "fenêtre à part")] {
             if ui.radio(pl.side == s, crate::i18n::t(l)).clicked() {
                 pl.side = s;
-                set(id, pl);
+                set(id, *pl);
                 ui.close();
             }
         }
         ui.separator();
+        if closable && ui.button(crate::i18n::t("fermer ce panneau")).clicked() {
+            CLOSED.lock().unwrap_or_else(|e| e.into_inner()).push(id.to_string());
+            ui.close();
+        }
         if ui.button(crate::i18n::t("réinitialiser la disposition")).clicked() {
             reset();
             ui.close();
         }
+    };
+    let mut pl2 = pl;
+    ui.scope_builder(egui::UiBuilder::new().max_rect(mr), |ui| {
+        egui::containers::menu::MenuButton::from_button(egui::Button::new(egui::RichText::new("▾").size(12.0).color(p.muted)).frame(false)).ui(ui, |ui| {
+            ui.set_min_width(190.0);
+            place_menu(ui, &mut pl2);
+        });
     });
+    resp.context_menu(|ui| place_menu(ui, &mut pl));
     let _ = Color32::TRANSPARENT;
 }
 
 /// Affiche un panneau à sa place (ancré ou flottant). `default` sert la première fois.
+#[allow(dead_code)]
 pub fn show<R>(ui: &mut Ui, id: &str, title: &str, default: Side, size: f32, min: f32, frame: egui::Frame, add: impl FnOnce(&mut Ui) -> R) -> Option<R> {
+    show_ex(ui, id, title, default, size, min, frame, false, add)
+}
+
+/// Comme `show`, avec un bouton × : `closed(id)` dit ensuite si on l'a fermé.
+#[allow(clippy::too_many_arguments)]
+pub fn show_ex<R>(ui: &mut Ui, id: &str, title: &str, default: Side, size: f32, min: f32, frame: egui::Frame, closable: bool, add: impl FnOnce(&mut Ui) -> R) -> Option<R> {
     let pl = place(id, default, size);
+    // L'en-tête prend toute la largeur, collé en haut : le cadre intérieur ne s'applique qu'au contenu
+    let inner = frame.inner_margin;
+    let frame = frame.inner_margin(0);
+    // Flottant : le contenu reste dans le cadre du panneau (un board ou un graphe y prend toute la place sans déborder)
+    let screen = ui.ctx().content_rect();
+    let float_pos = pos2(pl.pos[0].clamp(screen.left(), screen.right() - 80.0), pl.pos[1].clamp(screen.top(), screen.bottom() - 40.0));
+    let float_rect = (pl.side == Side::Float).then(|| Rect::from_min_size(float_pos, vec2(pl.size[0], pl.size[1])));
     let body = |ui: &mut Ui| {
-        grip(ui, id, title, pl);
-        add(ui)
+        let top = ui.max_rect().min;
+        if let Some(r) = float_rect {
+            ui.set_clip_rect(ui.clip_rect().intersect(r));
+        }
+        header(ui, id, title, pl, closable, top);
+        egui::Frame::new().inner_margin(inner).show(ui, |ui| {
+            if let Some(r) = float_rect {
+                ui.set_max_height((r.bottom() - ui.cursor().top() - 4.0).max(40.0));
+            }
+            add(ui)
+        }).inner
     };
     match pl.side {
         Side::Left => Some(egui::Panel::left(id.to_string()).resizable(true).default_size(size).min_size(min).frame(frame).show(ui, body).inner),
@@ -205,8 +308,7 @@ pub fn show<R>(ui: &mut Ui, id: &str, title: &str, default: Side, size: f32, min
         }
         Side::Float => {
             let ctx = ui.ctx().clone();
-            let screen = ctx.content_rect();
-            let pos = pos2(pl.pos[0].clamp(screen.left(), screen.right() - 80.0), pl.pos[1].clamp(screen.top(), screen.bottom() - 40.0));
+            let pos = float_pos;
             let r = egui::Window::new(title)
                 .id(egui::Id::unique(("dock", id)))
                 .title_bar(false)

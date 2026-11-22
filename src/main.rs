@@ -154,6 +154,9 @@ const NF_RES: [(&str, u32, u32); 6] = [("1920 × 1080 (HD)", 1920, 1080), ("3840
 const NF_FPS: [f32; 5] = [24.0, 25.0, 30.0, 50.0, 60.0];
 const NF_CODE: [(&str, &str); 10] = [("py", "Python"), ("rs", "Rust"), ("js", "JavaScript"), ("ts", "TypeScript"), ("html", "HTML"), ("css", "CSS"), ("json", "JSON"), ("glsl", "GLSL"), ("sh", "Shell"), ("txt", "texte brut")];
 
+/// Pages qu'on peut ouvrir dans une fenêtre à part (menu « fenêtre »), autant de fois qu'on veut.
+const VIEW_WINDOWS: [(&str, &str); 6] = [("cerveau", "brain"), ("références", "refs"), ("boards", "boards"), ("tâches", "tasks"), ("chat", "chat"), ("recherche", "search")];
+
 #[derive(PartialEq, Clone, Copy, Default)]
 enum RefSort {
     #[default]
@@ -323,6 +326,10 @@ struct App {
     recover_checked: bool,
     want_save_as: bool,
     nf_age: u32,
+    /// Explorateur ouvert (Ctrl+B) ; panneau « structure » masqué ; fenêtres de pages ajoutées
+    explorer_open: bool,
+    side_hidden: bool,
+    view_panels: Vec<String>,
     /// Zones de l'interface (image précédente) : la barre du bas montre les raccourcis de celle sous la souris
     zones_last: Vec<(&'static str, egui::Rect)>,
     zones_next: Vec<(&'static str, egui::Rect)>,
@@ -393,12 +400,16 @@ impl App {
         w.panes = self.panes.clone();
         w.view = view.to_string();
         w.assistant = self.assistant_open;
+        w.explorer = self.explorer_open;
+        w.views = self.view_panels.clone();
     }
 
     /// Met en place l'espace en cours : panneaux, couleur, onglets, vue.
     fn ws_apply(&mut self, ctx: &egui::Context, tabs: bool) {
         let w = self.ws.cur().clone();
         dock::import(w.places);
+        self.explorer_open = w.explorer;
+        self.view_panels = w.views.clone();
         theme::set_workspace_accent(w.accent);
         theme::apply(ctx, self.prefs.dark);
         if !tabs {
@@ -1001,6 +1012,12 @@ impl App {
         egui::Panel::top("workspaces").exact_size(28.0).frame(egui::Frame::new().fill(p.panel).stroke(egui::Stroke::new(1.0, p.line)).inner_margin(egui::Margin::symmetric(12, 0))).show(ui, |ui| {
             ui.horizontal_centered(|ui| {
                 ui.spacing_mut().item_spacing.x = 4.0;
+                // Ouvrir / fermer l'explorateur, d'où qu'on soit
+                let on = self.explorer_open;
+                if ui.add(egui::Button::new(RichText::new("☰").size(13.0).color(if on { accent } else { p.muted })).frame(false)).on_hover_text(crate::i18n::t("fichiers (Ctrl+B)")).clicked() {
+                    self.explorer_open = !on;
+                }
+                ui.add_space(8.0);
                 for (label, v) in pages {
                     let view = view_of(v);
                     let on = view == self.view();
@@ -1017,6 +1034,43 @@ impl App {
                 }
             });
         });
+    }
+
+    /// Ouvre une page dans une nouvelle fenêtre flottante (cerveau, références, boards…).
+    fn add_view_panel(&mut self, kind: &str) {
+        let n = (1..).find(|n| !self.view_panels.contains(&format!("{kind}#{n}"))).unwrap_or(1);
+        let id = format!("{kind}#{n}");
+        if let Some(ctx) = &self.ctx {
+            let c = ctx.content_rect().center();
+            let off = 24.0 * (self.view_panels.len() % 6) as f32;
+            dock::put(&format!("view:{id}"), dock::Side::Float, [c.x - 360.0 + off, c.y - 240.0 + off], [720.0, 480.0]);
+        }
+        self.view_panels.push(id);
+    }
+
+    /// Les fenêtres de pages ajoutées par le menu « fenêtre » : chacune est un panneau qu'on place où on veut.
+    fn view_windows(&mut self, ui: &mut egui::Ui) {
+        let p = theme::pal();
+        for id in self.view_panels.clone() {
+            let kind = id.split('#').next().unwrap_or("").to_string();
+            let Some((label, _)) = VIEW_WINDOWS.iter().find(|(_, k)| *k == kind) else { continue };
+            let n = id.split('#').nth(1).unwrap_or("1");
+            let title = if n == "1" { crate::i18n::t(label) } else { format!("{} {n}", crate::i18n::t(label)) };
+            let pid = format!("view:{id}");
+            dock::show_ex(ui, &pid, &title, dock::Side::Float, 720.0, 260.0, egui::Frame::new().fill(p.bg).stroke(egui::Stroke::new(1.0, p.line)), true, |ui| {
+                ui.push_id(&pid, |ui| match kind.as_str() {
+                    "brain" => self.brain_view(ui),
+                    "refs" => self.refs_view(ui),
+                    "boards" => self.boards_view(ui),
+                    "tasks" => self.tasks_view(ui),
+                    "chat" => self.chat_view(ui),
+                    _ => self.search_view(ui),
+                });
+            });
+            if dock::closed(&pid) {
+                self.view_panels.retain(|x| *x != id);
+            }
+        }
     }
 
     fn report<T>(&mut self, r: Result<T, String>) -> Option<T> {
@@ -1601,6 +1655,9 @@ impl App {
         if pressed(Modifiers::COMMAND, Key::L) {
             self.assistant_open = !self.assistant_open;
         }
+        if pressed(Modifiers::COMMAND, Key::B) {
+            self.explorer_open = !self.explorer_open;
+        }
         if pressed(Modifiers::COMMAND | Modifiers::SHIFT, Key::M) {
             self.compact = !self.compact;
         }
@@ -1752,7 +1809,43 @@ impl App {
                         }
                         // Fenêtre : thème, épingler, compact
                         let (r, _) = egui::containers::menu::MenuButton::new(crate::i18n::t("fenêtre ▾")).ui(ui, |ui| {
-                            ui.set_min_width(220.0);
+                            ui.set_min_width(260.0);
+                            // Panneaux : on les ouvre et ferme d'ici, puis on les place par leur en-tête
+                            ui.label(caps(&crate::i18n::t("panneaux")));
+                            ui.checkbox(&mut self.explorer_open, format!("{}   Ctrl+B", crate::i18n::t("fichiers")));
+                            let mut side = !self.side_hidden;
+                            if ui.checkbox(&mut side, crate::i18n::t("structure et liens")).changed() {
+                                self.side_hidden = !side;
+                            }
+                            ui.checkbox(&mut self.assistant_open, format!("{}   Ctrl+L", crate::i18n::t("assistant")));
+                            let mut term = self.terminal.is_some();
+                            if ui.checkbox(&mut term, format!("{}   Ctrl+`", crate::i18n::t("terminal"))).changed() {
+                                self.toggle_terminal();
+                            }
+                            ui.separator();
+                            // Nouvelles fenêtres : autant qu'on veut, chacune se place par son en-tête
+                            ui.label(caps(&crate::i18n::t("ajouter une fenêtre")));
+                            for (label, kind) in VIEW_WINDOWS {
+                                if ui.button(format!("＋ {}", crate::i18n::t(label))).clicked() {
+                                    self.add_view_panel(kind);
+                                    ui.close();
+                                }
+                            }
+                            if let Some(rel) = self.current().map(|d| d.rel.clone()) {
+                                if ui.button(format!("＋ {}", crate::i18n::t("le fichier ouvert, à part"))).clicked() {
+                                    let at = ctx.content_rect().center() - egui::vec2(320.0, 230.0);
+                                    self.tear_tab(rel, dock::Side::Float, at);
+                                    ui.close();
+                                }
+                            }
+                            if ui.button(crate::i18n::t("réinitialiser la disposition")).clicked() {
+                                dock::reset();
+                                self.view_panels.clear();
+                                self.explorer_open = true;
+                                self.side_hidden = false;
+                                ui.close();
+                            }
+                            ui.separator();
                             if ui.button(if theme::is_dark() { "thème clair" } else { "thème sombre" }).clicked() {
                                 cmd = Some(extras::Cmd::Theme);
                             }
@@ -2011,7 +2104,13 @@ impl App {
                 continue;
             }
             let title = rel.rsplit('/').next().unwrap_or(&rel).to_string();
-            dock::show(ui, &format!("doc:{rel}"), &title, dock::Side::Float, 520.0, 260.0, egui::Frame::new().fill(p.bg).stroke(egui::Stroke::new(1.0, p.line)), |ui| {
+            let pid = format!("doc:{rel}");
+            if dock::closed(&pid) {
+                // Fermer le panneau ramène le fichier parmi les onglets
+                self.panes.retain(|r| *r != rel);
+                continue;
+            }
+            dock::show_ex(ui, &pid, &title, dock::Side::Float, 520.0, 260.0, egui::Frame::new().fill(p.bg).stroke(egui::Stroke::new(1.0, p.line)), true, |ui| {
                 let keep = self.active;
                 self.active = Some(j);
                 self.in_split = true;
@@ -2501,7 +2600,11 @@ impl App {
 
     fn side_panel(&mut self, ui: &mut egui::Ui) {
         let p = theme::pal();
-        crate::dock::show(ui, "side", &crate::i18n::t("structure"), crate::dock::Side::Right, 290.0, 200.0, egui::Frame::new().fill(p.panel).stroke(egui::Stroke::new(1.0, p.line)).inner_margin(12), |ui| {
+        if crate::dock::closed("side") {
+            self.side_hidden = true;
+            return;
+        }
+        crate::dock::show_ex(ui, "side", &crate::i18n::t("structure"), crate::dock::Side::Right, 290.0, 200.0, egui::Frame::new().fill(p.panel).stroke(egui::Stroke::new(1.0, p.line)).inner_margin(12), true, |ui| {
                 egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
                     let is_md = self.current().is_some_and(|d| vault::is_md(&d.rel));
                     // Structure : fonctions, classes, titres… (clic = aller à la ligne)
@@ -3001,7 +3104,7 @@ impl App {
         egui::CentralPanel::default().frame(egui::Frame::new().fill(p.bg)).show(ui, |ui| {
             egui::Frame::new().fill(p.panel).stroke(egui::Stroke::new(1.0, p.line)).inner_margin(egui::Margin::symmetric(12, 5)).show(ui, |ui| {
                 ui.set_width(ui.available_width());
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     ui.label(caps(&crate::i18n::t("board")));
                     let current = self.board.rel.clone().unwrap_or_default();
                     let mut pick = None;
@@ -3063,7 +3166,7 @@ impl App {
                     if ui.add_enabled(self.board.can_redo(), egui::Button::new("↷")).on_hover_text(crate::i18n::t("rétablir (Ctrl+Y)")).clicked() {
                         self.board.redo();
                     }
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.scope(|ui| {
                         if ui.button(crate::i18n::t("cadrer")).clicked() {
                             self.board.fit();
                         }
@@ -3349,7 +3452,11 @@ impl App {
         let mut apply_file: Option<(String, String)> = None;
         let mut insert: Option<String> = None;
         let mut bar_out: Option<extras::ChatBarOut> = None;
-        crate::dock::show(ui, "assistant", &crate::i18n::t("assistant"), crate::dock::Side::Right, 340.0, 240.0, egui::Frame::new().fill(p.panel).stroke(egui::Stroke::new(1.0, p.line)).inner_margin(12), |ui| {
+        if crate::dock::closed("assistant") {
+            self.assistant_open = false;
+            return;
+        }
+        crate::dock::show_ex(ui, "assistant", &crate::i18n::t("assistant"), crate::dock::Side::Right, 340.0, 240.0, egui::Frame::new().fill(p.panel).stroke(egui::Stroke::new(1.0, p.line)).inner_margin(12), true, |ui| {
                 ui.horizontal(|ui| {
                     ui.label(caps(&crate::i18n::t("assistant")));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -4572,10 +4679,17 @@ impl eframe::App for App {
                 self.zones_next.push(("top", egui::Rect::from_min_max(a.min, egui::pos2(a.max.x, b.min.y))));
                 self.zones_next.push(("pages", egui::Rect::from_min_max(b.min, egui::pos2(b.max.x, c.min.y))));
                 self.zones_next.push(("status", egui::Rect::from_min_max(egui::pos2(c.min.x, d.max.y), c.max)));
-                self.explorer(ui);
+                self.explorer_rect = None;
+                if self.explorer_open {
+                    self.explorer(ui);
+                    if crate::dock::closed("explorer") {
+                        self.explorer_open = false;
+                    }
+                }
                 if let Some(r) = self.explorer_rect {
                     self.zones_next.push(("explorer", r));
                 }
+                self.view_windows(ui);
             }
             if self.terminal.is_some() {
                 self.terminal_panel(ui);
@@ -4591,7 +4705,7 @@ impl eframe::App for App {
                     // Le panneau de droite (liens, résumé) sert aux textes ; la 3D, les vidéos
                     // et les documents gardent toute la largeur.
                     let text = self.current().is_none_or(|d| matches!(d.content, Content::Text(_)));
-                    if !self.compact && !self.assistant_open && text && self.split.is_none() {
+                    if !self.compact && !self.assistant_open && text && self.split.is_none() && !self.side_hidden {
                         let a = ui.available_rect_before_wrap();
                         self.side_panel(ui);
                         let b = ui.available_rect_before_wrap();
