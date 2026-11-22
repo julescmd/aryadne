@@ -2222,6 +2222,21 @@ impl Edit {
         ui.add(egui::Slider::new(&mut self.retopo_opt.adaptive, 0.0..=1.0).text(crate::i18n::t("taille adaptative"))).on_hover_text(crate::i18n::t("Les quads rétrécissent là où les boucles se resserrent au lieu de se déformer."));
         ui.add(egui::Slider::new(&mut self.retopo_opt.sharp_angle, 0.0..=90.0).clamping(egui::SliderClamping::Never).suffix("°").text(crate::i18n::t("arêtes vives"))).on_hover_text(crate::i18n::t("Au-delà de cet angle, une arête devient une boucle nette du maillage (0 : désactivé). Les bords ouverts sont toujours suivis."));
         ui.add(egui::Slider::new(&mut self.retopo_opt.guide_radius, 0.5..=4.0).clamping(egui::SliderClamping::Never).text(crate::i18n::t("portée des guides")));
+        ui.horizontal(|ui| {
+            ui.label(crate::i18n::t("objets séparés"));
+            let mut by_detail = self.retopo_opt.detail_density > 0.0;
+            ui.selectable_value(&mut by_detail, false, crate::i18n::t("même densité"));
+            ui.selectable_value(&mut by_detail, true, crate::i18n::t("selon les détails"));
+            self.retopo_opt.detail_density = match (by_detail, self.retopo_opt.detail_density > 0.0) {
+                (false, _) => 0.0,
+                (true, false) => 0.7,
+                (true, true) => self.retopo_opt.detail_density,
+            };
+            if by_detail {
+                ui.add(egui::Slider::new(&mut self.retopo_opt.detail_density, 0.1..=1.5).text(crate::i18n::t("force"))).on_hover_text(crate::i18n::t("Chaque objet non relié est retopologisé à part. Plus la force est haute, plus un objet chargé de détails reçoit de quads par rapport à un objet lisse."));
+            }
+        });
+        ui.checkbox(&mut self.retopo_opt.auto_loops, crate::i18n::t("boucles automatiques")).on_hover_text(crate::i18n::t("Trouve les rebords qui font le tour d'un détail (yeux, bouche, narines, base d'une corne) et y met des boucles, comme un guide dessiné."));
         ui.add_space(6.0);
         let mut cancel = false;
         if let Some(j) = &self.retopo_job {

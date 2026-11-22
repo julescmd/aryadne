@@ -63,11 +63,15 @@ pub struct Options {
     pub density: Vec<[f32; 5]>,
     /// Toujours subdiviser chaque face en quads (usage interne : seconde passe à quart de cible)
     pub force_split: bool,
+    /// Boucles automatiques autour des plis creux fermés (yeux, bouche, narines…)
+    pub auto_loops: bool,
+    /// Objets séparés : 0 = même densité partout ; 1 = densité selon les détails de chaque objet
+    pub detail_density: f32,
 }
 
 impl Default for Options {
     fn default() -> Self {
-        Options { faces: 1500, iterations: 160, guide_radius: 1.2, pure_quads: true, adaptive: 0.5, curvature: 1.0, sharp_angle: 35.0, symmetry: 0, density: vec![], force_split: false }
+        Options { faces: 1500, iterations: 160, guide_radius: 1.2, pure_quads: true, adaptive: 0.5, curvature: 1.0, sharp_angle: 35.0, symmetry: 0, density: vec![], force_split: false, auto_loops: true, detail_density: 0.0 }
     }
 }
 
@@ -1196,19 +1200,24 @@ fn place_cones(g: &mut Graph, f: &[[u32; 3]], geo: &[[f64; 2]], u: &mut [[f64; 2
     // ligne de grille. Sinon on déplace une singularité d'une case en diagonale (sa parité ne
     // change pas) jusqu'à ce que le tour se referme.
     let mut moved = 0;
-    for c in curves.iter_mut() {
-        for _ in 0..6 {
-            let Some(m) = curve_mismatch(g, c) else { break };
-            if m == 0 {
+    // Écart total des autres boucles : un déplacement qui referme celle-ci ne doit pas en ouvrir une autre
+    let total = |g: &Graph, curves: &[Curve], skip: usize| -> i32 { curves.iter().enumerate().filter(|(k, _)| *k != skip).filter_map(|(_, c)| curve_mismatch(g, c)).map(|m| m.abs()).sum() };
+    for ci in 0..curves.len() {
+        for _ in 0..40 {
+            let Some(m) = curve_mismatch(g, &curves[ci]) else { break };
+            // Un déplacement en diagonale change l'écart de 2 : un écart impair ne se corrige pas ainsi
+            if m == 0 || m % 2 != 0 {
                 break;
             }
+            let others = total(g, curves, ci);
+            let c = &curves[ci];
             let on_curve: HashSet<u32> = c.links.iter().chain(c.extra.iter()).map(|l| l.2).collect();
             let mut done = false;
             'search: for p in paths.iter().filter(|p| p.face != u32::MAX && p.cols.iter().any(|col| on_curve.contains(&col.0))) {
                 for b in [[1, 1], [1, -1], [-1, 1], [-1, -1]] {
                     let saved: Vec<(u32, [i32; 2])> = p.cols.iter().map(|col| (col.0, g.d[col.0 as usize])).collect();
                     push_path(g, f, &p.steps, b);
-                    if curve_mismatch(g, c).is_some_and(|m2| m2.abs() < m.abs()) {
+                    if curve_mismatch(g, &curves[ci]).is_some_and(|m2| m2.abs() < m.abs()) && total(g, curves, ci) <= others {
                         done = true;
                         moved += 1;
                         break 'search;
@@ -1222,7 +1231,16 @@ fn place_cones(g: &mut Graph, f: &[[u32; 3]], geo: &[[f64; 2]], u: &mut [[f64; 2
                 break;
             }
         }
+    }
+    for c in curves.iter_mut() {
         c.ok = curve_mismatch(g, c) == Some(0);
+    }
+    if debug && std::env::var("RING_DBG").is_ok() {
+        for (k, c) in curves.iter().enumerate() {
+            if !c.pin {
+                eprintln!("  anneau {k} : écart final {:?}", curve_mismatch(g, c));
+            }
+        }
     }
     if debug && moved > 0 {
         eprintln!("  singularités déplacées pour refermer les boucles : {moved}");
@@ -1233,7 +1251,7 @@ fn place_cones(g: &mut Graph, f: &[[u32; 3]], geo: &[[f64; 2]], u: &mut [[f64; 2
     // Les lignes caractéristiques ensuite (une fois tous les entiers des singularités connus) :
     // chacune est amenée sur la ligne de grille la plus proche, les mieux placées d'abord.
     loop {
-        let open: Vec<usize> = (0..curves.len()).filter(|&c| curves[c].fixed.is_none() && curves[c].ok).collect();
+        let open: Vec<usize> = (0..curves.len()).filter(|&c| curves[c].pin && curves[c].fixed.is_none() && curves[c].ok).collect();
         if open.is_empty() {
             break;
         }
@@ -1377,7 +1395,16 @@ pub fn remesh(pos: &[V3], tris: &[[u32; 3]], guides: &[Vec<V3>], opt: &Options, 
     }
     let area = |ts: &[[u32; 3]]| -> f32 { ts.iter().map(|t| len(cross(sub(pos[t[1] as usize], pos[t[0] as usize]), sub(pos[t[2] as usize], pos[t[0] as usize]))) * 0.5).sum() };
     let areas: Vec<f32> = pieces.iter().map(|p| area(p)).collect();
-    let total: f32 = areas.iter().sum::<f32>().max(1e-12);
+    // Part de chaque pièce : selon sa surface (densité égale partout), ou aussi selon ses
+    // détails (une pièce très sculptée reçoit des quads plus petits qu'une pièce lisse)
+    let weights: Vec<f32> = if opt.detail_density > 0.0 {
+        let detail: Vec<f32> = pieces.iter().zip(&areas).map(|(ts, &a)| piece_detail(&pos, ts) / a.sqrt().max(1e-12)).collect();
+        let mean = detail.iter().zip(&areas).map(|(d, a)| d * a).sum::<f32>() / areas.iter().sum::<f32>().max(1e-12);
+        detail.iter().zip(&areas).map(|(d, a)| a * (d / mean.max(1e-12)).clamp(0.25, 4.0).powf(opt.detail_density)).collect()
+    } else {
+        areas.clone()
+    };
+    let total: f32 = weights.iter().sum::<f32>().max(1e-12);
     let sym = (1..=3).contains(&opt.symmetry).then(|| opt.symmetry as usize - 1);
     let done = std::sync::atomic::AtomicUsize::new(0);
     let n = pieces.len();
@@ -1385,8 +1412,8 @@ pub fn remesh(pos: &[V3], tris: &[[u32; 3]], guides: &[Vec<V3>], opt: &Options, 
     let results: Vec<Option<Result>> = {
         pieces
             .iter()
-            .zip(areas.iter())
-            .map(|(ts, a)| {
+            .zip(areas.iter().zip(&weights))
+            .map(|(ts, (a, wgt))| {
                 // Sommets de la pièce, renumérotés
                 let mut remap: HashMap<u32, u32> = HashMap::new();
                 let mut p = vec![];
@@ -1407,7 +1434,7 @@ pub fn remesh(pos: &[V3], tris: &[[u32; 3]], guides: &[Vec<V3>], opt: &Options, 
                 // typique : 3 × volume / surface (r pour une sphère, 1,5 r pour un tore).
                 let vol: f32 = t2.iter().map(|t| dot(p[t[0] as usize], cross(p[t[1] as usize], p[t[2] as usize])) / 6.0).sum::<f32>().abs();
                 let rho = 3.0 * vol / a.max(1e-12);
-                let share = opt.faces as f32 * a / total;
+                let share = opt.faces as f32 * wgt / total;
                 // (seulement pour une pièce fermée : une paroi ouverte n'a pas de volume)
                 let closed = {
                     let mut c: HashMap<(u32, u32), u8> = HashMap::new();
@@ -1463,6 +1490,27 @@ pub fn remesh(pos: &[V3], tris: &[[u32; 3]], guides: &[Vec<V3>], opt: &Options, 
 /// La retopologie se fait sur la version gonflée, puis chaque sommet revient sur la vraie surface
 /// au même endroit relatif. Comme à la main, le rebord d'une paroi fine garde ainsi une ou deux
 /// boucles, et le dessus et le dessous ont la même grille.
+/// Quantité de détail d'une pièce : somme des angles dièdres × longueur des arêtes (courbure
+/// totale), sans dimension une fois divisée par la racine de l'aire
+fn piece_detail(pos: &[V3], ts: &[[u32; 3]]) -> f32 {
+    let mut first: HashMap<(u32, u32), V3> = HashMap::new();
+    let mut sum = 0.0;
+    for t in ts {
+        let (a, b, c) = (pos[t[0] as usize], pos[t[1] as usize], pos[t[2] as usize]);
+        let nn = norm(cross(sub(b, a), sub(c, a)));
+        for k in 0..3 {
+            let (x, y) = (t[k], t[(k + 1) % 3]);
+            let key = (x.min(y), x.max(y));
+            if let Some(m) = first.remove(&key) {
+                sum += dot(m, nn).clamp(-1.0, 1.0).acos() * len(sub(pos[y as usize], pos[x as usize]));
+            } else {
+                first.insert(key, nn);
+            }
+        }
+    }
+    sum
+}
+
 /// Morceaux des guides qui passent sur la surface `p` (à moins de `tol` d'un de ses sommets)
 fn guides_on(p: &[V3], guides: &[Vec<V3>], tol: f32) -> Vec<Vec<V3>> {
     if guides.is_empty() || tol <= 0.0 {
@@ -1747,6 +1795,17 @@ fn remesh_core(pos: &[V3], tris: &[[u32; 3]], guides: &[Vec<V3>], opt: &Options,
             }
         }
     }
+    let (cdir, cani, kmin) = curvature(&v, &f, &nrm, &adj, h);
+
+    // Boucles automatiques : les plis creux qui font le tour de quelque chose (orbite, bouche,
+    // narine, base d'une corne) deviennent des guides, comme si on les avait dessinés
+    let auto = if opt.auto_loops && std::env::var("NOAUTO").is_err() { auto_guides(&v, &nrm, &adj, &cdir, &cani, h) } else { vec![] };
+    if debug && !auto.is_empty() {
+        eprintln!("boucles automatiques : {}", auto.len());
+    }
+    let guides: Vec<Vec<V3>> = guides.iter().cloned().chain(auto).collect();
+    let (cdir, cani) = if opt.curvature > 0.0 { (cdir, cani) } else { (vec![[0.0; 3]; n_v], vec![0.0; n_v]) };
+    let guides = &guides;
     let r = h * opt.guide_radius;
     // Au-delà du rayon fixe, un guide attire encore le flux en s'estompant : plusieurs boucles
     // parallèles au guide (anneaux autour d'un œil, d'une bouche) au lieu d'une seule ligne
@@ -1793,7 +1852,7 @@ fn remesh_core(pos: &[V3], tris: &[[u32; 3]], guides: &[Vec<V3>], opt: &Options,
         }
     }
     lap("préparation");
-    let (cdir, cani) = if opt.curvature > 0.0 { curvature(&v, &f, &nrm, &adj, h) } else { (vec![[0.0; 3]; n_v], vec![0.0; n_v]) };
+
     // Une courbure même douce mais régulière (corps conique, bras, bec) guide les boucles : anneaux
     // autour des formes plutôt qu'une grille droite qui coupe en diagonale
     let s0: f32 = std::env::var("S0").ok().and_then(|x| x.parse().ok()).unwrap_or(0.15);
@@ -1909,7 +1968,7 @@ fn remesh_core(pos: &[V3], tris: &[[u32; 3]], guides: &[Vec<V3>], opt: &Options,
         let mut w = std::io::BufWriter::new(std::fs::File::create(path).unwrap());
         for i in 0..n_v {
             let qq = if std::env::var("DUMPC").is_ok() { levels[0].c[i] } else { q[i] };
-            writeln!(w, "{} {} {} {} {} {} {} {} {} {}", v[i][0], v[i][1], v[i][2], qq[0], qq[1], qq[2], nrm[i][0], nrm[i][1], nrm[i][2], levels[0].a[i]).unwrap();
+            writeln!(w, "{} {} {} {} {} {} {} {} {} {}", v[i][0], v[i][1], v[i][2], qq[0], qq[1], qq[2], nrm[i][0], nrm[i][1], nrm[i][2], if std::env::var("DUMPK").is_ok() { kmin[i] * h } else { levels[0].a[i] }).unwrap();
         }
     }
     progress(0.3);
@@ -1962,6 +2021,20 @@ fn remesh_core(pos: &[V3], tris: &[[u32; 3]], guides: &[Vec<V3>], opt: &Options,
         .collect();
     let mut u = vec![[0.0f64; 2]; n_v];
     let mut curves = build_curves(&g, &ft, &nrm, &q);
+    if std::env::var("RINGS").is_ok() {
+        let rings = ring_curves(&g, &v, &nrm, &q, &adj, &levels[0].a, h);
+        if debug {
+            eprintln!("anneaux à refermer : {}", rings.len());
+            if std::env::var("RING_DBG").is_ok() {
+                for (k, c) in rings.iter().enumerate() {
+                    let m = c.verts.len() as f32;
+                    let ce = c.verts.iter().fold([0.0f32; 3], |a, &i| add(a, mul(v[i as usize], 1.0 / m)));
+                    eprintln!("  anneau {} : {} sommets, centre ({:.1}, {:.1}, {:.1}), écart initial {:?}", curves.len() + k, c.verts.len(), ce[0], ce[1], ce[2], curve_mismatch(&g, c));
+                }
+            }
+        }
+        curves.extend(rings);
+    }
     if debug {
         eprintln!("lignes caractéristiques : {} ({} arêtes)", curves.len(), ft.edges.len());
     }
@@ -2142,6 +2215,7 @@ fn remesh_core(pos: &[V3], tris: &[[u32; 3]], guides: &[Vec<V3>], opt: &Options,
         res.faces = faces;
     }
     make_manifold(&mut res);
+    fill_holes(&mut res, &orig_v, &orig_f, h);
     // Pôles : sommets intérieurs dont la valence n'est pas 4
     {
         let mut val = vec![0u32; res.pos.len()];
@@ -2165,6 +2239,96 @@ fn remesh_core(pos: &[V3], tris: &[[u32; 3]], guides: &[Vec<V3>], opt: &Options,
     lap("lissage final");
     progress(1.0);
     res
+}
+
+/// Petits trous laissés par l'extraction (quelques faces manquantes) : refermés par des quads
+/// autour d'un sommet central, sauf là où la surface de départ avait elle-même un bord.
+fn fill_holes(r: &mut Result, ov: &[V3], of: &[[u32; 3]], h: f32) {
+    let mut ec: HashMap<(u32, u32), u8> = HashMap::new();
+    for t in of {
+        for k in 0..3 {
+            let (a, b) = (t[k], t[(k + 1) % 3]);
+            *ec.entry((a.min(b), a.max(b))).or_insert(0) += 1;
+        }
+    }
+    let cell = h * 2.0;
+    let key = |x: V3| ((x[0] / cell).floor() as i32, (x[1] / cell).floor() as i32, (x[2] / cell).floor() as i32);
+    let mut border: HashSet<(i32, i32, i32)> = HashSet::new();
+    for (&(a, b), &c) in &ec {
+        if c == 1 {
+            border.insert(key(ov[a as usize]));
+            border.insert(key(ov[b as usize]));
+        }
+    }
+    let near_border = |x: V3| {
+        let (a, b, c) = key(x);
+        (-1..=1).any(|i| (-1..=1).any(|j| (-1..=1).any(|k| border.contains(&(a + i, b + j, c + k)))))
+    };
+    // Arêtes de bord orientées (sens de la face), parcourues à l'envers pour suivre le trou
+    let mut cnt: HashMap<(u32, u32), u32> = HashMap::new();
+    for f in &r.faces {
+        for k in 0..f.len() {
+            let (a, b) = (f[k], f[(k + 1) % f.len()]);
+            *cnt.entry((a.min(b), a.max(b))).or_insert(0) += 1;
+        }
+    }
+    let mut next: HashMap<u32, u32> = HashMap::new();
+    let mut bad: HashSet<u32> = HashSet::new();
+    for f in &r.faces {
+        for k in 0..f.len() {
+            let (a, b) = (f[k], f[(k + 1) % f.len()]);
+            if cnt[&(a.min(b), a.max(b))] == 1 && next.insert(b, a).is_some() {
+                bad.insert(b);
+            }
+        }
+    }
+    let mut seen: HashSet<u32> = HashSet::new();
+    let mut added = vec![];
+    let starts: Vec<u32> = next.keys().copied().collect();
+    for s in starts {
+        if seen.contains(&s) || bad.contains(&s) {
+            continue;
+        }
+        let mut lp = vec![s];
+        let mut cur = next[&s];
+        let mut ok = true;
+        while cur != s {
+            if lp.len() > 12 || bad.contains(&cur) || !next.contains_key(&cur) {
+                ok = false;
+                break;
+            }
+            lp.push(cur);
+            cur = next[&cur];
+        }
+        for &x in &lp {
+            seen.insert(x);
+        }
+        if !ok || lp.len() < 3 {
+            continue;
+        }
+        let m = lp.len();
+        let c = lp.iter().fold([0.0f32; 3], |a, &i| add(a, mul(r.pos[i as usize], 1.0 / m as f32)));
+        if near_border(c) {
+            continue;
+        }
+        match m {
+            3 | 4 => added.push(lp),
+            _ => {
+                let ci = r.pos.len() as u32;
+                r.pos.push(c);
+                let mut i = 0;
+                while i + 2 <= m {
+                    if i + 2 == m {
+                        added.push(vec![ci, lp[i], lp[(i + 1) % m]]);
+                    } else {
+                        added.push(vec![ci, lp[i], lp[i + 1], lp[(i + 2) % m]]);
+                    }
+                    i += 2;
+                }
+            }
+        }
+    }
+    r.faces.extend(added);
 }
 
 /// Dernier filet : une arête partagée par plus de deux faces (aileron) perd ses faces les plus
@@ -2436,9 +2600,12 @@ fn linear_field(v: &[V3], n: &[V3], adj: &[Vec<u32>], base: &[V3], target: &[V3]
     let mut pz: Vec<[f64; 2]> = res.iter().zip(&diag).map(|(x, d)| [x[0] / d, x[1] / d]).collect();
     let mut p = pz.clone();
     let mut rz = dotv(&res, &pz);
-    let stop = dotv(&rhs, &rhs) * 1e-10;
+    // Le système est presque singulier sur certains maillages : au-delà de 1500 itérations le
+    // champ ne bouge plus de façon visible (le départ, z = 1, est déjà le champ lissé)
+    let tol: f64 = std::env::var("LFTOL").ok().and_then(|x| x.parse().ok()).unwrap_or(1e-10);
+    let stop = dotv(&rhs, &rhs) * tol;
     let mut it = 0;
-    while it < 4000 && dotv(&res, &res) > stop {
+    while it < 1500 && dotv(&res, &res) > stop {
         apply(&p, &mut az);
         let alpha = rz / dotv(&p, &az).max(1e-300);
         for i in 0..nv {
@@ -2726,7 +2893,7 @@ fn cancel_dipoles(v: &[V3], n: &[V3], adj: &[Vec<u32>], f: &[[u32; 3]], q: &mut 
 
 /// Directions principales de courbure et anisotropie |κ1 − κ2|·h (sans unité) par sommet.
 /// Tenseur de Taubin par anneau, lissé à l'échelle d'un quad pour ignorer le bruit du sculpt.
-fn curvature(v: &[V3], f: &[[u32; 3]], n: &[V3], adj: &[Vec<u32>], h: f32) -> (Vec<V3>, Vec<f32>) {
+fn curvature(v: &[V3], f: &[[u32; 3]], n: &[V3], adj: &[Vec<u32>], h: f32) -> (Vec<V3>, Vec<f32>, Vec<f32>) {
     // Tenseur du cycle normal (Cohen-Steiner & Morvan) : chaque arête apporte son angle dièdre
     // dans sa propre direction. Contrairement à un estimateur par voisins, il ne penche pas
     // selon le sens des diagonales de la triangulation (ce qui tordait les boucles en spirale).
@@ -2816,6 +2983,7 @@ fn curvature(v: &[V3], f: &[[u32; 3]], n: &[V3], adj: &[Vec<u32>], h: f32) -> (V
     }
     let mut dir = vec![[0.0f32; 3]; nv];
     let mut ani = vec![0.0f32; nv];
+    let mut kmin = vec![0.0f32; nv];
     for i in 0..nv {
         let nn = n[i];
         let b1 = norm(tangent(if nn[0].abs() < 0.9 { [1.0, 0.0, 0.0] } else { [0.0, 1.0, 0.0] }, nn));
@@ -2831,8 +2999,9 @@ fn curvature(v: &[V3], f: &[[u32; 3]], n: &[V3], adj: &[Vec<u32>], h: f32) -> (V
         // maillage donnerait des directions au hasard)
         let r = (2.0 * d / ((m11 + m22).abs() + 1e-12)).min(1.0);
         ani[i] = 2.0 * d * h * r;
+        kmin[i] = (m11 + m22) * 0.5 - d;
     }
-    (dir, ani)
+    (dir, ani, kmin)
 }
 
 /// Ordre cyclique (sens trigonométrique) des voisins de chaque point de grille, lu sur la
@@ -3137,6 +3306,261 @@ struct Curve {
     extra: Vec<(u32, u32, u32)>,
     /// Faux si la boucle ne se referme pas sur la même ligne de grille (elle reste alors libre)
     ok: bool,
+    /// Vrai : la ligne est posée sur une ligne de grille (arête vive, bord). Faux : on exige
+    /// seulement qu'elle se referme (anneau autour d'un membre : pas de boucle en spirale)
+    pin: bool,
+}
+
+/// Anneaux du flux : en suivant une direction du champ depuis des points bien orientés, on
+/// cherche les lignes qui font le tour d'une forme (corps, membre, corne) et reviennent au
+/// départ. Chacune devra se refermer sur la même ligne de grille : sans ça, l'arrondi des
+/// singularités laisse un décalage d'une rangée par tour et la boucle part en spirale sur
+/// tout le maillage.
+/// Boucles de forme : en suivant la direction des arêtes vives douces (rebord d'une paupière,
+/// lèvres, narine, base d'une corne), une ligne qui revient à son départ après un tour court
+/// entoure un détail qui doit avoir ses propres boucles. Elle sert de guide, comme si on
+/// l'avait dessinée. Le long d'un membre la direction suit l'axe et ne se referme pas : les
+/// anneaux des membres viennent déjà de la courbure.
+fn auto_guides(v: &[V3], n: &[V3], adj: &[Vec<u32>], dir: &[V3], ani: &[f32], h: f32) -> Vec<Vec<V3>> {
+    let t: f32 = std::env::var("AUTO_T").ok().and_then(|x| x.parse().ok()).unwrap_or(0.35);
+    if std::env::var("AUTO_DBG").is_ok() {
+        let mut ks = ani.to_vec();
+        ks.sort_by(|a, b| a.total_cmp(b));
+        let pc = |x: f32| ks[((ks.len() - 1) as f32 * x) as usize];
+        eprintln!("anisotropie : 50 % {:.2}, 80 % {:.2}, 95 % {:.2}, 99 % {:.2}", pc(0.5), pc(0.8), pc(0.95), pc(0.99));
+    }
+    let nv = v.len();
+    let cell = h * 3.0;
+    let mut best: HashMap<(i32, i32, i32), u32> = HashMap::new();
+    for i in 0..nv {
+        if ani[i] < t * 1.5 || adj[i].len() < 3 {
+            continue;
+        }
+        let k = ((v[i][0] / cell).floor() as i32, (v[i][1] / cell).floor() as i32, (v[i][2] / cell).floor() as i32);
+        let e = best.entry(k).or_insert(i as u32);
+        if ani[*e as usize] < ani[i] {
+            *e = i as u32;
+        }
+    }
+    let mut seeds: Vec<u32> = best.into_values().collect();
+    seeds.sort_by(|a, b| ani[*b as usize].total_cmp(&ani[*a as usize]));
+    seeds.truncate(600);
+    let mut covered = vec![false; nv];
+    let mut out: Vec<Vec<V3>> = vec![];
+    let mut centers: Vec<V3> = vec![];
+    // Pas faibles permis d'affilée : environ 3 quads (coin de l'œil où les plis se rejoignent)
+    let mean_edge = {
+        let (mut t, mut c) = (0.0, 0);
+        for i in (0..nv).step_by(7) {
+            for &j in &adj[i] {
+                t += len(sub(v[i], v[j as usize]));
+                c += 1;
+            }
+        }
+        t / c.max(1) as f32
+    };
+    let gap = ((h * 3.0 / mean_edge.max(1e-9)) as usize).max(3);
+    for &s in &seeds {
+        if covered[s as usize] {
+            continue;
+        }
+        let mut d = dir[s as usize];
+        let mut path = vec![s];
+        let mut on: HashMap<u32, usize> = HashMap::new();
+        on.insert(s, 0);
+        let (mut cur, mut length, mut weak) = (s, 0.0f32, 0);
+        let mut closed = false;
+        for _ in 0..3000 {
+            let c = cur as usize;
+            // Refermer : de retour près du départ, en s'en approchant (un trou de 2 quads est permis,
+            // le guide est une ligne et n'a pas besoin de suivre les arêtes)
+            let back = sub(v[s as usize], v[c]);
+            if length > h * 8.0 && len(back) < h * 2.0 && dot(back, d) > 0.0 {
+                closed = true;
+                break;
+            }
+            let mut nb = None;
+            let mut bd = 0.5;
+            for &w in &adj[c] {
+                if on.contains_key(&w) {
+                    continue;
+                }
+                let x = dot(norm(sub(v[w as usize], v[c])), d);
+                if x > bd {
+                    bd = x;
+                    nb = Some(w);
+                }
+            }
+            let Some(w) = nb else { break };
+            let wi = w as usize;
+            length += len(sub(v[wi], v[c]));
+            let a = norm(tangent(dir[wi], n[wi]));
+            d = if dot(a, d) >= 0.0 { a } else { mul(a, -1.0) };
+            weak = if ani[wi] < t { weak + 1 } else { 0 };
+            if weak > gap || length > h * 150.0 {
+                break;
+            }
+            on.insert(w, path.len());
+            path.push(w);
+            cur = w;
+        }
+        if let Ok(fp) = std::env::var("AUTO_DUMP") {
+            use std::io::Write;
+            if let Ok(mut fh) = std::fs::OpenOptions::new().create(true).append(true).open(fp) {
+                for &p in &path {
+                    let _ = writeln!(fh, "{} {} {}", v[p as usize][0], v[p as usize][1], v[p as usize][2]);
+                }
+                let _ = writeln!(fh, "{}", if closed { "# closed" } else { "" });
+            }
+        }
+        if !closed {
+            continue;
+        }
+        // Un pli franc tout le long (pas une ride de la peau), assez grand, pas un doublon
+        let mean_a = path.iter().map(|&p| ani[p as usize]).sum::<f32>() / path.len() as f32;
+        let cen = path.iter().fold([0.0f32; 3], |a, &p| add(a, mul(v[p as usize], 1.0 / path.len() as f32)));
+        if std::env::var("AUTO_DBG").is_ok() {
+            eprintln!("boucle : longueur {:.1} h, anisotropie moyenne {mean_a:.2}, centre ({:.2}, {:.2}, {:.2})", length / h, cen[0], cen[1], cen[2]);
+        }
+        let amin: f32 = std::env::var("AUTO_A").ok().and_then(|x| x.parse().ok()).unwrap_or(1.15);
+        if mean_a < t * amin || length < h * 9.0 || centers.iter().any(|c| len(sub(*c, cen)) < h * 3.0) {
+            continue;
+        }
+        centers.push(cen);
+        for &p in &path {
+            covered[p as usize] = true;
+            for &w in &adj[p as usize] {
+                covered[w as usize] = true;
+                for &x in &adj[w as usize] {
+                    covered[x as usize] = true;
+                }
+            }
+        }
+        let mut pts: Vec<V3> = path.iter().map(|&i| v[i as usize]).collect();
+        for _ in 0..6 {
+            let old = pts.clone();
+            let m = old.len();
+            for i in 0..m {
+                pts[i] = mul(add(add(old[(i + m - 1) % m], old[(i + 1) % m]), mul(old[i], 2.0)), 0.25);
+            }
+        }
+        let first = pts[0];
+        pts.push(first);
+        out.push(pts);
+    }
+    out
+}
+
+fn ring_curves(g: &Graph, v: &[V3], n: &[V3], q: &[V3], adj: &[Vec<u32>], aniso: &[f32], h: f32) -> Vec<Curve> {
+    let nv = v.len();
+    let cell = h * 4.0;
+    let amin: f32 = std::env::var("RING_A").ok().and_then(|x| x.parse().ok()).unwrap_or(0.02);
+    let mut best: HashMap<(i32, i32, i32), u32> = HashMap::new();
+    for i in 0..nv {
+        if aniso[i] < amin || adj[i].len() < 3 {
+            continue;
+        }
+        let k = ((v[i][0] / cell).floor() as i32, (v[i][1] / cell).floor() as i32, (v[i][2] / cell).floor() as i32);
+        let e = best.entry(k).or_insert(i as u32);
+        if aniso[*e as usize] < aniso[i] {
+            *e = i as u32;
+        }
+    }
+    let mut seeds: Vec<u32> = best.into_values().collect();
+    seeds.sort_by(|a, b| aniso[*b as usize].total_cmp(&aniso[*a as usize]));
+    seeds.truncate(1500);
+    let mut covered = vec![false; nv];
+    let mut out = vec![];
+    let max_steps = 4000usize;
+    for &s in &seeds {
+        if covered[s as usize] {
+            continue;
+        }
+        for pick in 0..2 {
+            let mut dir = if pick == 0 { q[s as usize] } else { cross(n[s as usize], q[s as usize]) };
+            let mut path = vec![s];
+            let mut on: HashMap<u32, usize> = HashMap::new();
+            on.insert(s, 0);
+            let mut cur = s;
+            let mut length = 0.0;
+            let mut closed: Option<usize> = None;
+            for _ in 0..max_steps {
+                let c = cur as usize;
+                // Refermer : un des premiers sommets du chemin est voisin et devant nous
+                if length > h * 6.0 {
+                    let mut hit = None;
+                    for &w in &adj[c] {
+                        if let Some(&ix) = on.get(&w) {
+                            if ix < 4 && dot(norm(sub(v[w as usize], v[c])), dir) > 0.2 {
+                                hit = Some(ix);
+                                break;
+                            }
+                        }
+                    }
+                    if let Some(ix) = hit {
+                        closed = Some(ix);
+                        break;
+                    }
+                }
+                let mut nb = None;
+                let mut bd = 0.5;
+                for &w in &adj[c] {
+                    if on.contains_key(&w) {
+                        continue;
+                    }
+                    let d = dot(norm(sub(v[w as usize], v[c])), dir);
+                    if d > bd {
+                        bd = d;
+                        nb = Some(w);
+                    }
+                }
+                let Some(w) = nb else { break };
+                length += len(sub(v[w as usize], v[c]));
+                // Transport de la direction : celle des 4 du champ en w la plus proche
+                let wi = w as usize;
+                let (a, b) = (q[wi], cross(n[wi], q[wi]));
+                let cand = [a, mul(a, -1.0), b, mul(b, -1.0)];
+                dir = *cand.iter().max_by(|x, y| dot(**x, dir).total_cmp(&dot(**y, dir))).unwrap();
+                on.insert(w, path.len());
+                path.push(w);
+                cur = w;
+                if length > h * 400.0 {
+                    break;
+                }
+            }
+            let Some(ix) = closed else { continue };
+            let path: Vec<u32> = path[ix..].to_vec();
+            if path.len() < 6 {
+                continue;
+            }
+            let m = path.len();
+            let edge = |a: u32, b: u32| g.map.get(&(a.min(b), a.max(b))).copied();
+            let mut links = vec![];
+            let mut fine = true;
+            for i in 0..m - 1 {
+                match edge(path[i], path[i + 1]) {
+                    Some(e) => links.push((i as u32, i as u32 + 1, e)),
+                    None => fine = false,
+                }
+            }
+            let Some(last) = edge(path[m - 1], path[0]) else { continue };
+            if !fine {
+                continue;
+            }
+            for &p in &path {
+                covered[p as usize] = true;
+                for &w in &adj[p as usize] {
+                    covered[w as usize] = true;
+                }
+            }
+            let p0 = path[0] as usize;
+            let t = sub(v[path[1] as usize], v[p0]);
+            let c0 = if dot(t, q[p0]).abs() >= dot(t, cross(n[p0], q[p0])).abs() { 1 } else { 0 };
+            out.push(Curve { verts: path, links, c0, fixed: None, extra: vec![(m as u32 - 1, 0, last)], ok: true, pin: false });
+            break;
+        }
+    }
+    out
 }
 
 fn build_curves(g: &Graph, ft: &Features, n: &[V3], q: &[V3]) -> Vec<Curve> {
@@ -3184,7 +3608,7 @@ fn build_curves(g: &Graph, ft: &Features, n: &[V3], q: &[V3]) -> Vec<Curve> {
         }
         let t = ft.tan[s];
         let c0 = if dot(t, q[s]).abs() >= dot(t, cross(n[s], q[s])).abs() { 1 } else { 0 };
-        out.push(Curve { verts, links, c0, fixed: None, extra, ok: true });
+        out.push(Curve { verts, links, c0, fixed: None, extra, ok: true, pin: true });
     }
     out
 }
@@ -3258,7 +3682,7 @@ fn curve_offset(g: &Graph, c: &Curve, u: &[[f64; 2]]) -> f64 {
 /// Contraintes des lignes déjà arrondies : (sommet, composante, valeur).
 fn curve_pins(g: &Graph, curves: &[Curve]) -> Vec<(u32, u8, f64)> {
     let mut pins = vec![];
-    for c in curves {
+    for c in curves.iter().filter(|c| c.pin) {
         if let Some(tau) = c.fixed {
             for (&(k, s, t), &v) in curve_frames(g, c).iter().zip(&c.verts) {
                 pins.push((v, k, s * (tau - t) as f64));
@@ -3784,6 +4208,9 @@ mod tests {
         opt.symmetry = std::env::var("RETOPO_SYM").ok().and_then(|x| x.parse().ok()).unwrap_or(0);
         if let Some(a) = std::env::var("RETOPO_ADAPT").ok().and_then(|x| x.parse().ok()) {
             opt.adaptive = a;
+        }
+        if let Some(a) = std::env::var("RETOPO_DETAIL").ok().and_then(|x| x.parse().ok()) {
+            opt.detail_density = a;
         }
         let t = std::time::Instant::now();
         // Guides : fichier texte, « x y z » par ligne, une ligne vide entre deux courbes

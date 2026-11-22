@@ -1474,5 +1474,11 @@
  "aller à cette image": "go to this frame",
  "signet sur cette image (M) · Alt+← / → : signet précédent / suivant": "bookmark this frame (M) · Alt+← / →: previous / next bookmark",
  "signet précédent (Alt+←)": "previous bookmark (Alt+←)",
- "signet suivant (Alt+→)": "next bookmark (Alt+→)"
+ "signet suivant (Alt+→)": "next bookmark (Alt+→)",
+ "boucles automatiques": "automatic loops",
+ "Trouve les rebords qui font le tour d'un détail (yeux, bouche, narines, base d'une corne) et y met des boucles, comme un guide dessiné.": "Finds rims that go around a detail (eyes, mouth, nostrils, horn base) and puts loops there, like a drawn guide.",
+ "objets séparés": "separate objects",
+ "même densité": "same density",
+ "selon les détails": "by detail",
+ "Chaque objet non relié est retopologisé à part. Plus la force est haute, plus un objet chargé de détails reçoit de quads par rapport à un objet lisse.": "Each unconnected object is retopologized on its own. The higher the strength, the more quads a detailed object gets compared with a smooth one."
 }
