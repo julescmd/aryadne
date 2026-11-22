@@ -21,6 +21,9 @@ pub fn is_model(rel: &str) -> bool {
 
 type V3 = [f32; 3];
 
+#[path = "pathtrace.rs"]
+pub mod pathtrace;
+
 pub struct Model {
     pub positions: Vec<V3>,
     pub tris: Vec<[u32; 3]>,
@@ -1951,6 +1954,11 @@ pub struct Viewer {
     prepared: Option<(bool, u64, Prepared)>,
     tex: Option<egui::TextureHandle>,
     last: Option<(Camera, [usize; 2], bool, u64, String)>,
+    /// Moteur de la vue : 0 aperçu (rapide), 1 tracé de chemins (réaliste, s'affine à l'arrêt)
+    pub engine: u8,
+    trace: Option<((Camera, [usize; 2], bool, u64, String), pathtrace::Accum)>,
+    pub trace_set: pathtrace::Settings,
+    pub trace_max: u32,
     capture_msg: Option<String>,
 }
 
@@ -2038,6 +2046,10 @@ impl Viewer {
             prepared: None,
             tex: None,
             last: None,
+            engine: 0,
+            trace: None,
+            trace_set: pathtrace::Settings::default(),
+            trace_max: 256,
             capture_msg: None,
         }
     }
@@ -3948,6 +3960,32 @@ impl Viewer {
                                 self.look.nodes = None;
                             }
                         }
+                        // Moteur de rendu de la vue
+                        let traced = self.engine == 1;
+                        egui::containers::menu::MenuButton::from_button(egui::Button::new(egui::RichText::new(crate::i18n::t("rendu ▾")).size(11.0).color(if traced { p.on_accent } else { p.text })).fill(if traced { p.accent } else { p.panel })).config(stay.clone()).ui(ui, |ui| {
+                            ui.set_min_width(260.0);
+                            ui.label(egui::RichText::new(crate::i18n::t("moteur de la vue")).color(p.muted).size(11.0));
+                            if ui.radio(self.engine == 0, crate::i18n::t("aperçu (rapide)")).on_hover_text(crate::i18n::t("Comme Workbench / Eevee : instantané, ombres et reflets approchés")).clicked() {
+                                self.engine = 0;
+                                self.trace = None;
+                                self.last = None;
+                            }
+                            if ui.radio(self.engine == 1, crate::i18n::t("tracé de chemins (réaliste)")).on_hover_text(crate::i18n::t("Comme Cycles : la lumière rebondit, l'image s'affine quand la vue ne bouge plus")).clicked() {
+                                self.engine = 1;
+                            }
+                            if self.engine == 1 {
+                                ui.separator();
+                                let mut ch = false;
+                                ch |= ui.add(egui::Slider::new(&mut self.trace_set.bounces, 1..=16).text(crate::i18n::t("rebonds"))).changed();
+                                ch |= ui.add(egui::Slider::new(&mut self.trace_max, 16..=4096).logarithmic(true).text(crate::i18n::t("échantillons"))).changed();
+                                ch |= ui.checkbox(&mut self.trace_set.floor, crate::i18n::t("sol (ombres et rebonds)")).changed();
+                                ch |= ui.add_enabled(self.trace_set.floor, egui::Checkbox::new(&mut self.trace_set.floor_visible, crate::i18n::t("sol visible"))).changed();
+                                ch |= ui.add(egui::Slider::new(&mut self.trace_set.clamp, 1.0..=100.0).logarithmic(true).text(crate::i18n::t("limite des points brillants"))).changed();
+                                if ch {
+                                    self.trace = None;
+                                }
+                            }
+                        });
                         let nodes_on = self.mat_active.is_some();
                         egui::containers::menu::MenuButton::from_button(egui::Button::new(egui::RichText::new(crate::i18n::t("nodes ▾")).size(11.0).color(if nodes_on { p.on_accent } else { p.text })).fill(if nodes_on { p.accent } else { p.panel })).config(stay.clone()).ui(ui, |ui| {
 
@@ -4769,6 +4807,7 @@ impl Viewer {
         }
         let look_key = format!("{:?}|{refs_key}", look.key());
         let key = (self.cam, size, z_up, self.prepared.as_ref().map(|p| p.1).unwrap_or(0), look_key);
+        let trace_key = key.clone();
         if self.last.as_ref() != Some(&key) || self.tex.is_none() {
             // Le maillage peut être en cours de recalcul (modificateurs, sortie du mode édition)
             let Some(prepared) = self.prepared.as_ref() else {
@@ -4788,6 +4827,36 @@ impl Viewer {
         }
         if interacting {
             ui.ctx().request_repaint();
+        }
+        // Tracé de chemins : à l'arrêt, l'image s'affine passe après passe (l'aperçu sert pendant le mouvement)
+        if self.engine == 1 && !interacting && self.mesh.is_none() {
+            if let Some(prepared) = self.prepared.as_ref() {
+                if self.trace.as_ref().is_none_or(|t| t.0 != trace_key) {
+                    let f = (400_000.0 / (size[0] * size[1]) as f32).sqrt().min(1.0);
+                    let (tw, th) = (((size[0] as f32 * f) as usize).max(8), ((size[1] as f32 * f) as usize).max(8));
+                    self.trace = Some((trace_key.clone(), pathtrace::Accum::new(tw, th)));
+                }
+                if let Some((_, acc)) = &mut self.trace {
+                    if acc.spp < self.trace_max {
+                        // Autant de passes qu'il en tient dans ~40 ms
+                        let t0 = std::time::Instant::now();
+                        while acc.spp < self.trace_max && (acc.spp == 0 || t0.elapsed().as_millis() < 40) {
+                            pathtrace::pass(&prepared.2, &self.cam, &look, &self.trace_set, acc);
+                        }
+                        let img = egui::ColorImage::from_rgba_unmultiplied([acc.w, acc.h], &acc.rgba(look.exposure));
+                        match &mut self.tex {
+                            Some(t) => t.set(img, egui::TextureOptions::LINEAR),
+                            None => self.tex = Some(ui.ctx().load_texture("model3d", img, egui::TextureOptions::LINEAR)),
+                        }
+                        ui.ctx().request_repaint();
+                    }
+                }
+            }
+        } else if self.engine == 1 && interacting {
+            // Le prochain arrêt repart de zéro, et l'aperçu redessine la vue en attendant
+            if self.trace.take().is_some() {
+                self.last = None;
+            }
         }
 
         // Grille du sol (sous le modèle)
@@ -5049,6 +5118,10 @@ impl Viewer {
             painter.galley(r.min + vec2(6.0, 3.0), g, p.text);
         }
         // Statistiques du modèle, discrètes, en bas à gauche (comme la superposition de Blender)
+        if let (1, Some((_, acc))) = (self.engine, &self.trace) {
+            let col = if self.look.show_bg { Color32::from_white_alpha(200) } else { p.muted };
+            painter.text(rect.left_bottom() + vec2(60.0, -10.0), egui::Align2::LEFT_BOTTOM, format!("{} · {} / {}", crate::i18n::t("tracé de chemins"), acc.spp, self.trace_max), egui::FontId::monospace(10.5), col);
+        }
         if !self.stats_text.is_empty() {
             let col = if self.look.show_bg { Color32::from_gray(225) } else { p.muted };
             painter.text(rect.right_bottom() + vec2(-12.0, -10.0), egui::Align2::RIGHT_BOTTOM, &self.stats_text, egui::FontId::monospace(10.5), col);
