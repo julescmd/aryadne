@@ -1729,7 +1729,7 @@ fn remesh_core(pos: &[V3], tris: &[[u32; 3]], guides: &[Vec<V3>], opt: &Options,
         }
     }
     lap("préparation");
-    let (cdir, cani) = if opt.curvature > 0.0 { curvature(&v, &nrm, &adj, h) } else { (vec![[0.0; 3]; n_v], vec![0.0; n_v]) };
+    let (cdir, cani) = if opt.curvature > 0.0 { curvature(&v, &f, &nrm, &adj, h) } else { (vec![[0.0; 3]; n_v], vec![0.0; n_v]) };
     // Une courbure même douce mais régulière (corps conique, bras, bec) guide les boucles : anneaux
     // autour des formes plutôt qu'une grille droite qui coupe en diagonale
     let s0: f32 = std::env::var("S0").ok().and_then(|x| x.parse().ok()).unwrap_or(0.15);
@@ -1837,7 +1837,8 @@ fn remesh_core(pos: &[V3], tris: &[[u32; 3]], guides: &[Vec<V3>], opt: &Options,
         use std::io::Write;
         let mut w = std::io::BufWriter::new(std::fs::File::create(path).unwrap());
         for i in 0..n_v {
-            writeln!(w, "{} {} {} {} {} {} {} {} {} {}", v[i][0], v[i][1], v[i][2], q[i][0], q[i][1], q[i][2], nrm[i][0], nrm[i][1], nrm[i][2], levels[0].a[i]).unwrap();
+            let qq = if std::env::var("DUMPC").is_ok() { levels[0].c[i] } else { q[i] };
+            writeln!(w, "{} {} {} {} {} {} {} {} {} {}", v[i][0], v[i][1], v[i][2], qq[0], qq[1], qq[2], nrm[i][0], nrm[i][1], nrm[i][2], levels[0].a[i]).unwrap();
         }
     }
     progress(0.3);
@@ -2654,62 +2655,91 @@ fn cancel_dipoles(v: &[V3], n: &[V3], adj: &[Vec<u32>], f: &[[u32; 3]], q: &mut 
 
 /// Directions principales de courbure et anisotropie |κ1 − κ2|·h (sans unité) par sommet.
 /// Tenseur de Taubin par anneau, lissé à l'échelle d'un quad pour ignorer le bruit du sculpt.
-fn curvature(v: &[V3], n: &[V3], adj: &[Vec<u32>], h: f32) -> (Vec<V3>, Vec<f32>) {
+fn curvature(v: &[V3], f: &[[u32; 3]], n: &[V3], adj: &[Vec<u32>], h: f32) -> (Vec<V3>, Vec<f32>) {
+    // Tenseur du cycle normal (Cohen-Steiner & Morvan) : chaque arête apporte son angle dièdre
+    // dans sa propre direction. Contrairement à un estimateur par voisins, il ne penche pas
+    // selon le sens des diagonales de la triangulation (ce qui tordait les boucles en spirale).
     let nv = v.len();
     let mut t = vec![[0.0f32; 6]; nv];
+    let mut area = vec![0.0f32; nv];
+    let mut fnrm = Vec::with_capacity(f.len());
+    let mut cen = Vec::with_capacity(f.len());
+    let mut owner: HashMap<(u32, u32), u32> = HashMap::with_capacity(f.len() * 3 / 2);
+    for (fi, tri) in f.iter().enumerate() {
+        let (a, b, c) = (v[tri[0] as usize], v[tri[1] as usize], v[tri[2] as usize]);
+        let cr = cross(sub(b, a), sub(c, a));
+        let ar = len(cr) * 0.5;
+        for &k in tri {
+            area[k as usize] += ar / 3.0;
+        }
+        fnrm.push(norm(cr));
+        cen.push(mul(add(add(a, b), c), 1.0 / 3.0));
+        for r in 0..3 {
+            let (x, y) = (tri[r], tri[(r + 1) % 3]);
+            let key = (x.min(y), x.max(y));
+            match owner.remove(&key) {
+                Some(g) => {
+                    let g = g as usize;
+                    let e = sub(v[y as usize], v[x as usize]);
+                    let l = len(e);
+                    if l < 1e-12 {
+                        continue;
+                    }
+                    let (n1, n2) = (fnrm[g], fnrm[fi]);
+                    let ang = dot(n1, n2).clamp(-1.0, 1.0).acos();
+                    let sign = if dot(sub(n2, n1), sub(cen[fi], cen[g])) >= 0.0 { 1.0 } else { -1.0 };
+                    let w = 0.5 * sign * ang * l;
+                    let d = mul(e, 1.0 / l);
+                    let m = [w * d[0] * d[0], w * d[1] * d[1], w * d[2] * d[2], w * d[0] * d[1], w * d[0] * d[2], w * d[1] * d[2]];
+                    for k in [x, y] {
+                        for (o, x) in t[k as usize].iter_mut().zip(m) {
+                            *o += x;
+                        }
+                    }
+                }
+                None => {
+                    owner.insert(key, fi as u32);
+                }
+            }
+        }
+    }
     let (mut total, mut count) = (0.0f64, 0usize);
     for i in 0..nv {
-        let mut acc = [0.0f32; 6];
-        let mut w = 0.0;
         for &j in &adj[i] {
-            let j = j as usize;
-            let e = sub(v[j], v[i]);
-            let l2 = dot(e, e);
-            if l2 < 1e-20 {
-                continue;
-            }
-            total += l2.sqrt() as f64;
+            total += len(sub(v[j as usize], v[i])) as f64;
             count += 1;
-            let d = tangent(e, n[i]);
-            let dl = dot(d, d);
-            if dl < 1e-20 {
-                continue;
-            }
-            let d = mul(d, 1.0 / dl.sqrt());
-            let k = dot(sub(n[j], n[i]), e) / l2;
-            acc[0] += k * d[0] * d[0];
-            acc[1] += k * d[1] * d[1];
-            acc[2] += k * d[2] * d[2];
-            acc[3] += k * d[0] * d[1];
-            acc[4] += k * d[0] * d[2];
-            acc[5] += k * d[1] * d[2];
-            w += 1.0;
         }
-        if w > 0.0 {
-            for x in acc.iter_mut() {
-                *x /= w;
-            }
-        }
-        t[i] = acc;
     }
     let mean_edge = (total / count.max(1) as f64) as f32;
     let ps: f32 = std::env::var("PS").ok().and_then(|x| x.parse().ok()).unwrap_or(2.0);
     let passes = (((h / mean_edge.max(1e-9)).powi(2) * ps).ceil() as usize).clamp(2, 400);
+    // Lissage du tenseur intégré et de l'aire ensemble, puis division : une moyenne pondérée par
+    // l'aire, qui ne laisse pas les petits triangles (zones denses) dominer avec leur bruit
     for _ in 0..passes {
-        let old = t.clone();
+        let (old, olda) = (t.clone(), area.clone());
         for i in 0..nv {
             if adj[i].is_empty() {
                 continue;
             }
             let mut acc = [0.0f32; 6];
+            let mut aa = 0.0;
             for &j in &adj[i] {
                 for k in 0..6 {
                     acc[k] += old[j as usize][k];
                 }
+                aa += olda[j as usize];
             }
             let inv = 0.5 / adj[i].len() as f32;
             for k in 0..6 {
                 t[i][k] = 0.5 * old[i][k] + acc[k] * inv;
+            }
+            area[i] = 0.5 * olda[i] + aa * inv;
+        }
+    }
+    for i in 0..nv {
+        if area[i] > 0.0 {
+            for x in t[i].iter_mut() {
+                *x /= area[i];
             }
         }
     }
@@ -2724,11 +2754,12 @@ fn curvature(v: &[V3], n: &[V3], adj: &[Vec<u32>], h: f32) -> (Vec<V3>, Vec<f32>
         let (m11, m12, m22) = (tm(b1, b1), tm(b1, b2), tm(b2, b2));
         let th = 0.5 * (2.0 * m12).atan2(m11 - m22);
         dir[i] = add(mul(b1, th.cos()), mul(b2, th.sin()));
+        // d = |k1 - k2| / 2 ; trace = k1 + k2
         let d = (((m11 - m22) * 0.5).powi(2) + m12 * m12).sqrt();
         // Part d'anisotropie : 1 sur un cylindre ou un cône, ~0 sur une sphère (où le bruit du
         // maillage donnerait des directions au hasard)
-        let r = (2.0 * d / (d + (m11 + m22).abs() * 0.5 + 1e-12)).min(1.0);
-        ani[i] = 8.0 * d * h * r;
+        let r = (2.0 * d / ((m11 + m22).abs() + 1e-12)).min(1.0);
+        ani[i] = 2.0 * d * h * r;
     }
     (dir, ani)
 }
