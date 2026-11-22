@@ -1295,7 +1295,97 @@ fn regauge(g: &mut Graph, u: &mut [[f64; 2]]) {
 }
 
 /// Retopologie. `guides` : traits (suites de points sur la surface).
+/// Retopologie d'un modèle. Un modèle fait de plusieurs pièces (corps, chapeau, boutons,
+/// lunettes…) est traité pièce par pièce : chacune reçoit sa propre grille de quads, avec une
+/// part des faces proportionnelle à sa surface. Sinon les pièces qui se touchent ou se
+/// traversent se mélangent (trous, aileron, pôles énormes).
 pub fn remesh(pos: &[V3], tris: &[[u32; 3]], guides: &[Vec<V3>], opt: &Options, progress: &dyn Fn(f32)) -> Result {
+    let (pos, tris) = weld(pos, tris);
+    // Pièces : composantes reliées par les arêtes
+    let mut uf = Uf((0..pos.len() as u32).collect());
+    for t in &tris {
+        uf.union(t[0], t[1]);
+        uf.union(t[1], t[2]);
+    }
+    let mut piece_of: HashMap<u32, usize> = HashMap::new();
+    let mut pieces: Vec<Vec<[u32; 3]>> = vec![];
+    for t in &tris {
+        let r = uf.find(t[0]);
+        let k = *piece_of.entry(r).or_insert_with(|| {
+            pieces.push(vec![]);
+            pieces.len() - 1
+        });
+        pieces[k].push(*t);
+    }
+    if pieces.len() <= 1 {
+        return remesh_one(&pos, &tris, guides, opt, progress);
+    }
+    let area = |ts: &[[u32; 3]]| -> f32 { ts.iter().map(|t| len(cross(sub(pos[t[1] as usize], pos[t[0] as usize]), sub(pos[t[2] as usize], pos[t[0] as usize]))) * 0.5).sum() };
+    let areas: Vec<f32> = pieces.iter().map(|p| area(p)).collect();
+    let total: f32 = areas.iter().sum::<f32>().max(1e-12);
+    let sym = (1..=3).contains(&opt.symmetry).then(|| opt.symmetry as usize - 1);
+    let done = std::sync::atomic::AtomicUsize::new(0);
+    let n = pieces.len();
+    // Une pièce après l'autre (chacune est déjà calculée en parallèle à l'intérieur)
+    let results: Vec<Option<Result>> = {
+        pieces
+            .iter()
+            .zip(areas.iter())
+            .map(|(ts, a)| {
+                // Sommets de la pièce, renumérotés
+                let mut remap: HashMap<u32, u32> = HashMap::new();
+                let mut p = vec![];
+                let t2: Vec<[u32; 3]> = ts
+                    .iter()
+                    .map(|t| {
+                        t.map(|v| {
+                            *remap.entry(v).or_insert_with(|| {
+                                p.push(pos[v as usize]);
+                                (p.len() - 1) as u32
+                            })
+                        })
+                    })
+                    .collect();
+                let mut o = opt.clone();
+                // Part des faces : selon la surface, mais une pièce fine (anneau, lunettes, doigt)
+                // en reçoit assez pour avoir une douzaine de quads autour de sa section. Son rayon
+                // typique : 3 × volume / surface (r pour une sphère, 1,5 r pour un tore).
+                let vol: f32 = t2.iter().map(|t| dot(p[t[0] as usize], cross(p[t[1] as usize], p[t[2] as usize])) / 6.0).sum::<f32>().abs();
+                let rho = 3.0 * vol / a.max(1e-12);
+                let share = opt.faces as f32 * a / total;
+                let need = if rho > 1e-9 { a * 4.0 / (rho * rho) } else { 0.0 };
+                o.faces = (share.max(need.min(opt.faces as f32 * 0.4)).round() as usize).max(24);
+                // La symétrie ne vaut que pour une pièce qui traverse le plan
+                if let Some(ax) = sym {
+                    let (lo, hi) = p.iter().fold((f32::MAX, f32::MIN), |(l, h), q| (l.min(q[ax]), h.max(q[ax])));
+                    let span = hi - lo;
+                    if !(lo < -span * 0.05 && hi > span * 0.05) {
+                        o.symmetry = 0;
+                    }
+                }
+                let k0 = done.load(std::sync::atomic::Ordering::Relaxed) as f32;
+                let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| remesh_one(&p, &t2, guides, &o, &|f| progress((k0 + f) / n as f32)))).ok();
+                done.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                r
+            })
+            .collect()
+    };
+    let mut out = Result { pos: vec![], faces: vec![], stats: Stats::default() };
+    for r in results.into_iter().flatten() {
+        let base = out.pos.len() as u32;
+        out.pos.extend(r.pos);
+        out.faces.extend(r.faces.into_iter().map(|f| f.into_iter().map(|v| v + base).collect()));
+        out.stats.dense += r.stats.dense;
+        out.stats.field_sing += r.stats.field_sing;
+        out.stats.unfixed += r.stats.unfixed;
+        out.stats.flips += r.stats.flips;
+        out.stats.poles += r.stats.poles;
+    }
+    progress(1.0);
+    out
+}
+
+fn remesh_one(pos: &[V3], tris: &[[u32; 3]], guides: &[Vec<V3>], opt: &Options, progress: &dyn Fn(f32)) -> Result {
     let mut stats = Stats::default();
     let t0 = std::time::Instant::now();
     let debug = std::env::var("RETOPO_DEBUG").is_ok();
@@ -3303,23 +3393,17 @@ mod tests {
     #[ignore]
     fn banc_obj() {
         let Ok(inp) = std::env::var("RETOPO_IN") else { return };
-        let (mut pos, mut tris) = (vec![], vec![]);
-        for l in std::fs::read_to_string(&inp).unwrap().lines() {
-            let mut it = l.split_whitespace();
-            match it.next() {
-                Some("v") => {
-                    let c: Vec<f32> = it.take(3).map(|x| x.parse().unwrap()).collect();
-                    pos.push([c[0], c[1], c[2]]);
-                }
-                Some("f") => {
-                    let ix: Vec<u32> = it.map(|t| t.split('/').next().unwrap().parse::<u32>().unwrap() - 1).collect();
-                    for k in 1..ix.len() - 1 {
-                        tris.push([ix[0], ix[k], ix[k + 1]]);
-                    }
-                }
-                _ => {}
+        let (pos, tris) = if inp.ends_with(".obj") {
+            lire_obj(&inp)
+        } else {
+            let m = crate::model3d::load(std::path::Path::new(&inp)).unwrap();
+            let pos = m.normalized(m.z_up);
+            if let Ok(out) = std::env::var("RETOPO_DUMP") {
+                let r = Result { pos: pos.clone(), faces: m.tris.iter().map(|t| t.to_vec()).collect(), stats: Stats::default() };
+                export_obj(&r, &|p| p, std::path::Path::new(&out)).unwrap();
             }
-        }
+            (pos, m.tris.clone())
+        };
         let mut opt = Options::default();
         opt.faces = std::env::var("RETOPO_FACES").ok().and_then(|x| x.parse().ok()).unwrap_or(6000);
         opt.symmetry = std::env::var("RETOPO_SYM").ok().and_then(|x| x.parse().ok()).unwrap_or(0);
