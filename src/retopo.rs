@@ -1431,7 +1431,10 @@ pub fn remesh(pos: &[V3], tris: &[[u32; 3]], guides: &[Vec<V3>], opt: &Options, 
                     }
                 }
                 let k0 = done.load(std::sync::atomic::Ordering::Relaxed) as f32;
-                let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| remesh_piece(&p, &t2, guides, &o, &|f| progress((k0 + f) / n as f32)))).ok();
+                // Un guide ne vaut que pour la pièce sur laquelle il est dessiné (pas pour un œil
+                // séparé qui passe juste à côté du contour de la paupière)
+                let mine = guides_on(&p, guides, (a / o.faces.max(1) as f32).sqrt() * 0.6);
+                let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| remesh_piece(&p, &t2, &mine, &o, &|f| progress((k0 + f) / n as f32)))).ok();
                 done.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 if std::env::var("RETOPO_DEBUG_PIECES").is_ok() {
                     eprintln!("pièce : {} triangles, aire {:.1} %, fermée {closed}, rho {rho:.4}, visé {} → {} faces", t2.len(), a / total * 100.0, o.faces, r.as_ref().map(|r| r.faces.len()).unwrap_or(0));
@@ -1460,6 +1463,51 @@ pub fn remesh(pos: &[V3], tris: &[[u32; 3]], guides: &[Vec<V3>], opt: &Options, 
 /// La retopologie se fait sur la version gonflée, puis chaque sommet revient sur la vraie surface
 /// au même endroit relatif. Comme à la main, le rebord d'une paroi fine garde ainsi une ou deux
 /// boucles, et le dessus et le dessous ont la même grille.
+/// Morceaux des guides qui passent sur la surface `p` (à moins de `tol` d'un de ses sommets)
+fn guides_on(p: &[V3], guides: &[Vec<V3>], tol: f32) -> Vec<Vec<V3>> {
+    if guides.is_empty() || tol <= 0.0 {
+        return vec![];
+    }
+    let key = |x: V3| ((x[0] / tol).floor() as i32, (x[1] / tol).floor() as i32, (x[2] / tol).floor() as i32);
+    let mut grid: HashMap<(i32, i32, i32), Vec<u32>> = HashMap::new();
+    for (i, &x) in p.iter().enumerate() {
+        grid.entry(key(x)).or_default().push(i as u32);
+    }
+    let near = |x: V3| {
+        let (a, b, c) = key(x);
+        for da in -1..=1 {
+            for db in -1..=1 {
+                for dc in -1..=1 {
+                    if let Some(l) = grid.get(&(a + da, b + db, c + dc)) {
+                        if l.iter().any(|&i| len(sub(p[i as usize], x)) < tol) {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+        false
+    };
+    let mut out = vec![];
+    for g in guides {
+        let mut run: Vec<V3> = vec![];
+        for &x in g {
+            if near(x) {
+                run.push(x);
+            } else if !run.is_empty() {
+                if run.len() > 1 {
+                    out.push(std::mem::take(&mut run));
+                }
+                run.clear();
+            }
+        }
+        if run.len() > 1 {
+            out.push(run);
+        }
+    }
+    out
+}
+
 fn remesh_piece(pos: &[V3], tris: &[[u32; 3]], guides: &[Vec<V3>], opt: &Options, progress: &dyn Fn(f32)) -> Result {
     let debug = std::env::var("RETOPO_DEBUG").is_ok();
     let n = pos.len();
@@ -1700,20 +1748,36 @@ fn remesh_core(pos: &[V3], tris: &[[u32; 3]], guides: &[Vec<V3>], opt: &Options,
         }
     }
     let r = h * opt.guide_radius;
+    // Au-delà du rayon fixe, un guide attire encore le flux en s'estompant : plusieurs boucles
+    // parallèles au guide (anneaux autour d'un œil, d'une bouche) au lieu d'une seule ligne
+    let reach: f32 = std::env::var("GREACH").ok().and_then(|x| x.parse().ok()).unwrap_or(10.0);
+    let big = r.max(h * reach);
+    let mut gsoft: Vec<(f32, V3)> = vec![(f32::MAX, [0.0; 3]); n_v];
     for g in guides {
         for s in g.windows(2) {
-            let (lo, hi) = ([s[0][0].min(s[1][0]) - r, s[0][1].min(s[1][1]) - r, s[0][2].min(s[1][2]) - r], [s[0][0].max(s[1][0]) + r, s[0][1].max(s[1][1]) + r, s[0][2].max(s[1][2]) + r]);
+            let (lo, hi) = ([s[0][0].min(s[1][0]) - big, s[0][1].min(s[1][1]) - big, s[0][2].min(s[1][2]) - big], [s[0][0].max(s[1][0]) + big, s[0][1].max(s[1][1]) + big, s[0][2].max(s[1][2]) + big]);
             for i in 0..n_v {
                 let p = v[i];
                 if p[0] < lo[0] || p[1] < lo[1] || p[2] < lo[2] || p[0] > hi[0] || p[1] > hi[1] || p[2] > hi[2] {
                     continue;
                 }
                 let (d, dir) = seg_dist(p, s[0], s[1]);
-                if d < r && dot(nrm[i], norm(dir)).abs() < 0.95 {
+                if dot(nrm[i], norm(dir)).abs() >= 0.95 {
+                    continue;
+                }
+                if d < r {
                     q[i] = norm(tangent(dir, nrm[i]));
                     fixed[i] = true;
+                } else if d < big && d < gsoft[i].0 {
+                    gsoft[i] = (d, norm(tangent(dir, nrm[i])));
                 }
             }
+        }
+    }
+    let gsoft: Vec<Option<(f32, V3)>> = gsoft.into_iter().map(|(d, t)| if d < big && dot(t, t) > 0.5 { Some((1.0 - ((d - r) / (big - r).max(1e-9)).clamp(0.0, 1.0), t)) } else { None }).collect();
+    for i in 0..n_v {
+        if let (false, Some((_, t))) = (fixed[i], gsoft[i]) {
+            q[i] = t;
         }
     }
 
@@ -1812,10 +1876,17 @@ fn remesh_core(pos: &[V3], tris: &[[u32; 3]], guides: &[Vec<V3>], opt: &Options,
         let lam = 0.87 * (mean_edge / (h * ell)).powi(2) * opt.curvature;
         let mut w: Vec<f32> = levels[0].a.iter().map(|a| a * lam).collect();
         let mut tg = levels[0].c.clone();
+        let gk: f32 = std::env::var("GSOFT").ok().and_then(|x| x.parse().ok()).unwrap_or(200.0);
         for i in 0..n_v {
             if fixed[i] {
                 w[i] = lam * 50.0;
                 tg[i] = q[i];
+            } else if let Some((f, t)) = gsoft[i] {
+                let ws = lam * gk * f * f;
+                if ws > w[i] {
+                    w[i] = ws;
+                    tg[i] = t;
+                }
             }
         }
         q = linear_field(&v, &nrm, &adj, &q, &tg, &w, lam * eps_k);
@@ -3665,10 +3736,11 @@ mod tests {
         let Ok(inp) = std::env::var("RETOPO_IN") else { return };
         let (pos, tris) = lire_obj(&inp);
         let t = std::time::Instant::now();
-        let (p, f, _) = simplify_to(&pos, &tris, 150_000);
+        let n = std::env::var("RETOPO_FACES").ok().and_then(|x| x.parse().ok()).unwrap_or(150_000);
+        let (p, f, _) = simplify_to(&pos, &tris, n);
         eprintln!("{} -> {} triangles en {:.1} s", tris.len(), f.len(), t.elapsed().as_secs_f32());
         let r = Result { pos: p, faces: f.iter().map(|t| t.to_vec()).collect(), stats: Stats::default() };
-        export_obj(&r, &|p| p, std::path::Path::new("/tmp/rt/simpl.obj")).unwrap();
+        export_obj(&r, &|p| p, std::path::Path::new(&std::env::var("RETOPO_OUT").unwrap_or("/tmp/rt/simpl.obj".into()))).unwrap();
     }
 
     fn lire_obj(inp: &str) -> (Vec<V3>, Vec<[u32; 3]>) {
@@ -3714,7 +3786,20 @@ mod tests {
             opt.adaptive = a;
         }
         let t = std::time::Instant::now();
-        let r = remesh(&pos, &tris, &[], &opt, &|_| {});
+        // Guides : fichier texte, « x y z » par ligne, une ligne vide entre deux courbes
+        let mut guides: Vec<Vec<V3>> = vec![vec![]];
+        if let Ok(gp) = std::env::var("RETOPO_GUIDES") {
+            for l in std::fs::read_to_string(gp).unwrap().lines() {
+                let c: Vec<f32> = l.split_whitespace().filter_map(|x| x.parse().ok()).collect();
+                if c.len() == 3 {
+                    guides.last_mut().unwrap().push([c[0], c[1], c[2]]);
+                } else if !guides.last().unwrap().is_empty() {
+                    guides.push(vec![]);
+                }
+            }
+        }
+        guides.retain(|g| g.len() > 1);
+        let r = remesh(&pos, &tris, &guides, &opt, &|_| {});
         eprintln!("{} faces ({} quads) en {:.1} s, {:?}", r.faces.len(), r.quads(), t.elapsed().as_secs_f32(), r.stats);
         if let Ok(out) = std::env::var("RETOPO_OUT") {
             export_obj(&r, &|p| p, std::path::Path::new(&out)).unwrap();
