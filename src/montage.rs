@@ -494,7 +494,7 @@ pub fn graph(p: &Project, project: &Path, from: f32, w: u32, h: u32, realtime: b
     if realtime {
         args.push("-re".into());
     }
-    args.extend(["-f".into(), "lavfi".into(), "-i".into(), format!("color=c=black:s={w}x{h}:r={}:d={total:.3}", p.fps)]);
+    args.extend(["-f".into(), "lavfi".into(), "-i".into(), format!("color=c=black:s={}x{}:r={}:d={total:.3}", w.max(2), h.max(2), p.fps)]);
     let mut filter = String::new();
     let (mut last, mut n, mut audio) = ("0:v".to_string(), 1usize, vec![]);
     let mut order: Vec<&Clip> = p.clips.iter().filter(|c| c.end() > from + 1e-3 && c.len() > 1e-3).collect();
@@ -510,7 +510,7 @@ pub fn graph(p: &Project, project: &Path, from: f32, w: u32, h: u32, realtime: b
         } else {
             args.extend(["-ss".into(), format!("{src_in:.3}"), "-t".into(), format!("{src_len:.3}"), "-i".into(), path]);
         }
-        if c.visual() && (c.opacity > 0.0 || !c.keys.is_empty()) {
+        if w > 0 && c.visual() && (c.opacity > 0.0 || !c.keys.is_empty()) {
             // Clés : chaque réglage animé devient une expression du temps de la timeline
             let pts = |f: &dyn Fn(&PoseKey) -> f32| -> Vec<(f32, f32)> { c.keys.iter().map(|q| (c.start + q.t - from, f(q))).collect() };
             let animated = c.keys.len() > 1;
@@ -579,7 +579,12 @@ pub fn graph(p: &Project, project: &Path, from: f32, w: u32, h: u32, realtime: b
     if !audio.is_empty() {
         filter += &format!("{}amix=inputs={}:normalize=0:duration=longest[aout];", audio.concat(), audio.len());
     }
-    filter += &format!("[{last}]null[vout]");
+    if w == 0 {
+        // Son seul : la vidéo de fond est jetée
+        filter += "[0:v]nullsink";
+    } else {
+        filter += &format!("[{last}]null[vout]");
+    }
     (args, filter, !audio.is_empty(), total)
 }
 
@@ -722,6 +727,8 @@ enum Drag {
 
 struct Playback {
     child: Child,
+    /// Le son : ffmpeg mixe les pistes, ffplay les joue
+    sound: Vec<Child>,
     rx: Receiver<(u32, Vec<u8>)>,
     from: f32,
     size: [usize; 2],
@@ -757,6 +764,8 @@ pub struct Editor {
     history: Vec<Project>,
     redo: Vec<Project>,
     last_head: f32,
+    /// Lecture sans le son
+    mute: bool,
 }
 
 impl Drop for Editor {
@@ -776,7 +785,7 @@ impl Editor {
         if error.is_none() && project.settle_all() {
             let _ = project.write(&path);
         }
-        Editor { path, error, playhead: 0.0, selected: None, zoom: 60.0, scroll: 0.0, drag: None, tex: None, preview_rx: None, shown: None, rev: 0, play: None, export_rx: None, message: None, add: vec![], root: root.to_string(), strips: Strips::default(), open_request: None, saved: project.clone(), history: vec![], redo: vec![], last_head: 0.0, project }
+        Editor { path, error, playhead: 0.0, selected: None, zoom: 60.0, scroll: 0.0, drag: None, tex: None, preview_rx: None, shown: None, rev: 0, play: None, export_rx: None, message: None, add: vec![], root: root.to_string(), strips: Strips::default(), open_request: None, saved: project.clone(), history: vec![], redo: vec![], last_head: 0.0, mute: false, project }
     }
 
     fn changed(&mut self) {
@@ -809,6 +818,10 @@ impl Editor {
         if let Some(mut p) = self.play.take() {
             let _ = p.child.kill();
             let _ = p.child.wait();
+            for mut c in p.sound {
+                let _ = c.kill();
+                let _ = c.wait();
+            }
         }
     }
 
@@ -822,7 +835,7 @@ impl Editor {
         let w = 640u32.min(self.project.width.max(2)) / 2 * 2;
         let h = ((w as f32 * self.project.height as f32 / self.project.width.max(1) as f32).round() as u32).max(2) / 2 * 2;
         let (inputs, filter, _, _) = graph(&self.project, &self.path, self.playhead, w, h, true, false);
-        let child = ffmpeg::command(ff).args(["-v", "error"]).args(inputs).args(["-filter_complex", &filter, "-map", "[vout]", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"]).stdout(Stdio::piped()).stderr(Stdio::null()).spawn();
+        let child = ffmpeg::command(ff.clone()).args(["-v", "error"]).args(inputs).args(["-filter_complex", &filter, "-map", "[vout]", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"]).stdout(Stdio::piped()).stderr(Stdio::null()).spawn();
         let Ok(mut child) = child else { return };
         let Some(mut out) = child.stdout.take() else { return };
         let (tx, rx) = sync_channel(2);
@@ -840,7 +853,29 @@ impl Editor {
             }
             ctx.request_repaint();
         });
-        self.play = Some(Playback { child, rx, from: self.playhead, size: [w as usize, h as usize] });
+        let sound = self.start_sound(&ff);
+        self.play = Some(Playback { child, sound, rx, from: self.playhead, size: [w as usize, h as usize] });
+    }
+
+    /// Le son du montage à partir de la tête de lecture, mixé par ffmpeg et joué par ffplay.
+    fn start_sound(&mut self, ff: &Path) -> Vec<Child> {
+        if self.mute {
+            return vec![];
+        }
+        let (inputs, filter, has, _) = graph(&self.project, &self.path, self.playhead, 0, 0, false, true);
+        if !has {
+            return vec![];
+        }
+        let Some(fp) = ffmpeg::find("ffplay") else {
+            self.message = Some(crate::i18n::t("Lecture sans son : ffplay est introuvable (réinstalle ffmpeg depuis la conversion).").to_string());
+            return vec![];
+        };
+        let Ok(mut mix) = ffmpeg::command(ff.to_path_buf()).args(["-v", "error"]).args(inputs).args(["-filter_complex", &filter, "-map", "[aout]", "-ar", "48000", "-ac", "2", "-f", "wav", "-"]).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn() else { return vec![] };
+        let Some(out) = mix.stdout.take() else { return vec![mix] };
+        match ffmpeg::command(fp).args(["-nodisp", "-autoexit", "-loglevel", "quiet", "-fflags", "nobuffer", "-i", "-"]).stdin(Stdio::from(out)).stdout(Stdio::null()).stderr(Stdio::null()).spawn() {
+            Ok(play) => vec![mix, play],
+            Err(_) => vec![mix],
+        }
     }
 
     pub fn show(&mut self, ui: &mut egui::Ui) {
@@ -937,6 +972,7 @@ impl Editor {
 
         // ---- Barre du haut
         let mut toggle_play = false;
+        let mut restart = false;
         let mut split = false;
         let mut delete = false;
         let mut undo: Option<bool> = None;
@@ -947,6 +983,12 @@ impl Editor {
             if ui.button("⏮").clicked() {
                 self.stop();
                 self.playhead = 0.0;
+            }
+            if ui.selectable_label(self.mute, if self.mute { "🔇" } else { "🔊" }).on_hover_text(crate::i18n::t("couper le son de la lecture")).clicked() {
+                self.mute = !self.mute;
+                if self.play.is_some() {
+                    restart = true;
+                }
             }
             ui.label(RichText::new(format!("{} / {}", timecode(self.playhead, self.project.fps), timecode(self.project.duration(), self.project.fps))).monospace().color(p.muted));
             ui.separator();
@@ -1036,6 +1078,9 @@ impl Editor {
         }
         if toggle_play {
             if self.play.is_some() { self.stop() } else { self.start(&ctx) }
+        }
+        if restart {
+            self.start(&ctx);
         }
         if split {
             let t = self.playhead;
@@ -1564,5 +1609,12 @@ mod tests {
         let info = crate::video::probe(&out).unwrap();
         assert!((info.duration - 5.0).abs() < 0.3, "{}", info.duration);
         assert_eq!((info.width, info.height), (320, 240));
+        // Le son seul de la lecture, à partir d'une seconde : un WAV d'environ quatre secondes
+        let (inputs, filter, has, _) = graph(&p, &file, 1.0, 0, 0, false, true);
+        assert!(has && !filter.contains("[vout]"));
+        let o = ffmpeg::command(ff).args(["-v", "error"]).args(inputs).args(["-filter_complex", &filter, "-map", "[aout]", "-ar", "48000", "-ac", "2", "-f", "wav", "-"]).output().unwrap();
+        assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+        let secs = (o.stdout.len() as f32 - 44.0) / (48000.0 * 4.0);
+        assert!((secs - 4.0).abs() < 0.4, "{secs}");
     }
 }

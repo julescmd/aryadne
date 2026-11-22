@@ -85,7 +85,7 @@ pub fn install(ctx: eframe::egui::Context) -> Arc<Mutex<InstallState>> {
                 s.message = "extraction…".into();
                 s.progress = None;
             });
-            let wanted = [exe("ffmpeg"), exe("ffprobe")];
+            let wanted = [exe("ffmpeg"), exe("ffprobe"), exe("ffplay")];
             if cfg!(windows) {
                 let mut z = zip::ZipArchive::new(std::fs::File::open(&tmp).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
                 for i in 0..z.len() {

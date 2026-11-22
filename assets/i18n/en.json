@@ -1317,5 +1317,7 @@
  "ffmpeg n'est pas installé : il sert à assembler la vidéo.": "ffmpeg is not installed: it is needed to build the video.",
  "enregistrer l'animation": "save the animation",
  "ffmpeg n'a pas pu écrire la vidéo": "ffmpeg could not write the video",
- "MODE ÉDITION · 1 2 3 : sommets, arêtes, faces · glisser : rectangle (Maj ajoute, Ctrl retire) · Ctrl+clic : chemin · Alt+clic : boucle · Ctrl+plus / moins · Ctrl+I inverser · G R S · E extruder · I incruster · M fusionner · L pièce liée · X supprimer · Ctrl+Z": "EDIT MODE · 1 2 3: vertices, edges, faces · drag: box (Shift adds, Ctrl removes) · Ctrl+click: shortest path · Alt+click: loop · Ctrl+plus / minus · Ctrl+I invert · G R S · E extrude · I inset · M merge · L linked · X delete · Ctrl+Z"
+ "MODE ÉDITION · 1 2 3 : sommets, arêtes, faces · glisser : rectangle (Maj ajoute, Ctrl retire) · Ctrl+clic : chemin · Alt+clic : boucle · Ctrl+plus / moins · Ctrl+I inverser · G R S · E extruder · I incruster · M fusionner · L pièce liée · X supprimer · Ctrl+Z": "EDIT MODE · 1 2 3: vertices, edges, faces · drag: box (Shift adds, Ctrl removes) · Ctrl+click: shortest path · Alt+click: loop · Ctrl+plus / minus · Ctrl+I invert · G R S · E extrude · I inset · M merge · L linked · X delete · Ctrl+Z",
+ "couper le son de la lecture": "mute playback",
+ "Lecture sans son : ffplay est introuvable (réinstalle ffmpeg depuis la conversion).": "Playing without sound: ffplay not found (reinstall ffmpeg from the converter)."
 }
