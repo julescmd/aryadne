@@ -627,7 +627,20 @@ struct ConePath {
 /// (CGLS). Les λ (un vecteur réel par chemin) laissent les singularités glisser librement :
 /// c'est la relaxation continue du problème entier, comme dans Mixed-Integer Quadrangulation.
 fn solve_ext(g: &Graph, geo: &[[f64; 2]], u: &mut [[f64; 2]], paths: &[&ConePath], lam: &mut [[f64; 2]], max_iter: usize, tol: f64) -> usize {
+    solve_rows(g, geo, u, paths, lam, &[], max_iter, tol)
+}
+
+/// Contrainte de boucle : écart entier actuel autour de la boucle et, pour chaque chemin de
+/// singularité libre (indice dans `paths`), ce que son λ ajoute à cet écart. Le solveur pousse
+/// l'écart continu vers 0 : les singularités se placent pour que la boucle se referme.
+struct LoopRow {
+    m0: f64,
+    coef: Vec<(usize, [f64; 2])>,
+}
+
+fn solve_rows(g: &Graph, geo: &[[f64; 2]], u: &mut [[f64; 2]], paths: &[&ConePath], lam: &mut [[f64; 2]], rows: &[LoopRow], max_iter: usize, tol: f64) -> usize {
     use rayon::prelude::*;
+    let loopw: f64 = std::env::var("LOOPW").ok().and_then(|x| x.parse().ok()).unwrap_or(1.0);
     const CHUNK: usize = 8192;
     let (n, ne, np) = (u.len(), g.ends.len(), paths.len());
     // Arêtes de chaque sommet (pour paralléliser Bᵀ) : (arête, le sommet est-il la première extrémité ?)
@@ -724,6 +737,26 @@ fn solve_ext(g: &Graph, geo: &[[f64; 2]], u: &mut [[f64; 2]], paths: &[&ConePath
     let mut r = vec![[0.0f64; 2]; ne];
     let mut rp = vec![0.0f64; npin];
     let mut qp = vec![0.0f64; npin];
+    let nr = rows.len();
+    let fwd_rows = |yl: &[[f64; 2]], out: &mut [f64]| {
+        for (k, row) in rows.iter().enumerate() {
+            out[k] = loopw * row.coef.iter().map(|&(s, c)| (c[0] * yl[s][0] + c[1] * yl[s][1]) * sc_l[s]).sum::<f64>();
+        }
+    };
+    let adj_rows = |rr: &[f64], ol: &mut [[f64; 2]]| {
+        for (k, row) in rows.iter().enumerate() {
+            for &(s, c) in &row.coef {
+                ol[s][0] += loopw * c[0] * rr[k] * sc_l[s];
+                ol[s][1] += loopw * c[1] * rr[k] * sc_l[s];
+            }
+        }
+    };
+    let mut rr = vec![0.0f64; nr];
+    let mut qr = vec![0.0f64; nr];
+    fwd_rows(&yl, &mut rr);
+    for (k, row) in rows.iter().enumerate() {
+        rr[k] = -loopw * row.m0 - rr[k];
+    }
     fwd_pins(&yu, &mut rp);
     for (k, &(_, _, target)) in g.pins.iter().enumerate() {
         rp[k] = PINW * target - rp[k];
@@ -736,6 +769,7 @@ fn solve_ext(g: &Graph, geo: &[[f64; 2]], u: &mut [[f64; 2]], paths: &[&ConePath
     let (mut su, mut sl) = (vec![[0.0f64; 2]; n], vec![[0.0f64; 2]; np]);
     adjoint(&r, &mut su, &mut sl);
     adj_pins(&rp, &mut su);
+    adj_rows(&rr, &mut sl);
     let (mut pu, mut pl) = (su.clone(), sl.clone());
     let mut gamma = dot2(&su, &su) + dot2(&sl, &sl);
     let stop = ne as f64 * tol;
@@ -744,15 +778,20 @@ fn solve_ext(g: &Graph, geo: &[[f64; 2]], u: &mut [[f64; 2]], paths: &[&ConePath
     while it < max_iter && gamma > stop {
         fwd(&pu, &pl, &mut q);
         fwd_pins(&pu, &mut qp);
-        let alpha = gamma / (dot2(&q, &q) + dot1(&qp, &qp)).max(1e-300);
+        fwd_rows(&pl, &mut qr);
+        let alpha = gamma / (dot2(&q, &q) + dot1(&qp, &qp) + dot1(&qr, &qr)).max(1e-300);
         for k in 0..npin {
             rp[k] -= alpha * qp[k];
+        }
+        for k in 0..nr {
+            rr[k] -= alpha * qr[k];
         }
         axpy(&mut yu, alpha, &pu);
         axpy(&mut yl, alpha, &pl);
         axpy(&mut r, -alpha, &q);
         adjoint(&r, &mut su, &mut sl);
         adj_pins(&rp, &mut su);
+        adj_rows(&rr, &mut sl);
         let g2 = dot2(&su, &su) + dot2(&sl, &sl);
         let beta = g2 / gamma;
         gamma = g2;
@@ -1151,7 +1190,8 @@ fn place_cones(g: &mut Graph, f: &[[u32; 3]], geo: &[[f64; 2]], u: &mut [[f64; 2
         let refs: Vec<&ConePath> = act.iter().map(|&i| &paths[i]).collect();
         let mut l: Vec<[f64; 2]> = act.iter().map(|&i| lam[i]).collect();
         let tol: f64 = std::env::var("TOL").ok().and_then(|x| x.parse().ok()).unwrap_or(1e-9);
-        let it = solve_ext(g, geo, u, &refs, &mut l, 3000, tol);
+        let rows = loop_rows(g, curves, &act, &paths);
+        let it = solve_rows(g, geo, u, &refs, &mut l, &rows, 3000, tol);
         for (k, &i) in act.iter().enumerate() {
             lam[i] = l[k];
         }
@@ -1511,6 +1551,46 @@ fn piece_detail(pos: &[V3], ts: &[[u32; 3]]) -> f32 {
     sum
 }
 
+/// Coefficients de l'écart de chaque boucle : il est linéaire en les décalages entiers d des
+/// arêtes de la boucle, et chaque chemin de singularité modifie ces d selon ses colonnes.
+fn loop_rows(g: &mut Graph, curves: &[Curve], act: &[usize], paths: &[ConePath]) -> Vec<LoopRow> {
+    if std::env::var("NOLOOPROWS").is_ok() {
+        return vec![];
+    }
+    let mut rows = vec![];
+    for c in curves.iter().filter(|c| !c.pin) {
+        let Some(m0) = curve_mismatch(g, c) else { continue };
+        let edges: Vec<u32> = c.links.iter().chain(c.extra.iter()).map(|l| l.2).collect();
+        // Coefficient de chaque composante de d sur chaque arête (différences finies exactes)
+        let mut ce: HashMap<u32, [f64; 2]> = HashMap::new();
+        for &e in &edges {
+            let saved = g.d[e as usize];
+            let mut k = [0.0; 2];
+            for j in 0..2 {
+                g.d[e as usize][j] += 1;
+                k[j] = (curve_mismatch(g, c).unwrap_or(m0) - m0) as f64;
+                g.d[e as usize] = saved;
+            }
+            ce.insert(e, k);
+        }
+        let mut coef = vec![];
+        for (s, &pi) in act.iter().enumerate() {
+            let mut a = [0.0f64; 2];
+            for &(e, dx, dy) in &paths[pi].cols {
+                if let Some(k) = ce.get(&e) {
+                    a[0] += k[0] * dx[0] as f64 + k[1] * dx[1] as f64;
+                    a[1] += k[0] * dy[0] as f64 + k[1] * dy[1] as f64;
+                }
+            }
+            if a != [0.0, 0.0] {
+                coef.push((s, a));
+            }
+        }
+        rows.push(LoopRow { m0: m0 as f64, coef });
+    }
+    rows
+}
+
 /// Morceaux des guides qui passent sur la surface `p` (à moins de `tol` d'un de ses sommets)
 fn guides_on(p: &[V3], guides: &[Vec<V3>], tol: f32) -> Vec<Vec<V3>> {
     if guides.is_empty() || tol <= 0.0 {
@@ -1803,6 +1883,7 @@ fn remesh_core(pos: &[V3], tris: &[[u32; 3]], guides: &[Vec<V3>], opt: &Options,
     if debug && !auto.is_empty() {
         eprintln!("boucles automatiques : {}", auto.len());
     }
+    let n_manual = guides.len();
     let guides: Vec<Vec<V3>> = guides.iter().cloned().chain(auto).collect();
     let (cdir, cani) = if opt.curvature > 0.0 { (cdir, cani) } else { (vec![[0.0; 3]; n_v], vec![0.0; n_v]) };
     let guides = &guides;
@@ -1811,8 +1892,12 @@ fn remesh_core(pos: &[V3], tris: &[[u32; 3]], guides: &[Vec<V3>], opt: &Options,
     // parallèles au guide (anneaux autour d'un œil, d'une bouche) au lieu d'une seule ligne
     let reach: f32 = std::env::var("GREACH").ok().and_then(|x| x.parse().ok()).unwrap_or(10.0);
     let big = r.max(h * reach);
-    let mut gsoft: Vec<(f32, V3)> = vec![(f32::MAX, [0.0; 3]); n_v];
-    for g in guides {
+    let mut gsoft: Vec<(f32, V3, f32)> = vec![(f32::MAX, [0.0; 3], 1.0); n_v];
+    // Une boucle trouvée automatiquement guide plus doucement qu'un trait dessiné, et ne fixe
+    // rien : elle oriente le flux sans le forcer (sinon replis et pôles en trop)
+    let auto_k: f32 = std::env::var("AUTO_K").ok().and_then(|x| x.parse().ok()).unwrap_or(0.25);
+    for (gi, g) in guides.iter().enumerate() {
+        let is_auto = gi >= n_manual;
         for s in g.windows(2) {
             let (lo, hi) = ([s[0][0].min(s[1][0]) - big, s[0][1].min(s[1][1]) - big, s[0][2].min(s[1][2]) - big], [s[0][0].max(s[1][0]) + big, s[0][1].max(s[1][1]) + big, s[0][2].max(s[1][2]) + big]);
             for i in 0..n_v {
@@ -1824,16 +1909,16 @@ fn remesh_core(pos: &[V3], tris: &[[u32; 3]], guides: &[Vec<V3>], opt: &Options,
                 if dot(nrm[i], norm(dir)).abs() >= 0.95 {
                     continue;
                 }
-                if d < r {
+                if d < r && !is_auto {
                     q[i] = norm(tangent(dir, nrm[i]));
                     fixed[i] = true;
                 } else if d < big && d < gsoft[i].0 {
-                    gsoft[i] = (d, norm(tangent(dir, nrm[i])));
+                    gsoft[i] = (d.max(r), norm(tangent(dir, nrm[i])), if is_auto { auto_k } else { 1.0 });
                 }
             }
         }
     }
-    let gsoft: Vec<Option<(f32, V3)>> = gsoft.into_iter().map(|(d, t)| if d < big && dot(t, t) > 0.5 { Some((1.0 - ((d - r) / (big - r).max(1e-9)).clamp(0.0, 1.0), t)) } else { None }).collect();
+    let gsoft: Vec<Option<(f32, V3)>> = gsoft.into_iter().map(|(d, t, k)| if d < big && dot(t, t) > 0.5 { Some(((1.0 - ((d - r) / (big - r).max(1e-9)).clamp(0.0, 1.0)) * k.sqrt(), t)) } else { None }).collect();
     for i in 0..n_v {
         if let (false, Some((_, t))) = (fixed[i], gsoft[i]) {
             q[i] = t;
@@ -3501,6 +3586,43 @@ fn ring_curves(g: &Graph, v: &[V3], n: &[V3], q: &[V3], adj: &[Vec<u32>], aniso:
                         closed = Some(ix);
                         break;
                     }
+                    // Repassé à côté du départ sans le toucher : on raccorde par le plus court
+                    // chemin sur les arêtes (quelques arêtes, hors du chemin déjà fait)
+                    let back = sub(v[s as usize], v[c]);
+                    if len(back) < h * 2.0 && dot(back, dir) > 0.0 {
+                        let mut prev: HashMap<u32, u32> = HashMap::new();
+                        let mut queue = std::collections::VecDeque::from([cur]);
+                        prev.insert(cur, cur);
+                        let mut found = false;
+                        while let Some(x) = queue.pop_front() {
+                            if x == s {
+                                found = true;
+                                break;
+                            }
+                            for &w in &adj[x as usize] {
+                                if prev.contains_key(&w) || (on.contains_key(&w) && w != s) || len(sub(v[w as usize], v[s as usize])) > h * 2.5 {
+                                    continue;
+                                }
+                                prev.insert(w, x);
+                                queue.push_back(w);
+                            }
+                        }
+                        if found {
+                            let mut tail = vec![];
+                            let mut x = prev[&s];
+                            while x != cur {
+                                tail.push(x);
+                                x = prev[&x];
+                            }
+                            tail.reverse();
+                            for w in tail {
+                                on.insert(w, path.len());
+                                path.push(w);
+                            }
+                            closed = Some(0);
+                            break;
+                        }
+                    }
                 }
                 let mut nb = None;
                 let mut bd = 0.5;
@@ -3556,6 +3678,15 @@ fn ring_curves(g: &Graph, v: &[V3], n: &[V3], q: &[V3], adj: &[Vec<u32>], aniso:
             let p0 = path[0] as usize;
             let t = sub(v[path[1] as usize], v[p0]);
             let c0 = if dot(t, q[p0]).abs() >= dot(t, cross(n[p0], q[p0])).abs() { 1 } else { 0 };
+            if let Ok(fp) = std::env::var("RING_DUMP") {
+                use std::io::Write;
+                if let Ok(mut fh) = std::fs::OpenOptions::new().create(true).append(true).open(fp) {
+                    for &p in &path {
+                        let _ = writeln!(fh, "{} {} {}", v[p as usize][0], v[p as usize][1], v[p as usize][2]);
+                    }
+                    let _ = writeln!(fh);
+                }
+            }
             out.push(Curve { verts: path, links, c0, fixed: None, extra: vec![(m as u32 - 1, 0, last)], ok: true, pin: false });
             break;
         }
