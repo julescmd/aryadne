@@ -3,6 +3,7 @@
 mod cloud;
 mod dock;
 mod formats;
+mod boardlive;
 mod gizmo;
 mod graph;
 mod untitled;
@@ -1577,7 +1578,7 @@ impl App {
         match self.view() {
             View::Brain => return t("molette : zoom · glisser : déplacer · clic : ouvrir · Ctrl+G revenir aux fichiers"),
             View::Refs => return t("Ctrl+V coller une image ou un lien · double-clic : ouvrir · glisser vers un board · molette : défiler"),
-            View::Boards => return t("V sélection · T texte · B pinceau · E gomme · L ligne · R rectangle · O ellipse · Maj+A flèche · Ctrl+C / X / V · Ctrl+D dupliquer · Suppr · Ctrl+Z · Espace+glisser : déplacer la vue"),
+            View::Boards => return t("V sélection · T texte · B pinceau · E gomme · L ligne · R rectangle · O ellipse · Maj+A flèche · Ctrl+C / X / V · Ctrl+D dupliquer · Suppr · Ctrl+Z · Espace+glisser : déplacer la vue · Alt+glisser : tourner un modèle"),
             View::Tasks => return t("Entrée ajouter une tâche · clic sur la case : faite · clic sur le texte : ouvrir la note"),
             View::Chat => return t("Entrée envoyer · Maj+Entrée nouvelle ligne · @ citer un fichier · Ctrl+L assistant à côté"),
             View::Search => return t("tape au moins 2 caractères · Entrée ouvrir le premier · clic : ouvrir à la ligne"),

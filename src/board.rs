@@ -122,6 +122,8 @@ enum Drag {
     Marquee(Pos2),
     Draw,
     Erase,
+    /// Alt+glisser sur un modèle 3D : le tourner
+    Orbit(String),
 }
 
 pub enum Event {
@@ -151,6 +153,8 @@ pub struct Board {
     shape_from: Option<Pos2>,
     /// Le dernier clic a eu lieu dans le board : le clavier lui revient
     focused: bool,
+    /// Vidéos qui jouent, modèles 3D qu'on tourne
+    pub live: crate::boardlive::Live,
     stroke_pts: Vec<Pos2>,
     undo: Vec<Vec<Item>>,
     redo: Vec<Vec<Item>>,
@@ -177,6 +181,7 @@ impl Default for Board {
             taper: 0.5,
             shape_from: None,
             focused: false,
+            live: Default::default(),
             stroke_pts: vec![],
             undo: vec![],
             redo: vec![],
@@ -380,7 +385,11 @@ impl Board {
     }
 
     pub fn drop_file(&mut self, rel: &str, at: Vec2, images: &mut Images) {
-        if crate::images::has_preview(rel) {
+        if crate::montage::is_project(rel) {
+            // Un montage se pose comme une vidéo, à ses proportions, et se lit sur place
+            let aspect = crate::montage::Project::read(&std::path::Path::new(images.root()).join(rel)).map(|p| p.width as f32 / p.height.max(1) as f32).unwrap_or(16.0 / 9.0);
+            self.add(Kind::Image { rel: rel.to_string(), flip: false }, at, vec2(480.0, 480.0 / aspect));
+        } else if crate::images::has_preview(rel) {
             // Une image arrive à sa taille d'origine ; un aperçu (PDF, vidéo…) garde une taille de vignette
             let size = match images.natural(rel) {
                 Some([w, h]) => vec2(w as f32, h as f32),
@@ -488,6 +497,37 @@ impl Board {
                 continue;
             }
             match &it.kind {
+                Kind::Image { rel, flip } if self.live.players.contains_key(rel) || crate::boardlive::is_model(rel) => {
+                    // Vivant : la vidéo qui joue, ou le modèle 3D rendu sous l'angle choisi
+                    let ctx = ui.ctx().clone();
+                    let uv = if *flip { Rect::from_min_max(pos2(1.0, 0.0), pos2(0.0, 1.0)) } else { Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)) };
+                    let tex;
+                    if let Some(pl) = self.live.players.get_mut(rel) {
+                        pl.poll(&ctx, rel);
+                        tex = pl.tex.as_ref().map(|t| t.id());
+                    } else {
+                        let root = images.root().to_string();
+                        let mv = self.live.models.entry(rel.clone()).or_insert_with(|| crate::boardlive::ModelView::load(&root, rel));
+                        let px = [(r.width() * ui.ctx().pixels_per_point()) as usize, (r.height() * ui.ctx().pixels_per_point()) as usize];
+                        tex = mv.texture(&ctx, rel, px).map(|t| t.id());
+                        if let Some(e) = &mv.error {
+                            painter.text(r.center(), egui::Align2::CENTER_CENTER, e, egui::FontId::monospace(10.0), p.missing);
+                        }
+                    }
+                    match tex {
+                        Some(t) => {
+                            painter.image(t, r, uv, Color32::WHITE);
+                        }
+                        None => {
+                            // En attendant : la vignette habituelle
+                            if let Some(l) = images.peek(rel, Size::Thumb) {
+                                painter.image(l.tex.id(), r, uv, Color32::WHITE);
+                            } else {
+                                painter.rect_filled(r, 0.0, p.line);
+                            }
+                        }
+                    }
+                }
                 Kind::Image { rel, flip } => {
                     let size = if r.width().max(r.height()) > 340.0 { Size::Full } else { Size::Thumb };
                     let slot = match images.get(rel, size) {
@@ -555,6 +595,90 @@ impl Board {
                 painter.rect_stroke(screen_rect(bb).expand(4.0), 0.0, Stroke::new(1.0, p.accent.linear_multiply(0.6)), egui::StrokeKind::Outside);
             }
         }
+        // Commandes des éléments vivants, par-dessus : ▶ ⏸ et boucle pour les vidéos, ⟳ pour les modèles
+        let ctx = ui.ctx().clone();
+        let mut toggle_play: Option<(String, f32)> = None;
+        let mut toggle_loop: Option<(String, f32)> = None;
+        let mut toggle_spin: Option<String> = None;
+        for (i, it) in self.data.items.iter().enumerate() {
+            let Kind::Image { rel, .. } = &it.kind else { continue };
+            let (play, model) = (crate::boardlive::is_playable(rel), crate::boardlive::is_model(rel));
+            if !play && !model {
+                continue;
+            }
+            let r = screen_rect(it.rect());
+            if r.width() < 70.0 || !rect.intersects(r) {
+                continue;
+            }
+            let near = pointer_in.is_some_and(|q| r.contains(q)) || self.selection.contains(&i);
+            let playing = self.live.players.contains_key(rel);
+            if !near && !playing {
+                continue;
+            }
+            let mut x = r.left() + 8.0;
+            let y = r.bottom() - 34.0;
+            let mut btn = |glyph: &str, on: bool, tip: &str, key: &str| -> bool {
+                let br = Rect::from_min_size(pos2(x, y), vec2(28.0, 26.0));
+                x += 32.0;
+                let resp = ui.interact(br, egui::Id::unique(("board-live", i, key)), Sense::click());
+                painter.rect_filled(br, 5.0, if on { p.accent } else { Color32::from_black_alpha(150) });
+                painter.text(br.center(), egui::Align2::CENTER_CENTER, glyph, egui::FontId::proportional(14.0), Color32::WHITE);
+                resp.on_hover_text(crate::i18n::t(tip)).clicked()
+            };
+            let aspect = it.w / it.h.max(1.0);
+            if play {
+                let looping = self.live.looping.get(rel).copied().unwrap_or(true);
+                if btn(if playing { "⏸" } else { "▶" }, playing, "lire / arrêter ici", "play") {
+                    toggle_play = Some((rel.clone(), aspect));
+                }
+                if btn("⟲", looping, "en boucle", "loop") {
+                    toggle_loop = Some((rel.clone(), aspect));
+                }
+            } else {
+                let spin = self.live.models.get(rel).is_some_and(|m| m.spin);
+                if btn("⟳", spin, "tourner tout seul (Alt+glisser : tourner à la main)", "spin") {
+                    toggle_spin = Some(rel.clone());
+                }
+            }
+        }
+        let root = images.root().to_string();
+        if let Some((rel, aspect)) = toggle_play {
+            if self.live.players.remove(&rel).is_none() {
+                let looping = self.live.looping.get(&rel).copied().unwrap_or(true);
+                if let Some(pl) = crate::boardlive::Player::start(&root, &rel, aspect, looping, &ctx) {
+                    self.live.players.insert(rel, pl);
+                }
+            }
+        }
+        if let Some((rel, aspect)) = toggle_loop {
+            let now = !self.live.looping.get(&rel).copied().unwrap_or(true);
+            self.live.looping.insert(rel.clone(), now);
+            // Une vidéo qui joue reprend avec le nouveau réglage
+            if self.live.players.remove(&rel).is_some() {
+                if let Some(pl) = crate::boardlive::Player::start(&root, &rel, aspect, now, &ctx) {
+                    self.live.players.insert(rel, pl);
+                }
+            }
+        }
+        if let Some(rel) = toggle_spin {
+            if let Some(m) = self.live.models.get_mut(&rel) {
+                m.spin = !m.spin;
+            }
+        }
+        // Lectures terminées : un montage en boucle repart, le reste s'arrête
+        let ended: Vec<String> = self.live.players.iter().filter(|(_, p)| p.ended).map(|(k, _)| k.clone()).collect();
+        for rel in ended {
+            let pl = self.live.players.remove(&rel);
+            let looping = self.live.looping.get(&rel).copied().unwrap_or(true);
+            if looping && crate::montage::is_project(&rel) {
+                let aspect = self.data.items.iter().find(|it| matches!(&it.kind, Kind::Image { rel: r, .. } if *r == rel)).map(|it| it.w / it.h.max(1.0)).unwrap_or(16.0 / 9.0);
+                if let Some(pl) = crate::boardlive::Player::start(&root, &rel, aspect, true, &ctx) {
+                    self.live.players.insert(rel, pl);
+                }
+            }
+            drop(pl);
+        }
+
         // Trait en cours
         if !self.stroke_pts.is_empty() {
             let pts: Vec<Pos2> = self.stroke_pts.iter().map(|w| to_screen(*w)).collect();
@@ -624,7 +748,12 @@ impl Board {
                 let r = screen_rect(self.data.items[i].rect());
                 corners(r).iter().position(|c| Rect::from_center_size(*c, vec2(16.0, 16.0)).contains(start_screen))
             });
+            let orbit = start_hit.filter(|_| mods.alt).and_then(|i| match &self.data.items[i].kind {
+                Kind::Image { rel, .. } if crate::boardlive::is_model(rel) => Some(rel.clone()),
+                _ => None,
+            });
             self.drag = match self.tool {
+                Tool::Select if orbit.is_some() => orbit.map(Drag::Orbit),
                 Tool::Select => {
                     if let (Some(i), Some(k)) = (single, start_handle) {
                         self.checkpoint();
@@ -753,6 +882,13 @@ impl Board {
                             self.dirty_since = Some(Instant::now());
                         }
                     }
+                    Drag::Orbit(rel) => {
+                        let d = resp.drag_delta();
+                        if let Some(m) = self.live.models.get_mut(rel) {
+                            m.yaw += d.x * 0.012;
+                            m.pitch = (m.pitch + d.y * 0.012).clamp(-1.5, 1.5);
+                        }
+                    }
                     Drag::Pan | Drag::Marquee(_) => {}
                 }
             }
@@ -771,6 +907,7 @@ impl Board {
                 }
                 Some(Drag::Draw) => self.finish_stroke(),
                 Some(Drag::Pan) => self.touch(),
+                Some(Drag::Orbit(_)) => {}
                 Some(Drag::Move(_)) | Some(Drag::Resize { .. }) | Some(Drag::Erase) => {
                     // Rien n'a bougé : on retire le point d'annulation inutile.
                     if self.undo.last() == Some(&self.data.items) {

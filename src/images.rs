@@ -91,6 +91,10 @@ impl Images {
         v
     }
 
+    pub fn root(&self) -> &str {
+        &self.root
+    }
+
     pub fn set_root(&mut self, root: &str) {
         if self.root != root {
             *self = Self { root: root.to_string(), ..Default::default() };

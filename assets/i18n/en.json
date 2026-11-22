@@ -1252,5 +1252,8 @@
  "Choisis un objet dans la liste ou dans la vue.": "Select an object in the list or the view.",
  "Sa couleur se règle dans l'onglet objet.": "Its color is set in the object tab.",
  "sélection rectangle": "box select",
- "cadrer la scène": "frame the scene"
+ "cadrer la scène": "frame the scene",
+ "lire / arrêter ici": "play / stop here",
+ "en boucle": "loop",
+ "tourner tout seul (Alt+glisser : tourner à la main)": "turntable (Alt+drag: rotate by hand)"
 }
