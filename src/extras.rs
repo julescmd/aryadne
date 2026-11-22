@@ -1305,7 +1305,7 @@ fn kind_of(rel: &str) -> &'static str {
     match e.as_str() {
         "md" | "txt" => "notes",
         "png" | "jpg" | "jpeg" | "webp" | "gif" | "bmp" | "tga" | "tif" | "tiff" | "exr" | "hdr" | "psd" | "kra" => "images",
-        "obj" | "fbx" | "glb" | "gltf" | "stl" | "blend" | "abc" | "usd" | "usdz" => "3d",
+        "obj" | "fbx" | "glb" | "gltf" | "stl" | "3ds" | "ply" | "ma" | "mb" | "max" | "blend" | "abc" | "usd" | "usdz" => "3d",
         "mp4" | "mov" | "webm" | "mkv" | "avi" => "vidéos",
         "pptx" | "docx" | "xlsx" | "odp" | "odt" | "ods" | "pdf" => "documents",
         "rs" | "py" | "js" | "ts" | "html" | "css" | "c" | "cpp" | "h" | "glsl" | "lua" | "sh" | "json" | "toml" | "yaml" | "yml" | "gd" => "code",

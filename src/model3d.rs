@@ -10,7 +10,7 @@ use std::io::BufRead;
 use std::path::Path;
 use std::sync::mpsc::{channel, Receiver};
 
-pub const EXT: [&str; 7] = ["obj", "fbx", "glb", "gltf", "stl", "aryscene", "arya3"];
+pub const EXT: [&str; 12] = ["obj", "fbx", "glb", "gltf", "stl", "3ds", "ply", "ma", "mb", "max", "aryscene", "arya3"];
 /// Nombre de triangles visé pour l'affichage interactif.
 const MAX_TRIS: usize = 150_000;
 
@@ -21,6 +21,8 @@ pub fn is_model(rel: &str) -> bool {
 
 type V3 = [f32; 3];
 
+#[path = "formats3d.rs"]
+pub mod formats3d;
 #[path = "pathtrace.rs"]
 pub mod pathtrace;
 #[path = "gputrace.rs"]
@@ -205,6 +207,11 @@ pub fn load(path: &Path) -> Result<Model, String> {
     match ext.as_str() {
         "obj" => load_obj(std::io::BufReader::new(std::fs::File::open(path).map_err(|e| e.to_string())?)),
         "stl" => load_stl(&std::fs::read(path).map_err(|e| e.to_string())?),
+        "3ds" => formats3d::load_3ds(&std::fs::read(path).map_err(|e| e.to_string())?),
+        "ply" => formats3d::load_ply(&std::fs::read(path).map_err(|e| e.to_string())?),
+        "ma" => formats3d::load_ma(&std::fs::read_to_string(path).map_err(|e| e.to_string())?),
+        "mb" => Err("Les .mb (Maya binaire) ne se lisent pas sans Maya : dans Maya, enregistre en .ma (Maya ASCII), ou exporte en FBX ou OBJ.".into()),
+        "max" => Err("Les .max se lisent seulement dans 3ds Max : exporte en FBX, OBJ ou 3DS.".into()),
         "fbx" => {
             let m = crate::fbx::load(&std::fs::read(path).map_err(|e| e.to_string())?)?;
             Model::with_edges(m.positions, m.tris, None, Some(m.edges), false)
@@ -1978,6 +1985,9 @@ pub struct Viewer {
     /// HDRI choisi depuis l'onglet Monde, chargé par la vue
     pending_hdr: Option<std::path::PathBuf>,
     scene_sel: Option<usize>,
+    /// Menu du clic droit sur un objet de la scène, et la commande choisie dedans
+    obj_menu: Option<Pos2>,
+    obj_action: Option<&'static str>,
     scene_errors: Vec<Option<String>>,
     scene_rx: Option<Receiver<(Result<Model, String>, Vec<Option<String>>, Vec<(usize, usize, usize)>)>>,
     /// Triangles de chaque objet dans le modèle réuni (objet, début, fin)
@@ -2114,6 +2124,8 @@ impl Viewer {
             ids_rev: 0,
             outline: None,
             scene_sel: None,
+            obj_menu: None,
+            obj_action: None,
             scene_errors: vec![],
             scene_rx: None,
             scene_ranges: vec![],
@@ -3337,10 +3349,45 @@ impl Viewer {
         }
         if !ui.ctx().egui_wants_keyboard_input() && self.edit.is_none() && self.modal.is_none() && self.mesh.is_none() {
             let sel = self.scene_sel.filter(|&k| k < scene.objects.len());
-            let (del, dup, hide, show_all, add) = ui.input(|i| {
+            let (mut del, mut dup, mut hide, mut show_all, add) = ui.input(|i| {
                 let plain = !i.modifiers.any();
                 (plain && (i.key_pressed(Key::X) || i.key_pressed(Key::Delete)), i.modifiers.shift && i.key_pressed(Key::D), plain && i.key_pressed(Key::H), i.modifiers.alt && i.key_pressed(Key::H), i.modifiers.shift && i.key_pressed(Key::A))
             });
+            // Commande choisie dans le menu du clic droit
+            let act = self.obj_action.take();
+            match act {
+                Some("delete") => del = true,
+                Some("duplicate") => dup = true,
+                Some("hide") => hide = true,
+                Some("show-all") => show_all = true,
+                Some("edit") => self.mesh_toggle = true,
+                Some(m @ ("move" | "rotate" | "scale")) => {
+                    if let (Some(k), Some(at)) = (sel, ui.input(|i| i.pointer.hover_pos())) {
+                        let o = &scene.objects[k];
+                        let kind = match m {
+                            "move" => 0,
+                            "rotate" => 1,
+                            _ => 2,
+                        };
+                        self.modal = Some((kind, None, (o.pos, o.rot, o.scale), at));
+                        self.gizmo_mode = kind;
+                    }
+                }
+                Some("reset") => {
+                    if let Some(k) = sel {
+                        let o = &mut scene.objects[k];
+                        (o.pos, o.rot, o.scale) = ([0.0; 3], [0.0; 3], [1.0; 3]);
+                        changed = true;
+                    }
+                }
+                Some("no-material") => {
+                    if let Some(k) = sel {
+                        scene.objects[k].material.clear();
+                        changed = true;
+                    }
+                }
+                _ => {}
+            }
             if add {
                 self.add_popup = ui.input(|i| i.pointer.hover_pos()).or(Some(ui.ctx().content_rect().center()));
             }
@@ -3505,7 +3552,7 @@ impl Viewer {
                             }
                         });
                         if ui.button(crate::i18n::t("choisir un fichier…")).clicked() {
-                            if let Some(files) = rfd::FileDialog::new().add_filter(crate::i18n::t("modèles et images"), &["obj", "fbx", "glb", "gltf", "stl", "png", "jpg", "jpeg", "webp"]).pick_files() {
+                            if let Some(files) = rfd::FileDialog::new().add_filter(crate::i18n::t("modèles et images"), &["obj", "fbx", "glb", "gltf", "stl", "3ds", "ply", "ma", "png", "jpg", "jpeg", "webp"]).pick_files() {
                                 for f in files {
                                     scene.add(&path, &f);
                                     changed = true;
@@ -4850,7 +4897,82 @@ impl Viewer {
             });
         }
         let avail = ui.available_size();
-        let (rect, resp) = ui.allocate_exact_size(avail.max(egui::vec2(50.0, 50.0)), Sense::click_and_drag());
+        let (full, _) = ui.allocate_exact_size(avail.max(egui::vec2(50.0, 50.0)), Sense::hover());
+        let mut rect = full;
+        // Onglet UV : l'éditeur UV à gauche de la vue 3D, comme l'espace « UV Editing » de Blender
+        if let Some(e) = self.edit.as_mut().filter(|e| e.tab == 2 && !e.tools.no_split && full.width() > 500.0) {
+            let w = (full.width() * 0.45).round();
+            let uv_rect = egui::Rect::from_min_size(full.min, egui::vec2(w - 3.0, full.height()));
+            e.uv_editor(ui, uv_rect);
+            ui.painter().rect_filled(egui::Rect::from_min_max(egui::pos2(full.min.x + w - 3.0, full.min.y), egui::pos2(full.min.x + w, full.max.y)), 0.0, crate::theme::gutter());
+            rect = egui::Rect::from_min_max(egui::pos2(full.min.x + w, full.min.y), full.max);
+        }
+        let resp = ui.interact(rect, ui.scope_id().with("viewport-3d"), Sense::click_and_drag());
+        if let Some(e) = self.edit.as_mut() {
+            // Raccourcis façon Blender (A, Alt+A, Ctrl+I, Ctrl+E, U, Ctrl+L) et menu du clic droit
+            if resp.hovered() {
+                e.keys_3d(ui, ui.input(|i| i.pointer.hover_pos()));
+            }
+            if resp.secondary_clicked() {
+                if let Some(at) = resp.interact_pointer_pos() {
+                    e.open_menu_3d(at);
+                }
+            }
+            e.context_menu(ui.ctx());
+        }
+        // Scène, mode objet : clic droit sur un objet = il devient l'actif, et son menu s'ouvre (comme Blender)
+        if self.edit.is_none() && self.mesh.is_none() && self.scene.is_some() {
+            if resp.secondary_clicked() {
+                if let (Some(at), Some((_, _, prep))) = (resp.interact_pointer_pos(), &self.prepared) {
+                    let hit = pick(prep, &self.cam, rect.width(), rect.height(), at.x - rect.left(), at.y - rect.top());
+                    if let Some(k) = hit.and_then(|(tri, _)| self.scene_ranges.iter().find(|r| (r.1..r.2).contains(&(tri as usize))).map(|r| r.0)) {
+                        if self.scene_sel != Some(k) && !self.scene_multi.contains(&k) {
+                            self.scene_multi.clear();
+                        }
+                        self.scene_sel = Some(k);
+                    }
+                    self.obj_menu = Some(at);
+                }
+            }
+            if let Some(at) = self.obj_menu {
+                let has = self.scene_sel.is_some();
+                let mut act: Option<&'static str> = None;
+                let area = egui::Area::new(egui::Id::unique("object-context-menu")).order(egui::Order::Foreground).fixed_pos(at).constrain(true).show(ui.ctx(), |ui| {
+                    egui::Frame::menu(ui.style()).show(ui, |ui| {
+                        ui.set_min_width(210.0);
+                        let name = self.scene_sel.and_then(|k| self.scene.as_ref().and_then(|s| s.objects.get(k))).map(|o| o.name.clone()).unwrap_or_else(|| crate::i18n::t("objet"));
+                        ui.label(egui::RichText::new(name).size(10.5).color(crate::theme::pal().muted));
+                        for (label, key, id, needs) in [
+                            ("mode édition", "Tab", "edit", true),
+                            ("déplacer", "G", "move", true),
+                            ("tourner", "R", "rotate", true),
+                            ("redimensionner", "S", "scale", true),
+                            ("remettre à zéro (position, rotation, taille)", "", "reset", true),
+                            ("dupliquer", "Maj+D", "duplicate", true),
+                            ("cacher", "H", "hide", true),
+                            ("tout montrer", "Alt+H", "show-all", false),
+                            ("retirer le matériau", "", "no-material", true),
+                            ("supprimer", "X", "delete", true),
+                        ] {
+                            if matches!(id, "show-all" | "duplicate" | "no-material") {
+                                ui.separator();
+                            }
+                            let text = if key.is_empty() { crate::i18n::t(label) } else { format!("{}    {key}", crate::i18n::t(label)) };
+                            if ui.add_enabled(has || !needs, egui::Button::new(text)).clicked() {
+                                act = Some(id);
+                            }
+                        }
+                    });
+                });
+                let outside = ui.input(|i| i.pointer.any_pressed()) && ui.ctx().pointer_latest_pos().is_some_and(|p| !area.response.rect.contains(p));
+                if act.is_some() || outside || ui.input(|i| i.key_pressed(Key::Escape)) {
+                    self.obj_menu = None;
+                }
+                if act.is_some() {
+                    self.obj_action = act;
+                }
+            }
+        }
         // Un .hdr ou .exr glissé depuis l'explorateur devient l'éclairage de la vue
         if let Some(rel) = crate::drop_rel(&resp, |r| {
             let r = r.to_lowercase();
@@ -5290,7 +5412,7 @@ impl Viewer {
         if resp.clicked() {
             if let (Some(e), Some((_, _, prep)), Some(pt)) = (&mut self.edit, &self.prepared, resp.interact_pointer_pos()) {
                 if let Some((tri, bary)) = pick(prep, &self.cam, rect.width(), rect.height(), pt.x - rect.left(), pt.y - rect.top()) {
-                    e.click(prep, tri, bary, mods.shift, mods.command);
+                    e.click(prep, tri, bary, mods.shift, mods.command, mods.alt);
                 } else if !mods.shift {
                     e.sel.clear();
                     e.version += 1;
@@ -5692,6 +5814,16 @@ impl Viewer {
                     let faces = e.topo.edge_faces.get(&(a, b)).map(|v| v.as_slice()).unwrap_or(&[]);
                     if visible(pa, pb, faces) {
                         painter.line_segment([pa, pb], Stroke::new(2.0, red));
+                    }
+                }
+            }
+            // Arêtes choisies (outil coutures), en orange par-dessus
+            let orange = Color32::from_rgb(255, 160, 40);
+            for &(a, b) in e.tools.esel.iter().take(40_000) {
+                if let (Some(pa), Some(pb)) = (project(prep.vertex(a as usize)), project(prep.vertex(b as usize))) {
+                    let faces = e.topo.edge_faces.get(&(a, b)).map(|v| v.as_slice()).unwrap_or(&[]);
+                    if visible(pa, pb, faces) {
+                        painter.line_segment([pa, pb], Stroke::new(2.6, orange));
                     }
                 }
             }

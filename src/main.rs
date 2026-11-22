@@ -1962,7 +1962,9 @@ impl App {
                 self.active = Some((self.active.unwrap_or(0) + 1) % n);
             }
         }
-        if pressed(Modifiers::COMMAND, Key::E) {
+        // Ctrl+E : lecture / édition d'une note (ailleurs, l'éditeur ouvert garde la touche : menu des arêtes en 3D)
+        let on_note = self.active.and_then(|i| self.docs.get(i)).is_some_and(|d| vault::is_md(&d.rel));
+        if on_note && pressed(Modifiers::COMMAND, Key::E) {
             if let Some(d) = self.active.and_then(|i| self.docs.get_mut(i)) {
                 if vault::is_md(&d.rel) {
                     d.preview = !d.preview;

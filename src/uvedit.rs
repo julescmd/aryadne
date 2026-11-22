@@ -121,6 +121,9 @@ pub struct EditData {
     /// Guides de retopologie (traits dessinés sur la surface, espace d'affichage)
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub guides: Vec<Vec<V3>>,
+    /// Coins d'UV épinglés (face, coin) : le dépliage les laisse où ils sont
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub pins: BTreeSet<(u32, u32)>,
 }
 
 fn tex_default() -> u32 {
@@ -132,7 +135,7 @@ fn margin_default() -> f32 {
 
 impl EditData {
     pub fn fresh(t: &Topo) -> EditData {
-        EditData { polys: t.polys.len(), face_mat: vec![0; t.polys.len()], slots: vec![Slot { name: "matériau 1".into(), color: PALETTE[0], material: String::new() }], seams: BTreeSet::new(), uv: vec![], chart: vec![], texture_px: 2048, margin_px: 8.0, guides: vec![] }
+        EditData { polys: t.polys.len(), face_mat: vec![0; t.polys.len()], slots: vec![Slot { name: "matériau 1".into(), color: PALETTE[0], material: String::new() }], seams: BTreeSet::new(), uv: vec![], chart: vec![], texture_px: 2048, margin_px: 8.0, guides: vec![], pins: BTreeSet::new() }
     }
 
     pub fn fits(&self, t: &Topo) -> bool {
@@ -360,6 +363,11 @@ fn solve_cg(rows: &[Vec<(usize, f32)>], rhs: &[f32], n: usize, iters: usize) -> 
 
 /// Déplie un îlot. Retourne les UV de chaque sommet UV.
 fn lscm(t: &Topo, faces: &[usize], corners: &[(usize, usize)], corner_vert: &[usize]) -> Vec<V2> {
+    lscm_pinned(t, faces, corners, corner_vert, &HashMap::new())
+}
+
+/// LSCM avec des sommets épinglés (au moins deux pour fixer l'îlot ; sinon épingles automatiques).
+fn lscm_pinned(t: &Topo, faces: &[usize], corners: &[(usize, usize)], corner_vert: &[usize], user_pins: &HashMap<usize, V2>) -> Vec<V2> {
     let nv = corner_vert.iter().copied().max().map(|m| m + 1).unwrap_or(0);
     let mut pos3 = vec![[0.0f32; 3]; nv];
     for (k, &(f, i)) in corners.iter().enumerate() {
@@ -380,7 +388,7 @@ fn lscm(t: &Topo, faces: &[usize], corners: &[(usize, usize)], corner_vert: &[us
         return planar(&pos3, t, faces);
     }
     let d = len(sub(pos3[p1], pos3[p0]));
-    let pinned: HashMap<usize, V2> = [(p0, [0.0, 0.0]), (p1, [d, 0.0])].into_iter().collect();
+    let pinned: HashMap<usize, V2> = if user_pins.len() >= 2 { user_pins.clone() } else { [(p0, [0.0, 0.0]), (p1, [d, 0.0])].into_iter().collect() };
     // Inconnues : u et v de chaque sommet non épinglé
     let mut var = vec![usize::MAX; nv];
     let mut nfree = 0;
@@ -454,7 +462,7 @@ fn lscm(t: &Topo, faces: &[usize], corners: &[(usize, usize)], corner_vert: &[us
             signed += (b[0] - a[0]) * (c[1] - a[1]) - (c[0] - a[0]) * (b[1] - a[1]);
         }
     }
-    if signed < 0.0 {
+    if signed < 0.0 && user_pins.len() < 2 {
         for p in &mut uv {
             p[0] = -p[0];
         }
@@ -1650,6 +1658,9 @@ pub fn auto_unwrap(t: &Topo, d: &mut EditData, o: &AutoOptions, pack_opt: &PackO
 use eframe::egui::{self, pos2, vec2, Color32, Pos2, Rect, RichText, Sense, Stroke};
 use std::path::PathBuf;
 
+#[path = "uvtools.rs"]
+pub mod tools;
+
 #[derive(Clone, Copy, PartialEq)]
 pub enum Tool {
     Faces,
@@ -1682,8 +1693,6 @@ pub struct Edit {
     pub scale: f32,
     pub message: Option<String>,
     pub owner: Vec<u32>,
-    uv_view: Rect,
-    uv_drag: bool,
     pub checker: bool,
     pub auto: AutoOptions,
     pub retopo_opt: crate::retopo::Options,
@@ -1707,6 +1716,8 @@ pub struct Edit {
     pub bake_high: String,
     /// Annuler / rétablir : l'état enregistré avant chaque action terminée
     pending: std::cell::Cell<bool>,
+    /// Outils façon Blender (arêtes, éditeur UV, menus) : voir uvtools.rs
+    pub tools: tools::State,
     last: Option<EditData>,
     undo: Vec<EditData>,
     redo: Vec<EditData>,
@@ -1752,7 +1763,7 @@ impl Edit {
         let data = std::fs::read_to_string(&file).ok().and_then(|t| serde_json::from_str::<EditData>(&t).ok()).filter(|d| d.fits(&topo)).unwrap_or_else(|| EditData::fresh(&topo));
         let n = topo.polys.len();
         let checker = data.has_uv();
-        Edit { topo, data, sel: BTreeSet::new(), tool: Tool::Faces, tab: 0, version: 1, seam_angle: 45.0, smart_angle: 66.0, min_faces: (n / 400).clamp(4, 300), optimize: true, rotate: true, density_target: 1024.0, file, scale, message: None, owner: vec![], uv_view: Rect::NOTHING, uv_drag: false, checker, auto: AutoOptions::default(), retopo_opt: crate::retopo::Options { faces: (n * 2).clamp(200, 8000) / 100 * 100, ..Default::default() }, retopo: None, retopo_job: None, retopo_export: false, retopo_show: true, guide_now: vec![], mat_request: None, tri_mat: vec![], bake_request: false, bake_size: 1024, bake_rays: 24, bake_high: String::new(), pending: Default::default(), last: None, undo: vec![], redo: vec![] }
+        Edit { topo, data, sel: BTreeSet::new(), tool: Tool::Faces, tab: 0, version: 1, seam_angle: 45.0, smart_angle: 66.0, min_faces: (n / 400).clamp(4, 300), optimize: true, rotate: true, density_target: 1024.0, file, scale, message: None, owner: vec![], checker, auto: AutoOptions::default(), retopo_opt: crate::retopo::Options { faces: (n * 2).clamp(200, 8000) / 100 * 100, ..Default::default() }, retopo: None, retopo_job: None, retopo_export: false, retopo_show: true, guide_now: vec![], mat_request: None, tri_mat: vec![], bake_request: false, bake_size: 1024, bake_rays: 24, bake_high: String::new(), pending: Default::default(), tools: Default::default(), last: None, undo: vec![], redo: vec![] }
     }
 
     pub fn save(&self) {
@@ -1793,12 +1804,19 @@ impl Edit {
     }
 
     /// Clic dans la vue 3D sur le triangle `tri` (points en espace d'affichage).
-    pub fn click(&mut self, prep: &crate::model3d::Prepared, tri: usize, bary: [f32; 3], shift: bool, ctrl: bool) {
+    pub fn click(&mut self, prep: &crate::model3d::Prepared, tri: usize, bary: [f32; 3], shift: bool, ctrl: bool, alt: bool) {
         let Some(&f) = self.owner.get(tri) else { return };
         match self.tool {
             Tool::Guides => {}
             Tool::Faces => {
-                if ctrl {
+                if alt {
+                    // Alt+clic : l'îlot entier (faces reliées jusqu'aux coutures)
+                    if !shift {
+                        self.sel.clear();
+                    }
+                    self.sel.insert(f);
+                    self.select_linked();
+                } else if ctrl {
                     self.sel.remove(&f);
                 } else if shift {
                     if !self.sel.remove(&f) {
@@ -1809,27 +1827,9 @@ impl Edit {
                 }
             }
             Tool::Seams => {
-                let t = prep.triangle(tri);
-                let p: Vec<V3> = t.iter().map(|&i| prep.vertex(i as usize)).collect();
-                let hit = [p[0][0] * bary[0] + p[1][0] * bary[1] + p[2][0] * bary[2], p[0][1] * bary[0] + p[1][1] * bary[1] + p[2][1] * bary[2], p[0][2] * bary[0] + p[1][2] * bary[1] + p[2][2] * bary[2]];
-                let poly = &self.topo.polys[f as usize];
-                let mut best = (f32::MAX, (0, 0));
-                for i in 0..poly.len() {
-                    let (a, b) = (poly[i], poly[(i + 1) % poly.len()]);
-                    let (pa, pb) = (prep.vertex(a as usize), prep.vertex(b as usize));
-                    let ab = sub(pb, pa);
-                    let tt = (dot(sub(hit, pa), ab) / dot(ab, ab).max(1e-12)).clamp(0.0, 1.0);
-                    let dd = len(sub(hit, add(pa, mul(ab, tt))));
-                    if dd < best.0 {
-                        best = (dd, key(a, b));
-                    }
+                if let Some(e) = self.edge_at(prep, tri, bary) {
+                    self.click_edge(e, shift, ctrl, alt);
                 }
-                if ctrl {
-                    self.data.seams.remove(&best.1);
-                } else if !self.data.seams.remove(&best.1) {
-                    self.data.seams.insert(best.1);
-                }
-                self.save();
             }
         }
         self.version += 1;
@@ -2001,7 +2001,23 @@ impl Edit {
 
     fn tab_seams(&mut self, ui: &mut egui::Ui) {
         let p = crate::theme::pal();
-        ui.label(RichText::new(crate::i18n::t("clic sur une arête : poser / enlever une couture · Ctrl+clic : enlever")).color(p.muted).size(10.0));
+        ui.label(RichText::new(crate::i18n::t("clic : choisir une arête · Maj : ajouter · Alt : boucle · Ctrl : chemin le plus court · clic droit ou Ctrl+E : menu")).color(p.muted).size(10.0));
+        ui.horizontal_wrapped(|ui| {
+            let n = self.tools.esel.len();
+            ui.label(RichText::new(format!("{n} {}", crate::i18n::t("arête(s) choisie(s)"))).size(10.5));
+            if ui.add_enabled(n > 0, egui::Button::new(crate::i18n::t("marquer comme couture"))).clicked() {
+                self.mark_seams(true);
+            }
+            if ui.add_enabled(n > 0, egui::Button::new(crate::i18n::t("effacer la couture"))).clicked() {
+                self.mark_seams(false);
+            }
+            if ui.small_button(crate::i18n::t("choisir les coutures")).clicked() {
+                self.run("sel-seams");
+            }
+            if ui.add_enabled(self.data.has_uv(), egui::Button::new(crate::i18n::t("coutures depuis les îlots"))).clicked() {
+                self.seams_from_islands();
+            }
+        });
         ui.add_space(4.0);
         ui.label(RichText::new(crate::i18n::t("automatique avancé")).size(11.0).strong());
         self.auto_options(ui);
@@ -2546,7 +2562,16 @@ impl Edit {
                 }
             });
         }
-        self.uv_canvas(ui, &sel_charts);
+        if self.tools.no_split {
+            let side = ui.available_width().min(420.0);
+            let (r, _) = ui.allocate_exact_size(vec2(side, side), Sense::hover());
+            self.uv_editor(ui, r);
+        } else {
+            ui.label(RichText::new(crate::i18n::t("L'éditeur UV est à gauche de la vue 3D.")).color(p.muted).size(10.5));
+        }
+        if ui.checkbox(&mut self.tools.no_split, crate::i18n::t("éditeur UV dans ce panneau")).changed() {
+            self.version += 1;
+        }
     }
 
     fn transform_charts(&mut self, charts_: &BTreeSet<u32>, op: u8, delta: V2) {
@@ -2579,79 +2604,6 @@ impl Edit {
         self.changed();
     }
 
-    /// Vue 2D des UV : clic = choisir un îlot, glisser = le déplacer.
-    fn uv_canvas(&mut self, ui: &mut egui::Ui, sel_charts: &BTreeSet<u32>) {
-        let p = crate::theme::pal();
-        let side = ui.available_width().min(420.0);
-        let (rect, resp) = ui.allocate_exact_size(vec2(side, side), Sense::click_and_drag());
-        self.uv_view = rect;
-        let painter = ui.painter_at(rect.expand(2.0));
-        painter.rect_filled(rect, 0.0, Color32::from_gray(40));
-        // Grille 0-1
-        for k in 0..=8 {
-            let t = k as f32 / 8.0;
-            let col = if k % 4 == 0 { Color32::from_gray(80) } else { Color32::from_gray(55) };
-            painter.line_segment([pos2(rect.left() + t * side, rect.top()), pos2(rect.left() + t * side, rect.bottom())], Stroke::new(1.0, col));
-            painter.line_segment([pos2(rect.left(), rect.top() + t * side), pos2(rect.right(), rect.top() + t * side)], Stroke::new(1.0, col));
-        }
-        let to = |q: V2| pos2(rect.left() + q[0] * side, rect.bottom() - q[1] * side);
-        let from = |s: Pos2| [(s.x - rect.left()) / side, (rect.bottom() - s.y) / side];
-        // Faces : remplissage selon le matériau, sélection en accent
-        let n = self.topo.polys.len();
-        let step = (n / 60_000).max(1);
-        let mut shapes = vec![];
-        for f in (0..n).step_by(step) {
-            let uv = &self.data.uv[f];
-            let pts: Vec<Pos2> = uv.iter().map(|q| to(*q)).collect();
-            let selected = self.data.chart.get(f).is_some_and(|c| sel_charts.contains(c));
-            let m = self.data.face_mat[f] as usize;
-            let c = self.data.slots.get(m).map(|s| s.color).unwrap_or(PALETTE[0]);
-            let fill = if selected { p.accent.gamma_multiply(0.55) } else { Color32::from_rgb(c[0], c[1], c[2]).gamma_multiply(0.35) };
-            if pts.len() >= 3 {
-                for k in 1..pts.len() - 1 {
-                    shapes.push(egui::Shape::convex_polygon(vec![pts[0], pts[k], pts[k + 1]], fill, Stroke::NONE));
-                }
-            }
-            shapes.push(egui::Shape::closed_line(pts, Stroke::new(0.6, if selected { p.accent } else { Color32::from_gray(170) })));
-        }
-        painter.extend(shapes);
-        painter.rect_stroke(rect, 0.0, Stroke::new(1.0, Color32::from_gray(120)), egui::StrokeKind::Outside);
-        // Clic : îlot sous la souris
-        if resp.clicked() || resp.drag_started() {
-            if let Some(pt) = resp.interact_pointer_pos() {
-                let q = from(pt);
-                let hit = (0..n).find(|&f| point_in_poly(q, &self.data.uv[f]));
-                let shift = ui.input(|i| i.modifiers.shift);
-                match hit {
-                    Some(f) => {
-                        let c = self.data.chart[f];
-                        let faces: Vec<u32> = (0..n as u32).filter(|g| self.data.chart[*g as usize] == c).collect();
-                        if !shift && !sel_charts.contains(&c) {
-                            self.sel.clear();
-                        }
-                        self.sel.extend(faces);
-                        self.uv_drag = true;
-                    }
-                    None => {
-                        if !shift {
-                            self.sel.clear();
-                        }
-                        self.uv_drag = false;
-                    }
-                }
-                self.version += 1;
-            }
-        }
-        if resp.dragged() && self.uv_drag {
-            let d = resp.drag_delta();
-            let now: BTreeSet<u32> = self.sel.iter().filter_map(|f| self.data.chart.get(*f as usize).copied()).collect();
-            self.transform_charts(&now, 9, [d.x / side, -d.y / side]);
-        }
-        if resp.drag_stopped() {
-            self.uv_drag = false;
-        }
-        ui.label(RichText::new(crate::i18n::t("clic : îlot · Maj : ajouter · glisser : déplacer")).color(p.muted).size(10.0));
-    }
 }
 
 fn point_in_poly(q: V2, poly: &[V2]) -> bool {
