@@ -131,6 +131,20 @@ pub fn simplify_arrays(positions: &[V3], tris_in: &[[u32; 3]], colors_in: &[Colo
     if tris_in.len() <= target {
         return (positions.to_vec(), tris_in.to_vec(), colors_in.to_vec());
     }
+    // D'abord des contractions d'arêtes propres ; la grille ne finit que ce qu'elles n'ont pas pu
+    let (p, t, ids) = crate::retopo::simplify_to(positions, tris_in, target);
+    let c: Vec<Color32> = ids.iter().map(|&i| colors_in.get(i as usize).copied().unwrap_or(Color32::WHITE)).collect();
+    if t.len() <= target + target / 10 {
+        return (p, t, c);
+    }
+    grid_simplify(&p, &t, &c, target)
+}
+
+/// Simplification par grille, en dernier recours (rapide mais laisse des échardes).
+fn grid_simplify(positions: &[V3], tris_in: &[[u32; 3]], colors_in: &[Color32], target: usize) -> (Vec<V3>, Vec<[u32; 3]>, Vec<Color32>) {
+    if tris_in.len() <= target {
+        return (positions.to_vec(), tris_in.to_vec(), colors_in.to_vec());
+    }
     let mut min = [f32::MAX; 3];
     let mut max = [f32::MIN; 3];
     for v in positions {

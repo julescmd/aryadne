@@ -127,7 +127,69 @@ fn weld(pos: &[V3], tris: &[[u32; 3]]) -> (Vec<V3>, Vec<[u32; 3]>) {
 /// plus courtes que `min_len` sont contractées en leur milieu, sans créer d'arête non
 /// variété ni retourner de triangle. Le calcul qui suit ne dépend alors plus de la taille
 /// du modèle d'origine, seulement du nombre de quads demandé.
-fn decimate(mut pos: Vec<V3>, mut tris: Vec<[u32; 3]>, min_len: f32, sharp: &Features) -> (Vec<V3>, Vec<[u32; 3]>) {
+fn decimate(pos: Vec<V3>, tris: Vec<[u32; 3]>, min_len: f32, sharp: &Features) -> (Vec<V3>, Vec<[u32; 3]>) {
+    let (p, t, _) = decimate_ids(pos, tris, min_len, sharp);
+    (p, t)
+}
+
+/// Simplification propre pour l'affichage et le modificateur « réduire » : contractions
+/// d'arêtes qui ne retournent ni n'écrasent aucun triangle (pas d'échardes ni de trous).
+/// Rend aussi, pour chaque triangle gardé, son indice dans `tris` (pour les couleurs).
+pub fn simplify_to(pos: &[V3], tris: &[[u32; 3]], target: usize) -> (Vec<V3>, Vec<[u32; 3]>, Vec<u32>) {
+    // Soudure des sommets confondus, en gardant l'indice d'origine de chaque triangle
+    let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
+    for p in pos {
+        for k in 0..3 {
+            lo[k] = lo[k].min(p[k]);
+            hi[k] = hi[k].max(p[k]);
+        }
+    }
+    let eps = (len(sub(hi, lo)) * 1e-6).max(1e-12);
+    let mut map: HashMap<[i64; 3], u32> = HashMap::new();
+    let mut wp: Vec<V3> = vec![];
+    let remap: Vec<u32> = pos
+        .iter()
+        .map(|p| {
+            let k = [((p[0] - lo[0]) / eps).round() as i64, ((p[1] - lo[1]) / eps).round() as i64, ((p[2] - lo[2]) / eps).round() as i64];
+            *map.entry(k).or_insert_with(|| {
+                wp.push(*p);
+                (wp.len() - 1) as u32
+            })
+        })
+        .collect();
+    drop(map);
+    let mut ids = vec![];
+    let mut wt = vec![];
+    for (i, t) in tris.iter().enumerate() {
+        let n = [remap[t[0] as usize], remap[t[1] as usize], remap[t[2] as usize]];
+        if n[0] != n[1] && n[1] != n[2] && n[0] != n[2] {
+            wt.push(n);
+            ids.push(i as u32);
+        }
+    }
+    let (mut p, mut t) = (wp, wt);
+    if t.len() <= target {
+        return (p, t, ids);
+    }
+    let area: f32 = t.iter().map(|x| len(cross(sub(p[x[1] as usize], p[x[0] as usize]), sub(p[x[2] as usize], p[x[0] as usize]))) * 0.5).sum();
+    // Longueur d'arête d'un maillage régulier de `target` triangles
+    let mut min_len = (4.0 * area / (3f32.sqrt() * target as f32)).sqrt() * 0.6;
+    for _ in 0..12 {
+        let none = Features { edges: vec![], deg: vec![0; p.len()], tan: vec![] };
+        let before = t.len();
+        let (np, nt, kept) = decimate_ids(p, t, min_len, &none);
+        ids = kept.iter().map(|&k| ids[k as usize]).collect();
+        p = np;
+        t = nt;
+        if t.len() <= target || t.len() == before && min_len > 1e3 {
+            break;
+        }
+        min_len *= 1.35;
+    }
+    (p, t, ids)
+}
+
+fn decimate_ids(mut pos: Vec<V3>, mut tris: Vec<[u32; 3]>, min_len: f32, sharp: &Features) -> (Vec<V3>, Vec<[u32; 3]>, Vec<u32>) {
     let nv = pos.len();
     let mut vf: Vec<Vec<u32>> = vec![vec![]; nv];
     for (fi, t) in tris.iter().enumerate() {
@@ -262,10 +324,12 @@ fn decimate(mut pos: Vec<V3>, mut tris: Vec<[u32; 3]>, min_len: f32, sharp: &Fea
     let mut remap = vec![u32::MAX; nv];
     let mut out_pos = vec![];
     let mut out = vec![];
+    let mut kept = vec![];
     for (fi, t) in tris.iter().enumerate() {
         if !alive[fi] {
             continue;
         }
+        kept.push(fi as u32);
         let mut nt = [0u32; 3];
         for k in 0..3 {
             let v = t[k] as usize;
@@ -278,7 +342,7 @@ fn decimate(mut pos: Vec<V3>, mut tris: Vec<[u32; 3]>, min_len: f32, sharp: &Fea
         out.push(nt);
     }
     tris.clear();
-    (out_pos, out)
+    (out_pos, out, kept)
 }
 
 /// Coupe les arêtes plus longues que `max_len` (découpe conforme 1 → 2, 3 ou 4 triangles).
@@ -1647,6 +1711,7 @@ pub fn remesh(pos: &[V3], tris: &[[u32; 3]], guides: &[Vec<V3>], opt: &Options, 
         }
         res.faces = faces;
     }
+    make_manifold(&mut res);
     // Pôles : sommets intérieurs dont la valence n'est pas 4
     {
         let mut val = vec![0u32; res.pos.len()];
@@ -1670,6 +1735,98 @@ pub fn remesh(pos: &[V3], tris: &[[u32; 3]], guides: &[Vec<V3>], opt: &Options, 
     lap("lissage final");
     progress(1.0);
     res
+}
+
+/// Dernier filet : une arête partagée par plus de deux faces (aileron) perd ses faces les plus
+/// petites, puis toutes les faces prennent le sens de leurs voisines (pas de face retournée).
+fn make_manifold(r: &mut Result) {
+    let area = |f: &Vec<u32>| -> f32 {
+        let mut a = [0.0; 3];
+        for k in 1..f.len().saturating_sub(1) {
+            a = add(a, cross(sub(r.pos[f[k] as usize], r.pos[f[0] as usize]), sub(r.pos[f[k + 1] as usize], r.pos[f[0] as usize])));
+        }
+        len(a)
+    };
+    for _ in 0..3 {
+        let mut ef: HashMap<(u32, u32), Vec<usize>> = HashMap::new();
+        for (fi, f) in r.faces.iter().enumerate() {
+            for k in 0..f.len() {
+                let (a, b) = (f[k], f[(k + 1) % f.len()]);
+                ef.entry((a.min(b), a.max(b))).or_default().push(fi);
+            }
+        }
+        let mut drop = vec![false; r.faces.len()];
+        let mut any = false;
+        for l in ef.values() {
+            let live: Vec<usize> = l.iter().copied().filter(|&f| !drop[f]).collect();
+            if live.len() > 2 {
+                let mut by: Vec<(f32, usize)> = live.iter().map(|&f| (area(&r.faces[f]), f)).collect();
+                by.sort_by(|x, y| y.0.total_cmp(&x.0));
+                for &(_, f) in &by[2..] {
+                    drop[f] = true;
+                    any = true;
+                }
+            }
+        }
+        if !any {
+            break;
+        }
+        let mut i = 0;
+        r.faces.retain(|_| {
+            i += 1;
+            !drop[i - 1]
+        });
+    }
+    // Orientation cohérente par composante (parcours en largeur)
+    let mut ef: HashMap<(u32, u32), Vec<usize>> = HashMap::new();
+    for (fi, f) in r.faces.iter().enumerate() {
+        for k in 0..f.len() {
+            let (a, b) = (f[k], f[(k + 1) % f.len()]);
+            ef.entry((a.min(b), a.max(b))).or_default().push(fi);
+        }
+    }
+    let n = r.faces.len();
+    let mut seen = vec![false; n];
+    let dir = |f: &Vec<u32>, a: u32, b: u32| -> bool { (0..f.len()).any(|k| f[k] == a && f[(k + 1) % f.len()] == b) };
+    for s in 0..n {
+        if seen[s] {
+            continue;
+        }
+        seen[s] = true;
+        let mut comp = vec![s];
+        let mut queue = std::collections::VecDeque::from([s]);
+        while let Some(fi) = queue.pop_front() {
+            let f = r.faces[fi].clone();
+            for k in 0..f.len() {
+                let (a, b) = (f[k], f[(k + 1) % f.len()]);
+                for &g in &ef[&(a.min(b), a.max(b))] {
+                    if g == fi || seen[g] {
+                        continue;
+                    }
+                    seen[g] = true;
+                    // Une voisine bien orientée parcourt l'arête commune dans l'autre sens
+                    if dir(&r.faces[g], a, b) {
+                        r.faces[g].reverse();
+                    }
+                    comp.push(g);
+                    queue.push_back(g);
+                }
+            }
+        }
+        // La composante pointe vers l'extérieur si son volume signé est positif
+        let mut vol = 0.0f32;
+        for &fi in &comp {
+            let f = &r.faces[fi];
+            for k in 1..f.len() - 1 {
+                vol += dot(r.pos[f[0] as usize], cross(r.pos[f[k] as usize], r.pos[f[k + 1] as usize]));
+            }
+        }
+        if vol < 0.0 {
+            for &fi in &comp {
+                r.faces[fi].reverse();
+            }
+        }
+    }
 }
 
 struct Level {
@@ -3106,6 +3263,72 @@ mod tests {
             tris = t;
         }
         (pos, tris)
+    }
+
+    /// Banc d'essai sur un vrai fichier : RETOPO_IN=a.obj RETOPO_OUT=b.obj RETOPO_FACES=6000
+    #[test]
+    #[ignore]
+    fn banc_simplif() {
+        let Ok(inp) = std::env::var("RETOPO_IN") else { return };
+        let (pos, tris) = lire_obj(&inp);
+        let t = std::time::Instant::now();
+        let (p, f, _) = simplify_to(&pos, &tris, 150_000);
+        eprintln!("{} -> {} triangles en {:.1} s", tris.len(), f.len(), t.elapsed().as_secs_f32());
+        let r = Result { pos: p, faces: f.iter().map(|t| t.to_vec()).collect(), stats: Stats::default() };
+        export_obj(&r, &|p| p, std::path::Path::new("/tmp/rt/simpl.obj")).unwrap();
+    }
+
+    fn lire_obj(inp: &str) -> (Vec<V3>, Vec<[u32; 3]>) {
+        let (mut pos, mut tris) = (vec![], vec![]);
+        for l in std::fs::read_to_string(inp).unwrap().lines() {
+            let mut it = l.split_whitespace();
+            match it.next() {
+                Some("v") => {
+                    let c: Vec<f32> = it.take(3).map(|x| x.parse().unwrap()).collect();
+                    pos.push([c[0], c[1], c[2]]);
+                }
+                Some("f") => {
+                    let ix: Vec<u32> = it.map(|t| t.split('/').next().unwrap().parse::<u32>().unwrap() - 1).collect();
+                    for k in 1..ix.len() - 1 {
+                        tris.push([ix[0], ix[k], ix[k + 1]]);
+                    }
+                }
+                _ => {}
+            }
+        }
+        (pos, tris)
+    }
+
+    #[test]
+    #[ignore]
+    fn banc_obj() {
+        let Ok(inp) = std::env::var("RETOPO_IN") else { return };
+        let (mut pos, mut tris) = (vec![], vec![]);
+        for l in std::fs::read_to_string(&inp).unwrap().lines() {
+            let mut it = l.split_whitespace();
+            match it.next() {
+                Some("v") => {
+                    let c: Vec<f32> = it.take(3).map(|x| x.parse().unwrap()).collect();
+                    pos.push([c[0], c[1], c[2]]);
+                }
+                Some("f") => {
+                    let ix: Vec<u32> = it.map(|t| t.split('/').next().unwrap().parse::<u32>().unwrap() - 1).collect();
+                    for k in 1..ix.len() - 1 {
+                        tris.push([ix[0], ix[k], ix[k + 1]]);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut opt = Options::default();
+        opt.faces = std::env::var("RETOPO_FACES").ok().and_then(|x| x.parse().ok()).unwrap_or(6000);
+        opt.symmetry = std::env::var("RETOPO_SYM").ok().and_then(|x| x.parse().ok()).unwrap_or(0);
+        let t = std::time::Instant::now();
+        let r = remesh(&pos, &tris, &[], &opt, &|_| {});
+        eprintln!("{} faces ({} quads) en {:.1} s, {:?}", r.faces.len(), r.quads(), t.elapsed().as_secs_f32(), r.stats);
+        if let Ok(out) = std::env::var("RETOPO_OUT") {
+            export_obj(&r, &|p| p, std::path::Path::new(&out)).unwrap();
+        }
     }
 
     #[test]
