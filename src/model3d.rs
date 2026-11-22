@@ -23,6 +23,8 @@ type V3 = [f32; 3];
 
 #[path = "pathtrace.rs"]
 pub mod pathtrace;
+#[path = "gputrace.rs"]
+pub mod gputrace;
 
 pub struct Model {
     pub positions: Vec<V3>,
@@ -1964,6 +1966,9 @@ pub struct Viewer {
     final_job: Option<pathtrace::Job>,
     final_tex: Option<egui::TextureHandle>,
     oidn_install: Option<std::sync::Arc<std::sync::Mutex<crate::ffmpeg::InstallState>>>,
+    /// La scène sur la carte graphique, et le nombre de passes par image
+    gpu_scene: Option<gputrace::Scene>,
+    gpu_batch: u32,
     capture_msg: Option<String>,
 }
 
@@ -2059,6 +2064,8 @@ impl Viewer {
             final_job: None,
             final_tex: None,
             oidn_install: None,
+            gpu_scene: None,
+            gpu_batch: 4,
             capture_msg: None,
         }
     }
@@ -4091,6 +4098,12 @@ impl Viewer {
                                 ch |= ui.add_enabled(self.trace_set.floor, egui::Checkbox::new(&mut self.trace_set.floor_visible, crate::i18n::t("sol visible"))).changed();
                                 ch |= ui.add(egui::Slider::new(&mut self.trace_set.clamp, 1.0..=100.0).logarithmic(true).text(crate::i18n::t("limite des points brillants"))).changed();
                                 ch |= ui.checkbox(&mut self.trace_set.denoise, crate::i18n::t("débruitage")).changed();
+                                // Carte graphique : bien plus rapide quand il y en a une
+                                if gputrace::hardware() {
+                                    ch |= ui.checkbox(&mut self.trace_set.gpu, format!("{} : {}", crate::i18n::t("carte graphique"), gputrace::device_name().unwrap_or_default())).changed();
+                                } else {
+                                    ui.label(egui::RichText::new(crate::i18n::t("pas de carte graphique utilisable : calcul sur le processeur")).size(10.5).color(p.muted));
+                                }
                                 // Débruiteur par IA (Intel Open Image Denoise), téléchargé une fois
                                 if crate::oidn::installed() {
                                     ui.label(egui::RichText::new(crate::i18n::t("débruiteur IA : Intel Open Image Denoise")).size(10.5).color(p.muted));
@@ -4973,20 +4986,44 @@ impl Viewer {
         // Tracé de chemins : à l'arrêt, l'image s'affine passe après passe (l'aperçu sert pendant le mouvement)
         if self.engine == 1 && !interacting && self.mesh.is_none() {
             if let Some(prepared) = self.prepared.as_ref() {
+                let use_gpu = self.trace_set.gpu && gputrace::hardware();
+                let mut fresh = false;
                 if self.trace.as_ref().is_none_or(|t| t.0 != trace_key) {
-                    let f = (400_000.0 / (size[0] * size[1]) as f32).sqrt().min(1.0);
+                    // Sur la carte graphique : pleine résolution ; sur le processeur : environ 0,4 mégapixel
+                    let f = if use_gpu { 1.0 } else { (400_000.0 / (size[0] * size[1]) as f32).sqrt().min(1.0) };
                     let (tw, th) = (((size[0] as f32 * f) as usize).max(8), ((size[1] as f32 * f) as usize).max(8));
                     self.trace = Some((trace_key.clone(), pathtrace::Accum::new(tw, th)));
+                    fresh = true;
                 }
                 if let Some((_, acc)) = &mut self.trace {
                     if acc.spp < self.trace_max {
-                        // Autant de passes qu'il en tient dans ~40 ms
+                        let before = acc.spp;
                         let t0 = std::time::Instant::now();
-                        while acc.spp < self.trace_max && (acc.spp == 0 || t0.elapsed().as_millis() < 40) {
-                            pathtrace::pass(&prepared.2, &self.cam, &look, &self.trace_set, acc);
+                        let scene_key = {
+                            use std::hash::{Hash, Hasher};
+                            let mut hh = std::collections::hash_map::DefaultHasher::new();
+                            (trace_key.2, trace_key.3, &trace_key.4).hash(&mut hh);
+                            hh.finish()
+                        };
+                        if use_gpu && gputrace::prepare(&mut self.gpu_scene, &prepared.2, &look, scene_key, acc.w, acc.h) {
+                            let s = self.gpu_scene.as_mut().unwrap();
+                            if fresh {
+                                gputrace::reset(s);
+                            }
+                            // Quelques passes par image, relues d'un coup
+                            let n = (self.trace_max - acc.spp).min(self.gpu_batch);
+                            gputrace::passes(s, &prepared.2, &self.cam, &look, &self.trace_set, n, acc);
+                            // Ajuste le nombre de passes pour rester autour de 30 ms
+                            let ms = t0.elapsed().as_millis() as u32;
+                            self.gpu_batch = if ms < 20 { (self.gpu_batch * 2).min(64) } else if ms > 45 { (self.gpu_batch / 2).max(1) } else { self.gpu_batch };
+                        } else {
+                            // Autant de passes qu'il en tient dans ~40 ms
+                            while acc.spp < self.trace_max && (acc.spp == 0 || t0.elapsed().as_millis() < 40) {
+                                pathtrace::pass(&prepared.2, &self.cam, &look, &self.trace_set, acc);
+                            }
                         }
                         // L'IA (plus lente) passe quand l'image est finie et toutes les 16 passes ; le filtre rapide entre-temps
-                        let ai = acc.spp >= self.trace_max || acc.spp % 16 == 0;
+                        let ai = acc.spp >= self.trace_max || acc.spp / 16 != before / 16;
                         let img = egui::ColorImage::from_rgba_unmultiplied([acc.w, acc.h], &acc.image_ex(look.exposure, self.trace_set.denoise, ai));
                         match &mut self.tex {
                             Some(t) => t.set(img, egui::TextureOptions::LINEAR),

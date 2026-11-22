@@ -1356,5 +1356,10 @@
  "Rendu final en tracé de chemins, à la taille choisie, puis enregistrement en PNG": "Final path-traced render at the chosen size, then save as PNG",
  "rendu final": "final render",
  "rendre": "render",
- "Le point de vue est celui de la vue 3D ; rebonds et sol comme dans le menu « rendu ».": "Uses the 3D view's point of view; bounces and floor as in the « render » menu."
+ "Le point de vue est celui de la vue 3D ; rebonds et sol comme dans le menu « rendu ».": "Uses the 3D view's point of view; bounces and floor as in the « render » menu.",
+ "carte graphique": "graphics card",
+ "pas de carte graphique utilisable : calcul sur le processeur": "no usable graphics card: rendering on the CPU",
+ "débruiteur IA : Intel Open Image Denoise": "AI denoiser: Intel Open Image Denoise",
+ "installer le débruiteur IA (~65 Mo)": "install the AI denoiser (~65 MB)",
+ "Intel Open Image Denoise, le débruiteur de Cycles, Arnold et V-Ray. Sans droits admin.": "Intel Open Image Denoise, the denoiser used by Cycles, Arnold and V-Ray. No admin rights needed."
 }

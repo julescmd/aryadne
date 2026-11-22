@@ -9,11 +9,11 @@ pub struct Accum {
     pub w: usize,
     pub h: usize,
     /// Somme des échantillons (lumière linéaire) et couverture (0 : fond transparent)
-    sum: Vec<[f32; 3]>,
-    cover: Vec<f32>,
+    pub(super) sum: Vec<[f32; 3]>,
+    pub(super) cover: Vec<f32>,
     /// Normale et couleur de surface du premier impact (guident le débruitage)
-    nrm: Vec<[f32; 3]>,
-    alb: Vec<[f32; 3]>,
+    pub(super) nrm: Vec<[f32; 3]>,
+    pub(super) alb: Vec<[f32; 3]>,
     pub spp: u32,
 }
 
@@ -28,11 +28,13 @@ pub struct Settings {
     pub floor_visible: bool,
     /// Débruitage de l'image affichée
     pub denoise: bool,
+    /// Calcul sur la carte graphique (si elle est là)
+    pub gpu: bool,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { bounces: 6, floor: true, clamp: 12.0, floor_visible: false, denoise: true }
+        Settings { bounces: 6, floor: true, clamp: 12.0, floor_visible: false, denoise: true, gpu: true }
     }
 }
 
@@ -156,8 +158,13 @@ impl Job {
         std::thread::spawn(move || {
             let mut acc = Accum::new(w, h);
             let mut last = std::time::Instant::now();
+            let mut gpu = None;
+            let on_gpu = set.gpu && super::gputrace::hardware() && super::gputrace::prepare(&mut gpu, &m, &look, 0xF12, w, h);
             while acc.spp < target && !stop.load(std::sync::atomic::Ordering::Relaxed) {
-                pass(&m, &cam, &look, &set, &mut acc);
+                match gpu.as_mut().filter(|_| on_gpu) {
+                    Some(s) => super::gputrace::passes(s, &m, &cam, &look, &set, (target - acc.spp).min(8), &mut acc),
+                    None => pass(&m, &cam, &look, &set, &mut acc),
+                }
                 // Une image intermédiaire par seconde environ, et la dernière
                 if acc.spp == 1 || acc.spp == target || last.elapsed().as_secs_f32() > 1.0 {
                     last = std::time::Instant::now();
@@ -227,16 +234,16 @@ fn local(n: V3, x: f32, y: f32, z: f32) -> V3 {
 }
 
 /// Ce qu'une surface fait de la lumière.
-struct Surf {
-    albedo: V3,
-    rough: f32,
-    metal: f32,
-    emit: V3,
-    n: V3,
+pub(super) struct Surf {
+    pub(super) albedo: V3,
+    pub(super) rough: f32,
+    pub(super) metal: f32,
+    pub(super) emit: V3,
+    pub(super) n: V3,
 }
 
 /// Matériau du triangle `ti` au point de coordonnées barycentriques (w0, w1).
-fn surface(m: &Prepared, look: &Look, ti: usize, w0: f32, w1: f32, view: V3, res: [f32; 2]) -> Surf {
+pub(super) fn surface(m: &Prepared, look: &Look, ti: usize, w0: f32, w1: f32, view: V3, res: [f32; 2]) -> Surf {
     let t = m.tris[ti];
     let w2 = 1.0 - w0 - w1;
     let (pa, pb, pc) = (m.pos[t[0] as usize], m.pos[t[1] as usize], m.pos[t[2] as usize]);

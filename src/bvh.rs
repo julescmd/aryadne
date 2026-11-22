@@ -51,6 +51,23 @@ impl Bvh {
         Bvh { nodes, tris: items.into_iter().map(|x| (x.0, x.1, x.2, x.3)).collect() }
     }
 
+    /// L'arbre à plat pour la carte graphique : nœuds (min + début, max + nombre) et triangles
+    /// (sommet + indice d'origine, deux arêtes), dans l'ordre des feuilles.
+    pub fn flat(&self) -> (Vec<[f32; 4]>, Vec<[f32; 4]>) {
+        let mut nodes = Vec::with_capacity(self.nodes.len() * 2);
+        for n in &self.nodes {
+            nodes.push([n.lo[0], n.lo[1], n.lo[2], f32::from_bits(n.start)]);
+            nodes.push([n.hi[0], n.hi[1], n.hi[2], f32::from_bits(n.count)]);
+        }
+        let mut tris = Vec::with_capacity(self.tris.len() * 3);
+        for t in &self.tris {
+            tris.push([t.0[0], t.0[1], t.0[2], f32::from_bits(t.3)]);
+            tris.push([t.1[0], t.1[1], t.1[2], 0.0]);
+            tris.push([t.2[0], t.2[1], t.2[2], 0.0]);
+        }
+        (nodes, tris)
+    }
+
     /// Premier triangle touché entre `tmin` et `tmax`.
     pub fn closest(&self, o: V3, d: V3, tmin: f32, tmax: f32) -> Option<Hit> {
         self.trace(o, d, tmin, tmax, false)
