@@ -1580,6 +1580,8 @@ struct MeshEdit {
     skip_click: bool,
     /// Ce qu'on choisit au clic : 0 sommets, 1 arêtes, 2 faces (1, 2, 3 comme dans Blender)
     mode: u8,
+    /// Dernier sommet cliqué : départ du plus court chemin (Ctrl+clic)
+    active: Option<usize>,
 }
 
 /// Sépare les sommets partagés par des faces qui font entre elles un angle marqué : les arêtes vives
@@ -2162,7 +2164,7 @@ impl Viewer {
             (f, mesh)
         };
         let n = mesh.pos.len();
-        self.mesh = Some(MeshEdit { obj: k, file, mesh, sel: vec![false; n], hist: vec![], modal: None, boxing: None, skip_click: false, mode: 0 });
+        self.mesh = Some(MeshEdit { obj: k, file, mesh, sel: vec![false; n], hist: vec![], modal: None, boxing: None, skip_click: false, mode: 0, active: None });
         self.scene_multi.clear();
         self.capture_msg = None;
     }
@@ -2435,7 +2437,19 @@ impl Viewer {
                 }
             }
             // ---- Sélection : rectangle, ou clic sur le sommet le plus proche
-            let shift = ui.input(|i| i.modifiers.shift);
+            let (shift, ctrl_down, alt_down) = ui.input(|i| (i.modifiers.shift, i.modifiers.command, i.modifiers.alt));
+            // Ctrl+I inverser, Ctrl+plus étendre, Ctrl+moins réduire
+            if !typing && ctrl_down {
+                if ui.input(|i| i.key_pressed(Key::I)) {
+                    me.sel.iter_mut().for_each(|s| *s = !*s);
+                }
+                if ui.input(|i| i.key_pressed(Key::Plus) || i.key_pressed(Key::Equals)) {
+                    me.sel = me.mesh.grow(&me.sel);
+                }
+                if ui.input(|i| i.key_pressed(Key::Minus)) {
+                    me.sel = me.mesh.shrink(&me.sel);
+                }
+            }
             if let Some(start) = me.boxing {
                 let down = ui.input(|i| i.pointer.primary_down());
                 match (start, cur) {
@@ -2447,7 +2461,8 @@ impl Viewer {
                         if !down {
                             for i in 0..me.mesh.pos.len() {
                                 let inside = project(to_world(me.mesh.pos[i])).is_some_and(|s| area.contains(s));
-                                me.sel[i] = if shift { me.sel[i] || inside } else { inside };
+                                // Maj : ajoute ; Ctrl : retire ; sinon : remplace
+                                me.sel[i] = if ctrl_down { me.sel[i] && !inside } else if shift { me.sel[i] || inside } else { inside };
                             }
                             me.boxing = None;
                             me.skip_click = true;
@@ -2462,8 +2477,44 @@ impl Viewer {
             } else if resp.clicked() && !me.skip_click {
                 if let Some(at) = resp.interact_pointer_pos() {
                     let scr: Vec<Option<Pos2>> = me.mesh.pos.iter().map(|v| project(to_world(*v))).collect();
+                    let nearest_edge = |scr: &[Option<Pos2>]| me.mesh.edges().into_iter().filter_map(|(a, b)| {
+                        let (sa, sb) = (scr[a as usize]?, scr[b as usize]?);
+                        let ab = sb - sa;
+                        let t = ((at - sa).dot(ab) / ab.length_sq().max(1e-6)).clamp(0.0, 1.0);
+                        let d = (sa + ab * t - at).length();
+                        (d < 10.0).then_some(((a, b), d))
+                    }).min_by(|x, y| x.1.total_cmp(&y.1)).map(|x| x.0);
+                    let nearest_vert = |scr: &[Option<Pos2>]| (0..scr.len()).filter_map(|i| scr[i].map(|s| (i, (s - at).length()))).filter(|x| x.1 < 11.0).min_by(|a, b| a.1.total_cmp(&b.1)).map(|x| x.0);
+                    // Alt+clic : la boucle d'arêtes ; Ctrl+clic : le plus court chemin depuis le dernier sommet cliqué
+                    let special: Option<Vec<usize>> = if alt_down {
+                        nearest_edge(&scr).map(|(a, b)| me.mesh.edge_loop(a, b).into_iter().map(|v| v as usize).collect())
+                    } else if ctrl_down {
+                        match (me.active, nearest_vert(&scr)) {
+                            (Some(a), Some(b)) if a < me.mesh.pos.len() => {
+                                me.active = Some(b);
+                                Some(me.mesh.shortest_path(a as u32, b as u32).into_iter().map(|v| v as usize).collect())
+                            }
+                            _ => None,
+                        }
+                    } else {
+                        None
+                    };
+                    if let Some(vs) = special {
+                        if !shift && alt_down {
+                            me.sel.iter_mut().for_each(|s| *s = false);
+                        }
+                        for i in vs {
+                            if i < me.sel.len() {
+                                me.sel[i] = true;
+                            }
+                        }
+                        me.skip_click = true;
+                    }
+                    if let Some(v) = nearest_vert(&scr).filter(|_| !ctrl_down) {
+                        me.active = Some(v);
+                    }
                     // Ce qu'on vise : un sommet, une arête (ses deux bouts) ou une face (tous ses sommets)
-                    let hit: Option<Vec<usize>> = match me.mode {
+                    let hit: Option<Vec<usize>> = if me.skip_click { None } else { match me.mode {
                         1 => me.mesh.edges().into_iter().filter_map(|(a, b)| {
                             let (sa, sb) = (scr[a as usize]?, scr[b as usize]?);
                             let ab = sb - sa;
@@ -2486,7 +2537,7 @@ impl Viewer {
                             inside.then(|| (poly.iter().map(|&v| v as usize).collect::<Vec<usize>>(), depth))
                         }).min_by(|x, y| x.1.total_cmp(&y.1)).map(|x| x.0),
                         _ => (0..me.mesh.pos.len()).filter_map(|i| scr[i].map(|s| (i, (s - at).length()))).filter(|x| x.1 < 11.0).min_by(|a, b| a.1.total_cmp(&b.1)).map(|x| vec![x.0]),
-                    };
+                    } };
                     match hit {
                         Some(vs) if shift => {
                             let all = vs.iter().all(|&i| me.sel[i]);
@@ -2500,7 +2551,7 @@ impl Viewer {
                                 me.sel[i] = true;
                             }
                         }
-                        None if !shift => me.sel.iter_mut().for_each(|s| *s = false),
+                        None if !shift && !me.skip_click => me.sel.iter_mut().for_each(|s| *s = false),
                         None => {}
                     }
                 }
@@ -2790,6 +2841,14 @@ impl Viewer {
             if none {
                 self.scene_multi.clear();
                 self.scene_sel = None;
+            }
+            if ui.input(|i| i.modifiers.command && i.key_pressed(Key::I)) {
+                let mut cur: Vec<usize> = self.scene_multi.clone();
+                cur.extend(self.scene_sel);
+                let inv: Vec<usize> = (0..scene.objects.len()).filter(|k| !cur.contains(k) && scene.shown(*k)).collect();
+                self.scene_sel = inv.last().copied();
+                self.scene_multi = if inv.len() > 1 { inv } else { vec![] };
+                self.multi_follow = None;
             }
             if boxk {
                 self.box_sel = Some(None);
@@ -4777,8 +4836,14 @@ impl Viewer {
             self.scene_sel = Some(k);
         }
         if let Some(mut list) = boxed_pick {
-            // Maj : ajoute à la sélection actuelle
-            if mods.shift {
+            // Ctrl : retire de la sélection ; Maj : ajoute
+            if mods.command {
+                let mut all: Vec<usize> = self.scene_multi.clone();
+                all.extend(self.scene_sel);
+                all.retain(|k| !list.contains(k));
+                all.dedup();
+                list = all;
+            } else if mods.shift {
                 let mut all: Vec<usize> = self.scene_multi.clone();
                 all.extend(self.scene_sel);
                 all.retain(|k| !list.contains(k));

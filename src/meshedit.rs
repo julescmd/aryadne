@@ -148,6 +148,124 @@ impl EMesh {
         seen.into_iter().collect()
     }
 
+    /// Voisins de chaque sommet (par les arêtes).
+    pub fn neighbors(&self) -> Vec<Vec<u32>> {
+        let mut n: Vec<Vec<u32>> = vec![vec![]; self.pos.len()];
+        for (a, b) in self.edges() {
+            n[a as usize].push(b);
+            n[b as usize].push(a);
+        }
+        n
+    }
+
+    /// Le plus court chemin de `a` à `b` en suivant les arêtes (Ctrl+clic), longueurs réelles comprises.
+    pub fn shortest_path(&self, a: u32, b: u32) -> Vec<u32> {
+        let n = self.neighbors();
+        let len = |x: u32, y: u32| {
+            let (p, q) = (self.pos[x as usize], self.pos[y as usize]);
+            ((p[0] - q[0]).powi(2) + (p[1] - q[1]).powi(2) + (p[2] - q[2]).powi(2)).sqrt()
+        };
+        let mut dist = vec![f32::INFINITY; self.pos.len()];
+        let mut prev = vec![u32::MAX; self.pos.len()];
+        let mut done = vec![false; self.pos.len()];
+        if a as usize >= dist.len() || b as usize >= dist.len() {
+            return vec![];
+        }
+        dist[a as usize] = 0.0;
+        // Dijkstra simple : les maillages qu'on modifie à la main restent petits
+        let mut heap = std::collections::BinaryHeap::new();
+        heap.push((std::cmp::Reverse(0u64), a));
+        while let Some((_, v)) = heap.pop() {
+            if done[v as usize] {
+                continue;
+            }
+            done[v as usize] = true;
+            if v == b {
+                break;
+            }
+            for &w in &n[v as usize] {
+                let d = dist[v as usize] + len(v, w);
+                if d < dist[w as usize] {
+                    dist[w as usize] = d;
+                    prev[w as usize] = v;
+                    heap.push((std::cmp::Reverse((d * 1e6) as u64), w));
+                }
+            }
+        }
+        if !dist[b as usize].is_finite() {
+            return vec![];
+        }
+        let mut path = vec![b];
+        let mut v = b;
+        while v != a {
+            v = prev[v as usize];
+            path.push(v);
+        }
+        path.reverse();
+        path
+    }
+
+    /// Boucle d'arêtes passant par l'arête (a, b) (Alt+clic) : on traverse les sommets à quatre voisins
+    /// en prenant chaque fois l'arête d'en face, comme dans Blender.
+    pub fn edge_loop(&self, a: u32, b: u32) -> Vec<u32> {
+        let n = self.neighbors();
+        // Faces qui touchent une arête
+        let faces_of = |x: u32, y: u32| -> Vec<usize> { (0..self.polys.len()).filter(|&f| self.polys[f].contains(&x) && self.polys[f].contains(&y)).collect() };
+        let walk = |from: u32, to: u32| -> Vec<u32> {
+            let mut out = vec![];
+            let (mut u, mut v) = (from, to);
+            for _ in 0..self.pos.len() {
+                if n[v as usize].len() != 4 {
+                    break;
+                }
+                let fa = faces_of(u, v);
+                // L'arête suivante ne partage aucune face avec celle d'où l'on vient
+                let next = n[v as usize].iter().copied().find(|&w| w != u && faces_of(v, w).iter().all(|f| !fa.contains(f)));
+                let Some(w) = next else { break };
+                if w == from || out.contains(&w) {
+                    break;
+                }
+                out.push(w);
+                (u, v) = (v, w);
+            }
+            out
+        };
+        let mut fwd = walk(a, b);
+        let back = walk(b, a);
+        let mut all: Vec<u32> = back.into_iter().rev().collect();
+        all.push(a);
+        all.push(b);
+        all.append(&mut fwd);
+        all.dedup();
+        all
+    }
+
+    /// Étend la sélection d'un cran (Ctrl+plus) : les voisins des sommets choisis.
+    pub fn grow(&self, sel: &[bool]) -> Vec<bool> {
+        let mut out: Vec<bool> = (0..self.pos.len()).map(|i| sel.get(i).copied().unwrap_or(false)).collect();
+        for (a, b) in self.edges() {
+            let (sa, sb) = (sel.get(a as usize).copied().unwrap_or(false), sel.get(b as usize).copied().unwrap_or(false));
+            if sa || sb {
+                out[a as usize] = true;
+                out[b as usize] = true;
+            }
+        }
+        out
+    }
+
+    /// Réduit la sélection d'un cran (Ctrl+moins) : on retire les sommets du bord de la sélection.
+    pub fn shrink(&self, sel: &[bool]) -> Vec<bool> {
+        let on = |i: u32| sel.get(i as usize).copied().unwrap_or(false);
+        let mut out: Vec<bool> = (0..self.pos.len()).map(|i| on(i as u32)).collect();
+        for (a, b) in self.edges() {
+            if on(a) != on(b) {
+                out[a as usize] = false;
+                out[b as usize] = false;
+            }
+        }
+        out
+    }
+
     /// Supprime les sommets choisis et les faces qui s'en servaient.
     pub fn delete(&mut self, sel: &[bool]) {
         self.polys.retain(|p| !p.iter().any(|&v| sel.get(v as usize).copied().unwrap_or(false)));
@@ -373,6 +491,35 @@ pub fn apply(c: &[V3; 3], v: V3) -> V3 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chemins_et_boucles() {
+        // Grille de 4 × 4 quadrilatères (5 × 5 sommets)
+        let mut m = EMesh::default();
+        for y in 0..5 {
+            for x in 0..5 {
+                m.pos.push([x as f32, 0.0, y as f32]);
+            }
+        }
+        for y in 0..4u32 {
+            for x in 0..4u32 {
+                let i = y * 5 + x;
+                m.polys.push(vec![i, i + 1, i + 6, i + 5]);
+            }
+        }
+        // Le plus court chemin d'un coin à l'autre de la même rangée : la rangée elle-même
+        assert_eq!(m.shortest_path(0, 4), vec![0, 1, 2, 3, 4]);
+        // La boucle passant par l'arête (11, 12) au milieu : toute la rangée du milieu
+        let mut l = m.edge_loop(11, 12);
+        l.sort();
+        assert_eq!(l, vec![10, 11, 12, 13, 14]);
+        // Étendre puis réduire revient au départ (loin des bords)
+        let mut sel = vec![false; 25];
+        sel[12] = true;
+        let g = m.grow(&sel);
+        assert_eq!(g.iter().filter(|x| **x).count(), 5);
+        assert_eq!(m.shrink(&g), sel);
+    }
 
     #[test]
     fn inset_fusion_lies() {
