@@ -1730,7 +1730,9 @@ fn remesh_core(pos: &[V3], tris: &[[u32; 3]], guides: &[Vec<V3>], opt: &Options,
     }
     lap("préparation");
     let (cdir, cani) = if opt.curvature > 0.0 { curvature(&v, &nrm, &adj, h) } else { (vec![[0.0; 3]; n_v], vec![0.0; n_v]) };
-    let s0: f32 = std::env::var("S0").ok().and_then(|x| x.parse().ok()).unwrap_or(0.6);
+    // Une courbure même douce mais régulière (corps conique, bras, bec) guide les boucles : anneaux
+    // autour des formes plutôt qu'une grille droite qui coupe en diagonale
+    let s0: f32 = std::env::var("S0").ok().and_then(|x| x.parse().ok()).unwrap_or(0.15);
     let cw: Vec<f32> = cani.iter().map(|s| s * s / (s * s + s0 * s0)).collect();
     for i in 0..n_v {
         if !fixed[i] && cw[i] > 0.05 {
@@ -2722,7 +2724,11 @@ fn curvature(v: &[V3], n: &[V3], adj: &[Vec<u32>], h: f32) -> (Vec<V3>, Vec<f32>
         let (m11, m12, m22) = (tm(b1, b1), tm(b1, b2), tm(b2, b2));
         let th = 0.5 * (2.0 * m12).atan2(m11 - m22);
         dir[i] = add(mul(b1, th.cos()), mul(b2, th.sin()));
-        ani[i] = 8.0 * (((m11 - m22) * 0.5).powi(2) + m12 * m12).sqrt() * h;
+        let d = (((m11 - m22) * 0.5).powi(2) + m12 * m12).sqrt();
+        // Part d'anisotropie : 1 sur un cylindre ou un cône, ~0 sur une sphère (où le bruit du
+        // maillage donnerait des directions au hasard)
+        let r = (2.0 * d / (d + (m11 + m22).abs() * 0.5 + 1e-12)).min(1.0);
+        ani[i] = 8.0 * d * h * r;
     }
     (dir, ani)
 }
