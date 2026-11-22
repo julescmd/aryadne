@@ -1951,7 +1951,7 @@ pub struct Viewer {
     job: Option<(u64, Receiver<Prepared>)>,
     turntable: bool,
     pub z_up: Option<bool>,
-    prepared: Option<(bool, u64, Prepared)>,
+    prepared: Option<(bool, u64, std::sync::Arc<Prepared>)>,
     tex: Option<egui::TextureHandle>,
     last: Option<(Camera, [usize; 2], bool, u64, String)>,
     /// Moteur de la vue : 0 aperçu (rapide), 1 tracé de chemins (réaliste, s'affine à l'arrêt)
@@ -1959,6 +1959,10 @@ pub struct Viewer {
     trace: Option<((Camera, [usize; 2], bool, u64, String), pathtrace::Accum)>,
     pub trace_set: pathtrace::Settings,
     pub trace_max: u32,
+    /// Rendu final (F12) : réglages avant de lancer (largeur, hauteur, échantillons), puis le rendu en cours
+    render_dialog: Option<(usize, usize, u32)>,
+    final_job: Option<pathtrace::Job>,
+    final_tex: Option<egui::TextureHandle>,
     capture_msg: Option<String>,
 }
 
@@ -2050,6 +2054,9 @@ impl Viewer {
             trace: None,
             trace_set: pathtrace::Settings::default(),
             trace_max: 256,
+            render_dialog: None,
+            final_job: None,
+            final_tex: None,
             capture_msg: None,
         }
     }
@@ -2711,6 +2718,106 @@ impl Viewer {
             let _ = me.mesh.write_obj(&me.file);
             self.scene_dirty = true;
             ui.ctx().request_repaint();
+        }
+    }
+
+    /// F12 : réglages du rendu final, puis sa fenêtre (progression, image, enregistrement).
+    fn final_render_ui(&mut self, ctx: &egui::Context, look: &Look) {
+        let p = theme::pal();
+        if ctx.input(|i| i.key_pressed(egui::Key::F12)) && self.render_dialog.is_none() && self.final_job.is_none() {
+            self.render_dialog = Some((1920, 1080, 256));
+        }
+        if let Some((mut w, mut h, mut spp)) = self.render_dialog {
+            let mut go = false;
+            let mut close = false;
+            egui::Window::new(crate::i18n::t("rendu final")).collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]).show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.add(egui::DragValue::new(&mut w).range(16..=8192).suffix(" px"));
+                    ui.label("×");
+                    ui.add(egui::DragValue::new(&mut h).range(16..=8192).suffix(" px"));
+                });
+                ui.horizontal_wrapped(|ui| {
+                    for (a, b, l) in [(1280, 720, "720p"), (1920, 1080, "1080p"), (3840, 2160, "4K"), (1080, 1350, "portrait"), (2048, 2048, "carré")] {
+                        if ui.selectable_label(w == a && h == b, l).clicked() {
+                            (w, h) = (a, b);
+                        }
+                    }
+                });
+                ui.add(egui::Slider::new(&mut spp, 8..=4096).logarithmic(true).text(crate::i18n::t("échantillons")));
+                ui.checkbox(&mut self.trace_set.denoise, crate::i18n::t("débruitage"));
+                ui.label(egui::RichText::new(crate::i18n::t("Le point de vue est celui de la vue 3D ; rebonds et sol comme dans le menu « rendu ».")).size(10.5).color(p.muted));
+                ui.horizontal(|ui| {
+                    if ui.add(egui::Button::new(egui::RichText::new(crate::i18n::t("rendre")).color(p.on_accent)).fill(p.accent)).clicked() {
+                        go = true;
+                    }
+                    if ui.button(crate::i18n::t("annuler")).clicked() {
+                        close = true;
+                    }
+                });
+            });
+            self.render_dialog = if go || close { None } else { Some((w, h, spp)) };
+            if go {
+                if let Some((_, _, prep)) = &self.prepared {
+                    self.final_job = Some(pathtrace::Job::start(prep.clone(), self.cam, look.clone(), self.trace_set, w, h, spp, ctx.clone()));
+                    self.final_tex = None;
+                }
+            }
+        }
+        let Some(job) = &mut self.final_job else { return };
+        let done = job.poll();
+        if let Some(img) = job.image.take() {
+            let ci = egui::ColorImage::from_rgba_unmultiplied([job.w, job.h], &img);
+            match &mut self.final_tex {
+                Some(t) => t.set(ci, egui::TextureOptions::LINEAR),
+                None => self.final_tex = Some(ctx.load_texture("final-render", ci, egui::TextureOptions::LINEAR)),
+            }
+            job.image = Some(img);
+        }
+        let (mut close, mut save) = (false, false);
+        let mut open = true;
+        egui::Window::new(crate::i18n::t("rendu")).open(&mut open).default_size([720.0, 480.0]).resizable(true).show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                ui.add(egui::ProgressBar::new(job.spp as f32 / job.target.max(1) as f32).desired_width(260.0).fill(p.accent).text(format!("{} / {} · {:.0} s", job.spp, job.target, job.elapsed)));
+                if !done && ui.button(crate::i18n::t("arrêter")).clicked() {
+                    job.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+                    job.target = job.spp;
+                }
+                if ui.add_enabled(job.image.is_some(), egui::Button::new(crate::i18n::t("enregistrer…"))).clicked() {
+                    save = true;
+                }
+                if ui.button(crate::i18n::t("fermer")).clicked() {
+                    close = true;
+                }
+            });
+            if let Some(t) = &self.final_tex {
+                let avail = ui.available_size();
+                let k = (avail.x / job.w as f32).min(avail.y / job.h as f32).min(1.0).max(0.05);
+                let size = egui::vec2(job.w as f32 * k, job.h as f32 * k);
+                let (r, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+                // Damier sous les zones transparentes
+                ui.painter().rect_filled(r, 0.0, Color32::from_gray(if theme::is_dark() { 40 } else { 225 }));
+                ui.painter().image(t.id(), r, egui::Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+            } else {
+                ui.spinner();
+            }
+        });
+        if save {
+            if let Some(img) = &job.image {
+                if let Some(path) = rfd::FileDialog::new().add_filter("PNG", &["png"]).set_file_name("rendu.png").save_file() {
+                    let path = if path.extension().is_none() { path.with_extension("png") } else { path };
+                    if let Some(buf) = image::RgbaImage::from_raw(job.w as u32, job.h as u32, img.clone()) {
+                        let _ = buf.save(&path);
+                    }
+                }
+            }
+        }
+        if close || !open {
+            job.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+            self.final_job = None;
+            self.final_tex = None;
+        }
+        if !done {
+            ctx.request_repaint_after(std::time::Duration::from_millis(250));
         }
     }
 
@@ -3616,12 +3723,12 @@ impl Viewer {
                 prep.uv = uvs;
                 prep.mat = e.tri_mat.clone();
                 self.edit_seen = e.version;
-                self.prepared = Some((z_up, 0xED17_0000_0000 + e.version, prep));
+                self.prepared = Some((z_up, 0xED17_0000_0000 + e.version, std::sync::Arc::new(prep)));
                 self.last = None;
             }
         } else if let Some((k, rx)) = &self.job {
             if let Ok(p) = rx.try_recv() {
-                self.prepared = Some((z_up, *k, p));
+                self.prepared = Some((z_up, *k, std::sync::Arc::new(p)));
                 self.last = None;
                 self.job = None;
             } else {
@@ -3685,7 +3792,7 @@ impl Viewer {
                         self.slot_rev += 1;
                     }
                 }
-                if let Some((_, _, prep)) = &mut self.prepared {
+                if let Some(prep) = self.prepared.as_mut().and_then(|p| std::sync::Arc::get_mut(&mut p.2)) {
                     let total = self.scene_ranges.last().map(|r| r.2);
                     if prep.mat.len() != prep.tris.len() && total == Some(prep.tris.len()) {
                         prep.mat = vec![0; prep.tris.len()];
@@ -3981,9 +4088,15 @@ impl Viewer {
                                 ch |= ui.checkbox(&mut self.trace_set.floor, crate::i18n::t("sol (ombres et rebonds)")).changed();
                                 ch |= ui.add_enabled(self.trace_set.floor, egui::Checkbox::new(&mut self.trace_set.floor_visible, crate::i18n::t("sol visible"))).changed();
                                 ch |= ui.add(egui::Slider::new(&mut self.trace_set.clamp, 1.0..=100.0).logarithmic(true).text(crate::i18n::t("limite des points brillants"))).changed();
+                                ch |= ui.checkbox(&mut self.trace_set.denoise, crate::i18n::t("débruitage")).changed();
                                 if ch {
                                     self.trace = None;
                                 }
+                            }
+                            ui.separator();
+                            if ui.button(crate::i18n::t("rendre l'image…   F12")).on_hover_text(crate::i18n::t("Rendu final en tracé de chemins, à la taille choisie, puis enregistrement en PNG")).clicked() {
+                                self.render_dialog = Some((1920, 1080, 256));
+                                ui.close();
                             }
                         });
                         let nodes_on = self.mat_active.is_some();
@@ -4828,6 +4941,7 @@ impl Viewer {
         if interacting {
             ui.ctx().request_repaint();
         }
+        self.final_render_ui(ui.ctx(), &look);
         // Tracé de chemins : à l'arrêt, l'image s'affine passe après passe (l'aperçu sert pendant le mouvement)
         if self.engine == 1 && !interacting && self.mesh.is_none() {
             if let Some(prepared) = self.prepared.as_ref() {
@@ -4843,7 +4957,7 @@ impl Viewer {
                         while acc.spp < self.trace_max && (acc.spp == 0 || t0.elapsed().as_millis() < 40) {
                             pathtrace::pass(&prepared.2, &self.cam, &look, &self.trace_set, acc);
                         }
-                        let img = egui::ColorImage::from_rgba_unmultiplied([acc.w, acc.h], &acc.rgba(look.exposure));
+                        let img = egui::ColorImage::from_rgba_unmultiplied([acc.w, acc.h], &acc.image(look.exposure, self.trace_set.denoise));
                         match &mut self.tex {
                             Some(t) => t.set(img, egui::TextureOptions::LINEAR),
                             None => self.tex = Some(ui.ctx().load_texture("model3d", img, egui::TextureOptions::LINEAR)),

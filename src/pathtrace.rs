@@ -11,6 +11,9 @@ pub struct Accum {
     /// Somme des échantillons (lumière linéaire) et couverture (0 : fond transparent)
     sum: Vec<[f32; 3]>,
     cover: Vec<f32>,
+    /// Normale et couleur de surface du premier impact (guident le débruitage)
+    nrm: Vec<[f32; 3]>,
+    alb: Vec<[f32; 3]>,
     pub spp: u32,
 }
 
@@ -23,37 +26,142 @@ pub struct Settings {
     pub clamp: f32,
     /// Sol visible (sinon il ne montre que les ombres, sur le fond de la vue)
     pub floor_visible: bool,
+    /// Débruitage de l'image affichée
+    pub denoise: bool,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { bounces: 6, floor: true, clamp: 12.0, floor_visible: false }
+        Settings { bounces: 6, floor: true, clamp: 12.0, floor_visible: false, denoise: true }
     }
 }
 
 impl Accum {
     pub fn new(w: usize, h: usize) -> Accum {
-        Accum { w, h, sum: vec![[0.0; 3]; w * h], cover: vec![0.0; w * h], spp: 0 }
+        Accum { w, h, sum: vec![[0.0; 3]; w * h], cover: vec![0.0; w * h], nrm: vec![[0.0; 3]; w * h], alb: vec![[0.0; 3]; w * h], spp: 0 }
     }
 
-    /// L'image affichable (RGBA, tonemap et exposition de la vue).
-    pub fn rgba(&self, exposure: f32) -> Vec<u8> {
+    /// Lumière moyenne de chaque pixel (couleur non prémultipliée) et couverture.
+    fn mean(&self) -> (Vec<[f32; 3]>, Vec<f32>) {
         let n = self.spp.max(1) as f32;
+        let cover: Vec<f32> = self.cover.iter().map(|c| (c / n).clamp(0.0, 1.0)).collect();
+        let col = self.sum.iter().zip(&cover).map(|(s, a)| if *a > 0.0 { [s[0] / n / a, s[1] / n / a, s[2] / n / a] } else { [0.0; 3] }).collect();
+        (col, cover)
+    }
+
+    /// Débruitage : filtre « à trous » guidé par les normales, les couleurs de surface et la lumière
+    /// (les bords d'objets et de matériaux restent nets, le grain des surfaces lisses disparaît).
+    fn denoised(&self) -> (Vec<[f32; 3]>, Vec<f32>) {
+        let (mut col, cover) = self.mean();
+        let n = self.spp.max(1) as f32;
+        let (w, h) = (self.w, self.h);
+        let nrm: Vec<V3> = self.nrm.iter().map(|v| { let l = dot(*v, *v).sqrt(); if l > 1e-6 { scale(*v, 1.0 / l) } else { [0.0; 3] } }).collect();
+        let alb: Vec<V3> = self.alb.iter().map(|a| scale(*a, 1.0 / n)).collect();
+        // Moins d'échantillons : plus de bruit, donc un filtre plus permissif
+        let sigma_l = (4.0 / n.sqrt()).clamp(0.05, 4.0);
+        let k = [1.0 / 16.0, 1.0 / 4.0, 3.0 / 8.0, 1.0 / 4.0, 1.0 / 16.0];
+        for step in [1usize, 2, 4, 8] {
+            let src = col.clone();
+            col = (0..w * h)
+                .into_par_iter()
+                .map(|i| {
+                    if cover[i] <= 0.0 {
+                        return src[i];
+                    }
+                    let (x, y) = ((i % w) as i64, (i / w) as i64);
+                    let (c0, n0, a0) = (src[i], nrm[i], alb[i]);
+                    let l0 = lum(c0);
+                    let (mut acc, mut wsum) = ([0.0f32; 3], 0.0f32);
+                    for dy in -2i64..=2 {
+                        for dx in -2i64..=2 {
+                            let (xx, yy) = (x + dx * step as i64, y + dy * step as i64);
+                            if xx < 0 || yy < 0 || xx >= w as i64 || yy >= h as i64 {
+                                continue;
+                            }
+                            let j = yy as usize * w + xx as usize;
+                            if cover[j] <= 0.0 {
+                                continue;
+                            }
+                            let wn = dot(n0, nrm[j]).max(0.0).powi(32);
+                            let da = sub(a0, alb[j]);
+                            let wa = (-dot(da, da) * 40.0).exp();
+                            let wl = (-(l0 - lum(src[j])).abs() / (sigma_l * step as f32 * 0.5 + 1e-3)).exp();
+                            let wk = k[(dx + 2) as usize] * k[(dy + 2) as usize] * wn * wa * wl;
+                            acc = add(acc, scale(src[j], wk));
+                            wsum += wk;
+                        }
+                    }
+                    if wsum > 1e-6 { scale(acc, 1.0 / wsum) } else { c0 }
+                })
+                .collect();
+        }
+        (col, cover)
+    }
+
+    /// Image finale en 8 bits (RGBA), avec ou sans débruitage.
+    pub fn image(&self, exposure: f32, denoise: bool) -> Vec<u8> {
+        let (col, cover) = if denoise && self.spp >= 2 { self.denoised() } else { self.mean() };
         let e = 2f32.powf(exposure);
         let mut out = vec![0u8; self.w * self.h * 4];
         out.par_chunks_mut(4).enumerate().for_each(|(i, o)| {
-            let s = self.sum[i];
-            let a = (self.cover[i] / n).clamp(0.0, 1.0);
-            if a <= 0.0 {
+            if cover[i] <= 0.0 {
                 return;
             }
-            // La couleur est prémultipliée par la couverture : on la ramène avant le tonemap
-            let c = [s[0] / n / a, s[1] / n / a, s[2] / n / a];
-            let t = tone(c, e);
-            o[..3].copy_from_slice(&t);
-            o[3] = (a * 255.0) as u8;
+            o[..3].copy_from_slice(&tone(col[i], e));
+            o[3] = (cover[i] * 255.0) as u8;
         });
         out
+    }
+
+}
+
+/// Rendu final (F12) en arrière-plan : une image à la taille demandée, jusqu'au nombre d'échantillons voulu.
+pub struct Job {
+    pub w: usize,
+    pub h: usize,
+    pub target: u32,
+    pub spp: u32,
+    pub rx: std::sync::mpsc::Receiver<(u32, Vec<u8>)>,
+    pub cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    pub image: Option<Vec<u8>>,
+    pub started: std::time::Instant,
+    pub elapsed: f32,
+}
+
+impl Job {
+    #[allow(clippy::too_many_arguments)]
+    pub fn start(m: std::sync::Arc<Prepared>, cam: Camera, look: Look, set: Settings, w: usize, h: usize, target: u32, ctx: eframe::egui::Context) -> Job {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stop = cancel.clone();
+        std::thread::spawn(move || {
+            let mut acc = Accum::new(w, h);
+            let mut last = std::time::Instant::now();
+            while acc.spp < target && !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                pass(&m, &cam, &look, &set, &mut acc);
+                // Une image intermédiaire par seconde environ, et la dernière
+                if acc.spp == 1 || acc.spp == target || last.elapsed().as_secs_f32() > 1.0 {
+                    last = std::time::Instant::now();
+                    if tx.send((acc.spp, acc.image(look.exposure, set.denoise))).is_err() {
+                        return;
+                    }
+                    ctx.request_repaint();
+                }
+            }
+        });
+        Job { w, h, target, spp: 0, rx, cancel, image: None, started: std::time::Instant::now(), elapsed: 0.0 }
+    }
+
+    /// Reçoit les images arrivées ; vrai quand le rendu est fini.
+    pub fn poll(&mut self) -> bool {
+        while let Ok((spp, img)) = self.rx.try_recv() {
+            self.spp = spp;
+            self.image = Some(img);
+        }
+        if self.spp < self.target {
+            self.elapsed = self.started.elapsed().as_secs_f32();
+        }
+        self.spp >= self.target
     }
 }
 
@@ -224,7 +332,8 @@ fn sky(look: &Look, d: V3) -> V3 {
 
 /// Lumière qui revient le long d'un rayon de caméra. Renvoie la couleur et si le rayon a touché quelque chose.
 #[allow(clippy::too_many_arguments)]
-fn radiance(m: &Prepared, bvh: &crate::bvh::Bvh, look: &Look, lamps: &[Lamp], set: &Settings, mut o: V3, mut d: V3, r: &mut Rng, res: [f32; 2]) -> (V3, f32) {
+fn radiance(m: &Prepared, bvh: &crate::bvh::Bvh, look: &Look, lamps: &[Lamp], set: &Settings, mut o: V3, mut d: V3, r: &mut Rng, res: [f32; 2]) -> (V3, f32, V3, V3) {
+    let mut first = ([0.0f32; 3], [0.0f32; 3]);
     let mut l = [0.0f32; 3];
     let mut through = [1.0f32; 3];
     let mut hit_any = false;
@@ -264,7 +373,7 @@ fn radiance(m: &Prepared, bvh: &crate::bvh::Bvh, look: &Look, lamps: &[Lamp], se
                 let up = local([0.0, 1.0, 0.0], u1.sqrt() * (u2 * std::f32::consts::TAU).cos(), u1.sqrt() * (u2 * std::f32::consts::TAU).sin(), (1.0 - u1).sqrt());
                 let ao = if bvh.occluded(p, up, 1e-4, 1e9) { 0.25 } else { 0.0 };
                 let shade = (dark / total.max(1e-6) * 0.5 + ao).min(0.85);
-                return ([0.0; 3], shade);
+                return ([0.0; 3], shade, [0.0, 1.0, 0.0], [0.0; 3]);
             }
             (_, Some(ft)) => {
                 let p = add(o, scale(d, ft));
@@ -279,6 +388,9 @@ fn radiance(m: &Prepared, bvh: &crate::bvh::Bvh, look: &Look, lamps: &[Lamp], se
             }
         };
         hit_any = true;
+        if bounce == 0 {
+            first = (s.n, s.albedo);
+        }
         let wo = scale(d, -1.0);
         l = add(l, mul(through, s.emit));
         // Lumières de la scène : un rayon d'ombre vers chacune
@@ -323,7 +435,7 @@ fn radiance(m: &Prepared, bvh: &crate::bvh::Bvh, look: &Look, lamps: &[Lamp], se
     if k > set.clamp {
         l = scale(l, set.clamp / k);
     }
-    (l, if hit_any { 1.0 } else { 0.0 })
+    (l, if hit_any { 1.0 } else { 0.0 }, first.0, first.1)
 }
 
 /// Ajoute un échantillon par pixel à `acc`.
@@ -336,7 +448,7 @@ pub fn pass(m: &Prepared, cam: &Camera, look: &Look, set: &Settings, acc: &mut A
     let (cx, cy) = (w as f32 / 2.0, h as f32 / 2.0);
     let spp = acc.spp;
     let res = [w as f32, h as f32];
-    let rows: Vec<Vec<(V3, f32)>> = (0..h)
+    let rows: Vec<Vec<(V3, f32, V3, V3)>> = (0..h)
         .into_par_iter()
         .map(|y| {
             (0..w)
@@ -348,17 +460,19 @@ pub fn pass(m: &Prepared, cam: &Camera, look: &Look, set: &Settings, acc: &mut A
                     } else {
                         (cam.unrotate([-cam.pan[0], -cam.pan[1], cam.dist]), cam.unrotate(norm([(x as f32 + jx - cx) / focal, -(y as f32 + jy - cy) / focal, -1.0])))
                     };
-                    let (c, cover) = radiance(m, bvh, look, &lamps, set, o, d, &mut r, res);
-                    (c, if look.show_bg { 1.0 } else { cover })
+                    let (c, cover, n, a) = radiance(m, bvh, look, &lamps, set, o, d, &mut r, res);
+                    (c, if look.show_bg { 1.0 } else { cover }, n, a)
                 })
                 .collect()
         })
         .collect();
     for (y, row) in rows.into_iter().enumerate() {
-        for (x, (c, a)) in row.into_iter().enumerate() {
+        for (x, (c, a, n, al)) in row.into_iter().enumerate() {
             let k = y * w + x;
             acc.sum[k] = add(acc.sum[k], c);
             acc.cover[k] += a;
+            acc.nrm[k] = add(acc.nrm[k], n);
+            acc.alb[k] = add(acc.alb[k], al);
         }
     }
     acc.spp += 1;
@@ -380,7 +494,7 @@ mod tests {
             pass(&prep, &cam, &look, &Settings::default(), &mut acc);
         }
         assert_eq!(acc.spp, 8);
-        let img = acc.rgba(0.0);
+        let img = acc.image(0.0, true);
         let px = |x: usize, y: usize| &img[(y * 64 + x) * 4..(y * 64 + x) * 4 + 4];
         assert!(px(32, 24)[3] == 255 && px(32, 24)[0] > 40, "{:?}", px(32, 24));
         // Les coins du haut : ni modèle ni sol, fond transparent
@@ -401,9 +515,10 @@ mod look_test {
         let f = render(&prep, &cam, &look, 320, 240);
         image::RgbaImage::from_raw(320, 240, f.rgba).unwrap().save("/tmp/raster.png").unwrap();
         let mut acc = Accum::new(320, 240);
-        for _ in 0..64 {
+        for _ in 0..16 {
             pass(&prep, &cam, &look, &Settings::default(), &mut acc);
         }
-        image::RgbaImage::from_raw(320, 240, acc.rgba(0.0)).unwrap().save("/tmp/trace.png").unwrap();
+        image::RgbaImage::from_raw(320, 240, acc.image(0.0, false)).unwrap().save("/tmp/trace.png").unwrap();
+        image::RgbaImage::from_raw(320, 240, acc.image(0.0, true)).unwrap().save("/tmp/trace_dn.png").unwrap();
     }
 }

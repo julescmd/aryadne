@@ -1350,5 +1350,11 @@
  "document": "document",
  "sortir dans sa propre fenêtre": "move to its own window",
  "panneaux de l'éditeur, dans leur case": "editor panels, in their own tile",
- "Ce panneau appartient à un autre éditeur.": "This panel belongs to another editor."
+ "Ce panneau appartient à un autre éditeur.": "This panel belongs to another editor.",
+ "débruitage": "denoise",
+ "rendre l'image…   F12": "render image…   F12",
+ "Rendu final en tracé de chemins, à la taille choisie, puis enregistrement en PNG": "Final path-traced render at the chosen size, then save as PNG",
+ "rendu final": "final render",
+ "rendre": "render",
+ "Le point de vue est celui de la vue 3D ; rebonds et sol comme dans le menu « rendu ».": "Uses the 3D view's point of view; bounces and floor as in the « render » menu."
 }
