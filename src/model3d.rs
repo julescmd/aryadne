@@ -1448,6 +1448,86 @@ enum Hdr {
 
 const HEADER: [Hdr; 11] = [Hdr::Mode, Hdr::View, Hdr::Select, Hdr::Add, Hdr::Object, Hdr::Fill, Hdr::Shading, Hdr::Overlays, Hdr::Light, Hdr::Modifiers, Hdr::Busy];
 
+/// Rend chaque image d'une scène (début → fin) et les envoie à ffmpeg, qui écrit la vidéo `out`.
+/// La caméra de la scène sert de point de vue ; sans caméra, `view_cam`.
+#[allow(clippy::too_many_arguments)]
+fn encode_animation(ff: std::path::PathBuf, scene: crate::scene::Scene, path: &std::path::Path, frame_box: (V3, V3), look: &Look, view_cam: Camera, size: (usize, usize), out: &std::path::Path, tick: &dyn Fn()) -> Result<(), String> {
+    use std::io::Write;
+    let ((lo, hi), (w, h)) = (frame_box, size);
+    let (start, end) = (scene.start, scene.end.max(scene.start));
+    let fps = scene.fps.max(1.0);
+    let mut child = crate::ffmpeg::command(ff)
+        .args(["-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "rgba", "-s", &format!("{w}x{h}"), "-r", &format!("{fps}"), "-i", "-", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "18"])
+        .arg(out)
+        .stdin(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    let mut stdin = child.stdin.take().ok_or("ffmpeg sans entrée")?;
+    let longest = (hi[0] - lo[0]).max(hi[1] - lo[1]).max(hi[2] - lo[2]).max(1e-9);
+    let c = [(lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0, (lo[2] + hi[2]) / 2.0];
+    let floor = -((lo[1] + hi[1]) / 2.0) / longest;
+    let cam_obj = scene.objects.iter().position(|o| crate::scene::kind(o) == crate::scene::Kind::Camera);
+    let mut sc = scene;
+    for f in start..=end {
+        sc.apply_frame(f as f32);
+        let (model, _, ranges) = crate::scene::build_ranges(&sc, path);
+        let mut m = model?;
+        (m.min, m.max) = (lo, hi);
+        let s = m.size();
+        let l2 = s[0].max(s[1]).max(s[2]).max(1e-9);
+        let mc = [(m.min[0] + m.max[0]) / 2.0, (m.min[1] + m.max[1]) / 2.0, (m.min[2] + m.max[2]) / 2.0];
+        let origin = [-mc[0] / l2, -mc[1] / l2, -mc[2] / l2];
+        let base = crate::modifiers::Mesh::from_model(&m, m.z_up);
+        let mut prep = Prepared::from_mesh_fixed(crate::modifiers::apply(&[], base, origin), floor);
+        // Un matériau par objet, comme à l'écran
+        if ranges.last().map(|r| r.2) == Some(prep.tris.len()) {
+            prep.mat = vec![0; prep.tris.len()];
+            for (k, a, b) in &ranges {
+                prep.mat[*a..*b].fill(*k as u16);
+            }
+        }
+        // Lumières de la scène à cette image
+        let mut lk = look.clone();
+        lk.lamps = sc.lights().into_iter().map(|l| Lamp { point: l.point, at: if l.point { [(l.at[0] - c[0]) / longest, (l.at[1] - c[1]) / longest, (l.at[2] - c[2]) / longest] } else { l.at }, color: l.color, intensity: l.energy, range: l.range / longest }).collect();
+        // Le point de vue : la caméra de la scène si elle existe
+        let mut cam = view_cam;
+        if let Some(k) = cam_obj {
+            let wpos = sc.world(k, [0.0; 3]);
+            let o = &sc.objects[k];
+            cam.yaw = -o.rot[1].to_radians();
+            cam.pitch = -o.rot[0].to_radians();
+            cam.ortho = false;
+            let r = cam.rotate([(wpos[0] - c[0]) / longest, (wpos[1] - c[1]) / longest, (wpos[2] - c[2]) / longest]);
+            cam.pan = [-r[0], -r[1]];
+            cam.dist = r[2].max(0.05);
+        }
+        let frame = render(&prep, &cam, &lk, w, h);
+        if stdin.write_all(&frame.rgba).is_err() {
+            let mut msg = String::new();
+            if let Some(mut e) = child.stderr.take() {
+                let _ = std::io::Read::read_to_string(&mut e, &mut msg);
+            }
+            return Err(format!("ffmpeg : {}", msg.lines().last().unwrap_or("erreur")));
+        }
+        tick();
+    }
+    drop(stdin);
+    match child.wait() {
+        Ok(s) if s.success() => Ok(()),
+        _ => Err(crate::i18n::t("ffmpeg n'a pas pu écrire la vidéo")),
+    }
+}
+
+/// Rendu d'une animation de scène en vidéo, en arrière-plan.
+struct AnimJob {
+    done: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    finished: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    error: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+    total: usize,
+    out: std::path::PathBuf,
+}
+
 /// Projection de l'espace normalisé de la vue vers l'écran.
 fn projector(cam: Camera, rect: egui::Rect) -> impl Fn(V3) -> Option<Pos2> {
     let focal = rect.height().min(rect.width()) * 1.2;
@@ -1732,6 +1812,8 @@ pub struct Viewer {
     mesh: Option<MeshEdit>,
     /// Demande d'entrer ou de sortir du mode édition (bouton du panneau)
     mesh_toggle: bool,
+    want_anim: bool,
+    anim_job: Option<AnimJob>,
     /// La vue de la frame précédente (l'en-tête et les outils flottent par-dessus)
     vp_rect: Option<egui::Rect>,
     hdr_h: f32,
@@ -1827,6 +1909,8 @@ impl Viewer {
             box_sel: None,
             mesh: None,
             mesh_toggle: false,
+            want_anim: false,
+            anim_job: None,
             vp_rect: None,
             hdr_h: 30.0,
             prop_tab: PropTab::Object,
@@ -1943,6 +2027,51 @@ impl Viewer {
             Ok(()) => format!("capture : {}", out.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()),
             Err(e) => format!("capture impossible : {e}"),
         });
+    }
+
+    /// Rend chaque image de la scène (début → fin) et les assemble en MP4 avec ffmpeg, en arrière-plan.
+    /// La caméra de la scène sert de point de vue ; sans caméra, la vue actuelle.
+    fn render_animation(&mut self, ctx: &egui::Context) {
+        if self.anim_job.is_some() {
+            return;
+        }
+        let Some(ff) = crate::ffmpeg::find("ffmpeg") else {
+            self.capture_msg = Some(crate::i18n::t("ffmpeg n'est pas installé : il sert à assembler la vidéo."));
+            return;
+        };
+        let (Some(scene), Some((lo, hi))) = (self.scene.clone(), self.scene_frame) else { return };
+        let stem = self.path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "scene".into());
+        let mut dlg = rfd::FileDialog::new().set_title(crate::i18n::t("enregistrer l'animation")).set_file_name(format!("{stem}.mp4")).add_filter("MP4", &["mp4"]);
+        if let Some(dir) = self.path.parent().filter(|d| !d.to_string_lossy().contains(".app/untitled")) {
+            dlg = dlg.set_directory(dir);
+        }
+        let Some(mut out) = dlg.save_file() else { return };
+        if out.extension().is_none() {
+            out.set_extension("mp4");
+        }
+        let (look, _, _) = self.render_setup();
+        let view_cam = self.cam;
+        let path = self.path.clone();
+        let (w, h) = (1280usize, 720usize);
+        let job = AnimJob { done: Default::default(), finished: Default::default(), error: Default::default(), total: (scene.end.max(scene.start) - scene.start + 1) as usize, out: out.clone() };
+        let (done, finished, error) = (job.done.clone(), job.finished.clone(), job.error.clone());
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let r = encode_animation(ff, scene, &path, (lo, hi), &look, view_cam, (w, h), &out, &|| {
+                done.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                ctx.request_repaint();
+            });
+            match r {
+                Ok(()) => finished.store(true, std::sync::atomic::Ordering::Relaxed),
+                Err(e) => {
+                    if let Ok(mut g) = error.lock() {
+                        *g = Some(e);
+                    }
+                }
+            }
+            ctx.request_repaint();
+        });
+        self.anim_job = Some(job);
     }
 
     fn mods_file(&self) -> std::path::PathBuf {
@@ -3610,6 +3739,9 @@ impl Viewer {
                                 if ui.button(crate::i18n::t("image PNG (2400 px)")).clicked() {
                                     do_capture = true;
                                 }
+                                if is_scene && ui.button(crate::i18n::t("animation en vidéo (MP4)…")).on_hover_text(crate::i18n::t("Chaque image de la scène, du début à la fin, vue par sa caméra (ou par la vue actuelle s'il n'y en a pas)")).clicked() {
+                                    self.want_anim = true;
+                                }
                                 if ui.button(crate::i18n::t("turntable GIF (48 images)")).clicked() {
                                     do_gif = true;
                                 }
@@ -3820,6 +3952,24 @@ impl Viewer {
         }
         if do_gif {
             self.turntable_gif();
+        }
+        if std::mem::take(&mut self.want_anim) {
+            self.render_animation(&ctx);
+        }
+        // Rendu d'animation en cours : où il en est
+        if let Some(job) = &self.anim_job {
+            let done = job.done.load(std::sync::atomic::Ordering::Relaxed);
+            let err = job.error.lock().ok().and_then(|e| e.clone());
+            if let Some(e) = err {
+                self.capture_msg = Some(e);
+                self.anim_job = None;
+            } else if job.finished.load(std::sync::atomic::Ordering::Relaxed) {
+                self.capture_msg = Some(format!("{} {}", crate::i18n::t("animation enregistrée :"), job.out.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()));
+                self.anim_job = None;
+            } else {
+                self.capture_msg = Some(format!("{} {done} / {}", crate::i18n::t("rendu de l'animation…"), job.total));
+                ctx.request_repaint_after(std::time::Duration::from_millis(200));
+            }
         }
 
         // Panneaux de droite : de vrais panneaux qui prennent leur place, la vue occupe ce qui reste
@@ -4785,6 +4935,32 @@ pub fn fmt_n(n: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn animation_en_video() {
+        let Some(ff) = crate::ffmpeg::find("ffmpeg") else { return };
+        let dir = std::env::temp_dir().join(format!("aryadne-anim-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("s.aryscene");
+        let mut sc = crate::scene::Scene::starter();
+        sc.start = 0;
+        sc.end = 5;
+        let k = sc.objects.iter().position(|o| o.file == "@cube").unwrap();
+        sc.objects[k].set_key(0);
+        sc.objects[k].pos[0] = 3.0;
+        sc.objects[k].set_key(5);
+        sc.write(&path).unwrap();
+        let out = dir.join("s.mp4");
+        let n = std::sync::atomic::AtomicUsize::new(0);
+        encode_animation(ff, sc, &path, ([-6.0; 3], [6.0; 3]), &Look::default(), Camera::default(), (64, 36), &out, &|| {
+            n.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        })
+        .unwrap();
+        assert_eq!(n.load(std::sync::atomic::Ordering::Relaxed), 6);
+        assert!(std::fs::metadata(&out).map(|m| m.len() > 0).unwrap_or(false));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn formats_et_simplification() {

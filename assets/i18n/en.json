@@ -1309,5 +1309,12 @@
  "arêtes (2)": "edges (2)",
  "faces (3)": "faces (3)",
  "incruster demande au moins une face dont tous les sommets sont choisis": "inset needs at least one face with all its vertices selected",
- "MODE ÉDITION · Tab sortir · 1 2 3 : sommets, arêtes, faces · G R S (X Y Z : axe) · E extruder · I incruster · M fusionner · L, Ctrl+L : pièce liée · F face · X supprimer · Ctrl+Z annuler": "EDIT MODE · Tab exit · 1 2 3: vertices, edges, faces · G R S (X Y Z: axis) · E extrude · I inset · M merge · L, Ctrl+L: linked · F face · X delete · Ctrl+Z undo"
+ "MODE ÉDITION · Tab sortir · 1 2 3 : sommets, arêtes, faces · G R S (X Y Z : axe) · E extruder · I incruster · M fusionner · L, Ctrl+L : pièce liée · F face · X supprimer · Ctrl+Z annuler": "EDIT MODE · Tab exit · 1 2 3: vertices, edges, faces · G R S (X Y Z: axis) · E extrude · I inset · M merge · L, Ctrl+L: linked · F face · X delete · Ctrl+Z undo",
+ "animation en vidéo (MP4)…": "animation as video (MP4)…",
+ "Chaque image de la scène, du début à la fin, vue par sa caméra (ou par la vue actuelle s'il n'y en a pas)": "Every frame of the scene, start to end, seen through its camera (or the current view if there is none)",
+ "animation enregistrée :": "animation saved:",
+ "rendu de l'animation…": "rendering animation…",
+ "ffmpeg n'est pas installé : il sert à assembler la vidéo.": "ffmpeg is not installed: it is needed to build the video.",
+ "enregistrer l'animation": "save the animation",
+ "ffmpeg n'a pas pu écrire la vidéo": "ffmpeg could not write the video"
 }
