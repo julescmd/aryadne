@@ -2294,6 +2294,11 @@ fn pixel(s: &Step, i: &[V], c: &Ctx) -> [V; 4] {
 // ---------- éditeur ----------
 
 const NW: f32 = 190.0;
+
+thread_local! {
+    /// Nodes copiés, partagés entre tous les graphes ouverts
+    static NODE_CLIP: std::cell::RefCell<Option<(Vec<Node>, Vec<Link>)>> = const { std::cell::RefCell::new(None) };
+}
 const ROW: f32 = 22.0;
 const HEAD: f32 = 24.0;
 const THUMB: f32 = 96.0;
@@ -2845,15 +2850,53 @@ impl Editor {
                 self.selected = new.into_iter().collect();
                 self.changed();
             }
-            if cmd && key(egui::Key::C) {
+            // Ctrl+C / Ctrl+V : egui les transmet comme évènements Copier / Coller, pas comme touches.
+            // Les nodes passent par le presse-papiers du système : on les colle aussi dans un autre
+            // graphe, une autre fenêtre d'Aryadne.
+            let (copy_ev, cut_ev, paste_ev) = ctx.input(|i| {
+                let mut r = (false, false, None);
+                for e in &i.events {
+                    match e {
+                        egui::Event::Copy => r.0 = true,
+                        egui::Event::Cut => r.1 = true,
+                        egui::Event::Paste(t) => r.2 = Some(t.clone()),
+                        _ => {}
+                    }
+                }
+                r
+            });
+            if (cmd && key(egui::Key::C)) || copy_ev || cut_ev {
                 let ids: Vec<u32> = self.selected.iter().copied().collect();
                 let nodes: Vec<Node> = self.graph.nodes.iter().filter(|n| ids.contains(&n.id) && n.op != "mat_out" && n.op != "comp_out").cloned().collect();
                 let links: Vec<Link> = self.graph.links.iter().filter(|l| ids.contains(&l.from) && ids.contains(&l.to)).cloned().collect();
-                self.message = Some(format!("{} node(s) copié(s)", nodes.len()));
-                self.clipboard = Some((nodes, links));
+                if !nodes.is_empty() {
+                    self.message = Some(format!("{} {}", nodes.len(), crate::i18n::t("node(s) copié(s)")));
+                    if let Ok(t) = serde_json::to_string(&serde_json::json!({ "aryadne_nodes": nodes, "links": links })) {
+                        ctx.copy_text(t);
+                    }
+                    NODE_CLIP.with(|c| *c.borrow_mut() = Some((nodes.clone(), links.clone())));
+                    self.clipboard = Some((nodes, links));
+                    if cut_ev {
+                        for id in ids {
+                            if !self.is_output(id) {
+                                self.graph.remove(id);
+                            }
+                        }
+                        self.selected.clear();
+                        self.changed();
+                    }
+                }
             }
-            if cmd && key(egui::Key::V) {
-                if let Some((nodes, links)) = self.clipboard.clone() {
+            let pasted: Option<(Vec<Node>, Vec<Link>)> = paste_ev.as_deref().and_then(|t| {
+                let v: serde_json::Value = serde_json::from_str(t).ok()?;
+                let nodes: Vec<Node> = serde_json::from_value(v.get("aryadne_nodes")?.clone()).ok()?;
+                let links: Vec<Link> = serde_json::from_value(v.get("links")?.clone()).unwrap_or_default();
+                Some((nodes, links))
+            });
+            let want_paste = pasted.is_some() || (cmd && key(egui::Key::V));
+            if want_paste {
+                let clip = pasted.or_else(|| NODE_CLIP.with(|c| c.borrow().clone())).or_else(|| self.clipboard.clone());
+                if let Some((nodes, links)) = clip {
                     let at = ctx.pointer_latest_pos().map(to_graph).unwrap_or([0.0, 0.0]);
                     let min = nodes.iter().fold([f32::MAX; 2], |m, n| [m[0].min(n.pos[0]), m[1].min(n.pos[1])]);
                     let new = self.paste(nodes, links, [at[0] - min[0], at[1] - min[1]]);
@@ -2898,6 +2941,41 @@ impl Editor {
             }
             if key(egui::Key::Home) {
                 self.scene = Rect::ZERO;
+            }
+        }
+        // Image glissée depuis l'explorateur : sur un node qui prend une image, elle la remplace ;
+        // dans le vide, elle devient un node texture (ou image, ou vidéo)
+        if over_graph {
+            if let (Some(rel), Some(pt)) = (egui::DragAndDrop::payload::<String>(&ctx), ctx.pointer_latest_pos()) {
+                let g = to_graph(pt);
+                let is_vid = is_video_source(&rel);
+                let is_img = crate::images::has_preview(&rel) || ["exr", "hdr", "tga"].iter().any(|e| rel.to_lowercase().ends_with(&format!(".{e}")));
+                // Le node sous le pointeur, s'il a un champ fichier du bon genre
+                let target = self.graph.nodes.iter().rev().find(|n| {
+                    let Some(d) = def(&n.op) else { return false };
+                    let h = Self::node_size(n, d);
+                    g[0] >= n.pos[0] && g[0] <= n.pos[0] + NW && g[1] >= n.pos[1] && g[1] <= n.pos[1] + h && d.params.iter().any(|pp| matches!(pp, ParamDef::File(_))) && ((n.op == "video") == is_vid)
+                }).map(|n| (n.id, n.pos));
+                if is_vid || is_img {
+                    // Pendant le glisser : le node visé s'allume
+                    if let Some((_, pos)) = target {
+                        let k = graph_rect.width() / self.scene.width().max(1e-3);
+                        let tl = pos2(graph_rect.min.x + (pos[0] - self.scene.min.x) * k, graph_rect.min.y + (pos[1] - self.scene.min.y) * k);
+                        ui.painter().rect_stroke(Rect::from_min_size(tl, vec2(NW * k, HEAD * k)).expand(3.0), 4.0, Stroke::new(2.0, p.accent), egui::StrokeKind::Outside);
+                    }
+                    if ctx.input(|i| i.pointer.any_released()) {
+                        egui::DragAndDrop::clear_payload(&ctx);
+                        let id = match target {
+                            Some((id, _)) => id,
+                            None => self.graph.add(if is_vid { "video" } else if kind == GraphKind::Material { "texture" } else { "image" }, g),
+                        };
+                        if let Some(n) = self.graph.nodes.iter_mut().find(|n| n.id == id) {
+                            n.params.insert("fichier".into(), Param::S(rel.to_string()));
+                        }
+                        self.selected = [id].into_iter().collect();
+                        self.changed();
+                    }
+                }
             }
         }
         // Images glissées depuis l'ordinateur : un node texture / image par fichier

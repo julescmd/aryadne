@@ -535,6 +535,12 @@ impl Editor {
 
     fn add_image_layer(&mut self) {
         let Some(f) = rfd::FileDialog::new().add_filter("images", &["png", "jpg", "jpeg", "webp", "tga", "tif", "tiff", "bmp"]).pick_file() else { return };
+        self.add_image_file(&f);
+    }
+
+    /// Une image du disque devient un nouveau calque (bouton, ou glissée depuis l'explorateur).
+    fn add_image_file(&mut self, f: &std::path::Path) {
+        let f = f.to_path_buf();
         match image::open(&f) {
             Ok(img) => {
                 let img = img.to_rgba8();
@@ -691,6 +697,11 @@ impl Editor {
         }
         // ---- Toile
         let (rect, resp) = ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
+        // Image glissée depuis l'explorateur : un calque de plus
+        if let Some(rel) = crate::drop_rel(&resp, crate::images::has_preview) {
+            let abs = std::path::Path::new(&crate::nodes::vault_root()).join(rel);
+            self.add_image_file(&abs);
+        }
         let painter = ui.painter_at(rect);
         painter.rect_filled(rect, 0.0, p.bg);
         if self.fit && rect.width() > 10.0 {

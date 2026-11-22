@@ -1416,5 +1416,6 @@
  "Cet espace dans sa propre fenêtre, sur le même coffre : par exemple les matériaux sur un écran et la scène sur l'autre": "This workspace in its own window, on the same vault: for example materials on one screen and the scene on the other",
  "aperçu sur une sphère": "preview on a sphere",
  "aperçu sur un cube aux arêtes adoucies : on y voit l'usure des arêtes et la saleté des creux": "preview on a cube: edge wear and cavity dirt show on it",
- "ou dépose un modèle 3D ici": "or drop a 3D model here"
+ "ou dépose un modèle 3D ici": "or drop a 3D model here",
+ "node(s) copié(s)": "node(s) copied"
 }

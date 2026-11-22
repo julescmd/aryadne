@@ -4941,6 +4941,15 @@ pub fn notify(msg: impl Into<String>) {
     NOTICES.lock().unwrap_or_else(|e| e.into_inner()).push(msg.into());
 }
 
+/// Fichier de l'explorateur lâché sur `r`, seulement s'il convient (`fits` reçoit son chemin dans le coffre).
+pub fn drop_rel(r: &egui::Response, fits: impl Fn(&str) -> bool) -> Option<String> {
+    let rel = egui::DragAndDrop::payload::<String>(&r.ctx)?;
+    if !fits(&rel) {
+        return None;
+    }
+    drop_of::<String>(r).map(|x| (*x).clone())
+}
+
 pub fn drop_of<T: std::any::Any + Send + Sync>(r: &egui::Response) -> Option<std::sync::Arc<T>> {
     if egui::DragAndDrop::has_payload_of_type::<T>(&r.ctx) {
         r.dnd_release_payload::<T>()

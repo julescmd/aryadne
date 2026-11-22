@@ -2615,6 +2615,21 @@ impl Viewer {
                 me.modal = Some((kind, axis, orig, from));
             }
             let what = [crate::i18n::t("déplacer"), crate::i18n::t("tourner"), crate::i18n::t("taille")][kind.min(2) as usize].clone();
+            // Axe imposé : sa ligne traverse la vue, à sa couleur
+            if let Some(e) = axis {
+                let k = (0..3).max_by(|a, b| e[*a].abs().total_cmp(&e[*b].abs())).unwrap_or(0);
+                let painter = ui.painter_at(rect);
+                let mut last: Option<Pos2> = None;
+                for i in -60..=60 {
+                    let t = i as f32 / 60.0;
+                    let d = t * t.abs() * longest * 20.0;
+                    let q = project([pivot[0] + e[0] * d, pivot[1] + e[1] * d, pivot[2] + e[2] * d]);
+                    if let (Some(a), Some(b)) = (last, q) {
+                        painter.line_segment([a, b], Stroke::new(1.5, crate::gizmo::AXIS[k]));
+                    }
+                    last = q;
+                }
+            }
             ui.painter_at(rect).text(rect.left_bottom() + egui::vec2(12.0, -10.0), egui::Align2::LEFT_BOTTOM, format!("{what}   ·   X Y Z : {}   ·   {}   ·   {}", crate::i18n::t("imposer un axe"), crate::i18n::t("clic : valider"), crate::i18n::t("Échap : annuler")), egui::FontId::monospace(11.5), p.accent);
             ui.ctx().request_repaint();
         } else if hovered || me.boxing.is_some() {
@@ -4836,6 +4851,13 @@ impl Viewer {
         }
         let avail = ui.available_size();
         let (rect, resp) = ui.allocate_exact_size(avail.max(egui::vec2(50.0, 50.0)), Sense::click_and_drag());
+        // Un .hdr ou .exr glissé depuis l'explorateur devient l'éclairage de la vue
+        if let Some(rel) = crate::drop_rel(&resp, |r| {
+            let r = r.to_lowercase();
+            r.ends_with(".hdr") || r.ends_with(".exr")
+        }) {
+            self.pending_hdr = Some(std::path::Path::new(&self.root).join(rel));
+        }
         if self.vp_rect != Some(rect) {
             self.vp_rect = Some(rect);
             ui.ctx().request_repaint();
@@ -5117,6 +5139,27 @@ impl Viewer {
             let skip_pick = modal_ended || self.modal_click || self.modal.is_some();
             if !modal_ended && !ui.input(|i| i.pointer.any_down()) {
                 self.modal_click = false;
+            }
+            // Matériau glissé depuis l'explorateur sur un objet : il le reçoit
+            let is_mat = |r: &str| {
+                let r = r.to_lowercase();
+                r.ends_with(".arymat") || r.ends_with(".mat.json")
+            };
+            if let Some(pt) = ui.input(|i| i.pointer.latest_pos()).filter(|_| egui::DragAndDrop::payload::<String>(ui.ctx()).is_some_and(|r| is_mat(&r))) {
+                if let Some((_, _, prep)) = &self.prepared {
+                    let hit = pick(prep, &self.cam, rect.width(), rect.height(), pt.x - rect.left(), pt.y - rect.top());
+                    let obj = hit.and_then(|(tri, _)| self.scene_ranges.iter().find(|r| (r.1..r.2).contains(&(tri as usize))).map(|r| r.0));
+                    if let Some(k) = obj {
+                        if let Some(rel) = crate::drop_rel(&resp, is_mat) {
+                            if let Some(o) = self.scene.as_mut().and_then(|s| s.objects.get_mut(k)) {
+                                o.material = rel;
+                                self.scene_dirty = true;
+                                self.scene_sel = Some(k);
+                                self.slot_rev += 1;
+                            }
+                        }
+                    }
+                }
             }
             if resp.clicked() && !skip_pick && !self.stack.iter().any(|m| m.on) && self.applied.is_none() {
                 if let (Some((_, _, prep)), Some(pt)) = (&self.prepared, resp.interact_pointer_pos()) {

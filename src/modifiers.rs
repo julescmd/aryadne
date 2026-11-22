@@ -1430,7 +1430,9 @@ fn axis_ui(ui: &mut egui::Ui, a: &mut u8) -> bool {
     let mut c = false;
     ui.horizontal(|ui| {
         ui.label(RichText::new(crate::i18n::t("axe")).size(11.0));
-        for (k, l) in ["X", "Y", "Z"].iter().enumerate() {
+        // Montrés avec Z vers le haut (l'axe interne 1)
+        for (shown, l) in ["X", "Y", "Z"].iter().enumerate() {
+            let k = crate::gizmo::SHOWN[shown].0;
             c |= ui.selectable_value(a, k as u8, *l).changed();
         }
     });
@@ -1441,8 +1443,15 @@ fn vec3_ui(ui: &mut egui::Ui, v: &mut V3, label: &str, speed: f32) -> bool {
     let mut c = false;
     ui.horizontal(|ui| {
         ui.label(RichText::new(label).size(11.0));
-        for (k, l) in ["x", "y", "z"].iter().enumerate() {
-            c |= ui.add(egui::DragValue::new(&mut v[k]).speed(speed).max_decimals(3).prefix(format!("{l} "))).changed();
+        for (shown, l) in ["x", "y", "z"].iter().enumerate() {
+            let (k, sign) = crate::gizmo::SHOWN[shown];
+            // Une échelle n'a pas de sens : seul l'ordre des axes change
+            let sign = if label.contains("échelle") { 1.0 } else { sign };
+            let mut val = v[k] * sign + 0.0;
+            if ui.add(egui::DragValue::new(&mut val).speed(speed).max_decimals(3).prefix(format!("{l} "))).changed() {
+                v[k] = val * sign;
+                c = true;
+            }
         }
     });
     c
@@ -1452,7 +1461,8 @@ fn bool3_ui(ui: &mut egui::Ui, v: &mut [bool; 3], label: &str) -> bool {
     let mut c = false;
     ui.horizontal(|ui| {
         ui.label(RichText::new(label).size(11.0));
-        for (k, l) in ["X", "Y", "Z"].iter().enumerate() {
+        for (shown, l) in ["X", "Y", "Z"].iter().enumerate() {
+            let k = crate::gizmo::SHOWN[shown].0;
             c |= ui.toggle_value(&mut v[k], *l).changed();
         }
     });
