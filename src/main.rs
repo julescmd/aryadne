@@ -1613,7 +1613,7 @@ impl App {
             View::Files => {}
         }
         match self.current().map(|d| &d.content) {
-            Some(Content::Model(v)) if v.is_mesh_edit() => t("MODE ÉDITION · Tab sortir · clic, Maj+clic, A, B : sommets · G R S (X Y Z : axe) · E extruder · F face · X supprimer · Ctrl+Z annuler"),
+            Some(Content::Model(v)) if v.is_mesh_edit() => t("MODE ÉDITION · Tab sortir · 1 2 3 : sommets, arêtes, faces · G R S (X Y Z : axe) · E extruder · I incruster · M fusionner · L, Ctrl+L : pièce liée · F face · X supprimer · Ctrl+Z annuler"),
             Some(Content::Model(v)) if v.is_scene() => t("molette enfoncée : tourner (Maj : déplacer) · glisser : rectangle · G R S : déplacer, tourner, taille (X Y Z : axe) · Maj+clic, A, B : sélection · Maj+A ajouter · X supprimer · Maj+D dupliquer · P parent · H cacher · I clé · Tab édition · Espace lecture · Ctrl+Z annuler"),
             Some(Content::Model(_)) => t("glisser : tourner · Maj+glisser : déplacer · molette : zoom · 1 3 7 : vues · 5 : perspective · L + glisser : lumière · H + glisser : HDRI · F2 renommer le fichier"),
             Some(Content::Montage(_)) => t("Espace lire · S couper · Suppr supprimer · glisser les bords : raccourcir · Ctrl+molette : zoom · Ctrl+Z annuler"),

@@ -227,7 +227,110 @@ impl EMesh {
         true
     }
 
-    /// Triangles et côtés marqués.
+    /// Faces dont tous les sommets sont choisis.
+    pub fn faces_in(&self, sel: &[bool]) -> Vec<usize> {
+        let on = |v: u32| sel.get(v as usize).copied().unwrap_or(false);
+        (0..self.polys.len()).filter(|&f| self.polys[f].iter().all(|&v| on(v))).collect()
+    }
+
+    /// Insère une face plus petite dans chaque face choisie (I, comme dans Blender), reliée au bord par
+    /// des quadrilatères. `t` : de 0 (rien) à 1 (jusqu'au centre). Renvoie la sélection des nouvelles faces.
+    pub fn inset(&mut self, sel: &[bool], t: f32) -> Option<Vec<bool>> {
+        let faces = self.faces_in(sel);
+        if faces.is_empty() {
+            return None;
+        }
+        let t = t.clamp(0.01, 0.95);
+        let mut out = vec![false; self.pos.len()];
+        let mut extra: Vec<Vec<u32>> = vec![];
+        for &f in &faces {
+            let p = self.polys[f].clone();
+            let n = p.len() as f32;
+            let c = p.iter().fold([0.0f32; 3], |a, &v| {
+                let q = self.pos[v as usize];
+                [a[0] + q[0] / n, a[1] + q[1] / n, a[2] + q[2] / n]
+            });
+            let inner: Vec<u32> = p.iter().map(|&v| {
+                let q = self.pos[v as usize];
+                self.pos.push([q[0] + (c[0] - q[0]) * t, q[1] + (c[1] - q[1]) * t, q[2] + (c[2] - q[2]) * t]);
+                out.push(true);
+                self.pos.len() as u32 - 1
+            }).collect();
+            for k in 0..p.len() {
+                let k2 = (k + 1) % p.len();
+                extra.push(vec![p[k], p[k2], inner[k2], inner[k]]);
+            }
+            self.polys[f] = inner;
+        }
+        self.polys.extend(extra);
+        Some(out)
+    }
+
+    /// Fusionne les sommets choisis en un seul, à leur centre (M). Les faces qui s'aplatissent disparaissent.
+    pub fn merge(&mut self, sel: &[bool]) -> Option<Vec<bool>> {
+        let chosen: Vec<usize> = (0..self.pos.len()).filter(|&i| sel.get(i).copied().unwrap_or(false)).collect();
+        if chosen.len() < 2 {
+            return None;
+        }
+        let n = chosen.len() as f32;
+        let c = chosen.iter().fold([0.0f32; 3], |a, &i| [a[0] + self.pos[i][0] / n, a[1] + self.pos[i][1] / n, a[2] + self.pos[i][2] / n]);
+        let keep = chosen[0] as u32;
+        self.pos[keep as usize] = c;
+        for p in &mut self.polys {
+            for v in p.iter_mut() {
+                if sel.get(*v as usize).copied().unwrap_or(false) {
+                    *v = keep;
+                }
+            }
+            p.dedup();
+            while p.len() > 1 && p.first() == p.last() {
+                p.pop();
+            }
+        }
+        self.polys.retain(|p| p.len() >= 3);
+        // Les autres sommets choisis ne servent plus : on les retire
+        let mut gone = vec![false; self.pos.len()];
+        for &i in &chosen[1..] {
+            gone[i] = true;
+        }
+        let mut map = vec![u32::MAX; self.pos.len()];
+        let mut pos = vec![];
+        for (i, q) in self.pos.iter().enumerate() {
+            if !gone[i] {
+                map[i] = pos.len() as u32;
+                pos.push(*q);
+            }
+        }
+        for p in &mut self.polys {
+            for v in p.iter_mut() {
+                *v = map[*v as usize];
+            }
+        }
+        self.pos = pos;
+        let mut out = vec![false; self.pos.len()];
+        out[map[keep as usize] as usize] = true;
+        Some(out)
+    }
+
+    /// Tout ce qui touche la sélection par des faces (L / Ctrl+L) : la pièce entière.
+    pub fn linked(&self, sel: &[bool]) -> Vec<bool> {
+        let mut out: Vec<bool> = (0..self.pos.len()).map(|i| sel.get(i).copied().unwrap_or(false)).collect();
+        loop {
+            let mut grew = false;
+            for p in &self.polys {
+                if p.iter().any(|&v| out[v as usize]) && !p.iter().all(|&v| out[v as usize]) {
+                    for &v in p {
+                        out[v as usize] = true;
+                    }
+                    grew = true;
+                }
+            }
+            if !grew {
+                return out;
+            }
+        }
+    }
+
     #[cfg(test)]
     pub fn triangles(&self) -> (Vec<[u32; 3]>, Vec<u8>) {
         let (mut tris, mut edges) = (vec![], vec![]);
@@ -270,6 +373,31 @@ pub fn apply(c: &[V3; 3], v: V3) -> V3 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inset_fusion_lies() {
+        let model = crate::scene::primitive("@cube").unwrap();
+        let mut m = EMesh::from_model(&model);
+        let (nv, nf) = (m.pos.len(), m.polys.len());
+        // Une face choisie : quatre sommets de plus, quatre faces de plus
+        let top = m.polys[0].clone();
+        let mut sel = vec![false; nv];
+        for &v in &top {
+            sel[v as usize] = true;
+        }
+        let s2 = m.inset(&sel, 0.3).unwrap();
+        assert_eq!((m.pos.len(), m.polys.len()), (nv + 4, nf + 4));
+        assert_eq!(s2.iter().filter(|x| **x).count(), 4);
+        // Fusionner les quatre sommets intérieurs : un seul sommet, la face du milieu disparaît
+        let s3 = m.merge(&s2).unwrap();
+        assert_eq!(m.pos.len(), nv + 1);
+        assert_eq!(s3.iter().filter(|x| **x).count(), 1);
+        assert!(m.polys.iter().all(|p| p.len() >= 3));
+        // Lié : tout le cube depuis un seul sommet
+        let mut one = vec![false; m.pos.len()];
+        one[0] = true;
+        assert!(m.linked(&one).iter().all(|x| *x));
+    }
 
     #[test]
     fn cube_modifiable() {

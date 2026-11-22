@@ -1498,6 +1498,8 @@ struct MeshEdit {
     modal: Option<(u8, Option<V3>, Vec<V3>, Pos2)>,
     boxing: Option<Option<Pos2>>,
     skip_click: bool,
+    /// Ce qu'on choisit au clic : 0 sommets, 1 arêtes, 2 faces (1, 2, 3 comme dans Blender)
+    mode: u8,
 }
 
 /// Sépare les sommets partagés par des faces qui font entre elles un angle marqué : les arêtes vives
@@ -2031,7 +2033,7 @@ impl Viewer {
             (f, mesh)
         };
         let n = mesh.pos.len();
-        self.mesh = Some(MeshEdit { obj: k, file, mesh, sel: vec![false; n], hist: vec![], modal: None, boxing: None, skip_click: false });
+        self.mesh = Some(MeshEdit { obj: k, file, mesh, sel: vec![false; n], hist: vec![], modal: None, boxing: None, skip_click: false, mode: 0 });
         self.scene_multi.clear();
         self.capture_msg = None;
     }
@@ -2244,6 +2246,55 @@ impl Viewer {
             if !typing && ui.input(|i| i.modifiers.alt && i.key_pressed(Key::A)) {
                 me.sel.iter_mut().for_each(|s| *s = false);
             }
+            // Modes de sélection : 1 sommets, 2 arêtes, 3 faces
+            for (k, kk) in [Key::Num1, Key::Num2, Key::Num3].into_iter().enumerate() {
+                if key(kk) {
+                    me.mode = k as u8;
+                }
+            }
+            // I : face incrustée dans chaque face choisie
+            if key(Key::I) && any {
+                snapshot(me);
+                match me.mesh.inset(&me.sel, 0.25) {
+                    Some(sel) => {
+                        me.sel = sel;
+                        dirty = true;
+                    }
+                    None => {
+                        me.hist.pop();
+                        self.capture_msg = Some(crate::i18n::t("incruster demande au moins une face dont tous les sommets sont choisis"));
+                    }
+                }
+            }
+            // M : fusionner au centre
+            if key(Key::M) && any {
+                snapshot(me);
+                match me.mesh.merge(&me.sel) {
+                    Some(sel) => {
+                        me.sel = sel;
+                        dirty = true;
+                    }
+                    None => {
+                        me.hist.pop();
+                    }
+                }
+            }
+            // L : la pièce sous le pointeur ; Ctrl+L : tout ce qui touche la sélection
+            if !typing && ui.input(|i| i.modifiers.command && i.key_pressed(Key::L)) && any {
+                me.sel = me.mesh.linked(&me.sel);
+            } else if key(Key::L) {
+                if let Some(at) = cur {
+                    let near = (0..me.mesh.pos.len()).filter_map(|i| project(to_world(me.mesh.pos[i])).map(|s| (i, (s - at).length()))).min_by(|a, b| a.1.total_cmp(&b.1));
+                    if let Some((i, _)) = near {
+                        let mut one = vec![false; me.mesh.pos.len()];
+                        one[i] = true;
+                        let add = me.mesh.linked(&one);
+                        for (s, a) in me.sel.iter_mut().zip(add) {
+                            *s |= a;
+                        }
+                    }
+                }
+            }
             if key(Key::B) {
                 me.boxing = Some(None);
             }
@@ -2281,12 +2332,44 @@ impl Viewer {
                 ui.ctx().request_repaint();
             } else if resp.clicked() && !me.skip_click {
                 if let Some(at) = resp.interact_pointer_pos() {
-                    let near = (0..me.mesh.pos.len()).filter_map(|i| project(to_world(me.mesh.pos[i])).map(|s| (i, (s - at).length()))).filter(|x| x.1 < 11.0).min_by(|a, b| a.1.total_cmp(&b.1));
-                    match near {
-                        Some((i, _)) if shift => me.sel[i] = !me.sel[i],
-                        Some((i, _)) => {
+                    let scr: Vec<Option<Pos2>> = me.mesh.pos.iter().map(|v| project(to_world(*v))).collect();
+                    // Ce qu'on vise : un sommet, une arête (ses deux bouts) ou une face (tous ses sommets)
+                    let hit: Option<Vec<usize>> = match me.mode {
+                        1 => me.mesh.edges().into_iter().filter_map(|(a, b)| {
+                            let (sa, sb) = (scr[a as usize]?, scr[b as usize]?);
+                            let ab = sb - sa;
+                            let t = ((at - sa).dot(ab) / ab.length_sq().max(1e-6)).clamp(0.0, 1.0);
+                            let d = (sa + ab * t - at).length();
+                            (d < 8.0).then_some((vec![a as usize, b as usize], d))
+                        }).min_by(|x, y| x.1.total_cmp(&y.1)).map(|x| x.0),
+                        2 => me.mesh.polys.iter().filter_map(|poly| {
+                            let pts: Option<Vec<Pos2>> = poly.iter().map(|&v| scr[v as usize]).collect();
+                            let pts = pts?;
+                            // Le point est-il dans le polygone (à l'écran) ? Le plus proche de l'œil gagne
+                            let mut inside = false;
+                            for k in 0..pts.len() {
+                                let (a, b) = (pts[k], pts[(k + 1) % pts.len()]);
+                                if (a.y > at.y) != (b.y > at.y) && at.x < (b.x - a.x) * (at.y - a.y) / (b.y - a.y) + a.x {
+                                    inside = !inside;
+                                }
+                            }
+                            let depth = poly.iter().map(|&v| -view(to_world(me.mesh.pos[v as usize]))[2]).sum::<f32>() / poly.len() as f32;
+                            inside.then(|| (poly.iter().map(|&v| v as usize).collect::<Vec<usize>>(), depth))
+                        }).min_by(|x, y| x.1.total_cmp(&y.1)).map(|x| x.0),
+                        _ => (0..me.mesh.pos.len()).filter_map(|i| scr[i].map(|s| (i, (s - at).length()))).filter(|x| x.1 < 11.0).min_by(|a, b| a.1.total_cmp(&b.1)).map(|x| vec![x.0]),
+                    };
+                    match hit {
+                        Some(vs) if shift => {
+                            let all = vs.iter().all(|&i| me.sel[i]);
+                            for i in vs {
+                                me.sel[i] = !all;
+                            }
+                        }
+                        Some(vs) => {
                             me.sel.iter_mut().for_each(|s| *s = false);
-                            me.sel[i] = true;
+                            for i in vs {
+                                me.sel[i] = true;
+                            }
                         }
                         None if !shift => me.sel.iter_mut().for_each(|s| *s = false),
                         None => {}
@@ -2301,6 +2384,17 @@ impl Viewer {
         let over = ui.painter_at(rect);
         let screen: Vec<Option<Pos2>> = me.mesh.pos.iter().map(|v| project(to_world(*v))).collect();
         let light = me.mesh.pos.len() <= 20_000;
+        if light && me.mode == 2 {
+            for f in me.mesh.faces_in(&me.sel) {
+                let pts: Option<Vec<Pos2>> = me.mesh.polys[f].iter().map(|&v| screen[v as usize]).collect();
+                if let Some(pts) = pts {
+                    // En éventail : juste pour les polygones convexes (quadrilatères, triangles)
+                    for k in 1..pts.len().saturating_sub(1) {
+                        over.add(egui::Shape::convex_polygon(vec![pts[0], pts[k], pts[k + 1]], p.accent.gamma_multiply(0.22), Stroke::NONE));
+                    }
+                }
+            }
+        }
         if light {
             for (a, b) in me.mesh.edges() {
                 if let (Some(sa), Some(sb)) = (screen[a as usize], screen[b as usize]) {
@@ -2311,6 +2405,10 @@ impl Viewer {
         }
         for (i, s) in screen.iter().enumerate() {
             if let Some(s) = s {
+                // En mode face, les sommets se font discrets
+                if me.mode == 2 && !me.sel[i] {
+                    continue;
+                }
                 if me.sel[i] {
                     over.circle_filled(*s, 3.5, p.accent);
                 } else if light {
@@ -3395,7 +3493,17 @@ impl Viewer {
                 match item {
                     Hdr::Mode => {
                         let mode = if self.mesh.is_some() { "mode édition" } else if self.edit.is_some() { "UV et matériaux" } else { "mode objet" };
-                        egui::containers::menu::MenuButton::from_button(egui::Button::new(egui::RichText::new(format!("◆ {} ▾", crate::i18n::t(mode))).family(theme::bold()).size(12.0)).fill(p.panel)).ui(ui, |ui| {
+                        if let Some(me) = self.mesh.as_mut() {
+                        // Sommets, arêtes, faces : les trois modes de sélection, comme dans Blender
+                        for (k, (icon, tip)) in [("•", "sommets (1)"), ("⁄", "arêtes (2)"), ("▱", "faces (3)")].into_iter().enumerate() {
+                            let on = me.mode == k as u8;
+                            let b = egui::Button::new(egui::RichText::new(icon).size(13.0).color(if on { p.on_accent } else { p.text })).fill(if on { p.accent } else { p.panel }).min_size(egui::vec2(24.0, 20.0));
+                            if ui.add(b).on_hover_text(crate::i18n::t(tip)).clicked() {
+                                me.mode = k as u8;
+                            }
+                        }
+                    }
+                    egui::containers::menu::MenuButton::from_button(egui::Button::new(egui::RichText::new(format!("◆ {} ▾", crate::i18n::t(mode))).family(theme::bold()).size(12.0)).fill(p.panel)).ui(ui, |ui| {
                             ui.set_min_width(220.0);
                             if ui.selectable_label(self.mesh.is_none() && self.edit.is_none(), crate::i18n::t("mode objet")).clicked() {
                                 if self.mesh.is_some() {
@@ -4328,7 +4436,8 @@ impl Viewer {
             if scroll != 0.0 {
                 self.cam.dist = (self.cam.dist * (-scroll * 0.0015).exp()).clamp(0.2, 50.0);
             }
-            let keys = ui.input(|i| [Key::Num1, Key::Num3, Key::Num7, Key::Num5, Key::Home, Key::Period].map(|k| i.key_pressed(k) && !i.modifiers.command));
+            let editing_mesh = self.mesh.is_some();
+            let keys = ui.input(|i| [Key::Num1, Key::Num3, Key::Num7, Key::Num5, Key::Home, Key::Period].map(|k| i.key_pressed(k) && !i.modifiers.command && !(editing_mesh && matches!(k, Key::Num1 | Key::Num3))));
             let opposite = mods.shift;
             let half = std::f32::consts::FRAC_PI_2;
             if keys[0] {
