@@ -3076,8 +3076,13 @@ impl Viewer {
                     ui.spacing_mut().item_spacing.y = 3.0;
                     for (t, icon, tip) in PROP_TABS {
                         let on = tab == t;
-                        let b = egui::Button::new(egui::RichText::new(icon).size(14.0).color(if on { p.on_accent } else { p.muted })).fill(if on { p.accent } else { p.panel }).min_size(egui::vec2(26.0, 26.0));
-                        if ui.add(b).on_hover_text(crate::i18n::t(tip)).clicked() {
+                        // Tous les onglets à la même taille, alignés, quel que soit le glyphe
+                        let (r, resp) = ui.allocate_exact_size(egui::vec2(28.0, 28.0), egui::Sense::click());
+                        let fill = if on { p.accent } else if resp.hovered() { p.line } else { p.panel };
+                        ui.painter().rect_filled(r, 4.0, fill);
+                        ui.painter().rect_stroke(r, 4.0, Stroke::new(1.0, p.line), egui::StrokeKind::Inside);
+                        ui.painter().text(r.center(), egui::Align2::CENTER_CENTER, icon, egui::FontId::proportional(14.0), if on { p.on_accent } else { p.muted });
+                        if resp.on_hover_text(crate::i18n::t(tip)).clicked() {
                             new_tab = t;
                         }
                     }
@@ -4186,9 +4191,13 @@ impl Viewer {
             egui::Area::new(egui::Id::unique(("tools3d", self.path.to_string_lossy().to_string()))).order(egui::Order::Middle).fixed_pos(top).show(ui.ctx(), |ui| {
                 egui::Frame::new().fill(p.panel.gamma_multiply(0.94)).corner_radius(6).stroke(Stroke::new(1.0, p.line)).inner_margin(3).show(ui, |ui| {
                     ui.spacing_mut().item_spacing.y = 2.0;
+                    // Des cases toutes de la même taille, alignées
                     let tool = |ui: &mut egui::Ui, icon: &str, on: bool, tip: String| {
-                        let b = egui::Button::new(egui::RichText::new(icon).size(15.0).color(if on { p.on_accent } else { p.text })).fill(if on { p.accent } else { egui::Color32::TRANSPARENT }).min_size(egui::vec2(28.0, 28.0));
-                        ui.add(b).on_hover_text(tip).clicked()
+                        let (r, resp) = ui.allocate_exact_size(egui::vec2(28.0, 28.0), egui::Sense::click());
+                        let fill = if on { p.accent } else if resp.hovered() { p.line } else { egui::Color32::TRANSPARENT };
+                        ui.painter().rect_filled(r, 4.0, fill);
+                        ui.painter().text(r.center(), egui::Align2::CENTER_CENTER, icon, egui::FontId::proportional(15.0), if on { p.on_accent } else { p.text });
+                        resp.on_hover_text(tip).clicked()
                     };
                     if tool(ui, "⬚", self.box_sel.is_some(), format!("{} (B)", crate::i18n::t("sélection rectangle"))) {
                         self.hdr_key = Some((Key::B, egui::Modifiers::NONE));
