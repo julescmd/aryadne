@@ -46,16 +46,60 @@ fn path() -> Option<std::path::PathBuf> {
 }
 
 /// Les espaces fournis d'origine : (nom, couleur, vue, assistant ouvert, genre).
-pub const PRESETS: [(&str, Option<[u8; 3]>, &str, bool, &str); 8] = [
+/// Les références ne sont plus un espace à part : chaque espace qui en a besoin a sa page « références ».
+pub const PRESETS: [(&str, Option<[u8; 3]>, &str, bool, &str); 7] = [
     ("notes", None, "files", false, "notes"),
     ("3D", Some([0x3d, 0x9b, 0xff]), "files", false, "3d"),
     ("2D", Some([0xe8, 0x5d, 0xa8]), "files", false, "2d"),
     ("vidéo", Some([0x9b, 0x6d, 0xff]), "files", false, "video"),
     ("code", Some([0x3f, 0xc9, 0x7e]), "files", false, "code"),
     ("IA", Some([0xf2, 0xb5, 0x3a]), "chat", true, "ai"),
-    ("références", Some([0x2c, 0xc4, 0xc4]), "refs", false, "refs"),
     ("matériaux", Some([0xe0, 0x7a, 0x3a]), "files", false, "mat"),
 ];
+
+/// Les genres d'espaces connus d'Aryadne. Un espace d'un autre genre (fait à la main) accepte tout.
+pub const KINDS: [&str; 7] = ["notes", "3d", "2d", "video", "code", "ai", "mat"];
+
+/// Les pages de chaque espace, dans la deuxième rangée : (libellé, vue). Comme les jeux de menus de Maya,
+/// elles changent avec l'espace ; la première est la page de travail (onglets de fichiers).
+pub fn pages(kind: &str) -> &'static [(&'static str, &'static str)] {
+    match kind {
+        "3d" => &[("scène", "files"), ("références", "refs")],
+        "2d" => &[("images", "files"), ("boards", "boards"), ("références", "refs")],
+        "video" => &[("montage", "files"), ("médias", "refs")],
+        "code" => &[("éditeur", "files"), ("recherche", "search")],
+        "ai" => &[("chat", "chat"), ("recherche", "search")],
+        "mat" => &[("nodes", "files"), ("références", "refs")],
+        _ => &[("notes", "files"), ("cerveau", "brain"), ("tâches", "tasks"), ("recherche", "search")],
+    }
+}
+
+/// Extensions de code et de texte brut : elles s'ouvrent dans l'espace « code ».
+pub const CODE: [&str; 30] = ["rs", "py", "js", "ts", "tsx", "jsx", "html", "css", "json", "toml", "yaml", "yml", "c", "h", "cpp", "hpp", "java", "go", "lua", "sh", "glsl", "wgsl", "cs", "php", "rb", "swift", "kt", "sql", "xml", "ini"];
+
+/// L'espace où un fichier a sa place.
+pub fn owner(rel: &str) -> &'static str {
+    let low = rel.to_lowercase();
+    let ext = low.rsplit('.').next().unwrap_or("");
+    if crate::nodes::is_graph(rel) {
+        "mat"
+    } else if crate::model3d::is_model(rel) || matches!(ext, "hdr" | "exr") {
+        "3d"
+    } else if crate::montage::is_project(rel) || crate::video::is_video(rel) || crate::formats::has(rel, "seq") || matches!(ext, "wav" | "mp3" | "ogg" | "flac" | "m4a" | "aac") {
+        "video"
+    } else if crate::board::is_board(rel) || crate::images::is_image(rel) || crate::formats::has(rel, "img") {
+        "2d"
+    } else if CODE.contains(&ext) && crate::formats::of(rel).is_none() {
+        "code"
+    } else {
+        "notes"
+    }
+}
+
+/// Un fichier peut-il s'ouvrir dans un espace de ce genre ?
+pub fn accepts(kind: &str, rel: &str) -> bool {
+    !KINDS.contains(&kind) || owner(rel) == kind
+}
 
 pub fn preset(i: usize) -> Workspace {
     let (name, accent, view, assistant, kind) = PRESETS[i];
@@ -77,8 +121,14 @@ impl Set {
                 // Première fois : l'espace « notes » reprend la disposition déjà en place
                 let mut list: Vec<Workspace> = (0..PRESETS.len()).map(preset).collect();
                 list[0].places = crate::dock::export();
-                Set { current: 0, list, seeded: 1 }
+                Set { current: 0, list, seeded: 2 }
             });
+        // L'ancien espace « références » devient une page des autres espaces
+        if s.seeded < 2 {
+            let cur = s.list.get(s.current).map(|w| w.name.clone());
+            s.list.retain(|w| w.kind != "refs" && !(w.kind.is_empty() && w.name == "références"));
+            s.current = cur.and_then(|n| s.list.iter().position(|w| w.name == n)).unwrap_or(0);
+        }
         // Installation d'avant les genres : on les retrouve par le nom, et l'espace « matériaux » s'ajoute
         for w in &mut s.list {
             if w.kind.is_empty() {
@@ -87,10 +137,10 @@ impl Set {
         }
         if s.seeded < 1 {
             if !s.list.iter().any(|w| w.kind == "mat") {
-                s.list.push(preset(7));
+                s.list.push(preset(6));
             }
-            s.seeded = 1;
         }
+        s.seeded = s.seeded.max(2);
         if s.list.is_empty() {
             s.list.push(preset(0));
         }

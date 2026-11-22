@@ -120,6 +120,18 @@ enum View {
     Search,
 }
 
+fn view_of(id: &str) -> View {
+    match id {
+        "brain" => View::Brain,
+        "refs" => View::Refs,
+        "boards" => View::Boards,
+        "tasks" => View::Tasks,
+        "chat" => View::Chat,
+        "search" => View::Search,
+        _ => View::Files,
+    }
+}
+
 #[derive(PartialEq, Clone, Copy, Default)]
 enum RefSort {
     #[default]
@@ -278,6 +290,8 @@ struct App {
     /// Panneau en cours d'affichage (pour son en-tête)
     pane_now: Option<usize>,
     ws_started: bool,
+    /// On change d'espace pour ouvrir un fichier : pas de scène ouverte d'office
+    ws_routing: bool,
     ws_name: String,
     /// Nom tapé dans l'écran d'accueil (nouveau fichier de code)
     landing_name: String,
@@ -363,30 +377,23 @@ impl App {
         self.split = None;
         self.panes.clear();
         let known: std::collections::HashSet<&str> = self.entries.iter().map(|e| e.rel.as_str()).collect();
-        let tabs: Vec<String> = w.tabs.iter().filter(|t| known.contains(t.as_str())).cloned().collect();
+        let tabs: Vec<String> = w.tabs.iter().filter(|t| known.contains(t.as_str()) && workspace::accepts(&w.kind, t)).cloned().collect();
         for t in &tabs {
-            self.open(t.clone());
+            self.open_here(t.clone());
         }
         if let Some(a) = w.active.filter(|a| tabs.contains(a)) {
-            self.open(a);
+            self.open_here(a);
         }
         self.split = w.split.filter(|s| tabs.contains(s));
         self.panes = w.panes.into_iter().filter(|s| tabs.contains(s)).collect();
-        self.view = Some(match w.view.as_str() {
-            "brain" => View::Brain,
-            "refs" => View::Refs,
-            "boards" => View::Boards,
-            "tasks" => View::Tasks,
-            "chat" => View::Chat,
-            "search" => View::Search,
-            _ => View::Files,
-        });
+        let pages = workspace::pages(&w.kind);
+        self.view = Some(view_of(if pages.iter().any(|(_, v)| *v == w.view) { w.view.as_str() } else { pages[0].1 }));
         self.update_backlinks();
         // Espace 3D sans rien d'ouvert : on arrive dans une scène, la dernière utilisée ou une neuve (cube, lumière, caméra)
-        if w.kind == "3d" && self.docs.is_empty() && !self.entries.is_empty() {
+        if w.kind == "3d" && self.docs.is_empty() && !self.entries.is_empty() && !std::mem::take(&mut self.ws_routing) {
             let last = self.entries.iter().filter(|e| !e.is_dir && formats::has(&e.rel, "scene")).max_by_key(|e| e.modified).map(|e| e.rel.clone());
             match last {
-                Some(rel) => self.open(rel),
+                Some(rel) => self.open_here(rel),
                 None => self.run_cmd(extras::Cmd::NewScene, ctx),
             }
         }
@@ -597,9 +604,8 @@ impl App {
         self.ws.save();
     }
 
-    /// Barre des espaces de travail, sous le menu.
-    fn ws_bar(&mut self, ui: &mut egui::Ui) {
-        let p = theme::pal();
+    /// Au lancement : reprendre la disposition, la couleur et les onglets de l'espace en cours.
+    fn ws_start(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
         if !self.ws_started {
             // Au lancement : reprendre la disposition et la couleur, et les onglets si rien n'est ouvert
@@ -616,71 +622,73 @@ impl App {
             self.ws_capture();
             self.ws.save();
         }
+    }
+
+    /// Les espaces de travail, dans la barre du haut : chacun a sa couleur, ses pages et ses genres de fichiers.
+    fn ws_items(&mut self, ui: &mut egui::Ui) {
+        let p = theme::pal();
+        let ctx = ui.ctx().clone();
         let mut go: Option<usize> = None;
         let mut changed = false;
         let mut add = false;
         let mut dup: Option<usize> = None;
         let mut del: Option<usize> = None;
         let mut reset: Option<usize> = None;
-        egui::Panel::top("workspaces").exact_size(26.0).frame(egui::Frame::new().fill(p.panel).stroke(egui::Stroke::new(1.0, p.line)).inner_margin(egui::Margin::symmetric(10, 0))).show(ui, |ui| {
-            ui.horizontal_centered(|ui| {
-                ui.spacing_mut().item_spacing.x = 2.0;
-                let n = self.ws.list.len();
-                for i in 0..n {
-                    let on = i == self.ws.current;
-                    let color = self.ws.list[i].accent.map(|c| egui::Color32::from_rgb(c[0], c[1], c[2])).unwrap_or(if on { p.accent } else { p.muted });
-                    let label = crate::i18n::t(&self.ws.list[i].name);
-                    let mut text = egui::text::LayoutJob::default();
-                    let font = egui::FontId::new(12.0, if on { theme::bold() } else { egui::FontFamily::Proportional });
-                    text.append("● ", 0.0, egui::TextFormat { font_id: font.clone(), color, ..Default::default() });
-                    text.append(&label, 0.0, egui::TextFormat { font_id: font, color: if on { color } else { p.muted }, ..Default::default() });
-                    let r = ui.add(egui::Button::new(text).frame(false)).on_hover_text(crate::i18n::t("clic droit : renommer, couleur, dupliquer"));
-                    if r.clicked() {
-                        go = Some(i);
-                    }
-                    r.context_menu(|ui| {
-                        ui.set_min_width(210.0);
-                        if self.ws_name.is_empty() || ui.memory(|m| m.data.get_temp::<usize>(egui::Id::unique("ws-edit"))) != Some(i) {
-                            self.ws_name = self.ws.list[i].name.clone();
-                            ui.memory_mut(|m| m.data.insert_temp(egui::Id::unique("ws-edit"), i));
-                        }
-                        if ui.add(egui::TextEdit::singleline(&mut self.ws_name).hint_text(crate::i18n::t("nom de l'espace"))).changed() && !self.ws_name.trim().is_empty() {
-                            self.ws.list[i].name = self.ws_name.trim().to_string();
-                            changed = true;
-                        }
-                        ui.horizontal(|ui| {
-                            ui.label(crate::i18n::t("couleur"));
-                            let mut c = self.ws.list[i].accent.unwrap_or([p.accent.r(), p.accent.g(), p.accent.b()]);
-                            if ui.color_edit_button_srgb(&mut c).changed() {
-                                self.ws.list[i].accent = Some(c);
-                                changed = true;
-                            }
-                            if self.ws.list[i].accent.is_some() && ui.small_button(crate::i18n::t("celle des réglages")).clicked() {
-                                self.ws.list[i].accent = None;
-                                changed = true;
-                            }
-                        });
-                        ui.separator();
-                        if ui.button(crate::i18n::t("dupliquer")).clicked() {
-                            dup = Some(i);
-                            ui.close();
-                        }
-                        if ui.button(crate::i18n::t("réinitialiser la disposition")).clicked() {
-                            reset = Some(i);
-                            ui.close();
-                        }
-                        if n > 1 && ui.button(RichText::new(crate::i18n::t("supprimer")).color(p.missing)).clicked() {
-                            del = Some(i);
-                            ui.close();
-                        }
-                    });
-                    ui.add_space(6.0);
+        ui.spacing_mut().item_spacing.x = 2.0;
+        let n = self.ws.list.len();
+        for i in 0..n {
+            let on = i == self.ws.current;
+            let color = self.ws.list[i].accent.map(|c| egui::Color32::from_rgb(c[0], c[1], c[2])).unwrap_or(if on { p.accent } else { p.muted });
+            let label = crate::i18n::t(&self.ws.list[i].name);
+            let mut text = egui::text::LayoutJob::default();
+            let font = egui::FontId::new(13.0, if on { theme::bold() } else { egui::FontFamily::Proportional });
+            text.append("● ", 0.0, egui::TextFormat { font_id: font.clone(), color, ..Default::default() });
+            text.append(&label, 0.0, egui::TextFormat { font_id: font, color: if on { color } else { p.muted }, ..Default::default() });
+            let r = ui.add(egui::Button::new(text).frame(false)).on_hover_text(crate::i18n::t("clic droit : renommer, couleur, dupliquer"));
+            if r.clicked() {
+                go = Some(i);
+            }
+            r.context_menu(|ui| {
+                ui.set_min_width(210.0);
+                if self.ws_name.is_empty() || ui.memory(|m| m.data.get_temp::<usize>(egui::Id::unique("ws-edit"))) != Some(i) {
+                    self.ws_name = self.ws.list[i].name.clone();
+                    ui.memory_mut(|m| m.data.insert_temp(egui::Id::unique("ws-edit"), i));
                 }
-                if ui.add(egui::Button::new(RichText::new("＋").color(p.muted)).frame(false)).on_hover_text(crate::i18n::t("Enregistrer la disposition actuelle comme nouvel espace de travail")).clicked() {
-                    add = true;
+                if ui.add(egui::TextEdit::singleline(&mut self.ws_name).hint_text(crate::i18n::t("nom de l'espace"))).changed() && !self.ws_name.trim().is_empty() {
+                    self.ws.list[i].name = self.ws_name.trim().to_string();
+                    changed = true;
+                }
+                ui.horizontal(|ui| {
+                    ui.label(crate::i18n::t("couleur"));
+                    let mut c = self.ws.list[i].accent.unwrap_or([p.accent.r(), p.accent.g(), p.accent.b()]);
+                    if ui.color_edit_button_srgb(&mut c).changed() {
+                        self.ws.list[i].accent = Some(c);
+                        changed = true;
+                    }
+                    if self.ws.list[i].accent.is_some() && ui.small_button(crate::i18n::t("celle des réglages")).clicked() {
+                        self.ws.list[i].accent = None;
+                        changed = true;
+                    }
+                });
+                ui.separator();
+                if ui.button(crate::i18n::t("dupliquer")).clicked() {
+                    dup = Some(i);
+                    ui.close();
+                }
+                if ui.button(crate::i18n::t("réinitialiser la disposition")).clicked() {
+                    reset = Some(i);
+                    ui.close();
+                }
+                if n > 1 && ui.button(RichText::new(crate::i18n::t("supprimer")).color(p.missing)).clicked() {
+                    del = Some(i);
+                    ui.close();
                 }
             });
-        });
+            ui.add_space(10.0);
+        }
+        if ui.add(egui::Button::new(RichText::new("＋").color(p.muted)).frame(false)).on_hover_text(crate::i18n::t("Enregistrer la disposition actuelle comme nouvel espace de travail")).clicked() {
+            add = true;
+        }
         if add || dup.is_some() {
             self.ws_capture();
             let mut w = self.ws.list[dup.unwrap_or(self.ws.current)].clone();
@@ -720,6 +728,46 @@ impl App {
         }
     }
 
+    /// Deuxième rangée : les pages de l'espace en cours (comme les jeux de menus de Maya, elles changent avec lui).
+    fn ws_bar(&mut self, ui: &mut egui::Ui) {
+        let p = theme::pal();
+        let kind = self.ws.cur().kind.clone();
+        let pages = workspace::pages(&kind);
+        let view_id = |v: View| match v {
+            View::Files => "files",
+            View::Brain => "brain",
+            View::Refs => "refs",
+            View::Boards => "boards",
+            View::Tasks => "tasks",
+            View::Chat => "chat",
+            View::Search => "search",
+        };
+        // Une vue qui n'appartient pas à l'espace (raccourci, ancienne disposition) : on revient à sa première page
+        if !pages.iter().any(|(_, v)| *v == view_id(self.view())) {
+            self.view = Some(view_of(pages[0].1));
+        }
+        let accent = self.ws.cur().accent.map(|c| egui::Color32::from_rgb(c[0], c[1], c[2])).unwrap_or(p.accent);
+        egui::Panel::top("workspaces").exact_size(28.0).frame(egui::Frame::new().fill(p.panel).stroke(egui::Stroke::new(1.0, p.line)).inner_margin(egui::Margin::symmetric(12, 0))).show(ui, |ui| {
+            ui.horizontal_centered(|ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                for (label, v) in pages {
+                    let view = view_of(v);
+                    let on = view == self.view();
+                    let text = RichText::new(crate::i18n::t(label)).size(12.0).color(if on { p.text } else { p.muted });
+                    let r = ui.add(egui::Label::new(if on { text.family(theme::bold()) } else { text }).sense(egui::Sense::click()));
+                    if on {
+                        let y = ui.max_rect().bottom();
+                        ui.painter().rect_filled(egui::Rect::from_min_max(egui::pos2(r.rect.left(), y - 2.0), egui::pos2(r.rect.right(), y)), 0.0, accent);
+                    }
+                    if r.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                        self.view = Some(view);
+                    }
+                    ui.add_space(12.0);
+                }
+            });
+        });
+    }
+
     fn report<T>(&mut self, r: Result<T, String>) -> Option<T> {
         r.map_err(|e| self.error = Some(e)).ok()
     }
@@ -751,8 +799,11 @@ impl App {
         self.images.set_root(&root);
         vault::load_links(&root);
         self.refresh();
+        // Première note du coffre, si l'espace en cours est fait pour les notes
         if let Some(first) = self.entries.iter().find(|e| vault::is_md(&e.rel)).map(|e| e.rel.clone()) {
-            self.open(first);
+            if workspace::accepts(&self.ws.cur().kind, &first) {
+                self.open_here(first);
+            }
         }
         self.start_backup(false);
     }
@@ -847,7 +898,22 @@ impl App {
         Content::Video(Box::new(video::Viewer::open(path, notes, &ctx)))
     }
 
+    /// Ouvre un fichier dans l'espace où il a sa place : un montage dans l'espace vidéo, une scène dans l'espace 3D…
+    /// On y passe tout seul, comme Maya change de menus avec le mode.
     fn open(&mut self, rel: String) {
+        let here = self.ws.cur().kind.clone();
+        let want = workspace::owner(&rel);
+        if !workspace::accepts(&here, &rel) {
+            if let (Some(i), Some(ctx)) = (self.ws.list.iter().position(|w| w.kind == want), self.ctx.clone()) {
+                self.ws_routing = true;
+                self.ws_switch(i, &ctx);
+                self.ws_routing = false;
+            }
+        }
+        self.open_here(rel);
+    }
+
+    fn open_here(&mut self, rel: String) {
         self.view = Some(View::Files);
         self.selected = Some(rel.clone());
         self.files.reveal(&rel);
@@ -1346,21 +1412,7 @@ impl App {
                     });
                     r.on_hover_text(format!("{path}"));
                     ui.add_space(18.0);
-                    let tabs = [("fichiers", View::Files), ("cerveau", View::Brain), ("refs", View::Refs), ("boards", View::Boards), ("tâches", View::Tasks), ("chat", View::Chat), ("recherche", View::Search)];
-                    for (label, v) in tabs {
-                        let active = v == self.view();
-                        let color = if active { p.text } else { p.muted };
-                        let text = RichText::new(crate::i18n::t(label)).color(color);
-                        let r = ui.add(egui::Label::new(if active { text.family(theme::bold()) } else { text }).sense(egui::Sense::click()));
-                        if active {
-                            let y = ui.max_rect().bottom();
-                            ui.painter().rect_filled(egui::Rect::from_min_max(egui::pos2(r.rect.left(), y - 2.0), egui::pos2(r.rect.right(), y)), 0.0, p.accent);
-                        }
-                        if r.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
-                            self.view = Some(v);
-                        }
-                        ui.add_space(8.0);
-                    }
+                    self.ws_items(ui);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui.button(crate::i18n::t("réglages")).clicked() {
                             cmd = Some(extras::Cmd::Settings(settings::Tab::Appearance));
@@ -2513,8 +2565,15 @@ impl App {
         self.entries.iter().filter(|e| !e.is_dir && images::has_preview(&e.rel)).cloned().collect()
     }
 
-    fn aspect(&self, rel: &str) -> f32 {
-        self.images.peek(rel, images::Size::Thumb).map(|l| l.dims[0] as f32 / l.dims[1].max(1) as f32).unwrap_or(1.5)
+    /// Taille d'une image posée sur un board : sa taille d'origine en pixels, sinon une vignette aux bonnes proportions.
+    fn board_size(&self, rel: &str) -> egui::Vec2 {
+        match self.images.natural(rel) {
+            Some([w, h]) => egui::vec2(w as f32, h as f32),
+            None => {
+                let a = self.images.peek(rel, images::Size::Thumb).map(|l| l.dims[0] as f32 / l.dims[1].max(1) as f32).unwrap_or(1.5);
+                egui::vec2(240.0 * a, 240.0)
+            }
+        }
     }
 
     /// Moodboard automatique par mots-clés (nom, dossier, notes qui parlent de l'image).
@@ -2551,7 +2610,7 @@ impl App {
             .filter(|(_, s)| *s > 0)
             .collect();
         found.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
-        let picks: Vec<(String, f32)> = found.into_iter().take(40).map(|(r, _)| (r.clone(), self.aspect(&r))).collect();
+        let picks: Vec<(String, egui::Vec2)> = found.into_iter().take(40).map(|(r, _)| (r.clone(), self.board_size(&r))).collect();
         let n = picks.len();
         self.board.add_grid(picks);
         n
@@ -2579,8 +2638,8 @@ impl App {
             return Err(format!("Analyse des couleurs en cours ({pending} images restantes), réessaie dans un instant."));
         }
         scored.sort_by(|a, b| a.1.total_cmp(&b.1));
-        let mut picks = vec![(seed.to_string(), self.aspect(seed))];
-        picks.extend(scored.into_iter().take(15).filter(|(_, d)| *d < 90.0).map(|(r, _)| (r.clone(), self.aspect(&r))));
+        let mut picks = vec![(seed.to_string(), self.board_size(seed))];
+        picks.extend(scored.into_iter().take(15).filter(|(_, d)| *d < 90.0).map(|(r, _)| (r.clone(), self.board_size(&r))));
         let n = picks.len();
         self.board.add_grid(picks);
         Ok(n)
@@ -4128,6 +4187,7 @@ impl eframe::App for App {
             if self.compact {
                 self.compact_bar(ui);
             } else {
+                self.ws_start(ui);
                 self.topbar(ui);
                 self.ws_bar(ui);
                 self.statusbar(ui);

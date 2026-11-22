@@ -74,7 +74,23 @@ impl Default for Images {
     }
 }
 
+/// Taille d'origine des images, lue dans l'en-tête du fichier (sans le décoder), une fois par fichier.
+static NATURAL: std::sync::Mutex<Option<HashMap<std::path::PathBuf, Option<[u32; 2]>>>> = std::sync::Mutex::new(None);
+
 impl Images {
+    /// Dimensions en pixels de l'image d'origine (None : pas une image lisible, ou PDF, vidéo…).
+    pub fn natural(&self, rel: &str) -> Option<[u32; 2]> {
+        let path = std::path::Path::new(&self.root).join(rel);
+        let mut g = NATURAL.lock().ok()?;
+        let map = g.get_or_insert_with(HashMap::new);
+        if let Some(v) = map.get(&path) {
+            return *v;
+        }
+        let v = image::image_dimensions(&path).ok().map(|(w, h)| [w, h]);
+        map.insert(path, v);
+        v
+    }
+
     pub fn set_root(&mut self, root: &str) {
         if self.root != root {
             *self = Self { root: root.to_string(), ..Default::default() };

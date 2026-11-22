@@ -230,7 +230,8 @@ impl Board {
     }
 
     /// Dispose des images en rangées, à droite de ce qui existe déjà.
-    pub fn add_grid(&mut self, images: Vec<(String, f32)>) {
+    /// Chaque image arrive avec sa taille (en général sa taille d'origine en pixels).
+    pub fn add_grid(&mut self, images: Vec<(String, Vec2)>) {
         if images.is_empty() {
             return;
         }
@@ -239,17 +240,23 @@ impl Board {
         let start_x = if right == f32::MIN { 0.0 } else { right + 120.0 };
         let top = self.data.items.iter().map(|i| i.y).fold(f32::MAX, f32::min);
         let top = if top == f32::MAX { 0.0 } else { top };
-        let (row_h, max_w, gap) = (240.0, 1400.0, 16.0);
-        let (mut x, mut y) = (start_x, top);
+        // Rangées à la taille réelle des images : une rangée fait au moins la largeur de la plus grande
+        let widest = images.iter().map(|i| i.1.x).fold(0.0f32, f32::max);
+        let total: f32 = images.iter().map(|i| i.1.x).sum();
+        let max_w = widest.max(total.sqrt() * 40.0).max(1400.0);
+        let gap = 24.0;
+        let (mut x, mut y, mut row_h) = (start_x, top, 0.0f32);
         let first = self.data.items.len();
-        for (rel, aspect) in images {
-            let w = row_h * aspect.clamp(0.2, 5.0);
+        for (rel, size) in images {
+            let (w, h) = (size.x.max(8.0), size.y.max(8.0));
             if x > start_x && x + w > start_x + max_w {
                 x = start_x;
                 y += row_h + gap;
+                row_h = 0.0;
             }
-            self.data.items.push(Item { kind: Kind::Image { rel, flip: false }, x, y, w, h: row_h });
+            self.data.items.push(Item { kind: Kind::Image { rel, flip: false }, x, y, w, h });
             x += w + gap;
+            row_h = row_h.max(h);
         }
         self.selection = (first..self.data.items.len()).collect();
         self.fit_next = true;
@@ -333,9 +340,15 @@ impl Board {
 
     pub fn drop_file(&mut self, rel: &str, at: Vec2, images: &mut Images) {
         if crate::images::has_preview(rel) {
-            let aspect = images.peek(rel, Size::Thumb).map(|l| l.dims[0] as f32 / l.dims[1].max(1) as f32).unwrap_or(1.5);
-            let h = 260.0;
-            self.add(Kind::Image { rel: rel.to_string(), flip: false }, at, vec2(h * aspect, h));
+            // Une image arrive à sa taille d'origine ; un aperçu (PDF, vidéo…) garde une taille de vignette
+            let size = match images.natural(rel) {
+                Some([w, h]) => vec2(w as f32, h as f32),
+                None => {
+                    let aspect = images.peek(rel, Size::Thumb).map(|l| l.dims[0] as f32 / l.dims[1].max(1) as f32).unwrap_or(1.5);
+                    vec2(260.0 * aspect, 260.0)
+                }
+            };
+            self.add(Kind::Image { rel: rel.to_string(), flip: false }, at, size);
         } else if crate::vault::is_md(rel) {
             self.add(Kind::Note { rel: rel.to_string() }, at, vec2(300.0, 180.0));
         } else {
@@ -370,8 +383,9 @@ impl Board {
         // Les images gardent leurs vraies proportions dès qu'on les connaît.
         for it in &mut self.data.items {
             if let Kind::Image { rel, .. } = &it.kind {
-                if let Some(l) = images.peek(rel, Size::Thumb) {
-                    let aspect = l.dims[0] as f32 / l.dims[1].max(1) as f32;
+                // Proportions : celles du fichier d'origine si on les connaît (la vignette arrondit)
+                let aspect = images.natural(rel).map(|[w, h]| w as f32 / h.max(1) as f32).or_else(|| images.peek(rel, Size::Thumb).map(|l| l.dims[0] as f32 / l.dims[1].max(1) as f32));
+                if let Some(aspect) = aspect {
                     if ((it.w / it.h.max(1.0)) - aspect).abs() > 0.01 {
                         it.h = it.w / aspect;
                         self.dirty_since.get_or_insert_with(Instant::now);
@@ -1008,7 +1022,10 @@ mod tests {
     fn board_json_et_historique() {
         let mut b = Board::default();
         b.add(Kind::Text { text: "salut".into(), size: 18.0 }, vec2(0.0, 0.0), vec2(100.0, 50.0));
-        b.add_grid(vec![("refs/a.png".into(), 1.5), ("refs/b.png".into(), 0.5)]);
+        b.add_grid(vec![("refs/a.png".into(), vec2(1500.0, 1000.0)), ("refs/b.png".into(), vec2(400.0, 800.0))]);
+        // Taille d'origine conservée, et les deux images ne se recouvrent pas
+        assert_eq!((b.data.items[1].w, b.data.items[1].h), (1500.0, 1000.0));
+        assert!(!b.data.items[1].rect().intersects(b.data.items[2].rect()));
         b.stroke_pts = vec![pos2(0.0, 0.0), pos2(10.0, 0.0)];
         b.finish_stroke();
         assert_eq!(b.data.items.len(), 4);
