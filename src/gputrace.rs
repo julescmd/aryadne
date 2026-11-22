@@ -117,7 +117,7 @@ fn sky(d0: vec3<f32>) -> vec3<f32> {
   return mix(mix(c00, c10, fx), mix(c01, c11, fx), fy) * P.misc.z;
 }
 
-struct Surf { albedo: vec3<f32>, rough: f32, metal: f32, emit: vec3<f32>, n: vec3<f32> };
+struct Surf { albedo: vec3<f32>, rough: f32, metal: f32, emit: vec3<f32>, n: vec3<f32>, trans: f32, ior: f32, entering: bool };
 
 fn basis(n: vec3<f32>) -> mat3x3<f32> {
   var up = vec3<f32>(0.0, 1.0, 0.0);
@@ -190,12 +190,11 @@ fn surface(h: Hit, view: vec3<f32>) -> Surf {
   let pb = nrm[ix.y];
   let pc = nrm[ix.z];
   let n = normalize(pa.xyz * w0 + pb.xyz * w1 + pc.xyz * w2);
-  let a0 = mats[ti * 6u + 0u]; let m0 = mats[ti * 6u + 1u];
-  let a1 = mats[ti * 6u + 2u]; let m1 = mats[ti * 6u + 3u];
-  let a2 = mats[ti * 6u + 4u]; let m2 = mats[ti * 6u + 5u];
-  let al = a0 * w0 + a1 * w1 + a2 * w2;
-  let me = m0 * w0 + m1 * w1 + m2 * w2;
-  return Surf(al.xyz, clamp(al.w, 0.04, 1.0), clamp(me.w, 0.0, 1.0), me.xyz, n);
+  let b = ti * 9u;
+  let al = mats[b] * w0 + mats[b + 3u] * w1 + mats[b + 6u] * w2;
+  let me = mats[b + 1u] * w0 + mats[b + 4u] * w1 + mats[b + 7u] * w2;
+  let tr = mats[b + 2u] * w0 + mats[b + 5u] * w1 + mats[b + 8u] * w2;
+  return Surf(al.xyz, clamp(al.w, 0.04, 1.0), clamp(me.w, 0.0, 1.0), me.xyz, n, clamp(tr.x, 0.0, 1.0), max(tr.y, 1.0), true);
 }
 
 fn lamp_dir(i: u32, p: vec3<f32>) -> vec4<f32> {
@@ -246,6 +245,15 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     o = P.eye.xyz;
     let v = normalize(vec3<f32>(sx / P.cam.x, -sy / P.cam.x, -1.0));
     d = normalize(P.rx.xyz * v.x + P.ry.xyz * v.y + P.rz.xyz * v.z);
+    // Profondeur de champ
+    if (P.extra.y > 0.0) {
+      let fwd = -P.rz.xyz;
+      let pf = o + d * (P.extra.z / max(dot(d, fwd), 1e-4));
+      let r1 = sqrt(rnd()) * P.extra.y;
+      let r2 = rnd() * 2.0 * PI;
+      o = o + P.rx.xyz * (r1 * cos(r2)) + P.ry.xyz * (r1 * sin(r2));
+      d = normalize(pf - o);
+    }
   }
   var L = vec3<f32>(0.0);
   var through = vec3<f32>(1.0);
@@ -267,7 +275,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (hit.t > 0.0 && (ft < 0.0 || hit.t < ft)) {
       p = o + d * hit.t;
       s = surface(hit, -d);
-      if (dot(s.n, -d) < 0.0) { s.n = -s.n; }
+      if (dot(s.n, -d) < 0.0) { s.n = -s.n; s.entering = false; }
     } else if (ft > 0.0) {
       p = o + d * ft;
       if (bounce == 0u && !floor_vis && !show_bg) {
@@ -294,7 +302,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         first_n = vec3<f32>(0.0, 1.0, 0.0);
         break;
       }
-      s = Surf(vec3<f32>(0.55), 0.9, 0.0, vec3<f32>(0.0), vec3<f32>(0.0, 1.0, 0.0));
+      s = Surf(vec3<f32>(0.55), 0.9, 0.0, vec3<f32>(0.0), vec3<f32>(0.0, 1.0, 0.0), 0.0, 1.45, true);
     } else {
       if (bounce > 0u || show_bg) { L = L + through * sky(d); }
       break;
@@ -309,8 +317,40 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
       if (ld.w < 0.0 || dot(s.n, ld.xyz) <= 0.0) { continue; }
       if (trace(po, ld.xyz, ld.w, true).t > 0.0) { continue; }
       let Lp = P.lamps[i];
-      let e = Lp.color.xyz * Lp.color.w * lamp_fall(i, ld.w) * PI;
+      let e = Lp.color.xyz * Lp.color.w * lamp_fall(i, ld.w) * PI * (1.0 - s.trans);
       L = L + through * brdf_cos(s, wo, ld.xyz) * e;
+    }
+    // Verre : réflexion ou réfraction selon Fresnel
+    if (s.trans > 0.0 && rnd() < s.trans) {
+      let a = s.rough * s.rough * 0.5;
+      let u1 = rnd();
+      let u2 = rnd();
+      let phi = 2.0 * PI * u1;
+      let ct = sqrt(max((1.0 - u2) / (1.0 + (a * a - 1.0) * u2), 0.0));
+      let st = sqrt(max(1.0 - ct * ct, 0.0));
+      let h = normalize(basis(s.n) * vec3<f32>(st * cos(phi), st * sin(phi), ct));
+      var eta = s.ior;
+      if (s.entering) { eta = 1.0 / s.ior; }
+      let ci = clamp(dot(wo, h), -1.0, 1.0);
+      let k = 1.0 - eta * eta * (1.0 - ci * ci);
+      let r0 = pow((1.0 - s.ior) / (1.0 + s.ior), 2.0);
+      var f = 1.0;
+      if (k >= 0.0) { f = r0 + (1.0 - r0) * pow(1.0 - abs(ci), 5.0); }
+      var nd: vec3<f32>;
+      if (rnd() < f) {
+        nd = 2.0 * ci * h - wo;
+      } else {
+        nd = normalize(h * (eta * ci - sqrt(max(k, 0.0))) - wo * eta);
+        through = through * s.albedo;
+      }
+      o = p + nd * 2e-3;
+      d = nd;
+      if (bounce >= 2u) {
+        let q = clamp(dot(through, vec3<f32>(0.2126, 0.7152, 0.0722)), 0.05, 0.95);
+        if (rnd() > q) { break; }
+        through = through / q;
+      }
+      continue;
     }
     let wi = sample_dir(s, wo);
     let pd = pdf(s, wo, wi);
@@ -431,7 +471,7 @@ pub fn prepare(slot: &mut Option<Scene>, m: &Prepared, look: &Look, key: u64, w:
                         norm([na[0] * w0 + nb[0] * w1 + nc[0] * w2, na[1] * w0 + nb[1] * w1 + nc[1] * w2, na[2] * w0 + nb[2] * w1 + nc[2] * w2])
                     };
                     let s = super::pathtrace::surface(m, look, ti, w0, w1, n, res);
-                    [[s.albedo[0], s.albedo[1], s.albedo[2], s.rough], [s.emit[0], s.emit[1], s.emit[2], s.metal]]
+                    [[s.albedo[0], s.albedo[1], s.albedo[2], s.rough], [s.emit[0], s.emit[1], s.emit[2], s.metal], [s.trans, s.ior, 0.0, 0.0]]
                 })
             })
             .collect()
@@ -515,7 +555,7 @@ pub fn passes(s: &mut Scene, m: &Prepared, cam: &Camera, look: &Look, set: &Sett
             cam: [focal, focal / cam.dist, cam.pan[0], cam.pan[1]],
             misc: [m.floor, look.env_rot, look.env_strength, set.clamp],
             env: [env.w as u32, env.h as u32, lamps.len().min(16) as u32, 0],
-            extra: [cam.dist, 0.0, 0.0, 0.0],
+            extra: [cam.dist, set.aperture, if set.focus > 0.0 { set.focus } else { cam.dist }, 0.0],
             lamps: gl,
         };
         g.queue.write_buffer(&s.params, 0, as_bytes(std::slice::from_ref(&p)));
@@ -604,5 +644,25 @@ mod look_test {
         eprintln!("16 passes : {:?} sur {}", t.elapsed(), device_name().unwrap_or_default());
         image::RgbaImage::from_raw(320, 240, acc.image(0.0, false)).unwrap().save("/tmp/gpu.png").unwrap();
         image::RgbaImage::from_raw(320, 240, acc.image(0.0, true)).unwrap().save("/tmp/gpu_dn.png").unwrap();
+        // Une sphère de verre bleuté
+        let mut g = crate::nodes::Graph::new_material();
+        g.links.clear();
+        let out = g.nodes.iter().position(|n| n.op == "mat_out").unwrap();
+        g.nodes[out].values[0] = [0.85, 0.92, 1.0, 1.0];
+        g.nodes[out].values[1] = [0.05, 0.0, 0.0, 0.0];
+        g.nodes[out].values[4] = [1.0, 0.0, 0.0, 0.0];
+        g.nodes[out].values[5] = [1.5, 0.0, 0.0, 0.0];
+        let prog = crate::nodes::Program::compile(&g, "", 256).map_err(|e| e.1).unwrap();
+        let glass = Look { shadows: true, show_bg: true, nodes: Some(std::sync::Arc::new(prog)), ..Default::default() };
+        let mut slot = None;
+        assert!(prepare(&mut slot, &prep, &glass, 2, 320, 240));
+        let mut acc = Accum::new(320, 240);
+        passes(slot.as_mut().unwrap(), &prep, &Camera::default(), &glass, &Settings::default(), 32, &mut acc);
+        image::RgbaImage::from_raw(320, 240, acc.image(0.0, true)).unwrap().save("/tmp/gpu_glass.png").unwrap();
+        let mut acc2 = Accum::new(320, 240);
+        for _ in 0..32 {
+            crate::model3d::pathtrace::pass(&prep, &Camera::default(), &glass, &Settings::default(), &mut acc2);
+        }
+        image::RgbaImage::from_raw(320, 240, acc2.image(0.0, true)).unwrap().save("/tmp/cpu_glass.png").unwrap();
     }
 }

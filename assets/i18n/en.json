@@ -1361,5 +1361,9 @@
  "pas de carte graphique utilisable : calcul sur le processeur": "no usable graphics card: rendering on the CPU",
  "débruiteur IA : Intel Open Image Denoise": "AI denoiser: Intel Open Image Denoise",
  "installer le débruiteur IA (~65 Mo)": "install the AI denoiser (~65 MB)",
- "Intel Open Image Denoise, le débruiteur de Cycles, Arnold et V-Ray. Sans droits admin.": "Intel Open Image Denoise, the denoiser used by Cycles, Arnold and V-Ray. No admin rights needed."
+ "Intel Open Image Denoise, le débruiteur de Cycles, Arnold et V-Ray. Sans droits admin.": "Intel Open Image Denoise, the denoiser used by Cycles, Arnold and V-Ray. No admin rights needed.",
+ "flou de profondeur": "depth of field",
+ "Ouverture de l'objectif : 0 tout est net": "Lens aperture: 0 keeps everything sharp",
+ "distance nette": "focus distance",
+ "couleurs": "colors"
 }

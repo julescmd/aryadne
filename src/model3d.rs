@@ -4098,6 +4098,19 @@ impl Viewer {
                                 ch |= ui.add_enabled(self.trace_set.floor, egui::Checkbox::new(&mut self.trace_set.floor_visible, crate::i18n::t("sol visible"))).changed();
                                 ch |= ui.add(egui::Slider::new(&mut self.trace_set.clamp, 1.0..=100.0).logarithmic(true).text(crate::i18n::t("limite des points brillants"))).changed();
                                 ch |= ui.checkbox(&mut self.trace_set.denoise, crate::i18n::t("débruitage")).changed();
+                                ch |= ui.add(egui::Slider::new(&mut self.trace_set.aperture, 0.0..=0.2).text(crate::i18n::t("flou de profondeur"))).on_hover_text(crate::i18n::t("Ouverture de l'objectif : 0 tout est net")).changed();
+                                if self.trace_set.aperture > 0.0 {
+                                    let mut f = if self.trace_set.focus > 0.0 { self.trace_set.focus } else { self.cam.dist };
+                                    if ui.add(egui::Slider::new(&mut f, 0.05..=10.0).logarithmic(true).text(crate::i18n::t("distance nette"))).changed() {
+                                        self.trace_set.focus = f;
+                                        ch = true;
+                                    }
+                                }
+                                ui.horizontal(|ui| {
+                                    ui.label(egui::RichText::new(crate::i18n::t("couleurs")).size(11.0).color(p.muted));
+                                    ch |= ui.radio_value(&mut self.trace_set.agx, true, "AgX").changed();
+                                    ch |= ui.radio_value(&mut self.trace_set.agx, false, crate::i18n::t("filmique")).changed();
+                                });
                                 // Carte graphique : bien plus rapide quand il y en a une
                                 if gputrace::hardware() {
                                     ch |= ui.checkbox(&mut self.trace_set.gpu, format!("{} : {}", crate::i18n::t("carte graphique"), gputrace::device_name().unwrap_or_default())).changed();
@@ -5024,6 +5037,7 @@ impl Viewer {
                         }
                         // L'IA (plus lente) passe quand l'image est finie et toutes les 16 passes ; le filtre rapide entre-temps
                         let ai = acc.spp >= self.trace_max || acc.spp / 16 != before / 16;
+                        acc.agx = self.trace_set.agx;
                         let img = egui::ColorImage::from_rgba_unmultiplied([acc.w, acc.h], &acc.image_ex(look.exposure, self.trace_set.denoise, ai));
                         match &mut self.tex {
                             Some(t) => t.set(img, egui::TextureOptions::LINEAR),

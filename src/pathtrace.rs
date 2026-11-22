@@ -15,6 +15,8 @@ pub struct Accum {
     pub(super) nrm: Vec<[f32; 3]>,
     pub(super) alb: Vec<[f32; 3]>,
     pub spp: u32,
+    /// Rendu des couleurs AgX à l'affichage
+    pub agx: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -30,17 +32,22 @@ pub struct Settings {
     pub denoise: bool,
     /// Calcul sur la carte graphique (si elle est là)
     pub gpu: bool,
+    /// Profondeur de champ : rayon de l'ouverture (0 : tout net) et distance de mise au point (0 : le pivot de la vue)
+    pub aperture: f32,
+    pub focus: f32,
+    /// Rendu des couleurs AgX (comme Blender), sinon filmique
+    pub agx: bool,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { bounces: 6, floor: true, clamp: 12.0, floor_visible: false, denoise: true, gpu: true }
+        Settings { bounces: 6, floor: true, clamp: 12.0, floor_visible: false, denoise: true, gpu: true, aperture: 0.0, focus: 0.0, agx: true }
     }
 }
 
 impl Accum {
     pub fn new(w: usize, h: usize) -> Accum {
-        Accum { w, h, sum: vec![[0.0; 3]; w * h], cover: vec![0.0; w * h], nrm: vec![[0.0; 3]; w * h], alb: vec![[0.0; 3]; w * h], spp: 0 }
+        Accum { w, h, sum: vec![[0.0; 3]; w * h], cover: vec![0.0; w * h], nrm: vec![[0.0; 3]; w * h], alb: vec![[0.0; 3]; w * h], spp: 0, agx: true }
     }
 
     /// Lumière moyenne de chaque pixel (couleur non prémultipliée) et couverture.
@@ -128,7 +135,7 @@ impl Accum {
             if cover[i] <= 0.0 {
                 return;
             }
-            o[..3].copy_from_slice(&tone(col[i], e));
+            o[..3].copy_from_slice(&if self.agx { agx(col[i], e) } else { tone(col[i], e) });
             o[3] = (cover[i] * 255.0) as u8;
         });
         out
@@ -157,6 +164,7 @@ impl Job {
         let stop = cancel.clone();
         std::thread::spawn(move || {
             let mut acc = Accum::new(w, h);
+            acc.agx = set.agx;
             let mut last = std::time::Instant::now();
             let mut gpu = None;
             let on_gpu = set.gpu && super::gputrace::hardware() && super::gputrace::prepare(&mut gpu, &m, &look, 0xF12, w, h);
@@ -189,6 +197,29 @@ impl Job {
         }
         self.spp >= self.target
     }
+}
+
+/// Rendu des couleurs AgX (approximation de celui de Blender) : les hautes lumières saturées
+/// tournent au blanc doucement au lieu de virer, puis sRGB.
+pub fn agx(c: [f32; 3], exposure: f32) -> [u8; 3] {
+    let v = [c[0].max(0.0) * exposure, c[1].max(0.0) * exposure, c[2].max(0.0) * exposure];
+    let m = [[0.842_479, 0.078_434, 0.079_224], [0.042_328, 0.878_469, 0.079_166], [0.042_376, 0.078_434, 0.879_143]];
+    let (min_ev, max_ev) = (-12.473_931, 4.026_069);
+    let mut x = [0.0f32; 3];
+    for k in 0..3 {
+        let t = m[k][0] * v[0] + m[k][1] * v[1] + m[k][2] * v[2];
+        let l = t.max(1e-10).log2().clamp(min_ev, max_ev);
+        let n = (l - min_ev) / (max_ev - min_ev);
+        let (x2, x4) = (n * n, n * n * n * n);
+        x[k] = 15.5 * x4 * x2 - 40.14 * x4 * n + 31.96 * x4 - 6.868 * x2 * n + 0.4298 * x2 + 0.1191 * n - 0.00232;
+    }
+    let inv = [[1.196_879, -0.098_021, -0.099_030], [-0.052_897, 1.151_903, -0.098_961], [-0.052_972, -0.098_043, 1.151_074]];
+    let mut out = [0u8; 3];
+    for k in 0..3 {
+        let y = inv[k][0] * x[0] + inv[k][1] * x[1] + inv[k][2] * x[2];
+        out[k] = (y.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
+    }
+    out
 }
 
 /// Petit générateur pseudo-aléatoire (rapide, sans état partagé entre pixels).
@@ -240,6 +271,10 @@ pub(super) struct Surf {
     pub(super) metal: f32,
     pub(super) emit: V3,
     pub(super) n: V3,
+    /// Verre : part de lumière qui traverse, indice de réfraction, et si le rayon entre dans l'objet
+    pub(super) trans: f32,
+    pub(super) ior: f32,
+    pub(super) entering: bool,
 }
 
 /// Matériau du triangle `ti` au point de coordonnées barycentriques (w0, w1).
@@ -254,11 +289,12 @@ pub(super) fn surface(m: &Prepared, look: &Look, ti: usize, w0: f32, w1: f32, vi
     } else {
         face
     };
-    if dot(face, view) < 0.0 {
+    let entering = dot(face, view) >= 0.0;
+    if !entering {
         n = scale(n, -1.0);
     }
     let (albedo0, rough0, metal0) = look.material.params();
-    let mut s = Surf { albedo: if look.material == Material::Color { m.colors[ti] } else { albedo0 }, rough: rough0, metal: metal0, emit: [0.0; 3], n };
+    let mut s = Surf { albedo: if look.material == Material::Color { m.colors[ti] } else { albedo0 }, rough: rough0, metal: metal0, emit: [0.0; 3], n, trans: 0.0, ior: 1.45, entering };
     let slot_prog = m.mat.get(ti).and_then(|&k| look.slot_nodes.get(k as usize)).and_then(|p| p.as_ref());
     if let Some(prog) = slot_prog.or(look.nodes.as_ref()) {
         let pos = [pa[0] * w0 + pb[0] * w1 + pc[0] * w2, pa[1] * w0 + pb[1] * w1 + pc[1] * w2, pa[2] * w0 + pb[2] * w1 + pc[2] * w2];
@@ -278,6 +314,8 @@ pub(super) fn surface(m: &Prepared, look: &Look, ti: usize, w0: f32, w1: f32, vi
         s.rough = sf.rough;
         s.metal = sf.metal;
         s.emit = [sf.emit[0].max(0.0).powf(2.2), sf.emit[1].max(0.0).powf(2.2), sf.emit[2].max(0.0).powf(2.2)];
+        s.trans = sf.transmission * (1.0 - sf.metal);
+        s.ior = sf.ior;
     }
     s.rough = s.rough.clamp(0.04, 1.0);
     s.metal = s.metal.clamp(0.0, 1.0);
@@ -350,6 +388,28 @@ fn sample(s: &Surf, wo: V3, r: &mut Rng) -> V3 {
     }
 }
 
+/// Verre : direction après l'interface et teinte (la couleur du verre teinte ce qui traverse).
+fn dielectric(s: &Surf, wo: V3, r: &mut Rng) -> (V3, V3) {
+    let a = s.rough * s.rough * 0.5;
+    let (u1, u2) = (r.f(), r.f());
+    let phi = std::f32::consts::TAU * u1;
+    let cos_t = ((1.0 - u2) / (1.0 + (a * a - 1.0) * u2)).max(0.0).sqrt();
+    let sin_t = (1.0 - cos_t * cos_t).max(0.0).sqrt();
+    let h = local(s.n, sin_t * phi.cos(), sin_t * phi.sin(), cos_t);
+    let eta = if s.entering { 1.0 / s.ior } else { s.ior };
+    let ci = dot(wo, h).clamp(-1.0, 1.0);
+    let k = 1.0 - eta * eta * (1.0 - ci * ci);
+    // Fresnel (Schlick) ; sous l'angle limite : réflexion totale
+    let r0 = ((1.0 - s.ior) / (1.0 + s.ior)).powi(2);
+    let f = if k < 0.0 { 1.0 } else { r0 + (1.0 - r0) * (1.0 - ci.abs()).powi(5) };
+    if r.f() < f {
+        (sub(scale(h, 2.0 * ci), wo), [1.0; 3])
+    } else {
+        let t = sub(scale(h, eta * ci - k.max(0.0).sqrt()), scale(wo, eta));
+        (norm(t), s.albedo)
+    }
+}
+
 /// Le ciel dans la direction `d`.
 fn sky(look: &Look, d: V3) -> V3 {
     let c = look.env.bg.sample(rot_y(d, -look.env_rot));
@@ -403,7 +463,7 @@ fn radiance(m: &Prepared, bvh: &crate::bvh::Bvh, look: &Look, lamps: &[Lamp], se
             }
             (_, Some(ft)) => {
                 let p = add(o, scale(d, ft));
-                (p, Surf { albedo: [0.55; 3], rough: 0.9, metal: 0.0, emit: [0.0; 3], n: [0.0, 1.0, 0.0] })
+                (p, Surf { albedo: [0.55; 3], rough: 0.9, metal: 0.0, emit: [0.0; 3], n: [0.0, 1.0, 0.0], trans: 0.0, ior: 1.45, entering: true })
             }
             _ => {
                 // Rien : le ciel (caché derrière le modèle si on ne montre pas le fond)
@@ -435,8 +495,24 @@ fn radiance(m: &Prepared, bvh: &crate::bvh::Bvh, look: &Look, lamps: &[Lamp], se
             if fall <= 0.0 || dot(s.n, dir) <= 0.0 || bvh.occluded(po, dir, 1e-4, reach) {
                 continue;
             }
-            let e = scale(lamp.color, lamp.intensity * fall * std::f32::consts::PI);
+            let e = scale(lamp.color, lamp.intensity * fall * std::f32::consts::PI * (1.0 - s.trans));
             l = add(l, mul(through, mul(brdf_cos(&s, wo, dir), e)));
+        }
+        // Verre : réflexion ou réfraction selon Fresnel, autour d'une micro-normale (verre dépoli si rugueux)
+        if s.trans > 0.0 && r.f() < s.trans {
+            let (dir, tint) = dielectric(&s, wo, r);
+            through = mul(through, tint);
+            // La surface d'en face, pour un rayon qui traverse : on repart de l'autre côté
+            o = add(p, scale(dir, 2e-3));
+            d = dir;
+            if bounce >= 2 {
+                let q = lum(through).clamp(0.05, 0.95);
+                if r.f() > q {
+                    break;
+                }
+                through = scale(through, 1.0 / q);
+            }
+            continue;
         }
         // Rebond
         let wi = sample(&s, wo, r);
@@ -481,11 +557,20 @@ pub fn pass(m: &Prepared, cam: &Camera, look: &Look, set: &Settings, acc: &mut A
                 .map(|x| {
                     let mut r = Rng::new(x, y, spp);
                     let (jx, jy) = (r.f(), r.f());
-                    let (o, d) = if cam.ortho {
+                    let (mut o, mut d) = if cam.ortho {
                         (cam.unrotate([(x as f32 + jx - cx) / ortho_scale - cam.pan[0], -(y as f32 + jy - cy) / ortho_scale - cam.pan[1], cam.dist]), cam.unrotate([0.0, 0.0, -1.0]))
                     } else {
                         (cam.unrotate([-cam.pan[0], -cam.pan[1], cam.dist]), cam.unrotate(norm([(x as f32 + jx - cx) / focal, -(y as f32 + jy - cy) / focal, -1.0])))
                     };
+                    // Profondeur de champ : le rayon part d'un point de l'objectif et passe par le plan net
+                    if set.aperture > 0.0 && !cam.ortho {
+                        let f = if set.focus > 0.0 { set.focus } else { cam.dist };
+                        let fwd = cam.unrotate([0.0, 0.0, -1.0]);
+                        let pf = add(o, scale(d, f / dot(d, fwd).max(1e-4)));
+                        let (r1, r2) = (r.f().sqrt() * set.aperture, r.f() * std::f32::consts::TAU);
+                        o = add(o, cam.unrotate([r1 * r2.cos(), r1 * r2.sin(), 0.0]));
+                        d = norm(sub(pf, o));
+                    }
                     let (c, cover, n, a) = radiance(m, bvh, look, &lamps, set, o, d, &mut r, res);
                     (c, if look.show_bg { 1.0 } else { cover }, n, a)
                 })
