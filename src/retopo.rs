@@ -67,7 +67,7 @@ pub struct Options {
 
 impl Default for Options {
     fn default() -> Self {
-        Options { faces: 1500, iterations: 160, guide_radius: 1.2, pure_quads: true, adaptive: 1.0, curvature: 1.0, sharp_angle: 35.0, symmetry: 0, density: vec![], force_split: false }
+        Options { faces: 1500, iterations: 160, guide_radius: 1.2, pure_quads: true, adaptive: 0.5, curvature: 1.0, sharp_angle: 35.0, symmetry: 0, density: vec![], force_split: false }
     }
 }
 
@@ -2542,7 +2542,7 @@ fn scale_field(g: &Graph, f: &[[u32; 3]], v: &[V3], n: &[V3], q: &[V3], strength
             area[i as usize] += a;
         }
     }
-    let lim = 0.7f32;
+    let lim: f32 = std::env::var("PHILIM").ok().and_then(|x| x.parse().ok()).unwrap_or(0.7);
     let mut phi: Vec<f32> = x.iter().map(|&p| (p as f32 * strength).clamp(-lim, lim)).collect();
     for _ in 0..3 {
         let (mut num, mut den) = (0.0f64, 0.0f64);
@@ -3710,6 +3710,9 @@ mod tests {
         let mut opt = Options::default();
         opt.faces = std::env::var("RETOPO_FACES").ok().and_then(|x| x.parse().ok()).unwrap_or(6000);
         opt.symmetry = std::env::var("RETOPO_SYM").ok().and_then(|x| x.parse().ok()).unwrap_or(0);
+        if let Some(a) = std::env::var("RETOPO_ADAPT").ok().and_then(|x| x.parse().ok()) {
+            opt.adaptive = a;
+        }
         let t = std::time::Instant::now();
         let r = remesh(&pos, &tris, &[], &opt, &|_| {});
         eprintln!("{} faces ({} quads) en {:.1} s, {:?}", r.faces.len(), r.quads(), t.elapsed().as_secs_f32(), r.stats);
