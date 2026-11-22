@@ -29,6 +29,16 @@ pub struct Prefs {
     pub backup_daily: bool,
     /// Dossier des sauvegardes ("" = Documents/Aryadne-sauvegardes).
     pub backup_dir: String,
+    /// Polices : interface, chiffres et code, notes (nom intégré ou chemin d'un fichier ; vide = par défaut)
+    pub ui_font: String,
+    pub mono_font: String,
+    pub notes_font: String,
+}
+
+impl Prefs {
+    pub fn fonts(&self) -> theme::Fonts {
+        theme::Fonts { ui: self.ui_font.clone(), mono: self.mono_font.clone(), notes: self.notes_font.clone() }
+    }
 }
 
 impl Default for Prefs {
@@ -51,6 +61,9 @@ impl Default for Prefs {
             wayland_native: false,
             backup_daily: true,
             backup_dir: String::new(),
+            ui_font: String::new(),
+            mono_font: String::new(),
+            notes_font: String::new(),
         }
     }
 }
@@ -239,6 +252,18 @@ impl App {
                 self.prefs.accent = Some([custom.r(), custom.g(), custom.b()]);
             }
         });
+        ui.add_space(14.0);
+        ui.label(caps(&crate::i18n::t("polices")));
+        let (mut a, mut b, mut c) = (self.prefs.ui_font.clone(), self.prefs.mono_font.clone(), self.prefs.notes_font.clone());
+        egui::Grid::new("fonts").num_columns(3).spacing([12.0, 8.0]).show(ui, |ui| {
+            font_picker(ui, "interface", &mut a, "inter");
+            ui.end_row();
+            font_picker(ui, "chiffres et code", &mut b, "jetbrains");
+            ui.end_row();
+            font_picker(ui, "notes", &mut c, "jetbrains");
+            ui.end_row();
+        });
+        (self.prefs.ui_font, self.prefs.mono_font, self.prefs.notes_font) = (a, b, c);
         ui.add_space(14.0);
         ui.label(caps(&crate::i18n::t("taille de l'interface")));
         ui.horizontal(|ui| {
@@ -538,4 +563,36 @@ pub fn open_with(path: &std::path::Path) -> Result<(), String> {
     {
         open_external(path)
     }
+}
+
+/// Choix d'une police : intégrées, installées sur l'ordinateur, ou un fichier .ttf / .otf.
+fn font_picker(ui: &mut egui::Ui, label: &str, value: &mut String, default: &str) {
+    let p = theme::pal();
+    ui.label(RichText::new(crate::i18n::t(label)).color(p.muted));
+    let current = if value.is_empty() { default.to_string() } else { value.clone() };
+    egui::ComboBox::from_id_salt(("font", label)).width(220.0).selected_text(theme::font_label(&current)).height(360.0).show_ui(ui, |ui| {
+        for (id, name) in theme::builtin_fonts() {
+            if ui.selectable_label(current == id, name).clicked() {
+                *value = if id == default { String::new() } else { id };
+            }
+        }
+        ui.separator();
+        ui.label(RichText::new(crate::i18n::t("installées sur l'ordinateur")).color(p.muted).size(11.0));
+        for (name, path) in theme::system_fonts() {
+            if ui.selectable_label(current == path, name).clicked() {
+                *value = path;
+            }
+        }
+    });
+    ui.horizontal(|ui| {
+        if ui.small_button(crate::i18n::t("fichier…")).on_hover_text(crate::i18n::t("Choisir un fichier .ttf ou .otf")).clicked() {
+            if let Some(f) = rfd::FileDialog::new().add_filter("police", &["ttf", "otf"]).pick_file() {
+                *value = f.to_string_lossy().to_string();
+            }
+        }
+        // Aperçu dans la police choisie (une fois chargée)
+        if theme::has_font(ui, &current) {
+            ui.label(RichText::new("Aa Bb 0123").family(theme::font_family(&current, false, false)).size(14.0));
+        }
+    });
 }

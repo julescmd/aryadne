@@ -21,6 +21,8 @@ pub enum Kind {
         text: String,
         #[serde(default = "text_size")]
         size: f32,
+        #[serde(default, skip_serializing_if = "TextLook::is_plain")]
+        look: TextLook,
     },
     Note {
         rel: String,
@@ -38,6 +40,98 @@ pub enum Kind {
 
 fn text_size() -> f32 {
     18.0
+}
+
+/// Mise en forme d'un texte du board. Dans le texte, **gras**, *italique*, __souligné__ et ~~barré~~ marchent aussi par endroits.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+pub struct TextLook {
+    /// Police (nom intégré ou chemin d'un fichier) ; vide = celle de l'interface
+    #[serde(default)]
+    pub font: String,
+    #[serde(default)]
+    pub color: Option<[u8; 4]>,
+    #[serde(default)]
+    pub bold: bool,
+    #[serde(default)]
+    pub italic: bool,
+    #[serde(default)]
+    pub underline: bool,
+    #[serde(default)]
+    pub strike: bool,
+    /// 0 gauche, 1 centre, 2 droite
+    #[serde(default)]
+    pub align: u8,
+    /// Fond derrière le texte
+    #[serde(default)]
+    pub bg: Option<[u8; 4]>,
+}
+
+impl TextLook {
+    fn is_plain(&self) -> bool {
+        *self == TextLook::default()
+    }
+}
+
+/// Mise en page d'un texte stylé : segments **gras**, *italique*, __souligné__, ~~barré~~ par-dessus le style du bloc.
+pub fn text_job(text: &str, size: f32, look: &TextLook, base: Color32, width: f32, ui: &egui::Ui) -> egui::text::LayoutJob {
+    let mut job = egui::text::LayoutJob::default();
+    job.wrap.max_width = width;
+    job.halign = match look.align {
+        1 => egui::Align::Center,
+        2 => egui::Align::RIGHT,
+        _ => egui::Align::LEFT,
+    };
+    let color = look.color.map(|c| Color32::from_rgba_unmultiplied(c[0], c[1], c[2], c[3])).unwrap_or(base);
+    let custom = !look.font.is_empty() && theme::has_font(ui, &look.font);
+    let family = |b: bool, i: bool| -> egui::FontFamily {
+        if custom {
+            theme::font_family(&look.font, b, i)
+        } else {
+            match (b, i) {
+                (true, _) => theme::bold(),
+                (false, true) => egui::FontFamily::Name("italic".into()),
+                _ => egui::FontFamily::Proportional,
+            }
+        }
+    };
+    // Découpe selon les marques ; chaque marque bascule son style
+    let (mut b, mut i, mut u, mut st) = (false, false, false, false);
+    let mut seg = String::new();
+    let flush = |job: &mut egui::text::LayoutJob, seg: &mut String, b: bool, i: bool, u: bool, st: bool| {
+        if seg.is_empty() {
+            return;
+        }
+        let (b, i, u, st) = (b ^ look.bold, i ^ look.italic, u ^ look.underline, st ^ look.strike);
+        let line = egui::Stroke::new((size / 14.0).max(1.0), color);
+        job.append(seg, 0.0, egui::TextFormat {
+            font_id: egui::FontId::new(size, family(b, i)),
+            color,
+            underline: if u { line } else { egui::Stroke::NONE },
+            strikethrough: if st { line } else { egui::Stroke::NONE },
+            ..Default::default()
+        });
+        seg.clear();
+    };
+    let chars: Vec<char> = text.chars().collect();
+    let mut k = 0;
+    while k < chars.len() {
+        let two = if k + 1 < chars.len() { Some((chars[k], chars[k + 1])) } else { None };
+        match two {
+            Some(('*', '*')) => { flush(&mut job, &mut seg, b, i, u, st); b = !b; k += 2; continue; }
+            Some(('_', '_')) => { flush(&mut job, &mut seg, b, i, u, st); u = !u; k += 2; continue; }
+            Some(('~', '~')) => { flush(&mut job, &mut seg, b, i, u, st); st = !st; k += 2; continue; }
+            _ => {}
+        }
+        if chars[k] == '*' {
+            flush(&mut job, &mut seg, b, i, u, st);
+            i = !i;
+        } else {
+            seg.push(chars[k]);
+        }
+        k += 1;
+    }
+    flush(&mut job, &mut seg, b, i, u, st);
+    job
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -402,7 +496,7 @@ impl Board {
         } else if crate::vault::is_md(rel) {
             self.add(Kind::Note { rel: rel.to_string() }, at, vec2(300.0, 180.0));
         } else {
-            self.add(Kind::Text { text: format!("`{rel}`"), size: 16.0 }, at, vec2(300.0, 60.0));
+            self.add(Kind::Text { text: format!("`{rel}`"), size: 16.0, look: TextLook::default() }, at, vec2(300.0, 60.0));
         }
     }
 
@@ -554,10 +648,16 @@ impl Board {
                         }
                     }
                 }
-                Kind::Text { text, size } => {
+                Kind::Text { text, size, look } => {
+                    if !look.font.is_empty() {
+                        theme::ensure_font(ui.ctx(), &look.font);
+                    }
+                    if let Some(c) = look.bg {
+                        painter.rect_filled(r.expand(4.0 * zoom), 2.0, Color32::from_rgba_unmultiplied(c[0], c[1], c[2], c[3]));
+                    }
                     if self.editing != Some(i) {
-                        let font = egui::FontId::proportional((size * zoom).max(3.0));
-                        let galley = painter.layout(text.clone(), font, p.text, r.width().max(10.0));
+                        let job = text_job(text, (size * zoom).max(3.0), look, p.text, r.width().max(10.0), ui);
+                        let galley = ui.fonts_mut(|f| f.layout_job(job));
                         painter.with_clip_rect(r.expand(2.0)).galley(r.min, galley, p.text);
                     }
                 }
@@ -695,13 +795,16 @@ impl Board {
         // ---------- édition de texte en place ----------
         if let Some(i) = self.editing {
             let r = self.data.items.get(i).map(|it| screen_rect(it.rect()));
-            if let (Some(r), Some(Kind::Text { text, size })) = (r, self.data.items.get_mut(i).map(|it| &mut it.kind)) {
+            if let (Some(r), Some(Kind::Text { text, size, look })) = (r, self.data.items.get_mut(i).map(|it| &mut it.kind)) {
+                let look = look.clone();
                 painter.rect_stroke(r.expand(4.0), 0.0, Stroke::new(1.0, p.accent), egui::StrokeKind::Outside);
                 let edit = egui::TextEdit::multiline(text)
                     .hint_text(crate::i18n::t("écris ici…"))
                     .frame(egui::Frame::NONE)
                     .margin(egui::Margin::ZERO)
-                    .font(egui::FontId::proportional((*size * zoom).max(6.0)))
+                    .font(egui::FontId::new((*size * zoom).max(6.0), if !look.font.is_empty() && theme::has_font(ui, &look.font) { theme::font_family(&look.font, look.bold, look.italic) } else if look.bold { theme::bold() } else { egui::FontFamily::Proportional }))
+                    .text_color(look.color.map(|c| Color32::from_rgba_unmultiplied(c[0], c[1], c[2], c[3])).unwrap_or(p.text))
+                    .align(match look.align { 1 => egui::Align2::CENTER_TOP, 2 => egui::Align2::RIGHT_TOP, _ => egui::Align2::LEFT_TOP })
                     .desired_width(r.width().max(40.0));
                 let mut child = ui.new_child(egui::UiBuilder::new().max_rect(r.intersect(rect)));
                 let out = child.add(edit);
@@ -934,7 +1037,7 @@ impl Board {
                 },
                 Tool::Text => {
                     if let Some(w) = world_ptr {
-                        self.add(Kind::Text { text: String::new(), size: text_size() }, w.to_vec2() + vec2(140.0, 20.0), vec2(280.0, 40.0));
+                        self.add(Kind::Text { text: String::new(), size: text_size(), look: TextLook::default() }, w.to_vec2() + vec2(140.0, 20.0), vec2(280.0, 40.0));
                         self.editing = self.selection.last().copied();
                         self.tool = Tool::Select;
                     }
@@ -967,7 +1070,7 @@ impl Board {
                 Some((_, Kind::Stroke { .. })) => {}
                 None => {
                     if let Some(w) = world_ptr {
-                        self.add(Kind::Text { text: String::new(), size: text_size() }, w.to_vec2() + vec2(140.0, 20.0), vec2(280.0, 40.0));
+                        self.add(Kind::Text { text: String::new(), size: text_size(), look: TextLook::default() }, w.to_vec2() + vec2(140.0, 20.0), vec2(280.0, 40.0));
                         self.editing = self.selection.last().copied();
                     }
                 }
@@ -1154,7 +1257,7 @@ impl Board {
                 ui.close();
             }
             if ui.button(crate::i18n::t("ajouter du texte")).clicked() {
-                self.add(Kind::Text { text: String::new(), size: text_size() }, menu_at.to_vec2() + vec2(140.0, 20.0), vec2(280.0, 40.0));
+                self.add(Kind::Text { text: String::new(), size: text_size(), look: TextLook::default() }, menu_at.to_vec2() + vec2(140.0, 20.0), vec2(280.0, 40.0));
                 self.editing = self.selection.last().copied();
                 ui.close();
             }
@@ -1176,6 +1279,91 @@ impl Board {
         }
         if resp.dnd_hover_payload::<String>().is_some() {
             painter.rect_stroke(rect.shrink(6.0), 0.0, Stroke::new(2.0, p.accent), egui::StrokeKind::Inside);
+        }
+
+        // ---------- barre de mise en forme des textes choisis ----------
+        let texts: Vec<usize> = self.selection.iter().copied().filter(|&i| matches!(self.data.items.get(i).map(|x| &x.kind), Some(Kind::Text { .. }))).collect();
+        if let (Some(&first), None) = (texts.first(), self.drag.as_ref()) {
+            let r = screen_rect(self.data.items[first].rect());
+            let at = pos2(r.left().min(rect.right() - 600.0).max(rect.left() + 4.0), (r.top() - 44.0).max(rect.top() + 4.0));
+            let (mut size, mut look) = match &self.data.items[first].kind {
+                Kind::Text { size, look, .. } => (*size, look.clone()),
+                _ => (18.0, TextLook::default()),
+            };
+            let before = (size, look.clone());
+            egui::Area::new(egui::Id::unique(("board-text-bar", first))).order(egui::Order::Foreground).fixed_pos(at).show(ui.ctx(), |ui| {
+                egui::Frame::new().fill(p.bg).stroke(Stroke::new(1.0, p.line)).inner_margin(egui::Margin::symmetric(6, 4)).show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 4.0;
+                        let label = if look.font.is_empty() { crate::i18n::t("police") } else { theme::font_label(&look.font) };
+                        egui::ComboBox::from_id_salt("board-font").width(130.0).height(320.0).selected_text(label).show_ui(ui, |ui| {
+                            if ui.selectable_label(look.font.is_empty(), crate::i18n::t("celle de l'interface")).clicked() {
+                                look.font.clear();
+                            }
+                            for (id, name) in theme::builtin_fonts() {
+                                if ui.selectable_label(look.font == id, name).clicked() {
+                                    look.font = id;
+                                }
+                            }
+                            ui.separator();
+                            for (name, path) in theme::system_fonts() {
+                                if ui.selectable_label(look.font == path, name).clicked() {
+                                    look.font = path;
+                                }
+                            }
+                            ui.separator();
+                            if ui.button(crate::i18n::t("fichier…")).clicked() {
+                                if let Some(f) = rfd::FileDialog::new().add_filter("police", &["ttf", "otf"]).pick_file() {
+                                    look.font = f.to_string_lossy().to_string();
+                                }
+                            }
+                        });
+                        ui.add(egui::DragValue::new(&mut size).range(6.0..=400.0).speed(0.3).suffix(" px"));
+                        let mut col = look.color.map(|c| Color32::from_rgba_unmultiplied(c[0], c[1], c[2], c[3])).unwrap_or(p.text);
+                        if ui.color_edit_button_srgba(&mut col).on_hover_text(crate::i18n::t("couleur du texte")).changed() {
+                            look.color = Some(col.to_array());
+                        }
+                        ui.separator();
+                        for (on, txt, tip) in [(&mut look.bold, egui::RichText::new("B").family(theme::bold()), "gras (ou **mot**)"), (&mut look.italic, egui::RichText::new("I").family(egui::FontFamily::Name("italic".into())), "italique (ou *mot*)"), (&mut look.underline, egui::RichText::new("U").underline(), "souligné (ou __mot__)"), (&mut look.strike, egui::RichText::new("S").strikethrough(), "barré (ou ~~mot~~)")] {
+                            if ui.selectable_label(*on, txt).on_hover_text(crate::i18n::t(tip)).clicked() {
+                                *on = !*on;
+                            }
+                        }
+                        ui.separator();
+                        for (k, glyph, tip) in [(0u8, "⇤", "aligner à gauche"), (1, "↔", "centrer"), (2, "⇥", "aligner à droite")] {
+                            if ui.selectable_label(look.align == k, glyph).on_hover_text(crate::i18n::t(tip)).clicked() {
+                                look.align = k;
+                            }
+                        }
+                        ui.separator();
+                        let mut has_bg = look.bg.is_some();
+                        if ui.checkbox(&mut has_bg, crate::i18n::t("fond du texte")).changed() {
+                            look.bg = if has_bg { Some([255, 236, 140, 255]) } else { None };
+                        }
+                        if let Some(c) = look.bg {
+                            let mut col = Color32::from_rgba_unmultiplied(c[0], c[1], c[2], c[3]);
+                            if ui.color_edit_button_srgba(&mut col).changed() {
+                                look.bg = Some(col.to_array());
+                            }
+                        }
+                    });
+                });
+            });
+            if (size, look.clone()) != before {
+                self.checkpoint();
+                // Tous les textes choisis prennent ce qui vient de changer
+                for &i in &texts {
+                    if let Some(Item { kind: Kind::Text { size: s, look: l, .. }, .. }) = self.data.items.get_mut(i) {
+                        if size != before.0 {
+                            *s = size;
+                        }
+                        if look != before.1 {
+                            *l = look.clone();
+                        }
+                    }
+                }
+                self.touch();
+            }
         }
 
         // Curseurs
@@ -1281,7 +1469,7 @@ impl Board {
         let lines = t.lines().count().max(1) as f32;
         let longest = t.lines().map(|l| l.chars().count()).max().unwrap_or(1) as f32;
         let size = vec2((longest * 10.0 + 24.0).clamp(120.0, 640.0), lines * 24.0 + 16.0);
-        self.add(Kind::Text { text: t.to_string(), size: text_size() }, at.to_vec2(), size);
+        self.add(Kind::Text { text: t.to_string(), size: text_size(), look: TextLook::default() }, at.to_vec2(), size);
     }
 
     fn finish_stroke(&mut self) {
@@ -1365,7 +1553,7 @@ mod tests {
     #[test]
     fn board_json_et_historique() {
         let mut b = Board::default();
-        b.add(Kind::Text { text: "salut".into(), size: 18.0 }, vec2(0.0, 0.0), vec2(100.0, 50.0));
+        b.add(Kind::Text { text: "salut".into(), size: 18.0, look: TextLook::default() }, vec2(0.0, 0.0), vec2(100.0, 50.0));
         b.add_grid(vec![("refs/a.png".into(), vec2(1500.0, 1000.0)), ("refs/b.png".into(), vec2(400.0, 800.0))]);
         // Taille d'origine conservée, et les deux images ne se recouvrent pas
         assert_eq!((b.data.items[1].w, b.data.items[1].h), (1500.0, 1000.0));

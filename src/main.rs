@@ -372,8 +372,8 @@ struct App {
 impl App {
     fn new(ctx: &egui::Context) -> Self {
         egui_extras::install_image_loaders(ctx);
-        theme::install_fonts(ctx);
         let prefs = settings::Prefs::load();
+        theme::install_fonts(ctx, &prefs.fonts());
         i18n::set(if prefs.lang.is_empty() { "fr" } else { &prefs.lang });
         prefs.apply(ctx);
         let mut app = Self { view: Some(View::Files), ai: Some(ai::Settings::load()), prefs, ..Default::default() };
@@ -2670,7 +2670,9 @@ impl App {
                 Content::Text(text) => {
                     let lang = if is_md { "md".to_string() } else { ext(&rel) };
                     let fs = self.prefs.editor_size;
-                    let theme = if dark { egui_extras::syntax_highlighting::CodeTheme::dark(fs) } else { egui_extras::syntax_highlighting::CodeTheme::light(fs) };
+                    // Les notes ont leur police (réglages), le code garde la police à chasse fixe
+                    let font = if is_md { egui::FontId::new(fs, theme::notes()) } else { egui::FontId::monospace(fs) };
+                    let theme = if dark { egui_extras::syntax_highlighting::CodeTheme::dark(fs) } else { egui_extras::syntax_highlighting::CodeTheme::light(fs) }.with_font_id(font);
                     let id = egui::Id::unique(("code", &rel));
                     let notes: Vec<String> = existing.iter().cloned().collect();
                     let ed = &mut doc.code;
@@ -4801,6 +4803,10 @@ impl eframe::App for App {
             ctx.request_repaint_after(Duration::from_millis(200));
         }
 
+        // Polices changées dans les réglages : rechargées
+        if theme::fonts() != self.prefs.fonts() {
+            theme::install_fonts(&ctx, &self.prefs.fonts());
+        }
         self.images.poll(&ctx);
         self.poll_jobs();
         self.poll_backup();
