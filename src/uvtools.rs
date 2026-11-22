@@ -44,6 +44,16 @@ pub struct State {
     pub live: bool,
     /// L'éditeur UV n'est pas à côté de la vue 3D (seulement dans le panneau)
     pub no_split: bool,
+    /// Retopologie : l'outil guides peint de la densité au lieu de tracer des traits
+    pub density_brush: bool,
+    pub brush_radius: f32,
+    pub brush_factor: f32,
+}
+
+impl State {
+    pub fn new() -> State {
+        State { brush_radius: 0.05, brush_factor: 2.0, ..Default::default() }
+    }
 }
 
 const EPS_UV: f32 = 1e-5;

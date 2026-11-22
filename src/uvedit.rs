@@ -121,6 +121,9 @@ pub struct EditData {
     /// Guides de retopologie (traits dessinés sur la surface, espace d'affichage)
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub guides: Vec<Vec<V3>>,
+    /// Retopologie : touches de densité peintes (x, y, z, rayon, facteur)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub density: Vec<[f32; 5]>,
     /// Coins d'UV épinglés (face, coin) : le dépliage les laisse où ils sont
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub pins: BTreeSet<(u32, u32)>,
@@ -135,7 +138,7 @@ fn margin_default() -> f32 {
 
 impl EditData {
     pub fn fresh(t: &Topo) -> EditData {
-        EditData { polys: t.polys.len(), face_mat: vec![0; t.polys.len()], slots: vec![Slot { name: "matériau 1".into(), color: PALETTE[0], material: String::new() }], seams: BTreeSet::new(), uv: vec![], chart: vec![], texture_px: 2048, margin_px: 8.0, guides: vec![], pins: BTreeSet::new() }
+        EditData { polys: t.polys.len(), face_mat: vec![0; t.polys.len()], slots: vec![Slot { name: "matériau 1".into(), color: PALETTE[0], material: String::new() }], seams: BTreeSet::new(), uv: vec![], chart: vec![], texture_px: 2048, margin_px: 8.0, guides: vec![], density: vec![], pins: BTreeSet::new() }
     }
 
     pub fn fits(&self, t: &Topo) -> bool {
@@ -1763,7 +1766,7 @@ impl Edit {
         let data = std::fs::read_to_string(&file).ok().and_then(|t| serde_json::from_str::<EditData>(&t).ok()).filter(|d| d.fits(&topo)).unwrap_or_else(|| EditData::fresh(&topo));
         let n = topo.polys.len();
         let checker = data.has_uv();
-        Edit { topo, data, sel: BTreeSet::new(), tool: Tool::Faces, tab: 0, version: 1, seam_angle: 45.0, smart_angle: 66.0, min_faces: (n / 400).clamp(4, 300), optimize: true, rotate: true, density_target: 1024.0, file, scale, message: None, owner: vec![], checker, auto: AutoOptions::default(), retopo_opt: crate::retopo::Options { faces: (n * 2).clamp(200, 8000) / 100 * 100, ..Default::default() }, retopo: None, retopo_job: None, retopo_export: false, retopo_show: true, guide_now: vec![], mat_request: None, tri_mat: vec![], bake_request: false, bake_size: 1024, bake_rays: 24, bake_high: String::new(), pending: Default::default(), tools: Default::default(), last: None, undo: vec![], redo: vec![] }
+        Edit { topo, data, sel: BTreeSet::new(), tool: Tool::Faces, tab: 0, version: 1, seam_angle: 45.0, smart_angle: 66.0, min_faces: (n / 400).clamp(4, 300), optimize: true, rotate: true, density_target: 1024.0, file, scale, message: None, owner: vec![], checker, auto: AutoOptions::default(), retopo_opt: crate::retopo::Options { faces: (n * 2).clamp(200, 8000) / 100 * 100, ..Default::default() }, retopo: None, retopo_job: None, retopo_export: false, retopo_show: true, guide_now: vec![], mat_request: None, tri_mat: vec![], bake_request: false, bake_size: 1024, bake_rays: 24, bake_high: String::new(), pending: Default::default(), tools: tools::State::new(), last: None, undo: vec![], redo: vec![] }
     }
 
     pub fn save(&self) {
@@ -2115,12 +2118,26 @@ impl Edit {
         let t = prep.triangle(tri);
         let p: Vec<V3> = t.iter().map(|&i| prep.vertex(i as usize)).collect();
         let hit = [0, 1, 2].map(|k| p[0][k] * bary[0] + p[1][k] * bary[1] + p[2][k] * bary[2]);
+        // Pinceau de densité : des touches espacées d'un demi-rayon le long du trait
+        if self.tools.density_brush {
+            let (r, k) = (self.tools.brush_radius, self.tools.brush_factor);
+            let far = self.data.density.last().is_none_or(|d| ((d[0] - hit[0]).powi(2) + (d[1] - hit[1]).powi(2) + (d[2] - hit[2]).powi(2)).sqrt() > r * 0.5);
+            if far {
+                self.data.density.push([hit[0], hit[1], hit[2], r, k]);
+                self.version += 1;
+            }
+            return;
+        }
         if self.guide_now.last().is_none_or(|l| ((l[0] - hit[0]).powi(2) + (l[1] - hit[1]).powi(2) + (l[2] - hit[2]).powi(2)).sqrt() > 0.004) {
             self.guide_now.push(hit);
         }
     }
 
     pub fn guide_end(&mut self) {
+        if self.tools.density_brush {
+            self.changed();
+            return;
+        }
         let g = std::mem::take(&mut self.guide_now);
         if g.len() >= 2 {
             self.data.guides.push(g);
@@ -2164,6 +2181,27 @@ impl Edit {
                 self.changed();
             }
         });
+        ui.label(RichText::new(crate::i18n::t("Pour une boucle autour de la bouche, d'un œil, d'un genou ou d'un coude : dessine un trait fermé tout autour.")).color(p.muted).size(10.5));
+        ui.separator();
+        // Pinceau de densité
+        ui.horizontal(|ui| {
+            ui.toggle_value(&mut self.tools.density_brush, crate::i18n::t("pinceau de densité")).on_hover_text(crate::i18n::t("Peins sur le modèle là où il faut plus de quads (visage, mains, articulations) ou moins (dos, crâne)."));
+            ui.label(RichText::new(format!("{} {}", self.data.density.len(), crate::i18n::t("touche(s)"))).size(10.5).color(p.muted));
+            if ui.small_button(crate::i18n::t("effacer la densité")).clicked() {
+                self.data.density.clear();
+                self.changed();
+            }
+        });
+        if self.tools.density_brush {
+            ui.horizontal(|ui| {
+                ui.label(crate::i18n::t("rayon"));
+                ui.add(egui::DragValue::new(&mut self.tools.brush_radius).speed(0.002).range(0.005..=1.0));
+                ui.label(crate::i18n::t("densité"));
+                for (k, l) in [(0.5f32, "×0,5"), (2.0, "×2"), (3.0, "×3"), (4.0, "×4")] {
+                    ui.selectable_value(&mut self.tools.brush_factor, k, l);
+                }
+            });
+        }
         ui.separator();
         ui.horizontal(|ui| {
             ui.label(crate::i18n::t("faces visées"));
@@ -2203,7 +2241,8 @@ impl Edit {
                 }
             }
             let guides = self.data.guides.clone();
-            let opt = self.retopo_opt.clone();
+            let mut opt = self.retopo_opt.clone();
+            opt.density = self.data.density.clone();
             let progress = std::sync::Arc::new(std::sync::Mutex::new(0.0f32));
             let pr = progress.clone();
             let (tx, rx) = std::sync::mpsc::channel();

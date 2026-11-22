@@ -5834,6 +5834,13 @@ impl Viewer {
                 let cn = sub(self.cam.view([a[0] + n[0], a[1] + n[1], a[2] + n[2]]), ca);
                 if self.cam.ortho { cn[2] > 0.0 } else { dot(cn, [-ca[0], -ca[1], -ca[2]]) > 0.0 }
             };
+            // Touches de densité : des disques, verts pour plus de quads, bleus pour moins
+            for d in e.data.density.iter().take(4000) {
+                if let (Some(c), Some(edge)) = (project([d[0], d[1], d[2]]), project([d[0] + d[3], d[1], d[2]])) {
+                    let col = if d[4] >= 1.0 { Color32::from_rgba_unmultiplied(90, 220, 120, 40) } else { Color32::from_rgba_unmultiplied(90, 150, 255, 40) };
+                    painter.circle_filled(c, (edge - c).length().max(2.0), col);
+                }
+            }
             for g in e.data.guides.iter().chain(std::iter::once(&e.guide_now)) {
                 let pts: Vec<Pos2> = g.iter().filter_map(|v| project(*v)).collect();
                 if pts.len() >= 2 {

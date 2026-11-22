@@ -1458,5 +1458,11 @@
  "remettre à zéro (position, rotation, taille)": "reset (location, rotation, scale)",
  "cacher": "hide",
  "tout montrer": "show all",
- "retirer le matériau": "remove material"
+ "retirer le matériau": "remove material",
+ "Pour une boucle autour de la bouche, d'un œil, d'un genou ou d'un coude : dessine un trait fermé tout autour.": "For a loop around the mouth, an eye, a knee or an elbow: draw a closed stroke all around it.",
+ "pinceau de densité": "density brush",
+ "Peins sur le modèle là où il faut plus de quads (visage, mains, articulations) ou moins (dos, crâne).": "Paint on the model where you need more quads (face, hands, joints) or fewer (back, skull).",
+ "touche(s)": "stroke(s)",
+ "effacer la densité": "clear density",
+ "densité": "density"
 }

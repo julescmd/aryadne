@@ -58,11 +58,14 @@ pub struct Options {
     pub sharp_angle: f32,
     /// Symétrie : 0 aucune, 1 plan X = 0, 2 plan Y = 0, 3 plan Z = 0
     pub symmetry: u8,
+    /// Touches de densité peintes : centre x y z, rayon, facteur (2 : quads deux fois plus
+    /// petits ; 0,5 : deux fois plus grands)
+    pub density: Vec<[f32; 5]>,
 }
 
 impl Default for Options {
     fn default() -> Self {
-        Options { faces: 1500, iterations: 160, guide_radius: 1.2, pure_quads: true, adaptive: 1.0, curvature: 1.0, sharp_angle: 35.0, symmetry: 0 }
+        Options { faces: 1500, iterations: 160, guide_radius: 1.2, pure_quads: true, adaptive: 1.0, curvature: 1.0, sharp_angle: 35.0, symmetry: 0, density: vec![] }
     }
 }
 
@@ -1611,7 +1614,26 @@ fn remesh_one(pos: &[V3], tris: &[[u32; 3]], guides: &[Vec<V3>], opt: &Options, 
             }
         }
     }
-    let phi = scale_field(&g, &f, &v, &nrm, &q, opt.adaptive);
+    let mut phi = scale_field(&g, &f, &v, &nrm, &q, opt.adaptive);
+    // Densité peinte : les quads rétrécissent (ou grandissent) autour de chaque touche
+    if !opt.density.is_empty() {
+        for i in 0..n_v {
+            let mut best = 0.0f32;
+            for d in &opt.density {
+                let dist = len(sub(v[i], [d[0], d[1], d[2]]));
+                let r = d[3].max(1e-6);
+                if dist < r {
+                    let w = (1.0 - (dist / r).powi(2)).powi(2);
+                    // Le solveur absorbe environ la moitié de la variation : on la double pour obtenir le facteur demandé
+                    let k = 2.0 * d[4].clamp(0.05, 20.0).ln() * w;
+                    if k.abs() > best.abs() {
+                        best = k;
+                    }
+                }
+            }
+            phi[i] -= best;
+        }
+    }
     lap("échelle locale");
     let geo = edge_geometry(&g, &v, &nrm, &q, h, &phi);
     let geo_area: Vec<f64> = f
@@ -3426,6 +3448,18 @@ mod tests {
         assert_eq!(pq.stats.unfixed, 0);
         // Une sphère demande au minimum 8 pôles (topologie d'un cube)
         assert_eq!(pq.stats.poles, 8);
+    }
+
+    #[test]
+    fn densite_peinte() {
+        let (p, t) = sphere(3);
+        // Plus de quads autour du pôle nord
+        let opt = Options { faces: 600, density: vec![[0.0, 1.0, 0.0, 0.8, 2.0]], ..Default::default() };
+        let r = remesh(&p, &t, &[], &opt, &|_| {});
+        let near = r.faces.iter().filter(|f| f.iter().all(|&v| r.pos[v as usize][1] > 0.75)).count();
+        let far = r.faces.iter().filter(|f| f.iter().all(|&v| r.pos[v as usize][1] < -0.75)).count();
+        eprintln!("près {near}, loin {far}, total {}", r.faces.len());
+        assert!(near as f32 > far as f32 * 1.6);
     }
 
     fn cube(n: usize) -> (Vec<V3>, Vec<[u32; 3]>) {
