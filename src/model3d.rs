@@ -1405,6 +1405,26 @@ fn add3(a: V3, b: V3) -> V3 {
     [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
 }
 
+/// Éléments de l'en-tête de la vue 3D, dans l'ordre. Ajouter un menu : une variante ici, une ligne dans HEADER,
+/// un bras dans le match de `show`.
+#[derive(Clone, Copy, PartialEq)]
+enum Hdr {
+    Mode,
+    View,
+    Select,
+    Add,
+    Object,
+    Tools,
+    Fill,
+    Shading,
+    Overlays,
+    Light,
+    Modifiers,
+    Busy,
+}
+
+const HEADER: [Hdr; 12] = [Hdr::Mode, Hdr::View, Hdr::Select, Hdr::Add, Hdr::Object, Hdr::Tools, Hdr::Fill, Hdr::Shading, Hdr::Overlays, Hdr::Light, Hdr::Modifiers, Hdr::Busy];
+
 /// Projection de l'espace normalisé de la vue vers l'écran.
 fn projector(cam: Camera, rect: egui::Rect) -> impl Fn(V3) -> Option<Pos2> {
     let focal = rect.height().min(rect.width()) * 1.2;
@@ -1687,6 +1707,12 @@ pub struct Viewer {
     mesh: Option<MeshEdit>,
     /// Demande d'entrer ou de sortir du mode édition (bouton du panneau)
     mesh_toggle: bool,
+    /// Action d'un menu de l'en-tête, rejouée comme sa touche à l'image suivante (une seule logique pour les deux)
+    hdr_key: Option<(Key, egui::Modifiers)>,
+    /// Objet à ajouter depuis le menu « ajouter »
+    hdr_add: Option<&'static str>,
+    /// Triangles, sommets, taille : affichés en bas de la vue
+    stats_text: String,
     /// Un champ avait le clavier à l'image précédente (Tab y sert alors à passer au champ suivant)
     kb_busy: bool,
     /// Annuler dans la scène : dernier état enregistré, états précédents, états annulés
@@ -1769,6 +1795,9 @@ impl Viewer {
             box_sel: None,
             mesh: None,
             mesh_toggle: false,
+            hdr_key: None,
+            hdr_add: None,
+            stats_text: String::new(),
             kb_busy: false,
             scene_saved: None,
             scene_hist: vec![],
@@ -2387,6 +2416,22 @@ impl Viewer {
                 seek = Some((a + (b - a) * ((at.x - r.left() - 6.0) / (r.width() - 12.0)).clamp(0.0, 1.0)).round());
             }
         });
+        // Menu « ajouter » de l'en-tête
+        if let Some(id) = self.hdr_add.take() {
+            let k = match id {
+                "light" => {
+                    let k = scene.add_role("soleil", "light");
+                    (scene.objects[k].pos, scene.objects[k].rot) = ([0.0, 3.0, 0.0], [35.0, 0.0, -35.0]);
+                    k
+                }
+                "camera" => scene.add_role("caméra", "camera"),
+                "empty" => scene.add_role("groupe", ""),
+                prim => scene.add_primitive(prim),
+            };
+            self.scene_sel = Some(k);
+            self.scene_multi.clear();
+            changed = true;
+        }
         // Menu « ajouter » sous le curseur (Maj+A), comme dans Blender
         if let Some(at) = self.add_popup {
             let mut close = false;
@@ -2782,14 +2827,6 @@ impl Viewer {
                         self.mesh_toggle = true;
                     }
                 }
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 2.0;
-                    for (k, (label, key)) in [("déplacer", "G"), ("tourner", "R"), ("taille", "S")].iter().enumerate() {
-                        if ui.selectable_label(self.gizmo_mode == k as u8, egui::RichText::new(crate::i18n::t(label)).size(11.0)).on_hover_text(format!("{} ({key})", crate::i18n::t("Ce que fait la poignée dans la vue"))).clicked() {
-                            self.gizmo_mode = k as u8;
-                        }
-                    }
-                });
                 let mut row = |ui: &mut egui::Ui, label: &str, v: &mut [f32; 3], speed: f64, reset: [f32; 3]| {
                     ui.horizontal(|ui| {
                         if ui.add(egui::Button::new(egui::RichText::new(crate::i18n::t(label)).size(11.0).color(p.muted)).frame(false)).on_hover_text(crate::i18n::t("cliquer pour remettre à zéro")).clicked() {
@@ -2957,6 +2994,12 @@ impl Viewer {
 
     pub fn show(&mut self, ui: &mut egui::Ui) {
         let p = theme::pal();
+        if let Some((key, modifiers)) = self.hdr_key.take() {
+            ui.ctx().input_mut(|i| {
+                i.modifiers = modifiers;
+                i.events.push(egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers });
+            });
+        }
         if let State::Loading(rx) = &self.state {
             if let Ok(r) = rx.try_recv() {
                 self.state = match r {
@@ -3190,190 +3233,325 @@ impl Viewer {
 
         // ---------- barre d'outils : trois menus et quelques boutons ----------
         let stay = egui::containers::menu::MenuConfig::new().close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
+        // ---------- en-tête de la vue, à la manière de Blender ----------
+        // Les éléments viennent d'une liste : en ajouter un, c'est une ligne dans HEADER et un bras dans le match.
+        let is_scene = crate::scene::is_scene(&self.path);
+        let mut want_edit: Option<bool> = None;
+        egui::Frame::new().fill(p.bg).stroke(Stroke::new(1.0, p.line)).inner_margin(egui::Margin::symmetric(6, 3)).show(ui, |ui| {
+        ui.set_width(ui.available_width());
         ui.horizontal_wrapped(|ui| {
-            egui::containers::menu::MenuButton::new(crate::i18n::t("affichage ▾")).config(stay.clone()).ui(ui, |ui| {
-                ui.set_min_width(240.0);
-                ui.label(egui::RichText::new(crate::i18n::t("matériau")).color(p.muted).size(11.0));
-                for (m, l) in Material::ALL {
-                    if ui.radio(self.look.material == m && self.mat_active.is_none(), l).clicked() {
-                        self.look.material = m;
-                        self.mat_active = None;
-                        self.look.nodes = None;
+            ui.spacing_mut().item_spacing.x = 3.0;
+            for item in HEADER {
+                match item {
+                    Hdr::Mode => {
+                        let mode = if self.mesh.is_some() { "mode édition" } else if self.edit.is_some() { "UV et matériaux" } else { "mode objet" };
+                        egui::containers::menu::MenuButton::from_button(egui::Button::new(egui::RichText::new(format!("◆ {} ▾", crate::i18n::t(mode))).family(theme::bold()).size(12.0)).fill(p.panel)).ui(ui, |ui| {
+                            ui.set_min_width(220.0);
+                            if ui.selectable_label(self.mesh.is_none() && self.edit.is_none(), crate::i18n::t("mode objet")).clicked() {
+                                if self.mesh.is_some() {
+                                    self.mesh_toggle = true;
+                                }
+                                want_edit = Some(false);
+                                ui.close();
+                            }
+                            if is_scene {
+                                if ui.selectable_label(self.mesh.is_some(), format!("{}   Tab", crate::i18n::t("mode édition"))).on_hover_text(crate::i18n::t("Sommets, extrusion, faces de l'objet choisi")).clicked() {
+                                    if self.mesh.is_none() {
+                                        self.mesh_toggle = true;
+                                    }
+                                    ui.close();
+                                }
+                            } else if ui.selectable_label(self.edit.is_some(), crate::i18n::t("UV et matériaux")).on_hover_text(crate::i18n::t("IDs de matériau, coutures, UV, retopo")).clicked() {
+                                want_edit = Some(true);
+                                ui.close();
+                            }
+                        });
                     }
-                }
-                ui.label(egui::RichText::new(crate::i18n::t("matériaux en nodes")).color(p.muted).size(11.0));
-                for (name, path) in self.mat_files.clone() {
-                    let on = self.mat_active.as_ref().is_some_and(|m| m.0 == path);
-                    ui.horizontal(|ui| {
-                        if ui.radio(on, name).clicked() {
-                            self.mat_active = Some((path.clone(), None));
+                    Hdr::View => {
+                        egui::containers::menu::MenuButton::new(crate::i18n::t("vue")).config(stay.clone()).ui(ui, |ui| {
+                            ui.set_min_width(220.0);
+                            let half = std::f32::consts::FRAC_PI_2;
+                            for (label, yaw, pitch) in [("face (1)", 0.0, 0.0), ("arrière (Maj+1)", std::f32::consts::PI, 0.0), ("droite (3)", -half, 0.0), ("gauche (Maj+3)", half, 0.0), ("dessus (7)", 0.0, half), ("dessous (Maj+7)", 0.0, -half)] {
+                                if ui.button(crate::i18n::t(label)).clicked() {
+                                    self.cam.yaw = yaw;
+                                    self.cam.pitch = pitch;
+                                }
+                            }
+                            ui.separator();
+                            if ui.button(crate::i18n::t("cadrer (Origine ou .)")).clicked() {
+                                self.cam = Camera { ortho: self.cam.ortho, ..Default::default() };
+                            }
+
+                        let mut z = z_up;
+                        if ui.checkbox(&mut z, crate::i18n::t("axe Z vers le haut")).changed() {
+                            self.z_up = Some(z);
                         }
-                        if ui.small_button(crate::i18n::t("éditer")).on_hover_text(crate::i18n::t("ouvrir les nodes à côté du modèle")).clicked() {
-                            self.mat_active = Some((path.clone(), None));
-                            self.open_request = Some(path.clone());
-                            ui.close();
-                        }
-                    });
-                }
-                if ui.button(crate::i18n::t("＋ nouveau matériau…")).on_hover_text(crate::i18n::t("crée un matériau en nodes, l'applique et l'ouvre à côté")).clicked() && !self.root.is_empty() {
-                    let dir = std::path::Path::new(&self.root).join("nodes");
-                    let _ = std::fs::create_dir_all(&dir);
-                    let stem = self.path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "Matériau".into());
-                    let mut path = dir.join(format!("{stem}.{}", crate::formats::ext("mat")));
-                    let mut n = 2;
-                    while path.exists() {
-                        path = dir.join(format!("{stem} {n}.{}", crate::formats::ext("mat")));
-                        n += 1;
+                        ui.checkbox(&mut self.cam.ortho, crate::i18n::t("vue orthographique (5)"));
+                            ui.checkbox(&mut self.turntable, crate::i18n::t("rotation automatique (platine)"));
+                        });
                     }
-                    match crate::nodes::Graph::new_material().save(&path) {
-                        Ok(()) => {
-                            let name = path.file_name().map(|s| s.to_string_lossy().to_string()).map(|n| crate::formats::strip(&n).to_string()).unwrap_or_default();
-                            self.mat_files.push((name, path.clone()));
-                            self.mat_active = Some((path.clone(), None));
-                            self.open_request = Some(path);
-                        }
-                        Err(e) => self.mat_error = Some(e),
+                    Hdr::Select if is_scene => {
+                        egui::containers::menu::MenuButton::new(crate::i18n::t("sélection")).ui(ui, |ui| {
+                            ui.set_min_width(200.0);
+                            for (label, key, m) in [("tout   A", Key::A, egui::Modifiers::NONE), ("rien   Alt+A", Key::A, egui::Modifiers::ALT), ("rectangle   B", Key::B, egui::Modifiers::NONE)] {
+                                if ui.button(crate::i18n::t(label)).clicked() {
+                                    self.hdr_key = Some((key, m));
+                                    ui.close();
+                                }
+                            }
+                        });
                     }
-                    ui.close();
-                }
-                if let Some(e) = &self.mat_error {
-                    ui.label(egui::RichText::new(e).color(p.missing).size(10.5));
-                }
-                ui.separator();
-                ui.checkbox(&mut self.look.smooth, crate::i18n::t("ombrage lisse"));
-                ui.label(egui::RichText::new(crate::i18n::t("subdivision, miroir, torsion… : bouton « modificateurs »")).color(p.muted).size(10.5));
-                ui.separator();
-                ui.label(egui::RichText::new(crate::i18n::t("fil de fer")).color(p.muted).size(11.0));
-                ui.add(egui::Slider::new(&mut self.look.wire, 0.0..=1.0).text(crate::i18n::t("opacité")));
-                ui.horizontal(|ui| {
-                    for (c, l) in [([0.02, 0.02, 0.02], "noir"), ([1.0, 1.0, 1.0], "blanc"), (lin_accent(p.accent), "accent")] {
-                        if ui.selectable_label(self.look.wire_color == c, l).clicked() {
-                            self.look.wire_color = c;
-                            if self.look.wire == 0.0 {
-                                self.look.wire = 0.6;
+                    Hdr::Add if is_scene => {
+                        egui::containers::menu::MenuButton::new(crate::i18n::t("ajouter")).ui(ui, |ui| {
+                            ui.set_min_width(200.0);
+                            ui.label(egui::RichText::new(crate::i18n::t("FORMES")).size(10.0).color(p.muted));
+                            for (id, label) in crate::scene::PRIMITIVES {
+                                if ui.button(crate::i18n::t(label)).clicked() {
+                                    self.hdr_add = Some(id);
+                                    ui.close();
+                                }
+                            }
+                            ui.separator();
+                            for (label, id) in [("lumière", "light"), ("caméra", "camera"), ("groupe vide", "empty")] {
+                                if ui.button(crate::i18n::t(label)).clicked() {
+                                    self.hdr_add = Some(id);
+                                    ui.close();
+                                }
+                            }
+                            ui.separator();
+                            ui.label(egui::RichText::new(crate::i18n::t("Maj+A dans la vue : le même menu sous le curseur")).size(10.5).color(p.muted));
+                        });
+                    }
+                    Hdr::Object => {
+                        egui::containers::menu::MenuButton::new(crate::i18n::t("objet")).ui(ui, |ui| {
+                            ui.set_min_width(230.0);
+                            if is_scene {
+                                for (label, key, m) in [
+                                    ("dupliquer   Maj+D", Key::D, egui::Modifiers::SHIFT),
+                                    ("supprimer   X", Key::X, egui::Modifiers::NONE),
+                                    ("cacher   H", Key::H, egui::Modifiers::NONE),
+                                    ("tout afficher   Alt+H", Key::H, egui::Modifiers::ALT),
+                                    ("lier au parent actif   P", Key::P, egui::Modifiers::NONE),
+                                    ("retirer le parent   Alt+P", Key::P, egui::Modifiers::ALT),
+                                    ("poser une clé   I", Key::I, egui::Modifiers::NONE),
+                                ] {
+                                    if ui.button(crate::i18n::t(label)).clicked() {
+                                        self.hdr_key = Some((key, m));
+                                        ui.close();
+                                    }
+                                }
+                                ui.separator();
+                            }
+                            if ui.button(crate::i18n::t("modificateurs…")).clicked() {
+                                self.show_mods = true;
+                                self.edit = None;
+                                self.prepared = None;
+                                ui.close();
+                            }
+                            ui.menu_button(crate::i18n::t("capture"), |ui| {
+                                if ui.button(crate::i18n::t("image PNG (2400 px)")).clicked() {
+                                    do_capture = true;
+                                }
+                                if ui.button(crate::i18n::t("turntable GIF (48 images)")).clicked() {
+                                    do_gif = true;
+                                }
+                                ui.label(egui::RichText::new(crate::i18n::t("enregistré à côté du modèle")).color(p.muted).size(10.5));
+                            });
+                            if ui.button(crate::i18n::t("exporter…")).clicked() {
+                                ask_export = Some("obj");
+                                ui.close();
+                            }
+                        });
+                    }
+                    Hdr::Tools if is_scene => {
+                        ui.separator();
+                        for (k, (icon, label, key)) in [("✥", "déplacer", "G"), ("⟳", "tourner", "R"), ("⤡", "taille", "S")].iter().enumerate() {
+                            let on = self.gizmo_mode == k as u8;
+                            let b = egui::Button::new(egui::RichText::new(*icon).size(14.0).color(if on { p.on_accent } else { p.text })).fill(if on { p.accent } else { p.panel }).min_size(egui::vec2(26.0, 22.0));
+                            if ui.add(b).on_hover_text(format!("{} ({key})", crate::i18n::t(label))).clicked() {
+                                self.gizmo_mode = k as u8;
                             }
                         }
                     }
-                });
-                ui.checkbox(&mut self.look.wire_only, crate::i18n::t("fil de fer seul"));
-                ui.separator();
-                let mut z = z_up;
-                if ui.checkbox(&mut z, crate::i18n::t("axe Z vers le haut")).changed() {
-                    self.z_up = Some(z);
-                }
-                ui.checkbox(&mut self.cam.ortho, crate::i18n::t("vue orthographique (5)"));
-            });
-            egui::containers::menu::MenuButton::new(crate::i18n::t("éclairage ▾")).config(stay.clone()).ui(ui, |ui| {
-                ui.set_min_width(280.0);
-                ui.checkbox(&mut self.look.shadows, crate::i18n::t("ombres portées")).on_hover_text(crate::i18n::t("Chaque lumière projette l'ombre des objets. Plus lent sur les gros modèles."));
-                if self.look.shadows {
-                    ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new(crate::i18n::t("douceur")).color(p.muted).size(11.0));
-                        ui.add(egui::Slider::new(&mut self.look.shadow_soft, 0.0..=1.0).show_value(false)).on_hover_text(crate::i18n::t("0 : bord net. Plus haut : pénombre large, calculée avec plusieurs rayons."));
+                    Hdr::Fill => {
+                        ui.separator();
+                    }
+                    Hdr::Shading => {
+                        // Ombrage : une pastille par rendu, comme les sphères de Blender ; le nom au survol
+                        for ((m, l), icon) in Material::ALL.into_iter().zip(["◐", "◑", "○", "◉", "◈", "●"]) {
+                            let on = self.look.material == m && self.mat_active.is_none();
+                            let b = egui::Button::new(egui::RichText::new(icon).size(14.0).color(if on { p.on_accent } else { p.text })).fill(if on { p.accent } else { p.panel }).min_size(egui::vec2(24.0, 22.0));
+                            if ui.add(b).on_hover_text(crate::i18n::t(l)).clicked() {
+                                self.look.material = m;
+                                self.mat_active = None;
+                                self.look.nodes = None;
+                            }
+                        }
+                        let nodes_on = self.mat_active.is_some();
+                        egui::containers::menu::MenuButton::from_button(egui::Button::new(egui::RichText::new(crate::i18n::t("nodes ▾")).size(11.0).color(if nodes_on { p.on_accent } else { p.text })).fill(if nodes_on { p.accent } else { p.panel })).config(stay.clone()).ui(ui, |ui| {
+
+                            ui.set_min_width(240.0);
+                            ui.label(egui::RichText::new(crate::i18n::t("matériaux en nodes")).color(p.muted).size(11.0));
+                            for (name, path) in self.mat_files.clone() {
+                                let on = self.mat_active.as_ref().is_some_and(|m| m.0 == path);
+                                ui.horizontal(|ui| {
+                                    if ui.radio(on, name).clicked() {
+                                        self.mat_active = Some((path.clone(), None));
+                                    }
+                                    if ui.small_button(crate::i18n::t("éditer")).on_hover_text(crate::i18n::t("ouvrir les nodes à côté du modèle")).clicked() {
+                                        self.mat_active = Some((path.clone(), None));
+                                        self.open_request = Some(path.clone());
+                                        ui.close();
+                                    }
+                                });
+                            }
+                            if ui.button(crate::i18n::t("＋ nouveau matériau…")).on_hover_text(crate::i18n::t("crée un matériau en nodes, l'applique et l'ouvre à côté")).clicked() && !self.root.is_empty() {
+                                let dir = std::path::Path::new(&self.root).join("nodes");
+                                let _ = std::fs::create_dir_all(&dir);
+                                let stem = self.path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "Matériau".into());
+                                let mut path = dir.join(format!("{stem}.{}", crate::formats::ext("mat")));
+                                let mut n = 2;
+                                while path.exists() {
+                                    path = dir.join(format!("{stem} {n}.{}", crate::formats::ext("mat")));
+                                    n += 1;
+                                }
+                                match crate::nodes::Graph::new_material().save(&path) {
+                                    Ok(()) => {
+                                        let name = path.file_name().map(|s| s.to_string_lossy().to_string()).map(|n| crate::formats::strip(&n).to_string()).unwrap_or_default();
+                                        self.mat_files.push((name, path.clone()));
+                                        self.mat_active = Some((path.clone(), None));
+                                        self.open_request = Some(path);
+                                    }
+                                    Err(e) => self.mat_error = Some(e),
+                                }
+                                ui.close();
+                            }
+                            if let Some(e) = &self.mat_error {
+                                ui.label(egui::RichText::new(e).color(p.missing).size(10.5));
+                            }
+                        });
+                    }
+                    Hdr::Overlays => {
+                        egui::containers::menu::MenuButton::new(crate::i18n::t("superpositions")).config(stay.clone()).ui(ui, |ui| {
+                            ui.set_min_width(240.0);
+
+                        ui.checkbox(&mut self.look.smooth, crate::i18n::t("ombrage lisse"));
+                        ui.label(egui::RichText::new(crate::i18n::t("subdivision, miroir, torsion… : bouton « modificateurs »")).color(p.muted).size(10.5));
+                        ui.separator();
+                        ui.label(egui::RichText::new(crate::i18n::t("fil de fer")).color(p.muted).size(11.0));
+                        ui.add(egui::Slider::new(&mut self.look.wire, 0.0..=1.0).text(crate::i18n::t("opacité")));
+                        ui.horizontal(|ui| {
+                            for (c, l) in [([0.02, 0.02, 0.02], "noir"), ([1.0, 1.0, 1.0], "blanc"), (lin_accent(p.accent), "accent")] {
+                                if ui.selectable_label(self.look.wire_color == c, l).clicked() {
+                                    self.look.wire_color = c;
+                                    if self.look.wire == 0.0 {
+                                        self.look.wire = 0.6;
+                                    }
+                                }
+                            }
+                        });
+                        ui.checkbox(&mut self.look.wire_only, crate::i18n::t("fil de fer seul"));
+                        });
+                    }
+                    Hdr::Light => {
+                    egui::containers::menu::MenuButton::new(crate::i18n::t("éclairage")).config(stay.clone()).ui(ui, |ui| {
+                        ui.set_min_width(280.0);
+                        ui.checkbox(&mut self.look.shadows, crate::i18n::t("ombres portées")).on_hover_text(crate::i18n::t("Chaque lumière projette l'ombre des objets. Plus lent sur les gros modèles."));
+                        if self.look.shadows {
+                            ui.horizontal(|ui| {
+                                ui.label(egui::RichText::new(crate::i18n::t("douceur")).color(p.muted).size(11.0));
+                                ui.add(egui::Slider::new(&mut self.look.shadow_soft, 0.0..=1.0).show_value(false)).on_hover_text(crate::i18n::t("0 : bord net. Plus haut : pénombre large, calculée avec plusieurs rayons."));
+                            });
+                        }
+                        ui.separator();
+                        ui.label(egui::RichText::new(crate::i18n::t("environnement (HDRI)")).color(p.muted).size(11.0));
+                        for (i, name) in PRESETS.iter().enumerate() {
+                            if ui.selectable_label(self.look.env.name == *name, *name).clicked() {
+                                self.look.env = Env::preset(i);
+                            }
+                        }
+                        for (name, path) in self.hdr_files.clone() {
+                            if ui.selectable_label(self.look.env.name == std::path::Path::new(&path).file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default(), format!("{name}")).clicked() {
+                                pick_hdr = Some(path);
+                            }
+                        }
+                        if ui.button(crate::i18n::t("charger un .hdr / .exr…")).clicked() {
+                            pick_hdr = rfd::FileDialog::new().add_filter("HDRI", &["hdr", "exr"]).pick_file();
+                        }
+                        if self.env_loading.is_some() {
+                            ui.horizontal(|ui| {
+                                ui.spinner();
+                                ui.label(crate::i18n::t("chargement du HDRI…"));
+                            });
+                        }
+                        if let Some(e) = &self.env_error {
+                            ui.label(egui::RichText::new(e).color(p.missing).size(11.0));
+                        }
+                        ui.add(egui::Slider::new(&mut self.look.env_rot, -std::f32::consts::PI..=std::f32::consts::PI).text(crate::i18n::t("rotation (H + glisser)")).show_value(false));
+                        ui.add(egui::Slider::new(&mut self.look.env_strength, 0.0..=3.0).text(crate::i18n::t("intensité")));
+                        ui.add(egui::Slider::new(&mut self.look.exposure, -4.0..=4.0).text(crate::i18n::t("exposition (EV)")));
+                        ui.checkbox(&mut self.look.show_bg, crate::i18n::t("afficher le HDRI en fond"));
+                        ui.add_enabled(self.look.show_bg, egui::Checkbox::new(&mut self.look.blur_bg, "fond flou"));
+                        ui.separator();
+                        ui.label(egui::RichText::new(crate::i18n::t("lumière directionnelle (L + glisser)")).color(p.muted).size(11.0));
+                        ui.add(egui::Slider::new(&mut self.look.light.intensity, 0.0..=5.0).text(crate::i18n::t("intensité")));
+                        ui.add(egui::Slider::new(&mut self.look.light.azimuth, -std::f32::consts::PI..=std::f32::consts::PI).text(crate::i18n::t("direction")).show_value(false));
+                        ui.add(egui::Slider::new(&mut self.look.light.elevation, -1.5..=1.5).text(crate::i18n::t("hauteur")).show_value(false));
+                        ui.horizontal(|ui| {
+                            ui.label(crate::i18n::t("couleur"));
+                            let mut c = self.look.light.color;
+                            if ui.color_edit_button_rgb(&mut c).changed() {
+                                self.look.light.color = c;
+                            }
+                        });
+                        if ui.button(crate::i18n::t("réinitialiser l'éclairage")).clicked() {
+                            let mat = self.look.material;
+                            let (wire, wc) = (self.look.wire, self.look.wire_color);
+                            self.look = Look { material: mat, wire, wire_color: wc, ..Default::default() };
+                        }
                     });
-                }
-                ui.separator();
-                ui.label(egui::RichText::new(crate::i18n::t("environnement (HDRI)")).color(p.muted).size(11.0));
-                for (i, name) in PRESETS.iter().enumerate() {
-                    if ui.selectable_label(self.look.env.name == *name, *name).clicked() {
-                        self.look.env = Env::preset(i);
                     }
-                }
-                for (name, path) in self.hdr_files.clone() {
-                    if ui.selectable_label(self.look.env.name == std::path::Path::new(&path).file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default(), format!("{name}")).clicked() {
-                        pick_hdr = Some(path);
+                    Hdr::Modifiers => {
+                        let n_mods = self.stack.iter().filter(|m| m.on).count();
+                        let label = if n_mods > 0 { format!("{} ({n_mods})", crate::i18n::t("modificateurs")) } else { crate::i18n::t("modificateurs") };
+                        if ui.toggle_value(&mut self.show_mods, label).on_hover_text(crate::i18n::t("Pile de modificateurs, comme dans Blender et 3ds Max")).changed() && self.show_mods {
+                            self.edit = None;
+                            self.prepared = None;
+                        }
                     }
-                }
-                if ui.button(crate::i18n::t("charger un .hdr / .exr…")).clicked() {
-                    pick_hdr = rfd::FileDialog::new().add_filter("HDRI", &["hdr", "exr"]).pick_file();
-                }
-                if self.env_loading.is_some() {
-                    ui.horizontal(|ui| {
-                        ui.spinner();
-                        ui.label(crate::i18n::t("chargement du HDRI…"));
-                    });
-                }
-                if let Some(e) = &self.env_error {
-                    ui.label(egui::RichText::new(e).color(p.missing).size(11.0));
-                }
-                ui.add(egui::Slider::new(&mut self.look.env_rot, -std::f32::consts::PI..=std::f32::consts::PI).text(crate::i18n::t("rotation (H + glisser)")).show_value(false));
-                ui.add(egui::Slider::new(&mut self.look.env_strength, 0.0..=3.0).text(crate::i18n::t("intensité")));
-                ui.add(egui::Slider::new(&mut self.look.exposure, -4.0..=4.0).text(crate::i18n::t("exposition (EV)")));
-                ui.checkbox(&mut self.look.show_bg, crate::i18n::t("afficher le HDRI en fond"));
-                ui.add_enabled(self.look.show_bg, egui::Checkbox::new(&mut self.look.blur_bg, "fond flou"));
-                ui.separator();
-                ui.label(egui::RichText::new(crate::i18n::t("lumière directionnelle (L + glisser)")).color(p.muted).size(11.0));
-                ui.add(egui::Slider::new(&mut self.look.light.intensity, 0.0..=5.0).text(crate::i18n::t("intensité")));
-                ui.add(egui::Slider::new(&mut self.look.light.azimuth, -std::f32::consts::PI..=std::f32::consts::PI).text(crate::i18n::t("direction")).show_value(false));
-                ui.add(egui::Slider::new(&mut self.look.light.elevation, -1.5..=1.5).text(crate::i18n::t("hauteur")).show_value(false));
-                ui.horizontal(|ui| {
-                    ui.label(crate::i18n::t("couleur"));
-                    let mut c = self.look.light.color;
-                    if ui.color_edit_button_rgb(&mut c).changed() {
-                        self.look.light.color = c;
+                    Hdr::Busy => {
+                        if self.job.is_some() {
+                            ui.spinner();
+                        }
                     }
-                });
-                if ui.button(crate::i18n::t("réinitialiser l'éclairage")).clicked() {
-                    let mat = self.look.material;
-                    let (wire, wc) = (self.look.wire, self.look.wire_color);
-                    self.look = Look { material: mat, wire, wire_color: wc, ..Default::default() };
-                }
-            });
-            egui::containers::menu::MenuButton::new(crate::i18n::t("vue ▾")).config(stay).ui(ui, |ui| {
-                let half = std::f32::consts::FRAC_PI_2;
-                for (label, yaw, pitch) in [("face (1)", 0.0, 0.0), ("arrière (Maj+1)", std::f32::consts::PI, 0.0), ("droite (3)", -half, 0.0), ("gauche (Maj+3)", half, 0.0), ("dessus (7)", 0.0, half), ("dessous (Maj+7)", 0.0, -half)] {
-                    if ui.button(crate::i18n::t(label)).clicked() {
-                        self.cam.yaw = yaw;
-                        self.cam.pitch = pitch;
-                    }
-                }
-                ui.separator();
-                if ui.button(crate::i18n::t("cadrer (Origine ou .)")).clicked() {
-                    self.cam = Camera { ortho: self.cam.ortho, ..Default::default() };
-                }
-            });
-            ui.toggle_value(&mut self.turntable, crate::i18n::t("tourner")).on_hover_text(crate::i18n::t("Rotation automatique (platine)"));
-            let n_mods = self.stack.iter().filter(|m| m.on).count();
-            let label = if n_mods > 0 { format!("modificateurs ({n_mods})") } else { "modificateurs".into() };
-            if ui.toggle_value(&mut self.show_mods, label).on_hover_text(crate::i18n::t("Pile de modificateurs, comme dans Blender et 3ds Max")).changed() && self.show_mods {
-                self.edit = None;
-                self.prepared = None;
-            }
-            let mut editing = self.edit.is_some();
-            if ui.toggle_value(&mut editing, crate::i18n::t("édition")).on_hover_text(crate::i18n::t("IDs de matériau, coutures et UV (sur le maillage de base, modificateurs appliqués compris)")).changed() {
-                if editing {
-                    let mesh = self.applied.as_ref().map(|a| (**a).clone()).unwrap_or_else(|| crate::modifiers::Mesh::from_model(model, z_up));
-                    let s = model.size();
-                    let longest = s[0].max(s[1]).max(s[2]).max(1e-9);
-                    let file = std::path::Path::new(&self.root).join(".app/meshdata").join(self.mods_file().file_name().unwrap_or_default());
-                    self.edit = Some(crate::uvedit::Edit::open(&mesh, file, longest));
-                    self.edit_seen = 0;
-                    self.show_mods = false;
-                } else {
-                    self.edit = None;
-                    self.prepared = None;
+                    _ => {}
                 }
             }
-            if self.job.is_some() {
-                ui.spinner();
+        });
+        });
+        if let Some(on) = want_edit {
+            let editing = on;
+            if editing != self.edit.is_some() {
+                    if editing {
+                        let mesh = self.applied.as_ref().map(|a| (**a).clone()).unwrap_or_else(|| crate::modifiers::Mesh::from_model(model, z_up));
+                        let s = model.size();
+                        let longest = s[0].max(s[1]).max(s[2]).max(1e-9);
+                        let file = std::path::Path::new(&self.root).join(".app/meshdata").join(self.mods_file().file_name().unwrap_or_default());
+                        self.edit = Some(crate::uvedit::Edit::open(&mesh, file, longest));
+                        self.edit_seen = 0;
+                        self.show_mods = false;
+                    } else {
+                        self.edit = None;
+                        self.prepared = None;
+                    }
             }
-            egui::containers::menu::MenuButton::new(crate::i18n::t("capture ▾")).ui(ui, |ui| {
-                if ui.button(crate::i18n::t("image PNG (2400 px)")).clicked() {
-                    do_capture = true;
-                }
-                if ui.button(crate::i18n::t("turntable GIF (48 images)")).clicked() {
-                    do_gif = true;
-                }
-                ui.label(egui::RichText::new(crate::i18n::t("enregistré à côté du modèle")).color(p.muted).size(10.5));
-            });
-            if ui.button(crate::i18n::t("exporter…")).on_hover_text(crate::i18n::t("Choisir le format et l'endroit où enregistrer")).clicked() {
-                ask_export = Some("obj");
-            }
+        }
+        let stats = {
             let s = model.size();
             let shown = if shown_tris != model.total_tris { format!(" · affiché : {}", fmt_n(shown_tris)) } else { String::new() };
-            let text = format!("{} triangles{shown} · {} sommets · {:.2} × {:.2} × {:.2}", fmt_n(model.total_tris), fmt_n(model.total_vertices), s[0], s[1], s[2]);
-            ui.add(egui::Label::new(egui::RichText::new(text).color(p.muted).size(11.5)).truncate());
-        });
+            format!("{} triangles{shown} · {} sommets · {:.2} × {:.2} × {:.2}", fmt_n(model.total_tris), fmt_n(model.total_vertices), s[0], s[1], s[2])
+        };
+        self.stats_text = stats;
         if let Some(path) = pick_hdr {
             self.load_env(path, &ctx);
         }
@@ -4258,6 +4436,11 @@ impl Viewer {
             let r = egui::Rect::from_min_size(pos2(rect.left() + 12.0, rect.bottom() - g.size().y - 18.0), g.size() + vec2(12.0, 6.0));
             painter.rect_filled(r, 4.0, p.panel.gamma_multiply(0.92));
             painter.galley(r.min + vec2(6.0, 3.0), g, p.text);
+        }
+        // Statistiques du modèle, discrètes, en bas à gauche (comme la superposition de Blender)
+        if !self.stats_text.is_empty() {
+            let col = if self.look.show_bg { Color32::from_gray(225) } else { p.muted };
+            painter.text(rect.right_bottom() + vec2(-12.0, -10.0), egui::Align2::RIGHT_BOTTOM, &self.stats_text, egui::FontId::monospace(10.5), col);
         }
         if self.mesh.is_some() {
             let g = painter.layout_no_wrap(crate::i18n::t("MODE ÉDITION"), egui::FontId::monospace(11.0), p.on_accent);
