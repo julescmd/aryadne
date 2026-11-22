@@ -410,6 +410,81 @@ fn dielectric(s: &Surf, wo: V3, r: &mut Rng) -> (V3, V3) {
     }
 }
 
+/// Tables pour tirer des directions du ciel en proportion de leur lumière (le soleil d'un HDRI
+/// est trouvé tout de suite au lieu d'être touché par hasard).
+pub(super) struct EnvCdf {
+    pub(super) w: usize,
+    pub(super) h: usize,
+    /// Fonction de répartition cumulée de chaque rangée (normalisée), puis des rangées
+    pub(super) cond: Vec<f32>,
+    pub(super) marg: Vec<f32>,
+    pub(super) total: f32,
+}
+
+pub(super) fn env_cdf(look: &Look) -> std::sync::Arc<EnvCdf> {
+    static CACHE: std::sync::Mutex<Option<(usize, std::sync::Arc<EnvCdf>)>> = std::sync::Mutex::new(None);
+    let key = std::sync::Arc::as_ptr(&look.env) as usize;
+    let mut g = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((k, c)) = &*g {
+        if *k == key {
+            return c.clone();
+        }
+    }
+    let m = &look.env.bg;
+    let (w, h) = (m.w, m.h);
+    let mut cond = vec![0.0f32; w * h];
+    let mut rows = vec![0.0f32; h];
+    for y in 0..h {
+        let st = ((y as f32 + 0.5) / h as f32 * std::f32::consts::PI).sin();
+        let mut acc = 0.0;
+        for x in 0..w {
+            acc += lum(m.px[y * w + x]).max(1e-6) * st;
+            cond[y * w + x] = acc;
+        }
+        rows[y] = acc;
+        if acc > 0.0 {
+            for x in 0..w {
+                cond[y * w + x] /= acc;
+            }
+        }
+    }
+    let total: f32 = rows.iter().sum();
+    let mut marg = vec![0.0f32; h];
+    let mut acc = 0.0;
+    for y in 0..h {
+        acc += rows[y];
+        marg[y] = acc / total.max(1e-12);
+    }
+    let c = std::sync::Arc::new(EnvCdf { w, h, cond, marg, total });
+    *g = Some((key, c.clone()));
+    c
+}
+
+fn search(v: &[f32], u: f32) -> usize {
+    v.partition_point(|&x| x < u).min(v.len() - 1)
+}
+
+/// Densité (par angle solide) de tirer la direction `d` du ciel.
+fn env_pdf(look: &Look, cdf: &EnvCdf, d: V3) -> f32 {
+    let dm = rot_y(d, -look.env_rot);
+    let u = dm[0].atan2(-dm[2]) / std::f32::consts::TAU + 0.5;
+    let v = dm[1].clamp(-1.0, 1.0).acos() / std::f32::consts::PI;
+    let x = ((u * cdf.w as f32) as usize).min(cdf.w - 1);
+    let y = ((v * cdf.h as f32) as usize).min(cdf.h - 1);
+    let l = lum(look.env.bg.px[y * cdf.w + x]).max(1e-6);
+    l * (cdf.w * cdf.h) as f32 / (cdf.total.max(1e-12) * 2.0 * std::f32::consts::PI * std::f32::consts::PI)
+}
+
+/// Tire une direction du ciel ; renvoie la direction et sa densité.
+fn env_sample(look: &Look, cdf: &EnvCdf, r: &mut Rng) -> (V3, f32) {
+    let y = search(&cdf.marg, r.f());
+    let row = &cdf.cond[y * cdf.w..(y + 1) * cdf.w];
+    let x = search(row, r.f());
+    let dm = look.env.bg.dir_of(x as f32 + r.f(), y as f32 + r.f());
+    let d = rot_y(dm, look.env_rot);
+    (d, env_pdf(look, cdf, d))
+}
+
 /// Le ciel dans la direction `d`.
 fn sky(look: &Look, d: V3) -> V3 {
     let c = look.env.bg.sample(rot_y(d, -look.env_rot));
@@ -421,6 +496,9 @@ fn sky(look: &Look, d: V3) -> V3 {
 fn radiance(m: &Prepared, bvh: &crate::bvh::Bvh, look: &Look, lamps: &[Lamp], set: &Settings, mut o: V3, mut d: V3, r: &mut Rng, res: [f32; 2]) -> (V3, f32, V3, V3) {
     let mut first = ([0.0f32; 3], [0.0f32; 3]);
     let mut l = [0.0f32; 3];
+    let cdf = env_cdf(look);
+    // Densité du dernier rebond tiré par la surface (0 : verre ou rayon de caméra, pas de pondération)
+    let mut last_pdf = 0.0f32;
     let mut through = [1.0f32; 3];
     let mut hit_any = false;
     for bounce in 0..=set.bounces {
@@ -468,7 +546,14 @@ fn radiance(m: &Prepared, bvh: &crate::bvh::Bvh, look: &Look, lamps: &[Lamp], se
             _ => {
                 // Rien : le ciel (caché derrière le modèle si on ne montre pas le fond)
                 if bounce > 0 || look.show_bg {
-                    l = add(l, mul(through, sky(look, d)));
+                    // Pondération (MIS) avec le tirage direct du ciel fait au rebond d'avant
+                    let wgt = if last_pdf > 0.0 {
+                        let pl = env_pdf(look, &cdf, d);
+                        last_pdf * last_pdf / (last_pdf * last_pdf + pl * pl)
+                    } else {
+                        1.0
+                    };
+                    l = add(l, scale(mul(through, sky(look, d)), wgt));
                 }
                 break;
             }
@@ -498,8 +583,19 @@ fn radiance(m: &Prepared, bvh: &crate::bvh::Bvh, look: &Look, lamps: &[Lamp], se
             let e = scale(lamp.color, lamp.intensity * fall * std::f32::consts::PI * (1.0 - s.trans));
             l = add(l, mul(through, mul(brdf_cos(&s, wo, dir), e)));
         }
+        // Le ciel, tiré en proportion de sa lumière, pondéré avec le tirage de la surface (MIS)
+        if s.trans < 1.0 {
+            let (dir, pl) = env_sample(look, &cdf, r);
+            if pl > 0.0 && dot(s.n, dir) > 0.0 && !bvh.occluded(po, dir, 1e-4, 1e9) && !(set.floor && dir[1] < 0.0 && (m.floor - po[1]) / dir[1] > 0.0) {
+                let f = brdf_cos(&s, wo, dir);
+                let pb = pdf(&s, wo, dir);
+                let wgt = pl * pl / (pl * pl + pb * pb);
+                l = add(l, scale(mul(through, mul(f, sky(look, dir))), wgt * (1.0 - s.trans) / pl));
+            }
+        }
         // Verre : réflexion ou réfraction selon Fresnel, autour d'une micro-normale (verre dépoli si rugueux)
         if s.trans > 0.0 && r.f() < s.trans {
+            last_pdf = 0.0;
             let (dir, tint) = dielectric(&s, wo, r);
             through = mul(through, tint);
             // La surface d'en face, pour un rayon qui traverse : on repart de l'autre côté
@@ -522,6 +618,7 @@ fn radiance(m: &Prepared, bvh: &crate::bvh::Bvh, look: &Look, lamps: &[Lamp], se
         }
         let f = brdf_cos(&s, wo, wi);
         through = mul(through, scale(f, 1.0 / pd));
+        last_pdf = pd;
         // Roulette russe : les chemins qui ne portent presque plus rien s'arrêtent
         if bounce >= 2 {
             let q = lum(through).clamp(0.05, 0.95);

@@ -117,6 +117,52 @@ fn sky(d0: vec3<f32>) -> vec3<f32> {
   return mix(mix(c00, c10, fx), mix(c01, c11, fx), fy) * P.misc.z;
 }
 
+fn env_pdf(d0: vec3<f32>) -> f32 {
+  let s = sin(-P.misc.y);
+  let c = cos(-P.misc.y);
+  let d = vec3<f32>(d0.x * c + d0.z * s, d0.y, -d0.x * s + d0.z * c);
+  let w = P.env.x;
+  let hh = P.env.y;
+  let u = atan2(d.x, -d.z) / (2.0 * PI) + 0.5;
+  let v = acos(clamp(d.y, -1.0, 1.0)) / PI;
+  let x = min(u32(u * f32(w)), w - 1u);
+  let y = min(u32(v * f32(hh)), hh - 1u);
+  let l = max(dot(envmap[y * w + x].xyz, vec3<f32>(0.2126, 0.7152, 0.0722)), 1e-6);
+  return l * f32(w * hh) / (max(P.extra.w, 1e-12) * 2.0 * PI * PI);
+}
+
+// Direction du ciel tirée en proportion de sa lumière (xyz) et sa densité (w)
+fn env_sample() -> vec4<f32> {
+  let w = P.env.x;
+  let hh = P.env.y;
+  let base = w * hh;
+  let u1 = rnd();
+  var lo = 0u;
+  var hi = hh - 1u;
+  loop {
+    if (lo >= hi) { break; }
+    let mid = (lo + hi) / 2u;
+    if (envmap[base + mid].x < u1) { lo = mid + 1u; } else { hi = mid; }
+  }
+  let y = lo;
+  let u2 = rnd();
+  var a = 0u;
+  var b = w - 1u;
+  loop {
+    if (a >= b) { break; }
+    let mid = (a + b) / 2u;
+    if (envmap[y * w + mid].w < u2) { a = mid + 1u; } else { b = mid; }
+  }
+  let x = a;
+  let phi = ((f32(x) + rnd()) / f32(w) - 0.5) * 2.0 * PI;
+  let theta = (f32(y) + rnd()) / f32(hh) * PI;
+  let dm = vec3<f32>(sin(theta) * sin(phi), cos(theta), -sin(theta) * cos(phi));
+  let s = sin(P.misc.y);
+  let c = cos(P.misc.y);
+  let d = vec3<f32>(dm.x * c + dm.z * s, dm.y, -dm.x * s + dm.z * c);
+  return vec4<f32>(d, env_pdf(d));
+}
+
 struct Surf { albedo: vec3<f32>, rough: f32, metal: f32, emit: vec3<f32>, n: vec3<f32>, trans: f32, ior: f32, entering: bool };
 
 fn basis(n: vec3<f32>) -> mat3x3<f32> {
@@ -260,6 +306,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   var cover = 0.0;
   var first_n = vec3<f32>(0.0);
   var first_a = vec3<f32>(0.0);
+  var last_pdf = 0.0;
   let floor_on = P.flags.x == 1u;
   let floor_vis = P.flags.y == 1u;
   let show_bg = P.flags.z == 1u;
@@ -304,7 +351,14 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
       }
       s = Surf(vec3<f32>(0.55), 0.9, 0.0, vec3<f32>(0.0), vec3<f32>(0.0, 1.0, 0.0), 0.0, 1.45, true);
     } else {
-      if (bounce > 0u || show_bg) { L = L + through * sky(d); }
+      if (bounce > 0u || show_bg) {
+        var wgt = 1.0;
+        if (last_pdf > 0.0) {
+          let pl = env_pdf(d);
+          wgt = last_pdf * last_pdf / (last_pdf * last_pdf + pl * pl);
+        }
+        L = L + through * sky(d) * wgt;
+      }
       break;
     }
     cover = 1.0;
@@ -320,8 +374,21 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
       let e = Lp.color.xyz * Lp.color.w * lamp_fall(i, ld.w) * PI * (1.0 - s.trans);
       L = L + through * brdf_cos(s, wo, ld.xyz) * e;
     }
+    // Le ciel tiré selon sa lumière, pondéré (MIS)
+    if (s.trans < 1.0) {
+      let es = env_sample();
+      var blocked = false;
+      if (floor_on && es.y < 0.0 && (P.misc.x - po.y) / es.y > 0.0) { blocked = true; }
+      if (es.w > 0.0 && dot(s.n, es.xyz) > 0.0 && !blocked && trace(po, es.xyz, 1e9, true).t < 0.0) {
+        let f = brdf_cos(s, wo, es.xyz);
+        let pb = pdf(s, wo, es.xyz);
+        let wgt = es.w * es.w / (es.w * es.w + pb * pb);
+        L = L + through * f * sky(es.xyz) * (wgt * (1.0 - s.trans) / es.w);
+      }
+    }
     // Verre : réflexion ou réfraction selon Fresnel
     if (s.trans > 0.0 && rnd() < s.trans) {
+      last_pdf = 0.0;
       let a = s.rough * s.rough * 0.5;
       let u1 = rnd();
       let u2 = rnd();
@@ -356,6 +423,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let pd = pdf(s, wo, wi);
     if (pd <= 1e-6) { break; }
     through = through * brdf_cos(s, wo, wi) / pd;
+    last_pdf = pd;
     if (bounce >= 2u) {
       let q = clamp(dot(through, vec3<f32>(0.2126, 0.7152, 0.0722)), 0.05, 0.95);
       if (rnd() > q) { break; }
@@ -477,7 +545,10 @@ pub fn prepare(slot: &mut Option<Scene>, m: &Prepared, look: &Look, key: u64, w:
             .collect()
     };
     let env = &look.env.bg;
-    let envd: Vec<[f32; 4]> = env.px.iter().map(|c| [c[0], c[1], c[2], 0.0]).collect();
+    // Pixels du ciel (w : répartition cumulée dans la rangée), puis la répartition des rangées
+    let cdf = super::pathtrace::env_cdf(look);
+    let mut envd: Vec<[f32; 4]> = env.px.iter().zip(&cdf.cond).map(|(c, k)| [c[0], c[1], c[2], *k]).collect();
+    envd.extend(cdf.marg.iter().map(|m| [*m, 0.0, 0.0, 0.0]));
     let st = wgpu::BufferUsages::STORAGE;
     let bufs = [buffer(g, as_bytes(&nodes), st), buffer(g, as_bytes(&tris), st), buffer(g, as_bytes(&nrm), st), buffer(g, as_bytes(&idx), st), buffer(g, as_bytes(&mats), st), buffer(g, as_bytes(&envd), st)];
     let acc_size = (w * h * 3 * 16) as u64;
@@ -544,6 +615,7 @@ pub fn passes(s: &mut Scene, m: &Prepared, cam: &Camera, look: &Look, set: &Sett
     };
     let eye = cam.unrotate([-cam.pan[0], -cam.pan[1], cam.dist]);
     let env = &look.env.bg;
+    let cdf_total = super::pathtrace::env_cdf(look).total;
     for _ in 0..n {
         let p = Params {
             size: [w as u32, h as u32, s.spp, set.bounces],
@@ -555,7 +627,7 @@ pub fn passes(s: &mut Scene, m: &Prepared, cam: &Camera, look: &Look, set: &Sett
             cam: [focal, focal / cam.dist, cam.pan[0], cam.pan[1]],
             misc: [m.floor, look.env_rot, look.env_strength, set.clamp],
             env: [env.w as u32, env.h as u32, lamps.len().min(16) as u32, 0],
-            extra: [cam.dist, set.aperture, if set.focus > 0.0 { set.focus } else { cam.dist }, 0.0],
+            extra: [cam.dist, set.aperture, if set.focus > 0.0 { set.focus } else { cam.dist }, cdf_total],
             lamps: gl,
         };
         g.queue.write_buffer(&s.params, 0, as_bytes(std::slice::from_ref(&p)));
