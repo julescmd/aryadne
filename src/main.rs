@@ -3,6 +3,7 @@
 mod cloud;
 mod bridge;
 mod layout;
+mod icons;
 mod oidn;
 mod dock;
 mod formats;
@@ -107,8 +108,14 @@ fn load_config(name: &str) -> Option<String> {
     config(name).and_then(|f| std::fs::read_to_string(f).ok()).map(|s| s.trim().to_string())
 }
 
+/// Titre de section : en casse normale, demi-gras (pas de petites capitales grises).
 fn caps(text: &str) -> RichText {
-    RichText::new(text.to_uppercase()).size(10.5).color(theme::pal().muted).family(theme::bold())
+    let mut t = text.to_string();
+    if let Some(f) = t.get(0..1) {
+        let up = f.to_uppercase();
+        t.replace_range(0..1, &up);
+    }
+    RichText::new(t).size(12.0).color(theme::pal().text).family(theme::bold())
 }
 
 fn ext(rel: &str) -> String {

@@ -45,7 +45,7 @@ impl Default for Prefs {
     fn default() -> Self {
         Self {
             lang: String::new(),
-            dark: false,
+            dark: true,
             accent: None,
             ui_zoom: 1.0,
             editor_size: 13.0,

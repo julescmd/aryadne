@@ -180,7 +180,7 @@ fn header(ui: &mut Ui, id: &str, title: &str, mut pl: Place, closable: bool, pan
     painter.rect_filled(r, 0.0, if hot { p.accent.gamma_multiply(0.10) } else { p.bg.gamma_multiply(0.6) });
     painter.line_segment([r.left_bottom(), r.right_bottom()], Stroke::new(1.0, p.line));
     painter.text(pos2(r.left() + 8.0, r.center().y), egui::Align2::LEFT_CENTER, "⠿", egui::FontId::proportional(12.0), if hot { p.accent } else { p.muted });
-    painter.text(pos2(r.left() + 22.0, r.center().y), egui::Align2::LEFT_CENTER, title.to_uppercase(), egui::FontId::new(10.5, crate::theme::bold()), if hot { p.text } else { p.muted });
+    painter.text(pos2(r.left() + 22.0, r.center().y), egui::Align2::LEFT_CENTER, title, egui::FontId::new(12.0, crate::theme::bold()), if hot { p.text } else { p.muted });
     // Boutons à droite : × fermer, ▾ place
     let mut bx = r.right() - 4.0;
     let mut button = |glyph: &str, tip: &str| -> bool {

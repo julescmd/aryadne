@@ -1249,7 +1249,7 @@ pub fn panel_with(ui: &mut egui::Ui, stack: &mut Vec<Modifier>, applied: bool, r
     ui.spacing_mut().slider_width = 90.0;
     ui.set_max_width(ui.available_width());
     ui.horizontal(|ui| {
-        ui.label(RichText::new(crate::i18n::t("MODIFICATEURS")).size(10.5).color(p.muted).family(crate::theme::bold()));
+        ui.label(crate::theme::section(&crate::i18n::t("MODIFICATEURS")));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             egui::containers::menu::MenuButton::new("⋯").ui(ui, |ui| {
                 if ui.button(crate::i18n::t("tout déplier")).clicked() {

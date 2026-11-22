@@ -3027,7 +3027,7 @@ impl Viewer {
             let area = egui::Area::new(egui::Id::unique("scene-add-popup")).order(egui::Order::Foreground).fixed_pos(at).show(ui.ctx(), |ui| {
                 egui::Frame::popup(ui.style()).show(ui, |ui| {
                     ui.set_min_width(170.0);
-                    ui.label(egui::RichText::new(crate::i18n::t("AJOUTER")).size(10.5).color(p.muted).family(theme::bold()));
+                    ui.label(crate::theme::section(&crate::i18n::t("AJOUTER")));
                     for (id, label) in crate::scene::PRIMITIVES {
                         if ui.button(crate::i18n::t(label)).clicked() {
                             self.scene_sel = Some(scene.add_primitive(id));
@@ -3209,7 +3209,7 @@ impl Viewer {
         let sub_body = |ui: &mut egui::Ui| {
             ui.spacing_mut().slider_width = 80.0;
             ui.horizontal(|ui| {
-                ui.label(egui::RichText::new(crate::i18n::t("SCÈNE")).size(10.5).color(p.muted).family(theme::bold()));
+                ui.label(crate::theme::section(&crate::i18n::t("SCÈNE")));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     egui::containers::menu::MenuButton::new(crate::i18n::t("＋ ajouter ▾")).ui(ui, |ui| {
                         ui.set_min_width(240.0);
@@ -3290,8 +3290,9 @@ impl Viewer {
                             crate::scene::Kind::Light => "☀",
                             crate::scene::Kind::Camera => "◎",
                         };
-                        ui.label(egui::RichText::new(icon).size(11.0).color(p.muted));
-                        if ui.add(egui::Button::new(if o.visible { "◉" } else { "○" }).frame(false)).on_hover_text(crate::i18n::t("afficher / cacher")).clicked() {
+                        let (ir, _) = ui.allocate_exact_size(egui::vec2(16.0, 16.0), egui::Sense::hover());
+                        crate::icons::glyph(ui.painter(), ir, icon, p.muted);
+                        if crate::icons::button(ui, if o.visible { crate::icons::I::Eye } else { crate::icons::I::EyeOff }, false, 18.0, &crate::i18n::t("afficher / cacher")).clicked() {
                             o.visible = !o.visible;
                             changed = true;
                         }
@@ -3370,9 +3371,8 @@ impl Viewer {
                         // Tous les onglets à la même taille, alignés, quel que soit le glyphe
                         let (r, resp) = ui.allocate_exact_size(egui::vec2(28.0, 28.0), egui::Sense::click());
                         let fill = if on { p.accent } else if resp.hovered() { p.line } else { p.panel };
-                        ui.painter().rect_filled(r, 4.0, fill);
-                        ui.painter().rect_stroke(r, 4.0, Stroke::new(1.0, p.line), egui::StrokeKind::Inside);
-                        ui.painter().text(r.center(), egui::Align2::CENTER_CENTER, icon, egui::FontId::proportional(14.0), if on { p.on_accent } else { p.muted });
+                        ui.painter().rect_filled(r, 3.0, fill);
+                        crate::icons::glyph(ui.painter(), r.shrink(6.0), icon, if on { p.on_accent } else { p.text });
                         if resp.on_hover_text(crate::i18n::t(tip)).clicked() {
                             new_tab = t;
                         }
@@ -3381,7 +3381,7 @@ impl Viewer {
                 ui.separator();
                 ui.vertical(|ui| {
                     let title = PROP_TABS.iter().find(|x| x.0 == tab).map(|x| x.2).unwrap_or("");
-                    ui.label(egui::RichText::new(crate::i18n::t(title).to_uppercase()).size(10.5).color(p.muted).family(theme::bold()));
+                    ui.label(crate::theme::section(&crate::i18n::t(title)));
                     egui::ScrollArea::vertical().id_salt("scene-props").show(ui, |ui| {
                         match tab {
                             PropTab::Scene => {
@@ -4067,10 +4067,10 @@ impl Viewer {
                     }
                     Hdr::Shading => {
                         // Ombrage : une pastille par rendu, comme les sphères de Blender ; le nom au survol
-                        for ((m, l), icon) in Material::ALL.into_iter().zip(["◐", "◑", "○", "◉", "◈", "●"]) {
+                        use crate::icons::I;
+                        for ((m, l), icon) in Material::ALL.into_iter().zip([I::ShadeSolid, I::ShadeFlat, I::ShadeWhite, I::ShadeChrome, I::ShadeNormals, I::ShadeColor]) {
                             let on = self.look.material == m && self.mat_active.is_none();
-                            let b = egui::Button::new(egui::RichText::new(icon).size(14.0).color(if on { p.on_accent } else { p.text })).fill(if on { p.accent } else { p.panel }).min_size(egui::vec2(24.0, 22.0));
-                            if ui.add(b).on_hover_text(crate::i18n::t(l)).clicked() {
+                            if crate::icons::button(ui, icon, on, 22.0, &crate::i18n::t(l)).clicked() {
                                 self.look.material = m;
                                 self.mat_active = None;
                                 self.look.nodes = None;
@@ -4429,7 +4429,7 @@ impl Viewer {
             let mut go = false;
             egui::Window::new(crate::i18n::t("exporter le modèle")).collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]).show(ui.ctx(), |ui| {
                 ui.set_min_width(460.0);
-                ui.label(egui::RichText::new(crate::i18n::t("FORMAT")).size(10.5).color(p.muted).family(theme::bold()));
+                ui.label(crate::theme::section(&crate::i18n::t("FORMAT")));
                 for (f, help) in [("obj", "OBJ : quads et n-gones gardés"), ("fbx", "FBX : Maya, 3ds Max, Blender, Unity, Unreal (quads, UV, matériaux)"), ("glb", "glTF binaire : Blender, Unity, Unreal, web"), ("stl", "STL binaire : impression 3D"), ("ply", "PLY : scans, MeshLab")] {
                     ui.horizontal(|ui| {
                         if ui.radio(*fmt == f, egui::RichText::new(f.to_uppercase()).family(theme::bold())).clicked() && *fmt != f {
@@ -4443,7 +4443,7 @@ impl Viewer {
                     });
                 }
                 ui.add_space(6.0);
-                ui.label(egui::RichText::new(crate::i18n::t("EMPLACEMENT")).size(10.5).color(p.muted).family(theme::bold()));
+                ui.label(crate::theme::section(&crate::i18n::t("EMPLACEMENT")));
                 ui.horizontal(|ui| {
                     ui.add(egui::TextEdit::singleline(path).desired_width(350.0));
                     if ui.button(crate::i18n::t("parcourir…")).clicked() {
@@ -4531,8 +4531,8 @@ impl Viewer {
                     let tool = |ui: &mut egui::Ui, icon: &str, on: bool, tip: String| {
                         let (r, resp) = ui.allocate_exact_size(egui::vec2(28.0, 28.0), egui::Sense::click());
                         let fill = if on { p.accent } else if resp.hovered() { p.line } else { egui::Color32::TRANSPARENT };
-                        ui.painter().rect_filled(r, 4.0, fill);
-                        ui.painter().text(r.center(), egui::Align2::CENTER_CENTER, icon, egui::FontId::proportional(15.0), if on { p.on_accent } else { p.text });
+                        ui.painter().rect_filled(r, 3.0, fill);
+                        crate::icons::glyph(ui.painter(), r.shrink(6.0), icon, if on { p.on_accent } else { p.text });
                         resp.on_hover_text(tip).clicked()
                     };
                     if tool(ui, "⬚", self.box_sel.is_some(), format!("{} (B)", crate::i18n::t("sélection rectangle"))) {

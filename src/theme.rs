@@ -15,6 +15,8 @@ pub struct Palette {
     pub link: Color32,
     pub missing: Color32, // lien vers une note inexistante
     pub code_bg: Color32,
+    /// Champs et boutons (un cran sous les panneaux, comme dans Blender et Premiere)
+    pub field: Color32,
 }
 
 const fn rgb(hex: u32) -> Color32 {
@@ -32,19 +34,22 @@ pub const LIGHT: Palette = Palette {
     link: rgb(0x1d4ed8),
     missing: rgb(0xb42318),
     code_bg: rgb(0xf3f3f1),
+    field: rgb(0xe8e8e4),
 };
 
+/// Graphite : gris neutres étagés (zone de travail, panneaux, champs), comme les logiciels de création.
 pub const DARK: Palette = Palette {
-    bg: rgb(0x141416),
-    panel: rgb(0x1b1b1e),
-    line: rgb(0x2e2e33),
-    text: rgb(0xe6e6e8),
-    muted: rgb(0x9a9aa2),
+    bg: rgb(0x1d1e21),
+    panel: rgb(0x26272b),
+    line: rgb(0x393b41),
+    text: rgb(0xe4e5e9),
+    muted: rgb(0xa0a2ab),
     accent: rgb(0xff6a3d),
     on_accent: rgb(0x141416),
     link: rgb(0x7aa2f7),
     missing: rgb(0xf07167),
-    code_bg: rgb(0x1f1f23),
+    code_bg: rgb(0x222327),
+    field: rgb(0x18191b),
 };
 
 static IS_DARK: AtomicBool = AtomicBool::new(false);
@@ -275,9 +280,10 @@ pub fn apply(ctx: &egui::Context, dark: bool) {
             (TextStyle::Heading, prop(18.0)),
         ]
         .into();
-        style.spacing.item_spacing = egui::vec2(8.0, 6.0);
-        style.spacing.button_padding = egui::vec2(10.0, 4.0);
-        style.spacing.interact_size.y = 26.0;
+        // Densité d'un logiciel de création : rangées de 22 px, champs compacts
+        style.spacing.item_spacing = egui::vec2(6.0, 5.0);
+        style.spacing.button_padding = egui::vec2(8.0, 3.0);
+        style.spacing.interact_size.y = 22.0;
 
         let v = &mut style.visuals;
         *v = if dark { egui::Visuals::dark() } else { egui::Visuals::light() };
@@ -308,16 +314,25 @@ pub fn apply(ctx: &egui::Context, dark: bool) {
         }
         v.widgets.noninteractive.bg_stroke = Stroke::new(1.0, p.line);
         v.widgets.noninteractive.fg_stroke.color = p.text;
+        // Boutons secondaires et champs : un fond plein un cran sous le panneau, sans contour ;
+        // le survol éclaircit, l'appui souligne à la couleur de l'espace
         v.widgets.inactive.bg_fill = p.line;
         v.slider_trailing_fill = true;
-        v.widgets.inactive.weak_bg_fill = p.bg;
-        v.widgets.inactive.bg_stroke = Stroke::new(1.0, p.line);
-        v.widgets.hovered.bg_fill = p.panel;
-        v.widgets.hovered.weak_bg_fill = p.panel;
-        v.widgets.hovered.bg_stroke = Stroke::new(1.0, p.text);
+        v.widgets.inactive.weak_bg_fill = p.field;
+        v.widgets.inactive.bg_stroke = Stroke::new(1.0, p.field);
+        v.widgets.hovered.bg_fill = p.line;
+        v.widgets.hovered.weak_bg_fill = p.line;
+        v.widgets.hovered.bg_stroke = Stroke::new(1.0, p.line);
         v.widgets.active.bg_fill = p.line;
         v.widgets.active.weak_bg_fill = p.line;
         v.widgets.active.bg_stroke = Stroke::new(1.0, p.accent);
+        v.widgets.open.weak_bg_fill = p.line;
+        v.widgets.open.bg_stroke = Stroke::new(1.0, p.line);
+        v.extreme_bg_color = p.field;
+        // Coins légèrement adoucis sur les commandes ; panneaux et cases restent nets
+        for w in [&mut v.widgets.inactive, &mut v.widgets.hovered, &mut v.widgets.active, &mut v.widgets.open] {
+            w.corner_radius = CornerRadius::same(2);
+        }
     });
 }
 
@@ -343,4 +358,15 @@ pub fn mark(ui: &mut egui::Ui, height: f32) -> egui::Response {
 pub fn window_icon() -> Option<egui::IconData> {
     let img = image::load_from_memory(include_bytes!("../assets/icon.png")).ok()?.to_rgba8();
     Some(egui::IconData { width: img.width(), height: img.height(), rgba: img.into_raw() })
+}
+
+/// Titre de section : casse normale (première lettre en capitale), demi-gras, couleur du texte.
+pub fn section(text: &str) -> egui::RichText {
+    let low = if text.chars().filter(|c| c.is_alphabetic()).all(|c| c.is_uppercase()) { text.to_lowercase() } else { text.to_string() };
+    let mut c = low.chars();
+    let t = match c.next() {
+        Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
+        None => String::new(),
+    };
+    egui::RichText::new(t).size(12.0).color(pal().text).family(bold())
 }

@@ -987,7 +987,7 @@ impl Editor {
 
     fn layers_panel(&mut self, ui: &mut egui::Ui) {
         let p = theme::pal();
-        ui.label(egui::RichText::new(crate::i18n::t("CALQUES")).size(10.5).color(p.muted).family(theme::bold()));
+        ui.label(crate::theme::section(&crate::i18n::t("CALQUES")));
         // Réglages du calque actif
         let a = self.doc.active;
         let mut changed = false;
