@@ -3,6 +3,7 @@
 //! sommets ou îlots, sélection au rectangle, G R S avec contrainte d'axe, épingles, dépliage de
 //! la sélection en gardant les épingles, alignement, miroir, rotation, échelle moyenne.
 use super::*;
+use std::collections::HashSet;
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Menu {
@@ -347,6 +348,7 @@ impl Edit {
                     Menu::Faces => {
                         ui.label(RichText::new(crate::i18n::t("faces")).size(10.5).color(crate::theme::pal().muted));
                         item(ui, "déplier la sélection", "U", "unwrap-sel");
+                        item(ui, "redresser en grille (quads)", "", "grid");
                         item(ui, "couture autour de la sélection", "", "mark");
                         item(ui, "îlot (faces reliées)", "Ctrl+L", "linked");
                         item(ui, "agrandir la sélection", "", "grow");
@@ -390,6 +392,8 @@ impl Edit {
                         item(ui, "miroir horizontal", "", "flip-u");
                         item(ui, "miroir vertical", "", "flip-v");
                         item(ui, "tourner de 90°", "", "rot90");
+                        item(ui, "redresser en grille (quads)", "", "grid");
+                        item(ui, "souder (même sommet)", "V", "weld");
                         ui.separator();
                         item(ui, "choisir l'îlot", "L", "island");
                         item(ui, "échelle moyenne des îlots", "", "average");
@@ -494,6 +498,24 @@ impl Edit {
                         "flip-v" => [q[0], c[1] - d[1]],
                         _ => [c[0] - d[1], c[1] + d[0]],
                     };
+                }
+                self.changed();
+            }
+            "grid" => self.follow_quads(),
+            "weld" => {
+                // Les coins choisis d'un même sommet du maillage prennent la même place (leur moyenne)
+                let mut by: HashMap<u32, Vec<(u32, u32)>> = HashMap::new();
+                for &(f, i) in &self.tools.uvsel {
+                    by.entry(self.topo.polys[f as usize][i as usize]).or_default().push((f, i));
+                }
+                for (_, cs) in by {
+                    if cs.len() < 2 {
+                        continue;
+                    }
+                    let c = self.uv_center(&cs);
+                    for (f, i) in cs {
+                        self.data.uv[f as usize][i as usize] = c;
+                    }
                 }
                 self.changed();
             }
@@ -831,6 +853,9 @@ impl Edit {
             if plain && k(egui::Key::U) {
                 self.run("unwrap-sel");
             }
+            if plain && k(egui::Key::V) {
+                self.run("weld");
+            }
             if plain && k(egui::Key::L) {
                 if let Some(f) = hover.and_then(|h| self.face_under(from(h))) {
                     self.select_islands_of(&[f as u32].into_iter().collect());
@@ -908,6 +933,98 @@ impl Edit {
         child.label(RichText::new(format!("{} {}", self.tools.uvsel.len(), crate::i18n::t("coin(s)"))).size(10.5).color(p.muted));
         if hover.is_some() && self.tools.modal.is_none() {
             painter.text(rect.left_bottom() + vec2(10.0, -8.0), egui::Align2::LEFT_BOTTOM, crate::i18n::t("clic : choisir · glisser : rectangle ou déplacer · G R S · P épingler · U déplier · L îlot · clic droit : menu"), egui::FontId::proportional(10.5), p.muted);
+        }
+    }
+
+    /// Redresse les îlots choisis en grille régulière, quad après quad (Blender : « Follow Active
+    /// Quads »). Les îlots gardent leur place et leur surface. Les triangles et n-gones restent où
+    /// ils sont.
+    pub fn follow_quads(&mut self) {
+        if !self.data.has_uv() {
+            return;
+        }
+        let mut faces: BTreeSet<u32> = self.sel.clone();
+        faces.extend(self.tools.uvsel.iter().map(|c| c.0));
+        let charts_: BTreeSet<u32> = faces.iter().filter_map(|f| self.data.chart.get(*f as usize).copied()).collect();
+        let mut done_any = false;
+        for ch in charts_ {
+            let island: Vec<usize> = (0..self.topo.polys.len()).filter(|&f| self.data.chart[f] == ch && self.topo.polys[f].len() == 4).collect();
+            if island.is_empty() {
+                continue;
+            }
+            let in_island: HashSet<usize> = island.iter().copied().collect();
+            // Départ : le quad choisi le plus « carré » ; ses coins forment un carré unité
+            let start = island.iter().copied().find(|f| self.sel.contains(&(*f as u32))).unwrap_or(island[0]);
+            let mut uvv: HashMap<u32, V2> = HashMap::new();
+            let p0 = &self.topo.polys[start];
+            for (k, q) in [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]].iter().enumerate() {
+                uvv.insert(p0[k], *q);
+            }
+            let mut placed: HashSet<usize> = [start].into_iter().collect();
+            let mut queue = std::collections::VecDeque::from([start]);
+            while let Some(fi) = queue.pop_front() {
+                let poly = self.topo.polys[fi].clone();
+                for k in 0..4 {
+                    let (a, b) = (poly[k], poly[(k + 1) % 4]);
+                    // Côté opposé dans ce quad : d voisin de a, c voisin de b
+                    let (d, c) = (poly[(k + 3) % 4], poly[(k + 2) % 4]);
+                    if self.data.seams.contains(&key(a, b)) {
+                        continue;
+                    }
+                    let Some(fs) = self.topo.edge_faces.get(&key(a, b)) else { continue };
+                    for &g in fs {
+                        let g = g as usize;
+                        if g == fi || !in_island.contains(&g) || placed.contains(&g) {
+                            continue;
+                        }
+                        let gp = &self.topo.polys[g];
+                        let (Some(ia), Some(ib)) = (gp.iter().position(|&x| x == a), gp.iter().position(|&x| x == b)) else { continue };
+                        // Dans g, le voisin de a qui n'est pas b, et celui de b qui n'est pas a
+                        let na = if gp[(ia + 1) % 4] == b { gp[(ia + 3) % 4] } else { gp[(ia + 1) % 4] };
+                        let nb = if gp[(ib + 1) % 4] == a { gp[(ib + 3) % 4] } else { gp[(ib + 1) % 4] };
+                        let (ua, ub, ud, uc) = (uvv[&a], uvv[&b], uvv[&d], uvv[&c]);
+                        uvv.entry(na).or_insert([2.0 * ua[0] - ud[0], 2.0 * ua[1] - ud[1]]);
+                        uvv.entry(nb).or_insert([2.0 * ub[0] - uc[0], 2.0 * ub[1] - uc[1]]);
+                        placed.insert(g);
+                        queue.push_back(g);
+                    }
+                }
+            }
+            // Même centre et même surface qu'avant
+            let placed: Vec<usize> = placed.into_iter().collect();
+            let corners: Vec<(usize, usize)> = placed.iter().flat_map(|&f| (0..4).map(move |i| (f, i))).collect();
+            let old: Vec<V2> = corners.iter().map(|&(f, i)| self.data.uv[f][i]).collect();
+            let new: Vec<V2> = corners.iter().map(|&(f, i)| uvv[&self.topo.polys[f][i]]).collect();
+            let area = |pts: &[V2]| -> f32 {
+                placed
+                    .iter()
+                    .enumerate()
+                    .map(|(k, _)| {
+                        let q = &pts[k * 4..k * 4 + 4];
+                        0.5 * ((q[0][0] * q[1][1] - q[1][0] * q[0][1]) + (q[1][0] * q[2][1] - q[2][0] * q[1][1]) + (q[2][0] * q[3][1] - q[3][0] * q[2][1]) + (q[3][0] * q[0][1] - q[0][0] * q[3][1]))
+                    })
+                    .sum::<f32>()
+            };
+            let (ao, an) = (area(&old), area(&new));
+            let k = if an.abs() > 1e-12 { (ao.abs() / an.abs()).sqrt() } else { 1.0 };
+            // Même sens que l'ancien îlot (pas de miroir)
+            let flip = ao * an < 0.0;
+            let cen = |v: &[V2]| {
+                let n = v.len().max(1) as f32;
+                let s = v.iter().fold([0.0f32; 2], |a, q| [a[0] + q[0], a[1] + q[1]]);
+                [s[0] / n, s[1] / n]
+            };
+            let (co, cn) = (cen(&old), cen(&new));
+            for (j, &(f, i)) in corners.iter().enumerate() {
+                let q = new[j];
+                let dx = (q[0] - cn[0]) * k;
+                let dy = (q[1] - cn[1]) * k;
+                self.data.uv[f][i] = [co[0] + if flip { -dx } else { dx }, co[1] + dy];
+            }
+            done_any = true;
+        }
+        if done_any {
+            self.changed();
         }
     }
 
@@ -1024,5 +1141,19 @@ mod tests {
         e.tools.esel = lp.iter().copied().collect();
         e.mark_seams(true);
         assert_eq!(e.data.seams.len(), 4);
+        // Redresser une grille de quads déformée : chaque quad redevient un carré
+        e.data.seams.clear();
+        e.data.chart = vec![0; e.topo.polys.len()];
+        e.data.uv = e.topo.polys.iter().map(|p| p.iter().map(|&v| {
+            let q = e.topo.pos[v as usize];
+            [q[0] + 0.3 * (q[2] * 1.7).sin(), q[2] + 0.2 * q[0] * q[0] * 0.1]
+        }).collect()).collect();
+        e.sel = [5u32].into_iter().collect();
+        e.follow_quads();
+        for uv in &e.data.uv {
+            let s1 = ((uv[1][0] - uv[0][0]).powi(2) + (uv[1][1] - uv[0][1]).powi(2)).sqrt();
+            let s2 = ((uv[2][0] - uv[1][0]).powi(2) + (uv[2][1] - uv[1][1]).powi(2)).sqrt();
+            assert!((s1 - s2).abs() < 1e-3, "{uv:?}");
+        }
     }
 }
