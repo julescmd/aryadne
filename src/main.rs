@@ -5,6 +5,7 @@ mod dock;
 mod formats;
 mod boardlive;
 mod gizmo;
+mod paint;
 mod graph;
 mod untitled;
 mod meshedit;
@@ -138,6 +139,8 @@ fn view_of(id: &str) -> View {
 /// Options de la fenêtre « nouveau fichier », gardées d'une fois à l'autre.
 #[derive(Clone)]
 struct NewOpts {
+    img_size: usize,
+    img_white: bool,
     scene_starter: bool,
     res: usize,
     fps: usize,
@@ -147,11 +150,12 @@ struct NewOpts {
 
 impl Default for NewOpts {
     fn default() -> Self {
-        NewOpts { scene_starter: true, res: 0, fps: 0, preset: 0, code: 0 }
+        NewOpts { img_size: 0, img_white: true, scene_starter: true, res: 0, fps: 0, preset: 0, code: 0 }
     }
 }
 
 const NF_RES: [(&str, u32, u32); 6] = [("1920 × 1080 (HD)", 1920, 1080), ("3840 × 2160 (4K)", 3840, 2160), ("1280 × 720", 1280, 720), ("1080 × 1920 (vertical)", 1080, 1920), ("1080 × 1080 (carré)", 1080, 1080), ("2048 × 858 (cinéma 2.39)", 2048, 858)];
+const NF_IMG: [(&str, usize, usize); 6] = [("1920 × 1080", 1920, 1080), ("2048 × 2048 (texture)", 2048, 2048), ("1080 × 1350 (portrait)", 1080, 1350), ("3840 × 2160 (4K)", 3840, 2160), ("A4 à 150 ppp", 1240, 1754), ("1024 × 1024", 1024, 1024)];
 const NF_FPS: [f32; 5] = [24.0, 25.0, 30.0, 50.0, 60.0];
 const NF_CODE: [(&str, &str); 10] = [("py", "Python"), ("rs", "Rust"), ("js", "JavaScript"), ("ts", "TypeScript"), ("html", "HTML"), ("css", "CSS"), ("json", "JSON"), ("glsl", "GLSL"), ("sh", "Shell"), ("txt", "texte brut")];
 
@@ -182,6 +186,8 @@ enum Content {
     Video(Box<video::Viewer>),
     Montage(Box<montage::Editor>),
     Nodes(Box<nodes::Editor>),
+    /// Image à calques (.aryimg)
+    Paint(Box<paint::Editor>),
     /// Vidéo ouverte alors que ffmpeg n'est pas encore installé.
     NeedFfmpeg(Option<std::sync::Arc<std::sync::Mutex<ffmpeg::InstallState>>>),
     Unreadable(String),
@@ -496,6 +502,15 @@ impl App {
                             ui.radio_value(&mut o.scene_starter, true, crate::i18n::t("cube, lumière et caméra"));
                             ui.radio_value(&mut o.scene_starter, false, crate::i18n::t("scène vide"));
                         }
+                        "aryimg" => {
+                            egui::ComboBox::from_id_salt("nf-img").selected_text(NF_IMG[o.img_size].0).show_ui(ui, |ui| {
+                                for (k, (l, _, _)) in NF_IMG.iter().enumerate() {
+                                    ui.selectable_value(&mut o.img_size, k, crate::i18n::t(l));
+                                }
+                            });
+                            ui.radio_value(&mut o.img_white, true, crate::i18n::t("fond blanc"));
+                            ui.radio_value(&mut o.img_white, false, crate::i18n::t("fond transparent"));
+                        }
                         "aryseq" => {
                             egui::ComboBox::from_id_salt("nf-res").selected_text(NF_RES[o.res].0).show_ui(ui, |ui| {
                                 for (k, (l, _, _)) in NF_RES.iter().enumerate() {
@@ -589,6 +604,11 @@ impl App {
                     self.new_untitled(ext, move |p| g.save(p));
                 }
                 "arycomp" => self.new_untitled(ext, |p| nodes::Graph::new_compositor().save(p)),
+                "aryimg" => {
+                    let (_, w, h) = NF_IMG[o.img_size];
+                    let white = o.img_white;
+                    self.new_untitled(ext, move |p| paint::Doc::new(w, h, white).save(p));
+                }
                 "code" => self.new_untitled(NF_CODE[o.code].0, |p| std::fs::write(p, "").map_err(|e| e.to_string())),
                 _ => self.new_untitled(ext, |p| std::fs::write(p, "").map_err(|e| e.to_string())),
             }
@@ -1138,6 +1158,9 @@ impl App {
         if let Content::Nodes(ed) = &mut doc.content {
             ed.save_if_due(true);
         }
+        if let Content::Paint(ed) = &mut doc.content {
+            ed.save_if_due(true);
+        }
         if doc.dirty_since.take().is_none() {
             return;
         }
@@ -1262,6 +1285,11 @@ impl App {
                     }
                     (Err(e), _) => Content::Unreadable(e),
                     _ => Content::Unreadable("Contexte indisponible.".into()),
+                }
+            } else if paint::is_image_doc(&rel) {
+                match vault::safe(&self.root(), &rel).and_then(paint::Editor::open) {
+                    Ok(e) => Content::Paint(Box::new(e)),
+                    Err(e) => Content::Unreadable(e),
                 }
             } else if nodes::is_graph(&rel) {
                 match vault::safe(&self.root(), &rel).and_then(|p| nodes::Editor::open(p, &self.root())) {
@@ -1590,6 +1618,7 @@ impl App {
             Some(Content::Model(_)) => t("glisser : tourner · Maj+glisser : déplacer · molette : zoom · 1 3 7 : vues · 5 : perspective · L + glisser : lumière · H + glisser : HDRI · F2 renommer le fichier"),
             Some(Content::Montage(_)) => t("Espace lire · S couper · Suppr supprimer · glisser les bords : raccourcir · Ctrl+molette : zoom · Ctrl+Z annuler"),
             Some(Content::Nodes(_)) => t("clic droit : ajouter · Q aligner · Suppr supprimer · F2 renommer la node · molette : zoom · Ctrl+Z annuler"),
+            Some(Content::Paint(_)) => t("B pinceau · E gomme · G pot · I pipette · M sélection · V déplacer · [ ] taille · Ctrl+A / Ctrl+D sélection · Ctrl+J dupliquer · Ctrl+E fusionner · Ctrl+Z annuler · Espace+glisser : déplacer la vue"),
             Some(Content::Video(_)) => t("Espace lire · ← → image par image · Maj+← → seconde · I O : entrée, sortie · B pinceau · E gomme"),
             Some(Content::Image) => t("molette : zoom · glisser : déplacer · double-clic : 100 % / ajuster · F2 renommer le fichier"),
             Some(Content::Office(_)) => t("molette : défiler · Ctrl+molette : zoom · F2 renommer le fichier"),
@@ -2413,6 +2442,9 @@ impl App {
                 }
                 Content::Office(viewer) => {
                     egui::Frame::new().inner_margin(egui::Margin::symmetric(16, 10)).show(ui, |ui| viewer.show(ui));
+                }
+                Content::Paint(ed) => {
+                    egui::Frame::new().inner_margin(egui::Margin::symmetric(12, 8)).show(ui, |ui| ed.show(ui));
                 }
                 Content::Nodes(ed) => {
                     egui::Frame::new().inner_margin(egui::Margin::symmetric(12, 8)).show(ui, |ui| ed.show(ui));

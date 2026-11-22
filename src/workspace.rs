@@ -97,7 +97,7 @@ pub fn owner(rel: &str) -> &'static str {
         "3d"
     } else if crate::montage::is_project(rel) || crate::video::is_video(rel) || crate::formats::has(rel, "seq") || matches!(ext, "wav" | "mp3" | "ogg" | "flac" | "m4a" | "aac") {
         "video"
-    } else if crate::board::is_board(rel) || crate::images::is_image(rel) || crate::formats::has(rel, "img") {
+    } else if crate::board::is_board(rel) || crate::images::is_image(rel) || crate::formats::has(rel, "image") {
         "2d"
     } else if CODE.contains(&ext) && crate::formats::of(rel).is_none() {
         "code"

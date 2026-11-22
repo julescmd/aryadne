@@ -24,7 +24,7 @@ pub const ALL: [Format; 6] = [
     Format { id: "mat", ext: "arymat", legacy: &["mat.json"], label: "matériau en nodes", help: "Matériau pour les modèles et les objets d'une scène", ready: true },
     Format { id: "comp", ext: "arycomp", legacy: &["comp.json"], label: "compositing en nodes", help: "Retouche d'image ou étalonnage d'un clip", ready: true },
     Format { id: "board", ext: "aryboard", legacy: &["board.json"], label: "board", help: "Planche d'images, de notes et de liens", ready: true },
-    Format { id: "image", ext: "aryimg", legacy: &["arya2"], label: "image 2D", help: "Image à calques (à venir)", ready: false },
+    Format { id: "image", ext: "aryimg", legacy: &["arya2"], label: "image à calques", help: "Peinture et retouche à calques, comme Photoshop ; s'exporte en PNG ou JPG", ready: true },
 ];
 
 pub fn get(id: &str) -> &'static Format {
