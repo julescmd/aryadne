@@ -71,6 +71,7 @@ pub const DEFS: &[Def] = &[
     // Entrées
     Def { op: "image", label: "Image", cat: "entrée", inputs: &[], outputs: &[("image", Sock::Color), ("alpha", Sock::Float)], params: &[ParamDef::File("fichier")], mat: false, comp: true },
     Def { op: "color", label: "Couleur", cat: "entrée", inputs: &[("couleur", Sock::Color, [0.9, 0.4, 0.2, 1.0])], outputs: &[("couleur", Sock::Color)], params: &[], mat: true, comp: true },
+    Def { op: "param", label: "Paramètre exposé", cat: "entrée", inputs: &[("valeur", Sock::Color, [0.5, 0.5, 0.5, 1.0])], outputs: &[("couleur", Sock::Color), ("valeur", Sock::Float)], params: &[ParamDef::Choice("type", &["couleur", "valeur"])], mat: true, comp: false },
     Def { op: "value", label: "Valeur", cat: "entrée", inputs: &[("valeur", Sock::Float, f(0.5))], outputs: &[("valeur", Sock::Float)], params: &[], mat: true, comp: true },
     Def { op: "coords", label: "Coordonnées", cat: "entrée", inputs: &[], outputs: &[("u", Sock::Float), ("v", Sock::Float), ("uv", Sock::Color)], params: &[], mat: true, comp: true },
     Def { op: "geometry", label: "Géométrie", cat: "entrée", inputs: &[], outputs: &[("normale", Sock::Color), ("position", Sock::Color), ("hauteur", Sock::Float), ("pente", Sock::Float)], params: &[], mat: true, comp: false },
@@ -267,6 +268,19 @@ pub fn eval_ramp(stops: &[(f32, V)], t: f32, mode: u8) -> V {
     stops[stops.len() - 1].1
 }
 
+static ROOT: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+
+/// Dossier du coffre (les matériaux à calques y retrouvent leurs maîtres).
+pub fn set_vault_root(r: &str) {
+    if let Ok(mut g) = ROOT.lock() {
+        *g = r.to_string();
+    }
+}
+
+pub fn vault_root() -> String {
+    ROOT.lock().map(|g| g.clone()).unwrap_or_default()
+}
+
 pub fn def(op: &str) -> Option<&'static Def> {
     DEFS.iter().find(|d| d.op == op)
 }
@@ -326,6 +340,9 @@ pub struct Graph {
     /// Cadres de regroupement (visuels)
     #[serde(default)]
     pub frames: Vec<Frame>,
+    /// Matériau à calques (atelier) : la pile ; le graphe effectif en est tiré
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stack: Option<crate::atelier::Stack>,
 }
 
 #[derive(Clone, Serialize, Deserialize, PartialEq)]
@@ -394,6 +411,9 @@ impl Graph {
 
     /// Graphe réellement calculé : les nodes muets laissent passer leur première entrée.
     pub fn effective(&self) -> std::borrow::Cow<'_, Graph> {
+        if let Some(stack) = &self.stack {
+            return std::borrow::Cow::Owned(crate::atelier::flatten(stack, &vault_root()));
+        }
         if !self.nodes.iter().any(|n| n.muted) {
             return std::borrow::Cow::Borrowed(self);
         }
@@ -434,7 +454,7 @@ impl Graph {
     }
 
     pub fn new_material() -> Graph {
-        let mut g = Graph { kind: GraphKind::Material, nodes: vec![], links: vec![], next_id: 0, frames: vec![] };
+        let mut g = Graph { kind: GraphKind::Material, nodes: vec![], links: vec![], next_id: 0, frames: vec![], stack: None };
         let noise = g.add("noise", [0.0, 0.0]);
         let ramp = g.add("ramp", [220.0, 0.0]);
         let out = g.add("mat_out", [460.0, 40.0]);
@@ -443,8 +463,13 @@ impl Graph {
         g
     }
 
+    /// Matériau à calques (atelier) : une pile vide, le graphe vient de ses calques.
+    pub fn new_layered() -> Graph {
+        Graph { kind: GraphKind::Material, nodes: vec![], links: vec![], next_id: 0, frames: vec![], stack: Some(crate::atelier::Stack::default()) }
+    }
+
     pub fn new_compositor() -> Graph {
-        let mut g = Graph { kind: GraphKind::Compositor, nodes: vec![], links: vec![], next_id: 0, frames: vec![] };
+        let mut g = Graph { kind: GraphKind::Compositor, nodes: vec![], links: vec![], next_id: 0, frames: vec![], stack: None };
         let img = g.add("image", [0.0, 0.0]);
         let bc = g.add("brightcon", [220.0, 0.0]);
         let vig = g.add("vignette", [440.0, 20.0]);
@@ -480,7 +505,7 @@ pub const SHADER_EXAMPLES: &[(&str, &str)] = &[
 
 /// Matériaux prêts à l'emploi (menu « + » de l'éditeur).
 pub fn material_preset(name: &str) -> Option<Graph> {
-    let mut g = Graph { kind: GraphKind::Material, nodes: vec![], links: vec![], next_id: 0, frames: vec![] };
+    let mut g = Graph { kind: GraphKind::Material, nodes: vec![], links: vec![], next_id: 0, frames: vec![], stack: None };
     let out = g.add("mat_out", [700.0, 40.0]);
     let set = |g: &mut Graph, id: u32, k: usize, v: V| {
         if let Some(n) = g.nodes.iter_mut().find(|n| n.id == id) {
@@ -1347,6 +1372,10 @@ fn pnum(p: &BTreeMap<String, Param>, k: &str, d: f32) -> f32 {
 impl Program {
     /// `root` : dossier du coffre (pour les images), `max_img` : taille max des images chargées.
     pub fn compile(g: &Graph, root: &str, max_img: u32) -> Result<Program, (u32, String)> {
+        // Matériau à calques : on compile le graphe tiré de sa pile
+        if let Some(stack) = &g.stack {
+            return Self::compile(&crate::atelier::flatten(stack, root), root, max_img);
+        }
         // Ordre topologique depuis la sortie
         let out_op = if g.kind == GraphKind::Material { "mat_out" } else { "comp_out" };
         let out_node = g.nodes.iter().find(|n| n.op == out_op).map(|n| n.id);
@@ -1971,6 +2000,7 @@ fn pixel(s: &Step, i: &[V], c: &Ctx) -> [V; 4] {
             [[i[0][0] * k, i[0][1] * k, i[0][2] * k, i[0][3]], z, z, z]
         }
         "color" | "value" => [i[0], z, z, z],
+        "param" => [i[0], one(i[0][0]), z, z],
         "coords" => [one(c.uv[0]), one(c.uv[1]), [c.uv[0], c.uv[1], 0.0, 1.0], z],
         "geometry" => {
             let n = c.nrm;
@@ -2321,6 +2351,12 @@ pub struct Editor {
     pv_key: u64,
     /// Node dont la sortie remplace le matériau dans l'aperçu (« prévisualiser la node »)
     solo: Option<u32>,
+    /// Fichier à ouvrir dans un autre onglet (le maître d'un calque de l'atelier)
+    pub open_request: Option<PathBuf>,
+    /// Atelier : calque choisi, et les matériaux du coffre (relus de temps en temps)
+    layer_sel: Option<usize>,
+    mat_list: Option<(std::time::Instant, Vec<String>)>,
+    masters_seen: u64,
 }
 
 enum Act {
@@ -2390,6 +2426,10 @@ impl Editor {
             thumb_rx: None,
             thumb_version: 0,
             rename: None,
+            open_request: None,
+            layer_sel: None,
+            mat_list: None,
+            masters_seen: 0,
             frame_sel: false,
             frame_rename: None,
             frame_sel_request: false, pv_yaw: 0.4, pv_pitch: 0.25, pv_dist: 2.0, pv_env: 0, pv_model: None, pv_key: 0, solo: None,
@@ -2659,6 +2699,10 @@ impl Editor {
             ctx.request_repaint_after(std::time::Duration::from_millis(300));
         }
         self.thumbs_tick(&ctx);
+        if self.graph.stack.is_some() {
+            self.atelier_ui(ui, &ctx);
+            return;
+        }
         let kind = self.graph.kind;
         // Barre
         let mut add_now: Option<&'static str> = None;
@@ -3855,6 +3899,250 @@ impl Editor {
         }
     }
 
+    /// Les matériaux en nodes du coffre (chemins relatifs), pour choisir le maître d'un calque.
+    fn vault_materials(&mut self) -> Vec<String> {
+        if let Some((t, v)) = &self.mat_list {
+            if t.elapsed().as_secs() < 5 {
+                return v.clone();
+            }
+        }
+        let mut out = vec![];
+        fn walk(dir: &std::path::Path, root: &std::path::Path, out: &mut Vec<String>, depth: u8) {
+            let Ok(rd) = std::fs::read_dir(dir) else { return };
+            for e in rd.flatten() {
+                let p = e.path();
+                let name = e.file_name().to_string_lossy().to_string();
+                if name.starts_with('.') {
+                    continue;
+                }
+                if p.is_dir() && depth < 6 {
+                    walk(&p, root, out, depth + 1);
+                } else if crate::formats::has(&name, "mat") {
+                    if let Ok(r) = p.strip_prefix(root) {
+                        out.push(r.to_string_lossy().replace('\\', "/"));
+                    }
+                }
+            }
+        }
+        let root = std::path::PathBuf::from(&self.root);
+        walk(&root, &root, &mut out, 0);
+        out.sort();
+        // Pas soi-même ni d'autres matériaux à calques comme maître
+        let me = self.path.strip_prefix(&root).map(|r| r.to_string_lossy().replace('\\', "/")).unwrap_or_default();
+        out.retain(|r| *r != me && crate::atelier::load_master(&self.root, r).is_some_and(|g| g.stack.is_none()));
+        self.mat_list = Some((std::time::Instant::now(), out.clone()));
+        out
+    }
+
+    /// Atelier (façon Substance Painter) : l'aperçu au centre, la pile de calques à droite.
+    /// Double-clic sur un calque : son matériau maître s'ouvre dans l'éditeur de nodes (façon Designer).
+    fn atelier_ui(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        let p = theme::pal();
+        let mut changed = false;
+        let mats = self.vault_materials();
+        let Some(stack) = self.graph.stack.clone() else { return };
+        let mut stack = stack;
+        // Barre : ajouter un calque
+        ui.horizontal(|ui| {
+            ui.label(theme::section(&crate::i18n::t("atelier")));
+            egui::containers::menu::MenuButton::new(crate::i18n::t("＋ calque ▾")).ui(ui, |ui| {
+                ui.set_min_width(260.0);
+                ui.label(RichText::new(crate::i18n::t("depuis un matériau maître du coffre")).color(p.muted).size(11.0));
+                egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
+                    for m in &mats {
+                        let name = std::path::Path::new(m).file_name().map(|s| crate::formats::strip(&s.to_string_lossy()).to_string()).unwrap_or_default();
+                        if ui.button(&name).on_hover_text(m).clicked() {
+                            stack.layers.push(crate::atelier::Layer { name, master: m.clone(), params: Default::default(), mask: Default::default(), opacity: 1.0, visible: true });
+                            self.layer_sel = Some(stack.layers.len() - 1);
+                            changed = true;
+                            ui.close();
+                        }
+                    }
+                });
+                ui.separator();
+                if ui.button(crate::i18n::t("nouveau matériau maître…")).on_hover_text(crate::i18n::t("Crée un .arymat à côté, l'ajoute comme calque et l'ouvre en nodes")).clicked() {
+                    // Un atelier pas encore enregistré : le maître va dans « nodes/ » du coffre (pas dans le dossier caché)
+                    let untitled = self.path.strip_prefix(&self.root).is_ok_and(|r| r.to_string_lossy().replace('\\', "/").starts_with(crate::untitled::DIR));
+                    let dir = if untitled { std::path::Path::new(&self.root).join("nodes") } else { self.path.parent().unwrap_or(std::path::Path::new("")).to_path_buf() };
+                    let _ = std::fs::create_dir_all(&dir);
+                    let stem = self.path.file_stem().map(|s| crate::formats::strip(&s.to_string_lossy()).to_string()).unwrap_or_else(|| "matériau".into());
+                    let mut n = stack.layers.len() + 1;
+                    let mut file = dir.join(format!("{stem} - calque {n}.{}", crate::formats::ext("mat")));
+                    while file.exists() {
+                        n += 1;
+                        file = dir.join(format!("{stem} - calque {n}.{}", crate::formats::ext("mat")));
+                    }
+                    if Graph::new_material().save(&file).is_ok() {
+                        let rel = file.strip_prefix(&self.root).map(|r| r.to_string_lossy().replace('\\', "/")).unwrap_or_else(|_| file.to_string_lossy().to_string());
+                        stack.layers.push(crate::atelier::Layer { name: format!("calque {n}"), master: rel, params: Default::default(), mask: Default::default(), opacity: 1.0, visible: true });
+                        self.layer_sel = Some(stack.layers.len() - 1);
+                        self.open_request = Some(file);
+                        self.mat_list = None;
+                        changed = true;
+                    }
+                    ui.close();
+                }
+            });
+            if let Some(m) = &self.message {
+                ui.label(RichText::new(m).color(p.muted).size(11.0));
+            }
+        });
+        if let Err((_, e)) = &self.program {
+            ui.label(RichText::new(format!("⚠ {e}")).color(p.missing).size(11.5));
+        }
+        let avail = ui.available_rect_before_wrap();
+        let side = 330.0f32.min(avail.width() * 0.45);
+        let prev = Rect::from_min_max(avail.min, pos2(avail.max.x - side - 8.0, avail.max.y));
+        let panel = Rect::from_min_max(pos2(avail.max.x - side, avail.min.y), avail.max);
+        self.preview_ui(ui, prev, ctx);
+        ui.painter().rect_filled(panel, 0.0, p.panel);
+        let mut child = ui.new_child(egui::UiBuilder::new().max_rect(panel.shrink(8.0)));
+        let ui = &mut child;
+        // La pile : le calque du dessus en haut, comme dans Painter
+        ui.label(theme::section(&crate::i18n::t("calques")));
+        let n = stack.layers.len();
+        let (mut del, mut up, mut down) = (None, None, None);
+        egui::ScrollArea::vertical().id_salt("atelier-layers").max_height((panel.height() * 0.4).max(120.0)).show(ui, |ui| {
+            if n == 0 {
+                ui.label(RichText::new(crate::i18n::t("Ajoute un calque : un matériau maître du coffre, posé partout ou selon un masque (usure, saleté, poussière…).")).color(p.muted).size(11.0));
+            }
+            for i in (0..n).rev() {
+                let l = &mut stack.layers[i];
+                let on = self.layer_sel == Some(i);
+                let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 30.0), Sense::click());
+                ui.painter().rect_filled(r, 2.0, if on { p.accent.gamma_multiply(0.22) } else if resp.hovered() { p.line } else { p.field });
+                let eye = Rect::from_min_size(r.min + vec2(4.0, 6.0), vec2(18.0, 18.0));
+                crate::icons::draw(ui.painter(), eye.shrink(2.0), if l.visible { crate::icons::I::Eye } else { crate::icons::I::EyeOff }, if l.visible { p.text } else { p.muted });
+                ui.painter().text(pos2(r.left() + 30.0, r.center().y), egui::Align2::LEFT_CENTER, &l.name, egui::FontId::proportional(12.5), p.text);
+                let mask = crate::atelier::MASKS.iter().find(|m| m.0 == l.mask.kind).map(|m| m.1).unwrap_or("");
+                ui.painter().text(pos2(r.right() - 6.0, r.center().y), egui::Align2::RIGHT_CENTER, crate::i18n::t(mask), egui::FontId::proportional(10.5), p.muted);
+                if resp.clicked() {
+                    if ui.input(|i| i.pointer.interact_pos()).is_some_and(|at| eye.contains(at)) {
+                        l.visible = !l.visible;
+                        changed = true;
+                    } else {
+                        self.layer_sel = Some(i);
+                    }
+                }
+                if resp.double_clicked() {
+                    self.open_request = Some(std::path::Path::new(&self.root).join(&l.master));
+                }
+                resp.on_hover_text(crate::i18n::t("double-clic : ouvrir le matériau maître en nodes")).context_menu(|ui| {
+                    if ui.button(crate::i18n::t("monter")).clicked() {
+                        up = Some(i);
+                        ui.close();
+                    }
+                    if ui.button(crate::i18n::t("descendre")).clicked() {
+                        down = Some(i);
+                        ui.close();
+                    }
+                    if ui.button(crate::i18n::t("ouvrir le maître en nodes")).clicked() {
+                        self.open_request = Some(std::path::Path::new(&self.root).join(&l.master));
+                        ui.close();
+                    }
+                    if ui.button(RichText::new(crate::i18n::t("supprimer le calque")).color(p.missing)).clicked() {
+                        del = Some(i);
+                        ui.close();
+                    }
+                });
+            }
+        });
+        if let Some(i) = up.filter(|&i| i + 1 < n) {
+            stack.layers.swap(i, i + 1);
+            self.layer_sel = Some(i + 1);
+            changed = true;
+        }
+        if let Some(i) = down.filter(|&i| i > 0) {
+            stack.layers.swap(i, i - 1);
+            self.layer_sel = Some(i - 1);
+            changed = true;
+        }
+        if let Some(i) = del {
+            stack.layers.remove(i);
+            self.layer_sel = None;
+            changed = true;
+        }
+        // Le calque choisi : son instance (paramètres du maître) et son masque
+        if let Some(i) = self.layer_sel.filter(|&i| i < stack.layers.len()) {
+            ui.separator();
+            let l = &mut stack.layers[i];
+            ui.horizontal(|ui| {
+                changed |= ui.add(egui::TextEdit::singleline(&mut l.name).desired_width(160.0)).changed();
+                if ui.button(crate::i18n::t("maître ✎")).on_hover_text(&l.master).clicked() {
+                    self.open_request = Some(std::path::Path::new(&self.root).join(&l.master));
+                }
+            });
+            egui::ScrollArea::vertical().id_salt("atelier-props").show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(crate::i18n::t("opacité"));
+                    changed |= ui.add(egui::Slider::new(&mut l.opacity, 0.0..=1.0)).changed();
+                });
+                ui.add_space(4.0);
+                ui.label(theme::section(&crate::i18n::t("instance")));
+                let ex = crate::atelier::load_master(&self.root, &l.master).map(|g| crate::atelier::exposed(&g)).unwrap_or_default();
+                if ex.is_empty() {
+                    ui.label(RichText::new(crate::i18n::t("Ce maître n'expose aucun paramètre. Dans ses nodes, ajoute un « Paramètre exposé » (et renomme-le) pour le régler d'ici.")).color(p.muted).size(10.5));
+                }
+                for e in ex {
+                    let mut v = l.params.get(&e.name).copied().unwrap_or(e.default);
+                    ui.horizontal(|ui| {
+                        ui.label(&e.name);
+                        let ch = if e.color {
+                            let mut c = [v[0], v[1], v[2]];
+                            let r = ui.color_edit_button_rgb(&mut c).changed();
+                            v = [c[0], c[1], c[2], 1.0];
+                            r
+                        } else {
+                            ui.add(egui::Slider::new(&mut v[0], 0.0..=1.0)).changed()
+                        };
+                        if ch {
+                            l.params.insert(e.name.clone(), v);
+                            changed = true;
+                        }
+                        if l.params.contains_key(&e.name) && ui.small_button("↺").on_hover_text(crate::i18n::t("revenir à la valeur du maître")).clicked() {
+                            l.params.remove(&e.name);
+                            changed = true;
+                        }
+                    });
+                }
+                ui.add_space(4.0);
+                ui.label(theme::section(&crate::i18n::t("masque")));
+                egui::ComboBox::from_id_salt("atelier-mask").selected_text(crate::i18n::t(crate::atelier::MASKS.iter().find(|m| m.0 == l.mask.kind).map(|m| m.1).unwrap_or("partout"))).show_ui(ui, |ui| {
+                    for (id, label, _) in crate::atelier::MASKS {
+                        if ui.selectable_label(l.mask.kind == id, crate::i18n::t(label)).clicked() {
+                            l.mask.kind = id.to_string();
+                            changed = true;
+                        }
+                    }
+                });
+                if l.mask.kind != "plein" {
+                    changed |= ui.add(egui::Slider::new(&mut l.mask.amount, 0.0..=1.0).text(crate::i18n::t("quantité"))).changed();
+                    changed |= ui.add(egui::Slider::new(&mut l.mask.contrast, 0.0..=1.0).text(crate::i18n::t("contraste"))).changed();
+                    changed |= ui.add(egui::Slider::new(&mut l.mask.scale, 0.5..=40.0).logarithmic(true).text(crate::i18n::t("échelle"))).changed();
+                    changed |= ui.checkbox(&mut l.mask.invert, crate::i18n::t("inverser")).changed();
+                }
+            });
+        }
+        if changed || self.graph.stack.as_ref() != Some(&stack) {
+            self.graph.stack = Some(stack);
+            self.changed();
+        }
+        // Un maître modifié dans un autre onglet : l'aperçu suit
+        let key = self.graph.stack.as_ref().map(|s| s.layers.iter().map(|l| std::fs::metadata(std::path::Path::new(&self.root).join(&l.master)).and_then(|m| m.modified()).ok()).collect::<Vec<_>>());
+        let h = {
+            use std::hash::{Hash, Hasher};
+            let mut hh = std::collections::hash_map::DefaultHasher::new();
+            key.hash(&mut hh);
+            hh.finish()
+        };
+        if self.masters_seen != h {
+            self.masters_seen = h;
+            self.program = Program::compile(&self.graph.effective(), &self.root, 1024);
+            self.version += 1;
+        }
+        ctx.request_repaint_after(std::time::Duration::from_millis(500));
+    }
+
     fn preview_ui(&mut self, ui: &mut egui::Ui, rect: Rect, ctx: &egui::Context) {
         let p = theme::pal();
         ui.painter().rect_filled(rect, 0.0, Color32::from_gray(30));
@@ -4227,7 +4515,7 @@ mod tests {
         assert!(Shader::compile(DEFAULT_SHADER).is_ok());
 
         // Compositing : couleur → inverser → sortie
-        let mut g = Graph { kind: GraphKind::Compositor, nodes: vec![], links: vec![], next_id: 0, frames: vec![] };
+        let mut g = Graph { kind: GraphKind::Compositor, nodes: vec![], links: vec![], next_id: 0, frames: vec![], stack: None };
         let c = g.add("color", [0.0, 0.0]);
         g.nodes[0].values[0] = [0.2, 0.4, 0.6, 1.0];
         let inv = g.add("invert", [0.0, 0.0]);

@@ -4,6 +4,7 @@ mod cloud;
 mod bridge;
 mod layout;
 mod icons;
+mod atelier;
 mod oidn;
 mod dock;
 mod formats;
@@ -698,6 +699,58 @@ impl App {
         }
     }
 
+    /// Ctrl+Maj+S : une copie du fichier ouvert, à l'endroit et sous le nom choisis ; la copie s'ouvre, l'original ne change pas.
+    fn save_copy_as(&mut self, i: usize) {
+        let Some(rel) = self.docs.get(i).map(|d| d.rel.clone()) else { return };
+        if untitled::is_untitled(&rel) {
+            self.save_as(i);
+            return;
+        }
+        self.flush_all();
+        let root = self.root();
+        let src = std::path::Path::new(&root).join(&rel);
+        let e = ext(&rel);
+        let model = matches!(self.docs.get(i).map(|d| &d.content), Some(Content::Model(_))) && !crate::scene::is_scene(&src);
+        let stem = src.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+        let mut d = rfd::FileDialog::new().set_title(crate::i18n::t("enregistrer sous")).set_file_name(format!("{stem} copie.{e}"));
+        if let Some(dir) = src.parent() {
+            d = d.set_directory(dir);
+        }
+        if model {
+            // Un modèle peut changer de format en route
+            for f in crate::modifiers::EXPORT_FORMATS {
+                d = d.add_filter(f.to_uppercase(), &[*f]);
+            }
+        } else if !e.is_empty() {
+            d = d.add_filter(&e, &[e.as_str()]);
+        }
+        let Some(mut dest) = d.save_file() else { return };
+        if dest.extension().is_none() && !e.is_empty() {
+            dest.set_extension(&e);
+        }
+        if dest == src {
+            return;
+        }
+        if model {
+            if let Some(Content::Model(v)) = self.docs.get_mut(i).map(|d| &mut d.content) {
+                v.save_request = Some(Some(dest));
+            }
+            return;
+        }
+        if let Err(err) = std::fs::copy(&src, &dest) {
+            self.error = Some(err.to_string());
+            return;
+        }
+        self.refresh();
+        match vault::inside(&root, &dest) {
+            Some(new_rel) => {
+                self.open(new_rel.clone());
+                self.toast(format!("{} {new_rel}", crate::i18n::t("enregistré sous")));
+            }
+            None => self.toast(format!("{} {}", crate::i18n::t("enregistré hors du coffre :"), dest.to_string_lossy())),
+        }
+    }
+
     /// Fenêtres liées aux fichiers sans titre : fermer sans enregistrer, et récupération après un plantage.
     fn untitled_dialogs(&mut self, ctx: &egui::Context) {
         let p = theme::pal();
@@ -790,7 +843,7 @@ impl App {
         let (subtitle, actions, pick): (&str, Vec<(&str, extras::Cmd)>, Pick) = match w.kind.as_str() {
             "3d" => ("Une scène réunit des modèles, des lumières et des caméras. Une scène neuve arrive avec un cube, une lumière et une caméra.", vec![("nouvelle scène 3D", extras::Cmd::NewScene), ("importer des fichiers…", extras::Cmd::Import)], |r| model3d::is_model(r)),
             "video" => ("Un montage assemble des vidéos, des images, des sons et des titres sur une timeline.", vec![("nouveau montage vidéo", extras::Cmd::NewMontage), ("importer des fichiers…", extras::Cmd::Import)], |r| montage::is_project(r) || video::is_video(r)),
-            "mat" => ("Un matériau en nodes s'applique aux modèles et aux objets d'une scène ; un compositing retouche une image ou étalonne un clip.", vec![("nouveau matériau (nodes)", extras::Cmd::NewMaterial), ("nouveau compositing (nodes)", extras::Cmd::NewCompositor)], |r| nodes::is_graph(r)),
+            "mat" => ("Un matériau en nodes s'applique aux modèles et aux objets d'une scène ; un compositing retouche une image ou étalonne un clip.", vec![("nouveau matériau à calques (atelier)", extras::Cmd::NewLayered), ("nouveau matériau (nodes)", extras::Cmd::NewMaterial), ("nouveau compositing (nodes)", extras::Cmd::NewCompositor)], |r| nodes::is_graph(r)),
             "2d" => ("Images, croquis et planches.", vec![("nouveau board", extras::Cmd::NewBoard), ("importer des fichiers…", extras::Cmd::Import)], |r| images::is_image(r)),
             "code" => ("Crée un fichier en lui donnant son nom, ou rouvre un fichier récent.", vec![], |_| false),
             _ => ("Écris une note, ou rouvre un fichier récent.", vec![("nouvelle note", extras::Cmd::NewNote), ("note du jour", extras::Cmd::Daily)], |r| r.to_lowercase().ends_with(".md")),
@@ -1247,6 +1300,7 @@ impl App {
         recent.insert(0, path.clone());
         recent.truncate(8);
         save_config("recent_vaults", &recent.join("\n"));
+        nodes::set_vault_root(&path);
         self.vault = Some(path);
         self.docs.clear();
         self.active = None;
@@ -1880,6 +1934,20 @@ impl App {
                 }
             }
         }
+        // Ctrl+Maj+S : enregistrer une copie ailleurs (l'original reste), et l'ouvrir
+        if pressed(Modifiers::COMMAND | Modifiers::SHIFT, Key::S) {
+            if let Some(i) = self.active {
+                self.save_copy_as(i);
+            }
+        }
+        // Ctrl+S sur un modèle 3D modifié : les changements (modificateurs, retopo) vont dans le fichier
+        if ctx.input(|i| i.modifiers.command && !i.modifiers.shift && i.key_pressed(Key::S)) {
+            if let Some(Content::Model(v)) = self.active.and_then(|i| self.docs.get_mut(i)).map(|d| &mut d.content) {
+                if v.has_pending() {
+                    v.save_request = Some(None);
+                }
+            }
+        }
         if pressed(Modifiers::COMMAND, Key::S) {
             match self.active.filter(|&i| self.docs.get(i).is_some_and(|d| untitled::is_untitled(&d.rel))) {
                 Some(i) => self.save_as(i),
@@ -1924,6 +1992,7 @@ impl App {
                             ("scène 3D", extras::Cmd::NewScene),
                             ("montage vidéo", extras::Cmd::NewMontage),
                             ("matériau en nodes", extras::Cmd::NewMaterial),
+                            ("matériau à calques (atelier)", extras::Cmd::NewLayered),
                             ("compositing en nodes", extras::Cmd::NewCompositor),
                         ] {
                             if ui.button(crate::i18n::t(label)).clicked() {
@@ -2596,6 +2665,9 @@ impl App {
                 }
                 Content::Nodes(ed) => {
                     egui::Frame::new().inner_margin(egui::Margin::symmetric(12, 8)).show(ui, |ui| ed.show(ui));
+                    if let Some(path) = ed.open_request.take() {
+                        open_material = Some(path);
+                    }
                     if let Some((id, desc)) = ed.ai_request.take() {
                         let settings = self.ai.clone().unwrap_or_else(ai::Settings::load);
                         let local = self.local.clone();
@@ -2616,6 +2688,9 @@ impl App {
                     egui::Frame::new().inner_margin(egui::Margin::symmetric(16, 10)).show(ui, |ui| viewer.show(ui));
                     if let Some(path) = viewer.open_request.take() {
                         open_material = Some(path);
+                    }
+                    if std::mem::take(&mut viewer.reload_request) {
+                        self.actions.push(Action::Reload(rel.clone()));
                     }
                 }
                 Content::Image => {

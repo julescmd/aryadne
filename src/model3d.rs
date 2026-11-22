@@ -1858,6 +1858,10 @@ pub struct Viewer {
     slot_rev: u64,
     /// Matériau à ouvrir dans l'éditeur de nodes (à côté du modèle)
     pub open_request: Option<std::path::PathBuf>,
+    /// Ctrl+S : écrire les changements (modificateurs, retopo) dans le fichier (None) ou dans un autre (Ctrl+Maj+S)
+    pub save_request: Option<Option<std::path::PathBuf>>,
+    /// Le fichier a été réécrit : à recharger
+    pub reload_request: bool,
     pub root: String,
     mat_active: Option<(std::path::PathBuf, Option<std::time::SystemTime>)>,
     mat_error: Option<String>,
@@ -1991,6 +1995,8 @@ impl Viewer {
             slot_progs: vec![],
             slot_rev: 0,
             open_request: None,
+            save_request: None,
+            reload_request: false,
             root: String::new(),
             mat_active: None,
             mat_error: None,
@@ -2827,6 +2833,89 @@ impl Viewer {
         }
         if !done {
             ctx.request_repaint_after(std::time::Duration::from_millis(250));
+        }
+    }
+
+    /// Le modèle a-t-il des changements qui ne sont pas dans son fichier ?
+    pub fn has_pending(&self) -> bool {
+        self.stack.iter().any(|m| m.on) || self.applied.is_some() || self.edit.as_ref().is_some_and(|e| e.retopo.is_some() && e.retopo_show)
+    }
+
+    /// Écrit le modèle tel qu'on le voit (retopo affichée, ou modificateurs appliqués) dans `target`
+    /// (None : son propre fichier, avec une copie de sécurité de l'original).
+    fn write_model(&mut self, model: &Model, z_up: bool, target: Option<std::path::PathBuf>) {
+        let same = target.is_none();
+        let out = target.unwrap_or_else(|| self.path.clone());
+        let ext = out.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+        if !crate::modifiers::EXPORT_FORMATS.contains(&ext.as_str()) {
+            self.capture_msg = Some(format!("{} .{ext} : {}", crate::i18n::t("écriture impossible en"), crate::i18n::t("Ctrl+Maj+S pour enregistrer en OBJ, FBX, GLB, STL ou PLY")));
+            return;
+        }
+        if same && !self.has_pending() {
+            self.capture_msg = Some(crate::i18n::t("rien à enregistrer : le fichier est à jour"));
+            return;
+        }
+        // Le maillage à écrire : la retopo affichée, sinon la pile de modificateurs appliquée
+        let mesh = match self.edit.as_ref().and_then(|e| e.retopo.as_ref().filter(|_| e.retopo_show)) {
+            Some(r) => {
+                let mut m = crate::modifiers::Mesh { pos: r.pos.clone(), tris: vec![], colors: vec![], edges: vec![] };
+                for f in &r.faces {
+                    for k in 1..f.len().saturating_sub(1) {
+                        m.tris.push([f[0], f[k], f[k + 1]]);
+                        // Arêtes réelles : le tour du polygone, pas les diagonales du découpage
+                        let mut e = 0u8;
+                        if k == 1 {
+                            e |= 1;
+                        }
+                        e |= 2;
+                        if k + 2 == f.len() {
+                            e |= 4;
+                        }
+                        m.edges.push(e);
+                        m.colors.push(Color32::from_gray(200));
+                    }
+                }
+                m
+            }
+            None => {
+                let s = model.size();
+                let longest = s[0].max(s[1]).max(s[2]).max(1e-9);
+                let c = [(model.min[0] + model.max[0]) / 2.0, (model.min[1] + model.max[1]) / 2.0, (model.min[2] + model.max[2]) / 2.0];
+                let o = [-c[0] / longest, -c[1] / longest, -c[2] / longest];
+                let origin = if z_up { [o[0], o[2], -o[1]] } else { o };
+                let base = self.applied.as_ref().map(|a| (**a).clone()).unwrap_or_else(|| crate::modifiers::Mesh::from_model(model, z_up));
+                crate::modifiers::apply(&self.stack, base, origin)
+            }
+        };
+        // Copie de sécurité de l'original avant de l'écraser
+        if same && !self.root.is_empty() {
+            let dir = std::path::Path::new(&self.root).join(".app/backup");
+            let _ = std::fs::create_dir_all(&dir);
+            let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+            let name = self.path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+            let _ = std::fs::copy(&self.path, dir.join(format!("{stamp}-{name}")));
+        }
+        match crate::modifiers::export(&mesh, model, z_up, &out) {
+            Ok(()) => {
+                let name = out.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                if same {
+                    // Tout est dans le fichier : la pile, le maillage appliqué et la retopo n'ont plus lieu d'être
+                    self.stack.clear();
+                    self.applied = None;
+                    if !self.root.is_empty() {
+                        let f = self.mods_file();
+                        let _ = std::fs::remove_file(f.with_extension("mesh"));
+                        let _ = std::fs::write(&f, "[]");
+                    }
+                    self.edit = None;
+                    self.reload_request = true;
+                    self.capture_msg = Some(format!("{} {name} {}", crate::i18n::t("enregistré dans"), crate::i18n::t("(copie de l'original dans .app/backup)")));
+                } else {
+                    self.open_request = Some(out.clone());
+                    self.capture_msg = Some(format!("{} {name}", crate::i18n::t("enregistré sous")));
+                }
+            }
+            Err(e) => self.capture_msg = Some(format!("{} : {e}", crate::i18n::t("écriture impossible"))),
         }
     }
 
@@ -4348,6 +4437,9 @@ impl Viewer {
         }
         if let Some(e) = &mut self.edit {
             e.retopo_poll();
+        }
+        if let Some(target) = self.save_request.take() {
+            self.write_model(model, z_up, target);
         }
         if let (Some(e), Some(model)) = (&mut self.edit, Some(&*model)) {
             if std::mem::take(&mut e.retopo_export) {
