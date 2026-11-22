@@ -163,6 +163,10 @@ impl Set {
     }
 
     pub fn save(&self) {
+        // Une fenêtre secondaire (un espace ouvert à part) ne réécrit pas les espaces de la principale
+        if SECONDARY.load(std::sync::atomic::Ordering::Relaxed) {
+            return;
+        }
         if let (Some(p), Ok(d)) = (path(), serde_json::to_vec_pretty(self)) {
             if let Some(dir) = p.parent() {
                 let _ = std::fs::create_dir_all(dir);
@@ -194,4 +198,21 @@ mod tests {
         assert_eq!(old.list[0].view, "");
         assert_eq!(preset(1).kind, "3d");
     }
+}
+
+/// Vrai dans une fenêtre lancée par « ouvrir dans une nouvelle fenêtre ».
+pub static SECONDARY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Ouvre l'espace `index` du coffre `vault` dans une nouvelle fenêtre de l'application
+/// (par exemple les matériaux sur un écran et la scène sur l'autre).
+pub fn open_in_window(vault: &str, index: usize) -> Result<(), String> {
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    std::process::Command::new(exe).arg("--vault").arg(vault).arg("--workspace").arg(index.to_string()).spawn().map(|_| ()).map_err(|e| e.to_string())
+}
+
+/// Arguments de lancement : coffre et espace de travail à ouvrir (fenêtre secondaire).
+pub fn launch_args() -> (Option<String>, Option<usize>) {
+    let args: Vec<String> = std::env::args().collect();
+    let get = |flag: &str| args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).cloned();
+    (get("--vault"), get("--workspace").and_then(|w| w.parse().ok()))
 }

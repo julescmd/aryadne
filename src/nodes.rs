@@ -2347,6 +2347,9 @@ pub struct Editor {
     pv_pitch: f32,
     pv_dist: f32,
     pv_env: usize,
+    /// Forme d'aperçu : 0 sphère, 1 cube arrondi (choisi d'office pour un matériau à calques)
+    pv_shape: Option<u8>,
+    boxy: Option<std::sync::Arc<crate::model3d::Prepared>>,
     pv_model: Option<(String, std::sync::Arc<crate::model3d::Prepared>)>,
     pv_key: u64,
     /// Node dont la sortie remplace le matériau dans l'aperçu (« prévisualiser la node »)
@@ -2432,7 +2435,7 @@ impl Editor {
             masters_seen: 0,
             frame_sel: false,
             frame_rename: None,
-            frame_sel_request: false, pv_yaw: 0.4, pv_pitch: 0.25, pv_dist: 2.0, pv_env: 0, pv_model: None, pv_key: 0, solo: None,
+            frame_sel_request: false, pv_yaw: 0.4, pv_pitch: 0.25, pv_dist: 2.0, pv_env: 0, pv_shape: None, boxy: None, pv_model: None, pv_key: 0, solo: None,
         };
         // Un graphe dont des nodes se chevauchent (fichier écrit à la main, ancienne version) est rangé à l'ouverture
         if ed.overlaps() {
@@ -4181,7 +4184,11 @@ impl Editor {
                     self.pv_dist = (self.pv_dist * (-sc * 0.002).exp()).clamp(0.8, 8.0);
                     self.pv_key = 0;
                 }
-                let dropped: Vec<PathBuf> = ctx.input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).collect());
+                let mut dropped: Vec<PathBuf> = ctx.input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).collect());
+                // Ou glissé depuis l'explorateur
+                if let Some(rel) = crate::drop_of::<String>(&resp) {
+                    dropped.push(Path::new(&self.root).join(rel.as_str()));
+                }
                 for f in dropped {
                     if let Some(m) = crate::model3d::preview_model(&f) {
                         self.pv_model = Some((f.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(), std::sync::Arc::new(m)));
@@ -4212,6 +4219,7 @@ impl Editor {
                     GraphKind::Material => {
                         let model = match &self.pv_model {
                             Some((_, m)) => m.clone(),
+                            None if self.pv_shape.unwrap_or(if self.graph.stack.is_some() { 1 } else { 0 }) == 1 => self.boxy.get_or_insert_with(|| std::sync::Arc::new(crate::model3d::preview_box())).clone(),
                             None => self.sphere.get_or_insert_with(|| std::sync::Arc::new(crate::model3d::preview_sphere())).clone(),
                         };
                         let (yaw, pitch, dist, env) = (self.pv_yaw, self.pv_pitch, self.pv_dist, self.pv_env);
@@ -4252,13 +4260,21 @@ impl Editor {
                         }
                     }
                 });
-                if self.pv_model.is_some() {
-                    if ui.small_button(crate::i18n::t("sphère")).on_hover_text(crate::i18n::t("revenir à la sphère")).clicked() {
+                let shape = self.pv_shape.unwrap_or(if self.graph.stack.is_some() { 1 } else { 0 });
+                for (k, l, tip) in [(0u8, "sphère", "aperçu sur une sphère"), (1, "cube", "aperçu sur un cube aux arêtes adoucies : on y voit l'usure des arêtes et la saleté des creux")] {
+                    if ui.selectable_label(self.pv_model.is_none() && shape == k, RichText::new(crate::i18n::t(l)).size(10.5)).on_hover_text(crate::i18n::t(tip)).clicked() {
                         self.pv_model = None;
+                        self.pv_shape = Some(k);
                         self.pv_key = 0;
                     }
-                } else {
-                    ui.label(RichText::new(crate::i18n::t("dépose un modèle 3D ici")).color(p.muted).size(10.5));
+                }
+                match &self.pv_model {
+                    Some((name, _)) => {
+                        ui.label(RichText::new(name).size(10.5));
+                    }
+                    None => {
+                        ui.label(RichText::new(crate::i18n::t("ou dépose un modèle 3D ici")).color(p.muted).size(10.5));
+                    }
                 }
                 if let Some(id) = self.solo {
                     let name = self.graph.nodes.iter().find(|n| n.id == id).map(|n| if n.label.is_empty() { def(&n.op).map(|d| crate::i18n::t(d.label)).unwrap_or_default() } else { n.label.clone() }).unwrap_or_default();

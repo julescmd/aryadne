@@ -396,7 +396,15 @@ impl App {
             save_config("last_update_check", &now.to_string());
             app.updater.check(app.github_token.clone(), ctx);
         }
-        if let Some(p) = load_config("last_vault") {
+        let (vault_arg, ws_arg) = workspace::launch_args();
+        if let Some(i) = ws_arg {
+            // Fenêtre secondaire : cet espace-là, sans toucher aux réglages de la principale
+            workspace::SECONDARY.store(true, std::sync::atomic::Ordering::Relaxed);
+            if i < app.ws.list.len() {
+                app.ws.current = i;
+            }
+        }
+        if let Some(p) = vault_arg.or_else(|| load_config("last_vault")) {
             app.load_vault(p);
         }
         app
@@ -1018,6 +1026,12 @@ impl App {
                 ui.separator();
                 if ui.button(crate::i18n::t("dupliquer")).clicked() {
                     dup = Some(i);
+                    ui.close();
+                }
+                if ui.button(crate::i18n::t("ouvrir dans une nouvelle fenêtre")).on_hover_text(crate::i18n::t("Cet espace dans sa propre fenêtre, sur le même coffre : par exemple les matériaux sur un écran et la scène sur l'autre")).clicked() {
+                    if let Err(e) = workspace::open_in_window(&self.root(), i) {
+                        self.error = Some(e);
+                    }
                     ui.close();
                 }
                 if ui.button(crate::i18n::t("réinitialiser la disposition")).clicked() {

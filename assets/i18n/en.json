@@ -1411,5 +1411,10 @@
  "subdivision limitée à": "subdivision limited to",
  "niveaux : au-delà, plus de 40 millions de triangles": "levels: beyond that, more than 40 million triangles",
  "unités (3D)": "units (3D)",
- "Les positions, distances et tailles s'affichent dans cette unité ; les fichiers restent en mètres.": "Positions, distances and sizes are shown in this unit; files stay in meters."
+ "Les positions, distances et tailles s'affichent dans cette unité ; les fichiers restent en mètres.": "Positions, distances and sizes are shown in this unit; files stay in meters.",
+ "ouvrir dans une nouvelle fenêtre": "open in a new window",
+ "Cet espace dans sa propre fenêtre, sur le même coffre : par exemple les matériaux sur un écran et la scène sur l'autre": "This workspace in its own window, on the same vault: for example materials on one screen and the scene on the other",
+ "aperçu sur une sphère": "preview on a sphere",
+ "aperçu sur un cube aux arêtes adoucies : on y voit l'usure des arêtes et la saleté des creux": "preview on a cube: edge wear and cavity dirt show on it",
+ "ou dépose un modèle 3D ici": "or drop a 3D model here"
 }

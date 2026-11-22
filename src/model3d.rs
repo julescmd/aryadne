@@ -743,41 +743,62 @@ fn vertex_normals(pos: &[V3], tris: &[[u32; 3]]) -> Vec<V3> {
     n.into_iter().map(norm).collect()
 }
 
-/// Courbure moyenne par sommet (positive sur les arêtes saillantes, négative dans les creux),
-/// lue sur la variation des normales le long des arêtes puis légèrement lissée. Une seule
-/// passe sur les triangles : négligeable même sur un sculpt lourd.
+/// Courbure par sommet, comme une carte de courbure de Substance : positive sur les arêtes
+/// saillantes, négative dans les creux, à peu près nulle sur les surfaces planes ou doucement
+/// bombées. On compare chaque sommet à la surface lissée sur un rayon fixe (2,5 % de la taille
+/// du modèle) : le résultat ne dépend ni de la densité du maillage ni de sa taille. Rien à cuire.
 pub(crate) fn vertex_curvature(pos: &[V3], nrm: &[V3], tris: &[[u32; 3]]) -> Vec<f32> {
-    let mut acc = vec![0.0f32; pos.len()];
-    let mut cnt = vec![0.0f32; pos.len()];
+    let n = pos.len();
+    if n == 0 {
+        return vec![];
+    }
+    let mut edges: Vec<(u32, u32)> = Vec::with_capacity(tris.len() * 3);
     for t in tris {
         for k in 0..3 {
-            let (a, b) = (t[k] as usize, t[(k + 1) % 3] as usize);
-            let e = sub(pos[b], pos[a]);
-            let l2 = dot(e, e);
-            if l2 < 1e-16 {
-                continue;
+            let (a, b) = (t[k], t[(k + 1) % 3]);
+            if a != b {
+                edges.push((a.min(b), a.max(b)));
             }
-            let c = dot(sub(nrm[b], nrm[a]), e) / l2.sqrt();
-            acc[a] += c;
-            acc[b] += c;
+        }
+    }
+    edges.sort_unstable();
+    edges.dedup();
+    let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
+    for p in pos {
+        for k in 0..3 {
+            lo[k] = lo[k].min(p[k]);
+            hi[k] = hi[k].max(p[k]);
+        }
+    }
+    let size = (hi[0] - lo[0]).max(hi[1] - lo[1]).max(hi[2] - lo[2]).max(1e-9);
+    let avg = edges.iter().map(|&(a, b)| dot(sub(pos[a as usize], pos[b as usize]), sub(pos[a as usize], pos[b as usize])).sqrt()).sum::<f32>() / edges.len().max(1) as f32;
+    let radius = size * 0.025;
+    // Une diffusion de k pas s'étale sur environ arête × √k
+    let iters = ((radius / avg.max(1e-9)).powi(2) as usize).clamp(2, 160);
+    let mut sm = pos.to_vec();
+    let mut sum = vec![[0.0f32; 3]; n];
+    let mut cnt = vec![0.0f32; n];
+    for _ in 0..iters {
+        sum.iter_mut().for_each(|s| *s = [0.0; 3]);
+        cnt.iter_mut().for_each(|c| *c = 0.0);
+        for &(a, b) in &edges {
+            let (a, b) = (a as usize, b as usize);
+            for k in 0..3 {
+                sum[a][k] += sm[b][k];
+                sum[b][k] += sm[a][k];
+            }
             cnt[a] += 1.0;
             cnt[b] += 1.0;
         }
-    }
-    let mut cur: Vec<f32> = acc.iter().zip(&cnt).map(|(a, c)| if *c > 0.0 { a / c } else { 0.0 }).collect();
-    for _ in 0..2 {
-        let mut sum = cur.clone();
-        let mut n = vec![1.0f32; pos.len()];
-        for t in tris {
-            for k in 0..3 {
-                let (a, b) = (t[k] as usize, t[(k + 1) % 3] as usize);
-                sum[a] += cur[b];
-                n[a] += 1.0;
+        for i in 0..n {
+            if cnt[i] > 0.0 {
+                let c = cnt[i];
+                // Pas à moitié : plus stable
+                sm[i] = [(sm[i][0] + sum[i][0] / c) * 0.5, (sm[i][1] + sum[i][1] / c) * 0.5, (sm[i][2] + sum[i][2] / c) * 0.5];
             }
         }
-        cur = sum.iter().zip(&n).map(|(s, c)| s / c).collect();
     }
-    cur
+    (0..n).map(|i| dot(sub(pos[i], sm[i]), nrm[i]) / radius).collect()
 }
 
 /// Données prêtes pour le rendu (modèle centré, mis à l'échelle, normales).
@@ -1869,6 +1890,18 @@ pub fn preview_sphere() -> Prepared {
         }
     }
     let model = Model::new(pos, tris, None, false).expect("sphère");
+    Prepared::new(&model, false, 0)
+}
+
+/// Cube aux arêtes adoucies pour l'aperçu des matériaux : ses arêtes et ses coins montrent
+/// l'usure, la saleté des creux et la poussière, qu'une sphère n'a pas.
+pub fn preview_box() -> Prepared {
+    let pos: Vec<V3> = (0..8).map(|i| [if i & 1 == 0 { -0.6 } else { 0.6 }, if i & 2 == 0 { -0.6 } else { 0.6 }, if i & 4 == 0 { -0.6 } else { 0.6 }]).collect();
+    let quads = [[0u32, 2, 3, 1], [4, 5, 7, 6], [0, 1, 5, 4], [2, 6, 7, 3], [0, 4, 6, 2], [1, 3, 7, 5]];
+    let tris: Vec<[u32; 3]> = quads.iter().flat_map(|q| [[q[0], q[1], q[2]], [q[0], q[2], q[3]]]).collect();
+    let n = tris.len();
+    let (p, t, _, _) = split_flat(&pos, &tris, &vec![Color32::from_gray(205); n], &vec![7; n], 5, false);
+    let model = Model::new(p, t, None, false).expect("cube");
     Prepared::new(&model, false, 0)
 }
 
@@ -3694,7 +3727,10 @@ impl Viewer {
                                                     let sign = if signed { sign } else { 1.0 };
                                                     // Position : dans l'unité choisie (la scène est en mètres)
                                                     let (uname, uf) = if label == "position" { crate::settings::unit() } else { ("", 1.0) };
-                                                    let mut val = v[k] * sign * uf;
+                                                    let mut val = v[k] * sign * uf + 0.0;
+                                                    if val == 0.0 {
+                                                        val = 0.0;
+                                                    }
                                                     if ui.add(egui::DragValue::new(&mut val).speed(speed * uf as f64).prefix(format!("{axis} ")).suffix(if uname.is_empty() { String::new() } else { format!(" {uname}") }).max_decimals(3)).changed() {
                                                         v[k] = val * sign / uf;
                                                         changed = true;
@@ -4945,6 +4981,32 @@ impl Viewer {
                             self.modal_click = true;
                         }
                         ui.ctx().request_repaint();
+                    }
+                }
+                // Axe imposé : une ligne de sa couleur traverse toute la vue, comme dans Blender
+                if let (Some(k), Some(scene)) = (axis, self.scene.as_ref()) {
+                    if sel < scene.objects.len() {
+                        let w0 = scene.from_parent(sel, scene.objects[sel].pos);
+                        let proj = |w: V3| -> Option<Pos2> {
+                            let q = cam.view([(w[0] - c[0]) / longest, (w[1] - c[1]) / longest, (w[2] - c[2]) / longest]);
+                            if cam.ortho {
+                                Some(pos2(rect.center().x + q[0] * focal / cam.dist, rect.center().y - q[1] * focal / cam.dist))
+                            } else {
+                                (q[2] < -0.02).then(|| pos2(rect.center().x + q[0] / -q[2] * focal, rect.center().y - q[1] / -q[2] * focal))
+                            }
+                        };
+                        let painter = ui.painter_at(rect);
+                        let col = crate::gizmo::AXIS[k];
+                        let mut last: Option<Pos2> = None;
+                        for i in -60..=60 {
+                            let mut w = w0;
+                            w[k] += i as f32 / 60.0 * longest * 20.0 * (i as f32 / 60.0).abs();
+                            let q = proj(w);
+                            if let (Some(a), Some(b)) = (last, q) {
+                                painter.line_segment([a, b], Stroke::new(1.5, col));
+                            }
+                            last = q;
+                        }
                     }
                 }
                 // Rappel des touches, en bas de la vue
