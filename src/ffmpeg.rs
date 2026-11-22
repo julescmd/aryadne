@@ -85,6 +85,7 @@ pub fn install(ctx: eframe::egui::Context) -> Arc<Mutex<InstallState>> {
                 s.message = "extraction…".into();
                 s.progress = None;
             });
+            // Les binaires déjà là (peut-être en cours d'usage) restent en place
             let wanted = [exe("ffmpeg"), exe("ffprobe"), exe("ffplay")];
             if cfg!(windows) {
                 let mut z = zip::ZipArchive::new(std::fs::File::open(&tmp).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
@@ -92,7 +93,7 @@ pub fn install(ctx: eframe::egui::Context) -> Arc<Mutex<InstallState>> {
                     let mut f = z.by_index(i).map_err(|e| e.to_string())?;
                     let full = f.name().map(|n| n.to_string()).unwrap_or_default();
                     let name = full.rsplit('/').next().unwrap_or("").to_string();
-                    if full.contains("/bin/") && wanted.contains(&name) {
+                    if full.contains("/bin/") && wanted.contains(&name) && !dir.join(&name).is_file() {
                         let mut o = std::fs::File::create(dir.join(&name)).map_err(|e| e.to_string())?;
                         std::io::copy(&mut f, &mut o).map_err(|e| e.to_string())?;
                     }
@@ -110,7 +111,7 @@ pub fn install(ctx: eframe::egui::Context) -> Arc<Mutex<InstallState>> {
                     let mut entry = entry.map_err(|e| e.to_string())?;
                     let path = entry.path().map_err(|e| e.to_string())?.to_string_lossy().to_string();
                     let name = path.rsplit('/').next().unwrap_or("").to_string();
-                    if path.contains("/bin/") && wanted.contains(&name) {
+                    if path.contains("/bin/") && wanted.contains(&name) && !dir.join(&name).is_file() {
                         entry.unpack(dir.join(&name)).map_err(|e| e.to_string())?;
                     }
                 }

@@ -766,6 +766,9 @@ pub struct Editor {
     last_head: f32,
     /// Lecture sans le son
     mute: bool,
+    /// ffplay manque : on propose de l'installer avec ffmpeg
+    no_ffplay: bool,
+    sound_install: Option<std::sync::Arc<std::sync::Mutex<ffmpeg::InstallState>>>,
 }
 
 impl Drop for Editor {
@@ -785,7 +788,7 @@ impl Editor {
         if error.is_none() && project.settle_all() {
             let _ = project.write(&path);
         }
-        Editor { path, error, playhead: 0.0, selected: None, zoom: 60.0, scroll: 0.0, drag: None, tex: None, preview_rx: None, shown: None, rev: 0, play: None, export_rx: None, message: None, add: vec![], root: root.to_string(), strips: Strips::default(), open_request: None, saved: project.clone(), history: vec![], redo: vec![], last_head: 0.0, mute: false, project }
+        Editor { path, error, playhead: 0.0, selected: None, zoom: 60.0, scroll: 0.0, drag: None, tex: None, preview_rx: None, shown: None, rev: 0, play: None, export_rx: None, message: None, add: vec![], root: root.to_string(), strips: Strips::default(), open_request: None, saved: project.clone(), history: vec![], redo: vec![], last_head: 0.0, mute: false, no_ffplay: false, sound_install: None, project }
     }
 
     fn changed(&mut self) {
@@ -867,7 +870,7 @@ impl Editor {
             return vec![];
         }
         let Some(fp) = ffmpeg::find("ffplay") else {
-            self.message = Some(crate::i18n::t("Lecture sans son : ffplay est introuvable (réinstalle ffmpeg depuis la conversion).").to_string());
+            self.no_ffplay = true;
             return vec![];
         };
         let Ok(mut mix) = ffmpeg::command(ff.to_path_buf()).args(["-v", "error"]).args(inputs).args(["-filter_complex", &filter, "-map", "[aout]", "-ar", "48000", "-ac", "2", "-f", "wav", "-"]).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn() else { return vec![] };
@@ -990,6 +993,30 @@ impl Editor {
                     restart = true;
                 }
             }
+            if self.no_ffplay && !self.mute {
+                match &self.sound_install {
+                    None => {
+                        if ui.button(crate::i18n::t("installer le son (ffplay)")).on_hover_text(crate::i18n::t("La lecture est muette : ffplay manque. Aryadne le télécharge avec ffmpeg.")).clicked() {
+                            self.sound_install = Some(ffmpeg::install(ui.ctx().clone()));
+                        }
+                    }
+                    Some(j) => {
+                        let st = j.lock().map(|s| s.clone()).unwrap_or_default();
+                        if let Some(e) = &st.error {
+                            ui.label(RichText::new(e).color(p.missing).size(11.0));
+                        } else if st.done {
+                            self.no_ffplay = false;
+                            self.sound_install = None;
+                            if self.play.is_some() {
+                                restart = true;
+                            }
+                        } else {
+                            ui.spinner();
+                            ui.label(RichText::new(&st.message).size(11.0).color(p.muted));
+                        }
+                    }
+                }
+            }
             ui.label(RichText::new(format!("{} / {}", timecode(self.playhead, self.project.fps), timecode(self.project.duration(), self.project.fps))).monospace().color(p.muted));
             ui.separator();
             if ui.button(crate::i18n::t("＋ média")).on_hover_text(crate::i18n::t("Vidéos, images ou sons. On peut aussi les glisser sur la fenêtre.")).clicked() {
@@ -1033,7 +1060,7 @@ impl Editor {
                 if self.export_rx.is_some() {
                     ui.spinner();
                     ui.label(RichText::new(crate::i18n::t("export en cours…")).color(p.muted));
-                } else if ui.add(egui::Button::new(RichText::new(crate::i18n::t("exporter…")).color(p.on_accent)).fill(p.accent)).clicked() {
+                } else if ui.add(egui::Button::new(RichText::new(crate::i18n::t("exporter…")).color(p.on_accent)).fill(p.accent).wrap_mode(egui::TextWrapMode::Extend)).clicked() {
                     let stem = self.path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "montage".into());
                     let mut d = rfd::FileDialog::new().add_filter("MP4", &["mp4"]).set_file_name(format!("{stem}.mp4"));
                     if let Some(dir) = self.path.parent() {
