@@ -4281,7 +4281,19 @@ impl Viewer {
                 }
             }
         }
-        let dragging = self.gizmo_hold.is_none() && self.modal.is_none() && self.box_sel.is_none() && self.mesh.as_ref().is_none_or(|m| m.modal.is_none() && m.boxing.is_none()) && (resp.dragged_by(egui::PointerButton::Middle) || (!guiding && resp.dragged_by(egui::PointerButton::Primary)) || resp.dragged_by(egui::PointerButton::Secondary));
+        // Navigation comme dans Blender, dans une scène : glisser à gauche dans le vide = sélection au rectangle,
+        // molette enfoncée = tourner (Maj : déplacer, Ctrl : zoom), Alt + glisser à gauche = tourner (sans souris à trois boutons)
+        let scene_nav = crate::scene::is_scene(&self.path) && self.edit.is_none();
+        if scene_nav && resp.drag_started_by(egui::PointerButton::Primary) && !mods.alt && self.gizmo_hold.is_none() && self.modal.is_none() && !lkey && !hkey {
+            let at = ui.input(|i| i.pointer.press_origin());
+            match self.mesh.as_mut() {
+                Some(me) if me.modal.is_none() => me.boxing = Some(at),
+                Some(_) => {}
+                None => self.box_sel = Some(at),
+            }
+        }
+        let left_orbits = !scene_nav || mods.alt || lkey || hkey;
+        let dragging = self.gizmo_hold.is_none() && self.modal.is_none() && self.box_sel.is_none() && self.mesh.as_ref().is_none_or(|m| m.modal.is_none() && m.boxing.is_none()) && (resp.dragged_by(egui::PointerButton::Middle) || (!guiding && left_orbits && resp.dragged_by(egui::PointerButton::Primary)) || resp.dragged_by(egui::PointerButton::Secondary));
         if resp.clicked() {
             if let (Some(e), Some((_, _, prep)), Some(pt)) = (&mut self.edit, &self.prepared, resp.interact_pointer_pos()) {
                 if let Some((tri, bary)) = pick(prep, &self.cam, rect.width(), rect.height(), pt.x - rect.left(), pt.y - rect.top()) {
@@ -4496,7 +4508,15 @@ impl Viewer {
         if let Some(k) = marker_pick {
             self.scene_sel = Some(k);
         }
-        if let Some(list) = boxed_pick {
+        if let Some(mut list) = boxed_pick {
+            // Maj : ajoute à la sélection actuelle
+            if mods.shift {
+                let mut all: Vec<usize> = self.scene_multi.clone();
+                all.extend(self.scene_sel);
+                all.retain(|k| !list.contains(k));
+                all.extend(list);
+                list = all;
+            }
             self.scene_sel = list.last().copied();
             self.scene_multi = if list.len() > 1 { list } else { vec![] };
             self.multi_follow = None;

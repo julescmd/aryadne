@@ -1303,5 +1303,6 @@
  "fond blanc": "white background",
  "fond transparent": "transparent background",
  "A4 à 150 ppp": "A4 at 150 dpi",
- "B pinceau · E gomme · G pot · I pipette · M sélection · V déplacer · [ ] taille · Ctrl+A / Ctrl+D sélection · Ctrl+J dupliquer · Ctrl+E fusionner · Ctrl+Z annuler · Espace+glisser : déplacer la vue": "B brush · E eraser · G bucket · I eyedropper · M select · V move · [ ] size · Ctrl+A / Ctrl+D selection · Ctrl+J duplicate · Ctrl+E merge · Ctrl+Z undo · Space+drag: pan"
+ "B pinceau · E gomme · G pot · I pipette · M sélection · V déplacer · [ ] taille · Ctrl+A / Ctrl+D sélection · Ctrl+J dupliquer · Ctrl+E fusionner · Ctrl+Z annuler · Espace+glisser : déplacer la vue": "B brush · E eraser · G bucket · I eyedropper · M select · V move · [ ] size · Ctrl+A / Ctrl+D selection · Ctrl+J duplicate · Ctrl+E merge · Ctrl+Z undo · Space+drag: pan",
+ "molette enfoncée : tourner (Maj : déplacer) · glisser : rectangle · G R S : déplacer, tourner, taille (X Y Z : axe) · Maj+clic, A, B : sélection · Maj+A ajouter · X supprimer · Maj+D dupliquer · P parent · H cacher · I clé · Tab édition · Espace lecture · Ctrl+Z annuler": "middle drag: orbit (Shift: pan) · drag: box select · G R S: move, rotate, scale (X Y Z: axis) · Shift+click, A, B: select · Shift+A add · X delete · Shift+D duplicate · P parent · H hide · I key · Tab edit · Space play · Ctrl+Z undo"
 }
