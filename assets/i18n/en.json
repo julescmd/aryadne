@@ -1255,5 +1255,10 @@
  "cadrer la scène": "frame the scene",
  "lire / arrêter ici": "play / stop here",
  "en boucle": "loop",
- "tourner tout seul (Alt+glisser : tourner à la main)": "turntable (Alt+drag: rotate by hand)"
+ "tourner tout seul (Alt+glisser : tourner à la main)": "turntable (Alt+drag: rotate by hand)",
+ "Texture vidéo": "Video texture",
+ "temps (s)": "time (s)",
+ "choisir une vidéo…": "choose a video…",
+ "une vidéo ou un montage (.aryseq)": "a video or a video edit (.aryseq)",
+ "choisir une image…": "choose an image…"
 }

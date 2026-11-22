@@ -74,6 +74,7 @@ pub const DEFS: &[Def] = &[
     Def { op: "value", label: "Valeur", cat: "entrée", inputs: &[("valeur", Sock::Float, f(0.5))], outputs: &[("valeur", Sock::Float)], params: &[], mat: true, comp: true },
     Def { op: "coords", label: "Coordonnées", cat: "entrée", inputs: &[], outputs: &[("u", Sock::Float), ("v", Sock::Float), ("uv", Sock::Color)], params: &[], mat: true, comp: true },
     Def { op: "geometry", label: "Géométrie", cat: "entrée", inputs: &[], outputs: &[("normale", Sock::Color), ("position", Sock::Color), ("hauteur", Sock::Float), ("pente", Sock::Float)], params: &[], mat: true, comp: false },
+    Def { op: "video", label: "Texture vidéo", cat: "entrée", inputs: &[("échelle", Sock::Float, f(1.0))], outputs: &[("couleur", Sock::Color), ("alpha", Sock::Float)], params: &[ParamDef::File("fichier"), ParamDef::Float("temps (s)", 0.0, 600.0, 0.0), ParamDef::Choice("projection", &["triplanaire", "dessus (XZ)", "face (XY)", "côté (YZ)", "sphérique"])], mat: true, comp: true },
     Def { op: "texture", label: "Texture image", cat: "entrée", inputs: &[("échelle", Sock::Float, f(1.0))], outputs: &[("couleur", Sock::Color), ("alpha", Sock::Float)], params: &[ParamDef::File("fichier"), ParamDef::Choice("projection", &["triplanaire", "dessus (XZ)", "face (XY)", "côté (YZ)", "sphérique"])], mat: true, comp: true },
     Def { op: "curvature", label: "Courbure", cat: "entrée", inputs: &[("intensité", Sock::Float, f(1.0))], outputs: &[("arêtes", Sock::Float), ("creux", Sock::Float), ("brute", Sock::Float)], params: &[], mat: true, comp: false },
     Def { op: "fresnel", label: "Fresnel", cat: "entrée", inputs: &[("puissance", Sock::Float, f(3.0))], outputs: &[("fresnel", Sock::Float)], params: &[], mat: true, comp: false },
@@ -1291,6 +1292,38 @@ impl Img {
     }
 }
 
+/// Une vidéo ou un montage, utilisable comme texture (node « Texture vidéo »).
+pub fn is_video_source(rel: &str) -> bool {
+    crate::video::is_video(rel) || crate::montage::is_project(rel)
+}
+
+/// Image d'une vidéo ou d'un montage au temps `t` (secondes), enregistrée en PNG dans le cache du coffre.
+/// Recalculée seulement si le fichier change ou si le temps change.
+pub fn video_frame(root: &str, rel: &str, path: &Path, t: f32) -> Result<std::path::PathBuf, String> {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    rel.hash(&mut h);
+    ((t * 100.0).round() as i64).hash(&mut h);
+    std::fs::metadata(path).and_then(|m| m.modified()).ok().hash(&mut h);
+    let dir = Path::new(root).join(".app/cache/videoframes");
+    let out = dir.join(format!("{:016x}.png", h.finish()));
+    if out.exists() {
+        return Ok(out);
+    }
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    if crate::montage::is_project(rel) {
+        let p = crate::montage::Project::read(path)?;
+        crate::montage::frame(&p, path, t, 1024)?.save(&out).map_err(|e| e.to_string())?;
+    } else {
+        let ff = crate::ffmpeg::find("ffmpeg").ok_or("ffmpeg n'est pas installé.")?;
+        let o = crate::ffmpeg::command(ff).args(["-v", "error", "-ss", &format!("{t:.3}"), "-i"]).arg(path).args(["-frames:v", "1", "-vf", "scale='min(1024,iw)':-2", "-y"]).arg(&out).output().map_err(|e| e.to_string())?;
+        if !out.exists() {
+            return Err(format!("image de la vidéo impossible : {}", String::from_utf8_lossy(&o.stderr).lines().last().unwrap_or("?")));
+        }
+    }
+    Ok(out)
+}
+
 pub fn load_img(path: &Path, max: u32) -> Option<Img> {
     let i = image::open(path).ok()?;
     let i = if i.width() > max || i.height() > max { i.thumbnail(max, max) } else { i };
@@ -1350,12 +1383,14 @@ impl Program {
                 })
                 .collect();
             let shader = if n.op == "shader" { Some(Shader::compile(pstr(&n.params, "code")).map_err(|e| (id, e))?) } else { None };
-            let image = if n.op == "image" || n.op == "texture" {
+            let image = if n.op == "image" || n.op == "texture" || n.op == "video" {
                 let rel = pstr(&n.params, "fichier");
                 if rel.is_empty() {
                     None
                 } else {
                     let p = crate::vault::safe(root, rel).map_err(|e| (id, e))?;
+                    // Une vidéo ou un montage : l'image au temps choisi, gardée en cache
+                    let p = if is_video_source(rel) { video_frame(root, rel, &p, pnum(&n.params, "temps (s)", 0.0)).map_err(|e| (id, e))? } else { p };
                     Some(std::sync::Arc::new(load_img(&p, max_img).ok_or((id, format!("image illisible : {rel}")))?))
                 }
             } else {
@@ -1951,7 +1986,7 @@ fn pixel(s: &Step, i: &[V], c: &Ctx) -> [V; 4] {
             [one((1.0 - d).powf(i[0][0].max(0.1))), z, z, z]
         }
         "vcolor" => [c.vcol, z, z, z],
-        "texture" => match &s.image {
+        "texture" | "video" => match &s.image {
             Some(img) => {
                 let sc = i[0][0].max(1e-4);
                 let w = |u: f32, v: f32| img.sample(u.rem_euclid(1.0), v.rem_euclid(1.0));
@@ -2826,10 +2861,12 @@ impl Editor {
             let mut added = vec![];
             for f in dropped {
                 let ext = f.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
-                if !["png", "jpg", "jpeg", "webp", "tga", "tif", "tiff", "bmp", "exr", "hdr", "gif"].contains(&ext.as_str()) {
-                    self.message = Some(format!("{} : seules les images vont dans un graphe", f.display()));
+                let is_vid = is_video_source(&f.to_string_lossy());
+                if !is_vid && !["png", "jpg", "jpeg", "webp", "tga", "tif", "tiff", "bmp", "exr", "hdr", "gif"].contains(&ext.as_str()) {
+                    self.message = Some(format!("{} : seules les images et les vidéos vont dans un graphe", f.display()));
                     continue;
                 }
+                let op = if is_vid { "video" } else { op };
                 let rel = crate::vault::inside(&self.root, &f).map(Ok).unwrap_or_else(|| crate::vault::link_external(&self.root, &f));
                 match rel {
                     Ok(rel) => {
@@ -3744,9 +3781,11 @@ impl Editor {
                         }
                     }
                     (ParamDef::File(_), Param::S(rel)) => {
-                        let label = if rel.is_empty() { "choisir une image…".to_string() } else { rel.rsplit('/').next().unwrap_or(rel).to_string() };
-                        if child.button(RichText::new(label).size(11.0)).on_hover_text(crate::i18n::t("ou glisse une image dans le graphe")).clicked() {
-                            if let Some(f) = rfd::FileDialog::new().add_filter("images", &["png", "jpg", "jpeg", "webp", "tga", "tif", "tiff", "bmp", "exr", "hdr"]).pick_file() {
+                        let video = node.op == "video";
+                        let label = if rel.is_empty() { crate::i18n::t(if video { "choisir une vidéo…" } else { "choisir une image…" }) } else { rel.rsplit('/').next().unwrap_or(rel).to_string() };
+                        if child.button(RichText::new(label).size(11.0)).on_hover_text(crate::i18n::t(if video { "une vidéo ou un montage (.aryseq)" } else { "ou glisse une image dans le graphe" })).clicked() {
+                            let dlg = if video { rfd::FileDialog::new().add_filter("vidéo", &["mp4", "mov", "mkv", "webm", "avi", "m4v", "aryseq", "aryav"]) } else { rfd::FileDialog::new().add_filter("images", &["png", "jpg", "jpeg", "webp", "tga", "tif", "tiff", "bmp", "exr", "hdr"]) };
+                            if let Some(f) = dlg.pick_file() {
                                 let root = self.root.clone();
                                 let r = crate::vault::inside(&root, &f).map(Ok).unwrap_or_else(|| crate::vault::link_external(&root, &f));
                                 match r {
@@ -4010,6 +4049,30 @@ fn sock_color(s: Sock) -> Color32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn texture_video() {
+        // Sans ffmpeg (certaines machines de test), rien à vérifier
+        let Some(ff) = crate::ffmpeg::find("ffmpeg") else { return };
+        let dir = std::env::temp_dir().join(format!("aryadne-vt-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let vid = dir.join("clip.mp4");
+        let ok = crate::ffmpeg::command(ff).args(["-v", "error", "-f", "lavfi", "-i", "testsrc=duration=2:size=64x48:rate=10", "-pix_fmt", "yuv420p", "-y"]).arg(&vid).status().map(|s| s.success()).unwrap_or(false);
+        if !ok {
+            return;
+        }
+        let root = dir.to_string_lossy().to_string();
+        assert!(is_video_source("clip.mp4") && is_video_source("x.aryseq"));
+        let a = video_frame(&root, "clip.mp4", &vid, 0.5).unwrap();
+        let b = video_frame(&root, "clip.mp4", &vid, 1.5).unwrap();
+        // Deux temps, deux images ; le même temps reprend le cache
+        assert_ne!(a, b);
+        assert_eq!(a, video_frame(&root, "clip.mp4", &vid, 0.5).unwrap());
+        let img = load_img(&a, 1024).unwrap();
+        assert_eq!((img.w, img.h), (64, 48));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn coordonnees_branchees_dans_un_motif() {
