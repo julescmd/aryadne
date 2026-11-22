@@ -294,6 +294,9 @@ pub fn scan(root: &str) -> Vec<Entry> {
 /// Chemin tel qu'on l'affiche : sans le « @ » des dossiers liés ni le dossier virtuel
 /// des fichiers liés.
 pub fn display_rel(rel: &str) -> String {
+    if let Some(rest) = rel.strip_prefix(".app/untitled/") {
+        return format!("{} · {}", rest.rsplit('/').next().unwrap_or(rest), crate::i18n::t("non enregistré (Ctrl+S)"));
+    }
     if let Some(rest) = rel.strip_prefix(&format!("{LINKED_FILES}/")) {
         return rest.to_string();
     }

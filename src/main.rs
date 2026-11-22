@@ -4,6 +4,7 @@ mod cloud;
 mod dock;
 mod formats;
 mod gizmo;
+mod untitled;
 mod meshedit;
 mod montage;
 mod scene;
@@ -131,6 +132,26 @@ fn view_of(id: &str) -> View {
         _ => View::Files,
     }
 }
+
+/// Options de la fenêtre « nouveau fichier », gardées d'une fois à l'autre.
+#[derive(Clone)]
+struct NewOpts {
+    scene_starter: bool,
+    res: usize,
+    fps: usize,
+    preset: usize,
+    code: usize,
+}
+
+impl Default for NewOpts {
+    fn default() -> Self {
+        NewOpts { scene_starter: true, res: 0, fps: 0, preset: 0, code: 0 }
+    }
+}
+
+const NF_RES: [(&str, u32, u32); 6] = [("1920 × 1080 (HD)", 1920, 1080), ("3840 × 2160 (4K)", 3840, 2160), ("1280 × 720", 1280, 720), ("1080 × 1920 (vertical)", 1080, 1920), ("1080 × 1080 (carré)", 1080, 1080), ("2048 × 858 (cinéma 2.39)", 2048, 858)];
+const NF_FPS: [f32; 5] = [24.0, 25.0, 30.0, 50.0, 60.0];
+const NF_CODE: [(&str, &str); 10] = [("py", "Python"), ("rs", "Rust"), ("js", "JavaScript"), ("ts", "TypeScript"), ("html", "HTML"), ("css", "CSS"), ("json", "JSON"), ("glsl", "GLSL"), ("sh", "Shell"), ("txt", "texte brut")];
 
 #[derive(PartialEq, Clone, Copy, Default)]
 enum RefSort {
@@ -292,6 +313,15 @@ struct App {
     ws_started: bool,
     /// On change d'espace pour ouvrir un fichier : pas de scène ouverte d'office
     ws_routing: bool,
+    nf_opt: NewOpts,
+    /// Fichiers sans titre : empreinte à la création (pour savoir s'ils ont changé)
+    untitled_hash: HashMap<String, u64>,
+    /// Fermeture d'un fichier sans titre modifié : on demande quoi faire
+    close_ask: Option<String>,
+    recover: Vec<String>,
+    recover_checked: bool,
+    want_save_as: bool,
+    nf_age: u32,
     /// Zones de l'interface (image précédente) : la barre du bas montre les raccourcis de celle sous la souris
     zones_last: Vec<(&'static str, egui::Rect)>,
     zones_next: Vec<(&'static str, egui::Rect)>,
@@ -380,7 +410,8 @@ impl App {
         self.split = None;
         self.panes.clear();
         let known: std::collections::HashSet<&str> = self.entries.iter().map(|e| e.rel.as_str()).collect();
-        let tabs: Vec<String> = w.tabs.iter().filter(|t| known.contains(t.as_str()) && workspace::accepts(&w.kind, t)).cloned().collect();
+        let root = self.root();
+        let tabs: Vec<String> = w.tabs.iter().filter(|t| (known.contains(t.as_str()) || (untitled::is_untitled(t) && std::path::Path::new(&root).join(t.as_str()).exists())) && workspace::accepts(&w.kind, t)).cloned().collect();
         for t in &tabs {
             self.open_here(t.clone());
         }
@@ -402,99 +433,295 @@ impl App {
         }
     }
 
-    /// Fenêtre « nouveau fichier » : la liste des genres de fichiers qu'Aryadne sait créer, puis un nom.
+    /// Fenêtre « nouveau fichier » : le genre, puis ses options. Le fichier s'ouvre sous le nom `untitled.<ext>` ;
+    /// il ne prend un nom et une place dans le coffre qu'au premier Ctrl+S (seul le dossier demande un nom tout de suite).
     fn new_file_window(&mut self, ctx: &egui::Context) {
-        let Some((mut kind, mut name)) = self.new_file.take() else { return };
+        let Some((mut kind, mut name)) = self.new_file.take() else {
+            self.nf_age = 0;
+            return;
+        };
+        // La touche Entrée qui a ouvert la fenêtre (palette) ne doit pas aussi la valider
+        self.nf_age += 1;
+        let fresh = self.nf_age < 3;
         let p = theme::pal();
-        // (nom, extension, à quoi ça sert) : la note, puis tous les formats d'Aryadne prêts à l'emploi, puis le reste
+        // (nom, extension, à quoi ça sert)
         let mut kinds: Vec<(&str, &str, &str)> = vec![("note", "md", "Texte en Markdown : notes, listes, liens entre notes")];
         kinds.extend(formats::ALL.iter().filter(|f| f.ready).map(|f| (f.label, f.ext, f.help)));
-        kinds.push(("fichier de code ou de texte", "", "Tape le nom avec son extension : main.py, style.css, notes.txt…"));
+        kinds.push(("code ou texte", "code", "Script, page web, réglages, texte brut"));
         kinds.push(("dossier", "/", "Pour ranger"));
-        let kind_max = kinds.len() - 1;
-        kind = kind.min(kind_max);
-        #[allow(non_snake_case)]
-        let KINDS = &kinds;
+        kind = kind.min(kinds.len() - 1);
         let (mut keep, mut go) = (true, false);
+        let mut o = self.nf_opt.clone();
         egui::Window::new(crate::i18n::t("nouveau fichier")).collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]).show(ctx, |ui| {
-            ui.set_min_width(470.0);
-            for (k, (label, ext, help)) in KINDS.iter().enumerate() {
-                ui.horizontal(|ui| {
-                    if ui.radio(kind == k, RichText::new(crate::i18n::t(label)).family(theme::bold())).clicked() {
-                        kind = k;
-                    }
-                    if !ext.is_empty() && *ext != "/" {
-                        ui.label(RichText::new(format!(".{ext}")).monospace().size(11.0).color(p.accent));
+            ui.set_min_width(560.0);
+            ui.horizontal_top(|ui| {
+                // À gauche : les genres
+                ui.vertical(|ui| {
+                    ui.set_width(220.0);
+                    for (k, (label, ext, _)) in kinds.iter().enumerate() {
+                        let on = kind == k;
+                        let mut job = egui::text::LayoutJob::default();
+                        job.append(&crate::i18n::t(label), 0.0, egui::TextFormat { font_id: egui::FontId::new(13.0, if on { theme::bold() } else { egui::FontFamily::Proportional }), color: if on { p.text } else { p.muted }, ..Default::default() });
+                        if !matches!(*ext, "/" | "code") {
+                            job.append(&format!("  .{ext}"), 0.0, egui::TextFormat { font_id: egui::FontId::monospace(10.5), color: p.accent, ..Default::default() });
+                        }
+                        if ui.add(egui::Button::selectable(on, job).min_size(egui::vec2(214.0, 26.0))).clicked() {
+                            kind = k;
+                        }
                     }
                 });
-                ui.horizontal(|ui| {
-                    ui.add_space(24.0);
+                ui.separator();
+                // À droite : ce que fait ce genre, et ses options
+                ui.vertical(|ui| {
+                    let (label, ext, help) = kinds[kind];
+                    ui.label(RichText::new(crate::i18n::t(label)).size(16.0).family(theme::bold()));
                     ui.label(RichText::new(crate::i18n::t(help)).size(11.0).color(p.muted));
-                });
-            }
-            ui.add_space(8.0);
-            let dir = self.target_dir("");
-            ui.horizontal(|ui| {
-                ui.label(RichText::new(if dir.is_empty() { "/".to_string() } else { format!("{dir}/") }).monospace().size(11.0).color(p.muted));
-                let r = ui.add(egui::TextEdit::singleline(&mut name).hint_text(crate::i18n::t("nom")).desired_width(240.0));
-                if !r.has_focus() && name.is_empty() {
-                    r.request_focus();
-                }
-                let ext = KINDS[kind].1;
-                if !ext.is_empty() && ext != "/" {
-                    ui.label(RichText::new(format!(".{ext}")).monospace().size(11.0).color(p.muted));
-                }
-                go |= r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-            });
-            ui.add_space(8.0);
-            ui.horizontal(|ui| {
-                go |= ui.add(egui::Button::new(RichText::new(crate::i18n::t("créer")).color(p.on_accent)).fill(p.accent)).clicked();
-                if ui.button(crate::i18n::t("annuler")).clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-                    keep = false;
-                }
-            });
-        });
-        let clean = name.trim().trim_matches('/').replace('\\', "/");
-        if go && !clean.is_empty() {
-            let dir = self.target_dir("");
-            let ext = KINDS[kind].1;
-            let file = if ext.is_empty() || ext == "/" || clean.to_lowercase().ends_with(&format!(".{ext}")) { clean.clone() } else { format!("{clean}.{ext}") };
-            let rel = if dir.is_empty() { file } else { format!("{dir}/{file}") };
-            if ext == "/" {
-                let r = vault::safe(&self.root(), &rel).and_then(|path| std::fs::create_dir_all(path).map_err(|e| e.to_string()));
-                if self.report(r).is_some() {
-                    self.refresh();
-                    return;
-                }
-            } else if ext == "aryboard" {
-                if let Some(rel) = self.new_board(&clean) {
-                    self.open(rel);
-                    return;
-                }
-            } else if self.entries.iter().any(|e| e.rel == rel) {
-                self.toast = Some((crate::i18n::t("ce nom est déjà pris dans ce dossier"), Instant::now()));
-            } else {
-                let r = vault::safe(&self.root(), &rel).and_then(|path| {
-                    if let Some(d) = path.parent() {
-                        let _ = std::fs::create_dir_all(d);
-                    }
+                    ui.add_space(10.0);
+                    ui.label(caps(&crate::i18n::t("options")));
                     match ext {
-                        "aryscene" => scene::Scene::starter().write(&path),
-                        "aryseq" => montage::Project::default().write(&path),
-                        "arymat" => nodes::Graph::new_material().save(&path),
-                        "arycomp" => nodes::Graph::new_compositor().save(&path),
-                        _ => std::fs::write(&path, "").map_err(|e| e.to_string()),
+                        "aryscene" => {
+                            ui.radio_value(&mut o.scene_starter, true, crate::i18n::t("cube, lumière et caméra"));
+                            ui.radio_value(&mut o.scene_starter, false, crate::i18n::t("scène vide"));
+                        }
+                        "aryseq" => {
+                            egui::ComboBox::from_id_salt("nf-res").selected_text(NF_RES[o.res].0).show_ui(ui, |ui| {
+                                for (k, (l, _, _)) in NF_RES.iter().enumerate() {
+                                    ui.selectable_value(&mut o.res, k, *l);
+                                }
+                            });
+                            ui.horizontal(|ui| {
+                                ui.label(crate::i18n::t("images/s"));
+                                for (k, f) in NF_FPS.iter().enumerate() {
+                                    ui.selectable_value(&mut o.fps, k, format!("{f}"));
+                                }
+                            });
+                        }
+                        "arymat" => {
+                            let cur = if o.preset == 0 { crate::i18n::t("vide (sortie seule)") } else { crate::i18n::t(nodes::MATERIAL_PRESETS[o.preset - 1]) };
+                            egui::ComboBox::from_id_salt("nf-preset").selected_text(cur).height(320.0).show_ui(ui, |ui| {
+                                ui.selectable_value(&mut o.preset, 0, crate::i18n::t("vide (sortie seule)"));
+                                for (k, n) in nodes::MATERIAL_PRESETS.iter().enumerate() {
+                                    ui.selectable_value(&mut o.preset, k + 1, crate::i18n::t(n));
+                                }
+                            });
+                        }
+                        "code" => {
+                            ui.horizontal_wrapped(|ui| {
+                                for (k, (e, l)) in NF_CODE.iter().enumerate() {
+                                    ui.selectable_value(&mut o.code, k, *l).on_hover_text(format!(".{e}"));
+                                }
+                            });
+                        }
+                        "/" | "aryboard" => {
+                            let r = ui.add(egui::TextEdit::singleline(&mut name).hint_text(crate::i18n::t("nom")).desired_width(260.0));
+                            if !r.has_focus() && name.is_empty() {
+                                r.request_focus();
+                            }
+                            go |= r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                        }
+                        _ => {
+                            ui.label(RichText::new(crate::i18n::t("rien à régler")).size(11.0).color(p.muted));
+                        }
                     }
+                    ui.add_space(12.0);
+                    if !matches!(ext, "/" | "aryboard") {
+                        let shown = if ext == "code" { format!("untitled.{}", NF_CODE[o.code].0) } else { format!("untitled.{ext}") };
+                        ui.label(RichText::new(format!("{} {shown} · {}", crate::i18n::t("s'ouvre sous le nom"), crate::i18n::t("Ctrl+S pour choisir son nom et son dossier"))).size(10.5).color(p.muted));
+                    }
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        go |= ui.add(egui::Button::new(RichText::new(crate::i18n::t("créer")).color(p.on_accent)).fill(p.accent)).clicked();
+                        if ui.button(crate::i18n::t("annuler")).clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                            keep = false;
+                        }
+                    });
                 });
-                if self.report(r).is_some() {
-                    self.refresh();
-                    self.open(rel);
-                    return;
-                }
+            });
+            if !fresh && ui.input(|i| i.key_pressed(egui::Key::Enter)) && !matches!(kinds[kind].1, "/" | "aryboard") {
+                go = true;
             }
+        });
+        self.nf_opt = o.clone();
+        if go {
+            let ext = kinds[kind].1;
+            let clean = name.trim().trim_matches('/').replace('\\', "/");
+            match ext {
+                "/" => {
+                    if clean.is_empty() {
+                        self.new_file = Some((kind, name));
+                        return;
+                    }
+                    let rel = vault::join(&self.target_dir(""), &clean);
+                    let r = vault::safe(&self.root(), &rel).and_then(|path| std::fs::create_dir_all(path).map_err(|e| e.to_string()));
+                    if self.report(r).is_some() {
+                        self.refresh();
+                    }
+                }
+                "aryboard" => {
+                    if let Some(rel) = self.new_board(if clean.is_empty() { "Moodboard" } else { &clean }) {
+                        self.open(rel);
+                    }
+                }
+                "aryscene" => {
+                    let starter = o.scene_starter;
+                    self.new_untitled(ext, move |p| if starter { scene::Scene::starter() } else { scene::Scene::default() }.write(p));
+                }
+                "aryseq" => {
+                    let (_, w, h) = NF_RES[o.res];
+                    let fps = NF_FPS[o.fps];
+                    self.new_untitled(ext, move |p| montage::Project { width: w, height: h, fps, ..Default::default() }.write(p));
+                }
+                "arymat" => {
+                    let g = if o.preset == 0 { nodes::Graph::new_material() } else { nodes::material_preset(nodes::MATERIAL_PRESETS[o.preset - 1]).unwrap_or_else(nodes::Graph::new_material) };
+                    self.new_untitled(ext, move |p| g.save(p));
+                }
+                "arycomp" => self.new_untitled(ext, |p| nodes::Graph::new_compositor().save(p)),
+                "code" => self.new_untitled(NF_CODE[o.code].0, |p| std::fs::write(p, "").map_err(|e| e.to_string())),
+                _ => self.new_untitled(ext, |p| std::fs::write(p, "").map_err(|e| e.to_string())),
+            }
+            return;
         }
         if keep {
             self.new_file = Some((kind, name));
+        }
+    }
+
+    /// Crée un fichier sans titre (`untitled.<ext>`) dans le dossier caché, et l'ouvre.
+    fn new_untitled(&mut self, ext: &str, write: impl FnOnce(&std::path::Path) -> Result<(), String>) {
+        let root = self.root();
+        let rel = untitled::new_rel(&root, ext);
+        let path = std::path::Path::new(&root).join(&rel);
+        let r = path.parent().map(|d| std::fs::create_dir_all(d).map_err(|e| e.to_string())).unwrap_or(Ok(())).and_then(|_| write(&path));
+        if self.report(r).is_some() {
+            self.untitled_hash.insert(rel.clone(), untitled::hash(&root, &rel));
+            self.open(rel);
+        }
+    }
+
+    /// Un fichier sans titre a-t-il changé depuis sa création ?
+    fn untitled_changed(&self, rel: &str) -> bool {
+        self.untitled_hash.get(rel).is_none_or(|h| *h != untitled::hash(&self.root(), rel))
+    }
+
+    /// Ctrl+S sur un fichier sans titre : on choisit son nom et son dossier, puis il se rouvre à sa vraie place.
+    fn save_as(&mut self, i: usize) {
+        self.flush_all();
+        let Some(rel) = self.docs.get(i).map(|d| d.rel.clone()) else { return };
+        let root = self.root();
+        let e = ext(&rel);
+        let fallback = match e.as_str() {
+            "md" => self.notes_dir(),
+            "arymat" | "arycomp" => "nodes".to_string(),
+            "aryscene" => "3d".to_string(),
+            "aryseq" => "montage".to_string(),
+            _ => String::new(),
+        };
+        let start = std::path::Path::new(&root).join(self.target_dir(&fallback));
+        let mut d = rfd::FileDialog::new().set_title(crate::i18n::t("enregistrer sous")).set_directory(start).set_file_name(format!("untitled.{e}"));
+        if !e.is_empty() {
+            d = d.add_filter(&e, &[e.as_str()]);
+        }
+        let Some(mut dest) = d.save_file() else { return };
+        if !e.is_empty() && dest.extension().is_none() {
+            dest.set_extension(&e);
+        }
+        if let Err(err) = untitled::save_to(&root, &rel, &dest) {
+            self.error = Some(err);
+            return;
+        }
+        self.untitled_hash.remove(&rel);
+        if i < self.docs.len() {
+            self.docs.remove(i);
+            self.active = if self.docs.is_empty() { None } else { Some(self.active.unwrap_or(0).min(self.docs.len() - 1)) };
+        }
+        self.refresh();
+        match vault::inside(&root, &dest) {
+            Some(new_rel) => {
+                self.open(new_rel.clone());
+                self.toast(format!("{} {new_rel}", crate::i18n::t("enregistré :")));
+            }
+            None => self.toast(format!("{} {}", crate::i18n::t("enregistré hors du coffre :"), dest.to_string_lossy())),
+        }
+    }
+
+    /// Fenêtres liées aux fichiers sans titre : fermer sans enregistrer, et récupération après un plantage.
+    fn untitled_dialogs(&mut self, ctx: &egui::Context) {
+        let p = theme::pal();
+        if let Some(rel) = self.close_ask.clone() {
+            let mut choice = 0;
+            egui::Window::new(crate::i18n::t("fichier non enregistré")).collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]).show(ctx, |ui| {
+                ui.label(format!("« {} » {}", untitled::name(&rel), crate::i18n::t("n'a pas encore de nom ni de place dans le coffre.")));
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.add(egui::Button::new(RichText::new(crate::i18n::t("enregistrer…")).color(p.on_accent)).fill(p.accent)).clicked() {
+                        choice = 1;
+                    }
+                    if ui.button(crate::i18n::t("ne pas enregistrer")).clicked() {
+                        choice = 2;
+                    }
+                    if ui.button(crate::i18n::t("annuler")).clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                        choice = 3;
+                    }
+                });
+            });
+            let idx = self.docs.iter().position(|d| d.rel == rel);
+            match (choice, idx) {
+                (1, Some(i)) => {
+                    self.close_ask = None;
+                    self.save_as(i);
+                }
+                (2, Some(i)) => {
+                    self.close_ask = None;
+                    untitled::discard(&self.root(), &rel);
+                    self.untitled_hash.remove(&rel);
+                    self.docs.remove(i);
+                    self.active = if self.docs.is_empty() { None } else { Some(self.active.unwrap_or(0).min(self.docs.len() - 1)) };
+                }
+                (3, _) | (_, None) if choice != 0 || idx.is_none() => self.close_ask = None,
+                _ => {}
+            }
+        }
+        // Au lancement : des fichiers sans titre restés là (plantage, ou fermés sans enregistrer)
+        if !self.recover_checked && self.ws_started && self.vault.is_some() {
+            self.recover_checked = true;
+            let open: HashSet<String> = self.docs.iter().map(|d| d.rel.clone()).collect();
+            self.recover = untitled::leftovers(&self.root()).into_iter().filter(|r| !open.contains(r)).collect();
+        }
+        if !self.recover.is_empty() {
+            let mut choice = 0;
+            egui::Window::new(crate::i18n::t("fichiers à récupérer")).collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]).show(ctx, |ui| {
+                ui.label(crate::i18n::t("Ces fichiers n'avaient pas été enregistrés quand Aryadne s'est fermé :"));
+                ui.add_space(4.0);
+                for r in &self.recover {
+                    ui.label(RichText::new(format!("• {}", untitled::name(r))).monospace().size(12.0));
+                }
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.add(egui::Button::new(RichText::new(crate::i18n::t("les rouvrir")).color(p.on_accent)).fill(p.accent)).clicked() {
+                        choice = 1;
+                    }
+                    if ui.button(crate::i18n::t("les supprimer")).clicked() {
+                        choice = 2;
+                    }
+                });
+            });
+            let list = std::mem::take(&mut self.recover);
+            match choice {
+                1 => {
+                    for r in list {
+                        // Empreinte inconnue : ils comptent comme modifiés, la fermeture demandera quoi faire
+                        self.untitled_hash.insert(r.clone(), 0);
+                        self.open(r);
+                    }
+                }
+                2 => {
+                    let root = self.root();
+                    for r in list {
+                        untitled::discard(&root, &r);
+                    }
+                }
+                _ => self.recover = list,
+            }
         }
     }
 
@@ -622,8 +849,16 @@ impl App {
             }
         }
         if ctx.input(|i| i.viewport().close_requested()) {
+            self.flush_all();
             self.ws_capture();
             self.ws.save();
+            // Fichiers sans titre jamais modifiés : rien à garder. Les autres restent pour être récupérés.
+            let root = self.root();
+            for d in &self.docs {
+                if untitled::is_untitled(&d.rel) && !self.untitled_changed(&d.rel) {
+                    untitled::discard(&root, &d.rel);
+                }
+            }
         }
     }
 
@@ -1024,6 +1259,12 @@ impl App {
     }
 
     fn new_note(&mut self) {
+        // Ctrl+N : une note sans titre, qui prend son nom au premier Ctrl+S
+        self.new_untitled("md", |p| std::fs::write(p, "").map_err(|e| e.to_string()));
+    }
+
+    #[allow(dead_code)]
+    fn new_note_named(&mut self) {
         let nd = self.notes_dir();
         let dir = self.target_dir(&nd);
         let mut name = "Sans titre.md".to_string();
@@ -1113,6 +1354,16 @@ impl App {
                     }
                 }
                 Action::Close(i) => {
+                    // Un fichier sans titre : rien n'est perdu sans qu'on l'ait choisi
+                    if let Some(rel) = self.docs.get(i).map(|d| d.rel.clone()).filter(|r| untitled::is_untitled(r)) {
+                        self.flush(i);
+                        if self.untitled_changed(&rel) {
+                            self.close_ask = Some(rel);
+                            continue;
+                        }
+                        untitled::discard(&self.root(), &rel);
+                        self.untitled_hash.remove(&rel);
+                    }
                     self.flush(i);
                     if i < self.docs.len() {
                         self.docs.remove(i);
@@ -1408,8 +1659,13 @@ impl App {
             }
         }
         if pressed(Modifiers::COMMAND, Key::S) {
-            self.flush_all();
-            self.update_backlinks();
+            match self.active.filter(|&i| self.docs.get(i).is_some_and(|d| untitled::is_untitled(&d.rel))) {
+                Some(i) => self.save_as(i),
+                None => {
+                    self.flush_all();
+                    self.update_backlinks();
+                }
+            }
         }
         if pressed(Modifiers::COMMAND, Key::W) {
             if let Some(i) = self.active {
@@ -1562,7 +1818,7 @@ impl App {
                         ui.label(RichText::new(crate::i18n::t(mode)).color(p.on_accent).family(theme::bold()).size(11.0));
                     });
                     if let Some(d) = self.current() {
-                        ui.label(RichText::new(&d.rel).size(11.5));
+                        ui.label(RichText::new(vault::display_rel(&d.rel)).size(11.5));
                         if let Content::Text(t) = &d.content {
                             let lang = if vault::is_md(&d.rel) { "markdown".to_string() } else if ext(&d.rel).is_empty() { "texte".into() } else { ext(&d.rel) };
                             ui.label(RichText::new(lang).color(p.muted).size(11.5));
@@ -1868,6 +2124,10 @@ impl App {
                 ui.set_width(ui.available_width());
                 ui.horizontal(|ui| {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        // Fichier sans titre : le bouton pour lui donner un nom et une place
+                        if untitled::is_untitled(&rel) && ui.add(egui::Button::new(RichText::new(crate::i18n::t("enregistrer…  Ctrl+S")).color(p.on_accent)).fill(p.accent)).clicked() {
+                            self.want_save_as = true;
+                        }
                         // « ouvrir ▾ » : application par défaut, au choix, ou dans le dossier
                         let ext_label = if rel.to_lowercase().ends_with(".blend") { "dans Blender" } else { "avec l'app par défaut" };
                         let mut which = 0;
@@ -3783,6 +4043,12 @@ impl App {
 
     fn dialogs(&mut self, ctx: &egui::Context) {
         self.new_file_window(ctx);
+        if std::mem::take(&mut self.want_save_as) {
+            if let Some(i) = self.active {
+                self.save_as(i);
+            }
+        }
+        self.untitled_dialogs(ctx);
         // Une fenêtre s'affiche à l'image suivante : sinon le clic qui l'ouvre compte
         // comme un clic à l'extérieur et la referme aussitôt.
         if self.dialog.is_none() {

@@ -231,54 +231,10 @@ impl App {
                     self.toast = Some((format!("{} {} · {fixed} {}", renamed.len(), crate::i18n::t("fichier(s) renommé(s)"), crate::i18n::t("fichier(s) corrigé(s) pour suivre les nouveaux noms")), Instant::now()));
                 }
             }
-            Cmd::NewMontage => {
-                let mut rel = format!("Montage.{}", crate::formats::ext("seq"));
-                let mut i = 2;
-                while self.entries.iter().any(|e| e.rel == rel) {
-                    rel = format!("Montage {i}.{}", crate::formats::ext("seq"));
-                    i += 1;
-                }
-                let r = vault::safe(&self.root(), &rel).and_then(|p| crate::montage::Project::default().write(&p));
-                if self.report(r).is_some() {
-                    self.refresh();
-                    self.open(rel);
-                }
-            }
-            Cmd::NewScene => {
-                let dir = if self.entries.iter().any(|e| e.is_dir && e.rel == "3d") { "3d/" } else { "" };
-                let mut rel = format!("{dir}Scène.{}", crate::formats::ext("scene"));
-                let mut i = 2;
-                while self.entries.iter().any(|e| e.rel == rel) {
-                    rel = format!("{dir}Scène {i}.{}", crate::formats::ext("scene"));
-                    i += 1;
-                }
-                let r = vault::safe(&self.root(), &rel).and_then(|p| crate::scene::Scene::starter().write(&p));
-                if self.report(r).is_some() {
-                    self.refresh();
-                    self.open(rel);
-                }
-            }
-            Cmd::NewMaterial | Cmd::NewCompositor => {
-                let mat = cmd == Cmd::NewMaterial;
-                let dir = if self.entries.iter().any(|e| e.rel == "nodes") { "nodes".to_string() } else {
-                    let _ = vault::create_dir(&self.root(), "nodes");
-                    "nodes".to_string()
-                };
-                let base = if mat { "Matériau" } else { "Compositing" };
-                let ext = crate::formats::ext(if mat { "mat" } else { "comp" });
-                let mut rel = format!("{dir}/{base}.{ext}");
-                let mut i = 2;
-                while self.entries.iter().any(|e| e.rel == rel) {
-                    rel = format!("{dir}/{base} {i}.{ext}");
-                    i += 1;
-                }
-                let g = if mat { nodes::Graph::new_material() } else { nodes::Graph::new_compositor() };
-                let r = vault::safe(&self.root(), &rel).and_then(|p| g.save(&p));
-                if self.report(r).is_some() {
-                    self.refresh();
-                    self.open(rel);
-                }
-            }
+            Cmd::NewMontage => self.new_untitled(crate::formats::ext("seq"), |p| crate::montage::Project::default().write(p)),
+            Cmd::NewScene => self.new_untitled(crate::formats::ext("scene"), |p| crate::scene::Scene::starter().write(p)),
+            Cmd::NewMaterial => self.new_untitled(crate::formats::ext("mat"), |p| nodes::Graph::new_material().save(p)),
+            Cmd::NewCompositor => self.new_untitled(crate::formats::ext("comp"), |p| nodes::Graph::new_compositor().save(p)),
             Cmd::NewBoard => {
                 self.new_board("Moodboard");
                 self.view = Some(View::Boards);
