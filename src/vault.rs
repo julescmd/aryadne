@@ -237,21 +237,31 @@ pub fn init(root: &str) -> Result<(), String> {
 
 fn walk(base: &Path, dir: &Path, prefix: &str, depth: usize, out: &mut Vec<Entry>) {
     let Ok(rd) = fs::read_dir(dir) else { return };
-    let mut items: Vec<_> = rd.flatten().collect();
-    items.sort_by_key(|e| {
-        let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
-        (!is_dir, e.file_name().to_string_lossy().to_lowercase())
-    });
-    for e in items {
-        let name = e.file_name().to_string_lossy().to_string();
-        if name.starts_with('.') || IGNORED.contains(&name.as_str()) {
-            continue;
-        }
-        let path = e.path();
+    // Un seul appel système par élément : le type et la date viennent des infos du dossier
+    // (gratuites sous Windows), au lieu de trois lectures séparées
+    let mut items: Vec<(String, bool, u64, std::path::PathBuf)> = rd
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name().to_string_lossy().to_string();
+            if name.starts_with('.') || IGNORED.contains(&name.as_str()) {
+                return None;
+            }
+            let path = e.path();
+            // Lien symbolique : on suit la cible (comme avant avec is_dir et metadata)
+            let md = match e.file_type() {
+                Ok(t) if t.is_symlink() => fs::metadata(&path).ok(),
+                _ => e.metadata().ok(),
+            };
+            let is_dir = md.as_ref().is_some_and(|m| m.is_dir());
+            let modified = md.and_then(|m| m.modified().ok()).and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map(|d| d.as_secs()).unwrap_or(0);
+            Some((name, is_dir, modified, path))
+        })
+        .collect();
+    items.sort_by_cached_key(|(name, is_dir, _, _)| (!*is_dir, name.to_lowercase()));
+    for (name, is_dir, modified, path) in items {
         let sub = path.strip_prefix(base).unwrap().to_string_lossy().replace('\\', "/");
         let rel = join(prefix, &sub);
-        let is_dir = path.is_dir();
-        out.push(Entry { rel, name, is_dir, depth, modified: mtime(&path) });
+        out.push(Entry { rel, name, is_dir, depth, modified });
         if is_dir && depth < 24 {
             walk(base, &path, prefix, depth + 1, out);
         }
@@ -641,5 +651,27 @@ mod atomic_tests {
         // Aucun fichier temporaire ne reste
         assert_eq!(std::fs::read_dir(&d).unwrap().count(), 1);
         std::fs::remove_dir_all(&d).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod scan_bench {
+    /// Mesure : `cargo test --release scan_10k -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn scan_10k() {
+        let d = std::env::temp_dir().join("aryadne-scan10k");
+        if !d.exists() {
+            for i in 0..100 {
+                let sub = d.join(format!("dossier {i}"));
+                std::fs::create_dir_all(&sub).unwrap();
+                for j in 0..100 {
+                    std::fs::write(sub.join(format!("note {j}.md")), "x").unwrap();
+                }
+            }
+        }
+        let t = std::time::Instant::now();
+        let n = super::scan(d.to_str().unwrap()).len();
+        eprintln!("{n} éléments en {:.0} ms", t.elapsed().as_secs_f64() * 1000.0);
     }
 }
