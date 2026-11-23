@@ -1593,5 +1593,8 @@
  "tout remettre par défaut": "reset all to defaults",
  "ouvrir un fichier, ou créer une note": "open a file, or create a note",
  "recherche dans tout le coffre": "search the whole vault",
- "fermer l'onglet": "close tab"
+ "fermer l'onglet": "close tab",
+ "navigation 3D": "3D navigation",
+ "Alt + clic gauche : tourner · Alt + clic milieu (ou milieu seul) : déplacer · Alt + clic droit : zoom · molette : zoom": "Alt + left click: orbit · Alt + middle click (or middle alone): pan · Alt + right click: zoom · wheel: zoom",
+ "Molette enfoncée : tourner · Maj : déplacer · Ctrl : zoom · Alt + clic gauche : tourner · molette : zoom": "Middle mouse: orbit · Shift: pan · Ctrl: zoom · Alt + left click: orbit · wheel: zoom"
 }

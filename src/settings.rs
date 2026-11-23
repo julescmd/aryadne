@@ -38,6 +38,8 @@ pub struct Prefs {
     /// Accessibilité : contraste élevé et animations réduites
     pub high_contrast: bool,
     pub reduce_motion: bool,
+    /// Navigation 3D : « blender » (molette enfoncée) ou « maya » (Alt + boutons)
+    pub nav3d: String,
 }
 
 /// Unités de longueur proposées : nom et nombre d'unités dans un mètre.
@@ -47,6 +49,13 @@ static UNIT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::ne
 /// L'unité choisie : nom et facteur (valeur affichée = mètres × facteur).
 pub fn unit() -> (&'static str, f32) {
     UNITS[UNIT.load(std::sync::atomic::Ordering::Relaxed).min(UNITS.len() - 1)]
+}
+
+static NAV_MAYA: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Navigation 3D au profil Maya (Alt + gauche / milieu / droit) au lieu de Blender
+pub fn nav_maya() -> bool {
+    NAV_MAYA.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 pub fn set_unit(name: &str) {
@@ -85,6 +94,7 @@ impl Default for Prefs {
             unit: "m".into(),
             high_contrast: false,
             reduce_motion: false,
+            nav3d: "blender".into(),
         }
     }
 }
@@ -112,6 +122,7 @@ impl Prefs {
     pub fn apply(&self, ctx: &egui::Context) {
         theme::set_accent(self.accent.map(|[r, g, b]| egui::Color32::from_rgb(r, g, b)));
         theme::set_access(self.high_contrast, self.reduce_motion);
+        NAV_MAYA.store(self.nav3d == "maya", std::sync::atomic::Ordering::Relaxed);
         theme::apply(ctx, self.dark);
         ctx.set_zoom_factor(self.ui_zoom.clamp(0.6, 2.0));
     }
@@ -296,6 +307,21 @@ impl App {
             }
         });
         ui.label(egui::RichText::new(crate::i18n::t("Les positions, distances et tailles s'affichent dans cette unité ; les fichiers restent en mètres.")).size(11.0).color(p.muted));
+        ui.add_space(10.0);
+        ui.label(caps(&crate::i18n::t("navigation 3D")));
+        ui.horizontal(|ui| {
+            for (id, name) in [("blender", "Blender"), ("maya", "Maya")] {
+                if ui.selectable_label(self.prefs.nav3d == id, name).clicked() {
+                    self.prefs.nav3d = id.to_string();
+                }
+            }
+        });
+        let help = if self.prefs.nav3d == "maya" {
+            "Alt + clic gauche : tourner · Alt + clic milieu (ou milieu seul) : déplacer · Alt + clic droit : zoom · molette : zoom"
+        } else {
+            "Molette enfoncée : tourner · Maj : déplacer · Ctrl : zoom · Alt + clic gauche : tourner · molette : zoom"
+        };
+        ui.label(egui::RichText::new(crate::i18n::t(help)).size(11.0).color(p.muted));
         ui.add_space(14.0);
         ui.label(caps(&crate::i18n::t("taille de l'interface")));
         ui.horizontal(|ui| {

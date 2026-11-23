@@ -5559,7 +5559,18 @@ impl Viewer {
         if dragging {
             let d = resp.drag_delta();
             let right = resp.dragged_by(egui::PointerButton::Secondary);
-            if lkey {
+            let middle = resp.dragged_by(egui::PointerButton::Middle);
+            // Profil Maya : Alt + gauche tourner, Alt + milieu (ou milieu seul) déplacer, Alt + droit zoom
+            let maya = crate::settings::nav_maya();
+            if maya && !lkey && !hkey && (middle || (right && mods.alt)) {
+                if right {
+                    self.cam.dist = (self.cam.dist * ((d.y - d.x) * 0.01).exp()).clamp(0.2, 50.0);
+                } else {
+                    let k = self.cam.dist / (rect.height().min(rect.width()) * 1.2);
+                    self.cam.pan[0] += d.x * k;
+                    self.cam.pan[1] -= d.y * k;
+                }
+            } else if lkey {
                 self.look.light.azimuth -= d.x * 0.01;
                 self.look.light.elevation = (self.look.light.elevation - d.y * 0.01).clamp(-1.5, 1.5);
             } else if hkey {
