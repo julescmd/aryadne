@@ -19,6 +19,40 @@ fn weekday_fr() -> &'static str {
 
 // ---------- palette de commandes ----------
 
+/// Recherche floue : les lettres de `q` dans l'ordre dans `s`. Plus le score est haut, mieux
+/// c'est : lettres collées, débuts de mots, et texte trouvé tel quel valent plus. None si absent.
+pub fn fuzzy(q: &str, s: &str) -> Option<i32> {
+    let q: Vec<char> = q.chars().filter(|c| !c.is_whitespace()).collect();
+    if q.is_empty() {
+        return Some(0);
+    }
+    let s: Vec<char> = s.chars().collect();
+    let (mut qi, mut score, mut prev) = (0usize, 0i32, usize::MAX - 1);
+    for (i, &c) in s.iter().enumerate() {
+        if qi < q.len() && c == q[qi] {
+            score += 1;
+            if prev.wrapping_add(1) == i {
+                score += 5;
+            }
+            if i == 0 || !s[i - 1].is_alphanumeric() {
+                score += 8;
+            }
+            prev = i;
+            qi += 1;
+        }
+    }
+    if qi < q.len() {
+        return None;
+    }
+    let qs: String = q.iter().collect();
+    let ss: String = s.iter().collect();
+    // Texte trouvé tel quel (à partir de 3 lettres : en dessous, les initiales comptent plus)
+    if q.len() >= 3 && ss.contains(&qs) {
+        score += 30;
+    }
+    Some(score - (s.len() as i32) / 8)
+}
+
 #[derive(Clone, Copy, PartialEq)]
 pub enum Cmd {
     View(View),
@@ -251,17 +285,34 @@ impl App {
         }
     }
 
-    /// Ctrl+Maj+P : toutes les actions de l'application, filtrables au clavier.
+    /// Ctrl+K ou Ctrl+Maj+P : toutes les actions de l'application et les fichiers du coffre,
+    /// recherche floue (« nvscn » trouve « nouvelle scène »), dernières commandes en tête.
     pub(super) fn palette_ui(&mut self, ctx: &egui::Context) {
         let p = theme::pal();
         let Some((mut query, mut sel)) = self.palette.take() else { return };
         let q = crate::chat::fold(&query);
         let all = self.commands();
-        let words: Vec<&str> = q.split_whitespace().collect();
-        let matches: Vec<(&str, &str, Cmd)> = all.into_iter().filter(|(l, _, _)| {
-            let f = crate::chat::fold(&format!("{l} {}", crate::i18n::t(l)));
-            words.iter().all(|w| f.contains(w))
-        }).collect();
+        let mut scored: Vec<(i32, (&str, &str, Cmd))> = all
+            .into_iter()
+            .filter_map(|c| {
+                let s = fuzzy(&q, &crate::chat::fold(c.0)).max(fuzzy(&q, &crate::chat::fold(&crate::i18n::t(c.0))))?;
+                let recent = self.cmd_recent.iter().position(|r| r == c.0).map(|i| 40 - i as i32 * 4).unwrap_or(0);
+                Some((s + recent, c))
+            })
+            .collect();
+        scored.sort_by(|a, b| b.0.cmp(&a.0));
+        let mut matches: Vec<(String, String, Option<Cmd>)> = scored.into_iter().map(|(_, (l, k, c))| (crate::i18n::t(l), k.to_string(), Some(c))).collect();
+        let labels: Vec<&'static str> = self.commands().into_iter().map(|c| c.0).collect();
+        // Fichiers du coffre : « ouvrir » directement depuis la palette
+        let mut files: Vec<(i32, String)> = vec![];
+        if q.chars().count() >= 2 {
+            files = self.entries.iter().filter(|e| !e.is_dir).filter_map(|e| fuzzy(&q, &crate::chat::fold(&e.rel)).map(|s| (s, e.rel.clone()))).collect();
+            files.sort_by(|a, b| b.0.cmp(&a.0));
+            files.truncate(8);
+            for (_, rel) in &files {
+                matches.push((format!("{} {}", crate::i18n::t("ouvrir"), vault::display_rel(rel)), String::new(), None));
+            }
+        }
         let (up, down, enter, esc) = ctx.input(|i| (i.key_pressed(Key::ArrowUp), i.key_pressed(Key::ArrowDown), i.key_pressed(Key::Enter), i.key_pressed(Key::Escape)));
         if down && sel + 1 < matches.len() {
             sel += 1;
@@ -275,11 +326,14 @@ impl App {
             ui.set_width(560.0);
             ui.horizontal(|ui| {
                 ui.label(RichText::new("⌘").color(p.accent).family(theme::bold()));
-                ui.add(egui::TextEdit::singleline(&mut query).hint_text(crate::i18n::t("chercher une commande…")).frame(egui::Frame::NONE).desired_width(f32::INFINITY)).request_focus();
+                ui.add(egui::TextEdit::singleline(&mut query).hint_text(crate::i18n::t("chercher une commande ou un fichier…")).frame(egui::Frame::NONE).desired_width(f32::INFINITY)).request_focus();
             });
             ui.separator();
             egui::ScrollArea::vertical().max_height(420.0).show(ui, |ui| {
                 for (i, (label, keys, cmd)) in matches.iter().enumerate() {
+                    if cmd.is_none() && (i == 0 || matches[i - 1].2.is_some()) {
+                        ui.label(RichText::new(crate::i18n::t("fichiers")).color(p.muted).size(10.5));
+                    }
                     let (r, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 22.0), egui::Sense::click());
                     if i == sel {
                         ui.painter().rect_filled(r, 0.0, p.accent.gamma_multiply(0.15));
@@ -287,10 +341,10 @@ impl App {
                             ui.scroll_to_rect(r, None);
                         }
                     }
-                    ui.painter().text(r.left_center() + egui::vec2(8.0, 0.0), egui::Align2::LEFT_CENTER, crate::i18n::t(label), egui::FontId::monospace(12.5), if i == sel { p.text } else { p.muted });
-                    ui.painter().text(r.right_center() - egui::vec2(8.0, 0.0), egui::Align2::RIGHT_CENTER, *keys, egui::FontId::monospace(11.0), p.muted);
+                    ui.painter().text(r.left_center() + egui::vec2(8.0, 0.0), egui::Align2::LEFT_CENTER, label, egui::FontId::monospace(12.5), if i == sel { p.text } else { p.muted });
+                    ui.painter().text(r.right_center() - egui::vec2(8.0, 0.0), egui::Align2::RIGHT_CENTER, keys, egui::FontId::monospace(11.0), p.muted);
                     if resp.clicked() {
-                        chosen = Some(*cmd);
+                        chosen = Some(i);
                     }
                 }
                 if matches.is_empty() {
@@ -298,11 +352,28 @@ impl App {
                 }
             });
         });
-        if enter {
-            chosen = matches.get(sel).map(|m| m.2);
+        if enter && !matches.is_empty() {
+            chosen = Some(sel);
         }
-        if let Some(c) = chosen {
-            self.run_cmd(c, ctx);
+        if let Some(i) = chosen {
+            match matches[i].2 {
+                Some(c) => {
+                    // Retient la commande (par son libellé d'origine) pour la remonter la prochaine fois
+                    if let Some(l) = labels.iter().find(|l| crate::i18n::t(l) == matches[i].0) {
+                        self.cmd_recent.retain(|r| r != l);
+                        self.cmd_recent.insert(0, l.to_string());
+                        self.cmd_recent.truncate(10);
+                    }
+                    self.run_cmd(c, ctx);
+                }
+                None => {
+                    let k = i - matches.iter().filter(|m| m.2.is_some()).count();
+                    if let Some((_, rel)) = files.get(k) {
+                        self.view = Some(View::Files);
+                        self.open(rel.clone());
+                    }
+                }
+            }
         } else if !(esc || modal.should_close()) {
             self.palette = Some((query, sel));
         }
@@ -1940,4 +2011,17 @@ pub fn find_blender() -> Option<PathBuf> {
     }
     found.sort();
     found.pop()
+}
+
+#[cfg(test)]
+mod palette_tests {
+    #[test]
+    fn recherche_floue() {
+        use super::fuzzy;
+        assert!(fuzzy("nvscn", "nouvelle scene 3d").is_some());
+        assert!(fuzzy("xyz", "nouvelle scene").is_none());
+        // Texte trouvé tel quel et débuts de mots passent devant
+        assert!(fuzzy("scene", "nouvelle scene 3d").unwrap() > fuzzy("scene", "sauvegarder le coffre maintenant").unwrap_or(-99));
+        assert!(fuzzy("ns", "nouvelle scene").unwrap() > fuzzy("ns", "transfert").unwrap_or(-99));
+    }
 }

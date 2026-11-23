@@ -281,6 +281,8 @@ struct App {
     assistant_open: bool,
     organize: Option<Organize>,
     palette: Option<(String, usize)>,
+    /// Dernières commandes lancées depuis la palette (les plus récentes d'abord)
+    cmd_recent: Vec<String>,
     template_dlg: Option<extras::TemplateDlg>,
     history_dlg: Option<extras::HistoryDlg>,
     url_dlg: Option<String>,
@@ -1814,7 +1816,7 @@ impl App {
         let zone = at.and_then(|p| self.zones_last.iter().rev().find(|(_, r)| r.contains(p)).map(|z| z.0));
         let pages = workspace::pages(&self.ws.cur().kind).len();
         match zone {
-            Some("top") => return t("clic : changer d'espace · clic droit sur un espace : nom, couleur, dupliquer · ＋ nouvel espace · Ctrl+PgPréc / PgSuiv : espace voisin · Ctrl+Maj+P commandes"),
+            Some("top") => return t("clic : changer d'espace · clic droit sur un espace : nom, couleur, dupliquer · ＋ nouvel espace · Ctrl+PgPréc / PgSuiv : espace voisin · Ctrl+K commandes"),
             Some("pages") => return format!("{} · Ctrl+1…{pages}", t("clic : changer de page")),
             Some("tabs") => return t("clic : afficher · clic du milieu : fermer · glisser hors de la barre : panneau à part · Ctrl+Tab onglet suivant · Ctrl+W fermer"),
             Some("explorer") => {}
@@ -1847,8 +1849,8 @@ impl App {
             Some(Content::Office(_)) => t("molette : défiler · Ctrl+molette : zoom · F2 renommer le fichier"),
             Some(Content::Text(_)) if self.current().is_some_and(|d| vault::is_md(&d.rel)) => t("Ctrl+E lire / éditer · [[ lien vers une note · Ctrl+F chercher · Ctrl+Z annuler · Ctrl+S enregistrer · F2 renommer"),
             Some(Content::Text(_)) => t("Ctrl+F chercher · Ctrl+G aller à la ligne · Ctrl+Maj+O symboles · F12 définition · Alt+Maj+F formater · F5 exécuter · Ctrl+` terminal"),
-            Some(_) => t("F2 renommer le fichier · Ctrl+P ouvrir · Ctrl+Maj+P commandes"),
-            None => t("Ctrl+N nouvelle note · Ctrl+P ouvrir un fichier · glisse des fichiers pour les importer · Ctrl+Maj+P commandes"),
+            Some(_) => t("F2 renommer le fichier · Ctrl+P ouvrir · Ctrl+K commandes"),
+            None => t("Ctrl+N nouvelle note · Ctrl+P ouvrir un fichier · glisse des fichiers pour les importer · Ctrl+K commandes"),
         }
     }
 
@@ -1886,7 +1888,7 @@ impl App {
                 self.multi.clear();
             }
         }
-        if pressed(Modifiers::COMMAND | Modifiers::SHIFT, Key::P) {
+        if pressed(Modifiers::COMMAND | Modifiers::SHIFT, Key::P) || pressed(Modifiers::COMMAND, Key::K) {
             self.palette = Some((String::new(), 0));
         }
         if pressed(Modifiers::COMMAND, Key::P) {
