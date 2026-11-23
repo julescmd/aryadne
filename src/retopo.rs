@@ -67,11 +67,13 @@ pub struct Options {
     pub auto_loops: bool,
     /// Objets séparés : 0 = même densité partout ; 1 = densité selon les détails de chaque objet
     pub detail_density: f32,
+    /// Usage interne : boules (centre, rayon) où le maillage dense est affiné
+    pub zones: Vec<[f32; 4]>,
 }
 
 impl Default for Options {
     fn default() -> Self {
-        Options { faces: 1500, iterations: 160, guide_radius: 1.2, pure_quads: true, adaptive: 0.5, curvature: 1.0, sharp_angle: 35.0, symmetry: 0, density: vec![], force_split: false, auto_loops: false, detail_density: 0.0 }
+        Options { faces: 1500, iterations: 160, guide_radius: 1.2, pure_quads: true, adaptive: 0.5, curvature: 1.0, sharp_angle: 35.0, symmetry: 0, density: vec![], force_split: false, auto_loops: false, detail_density: 0.0, zones: vec![] }
     }
 }
 
@@ -358,7 +360,7 @@ fn decimate_ids(mut pos: Vec<V3>, mut tris: Vec<[u32; 3]>, min_len: f32, sharp: 
 
 /// Coupe les arêtes plus longues que `max_len` (découpe conforme 1 → 2, 3 ou 4 triangles).
 fn refine(pos: Vec<V3>, tris: Vec<[u32; 3]>, max_len: f32, cap: usize) -> (Vec<V3>, Vec<[u32; 3]>) {
-    refine_n(pos, tris, max_len, 20, cap)
+    refine_n(pos, tris, &|_| max_len, 20, cap)
 }
 
 #[cfg(test)]
@@ -368,10 +370,10 @@ fn refine_once(pos: Vec<V3>, tris: Vec<[u32; 3]>) -> (Vec<V3>, Vec<[u32; 3]>) {
 
 #[cfg(test)]
 fn refine_n1(pos: Vec<V3>, tris: Vec<[u32; 3]>) -> (Vec<V3>, Vec<[u32; 3]>) {
-    refine_n(pos, tris, 0.0, 0, usize::MAX)
+    refine_n(pos, tris, &|_| 0.0, 0, usize::MAX)
 }
 
-fn refine_n(mut pos: Vec<V3>, mut tris: Vec<[u32; 3]>, max_len: f32, passes: usize, cap: usize) -> (Vec<V3>, Vec<[u32; 3]>) {
+fn refine_n(mut pos: Vec<V3>, mut tris: Vec<[u32; 3]>, lim: &dyn Fn(V3) -> f32, passes: usize, cap: usize) -> (Vec<V3>, Vec<[u32; 3]>) {
     for _ in 0..(passes * 3).max(1) {
         // Une arête n'est coupée que si elle est (presque) la plus longue d'un de ses triangles :
         // sans ça, les triangles très allongés se multiplient par centaines de milliers.
@@ -380,6 +382,7 @@ fn refine_n(mut pos: Vec<V3>, mut tris: Vec<[u32; 3]>, max_len: f32, passes: usi
             let l = [0, 1, 2].map(|k| len(sub(pos[t[k] as usize], pos[t[(k + 1) % 3] as usize])));
             let longest = l[0].max(l[1]).max(l[2]);
             for k in 0..3 {
+                let max_len = lim(mul(add(pos[t[k] as usize], pos[t[(k + 1) % 3] as usize]), 0.5));
                 if l[k] > max_len && (l[k] >= 0.75 * longest || max_len <= 0.0) {
                     let (a, b) = (t[k], t[(k + 1) % 3]);
                     marked.insert((a.min(b), a.max(b)));
@@ -1809,6 +1812,7 @@ fn remesh_one(pos: &[V3], tris: &[[u32; 3]], guides: &[Vec<V3>], opt: &Options, 
 }
 
 fn remesh_core(pos: &[V3], tris: &[[u32; 3]], guides: &[Vec<V3>], opt: &Options, progress: &dyn Fn(f32)) -> Result {
+    let (pos0, tris0) = (pos, tris);
     let mut stats = Stats::default();
     let t0 = std::time::Instant::now();
     let debug = std::env::var("RETOPO_DEBUG").is_ok();
@@ -1834,6 +1838,16 @@ fn remesh_core(pos: &[V3], tris: &[[u32; 3]], guides: &[Vec<V3>], opt: &Options,
     lap("simplification");
     // Garde-fou : un maillage fait de triangles très allongés ne doit pas exploser en taille
     let (v, f) = refine(pos, tris, h / dens, (target * 60).max(40_000));
+    // Zones où plusieurs singularités tombent à moins d'un quad l'une de l'autre (pointe de
+    // corne, bout de doigt) : le maillage dense y est trop grossier pour les écarter d'un quad
+    // chacune, l'extraction les entasse en une étoile. On y double la finesse.
+    let (v, f) = if opt.zones.is_empty() {
+        (v, f)
+    } else {
+        let zones = opt.zones.clone();
+        let fine = h / (dens * 2.5);
+        refine_n(v, f, &|m: V3| if zones.iter().any(|z| len(sub(m, [z[0], z[1], z[2]])) < z[3]) { fine } else { f32::MAX }, 20, (target * 120).max(80_000))
+    };
     let n_v = v.len();
     stats.dense = n_v;
 
@@ -2078,6 +2092,46 @@ fn remesh_core(pos: &[V3], tris: &[[u32; 3]], guides: &[Vec<V3>], opt: &Options,
             for &e in &g.fe[fi] {
                 g.w[e as usize] = stiff.sqrt();
             }
+        }
+    }
+    // Singularités serrées (moins d'un quad) : on recommence une fois avec un maillage dense plus
+    // fin autour d'elles
+    if opt.zones.is_empty() && std::env::var("NOZONES").is_err() {
+        let mut sing: Vec<V3> = vec![];
+        for fi in 0..f.len() {
+            if g.closure(&f[fi], fi).0 != 0 {
+                let t = f[fi];
+                sing.push(mul(add(add(v[t[0] as usize], v[t[1] as usize]), v[t[2] as usize]), 1.0 / 3.0));
+            }
+        }
+        let close: f32 = std::env::var("ZONE_D").ok().and_then(|x| x.parse().ok()).unwrap_or(2.0);
+        if debug {
+            let mut dmin = f32::MAX;
+            for a in 0..sing.len() {
+                for b in a + 1..sing.len() {
+                    dmin = dmin.min(len(sub(sing[a], sing[b])));
+                }
+            }
+            eprintln!("h {h:.3}, écart minimal entre singularités {dmin:.3}");
+        }
+        let mut zones: Vec<[f32; 4]> = vec![];
+        for a in 0..sing.len() {
+            for b in a + 1..sing.len() {
+                if len(sub(sing[a], sing[b])) < h * close {
+                    let m = mul(add(sing[a], sing[b]), 0.5);
+                    if !zones.iter().any(|z| len(sub(m, [z[0], z[1], z[2]])) < h) {
+                        zones.push([m[0], m[1], m[2], h * 2.0]);
+                    }
+                }
+            }
+        }
+        if !zones.is_empty() {
+            if debug {
+                eprintln!("singularités serrées : {} zones affinées, on recommence", zones.len());
+            }
+            let mut o2 = opt.clone();
+            o2.zones = zones;
+            return remesh_core(pos0, tris0, guides, &o2, progress);
         }
     }
     if let Ok(fp) = std::env::var("FIELD_ONLY") {
