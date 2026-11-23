@@ -19,14 +19,14 @@ pub struct Provider {
 
 pub const PROVIDERS: &[Provider] = &[
     Provider { id: "ollama", name: "Ollama (local)", url: "http://localhost:11434/v1", key_page: "", suggested: &[] },
-    Provider { id: "anthropic", name: "Claude (Anthropic)", url: "https://api.anthropic.com/v1", key_page: "https://console.anthropic.com/settings/keys", suggested: &["claude-sonnet-4-5", "claude-opus-4-1", "claude-haiku-4-5"] },
+    Provider { id: "anthropic", name: "Claude (Anthropic)", url: "https://api.anthropic.com/v1", key_page: "https://console.anthropic.com/settings/keys", suggested: &["claude-sonnet-5-5", "claude-opus-5-5", "claude-haiku-5-5", "claude-fable-5-2"] },
     Provider { id: "openai", name: "ChatGPT (OpenAI)", url: "https://api.openai.com/v1", key_page: "https://platform.openai.com/api-keys", suggested: &["gpt-5", "gpt-5-mini", "gpt-4.1", "gpt-4o-mini"] },
     Provider { id: "deepseek", name: "DeepSeek", url: "https://api.deepseek.com/v1", key_page: "https://platform.deepseek.com/api_keys", suggested: &["deepseek-chat", "deepseek-reasoner"] },
     Provider { id: "gemini", name: "Gemini (Google)", url: "https://generativelanguage.googleapis.com/v1beta/openai", key_page: "https://aistudio.google.com/apikey", suggested: &["gemini-2.5-flash", "gemini-2.5-pro"] },
     Provider { id: "mistral", name: "Mistral", url: "https://api.mistral.ai/v1", key_page: "https://console.mistral.ai/api-keys", suggested: &["mistral-large-latest", "mistral-small-latest", "codestral-latest"] },
     Provider { id: "xai", name: "Grok (xAI)", url: "https://api.x.ai/v1", key_page: "https://console.x.ai", suggested: &["grok-4", "grok-3-mini"] },
     Provider { id: "groq", name: "Groq (très rapide)", url: "https://api.groq.com/openai/v1", key_page: "https://console.groq.com/keys", suggested: &["llama-3.3-70b-versatile", "qwen/qwen3-32b"] },
-    Provider { id: "openrouter", name: "OpenRouter (tous les modèles)", url: "https://openrouter.ai/api/v1", key_page: "https://openrouter.ai/keys", suggested: &["anthropic/claude-sonnet-4.5", "openai/gpt-5", "deepseek/deepseek-chat"] },
+    Provider { id: "openrouter", name: "OpenRouter (tous les modèles)", url: "https://openrouter.ai/api/v1", key_page: "https://openrouter.ai/keys", suggested: &["anthropic/claude-sonnet-5.5", "openai/gpt-5", "deepseek/deepseek-chat"] },
     Provider { id: "lmstudio", name: "LM Studio (local)", url: "http://localhost:1234/v1", key_page: "", suggested: &[] },
 ];
 
@@ -230,18 +230,25 @@ pub fn complete(s: &Settings, system: &str, user: &str) -> Result<String, String
         }
         return v["message"]["content"].as_str().map(|t| t.trim().to_string()).ok_or_else(|| "Réponse vide du modèle.".into());
     }
-    let body = json!({
+    if s.provider_id() == "anthropic" {
+        let msgs = vec![json!({ "role": "system", "content": system }), json!({ "role": "user", "content": user })];
+        let mut out = String::new();
+        anthropic_stream(s, &msgs, &std::sync::atomic::AtomicBool::new(false), &mut |d| out.push_str(d))?;
+        return Ok(out.trim().to_string());
+    }
+    let mut body = json!({
         "model": s.model,
-        "temperature": 0.2,
         "messages": [
             { "role": "system", "content": system },
             { "role": "user", "content": user }
         ]
     });
+    if sampling_ok(&s.model) {
+        body["temperature"] = json!(0.2);
+    }
     let url = format!("{}/chat/completions", s.url.trim_end_matches('/'));
     let agent = crate::ollama::agent(180);
-    let req = auth(agent.post(&url), s.provider_id(), &s.key);
-    let mut resp = req.send_json(&body).map_err(|e| match e {
+    let mut resp = post_json(&agent, &url, s.provider_id(), &s.key, &body).map_err(|e| match e {
         ureq::Error::Io(_) | ureq::Error::ConnectionFailed | ureq::Error::HostNotFound => {
             format!("Impossible de joindre {url}. Le serveur IA est-il lancé ?")
         }
@@ -254,4 +261,147 @@ pub fn complete(s: &Settings, system: &str, user: &str) -> Result<String, String
         .as_str()
         .map(|s| s.trim().to_string())
         .ok_or_else(|| format!("Réponse inattendue : {}", v.to_string().chars().take(200).collect::<String>()))
+}
+
+/// Les modèles récents (Claude 4.7 et plus, raisonnement d'OpenAI) refusent une température
+/// personnalisée (erreur 400) : on la laisse à sa valeur par défaut.
+pub fn sampling_ok(model: &str) -> bool {
+    let m = model.to_lowercase();
+    let m = m.rsplit('/').next().unwrap_or(&m);
+    !(m.starts_with("o1") || m.starts_with("o3") || m.starts_with("o4") || m.starts_with("gpt-5") || m.starts_with("claude"))
+}
+
+/// Envoie du JSON ; une erreur HTTP garde le message du serveur (au lieu de « http status: 400 »).
+pub fn post_json(agent: &ureq::Agent, url: &str, provider_id: &str, key: &str, body: &Value) -> Result<ureq::http::Response<ureq::Body>, ureq::Error> {
+    let req = auth(agent.post(url).config().http_status_as_error(false).build(), provider_id, key);
+    let mut resp = req.send_json(body)?;
+    let code = resp.status().as_u16();
+    if code >= 400 {
+        let text = resp.body_mut().read_to_string().unwrap_or_default();
+        let msg = serde_json::from_str::<Value>(&text).ok().and_then(|v| v["error"]["message"].as_str().or(v["error"].as_str()).or(v["message"].as_str()).map(str::to_string)).unwrap_or_else(|| text.chars().take(300).collect());
+        LAST_ERROR.lock().map(|mut l| *l = msg).ok();
+        return Err(ureq::Error::StatusCode(code));
+    }
+    Ok(resp)
+}
+
+/// Message du serveur pour la dernière erreur HTTP (voir `post_json`).
+pub static LAST_ERROR: LazyLock<Mutex<String>> = LazyLock::new(|| Mutex::new(String::new()));
+
+/// Texte d'une erreur HTTP, avec le message du serveur s'il y en a un.
+pub fn http_error(e: ureq::Error, url: &str, model: &str) -> String {
+    let detail = LAST_ERROR.lock().map(|mut l| std::mem::take(&mut *l)).unwrap_or_default();
+    let base = match e {
+        ureq::Error::StatusCode(404) => format!("Modèle « {model} » introuvable."),
+        ureq::Error::StatusCode(401) | ureq::Error::StatusCode(403) => "Clé API refusée. Vérifie-la dans réglages › ia.".into(),
+        ureq::Error::StatusCode(402) => "Crédit épuisé chez ce fournisseur.".into(),
+        ureq::Error::StatusCode(429) => "Trop de requêtes (ou quota atteint). Réessaie dans un moment.".into(),
+        ureq::Error::StatusCode(529) | ureq::Error::StatusCode(503) => "Le service est surchargé. Réessaie dans un moment.".into(),
+        ureq::Error::StatusCode(c) => format!("Erreur {c} du serveur."),
+        ureq::Error::Io(_) | ureq::Error::ConnectionFailed | ureq::Error::HostNotFound => format!("Impossible de joindre {url}."),
+        other => other.to_string(),
+    };
+    if detail.is_empty() { base } else { format!("{base} ({detail})") }
+}
+
+/// Messages au format OpenAI → format de l'API Messages de Claude : le système à part,
+/// les images en base64.
+fn to_anthropic(messages: &[Value]) -> (String, Vec<Value>) {
+    let mut system = String::new();
+    let mut out: Vec<Value> = vec![];
+    for m in messages {
+        let role = m["role"].as_str().unwrap_or("user");
+        if role == "system" {
+            if let Some(t) = m["content"].as_str() {
+                system.push_str(t);
+            }
+            continue;
+        }
+        let content = match &m["content"] {
+            Value::String(t) => json!([{ "type": "text", "text": t }]),
+            Value::Array(parts) => Value::Array(
+                parts
+                    .iter()
+                    .filter_map(|p| match p["type"].as_str() {
+                        Some("text") => Some(json!({ "type": "text", "text": p["text"] })),
+                        Some("image_url") => {
+                            let u = p["image_url"]["url"].as_str()?;
+                            let rest = u.strip_prefix("data:")?;
+                            let (mime, data) = rest.split_once(";base64,")?;
+                            Some(json!({ "type": "image", "source": { "type": "base64", "media_type": mime, "data": data } }))
+                        }
+                        _ => None,
+                    })
+                    .collect(),
+            ),
+            _ => continue,
+        };
+        // Deux messages du même rôle à la suite : on les réunit (l'API veut une alternance)
+        if let Some(last) = out.last_mut().filter(|l| l["role"] == role) {
+            if let (Some(a), Some(b)) = (last["content"].as_array_mut(), content.as_array()) {
+                a.extend(b.iter().cloned());
+                continue;
+            }
+        }
+        out.push(json!({ "role": role, "content": content }));
+    }
+    if out.first().is_some_and(|m| m["role"] == "assistant") {
+        out.insert(0, json!({ "role": "user", "content": [{ "type": "text", "text": "(suite)" }] }));
+    }
+    (system, out)
+}
+
+/// Claude par son API native (/v1/messages), en streaming.
+pub fn anthropic_stream(s: &Settings, messages: &[Value], stop: &std::sync::atomic::AtomicBool, on_delta: &mut dyn FnMut(&str)) -> Result<(), String> {
+    use std::io::BufRead;
+    let url = format!("{}/messages", s.url.trim_end_matches('/'));
+    let (system, msgs) = to_anthropic(messages);
+    let mut body = json!({ "model": s.model, "max_tokens": 16000, "messages": msgs, "stream": true });
+    if !system.is_empty() {
+        body["system"] = json!(system);
+    }
+    let agent = crate::ollama::agent(900);
+    let mut resp = post_json(&agent, &url, "anthropic", &s.key, &body).map_err(|e| http_error(e, &url, &s.model))?;
+    let reader = std::io::BufReader::new(resp.body_mut().with_config().limit(u64::MAX).reader());
+    for line in reader.lines() {
+        if stop.load(std::sync::atomic::Ordering::Relaxed) {
+            break;
+        }
+        let line = line.map_err(|e| e.to_string())?;
+        let Some(data) = line.strip_prefix("data:").map(str::trim) else { continue };
+        let Ok(v) = serde_json::from_str::<Value>(data) else { continue };
+        match v["type"].as_str() {
+            Some("content_block_delta") => {
+                if let Some(t) = v["delta"]["text"].as_str() {
+                    on_delta(t);
+                }
+            }
+            Some("error") => return Err(v["error"]["message"].as_str().unwrap_or("erreur du serveur").to_string()),
+            Some("message_stop") => break,
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn format_claude() {
+        let m = vec![
+            json!({ "role": "system", "content": "sys" }),
+            json!({ "role": "assistant", "content": "a" }),
+            json!({ "role": "user", "content": "q" }),
+            json!({ "role": "user", "content": [{ "type": "text", "text": "t" }, { "type": "image_url", "image_url": { "url": "data:image/png;base64,QUJD" } }] }),
+        ];
+        let (sys, out) = to_anthropic(&m);
+        assert_eq!(sys, "sys");
+        assert_eq!(out[0]["role"], "user");
+        assert_eq!(out[1]["role"], "assistant");
+        assert_eq!(out[2]["content"].as_array().unwrap().len(), 3);
+        assert_eq!(out[2]["content"][2]["source"]["data"], "QUJD");
+        assert!(!sampling_ok("claude-sonnet-5-5") && !sampling_ok("anthropic/claude-opus-5-5") && sampling_ok("llama3.2"));
+    }
 }

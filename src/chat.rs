@@ -32,6 +32,12 @@ pub struct Msg {
     /// Noms des pièces jointes envoyées avec ce message.
     #[serde(default)]
     pub attached: Vec<String>,
+    /// Aperçus des images jointes (JPEG en base64, 320 px), affichés dans la conversation
+    #[serde(default)]
+    pub thumbs: Vec<String>,
+    /// Pièces jointes complètes, gardées en mémoire pour « modifier » et « régénérer »
+    #[serde(skip)]
+    pub sent: Vec<Attachment>,
 }
 
 /// Conversation enregistrée dans .app/chats/ du coffre.
@@ -67,7 +73,7 @@ pub fn list_saved(root: &str) -> Vec<(String, String, std::time::SystemTime)> {
 /// Pièce jointe : image (envoyée au modèle s'il voit les images) ou texte.
 #[derive(Clone)]
 pub enum Attachment {
-    Image { name: String, data_url: String },
+    Image { name: String, data_url: String, thumb: String },
     Text { name: String, text: String },
 }
 
@@ -147,7 +153,11 @@ impl Attachment {
         let mut buf = std::io::Cursor::new(Vec::new());
         let _ = img.to_rgb8().write_to(&mut buf, image::ImageFormat::Jpeg);
         let b64 = base64::engine::general_purpose::STANDARD.encode(buf.into_inner());
-        Attachment::Image { name: name.to_string(), data_url: format!("data:image/jpeg;base64,{b64}") }
+        let small = img.thumbnail(320, 320);
+        let mut tb = std::io::Cursor::new(Vec::new());
+        let _ = small.to_rgb8().write_to(&mut tb, image::ImageFormat::Jpeg);
+        let thumb = base64::engine::general_purpose::STANDARD.encode(tb.into_inner());
+        Attachment::Image { name: name.to_string(), data_url: format!("data:image/jpeg;base64,{b64}"), thumb }
     }
 }
 
@@ -270,7 +280,8 @@ impl Chat {
         self.input.clear();
         let attachments = std::mem::take(&mut self.attachments);
         let attached: Vec<String> = attachments.iter().map(|a| a.name().to_string()).collect();
-        self.msgs.push(Msg { role: Role::User, text: q.clone(), sources: vec![], error: None, attached });
+        let thumbs: Vec<String> = attachments.iter().filter_map(|a| if let Attachment::Image { thumb, .. } = a { Some(thumb.clone()) } else { None }).collect();
+        self.msgs.push(Msg { role: Role::User, text: q.clone(), sources: vec![], error: None, attached, thumbs, sent: attachments.clone() });
         let history: Vec<Msg> = self.msgs.iter().rev().skip(1).take(8).rev().cloned().collect();
         let stop = Arc::new(AtomicBool::new(false));
         let live = Arc::new(Mutex::new(Live { status: "recherche dans le coffre…".into(), stop: stop.clone(), asked: Some(std::time::Instant::now()), ..Default::default() }));
@@ -371,7 +382,7 @@ impl Chat {
                 text.push_str("\n\n*(arrêté)*");
             }
             self.last_speed = secs.filter(|s| *s > 0.2 && chunks > 3).map(|s| chunks as f32 / s);
-            self.msgs.push(Msg { role: Role::Assistant, text, sources, error, attached: vec![] });
+            self.msgs.push(Msg { role: Role::Assistant, text, sources, error, attached: vec![], thumbs: vec![], sent: vec![] });
             self.live = None;
         }
     }
@@ -654,25 +665,19 @@ fn stream_ollama(s: &crate::ai::Settings, messages: Vec<Value>, stop: &AtomicBoo
 
 /// Requête en streaming (Server-Sent Events) vers une API compatible OpenAI.
 fn stream(s: &crate::ai::Settings, messages: Vec<Value>, stop: &AtomicBool, on_delta: &dyn Fn(&str)) -> Result<(), String> {
+    // Claude : son API native (le format OpenAI de compatibilité suit mal les nouveaux modèles)
+    if s.provider_id() == "anthropic" {
+        let mut f = |d: &str| on_delta(d);
+        return crate::ai::anthropic_stream(s, &messages, stop, &mut f);
+    }
     let url = format!("{}/chat/completions", s.url.trim_end_matches('/'));
-    let req = crate::ai::auth(crate::ollama::agent(600).post(&url), s.provider_id(), &s.key);
     let mut body = json!({ "model": s.model, "messages": messages, "stream": true });
-    // Les modèles « raisonnement » d'OpenAI refusent une température personnalisée
-    let m = s.model.to_lowercase();
-    if !(m.starts_with("o1") || m.starts_with("o3") || m.starts_with("o4") || m.starts_with("gpt-5")) {
+    // Les modèles récents refusent une température personnalisée
+    if crate::ai::sampling_ok(&s.model) {
         body["temperature"] = json!(0.3);
     }
-    if s.provider_id() == "anthropic" {
-        body["max_tokens"] = json!(8192);
-    }
-    let mut resp = req.send_json(&body).map_err(|e| match e {
-        ureq::Error::StatusCode(404) => format!("Modèle « {} » introuvable. Télécharge-le dans les réglages ia.", s.model),
-        ureq::Error::StatusCode(401) | ureq::Error::StatusCode(403) => "Clé API refusée. Vérifie-la dans réglages › ia.".into(),
-        ureq::Error::StatusCode(402) => "Crédit épuisé chez ce fournisseur.".into(),
-        ureq::Error::StatusCode(429) => "Trop de requêtes (ou quota atteint). Réessaie dans un moment.".into(),
-        ureq::Error::Io(_) | ureq::Error::ConnectionFailed | ureq::Error::HostNotFound => format!("Impossible de joindre {url}."),
-        other => other.to_string(),
-    })?;
+    let agent = crate::ollama::agent(600);
+    let mut resp = crate::ai::post_json(&agent, &url, s.provider_id(), &s.key, &body).map_err(|e| crate::ai::http_error(e, &url, &s.model))?;
     let reader = std::io::BufReader::new(resp.body_mut().with_config().limit(u64::MAX).reader());
     for line in reader.lines() {
         if stop.load(Ordering::Relaxed) {

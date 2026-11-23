@@ -1096,6 +1096,34 @@ pub struct ChatBarOut {
     pub think: Option<bool>,
 }
 
+/// Colle l'image du presse-papiers comme pièce jointe ; faux s'il n'y en a pas.
+pub fn paste_image(chat: &mut chat::Chat) -> bool {
+    let Some(img) = arboard::Clipboard::new().ok().and_then(|mut c| c.get_image().ok()) else { return false };
+    let Some(buf) = image::RgbaImage::from_raw(img.width as u32, img.height as u32, img.bytes.into_owned()) else { return false };
+    let n = chat.attachments.iter().filter(|a| matches!(a, chat::Attachment::Image { .. })).count();
+    let name = if n == 0 { "presse-papiers.png".to_string() } else { format!("presse-papiers {}.png", n + 1) };
+    chat.attachments.push(chat::Attachment::from_image(image::DynamicImage::ImageRgba8(buf), &name));
+    true
+}
+
+/// Texture d'une vignette JPEG en base64, gardée en cache pour la session.
+pub fn thumb_texture(ctx: &egui::Context, b64: &str) -> Option<egui::TextureHandle> {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    b64.hash(&mut h);
+    let id = egui::Id::unique(("chat-thumb", h.finish()));
+    if let Some(t) = ctx.data(|d| d.get_temp::<egui::TextureHandle>(id)) {
+        return Some(t);
+    }
+    use base64::Engine;
+    let bytes = base64::engine::general_purpose::STANDARD.decode(b64).ok()?;
+    let img = image::load_from_memory(&bytes).ok()?.to_rgba8();
+    let ci = egui::ColorImage::from_rgba_unmultiplied([img.width() as usize, img.height() as usize], img.as_raw());
+    let t = ctx.load_texture(format!("chat-thumb-{}", h.finish()), ci, egui::TextureOptions::LINEAR);
+    ctx.data_mut(|d| d.insert_temp(id, t.clone()));
+    Some(t)
+}
+
 /// Pièces jointes (avec ×), « joindre ▾ », choix du modèle et bouton d'arrêt.
 pub fn chat_bar(ui: &mut egui::Ui, chat: &mut chat::Chat, local: &ollama::Local, settings: &ai::Settings, open_file: Option<(String, PathBuf)>) -> ChatBarOut {
     let p = theme::pal();
@@ -1120,17 +1148,29 @@ pub fn chat_bar(ui: &mut egui::Ui, chat: &mut chat::Chat, local: &ollama::Local,
                     chat.attachments.extend(chat::Attachment::from_path(path));
                 }
             }
-            if ui.button(crate::i18n::t("l'image du presse-papiers")).clicked() {
-                if let Some(img) = arboard::Clipboard::new().ok().and_then(|mut c| c.get_image().ok()) {
-                    if let Some(buf) = image::RgbaImage::from_raw(img.width as u32, img.height as u32, img.bytes.into_owned()) {
-                        chat.attachments.push(chat::Attachment::from_image(image::DynamicImage::ImageRgba8(buf), "presse-papiers.png"));
-                    }
-                }
+            if ui.button(format!("{}   Ctrl+V", crate::i18n::t("l'image du presse-papiers"))).clicked() {
+                paste_image(chat);
             }
             ui.label(RichText::new(crate::i18n::t("Tu peux aussi glisser des fichiers dans la fenêtre (vue chat).")).color(p.muted).size(10.5));
         });
         let mut remove = None;
         for (i, a) in chat.attachments.iter().enumerate() {
+            if let chat::Attachment::Image { thumb, name, .. } = a {
+                // Aperçu : la vignette, l'image plus grande au survol, × pour retirer
+                if let Some(tex) = thumb_texture(ui.ctx(), thumb) {
+                    let sz = tex.size_vec2();
+                    let h = 44.0;
+                    let r = ui.add(egui::Image::new((tex.id(), egui::vec2(sz.x / sz.y * h, h))).corner_radius(4).sense(egui::Sense::click()));
+                    let r = r.on_hover_ui(|ui| {
+                        ui.add(egui::Image::new((tex.id(), sz)));
+                        ui.label(RichText::new(format!("{name} · {}", crate::i18n::t("clic : retirer"))).size(10.5).color(p.muted));
+                    });
+                    if r.clicked() {
+                        remove = Some(i);
+                    }
+                    continue;
+                }
+            }
             let icon = if matches!(a, chat::Attachment::Image { .. }) { "▣" } else { "▤" };
             if ui.add(egui::Button::new(RichText::new(format!("{icon} {}  ×", a.name())).size(11.0)).fill(p.panel)).on_hover_text(crate::i18n::t("retirer")).clicked() {
                 remove = Some(i);

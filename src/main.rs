@@ -3953,6 +3953,15 @@ impl App {
                         .desired_rows(2)
                         .desired_width(ui.available_width() - 90.0);
                     let r = ui.add(edit);
+                    // Ctrl+V avec une image dans le presse-papiers : elle est jointe au message
+                    // (du texte collé reste du texte : Word ou un navigateur mettent aussi une image à côté)
+                    let pasted = ui.input(|i| {
+                        let text = i.events.iter().any(|e| matches!(e, egui::Event::Paste(t) if !t.trim().is_empty()));
+                        !text && i.events.iter().any(|e| matches!(e, egui::Event::Paste(_)) || matches!(e, egui::Event::Key { key: Key::V, pressed: true, modifiers, .. } if modifiers.command))
+                    });
+                    if pasted && (r.has_focus() || !ui.ctx().egui_wants_keyboard_input()) {
+                        extras::paste_image(&mut self.chat);
+                    }
                     if r.has_focus() && enter {
                         // Retire le saut de ligne que l'Entrée vient d'ajouter
                         while self.chat.input.ends_with('\n') {
@@ -3994,10 +4003,43 @@ impl App {
                     }
                     let msgs = self.chat.msgs.clone();
                     let last = msgs.len().saturating_sub(1);
+                    let mut edit_at: Option<usize> = None;
+                    let mut regen = false;
                     for (k, m) in msgs.iter().enumerate() {
                         let (text, choices) = chat::split_choices(&m.text);
-                        let shown = if m.attached.is_empty() { text } else { format!("{text}\n\n📎 {}", m.attached.join(", ")) };
+                        let others: Vec<&String> = m.attached.iter().filter(|n| !(m.thumbs.len() > 0 && crate::images::is_image(n))).collect();
+                        let shown = if others.is_empty() { text } else { format!("{text}\n\n📎 {}", others.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")) };
                         msg_block(ui, m.role == chat::Role::User, &shown, &m.sources, m.error.as_deref(), None, &existing, &paths, &mut goto);
+                        // Images jointes : aperçus (plus grands au survol)
+                        if !m.thumbs.is_empty() {
+                            ui.horizontal_wrapped(|ui| {
+                                for t in &m.thumbs {
+                                    if let Some(tex) = extras::thumb_texture(ui.ctx(), t) {
+                                        let sz = tex.size_vec2();
+                                        let h = 96.0;
+                                        ui.add(egui::Image::new((tex.id(), egui::vec2(sz.x / sz.y * h, h))).corner_radius(4).sense(egui::Sense::hover())).on_hover_ui(|ui| {
+                                            ui.add(egui::Image::new((tex.id(), sz)));
+                                        });
+                                    }
+                                }
+                            });
+                        }
+                        // Actions sur le message : modifier (question), copier, régénérer (dernière réponse)
+                        if !self.chat.busy() {
+                            ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing.x = 10.0;
+                                let small = |s: &str| egui::Button::new(RichText::new(crate::i18n::t(s)).size(10.5).color(p.muted)).frame(false);
+                                if m.role == chat::Role::User && ui.add(small("modifier")).on_hover_text(crate::i18n::t("Reprendre cette question pour la changer : la suite de la conversation est remplacée")).clicked() {
+                                    edit_at = Some(k);
+                                }
+                                if ui.add(small("copier")).clicked() {
+                                    ui.ctx().copy_text(m.text.clone());
+                                }
+                                if k == last && m.role == chat::Role::Assistant && ui.add(small("régénérer")).on_hover_text(crate::i18n::t("Redemander la même chose")).clicked() {
+                                    regen = true;
+                                }
+                            });
+                        }
                         if k == last && m.role == chat::Role::Assistant && !self.chat.busy() {
                             if let Some(c) = extras::choice_buttons(ui, &choices) {
                                 self.chat.input = c;
@@ -4008,6 +4050,17 @@ impl App {
                             if let Some(f) = extras::file_buttons(ui, &m.text, &|r| paths.contains(r)) {
                                 apply_file = Some(f);
                             }
+                        }
+                    }
+                    // Modifier une question : elle revient dans le champ (avec ses pièces jointes) et la suite est retirée
+                    let redo_at = if regen { (0..msgs.len()).rev().find(|&i| msgs[i].role == chat::Role::User) } else { None };
+                    if let Some(k) = edit_at.or(redo_at) {
+                        let m = self.chat.msgs[k].clone();
+                        self.chat.msgs.truncate(k);
+                        self.chat.input = m.text;
+                        self.chat.attachments = m.sent;
+                        if regen {
+                            send = true;
                         }
                     }
                     if let Some(live) = &self.chat.live {

@@ -1489,5 +1489,10 @@
  "Les UV et matériaux sont gardés avec la copie de l'objet propre à la scène": "UVs and materials are kept with the scene's own copy of the object",
  "retopo appliquée à l'objet": "retopology applied to the object",
  "pas de scène": "no scene",
- "seuls les objets à maillage se modifient": "only mesh objects can be edited"
+ "seuls les objets à maillage se modifient": "only mesh objects can be edited",
+ "modifier": "edit",
+ "régénérer": "regenerate",
+ "clic : retirer": "click: remove",
+ "Reprendre cette question pour la changer : la suite de la conversation est remplacée": "Bring this question back to change it: the rest of the conversation is replaced",
+ "Redemander la même chose": "Ask the same thing again"
 }

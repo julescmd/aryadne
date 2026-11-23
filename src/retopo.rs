@@ -2240,7 +2240,15 @@ fn remesh_core(pos: &[V3], tris: &[[u32; 3]], guides: &[Vec<V3>], opt: &Options,
     let mut q = q;
     let mut fixed = vec![false; n_v];
     // Arêtes vives et bords : le champ les longe
-    let ft = features(&v, &f, opt.sharp_angle, 3.0 * h);
+    let mut ft = features(&v, &f, opt.sharp_angle, 3.0 * h);
+    let facet_d: f32 = std::env::var("FACET_D").ok().and_then(|x| x.parse().ok()).unwrap_or(0.0);
+    if facet_d > 0.0 {
+        let before = ft.edges.len();
+        ft = drop_faceting(&v, &f, ft, facet_d * h, opt.sharp_angle);
+        if debug {
+            eprintln!("facettes : {} arêtes vives sur {before} retirées (cylindres à pans)", before - ft.edges.len());
+        }
+    }
     for i in 0..n_v {
         if ft.deg[i] == 2 {
             let t = tangent(ft.tan[i], nrm[i]);
@@ -3854,6 +3862,82 @@ fn features(v: &[V3], f: &[[u32; 3]], angle_deg: f32, min_len: f32) -> Features 
     Features { edges, deg, tan }
 }
 
+/// Un cylindre bas-poly a une arête vive entre chaque pan : ces arêtes parallèles et serrées
+/// (moins de `d` entre elles) ne sont pas des arêtes voulues, et les suivre toutes donne des
+/// colonnes de pôles. On les retire si leur angle reste modéré (sous 65°) ; les bords restent.
+fn drop_faceting(v: &[V3], f: &[[u32; 3]], ft: Features, d: f32, angle_deg: f32) -> Features {
+    let mut fn_of: HashMap<(u32, u32), Vec<V3>> = HashMap::default();
+    for t in f {
+        let nf = norm(cross(sub(v[t[1] as usize], v[t[0] as usize]), sub(v[t[2] as usize], v[t[0] as usize])));
+        for k in 0..3 {
+            let (a, b) = (t[k], t[(k + 1) % 3]);
+            fn_of.entry((a.min(b), a.max(b))).or_default().push(nf);
+        }
+    }
+    let info: Vec<(V3, V3, f32, bool)> = ft
+        .edges
+        .iter()
+        .map(|&(a, b)| {
+            let (pa, pb) = (v[a as usize], v[b as usize]);
+            let ns = &fn_of[&(a, b)];
+            let border = ns.len() != 2;
+            let c = if border { -1.0 } else { dot(ns[0], ns[1]) };
+            (mul(add(pa, pb), 0.5), norm(sub(pb, pa)), c, border)
+        })
+        .collect();
+    let cell = d.max(1e-9);
+    let key = |p: V3| ((p[0] / cell).floor() as i32, (p[1] / cell).floor() as i32, (p[2] / cell).floor() as i32);
+    let mut grid: HashMap<(i32, i32, i32), Vec<u32>> = HashMap::default();
+    for (i, e) in info.iter().enumerate() {
+        grid.entry(key(e.0)).or_default().push(i as u32);
+    }
+    let cmax = 65f32.max(angle_deg).to_radians().cos();
+    let keep: Vec<bool> = (0..info.len())
+        .map(|i| {
+            let (m, t, c, border) = info[i];
+            if border || c < cmax {
+                return true;
+            }
+            let (x, y, z) = key(m);
+            for dx in -1..=1 {
+                for dy in -1..=1 {
+                    for dz in -1..=1 {
+                        if let Some(l) = grid.get(&(x + dx, y + dy, z + dz)) {
+                            for &j in l {
+                                let (m2, t2, c2, b2) = info[j as usize];
+                                if b2 || c2 < cmax || dot(t, t2).abs() < 0.9 {
+                                    continue;
+                                }
+                                let off = sub(m2, m);
+                                let perp = sub(off, mul(t, dot(off, t)));
+                                let pd = len(perp);
+                                if pd > d * 0.05 && pd < d {
+                                    return false;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            true
+        })
+        .collect();
+    let edges: Vec<(u32, u32)> = ft.edges.iter().zip(&keep).filter(|(_, k)| **k).map(|(e, _)| *e).collect();
+    let mut deg = vec![0u8; v.len()];
+    let mut ends: Vec<[u32; 2]> = vec![[u32::MAX; 2]; v.len()];
+    for &(a, b) in &edges {
+        for (x, y) in [(a, b), (b, a)] {
+            let dd = deg[x as usize] as usize;
+            if dd < 2 {
+                ends[x as usize][dd] = y;
+            }
+            deg[x as usize] = deg[x as usize].saturating_add(1);
+        }
+    }
+    let tan = (0..v.len()).map(|i| if deg[i] == 2 { norm(sub(v[ends[i][0] as usize], v[ends[i][1] as usize])) } else { [0.0; 3] }).collect();
+    Features { edges, deg, tan }
+}
+
 /// Garde la moitié du maillage du côté positif de l'axe ; la coupe tombe exactement sur le plan.
 fn clip_half(pos: &[V3], tris: &[[u32; 3]], axis: usize) -> (Vec<V3>, Vec<[u32; 3]>) {
     let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
@@ -4756,6 +4840,7 @@ fn relax(r: &mut Result, v: &[V3], f: &[[u32; 3]], iters: usize, flags: &[u8], s
         }
         best.1
     };
+    let iters = std::env::var("RELAX_N").ok().and_then(|x| x.parse().ok()).unwrap_or(iters);
     for _ in 0..iters {
         let old = r.pos.clone();
         for i in 0..n {
