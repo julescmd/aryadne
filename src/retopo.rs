@@ -1274,6 +1274,29 @@ fn place_cones(g: &mut Graph, f: &[[u32; 3]], geo: &[[f64; 2]], u: &mut [[f64; 2
             }
         }
     }
+    if std::env::var("ALIGN_TEST").is_ok() {
+        // Vérifie le sens : pousser b = ±(I − R)·dp déplace-t-il la singularité de dp ?
+        solve_ext(g, geo, u, &[], &mut [], 1500, 1e-9);
+        for &i in (0..paths.len()).filter(|&i| paths[i].face != u32::MAX).collect::<Vec<_>>().iter().take(6) {
+            let fi = paths[i].face as usize;
+            let (ks, _, _) = g.closure(&f[fi], fi);
+            if ks != 1 && ks != 3 {
+                continue;
+            }
+            let p0 = u[f[fi][0] as usize];
+            for sg in [1i32, -1] {
+                let dp = [1, 0];
+                let r = trot(ks, dp);
+                let b = [sg * (dp[0] - r[0]), sg * (dp[1] - r[1])];
+                push_path(g, f, &paths[i].steps, b);
+                let mut u2 = u.to_vec();
+                solve_ext(g, geo, &mut u2, &[], &mut [], 1500, 1e-9);
+                let p1 = u2[f[fi][0] as usize];
+                eprintln!("  test ks {ks} signe {sg} : {:.2},{:.2} -> {:.2},{:.2}", p0[0], p0[1], p1[0], p1[1]);
+                push_path(g, f, &paths[i].steps, [-b[0], -b[1]]);
+            }
+        }
+    }
     if std::env::var("ALIGN").is_ok() {
         solve_ext(g, geo, u, &[], &mut [], 1500, 1e-9);
         let n = align_cones(g, f, geo, u, &paths, curves, false);
@@ -1571,7 +1594,7 @@ fn piece_detail(pos: &[V3], ts: &[[u32; 3]]) -> f32 {
 /// (les boucles qui « se promènent »). On déplace l'une d'un cran pour qu'elles partagent une
 /// ligne : la ligne va alors d'un pôle à l'autre, comme dans une topologie faite à la main.
 fn align_cones(g: &mut Graph, f: &[[u32; 3]], geo: &[[f64; 2]], u: &[[f64; 2]], paths: &[ConePath], curves: &[Curve], dry: bool) -> usize {
-    let reach: f64 = std::env::var("ALIGN_R").ok().and_then(|x| x.parse().ok()).unwrap_or(8.0);
+    let reach: f64 = std::env::var("ALIGN_R").ok().and_then(|x| x.parse().ok()).unwrap_or(5.0);
     let mut adj: Vec<Vec<(u32, u32)>> = vec![vec![]; g.k.len().max(1)];
     let nv = g.ends.iter().map(|e| e.0.max(e.1) as usize + 1).max().unwrap_or(0);
     adj.resize(nv, vec![]);
@@ -1596,9 +1619,18 @@ fn align_cones(g: &mut Graph, f: &[[u32; 3]], geo: &[[f64; 2]], u: &[[f64; 2]], 
         if ks == 0 || ks == 2 {
             return None;
         }
-        let a = u[f[fi][0] as usize];
+        // Moyenne des trois coins ramenés dans le repère du premier
+        let t = f[fi];
+        let es = g.fe[fi];
+        let (k1, d1) = g.dir(es[0], t[0]);
+        let (k2, d2) = g.dir(es[1], t[1]);
+        let p1 = rf(k1, u[t[1] as usize]);
+        let p2 = rf(k1 + k2, u[t[2] as usize]);
+        let r2 = trot(k1, d2);
+        let a = u[t[0] as usize];
+        let m = [(a[0] + p1[0] + d1[0] as f64 + p2[0] + (d1[0] + r2[0]) as f64) / 3.0, (a[1] + p1[1] + d1[1] as f64 + p2[1] + (d1[1] + r2[1]) as f64) / 3.0];
         let s = shift.borrow().get(&fi).copied().unwrap_or([0, 0]);
-        Some([a[0].round() as i32 + s[0], a[1].round() as i32 + s[1]])
+        Some([m[0].round() as i32 + s[0], m[1].round() as i32 + s[1]])
     };
     let cones: Vec<usize> = (0..paths.len()).filter(|&i| paths[i].face != u32::MAX && pos_of(g, paths[i].face as usize).is_some()).collect();
     let face_of: HashMap<u32, usize> = cones.iter().map(|&i| (f[paths[i].face as usize][0], i)).collect();
@@ -1668,6 +1700,7 @@ fn align_cones(g: &mut Graph, f: &[[u32; 3]], geo: &[[f64; 2]], u: &[[f64; 2]], 
         return 0;
     }
     let mut moved = 0;
+    let mut accepted: Vec<(usize, [i32; 2])> = vec![];
     let mut done: HashSet<usize> = HashSet::new();
     for &i in &cones {
         if done.contains(&i) {
@@ -1686,14 +1719,15 @@ fn align_cones(g: &mut Graph, f: &[[u32; 3]], geo: &[[f64; 2]], u: &[[f64; 2]], 
                 // Déplacer p de dp : la fermeture change de (I − R)·dp, on pousse l'opposé
                 let (ks, _, _) = g.closure(&f[fi], fi);
                 let r = trot(ks, dp);
-                let sg: i32 = if std::env::var("ALIGN_SIGN").is_ok() { 1 } else { -1 };
-                let delta = [sg * (dp[0] - r[0]), sg * (dp[1] - r[1])];
-                push_path(g, f, &paths[i].steps, delta);
+                let delta = [-(dp[0] - r[0]), -(dp[1] - r[1])];
+                // Score avec le déplacement seul (les transports entre repères restent ceux de la
+                // paramétrisation calculée), puis l'écart des anneaux avec le vrai changement d'entiers
                 let old = shift.borrow().get(&fi).copied().unwrap_or([0, 0]);
                 shift.borrow_mut().insert(fi, [old[0] + dp[0], old[1] + dp[1]]);
                 let s1 = score(&neighbours(g, i));
-                let ok = s1 > s0 && mismatch_total(g) <= m0;
                 shift.borrow_mut().insert(fi, old);
+                push_path(g, f, &paths[i].steps, delta);
+                let ok = s1 > s0 && mismatch_total(g) <= m0;
                 push_path(g, f, &paths[i].steps, [-delta[0], -delta[1]]);
                 if ok && best.is_none_or(|b| s1 > b.1) {
                     best = Some((dp, s1));
@@ -1701,18 +1735,22 @@ fn align_cones(g: &mut Graph, f: &[[u32; 3]], geo: &[[f64; 2]], u: &[[f64; 2]], 
             }
         }
         if let Some((dp, _)) = best {
-            let (ks, _, _) = g.closure(&f[fi], fi);
-            let r = trot(ks, dp);
-            let sg: i32 = if std::env::var("ALIGN_SIGN").is_ok() { 1 } else { -1 };
-            push_path(g, f, &paths[i].steps, [sg * (dp[0] - r[0]), sg * (dp[1] - r[1])]);
             let old = shift.borrow().get(&fi).copied().unwrap_or([0, 0]);
             shift.borrow_mut().insert(fi, [old[0] + dp[0], old[1] + dp[1]]);
+            accepted.push((i, dp));
             moved += 1;
             done.insert(i);
             for (j, _) in neighbours(g, i) {
                 done.insert(j);
             }
         }
+    }
+    // Les entiers ne changent qu'à la fin : les repères utilisés pour comparer restent cohérents
+    for (i, dp) in accepted {
+        let fi = paths[i].face as usize;
+        let (ks, _, _) = g.closure(&f[fi], fi);
+        let r = trot(ks, dp);
+        push_path(g, f, &paths[i].steps, [-(dp[0] - r[0]), -(dp[1] - r[1])]);
     }
     moved
 }
