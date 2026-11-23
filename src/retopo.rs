@@ -702,6 +702,11 @@ fn odd(ks: u8, c: [i32; 2]) -> bool {
     }
 }
 
+thread_local! {
+    /// Positions du maillage de calcul, pour les sorties de débogage seulement (FLIP_POS)
+    static DBG_POS: std::cell::RefCell<Vec<V3>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
 /// Triangles repliés dans la carte entière (aire orientée négative).
 fn count_flips(g: &Graph, f: &[[u32; 3]]) -> usize {
     let mut n = 0;
@@ -1026,6 +1031,47 @@ fn cone_paths(g: &mut Graph, f: &[[u32; 3]]) -> Vec<ConePath> {
             list.push((c, steps));
         }
     }
+    // Bords en plus du premier (bras ouvert au poignet, tube ouvert aux deux bouts…) : chacun
+    // donne un degré de liberté entier, la translation de la grille autour de lui. Sans lui, la
+    // grille est forcée de ne pas « tourner » autour du tube et toute la zone se retourne.
+    if std::env::var("NOEXTRABORDERS").is_err() {
+        let nv = g.ends.iter().map(|e| e.0.max(e.1)).max().map(|m| m as usize + 1).unwrap_or(0);
+        let mut ub = Uf((0..nv as u32).collect());
+        let mut bedges = vec![];
+        for e in 0..g.ends.len() {
+            let [fa, fb] = g.ef[e];
+            if !g.nm[e] && (fa == u32::MAX) != (fb == u32::MAX) {
+                let (a, b) = g.ends[e];
+                ub.union(a, b);
+                bedges.push(e as u32);
+            }
+        }
+        // Le bord par lequel sort chaque racine est déjà relié ; un chemin par autre bord
+        let mut done: HashSet<u32> = HashSet::default();
+        for x in 0..nf {
+            if exit[x] != u8::MAX {
+                let e = g.fe[x][exit[x] as usize] as usize;
+                done.insert(ub.find(g.ends[e].0));
+            }
+        }
+        for &e in &bedges {
+            let comp = ub.find(g.ends[e as usize].0);
+            if done.contains(&comp) {
+                continue;
+            }
+            let [fa, fb] = g.ef[e as usize];
+            let x = if fa == u32::MAX { fb } else { fa };
+            if sing[x as usize] || !visited[x as usize] {
+                continue;
+            }
+            done.insert(comp);
+            let mut steps = vec![(x, slot_of(g, x, e))];
+            steps.extend(up(x, u32::MAX));
+            if steps.len() >= 2 {
+                list.push((u32::MAX, steps));
+            }
+        }
+    }
     // Boucles des anses : arbre primal sur les arêtes non traversées, en prenant d'abord
     // celles des triangles singuliers pour que les boucles ne passent pas par eux.
     let nv = g.ends.iter().map(|e| e.1).max().map(|m| m as usize + 1).unwrap_or(0);
@@ -1342,6 +1388,20 @@ fn place_cones(g: &mut Graph, f: &[[u32; 3]], geo: &[[f64; 2]], u: &mut [[f64; 2
             }
             let flips = (0..f.len()).filter(|&fi| g.closure(&f[fi], fi).0 == 0 && param_area_ratio_real(g, f, u, geo_area, fi, Some(&extra)) < 0.0).count();
             eprintln!("  lot {round} : {} singularités libres, {it} itérations, {take} arrondies, {flips} triangles repliés", act.len());
+            if round == 0 && std::env::var("FLIP_POS").is_ok() {
+                DBG_POS.with(|dp| {
+                    let dp = dp.borrow();
+                    let mut out = String::new();
+                    for fi in 0..f.len() {
+                        if g.closure(&f[fi], fi).0 == 0 && param_area_ratio_real(g, f, u, geo_area, fi, Some(&extra)) < 0.0 {
+                            if let Some(p) = dp.get(f[fi][0] as usize) {
+                                out += &format!("{} {} {}\n", p[0], p[1], p[2]);
+                            }
+                        }
+                    }
+                    let _ = std::fs::write(std::env::var("FLIP_POS").unwrap(), out);
+                });
+            }
         }
         for &(_, i, b) in cand.iter().take(take) {
             if b != [0, 0] {
@@ -2585,6 +2645,9 @@ fn remesh_core(pos: &[V3], tris: &[[u32; 3]], guides: &[Vec<V3>], opt: &Options,
         eprintln!("lignes caractéristiques : {} ({} arêtes)", curves.len(), ft.edges.len());
     }
     progress(0.35);
+    if std::env::var("FLIP_POS").is_ok() {
+        DBG_POS.with(|dp| *dp.borrow_mut() = v.clone());
+    }
     stats.unfixed = place_cones(&mut g, &f, &geo, &mut u, &geo_area, &mut curves, debug, progress);
     progress(0.92);
     lap("singularités sur la grille");
