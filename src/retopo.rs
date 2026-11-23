@@ -2047,7 +2047,16 @@ fn remesh_piece(pos: &[V3], tris: &[[u32; 3]], guides: &[Vec<V3>], opt: &Options
         }
     }
     let inflated: Vec<V3> = (0..n).map(|i| add(pos[i], mul(vn[i], push[i]))).collect();
-    let r = remesh_one(&inflated, tris, guides, opt, progress);
+    // Le gonflement laisse de petites cassures partout sur la surface : à l'angle des arêtes
+    // vives habituel, des milliers d'arêtes deviennent des lignes à suivre et se contredisent.
+    // Sur une pièce gonflée on ne suit donc que les bords ouverts (monstre : 17 → 0 quads
+    // repliés, chapeau : 2 → 0 et 94 → 79 pôles).
+    let mut o2 = opt.clone();
+    let inf_sharp: f32 = std::env::var("INF_SHARP").ok().and_then(|x| x.parse().ok()).unwrap_or(180.0);
+    if inf_sharp > 0.0 {
+        o2.sharp_angle = o2.sharp_angle.max(inf_sharp);
+    }
+    let r = remesh_one(&inflated, tris, guides, &o2, progress);
     if let Ok(d) = std::env::var("DUMP_INF") {
         let mut o = String::new();
         for p in &r.pos {
