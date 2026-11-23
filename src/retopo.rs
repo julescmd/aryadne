@@ -3574,15 +3574,17 @@ fn ring_curves(g: &Graph, v: &[V3], n: &[V3], q: &[V3], adj: &[Vec<u32>], aniso:
     let mut seeds: Vec<u32> = best.into_values().collect();
     seeds.sort_by(|a, b| aniso[*b as usize].total_cmp(&aniso[*a as usize]));
     seeds.truncate(1500);
-    let mut covered = vec![false; nv];
+    // Direction des anneaux déjà trouvés près de chaque sommet : un anneau dans l'autre sens
+    // (le long du corps plutôt qu'autour) reste permis au même endroit
+    let mut covered = vec![[0.0f32; 3]; nv];
     let mut out = vec![];
     let max_steps = 4000usize;
     for &s in &seeds {
-        if covered[s as usize] {
-            continue;
-        }
         for pick in 0..2 {
             let mut dir = if pick == 0 { q[s as usize] } else { cross(n[s as usize], q[s as usize]) };
+            if dot(covered[s as usize], dir).abs() > 0.7 {
+                continue;
+            }
             let mut path = vec![s];
             let mut on: HashMap<u32, usize> = HashMap::new();
             on.insert(s, 0);
@@ -3692,15 +3694,20 @@ fn ring_curves(g: &Graph, v: &[V3], n: &[V3], q: &[V3], adj: &[Vec<u32>], aniso:
             // Un anneau par bande de quelques quads : des anneaux trop serrés se contredisent
             let spread: f32 = std::env::var("RING_GAP").ok().and_then(|x| x.parse().ok()).unwrap_or(4.0);
             let mut front: Vec<u32> = path.clone();
-            for &p in &path {
-                covered[p as usize] = true;
+            let mut mark: HashSet<u32> = HashSet::new();
+            for i in 0..m {
+                let t = norm(sub(v[path[(i + 1) % m] as usize], v[path[(i + m - 1) % m] as usize]));
+                covered[path[i] as usize] = t;
+                mark.insert(path[i]);
             }
             while !front.is_empty() {
                 let mut next = vec![];
                 for &x in &front {
                     for &w in &adj[x as usize] {
-                        if !covered[w as usize] && path.iter().any(|&p| len(sub(v[p as usize], v[w as usize])) < h * spread) {
-                            covered[w as usize] = true;
+                        if !mark.contains(&w) && path.iter().any(|&p| len(sub(v[p as usize], v[w as usize])) < h * spread) {
+                            mark.insert(w);
+                            let t = covered[x as usize];
+                            covered[w as usize] = norm(tangent(t, n[w as usize]));
                             next.push(w);
                         }
                     }
@@ -3734,7 +3741,6 @@ fn ring_curves(g: &Graph, v: &[V3], n: &[V3], q: &[V3], adj: &[Vec<u32>], aniso:
                 }
             }
             out.push(Curve { verts: path, links, c0, fixed: None, extra: vec![(m as u32 - 1, 0, last)], ok: true, pin: false });
-            break;
         }
     }
     out
