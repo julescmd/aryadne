@@ -2015,8 +2015,52 @@ fn remesh_piece(pos: &[V3], tris: &[[u32; 3]], guides: &[Vec<V3>], opt: &Options
             push[i] = prev[i].max(avg).max(m * 0.5);
         }
     }
+    // Espace libre devant chaque sommet : dans un coin rentrant (paroi qui rejoint un rebord),
+    // le gonflement ne doit pas traverser la surface d'en face
+    if std::env::var("NOCLEAR").is_err() {
+        use rayon::prelude::*;
+        let maxp = push.iter().cloned().fold(0.0f32, f32::max);
+        let clear: Vec<f32> = (0..n)
+            .into_par_iter()
+            .map(|i| {
+                if push[i] <= 0.0 {
+                    return f32::MAX;
+                }
+                match bvh.closest(pos[i], vn[i], h * 1e-3, 2.5 * maxp + h) {
+                    Some(hit) => hit.t,
+                    None => f32::MAX,
+                }
+            })
+            .collect();
+        let cf: f32 = std::env::var("CLEARF").ok().and_then(|x| x.parse().ok()).unwrap_or(0.4);
+        for i in 0..n {
+            push[i] = push[i].min(clear[i] * cf);
+        }
+        // Lissage léger pour ne pas créer de marche là où la limite s'applique
+        for _ in 0..2 {
+            let prev = push.clone();
+            for i in 0..n {
+                let avg = (prev[i] + nb[i].iter().map(|&j| prev[j as usize]).sum::<f32>()) / (1 + nb[i].len()) as f32;
+                push[i] = prev[i].min(avg.max(prev[i] * 0.5)).min(clear[i] * cf);
+            }
+        }
+    }
     let inflated: Vec<V3> = (0..n).map(|i| add(pos[i], mul(vn[i], push[i]))).collect();
     let r = remesh_one(&inflated, tris, guides, opt, progress);
+    if let Ok(d) = std::env::var("DUMP_INF") {
+        let mut o = String::new();
+        for p in &r.pos {
+            o += &format!("v {} {} {}\n", p[0], p[1], p[2]);
+        }
+        for f in &r.faces {
+            o += "f";
+            for &i in f {
+                o += &format!(" {}", i + 1);
+            }
+            o += "\n";
+        }
+        let _ = std::fs::write(format!("{d}_{}.obj", tris.len()), o);
+    }
     // Retour sur la vraie surface : le point le plus proche sur la version gonflée, même place
     // relative (coordonnées barycentriques) sur l'originale
     let cell = h.max(1e-6);
