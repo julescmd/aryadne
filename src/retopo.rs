@@ -5043,6 +5043,9 @@ mod tests {
         let mut opt = Options::default();
         opt.faces = std::env::var("RETOPO_FACES").ok().and_then(|x| x.parse().ok()).unwrap_or(6000);
         opt.symmetry = std::env::var("RETOPO_SYM").ok().and_then(|x| x.parse().ok()).unwrap_or(0);
+        if let Some(a) = std::env::var("RETOPO_SHARP").ok().and_then(|x| x.parse().ok()) {
+            opt.sharp_angle = a;
+        }
         if let Some(a) = std::env::var("RETOPO_ADAPT").ok().and_then(|x| x.parse().ok()) {
             opt.adaptive = a;
         }
