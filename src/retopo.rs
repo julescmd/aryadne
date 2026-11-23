@@ -9,7 +9,47 @@
 //!    un pas de grille deviennent des arêtes, puis les faces sont lues en tournant autour
 //!    de chaque sommet.
 
-use std::collections::{HashMap, HashSet};
+// Tables à hachage déterministes (même résultat à chaque lancement : la table standard tire une
+// graine au hasard, et l'ordre de parcours changeait la retopo d'un essai à l'autre)
+type HashMap<K, V> = std::collections::HashMap<K, V, std::hash::BuildHasherDefault<FxHasher>>;
+type HashSet<K> = std::collections::HashSet<K, std::hash::BuildHasherDefault<FxHasher>>;
+
+/// Hachage rapide et sans graine (celui de rustc)
+#[derive(Default, Clone, Copy)]
+struct FxHasher(u64);
+
+impl std::hash::Hasher for FxHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    fn write(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.add(b as u64);
+        }
+    }
+    fn write_u8(&mut self, i: u8) {
+        self.add(i as u64);
+    }
+    fn write_u32(&mut self, i: u32) {
+        self.add(i as u64);
+    }
+    fn write_u64(&mut self, i: u64) {
+        self.add(i);
+    }
+    fn write_usize(&mut self, i: usize) {
+        self.add(i as u64);
+    }
+    fn write_i32(&mut self, i: i32) {
+        self.add(i as u32 as u64);
+    }
+}
+
+impl FxHasher {
+    #[inline]
+    fn add(&mut self, w: u64) {
+        self.0 = (self.0.rotate_left(5) ^ w).wrapping_mul(0x51_7c_c1_b7_27_22_0a_95);
+    }
+}
 
 type V3 = [f32; 3];
 
@@ -113,7 +153,7 @@ fn weld(pos: &[V3], tris: &[[u32; 3]]) -> (Vec<V3>, Vec<[u32; 3]>) {
         }
     }
     let eps = (len(sub(hi, lo)) * 1e-6).max(1e-12);
-    let mut map: HashMap<[i64; 3], u32> = HashMap::new();
+    let mut map: HashMap<[i64; 3], u32> = HashMap::default();
     let mut remap = vec![u32::MAX; pos.len()];
     let mut out = vec![];
     let mut used = vec![false; pos.len()];
@@ -158,7 +198,7 @@ pub fn simplify_to(pos: &[V3], tris: &[[u32; 3]], target: usize) -> (Vec<V3>, Ve
         }
     }
     let eps = (len(sub(hi, lo)) * 1e-6).max(1e-12);
-    let mut map: HashMap<[i64; 3], u32> = HashMap::new();
+    let mut map: HashMap<[i64; 3], u32> = HashMap::default();
     let mut wp: Vec<V3> = vec![];
     let remap: Vec<u32> = pos
         .iter()
@@ -212,7 +252,7 @@ fn decimate_ids(mut pos: Vec<V3>, mut tris: Vec<[u32; 3]>, min_len: f32, sharp: 
     }
     let mut alive = vec![true; tris.len()];
     // Sommets de bord
-    let mut count: HashMap<(u32, u32), u8> = HashMap::new();
+    let mut count: HashMap<(u32, u32), u8> = HashMap::default();
     for t in &tris {
         for k in 0..3 {
             let (a, b) = (t[k], t[(k + 1) % 3]);
@@ -377,7 +417,7 @@ fn refine_n(mut pos: Vec<V3>, mut tris: Vec<[u32; 3]>, lim: &dyn Fn(V3) -> f32, 
     for _ in 0..(passes * 3).max(1) {
         // Une arête n'est coupée que si elle est (presque) la plus longue d'un de ses triangles :
         // sans ça, les triangles très allongés se multiplient par centaines de milliers.
-        let mut marked: HashSet<(u32, u32)> = HashSet::new();
+        let mut marked: HashSet<(u32, u32)> = HashSet::default();
         for t in &tris {
             let l = [0, 1, 2].map(|k| len(sub(pos[t[k] as usize], pos[t[(k + 1) % 3] as usize])));
             let longest = l[0].max(l[1]).max(l[2]);
@@ -389,7 +429,7 @@ fn refine_n(mut pos: Vec<V3>, mut tris: Vec<[u32; 3]>, lim: &dyn Fn(V3) -> f32, 
                 }
             }
         }
-        let mut mid: HashMap<(u32, u32), u32> = HashMap::new();
+        let mut mid: HashMap<(u32, u32), u32> = HashMap::default();
         let mut out = Vec::with_capacity(tris.len() * 2);
         for t in &tris {
             let mut m = [u32::MAX; 3];
@@ -509,7 +549,7 @@ struct Graph {
 
 impl Graph {
     fn new(f: &[[u32; 3]]) -> Graph {
-        let mut g = Graph { ends: vec![], k: vec![], d: vec![], ef: vec![], nm: vec![], fe: Vec::with_capacity(f.len()), map: HashMap::new(), w: vec![], pins: vec![] };
+        let mut g = Graph { ends: vec![], k: vec![], d: vec![], ef: vec![], nm: vec![], fe: Vec::with_capacity(f.len()), map: HashMap::default(), w: vec![], pins: vec![] };
         for (fi, t) in f.iter().enumerate() {
             let mut es = [0u32; 3];
             for s in 0..3 {
@@ -728,7 +768,8 @@ fn solve_rows(g: &Graph, geo: &[[f64; 2]], u: &mut [[f64; 2]], paths: &[&ConePat
             ol[s] = [acc[0] * sc_l[s], acc[1] * sc_l[s]];
         }
     };
-    let dot2 = |a: &[[f64; 2]], b: &[[f64; 2]]| -> f64 { a.par_iter().zip(b.par_iter()).with_min_len(CHUNK).map(|(x, y)| x[0] * y[0] + x[1] * y[1]).sum() };
+    // Somme par blocs fixes puis dans l'ordre : le découpage de rayon varie d'un lancement à l'autre
+    let dot2 = |a: &[[f64; 2]], b: &[[f64; 2]]| -> f64 { a.par_chunks(CHUNK).zip(b.par_chunks(CHUNK)).map(|(x, y)| x.iter().zip(y).map(|(x, y)| x[0] * y[0] + x[1] * y[1]).sum::<f64>()).collect::<Vec<f64>>().iter().sum() };
     let axpy = |x: &mut [[f64; 2]], a: f64, p: &[[f64; 2]]| {
         x.par_iter_mut().zip(p.par_iter()).with_min_len(CHUNK).for_each(|(x, p)| {
             x[0] += a * p[0];
@@ -1085,7 +1126,7 @@ fn stiffen(g: &mut Graph, f: &[[u32; 3]], geo: &[[f64; 2]], u: &mut [[f64; 2]], 
                     for fi in 0..nf {
                         if !sing[fi] && param_area_ratio(g, f, u, geo_area, fi) < 0.0 {
                             // distance (en faces) à la singularité la plus proche
-                            let mut seen: HashSet<u32> = HashSet::new();
+                            let mut seen: HashSet<u32> = HashSet::default();
                             let mut front = vec![fi as u32];
                             seen.insert(fi as u32);
                             let mut dist = 5;
@@ -1110,7 +1151,7 @@ fn stiffen(g: &mut Graph, f: &[[u32; 3]], geo: &[[f64; 2]], u: &mut [[f64; 2]], 
                         }
                     }
                     eprintln!("  replis à 0,1,2,3,4 faces d'une singularité, ou plus loin : {near:?}");
-                    let mut cells: HashMap<[i32; 2], (usize, u32)> = HashMap::new();
+                    let mut cells: HashMap<[i32; 2], (usize, u32)> = HashMap::default();
                     for fi in 0..nf {
                         if !sing[fi] && param_area_ratio(g, f, u, geo_area, fi) < 0.0 {
                             let a = f[fi][0];
@@ -1138,7 +1179,7 @@ fn stiffen(g: &mut Graph, f: &[[u32; 3]], geo: &[[f64; 2]], u: &mut [[f64; 2]], 
         if bad.is_empty() {
             break;
         }
-        let mut touched: HashSet<u32> = HashSet::new();
+        let mut touched: HashSet<u32> = HashSet::default();
         for &fi in &bad {
             for &e in &g.fe[fi] {
                 touched.insert(e);
@@ -1408,7 +1449,7 @@ pub fn remesh(pos: &[V3], tris: &[[u32; 3]], guides: &[Vec<V3>], opt: &Options, 
     // le bord d'un chapeau collé à sa calotte) : on garde les deux faces qui continuent le mieux
     // la surface et on détache les autres. Sinon le flux et la grille s'emmêlent à la jonction.
     for _ in 0..4 {
-        let mut ef: HashMap<(u32, u32), Vec<usize>> = HashMap::new();
+        let mut ef: HashMap<(u32, u32), Vec<usize>> = HashMap::default();
         for (i, t) in tris.iter().enumerate() {
             for k in 0..3 {
                 let (a, b) = (t[k], t[(k + 1) % 3]);
@@ -1458,7 +1499,7 @@ pub fn remesh(pos: &[V3], tris: &[[u32; 3]], guides: &[Vec<V3>], opt: &Options, 
         uf.union(t[0], t[1]);
         uf.union(t[1], t[2]);
     }
-    let mut piece_of: HashMap<u32, usize> = HashMap::new();
+    let mut piece_of: HashMap<u32, usize> = HashMap::default();
     let mut pieces: Vec<Vec<[u32; 3]>> = vec![];
     for t in &tris {
         let r = uf.find(t[0]);
@@ -1493,7 +1534,7 @@ pub fn remesh(pos: &[V3], tris: &[[u32; 3]], guides: &[Vec<V3>], opt: &Options, 
             .zip(areas.iter().zip(&weights))
             .map(|(ts, (a, wgt))| {
                 // Sommets de la pièce, renumérotés
-                let mut remap: HashMap<u32, u32> = HashMap::new();
+                let mut remap: HashMap<u32, u32> = HashMap::default();
                 let mut p = vec![];
                 let t2: Vec<[u32; 3]> = ts
                     .iter()
@@ -1515,7 +1556,7 @@ pub fn remesh(pos: &[V3], tris: &[[u32; 3]], guides: &[Vec<V3>], opt: &Options, 
                 let share = opt.faces as f32 * wgt / total;
                 // (seulement pour une pièce fermée : une paroi ouverte n'a pas de volume)
                 let closed = {
-                    let mut c: HashMap<(u32, u32), u8> = HashMap::new();
+                    let mut c: HashMap<(u32, u32), u8> = HashMap::default();
                     for t in &t2 {
                         for k in 0..3 {
                             let (x, y) = (t[k], t[(k + 1) % 3]);
@@ -1571,7 +1612,7 @@ pub fn remesh(pos: &[V3], tris: &[[u32; 3]], guides: &[Vec<V3>], opt: &Options, 
 /// Quantité de détail d'une pièce : somme des angles dièdres × longueur des arêtes (courbure
 /// totale), sans dimension une fois divisée par la racine de l'aire
 fn piece_detail(pos: &[V3], ts: &[[u32; 3]]) -> f32 {
-    let mut first: HashMap<(u32, u32), V3> = HashMap::new();
+    let mut first: HashMap<(u32, u32), V3> = HashMap::default();
     let mut sum = 0.0;
     for t in ts {
         let (a, b, c) = (pos[t[0] as usize], pos[t[1] as usize], pos[t[2] as usize]);
@@ -1613,7 +1654,7 @@ fn align_cones(g: &mut Graph, f: &[[u32; 3]], geo: &[[f64; 2]], u: &[[f64; 2]], 
     // Position entière d'une singularité : le point de grille le plus proche du premier coin de
     // sa face (la face est plus petite qu'une case), dans le repère de ce coin. Les déplacements
     // décidés ici s'ajoutent ensuite (la paramétrisation n'est pas recalculée entre deux).
-    let shift: std::cell::RefCell<HashMap<usize, [i32; 2]>> = std::cell::RefCell::new(HashMap::new());
+    let shift: std::cell::RefCell<HashMap<usize, [i32; 2]>> = std::cell::RefCell::new(HashMap::default());
     let pos_of = |g: &Graph, fi: usize| -> Option<[i32; 2]> {
         let (ks, _, _) = g.closure(&f[fi], fi);
         if ks == 0 || ks == 2 {
@@ -1640,7 +1681,7 @@ fn align_cones(g: &mut Graph, f: &[[u32; 3]], geo: &[[f64; 2]], u: &[[f64; 2]], 
         let fi = paths[i].face as usize;
         let Some(pa) = pos_of(g, fi) else { return vec![] };
         let a0 = f[fi][0];
-        let mut seen: HashMap<u32, (u8, [i32; 2], f64)> = HashMap::new();
+        let mut seen: HashMap<u32, (u8, [i32; 2], f64)> = HashMap::default();
         seen.insert(a0, (0, [0, 0], 0.0));
         let mut queue = std::collections::VecDeque::from([a0]);
         let mut out = vec![];
@@ -1701,7 +1742,7 @@ fn align_cones(g: &mut Graph, f: &[[u32; 3]], geo: &[[f64; 2]], u: &[[f64; 2]], 
     }
     let mut moved = 0;
     let mut accepted: Vec<(usize, [i32; 2])> = vec![];
-    let mut done: HashSet<usize> = HashSet::new();
+    let mut done: HashSet<usize> = HashSet::default();
     for &i in &cones {
         if done.contains(&i) {
             continue;
@@ -1766,7 +1807,7 @@ fn loop_rows(g: &mut Graph, curves: &[Curve], act: &[usize], paths: &[ConePath])
         let Some(m0) = curve_mismatch(g, c) else { continue };
         let edges: Vec<u32> = c.links.iter().chain(c.extra.iter()).map(|l| l.2).collect();
         // Coefficient de chaque composante de d sur chaque arête (différences finies exactes)
-        let mut ce: HashMap<u32, [f64; 2]> = HashMap::new();
+        let mut ce: HashMap<u32, [f64; 2]> = HashMap::default();
         for &e in &edges {
             let saved = g.d[e as usize];
             let mut k = [0.0; 2];
@@ -1801,7 +1842,7 @@ fn guides_on(p: &[V3], guides: &[Vec<V3>], tol: f32) -> Vec<Vec<V3>> {
         return vec![];
     }
     let key = |x: V3| ((x[0] / tol).floor() as i32, (x[1] / tol).floor() as i32, (x[2] / tol).floor() as i32);
-    let mut grid: HashMap<(i32, i32, i32), Vec<u32>> = HashMap::new();
+    let mut grid: HashMap<(i32, i32, i32), Vec<u32>> = HashMap::default();
     for (i, &x) in p.iter().enumerate() {
         grid.entry(key(x)).or_default().push(i as u32);
     }
@@ -1910,7 +1951,7 @@ fn remesh_piece(pos: &[V3], tris: &[[u32; 3]], guides: &[Vec<V3>], opt: &Options
     // relative (coordonnées barycentriques) sur l'originale
     let cell = h.max(1e-6);
     let key3 = |p: V3| [(p[0] / cell).floor() as i64, (p[1] / cell).floor() as i64, (p[2] / cell).floor() as i64];
-    let mut grid: HashMap<[i64; 3], Vec<u32>> = HashMap::new();
+    let mut grid: HashMap<[i64; 3], Vec<u32>> = HashMap::default();
     for (i, t) in tris.iter().enumerate() {
         let c = mul(add(add(inflated[t[0] as usize], inflated[t[1] as usize]), inflated[t[2] as usize]), 1.0 / 3.0);
         grid.entry(key3(c)).or_default().push(i as u32);
@@ -2428,9 +2469,9 @@ fn remesh_core(pos: &[V3], tris: &[[u32; 3]], guides: &[Vec<V3>], opt: &Options,
             _ => {}
         }
     }
-    let mut cluster: HashMap<u32, (V3, V3, f32)> = HashMap::new();
+    let mut cluster: HashMap<u32, (V3, V3, f32)> = HashMap::default();
     // Par groupe : somme et nombre des sommets sur une ligne, et coin éventuel
-    let mut fcl: HashMap<u32, (V3, f32, Option<V3>)> = HashMap::new();
+    let mut fcl: HashMap<u32, (V3, f32, Option<V3>)> = HashMap::default();
     for i in 0..n_v {
         let r = uf.find(i as u32);
         let e = cluster.entry(r).or_insert(([0.0; 3], [0.0; 3], 0.0));
@@ -2447,7 +2488,7 @@ fn remesh_core(pos: &[V3], tris: &[[u32; 3]], guides: &[Vec<V3>], opt: &Options,
             }
         }
     }
-    let mut id: HashMap<u32, u32> = HashMap::new();
+    let mut id: HashMap<u32, u32> = HashMap::default();
     let mut out_pos: Vec<V3> = vec![];
     let mut out_n: Vec<V3> = vec![];
     // 0 : sommet libre, 1 : sur une ligne caractéristique, 2 : coin (ne bouge pas)
@@ -2473,7 +2514,7 @@ fn remesh_core(pos: &[V3], tris: &[[u32; 3]], guides: &[Vec<V3>], opt: &Options,
         }
         out_n.push(norm(n));
     }
-    let mut edges: HashSet<(u32, u32)> = HashSet::new();
+    let mut edges: HashSet<(u32, u32)> = HashSet::default();
     for (a, b) in unit_edges {
         let (a, b) = (id[&uf.find(a)], id[&uf.find(b)]);
         if a != b {
@@ -2581,7 +2622,7 @@ fn remesh_core(pos: &[V3], tris: &[[u32; 3]], guides: &[Vec<V3>], opt: &Options,
     // Pôles : sommets intérieurs dont la valence n'est pas 4
     {
         let mut val = vec![0u32; res.pos.len()];
-        let mut ec: HashMap<(u32, u32), u8> = HashMap::new();
+        let mut ec: HashMap<(u32, u32), u8> = HashMap::default();
         for f in &res.faces {
             for k in 0..f.len() {
                 val[f[k] as usize] += 1;
@@ -2610,11 +2651,11 @@ fn remesh_core(pos: &[V3], tris: &[[u32; 3]], guides: &[Vec<V3>], opt: &Options,
 /// qu'un, régulier. On répète jusqu'à un centre à 4 arêtes : un capuchon propre à 4 pôles.
 fn fix_stars(r: &mut Result) {
     let mut any = false;
-    let mut tried: HashSet<(u32, u32)> = HashSet::new();
+    let mut tried: HashSet<(u32, u32)> = HashSet::default();
     for _ in 0..200 {
         let nv = r.pos.len();
-        let mut nb: Vec<HashSet<u32>> = vec![HashSet::new(); nv];
-        let mut ef: HashMap<(u32, u32), Vec<u32>> = HashMap::new();
+        let mut nb: Vec<HashSet<u32>> = vec![HashSet::default(); nv];
+        let mut ef: HashMap<(u32, u32), Vec<u32>> = HashMap::default();
         for (fi, f) in r.faces.iter().enumerate() {
             for k in 0..f.len() {
                 let (a, b) = (f[k], f[(k + 1) % f.len()]);
@@ -2700,7 +2741,7 @@ fn fix_stars(r: &mut Result) {
             g.len() == f.len()
         });
         if ok {
-            let mut nb2: HashMap<u32, HashSet<u32>> = HashMap::new();
+            let mut nb2: HashMap<u32, HashSet<u32>> = HashMap::default();
             for f in &r.faces {
                 for k in 0..f.len() {
                     let (a, b) = (f[k], f[(k + 1) % f.len()]);
@@ -2740,7 +2781,7 @@ fn fix_stars(r: &mut Result) {
 /// Petits trous laissés par l'extraction (quelques faces manquantes) : refermés par des quads
 /// autour d'un sommet central, sauf là où la surface de départ avait elle-même un bord.
 fn fill_holes(r: &mut Result, ov: &[V3], of: &[[u32; 3]], h: f32) {
-    let mut ec: HashMap<(u32, u32), u8> = HashMap::new();
+    let mut ec: HashMap<(u32, u32), u8> = HashMap::default();
     for t in of {
         for k in 0..3 {
             let (a, b) = (t[k], t[(k + 1) % 3]);
@@ -2749,7 +2790,7 @@ fn fill_holes(r: &mut Result, ov: &[V3], of: &[[u32; 3]], h: f32) {
     }
     let cell = h * 2.0;
     let key = |x: V3| ((x[0] / cell).floor() as i32, (x[1] / cell).floor() as i32, (x[2] / cell).floor() as i32);
-    let mut border: HashSet<(i32, i32, i32)> = HashSet::new();
+    let mut border: HashSet<(i32, i32, i32)> = HashSet::default();
     for (&(a, b), &c) in &ec {
         if c == 1 {
             border.insert(key(ov[a as usize]));
@@ -2761,15 +2802,15 @@ fn fill_holes(r: &mut Result, ov: &[V3], of: &[[u32; 3]], h: f32) {
         (-1..=1).any(|i| (-1..=1).any(|j| (-1..=1).any(|k| border.contains(&(a + i, b + j, c + k)))))
     };
     // Arêtes de bord orientées (sens de la face), parcourues à l'envers pour suivre le trou
-    let mut cnt: HashMap<(u32, u32), u32> = HashMap::new();
+    let mut cnt: HashMap<(u32, u32), u32> = HashMap::default();
     for f in &r.faces {
         for k in 0..f.len() {
             let (a, b) = (f[k], f[(k + 1) % f.len()]);
             *cnt.entry((a.min(b), a.max(b))).or_insert(0) += 1;
         }
     }
-    let mut next: HashMap<u32, u32> = HashMap::new();
-    let mut bad: HashSet<u32> = HashSet::new();
+    let mut next: HashMap<u32, u32> = HashMap::default();
+    let mut bad: HashSet<u32> = HashSet::default();
     for f in &r.faces {
         for k in 0..f.len() {
             let (a, b) = (f[k], f[(k + 1) % f.len()]);
@@ -2778,7 +2819,7 @@ fn fill_holes(r: &mut Result, ov: &[V3], of: &[[u32; 3]], h: f32) {
             }
         }
     }
-    let mut seen: HashSet<u32> = HashSet::new();
+    let mut seen: HashSet<u32> = HashSet::default();
     let mut added = vec![];
     let starts: Vec<u32> = next.keys().copied().collect();
     for s in starts {
@@ -2838,7 +2879,7 @@ fn make_manifold(r: &mut Result) {
         len(a)
     };
     for _ in 0..3 {
-        let mut ef: HashMap<(u32, u32), Vec<usize>> = HashMap::new();
+        let mut ef: HashMap<(u32, u32), Vec<usize>> = HashMap::default();
         for (fi, f) in r.faces.iter().enumerate() {
             for k in 0..f.len() {
                 let (a, b) = (f[k], f[(k + 1) % f.len()]);
@@ -2868,7 +2909,7 @@ fn make_manifold(r: &mut Result) {
         });
     }
     // Orientation cohérente par composante (parcours en largeur)
-    let mut ef: HashMap<(u32, u32), Vec<usize>> = HashMap::new();
+    let mut ef: HashMap<(u32, u32), Vec<usize>> = HashMap::default();
     for (fi, f) in r.faces.iter().enumerate() {
         for k in 0..f.len() {
             let (a, b) = (f[k], f[(k + 1) % f.len()]);
@@ -2933,7 +2974,7 @@ struct Level {
 /// Regroupe les sommets par cellule de grille (et par orientation de normale, pour ne pas
 /// fusionner les deux faces d'une paroi mince).
 fn coarsen(fine: &mut Level, cell: f32) -> Level {
-    let mut map: HashMap<[i32; 4], u32> = HashMap::new();
+    let mut map: HashMap<[i32; 4], u32> = HashMap::default();
     let mut v: Vec<V3> = vec![];
     let mut n: Vec<V3> = vec![];
     let mut cnt: Vec<f32> = vec![];
@@ -2959,7 +3000,7 @@ fn coarsen(fine: &mut Level, cell: f32) -> Level {
         v[i] = mul(v[i], 1.0 / cnt[i]);
         n[i] = norm(n[i]);
     }
-    let mut adj: Vec<HashSet<u32>> = vec![HashSet::new(); v.len()];
+    let mut adj: Vec<HashSet<u32>> = vec![HashSet::default(); v.len()];
     for (i, l) in fine.adj.iter().enumerate() {
         for &j in l {
             let (a, b) = (parent[i], parent[j as usize]);
@@ -3398,7 +3439,7 @@ fn curvature(v: &[V3], f: &[[u32; 3]], n: &[V3], adj: &[Vec<u32>], h: f32) -> (V
     let mut area = vec![0.0f32; nv];
     let mut fnrm = Vec::with_capacity(f.len());
     let mut cen = Vec::with_capacity(f.len());
-    let mut owner: HashMap<(u32, u32), u32> = HashMap::with_capacity(f.len() * 3 / 2);
+    let mut owner: HashMap<(u32, u32), u32> = HashMap::with_capacity_and_hasher(f.len() * 3 / 2, Default::default());
     for (fi, tri) in f.iter().enumerate() {
         let (a, b, c) = (v[tri[0] as usize], v[tri[1] as usize], v[tri[2] as usize]);
         let cr = cross(sub(b, a), sub(c, a));
@@ -3505,7 +3546,7 @@ fn curvature(v: &[V3], f: &[[u32; 3]], n: &[V3], adj: &[Vec<u32>], h: f32) -> (V
 /// x → y forment un triangle (a, x, y) avec a dans K. C'est exact même quand la géométrie
 /// est pincée ou repliée, contrairement à un tri par angles.
 fn rotations(f: &[[u32; 3]], cl: &[u32], n: usize, edges: &HashSet<(u32, u32)>) -> (Vec<Option<Vec<u32>>>, Vec<bool>) {
-    let mut arcs: Vec<HashMap<u32, u32>> = vec![HashMap::new(); n];
+    let mut arcs: Vec<HashMap<u32, u32>> = vec![HashMap::default(); n];
     let mut bad = vec![false; n];
     for t in f {
         for r in 0..3 {
@@ -3586,7 +3627,7 @@ fn extract_faces(pos: &[V3], nrm: &[V3], edges: &HashSet<(u32, u32)>, rot: &[Opt
         let k = l.iter().position(|&x| x == u)?;
         Some(l[(k + l.len() - 1) % l.len()])
     };
-    let mut used: HashSet<(u32, u32)> = HashSet::new();
+    let mut used: HashSet<(u32, u32)> = HashSet::default();
     let mut faces = vec![];
     for a in 0..n as u32 {
         for &b in &nb[a as usize].clone() {
@@ -3623,7 +3664,7 @@ fn extract_faces(pos: &[V3], nrm: &[V3], edges: &HashSet<(u32, u32)>, rot: &[Opt
         }
     }
     // Doublons (même face trouvée deux fois dans des sens opposés)
-    let mut seen = HashSet::new();
+    let mut seen = HashSet::default();
     faces.retain(|f| {
         let mut k = f.clone();
         k.sort();
@@ -3645,7 +3686,7 @@ struct Features {
 }
 
 fn features(v: &[V3], f: &[[u32; 3]], angle_deg: f32, min_len: f32) -> Features {
-    let mut map: HashMap<(u32, u32), (u8, V3)> = HashMap::new();
+    let mut map: HashMap<(u32, u32), (u8, V3)> = HashMap::default();
     let cosa = angle_deg.to_radians().cos();
     let mut edges = vec![];
     for t in f {
@@ -3673,7 +3714,7 @@ fn features(v: &[V3], f: &[[u32; 3]], angle_deg: f32, min_len: f32) -> Features 
         for &(a, b) in &edges {
             uf.union(a, b);
         }
-        let mut total: HashMap<u32, f32> = HashMap::new();
+        let mut total: HashMap<u32, f32> = HashMap::default();
         for &(a, b) in &edges {
             *total.entry(uf.find(a)).or_insert(0.0) += len(sub(v[a as usize], v[b as usize]));
         }
@@ -3710,7 +3751,7 @@ fn clip_half(pos: &[V3], tris: &[[u32; 3]], axis: usize) -> (Vec<V3>, Vec<[u32; 
             p[axis] = 0.0;
         }
     }
-    let mut cut: HashMap<(u32, u32), u32> = HashMap::new();
+    let mut cut: HashMap<(u32, u32), u32> = HashMap::default();
     let mut out = vec![];
     for t in tris {
         let ins = [pos[t[0] as usize][axis] >= 0.0, pos[t[1] as usize][axis] >= 0.0, pos[t[2] as usize][axis] >= 0.0];
@@ -3759,7 +3800,7 @@ fn clip_half(pos: &[V3], tris: &[[u32; 3]], axis: usize) -> (Vec<V3>, Vec<[u32; 
 fn mirror(r: &mut Result, axis: usize, tol: f32) {
     let n = r.pos.len();
     // Les sommets du bord de la demi-surface proches du plan sont ramenés dessus
-    let mut ec: HashMap<(u32, u32), u8> = HashMap::new();
+    let mut ec: HashMap<(u32, u32), u8> = HashMap::default();
     for f in &r.faces {
         for k in 0..f.len() {
             let (a, b) = (f[k], f[(k + 1) % f.len()]);
@@ -3828,7 +3869,7 @@ fn auto_guides(v: &[V3], n: &[V3], adj: &[Vec<u32>], dir: &[V3], ani: &[f32], h:
     }
     let nv = v.len();
     let cell = h * 3.0;
-    let mut best: HashMap<(i32, i32, i32), u32> = HashMap::new();
+    let mut best: HashMap<(i32, i32, i32), u32> = HashMap::default();
     for i in 0..nv {
         if ani[i] < t * 1.5 || adj[i].len() < 3 {
             continue;
@@ -3863,7 +3904,7 @@ fn auto_guides(v: &[V3], n: &[V3], adj: &[Vec<u32>], dir: &[V3], ani: &[f32], h:
         }
         let mut d = dir[s as usize];
         let mut path = vec![s];
-        let mut on: HashMap<u32, usize> = HashMap::new();
+        let mut on: HashMap<u32, usize> = HashMap::default();
         on.insert(s, 0);
         let (mut cur, mut length, mut weak) = (s, 0.0f32, 0);
         let mut closed = false;
@@ -3952,7 +3993,7 @@ fn ring_curves(g: &Graph, v: &[V3], n: &[V3], q: &[V3], adj: &[Vec<u32>], aniso:
     let nv = v.len();
     let cell = h * 4.0;
     let amin: f32 = std::env::var("RING_A").ok().and_then(|x| x.parse().ok()).unwrap_or(0.02);
-    let mut best: HashMap<(i32, i32, i32), u32> = HashMap::new();
+    let mut best: HashMap<(i32, i32, i32), u32> = HashMap::default();
     for i in 0..nv {
         if aniso[i] < amin || adj[i].len() < 3 {
             continue;
@@ -3978,7 +4019,7 @@ fn ring_curves(g: &Graph, v: &[V3], n: &[V3], q: &[V3], adj: &[Vec<u32>], aniso:
                 continue;
             }
             let mut path = vec![s];
-            let mut on: HashMap<u32, usize> = HashMap::new();
+            let mut on: HashMap<u32, usize> = HashMap::default();
             on.insert(s, 0);
             let mut cur = s;
             let mut length = 0.0;
@@ -4004,7 +4045,7 @@ fn ring_curves(g: &Graph, v: &[V3], n: &[V3], q: &[V3], adj: &[Vec<u32>], aniso:
                     // chemin sur les arêtes (quelques arêtes, hors du chemin déjà fait)
                     let back = sub(v[s as usize], v[c]);
                     if len(back) < h * 2.0 && dot(back, dir) > 0.0 {
-                        let mut prev: HashMap<u32, u32> = HashMap::new();
+                        let mut prev: HashMap<u32, u32> = HashMap::default();
                         let mut queue = std::collections::VecDeque::from([cur]);
                         prev.insert(cur, cur);
                         let mut found = false;
@@ -4086,7 +4127,7 @@ fn ring_curves(g: &Graph, v: &[V3], n: &[V3], q: &[V3], adj: &[Vec<u32>], aniso:
             // Un anneau par bande de quelques quads : des anneaux trop serrés se contredisent
             let spread: f32 = std::env::var("RING_GAP").ok().and_then(|x| x.parse().ok()).unwrap_or(4.0);
             let mut front: Vec<u32> = path.clone();
-            let mut mark: HashSet<u32> = HashSet::new();
+            let mut mark: HashSet<u32> = HashSet::default();
             for i in 0..m {
                 let t = norm(sub(v[path[(i + 1) % m] as usize], v[path[(i + m - 1) % m] as usize]));
                 covered[path[i] as usize] = t;
@@ -4156,12 +4197,12 @@ fn build_curves(g: &Graph, ft: &Features, n: &[V3], q: &[V3]) -> Vec<Curve> {
             continue;
         }
         let mut verts = vec![s as u32];
-        let mut index: HashMap<u32, u32> = HashMap::new();
+        let mut index: HashMap<u32, u32> = HashMap::default();
         index.insert(s as u32, 0);
         seen[s] = true;
         let mut links = vec![];
         let mut extra = vec![];
-        let mut used: HashSet<u32> = HashSet::new();
+        let mut used: HashSet<u32> = HashSet::default();
         let mut k = 0;
         while k < verts.len() {
             let a = verts[k];
@@ -4283,7 +4324,7 @@ fn sanitize(faces: Vec<Vec<u32>>) -> Vec<Vec<u32>> {
         if f.len() < 3 {
             continue;
         }
-        let mut seen: HashMap<u32, usize> = HashMap::new();
+        let mut seen: HashMap<u32, usize> = HashMap::default();
         let mut split = None;
         for (i, &v) in f.iter().enumerate() {
             if let Some(&j) = seen.get(&v) {
@@ -4308,7 +4349,7 @@ fn sanitize(faces: Vec<Vec<u32>>) -> Vec<Vec<u32>> {
 
 /// Sommets intérieurs de valence 2 (« doublets ») : les deux faces qui les entourent fusionnent.
 fn remove_doublets(faces: &mut Vec<Vec<u32>>) -> bool {
-    let mut inc: HashMap<u32, Vec<(u32, u32)>> = HashMap::new();
+    let mut inc: HashMap<u32, Vec<(u32, u32)>> = HashMap::default();
     for (fi, f) in faces.iter().enumerate() {
         for (k, &v) in f.iter().enumerate() {
             inc.entry(v).or_default().push((fi as u32, k as u32));
@@ -4376,7 +4417,7 @@ fn split_even(pos: &[V3], faces: Vec<Vec<u32>>) -> Vec<Vec<u32>> {
 fn pair_odd(pos: &mut Vec<V3>, mut faces: Vec<Vec<u32>>) -> Vec<Vec<u32>> {
     for _ in 0..faces.len() {
         let Some(start) = faces.iter().position(|f| f.len() % 2 == 1) else { break };
-        let mut by_edge: HashMap<(u32, u32), Vec<u32>> = HashMap::new();
+        let mut by_edge: HashMap<(u32, u32), Vec<u32>> = HashMap::default();
         for (fi, f) in faces.iter().enumerate() {
             for k in 0..f.len() {
                 let (a, b) = (f[k], f[(k + 1) % f.len()]);
@@ -4384,7 +4425,7 @@ fn pair_odd(pos: &mut Vec<V3>, mut faces: Vec<Vec<u32>>) -> Vec<Vec<u32>> {
             }
         }
         // Parcours en largeur jusqu'à une autre face impaire ou un bord
-        let mut prev: HashMap<u32, (u32, (u32, u32))> = HashMap::new();
+        let mut prev: HashMap<u32, (u32, (u32, u32))> = HashMap::default();
         let mut queue = std::collections::VecDeque::new();
         queue.push_back(start as u32);
         prev.insert(start as u32, (u32::MAX, (0, 0)));
@@ -4430,7 +4471,7 @@ fn pair_odd(pos: &mut Vec<V3>, mut faces: Vec<Vec<u32>>) -> Vec<Vec<u32>> {
         }
         chain.reverse();
         // chain[i] = (face atteinte, arête d'entrée) ; la face de départ sort par chain[0].1
-        let mut mids: HashMap<(u32, u32), u32> = HashMap::new();
+        let mut mids: HashMap<(u32, u32), u32> = HashMap::default();
         let mut mid = |key: (u32, u32), pos: &mut Vec<V3>| -> u32 {
             *mids.entry(key).or_insert_with(|| {
                 pos.push(mul(add(pos[key.0 as usize], pos[key.1 as usize]), 0.5));
@@ -4456,7 +4497,7 @@ fn pair_odd(pos: &mut Vec<V3>, mut faces: Vec<Vec<u32>>) -> Vec<Vec<u32>> {
         }
         path.push((face, inn, border));
         let mut new_faces = vec![];
-        let mut dead: HashSet<u32> = HashSet::new();
+        let mut dead: HashSet<u32> = HashSet::default();
         for (fi, e_in, e_out) in path {
             let f = faces[fi as usize].clone();
             dead.insert(fi);
@@ -4526,7 +4567,7 @@ fn cleanup_quads(pos: &mut Vec<V3>, faces: Vec<Vec<u32>>) -> Vec<Vec<u32>> {
 /// Chaque face à n côtés devient n quads (centre + milieux des arêtes).
 fn split_quads(r: &Result) -> Result {
     let mut pos = r.pos.clone();
-    let mut mid: HashMap<(u32, u32), u32> = HashMap::new();
+    let mut mid: HashMap<(u32, u32), u32> = HashMap::default();
     let mut faces = Vec::with_capacity(r.faces.len() * 4);
     for f in &r.faces {
         let n = f.len();
@@ -4552,7 +4593,7 @@ fn split_quads(r: &Result) -> Result {
 /// Lissage léger puis reprojection sur la surface d'origine (sommet dense le plus proche).
 fn relax(r: &mut Result, v: &[V3], f: &[[u32; 3]], iters: usize, flags: &[u8], segs: &[(V3, V3)], snap: f32) {
     let n = r.pos.len();
-    let mut nb: Vec<HashSet<u32>> = vec![HashSet::new(); n];
+    let mut nb: Vec<HashSet<u32>> = vec![HashSet::default(); n];
     for face in &r.faces {
         for k in 0..face.len() {
             let (a, b) = (face[k], face[(k + 1) % face.len()]);
@@ -4570,7 +4611,7 @@ fn relax(r: &mut Result, v: &[V3], f: &[[u32; 3]], iters: usize, flags: &[u8], s
     }
     let cell = ((hi[0] - lo[0]).max(hi[1] - lo[1]).max(hi[2] - lo[2]) / 48.0).max(1e-6);
     let key = |p: V3| [((p[0] - lo[0]) / cell) as i32, ((p[1] - lo[1]) / cell) as i32, ((p[2] - lo[2]) / cell) as i32];
-    let mut grid: HashMap<[i32; 3], Vec<u32>> = HashMap::new();
+    let mut grid: HashMap<[i32; 3], Vec<u32>> = HashMap::default();
     for (ti, t) in f.iter().enumerate() {
         let c = mul(add(add(v[t[0] as usize], v[t[1] as usize]), v[t[2] as usize]), 1.0 / 3.0);
         grid.entry(key(c)).or_default().push(ti as u32);
@@ -4900,7 +4941,7 @@ mod tests {
             assert!(r.pos.iter().any(|b| len(sub(*b, m)) < 1e-4), "pas de symétrique pour {a:?}");
         }
         // Maillage fermé : chaque arête a deux faces
-        let mut ec: HashMap<(u32, u32), u8> = HashMap::new();
+        let mut ec: HashMap<(u32, u32), u8> = HashMap::default();
         for f in &r.faces {
             for k in 0..f.len() {
                 let (a, b) = (f[k], f[(k + 1) % f.len()]);
