@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod cloud;
+mod keymap;
 mod bridge;
 mod layout;
 mod icons;
@@ -1855,7 +1856,7 @@ impl App {
     }
 
     fn shortcuts(&mut self, ctx: &egui::Context) {
-        if self.vault.is_none() || self.dialog.is_some() {
+        if self.vault.is_none() || self.dialog.is_some() || keymap::capturing(ctx) {
             return;
         }
         let pressed = |m: Modifiers, k: Key| ctx.input_mut(|i| i.consume_shortcut(&KeyboardShortcut::new(m, k)));
@@ -1888,32 +1889,32 @@ impl App {
                 self.multi.clear();
             }
         }
-        if pressed(Modifiers::COMMAND | Modifiers::SHIFT, Key::P) || pressed(Modifiers::COMMAND, Key::K) {
+        if keymap::pressed(ctx, "palette") {
             self.palette = Some((String::new(), 0));
         }
-        if pressed(Modifiers::COMMAND, Key::P) {
+        if keymap::pressed(ctx, "switcher") {
             self.switcher = Some((String::new(), 0));
         }
-        if pressed(Modifiers::COMMAND, Key::J) {
+        if keymap::pressed(ctx, "daily") {
             self.daily_note();
         }
-        if pressed(Modifiers::COMMAND, Key::Backslash) {
+        if keymap::pressed(ctx, "split") {
             self.toggle_split();
         }
-        if pressed(Modifiers::COMMAND, Key::N) {
+        if keymap::pressed(ctx, "new_note") {
             self.new_note();
         }
-        if pressed(Modifiers::COMMAND | Modifiers::SHIFT, Key::F) {
+        if keymap::pressed(ctx, "search") {
             self.view = Some(View::Search);
             self.search.last_query.clear();
         }
-        if pressed(Modifiers::COMMAND, Key::L) {
+        if keymap::pressed(ctx, "assistant") {
             self.assistant_open = !self.assistant_open;
         }
-        if pressed(Modifiers::COMMAND, Key::B) {
+        if keymap::pressed(ctx, "explorer") {
             self.explorer_open = !self.explorer_open;
         }
-        if pressed(Modifiers::COMMAND | Modifiers::SHIFT, Key::M) {
+        if keymap::pressed(ctx, "compact") {
             self.compact = !self.compact;
         }
         let text_open = self.view() == View::Files && self.current().is_some_and(|d| matches!(d.content, Content::Text(_)));
@@ -1925,7 +1926,7 @@ impl App {
         if text_open && pressed(Modifiers::ALT | Modifiers::SHIFT, Key::F) {
             self.format_current();
         }
-        if pressed(Modifiers::COMMAND, Key::Backtick) {
+        if keymap::pressed(ctx, "terminal") {
             self.toggle_terminal();
         }
         if text_open && pressed(Modifiers::COMMAND, Key::G) {
@@ -1947,10 +1948,10 @@ impl App {
         // Ctrl+Page précédente / suivante : espace voisin (comme dans Blender)
         let n_ws = self.ws.list.len();
         if n_ws > 1 {
-            if pressed(Modifiers::COMMAND, Key::PageDown) {
+            if keymap::pressed(ctx, "next_ws") {
                 let i = (self.ws.current + 1) % n_ws;
                 self.ws_switch(i, ctx);
-            } else if pressed(Modifiers::COMMAND, Key::PageUp) {
+            } else if keymap::pressed(ctx, "prev_ws") {
                 let i = (self.ws.current + n_ws - 1) % n_ws;
                 self.ws_switch(i, ctx);
             }
@@ -1958,9 +1959,9 @@ impl App {
         // Ctrl+Tab / Ctrl+Maj+Tab : onglet suivant / précédent
         if !self.docs.is_empty() {
             let n = self.docs.len();
-            if pressed(Modifiers::COMMAND | Modifiers::SHIFT, Key::Tab) {
+            if keymap::pressed(ctx, "prev_tab") {
                 self.active = Some((self.active.unwrap_or(0) + n - 1) % n);
-            } else if pressed(Modifiers::COMMAND, Key::Tab) {
+            } else if keymap::pressed(ctx, "next_tab") {
                 self.active = Some((self.active.unwrap_or(0) + 1) % n);
             }
         }
@@ -1974,7 +1975,7 @@ impl App {
             }
         }
         // Ctrl+Maj+S : enregistrer une copie ailleurs (l'original reste), et l'ouvrir
-        if pressed(Modifiers::COMMAND | Modifiers::SHIFT, Key::S) {
+        if keymap::pressed(ctx, "save_copy") {
             if let Some(i) = self.active {
                 self.save_copy_as(i);
             }
@@ -1996,7 +1997,7 @@ impl App {
                 }
             }
         }
-        if pressed(Modifiers::COMMAND, Key::W) {
+        if keymap::pressed(ctx, "close_tab") {
             if let Some(i) = self.active {
                 self.actions.push(Action::Close(i));
             }

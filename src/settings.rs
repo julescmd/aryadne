@@ -528,7 +528,10 @@ impl App {
 
 fn tab_shortcuts(ui: &mut egui::Ui) {
     let p = theme::pal();
-    ui.label(caps(&crate::i18n::t("raccourcis")));
+    ui.label(caps(&crate::i18n::t("raccourcis globaux")));
+    crate::keymap::settings_ui(ui);
+    ui.add_space(16.0);
+    ui.label(caps(&crate::i18n::t("autres raccourcis")));
     let rows = [
         ("Ctrl+P", "ouvrir un fichier, ou créer une note"),
         ("Ctrl+N", "nouvelle note"),

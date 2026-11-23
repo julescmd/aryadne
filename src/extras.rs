@@ -301,7 +301,21 @@ impl App {
             })
             .collect();
         scored.sort_by(|a, b| b.0.cmp(&a.0));
-        let mut matches: Vec<(String, String, Option<Cmd>)> = scored.into_iter().map(|(_, (l, k, c))| (crate::i18n::t(l), k.to_string(), Some(c))).collect();
+        // Raccourcis modifiables : ceux de la carte des raccourcis, pas ceux écrits en dur
+        let live_keys = |l: &str, k: &str| -> String {
+            let id = match l {
+                "aller : recherche" => "search",
+                "nouvelle note" => "new_note",
+                "note du jour" => "daily",
+                "assistant IA" => "assistant",
+                "mode compact" => "compact",
+                "vue côte à côte" => "split",
+                "fichier : fermer l'onglet" => "close_tab",
+                _ => return k.to_string(),
+            };
+            crate::keymap::text(id)
+        };
+        let mut matches: Vec<(String, String, Option<Cmd>)> = scored.into_iter().map(|(_, (l, k, c))| (crate::i18n::t(l), live_keys(l, k), Some(c))).collect();
         let labels: Vec<&'static str> = self.commands().into_iter().map(|c| c.0).collect();
         // Fichiers du coffre : « ouvrir » directement depuis la palette
         let mut files: Vec<(i32, String)> = vec![];
