@@ -264,7 +264,7 @@ impl App {
                     if let Some(a) = active {
                         self.open(map(&a));
                     }
-                    self.toast = Some((format!("{} {} · {fixed} {}", renamed.len(), crate::i18n::t("fichier(s) renommé(s)"), crate::i18n::t("fichier(s) corrigé(s) pour suivre les nouveaux noms")), Instant::now()));
+                    self.toast = Some((format!("{} {} · {fixed} {}", renamed.len(), crate::i18n::t_mid("fichier(s) renommé(s)"), crate::i18n::t_mid("fichier(s) corrigé(s) pour suivre les nouveaux noms")), Instant::now()));
                 }
             }
             Cmd::NewMontage => self.new_untitled(crate::formats::ext("seq"), |p| crate::montage::Project::default().write(p)),

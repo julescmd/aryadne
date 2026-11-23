@@ -2007,7 +2007,7 @@ impl Edit {
         ui.label(RichText::new(crate::i18n::t("clic : choisir une arête · Maj : ajouter · Alt : boucle · Ctrl : chemin le plus court · clic droit ou Ctrl+E : menu")).color(p.muted).size(10.0));
         ui.horizontal_wrapped(|ui| {
             let n = self.tools.esel.len();
-            ui.label(RichText::new(format!("{n} {}", crate::i18n::t("arête(s) choisie(s)"))).size(10.5));
+            ui.label(RichText::new(format!("{n} {}", crate::i18n::t_mid("arête(s) choisie(s)"))).size(10.5));
             if ui.add_enabled(n > 0, egui::Button::new(crate::i18n::t("marquer comme couture"))).clicked() {
                 self.mark_seams(true);
             }
@@ -2172,7 +2172,7 @@ impl Edit {
         ui.label(RichText::new(crate::i18n::t("Dessine des guides sur le modèle (glisser) : les boucles de quads suivront tes traits. Maj ou clic droit : tourner la vue.")).color(p.muted).size(11.0));
         ui.add_space(4.0);
         ui.horizontal(|ui| {
-            ui.label(RichText::new(format!("{} {}", self.data.guides.len(), crate::i18n::t("guide(s)"))).strong());
+            ui.label(RichText::new(format!("{} {}", self.data.guides.len(), crate::i18n::t_mid("guide(s)"))).strong());
             if ui.small_button(crate::i18n::t("annuler le dernier")).clicked() && self.data.guides.pop().is_some() {
                 self.changed();
             }
@@ -2186,7 +2186,7 @@ impl Edit {
         // Pinceau de densité
         ui.horizontal(|ui| {
             ui.toggle_value(&mut self.tools.density_brush, crate::i18n::t("pinceau de densité")).on_hover_text(crate::i18n::t("Peins sur le modèle là où il faut plus de quads (visage, mains, articulations) ou moins (dos, crâne)."));
-            ui.label(RichText::new(format!("{} {}", self.data.density.len(), crate::i18n::t("touche(s)"))).size(10.5).color(p.muted));
+            ui.label(RichText::new(format!("{} {}", self.data.density.len(), crate::i18n::t_mid("touche(s)"))).size(10.5).color(p.muted));
             if ui.small_button(crate::i18n::t("effacer la densité")).clicked() {
                 self.data.density.clear();
                 self.changed();
@@ -2538,7 +2538,7 @@ impl Edit {
             if ui.add_enabled(self.data.has_uv(), egui::Button::new(crate::i18n::t("baker les textures"))).on_hover_text(crate::i18n::t("Écrit couleur, rugosité, métal, normale et courbure dans le dossier textures/, à partir des UV et des matériaux de chaque ID")).clicked() {
                 self.bake_request = true;
             }
-            egui::ComboBox::from_id_salt("bake-rays").selected_text(if self.bake_rays == 0 { crate::i18n::t("sans occlusion") } else { format!("{} {}", self.bake_rays, crate::i18n::t("rayons")) }).width(96.0).show_ui(ui, |ui| {
+            egui::ComboBox::from_id_salt("bake-rays").selected_text(if self.bake_rays == 0 { crate::i18n::t("sans occlusion") } else { format!("{} {}", self.bake_rays, crate::i18n::t_mid("rayons")) }).width(96.0).show_ui(ui, |ui| {
                 for (r, l) in [(0u32, "sans occlusion"), (8, "8 (brouillon)"), (24, "24"), (64, "64"), (128, "128 (lisse)")] {
                     ui.selectable_value(&mut self.bake_rays, r, crate::i18n::t(l));
                 }

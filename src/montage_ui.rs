@@ -1049,7 +1049,7 @@ impl Editor {
         let idx = self.with_links(&self.selected(), false);
         self.clipboard = idx.iter().map(|&i| self.project.clips[i].clone()).collect();
         if !self.clipboard.is_empty() {
-            self.message = Some(format!("{} {}", self.clipboard.len(), crate::i18n::t("clip(s) copié(s)")));
+            self.message = Some(format!("{} {}", self.clipboard.len(), crate::i18n::t_mid("clip(s) copié(s)")));
         }
     }
 

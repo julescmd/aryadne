@@ -564,7 +564,7 @@ fn apply_more(k: Kind, mut m: Mesh, origin: V3, lo: V3, hi: V3) -> Mesh {
                 safe += 1;
             }
             if safe < levels {
-                crate::notify(format!("{} {safe} {}", crate::i18n::t("subdivision limitée à"), crate::i18n::t("niveaux : au-delà, plus de 40 millions de triangles")));
+                crate::notify(format!("{} {safe} {}", crate::i18n::t("subdivision limitée à"), crate::i18n::t_mid("niveaux : au-delà, plus de 40 millions de triangles")));
             }
             let levels = safe;
             if simple {

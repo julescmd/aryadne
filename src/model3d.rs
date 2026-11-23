@@ -3817,7 +3817,7 @@ impl Viewer {
                                     ui.label(egui::RichText::new(crate::i18n::t("fin")).size(11.0).color(p.muted));
                                     changed |= ui.add(egui::DragValue::new(&mut scene.end)).changed();
                                 });
-                                ui.label(egui::RichText::new(format!("{} {}", scene.objects.len(), crate::i18n::t("objet(s)"))).size(11.0).color(p.muted));
+                                ui.label(egui::RichText::new(format!("{} {}", scene.objects.len(), crate::i18n::t_mid("objet(s)"))).size(11.0).color(p.muted));
                                 ui.separator();
                                 ui.label(egui::RichText::new(crate::i18n::t("SUPERPOSITIONS")).size(10.5).color(p.muted));
                                 overlays_ui(&mut self.look, ui);
@@ -4920,7 +4920,7 @@ impl Viewer {
                                 k > upto || !m.on
                             });
                             self.applied = Some(std::sync::Arc::new(mesh));
-                            format!("{n} {}", crate::i18n::t("modificateur(s) appliqué(s)"))
+                            format!("{n} {}", crate::i18n::t_mid("modificateur(s) appliqué(s)"))
                         }
                         Err(e) => format!("{} : {e}", crate::i18n::t("application impossible")),
                     });

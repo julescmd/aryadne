@@ -768,7 +768,7 @@ impl App {
         if let Some(rel) = self.close_ask.clone() {
             let mut choice = 0;
             egui::Window::new(crate::i18n::t("fichier non enregistré")).collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]).show(ctx, |ui| {
-                ui.label(format!("« {} » {}", untitled::name(&rel), crate::i18n::t("n'a pas encore de nom ni de place dans le coffre.")));
+                ui.label(format!("« {} » {}", untitled::name(&rel), crate::i18n::t_mid("n'a pas encore de nom ni de place dans le coffre.")));
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
                     if ui.add(egui::Button::new(RichText::new(crate::i18n::t("enregistrer…")).color(p.on_accent)).fill(p.accent)).clicked() {
@@ -963,7 +963,7 @@ impl App {
             // Fichiers aux anciennes extensions : on le signale une fois, la conversion reste un choix
             let old = self.entries.iter().filter(|e| !e.is_dir && formats::upgrade(&e.rel).is_some()).count();
             if old > 0 {
-                self.toast = Some((format!("{old} {}", crate::i18n::t("fichier(s) avec une ancienne extension : palette de commandes → « passer aux nouvelles extensions »")), Instant::now()));
+                self.toast = Some((format!("{old} {}", crate::i18n::t_mid("fichier(s) avec une ancienne extension : palette de commandes → « passer aux nouvelles extensions »")), Instant::now()));
             }
         }
         if ctx.input(|i| i.viewport().close_requested()) {
@@ -2211,7 +2211,7 @@ impl App {
                         if let Content::Text(t) = &d.content {
                             let lang = if vault::is_md(&d.rel) { "markdown".to_string() } else if ext(&d.rel).is_empty() { "texte".into() } else { ext(&d.rel) };
                             ui.label(RichText::new(lang).color(p.muted).size(11.5));
-                            ui.label(RichText::new(format!("{} {} · {} {}", t.lines().count(), crate::i18n::t("lignes"), t.split_whitespace().count(), crate::i18n::t("mots"))).color(p.muted).size(11.5));
+                            ui.label(RichText::new(format!("{} {} · {} {}", t.lines().count(), crate::i18n::t_mid("lignes"), t.split_whitespace().count(), crate::i18n::t_mid("mots"))).color(p.muted).size(11.5));
                             ui.label(RichText::new(crate::i18n::t(if d.dirty_since.is_some() { "● modifié" } else { "sauvé" })).color(p.muted).size(11.5));
                             match &d.code.lsp {
                                 Some(l) => {
@@ -4575,7 +4575,7 @@ impl App {
                     } else {
                         let n = rel.lines().count();
                         if n > 1 {
-                            ui.label(format!("{} {n} {}", crate::i18n::t("Mettre"), crate::i18n::t("éléments à la corbeille du coffre (.app/trash) ? Ctrl+Z dans l'explorateur les remet.")));
+                            ui.label(format!("{} {n} {}", crate::i18n::t("Mettre"), crate::i18n::t_mid("éléments à la corbeille du coffre (.app/trash) ? Ctrl+Z dans l'explorateur les remet.")));
                         } else {
                             ui.label(format!("Mettre « {rel} » à la corbeille du coffre (.app/trash) ?"));
                         }
@@ -5338,7 +5338,7 @@ fn msg_block(
 ) {
     let p = theme::pal();
     ui.add_space(10.0);
-    let (who, color) = if user { ("vous ›", p.muted) } else { ("aryadne ›", p.accent) };
+    let (who, color) = if user { (crate::i18n::t("vous"), p.muted) } else { ("Aryadne".to_string(), p.accent) };
     ui.label(RichText::new(who).color(color).family(theme::bold()).size(12.0));
     let fill = if user { p.panel } else { p.bg };
     egui::Frame::new().fill(fill).stroke(egui::Stroke::new(1.0, p.line)).inner_margin(12).show(ui, |ui| {

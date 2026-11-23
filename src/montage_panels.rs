@@ -100,7 +100,7 @@ impl Editor {
         let items = self.bin_items();
         ui.horizontal(|ui| {
             ui.label(RichText::new(format!("{} : {stem}", crate::i18n::t("Projet"))).size(12.0).family(crate::theme::bold()));
-            ui.label(RichText::new(format!("{} {}", items.len(), crate::i18n::t("élément(s)"))).size(10.5).color(p.muted));
+            ui.label(RichText::new(format!("{} {}", items.len(), crate::i18n::t_mid("élément(s)"))).size(10.5).color(p.muted));
         });
         ui.horizontal(|ui| {
             ui.add(egui::TextEdit::singleline(&mut self.bin_search).hint_text(crate::i18n::t("rechercher")).desired_width((ui.available_width() - 90.0).max(60.0)));
@@ -398,7 +398,7 @@ impl Editor {
                                 }
                                 ch = true;
                             }
-                            ui.label(RichText::new(format!("{} {}", c.keys.len(), crate::i18n::t("clé(s)"))).size(10.5).color(p.muted));
+                            ui.label(RichText::new(format!("{} {}", c.keys.len(), crate::i18n::t_mid("clé(s)"))).size(10.5).color(p.muted));
                         }
                     });
                     ch |= row(ui, "Position", &mut |ui| scrub(ui, &mut c.x, 1.0, -8000.0..=8000.0, "", 1) | scrub(ui, &mut c.y, 1.0, -8000.0..=8000.0, "", 1));

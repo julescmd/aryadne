@@ -2870,7 +2870,7 @@ impl Editor {
                 let nodes: Vec<Node> = self.graph.nodes.iter().filter(|n| ids.contains(&n.id) && n.op != "mat_out" && n.op != "comp_out").cloned().collect();
                 let links: Vec<Link> = self.graph.links.iter().filter(|l| ids.contains(&l.from) && ids.contains(&l.to)).cloned().collect();
                 if !nodes.is_empty() {
-                    self.message = Some(format!("{} {}", nodes.len(), crate::i18n::t("node(s) copié(s)")));
+                    self.message = Some(format!("{} {}", nodes.len(), crate::i18n::t_mid("node(s) copié(s)")));
                     if let Ok(t) = serde_json::to_string(&serde_json::json!({ "aryadne_nodes": nodes, "links": links })) {
                         ctx.copy_text(t);
                     }
