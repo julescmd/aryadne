@@ -71,7 +71,7 @@ pub struct Options {
 
 impl Default for Options {
     fn default() -> Self {
-        Options { faces: 1500, iterations: 160, guide_radius: 1.2, pure_quads: true, adaptive: 0.5, curvature: 1.0, sharp_angle: 35.0, symmetry: 0, density: vec![], force_split: false, auto_loops: true, detail_density: 0.0 }
+        Options { faces: 1500, iterations: 160, guide_radius: 1.2, pure_quads: true, adaptive: 0.5, curvature: 1.0, sharp_angle: 35.0, symmetry: 0, density: vec![], force_split: false, auto_loops: false, detail_density: 0.0 }
     }
 }
 
@@ -640,7 +640,7 @@ struct LoopRow {
 
 fn solve_rows(g: &Graph, geo: &[[f64; 2]], u: &mut [[f64; 2]], paths: &[&ConePath], lam: &mut [[f64; 2]], rows: &[LoopRow], max_iter: usize, tol: f64) -> usize {
     use rayon::prelude::*;
-    let loopw: f64 = std::env::var("LOOPW").ok().and_then(|x| x.parse().ok()).unwrap_or(1.0);
+    let loopw: f64 = std::env::var("LOOPW").ok().and_then(|x| x.parse().ok()).unwrap_or(0.3);
     const CHUNK: usize = 8192;
     let (n, ne, np) = (u.len(), g.ends.len(), paths.len());
     // Arêtes de chaque sommet (pour paralléliser Bᵀ) : (arête, le sommet est-il la première extrémité ?)
@@ -1245,8 +1245,7 @@ fn place_cones(g: &mut Graph, f: &[[u32; 3]], geo: &[[f64; 2]], u: &mut [[f64; 2
     for ci in 0..curves.len() {
         for _ in 0..40 {
             let Some(m) = curve_mismatch(g, &curves[ci]) else { break };
-            // Un déplacement en diagonale change l'écart de 2 : un écart impair ne se corrige pas ainsi
-            if m == 0 || m % 2 != 0 {
+            if m == 0 {
                 break;
             }
             let others = total(g, curves, ci);
@@ -1257,7 +1256,7 @@ fn place_cones(g: &mut Graph, f: &[[u32; 3]], geo: &[[f64; 2]], u: &mut [[f64; 2
                 for b in [[1, 1], [1, -1], [-1, 1], [-1, -1]] {
                     let saved: Vec<(u32, [i32; 2])> = p.cols.iter().map(|col| (col.0, g.d[col.0 as usize])).collect();
                     push_path(g, f, &p.steps, b);
-                    if curve_mismatch(g, &curves[ci]).is_some_and(|m2| m2.abs() < m.abs()) && total(g, curves, ci) <= others {
+                    if curve_mismatch(g, &curves[ci]).is_some_and(|m2| m2.abs() < m.abs() && total(g, curves, ci) + m2.abs() < others + m.abs()) {
                         done = true;
                         moved += 1;
                         break 'search;
@@ -1278,7 +1277,9 @@ fn place_cones(g: &mut Graph, f: &[[u32; 3]], geo: &[[f64; 2]], u: &mut [[f64; 2
     if debug && std::env::var("RING_DBG").is_ok() {
         for (k, c) in curves.iter().enumerate() {
             if !c.pin {
-                eprintln!("  anneau {k} : écart final {:?}", curve_mismatch(g, c));
+                let mut o = c.clone();
+                o.c0 = 1 - o.c0;
+                eprintln!("  anneau {k} : écart final {:?} (autre composante {:?})", curve_mismatch(g, c), curve_mismatch(g, &o));
             }
         }
     }
@@ -2027,7 +2028,7 @@ fn remesh_core(pos: &[V3], tris: &[[u32; 3]], guides: &[Vec<V3>], opt: &Options,
         let gk: f32 = std::env::var("GSOFT").ok().and_then(|x| x.parse().ok()).unwrap_or(200.0) * (ell / 2.0).powi(2);
         for i in 0..n_v {
             if fixed[i] {
-                w[i] = lam * 50.0 * (ell / 2.0).powi(2);
+                w[i] = lam * 50.0;
                 tg[i] = q[i];
             } else if let Some((f, t)) = gsoft[i] {
                 let ws = lam * gk * f * f;
@@ -2124,7 +2125,7 @@ fn remesh_core(pos: &[V3], tris: &[[u32; 3]], guides: &[Vec<V3>], opt: &Options,
         .collect();
     let mut u = vec![[0.0f64; 2]; n_v];
     let mut curves = build_curves(&g, &ft, &nrm, &q);
-    if std::env::var("RINGS").is_ok() {
+    if std::env::var("NORINGS").is_err() {
         let rings = ring_curves(&g, &v, &nrm, &q, &adj, &levels[0].a, h);
         if debug {
             eprintln!("anneaux à refermer : {}", rings.len());
@@ -3397,6 +3398,7 @@ fn mirror(r: &mut Result, axis: usize, tol: f32) {
 }
 
 /// Une ligne caractéristique : chaîne de sommets denses reliés par des arêtes vives ou de bord.
+#[derive(Clone)]
 struct Curve {
     verts: Vec<u32>,
     /// (indice dans verts, indice dans verts, arête) dans l'ordre d'un parcours depuis verts[0]
@@ -3687,15 +3689,41 @@ fn ring_curves(g: &Graph, v: &[V3], n: &[V3], q: &[V3], adj: &[Vec<u32>], aniso:
             if !fine {
                 continue;
             }
+            // Un anneau par bande de quelques quads : des anneaux trop serrés se contredisent
+            let spread: f32 = std::env::var("RING_GAP").ok().and_then(|x| x.parse().ok()).unwrap_or(4.0);
+            let mut front: Vec<u32> = path.clone();
             for &p in &path {
                 covered[p as usize] = true;
-                for &w in &adj[p as usize] {
-                    covered[w as usize] = true;
+            }
+            while !front.is_empty() {
+                let mut next = vec![];
+                for &x in &front {
+                    for &w in &adj[x as usize] {
+                        if !covered[w as usize] && path.iter().any(|&p| len(sub(v[p as usize], v[w as usize])) < h * spread) {
+                            covered[w as usize] = true;
+                            next.push(w);
+                        }
+                    }
+                }
+                front = next;
+            }
+            // Composante perpendiculaire : celle où la boucle avance le moins, mesurée sur tout
+            // le tour dans le repère du départ (une seule arête en zigzag peut tromper)
+            let mut acc = [0i64; 2];
+            let mut rot = 0u8;
+            for i in 0..m {
+                let (a, b) = (path[i], path[(i + 1) % m]);
+                let ai = a as usize;
+                let t = sub(v[b as usize], v[ai]);
+                let loc = [(dot(t, q[ai]) / h * 1000.0) as i32, (dot(t, cross(n[ai], q[ai])) / h * 1000.0) as i32];
+                let r = trot(rot, loc);
+                acc[0] += r[0].abs() as i64;
+                acc[1] += r[1].abs() as i64;
+                if let Some(&e) = g.map.get(&(a.min(b), a.max(b))) {
+                    rot = (rot + g.dir(e, a).0) & 3;
                 }
             }
-            let p0 = path[0] as usize;
-            let t = sub(v[path[1] as usize], v[p0]);
-            let c0 = if dot(t, q[p0]).abs() >= dot(t, cross(n[p0], q[p0])).abs() { 1 } else { 0 };
+            let c0 = if acc[0] >= acc[1] { 1 } else { 0 };
             if let Ok(fp) = std::env::var("RING_DUMP") {
                 use std::io::Write;
                 if let Ok(mut fh) = std::fs::OpenOptions::new().create(true).append(true).open(fp) {
