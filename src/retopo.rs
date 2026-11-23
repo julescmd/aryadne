@@ -640,7 +640,7 @@ struct LoopRow {
 
 fn solve_rows(g: &Graph, geo: &[[f64; 2]], u: &mut [[f64; 2]], paths: &[&ConePath], lam: &mut [[f64; 2]], rows: &[LoopRow], max_iter: usize, tol: f64) -> usize {
     use rayon::prelude::*;
-    let loopw: f64 = std::env::var("LOOPW").ok().and_then(|x| x.parse().ok()).unwrap_or(0.3);
+    let loopw: f64 = std::env::var("LOOPW").ok().and_then(|x| x.parse().ok()).unwrap_or(1.0);
     const CHUNK: usize = 8192;
     let (n, ne, np) = (u.len(), g.ends.len(), paths.len());
     // Arêtes de chaque sommet (pour paralléliser Bᵀ) : (arête, le sommet est-il la première extrémité ?)
