@@ -1,5 +1,5 @@
 //! Look plat, angles droits, bordures fines. Mode clair par défaut, mode sombre en option.
-//! Pour ajuster les couleurs, modifie LIGHT et DARK ci-dessous.
+//! Les couleurs viennent de la charte graphique : THEMES ci-dessous.
 use eframe::egui::{self, Color32, CornerRadius, FontFamily, FontId, Stroke, TextStyle};
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -17,6 +17,17 @@ pub struct Palette {
     pub code_bg: Color32,
     /// Champs et boutons (un cran sous les panneaux, comme dans Blender et Premiere)
     pub field: Color32,
+    /// Menus déroulants, infobulles, fenêtres flottantes
+    pub raised: Color32,
+    /// Fonds discrets : pastilles actives, barres de progression
+    pub secondary: Color32,
+    /// Mise en avant ponctuelle : nouveauté, élément épinglé, repère
+    pub highlight: Color32,
+    /// Fond de la sélection
+    pub selection: Color32,
+    pub success: Color32,
+    pub warning: Color32,
+    pub info: Color32,
 }
 
 /// Couleur des interstices entre les panneaux (comme Blender : des zones arrondies sur fond sombre).
@@ -30,34 +41,46 @@ const fn rgb(hex: u32) -> Color32 {
     Color32::from_rgb((hex >> 16) as u8, (hex >> 8) as u8, hex as u8)
 }
 
-pub const LIGHT: Palette = Palette {
-    bg: rgb(0xffffff),
-    panel: rgb(0xf3f3f1),
-    line: rgb(0xdcdcd7),
-    text: rgb(0x18181b),
-    muted: rgb(0x68686e),
-    accent: rgb(0xff4f1f),
-    on_accent: rgb(0xffffff),
-    link: rgb(0x1d4ed8),
-    missing: rgb(0xb42318),
-    code_bg: rgb(0xf3f3f1),
-    field: rgb(0xe8e8e4),
-};
+/// Les thèmes de la charte graphique (voir la charte « Aryadne »). Chacun part de cinq couleurs
+/// (texte, fond, primaire, secondaire, accent) ; les couleurs d'état et d'espace gardent leur teinte
+/// d'un thème à l'autre, seule leur clarté s'ajuste pour rester lisible (4,5:1 sur les panneaux).
+pub struct ThemeDef {
+    pub id: &'static str,
+    pub name: &'static str,
+    pub dark: bool,
+    pub p: Palette,
+    /// notes, 3D, 2D, vidéo, code, IA, matériaux
+    pub ws: [Color32; 7],
+}
 
-/// Graphite : gris neutres étagés (zone de travail, panneaux, champs), comme les logiciels de création.
-pub const DARK: Palette = Palette {
-    bg: rgb(0x1d1e21),
-    panel: rgb(0x26272b),
-    line: rgb(0x393b41),
-    text: rgb(0xe4e5e9),
-    muted: rgb(0xa0a2ab),
-    accent: rgb(0xff6a3d),
-    on_accent: rgb(0x141416),
-    link: rgb(0x7aa2f7),
-    missing: rgb(0xf07167),
-    code_bg: rgb(0x222327),
-    field: rgb(0x18191b),
-};
+pub const THEMES: [ThemeDef; 6] = [
+    ThemeDef { id: "rose", name: "Rose poudré", dark: true, p: Palette { bg: rgb(0x1a1417), panel: rgb(0x231d20), line: rgb(0x463130), text: rgb(0xf4eef1), muted: rgb(0x948e91), accent: rgb(0xccacb9), on_accent: rgb(0x100a0d), link: rgb(0xbea197), missing: rgb(0xd88983), code_bg: rgb(0x231d20), field: rgb(0x100a0d), raised: rgb(0x2e282b), secondary: rgb(0x63413d), highlight: rgb(0xa67f6f), selection: rgb(0x52454b), success: rgb(0x88bf9a), warning: rgb(0xd1af75), info: rgb(0x94b0d1) }, ws: [rgb(0xc4b68d), rgb(0x8ba8c6), rgb(0xcb9ab2), rgb(0xaf9cc9), rgb(0x83b99e), rgb(0x7fb8bd), rgb(0xc69580)] },
+    ThemeDef { id: "sauge", name: "Sauge", dark: true, p: Palette { bg: rgb(0x161412), panel: rgb(0x201d1b), line: rgb(0x3e4430), text: rgb(0xf3efed), muted: rgb(0x928f8d), accent: rgb(0xc6b3a6), on_accent: rgb(0x0c0a08), link: rgb(0xa2b995), missing: rgb(0xd88983), code_bg: rgb(0x201d1b), field: rgb(0x0c0a08), raised: rgb(0x2a2826), secondary: rgb(0x576441), highlight: rgb(0x779c66), selection: rgb(0x4e4742), success: rgb(0x88bf9a), warning: rgb(0xd1af75), info: rgb(0x94b0d1) }, ws: [rgb(0xc4b68d), rgb(0x8ba8c6), rgb(0xcb9ab2), rgb(0xaf9cc9), rgb(0x83b99e), rgb(0x7fb8bd), rgb(0xc69580)] },
+    ThemeDef { id: "lagon", name: "Lagon", dark: true, p: Palette { bg: rgb(0x0f1515), panel: rgb(0x181f1f), line: rgb(0x4b2d41), text: rgb(0xe6f3f2), muted: rgb(0x889291), accent: rgb(0x9acdcb), on_accent: rgb(0x050b0b), link: rgb(0xc09f8d), missing: rgb(0xd88983), code_bg: rgb(0x181f1f), field: rgb(0x050b0b), raised: rgb(0x222929), secondary: rgb(0x75395c), highlight: rgb(0xb48067), selection: rgb(0x3c504f), success: rgb(0x88bf9a), warning: rgb(0xd1af75), info: rgb(0x94b0d1) }, ws: [rgb(0xc4b68d), rgb(0x8ba8c6), rgb(0xcb9ab2), rgb(0xaf9cc9), rgb(0x83b99e), rgb(0x7fb8bd), rgb(0xc69580)] },
+    ThemeDef { id: "argile", name: "Argile", dark: true, p: Palette { bg: rgb(0x181515), panel: rgb(0x211e1e), line: rgb(0x453532), text: rgb(0xefecec), muted: rgb(0x908e8e), accent: rgb(0xc3b0ad), on_accent: rgb(0x0e0b0b), link: rgb(0xc3a7a3), missing: rgb(0xd88983), code_bg: rgb(0x211e1e), field: rgb(0x0e0b0b), raised: rgb(0x2b2828), secondary: rgb(0x634743), highlight: rgb(0xab827b), selection: rgb(0x4e4746), success: rgb(0x88bf9a), warning: rgb(0xd1af75), info: rgb(0x94b0d1) }, ws: [rgb(0xc4b68d), rgb(0x8ba8c6), rgb(0xcb9ab2), rgb(0xaf9cc9), rgb(0x83b99e), rgb(0x7fb8bd), rgb(0xc69580)] },
+    ThemeDef { id: "graphite", name: "Graphite", dark: true, p: Palette { bg: rgb(0x1d1e21), panel: rgb(0x26272b), line: rgb(0x393b41), text: rgb(0xe4e5e9), muted: rgb(0xa0a2ab), accent: rgb(0xff6a3d), on_accent: rgb(0x141416), link: rgb(0x7aa2f7), missing: rgb(0xd88983), code_bg: rgb(0x26272b), field: rgb(0x18191b), raised: rgb(0x2e2f34), secondary: rgb(0x3a3c44), highlight: rgb(0xff8a65), selection: rgb(0x633a30), success: rgb(0x88bf9a), warning: rgb(0xd1af75), info: rgb(0x94b0d1) }, ws: [rgb(0xc4b68d), rgb(0x8ba8c6), rgb(0xcb9ab2), rgb(0xaf9cc9), rgb(0x83b99e), rgb(0x7fb8bd), rgb(0xc69580)] },
+    ThemeDef { id: "clair", name: "Clair", dark: false, p: Palette { bg: rgb(0xfaf8f7), panel: rgb(0xf1eded), line: rgb(0xd9d0cf), text: rgb(0x1c1517), muted: rgb(0x716568), accent: rgb(0x8e5e70), on_accent: rgb(0xffffff), link: rgb(0x7f5546), missing: rgb(0xa52f27), code_bg: rgb(0xf1eded), field: rgb(0xffffff), raised: rgb(0xffffff), secondary: rgb(0xe3d3d6), highlight: rgb(0x836254), selection: rgb(0xe0d0d6), success: rgb(0x317548), warning: rgb(0x856021), info: rgb(0x336399) }, ws: [rgb(0x7c6932), rgb(0x396693), rgb(0x913b66), rgb(0x5f3d8f), rgb(0x337353), rgb(0x307076), rgb(0x975235)] },
+];
+
+/// Thème choisi (indice dans THEMES)
+static THEME: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Choisit le thème par son identifiant (« rose », « sauge », « lagon », « argile », « graphite », « clair »).
+pub fn set_theme(id: &str) {
+    let i = THEMES.iter().position(|t| t.id == id).unwrap_or(0);
+    THEME.store(i, Ordering::Relaxed);
+    IS_DARK.store(THEMES[i].dark, Ordering::Relaxed);
+}
+
+pub fn theme() -> &'static ThemeDef {
+    &THEMES[THEME.load(Ordering::Relaxed).min(THEMES.len() - 1)]
+}
+
+/// Couleur d'un genre d'espace de travail dans le thème courant (notes, 3d, 2d, video, code, ai, mat)
+pub fn ws_color(kind: &str) -> Option<Color32> {
+    let k = ["notes", "3d", "2d", "video", "code", "ai", "mat"].iter().position(|x| *x == kind)?;
+    Some(theme().ws[k])
+}
 
 static IS_DARK: AtomicBool = AtomicBool::new(false);
 /// Contraste élevé : textes secondaires, bordures et champs bien plus marqués (WCAG AA partout)
@@ -127,7 +150,7 @@ pub fn set_workspace_accent(c: Option<[u8; 3]>) {
 }
 
 pub fn pal() -> Palette {
-    let mut p = if IS_DARK.load(Ordering::Relaxed) { DARK } else { LIGHT };
+    let mut p = theme().p;
     let w = WS_ACCENT.load(Ordering::Relaxed);
     let a = if w != 0 { w } else { ACCENT.load(Ordering::Relaxed) };
     if a != 0 {
@@ -338,7 +361,8 @@ pub fn bold() -> FontFamily {
     FontFamily::Name("bold".into())
 }
 
-pub fn apply(ctx: &egui::Context, dark: bool) {
+pub fn apply(ctx: &egui::Context, _dark: bool) {
+    let dark = theme().dark;
     IS_DARK.store(dark, Ordering::Relaxed);
     let p = pal();
     let prop = |size: f32| FontId::new(size, FontFamily::Proportional);
@@ -359,12 +383,12 @@ pub fn apply(ctx: &egui::Context, dark: bool) {
         let v = &mut style.visuals;
         *v = if dark { egui::Visuals::dark() } else { egui::Visuals::light() };
         v.panel_fill = p.panel;
-        v.window_fill = p.bg;
+        v.window_fill = p.raised;
         v.extreme_bg_color = p.bg;
         v.faint_bg_color = p.code_bg;
         v.override_text_color = Some(p.text);
         v.hyperlink_color = p.link;
-        v.selection.bg_fill = p.accent.linear_multiply(0.28);
+        v.selection.bg_fill = p.selection;
         v.selection.stroke = Stroke::new(1.0, p.accent);
         v.window_stroke = Stroke::new(1.0, p.line);
         v.window_shadow = egui::Shadow::NONE;
@@ -461,15 +485,16 @@ pub fn section(text: &str) -> egui::RichText {
 mod tests {
     use super::*;
 
-    /// WCAG AA : textes à 4,5:1, bordures en contraste élevé à 3:1, dans les deux thèmes
+    /// WCAG AA : textes à 4,5:1, bordures en contraste élevé à 3:1, dans chaque thème
     #[test]
     fn contrastes_aa() {
-        for dark in [false, true] {
+        for t in &THEMES {
+            let dark = t.id;
             for hc in [false, true] {
-                IS_DARK.store(dark, Ordering::Relaxed);
+                set_theme(t.id);
                 set_access(hc, false);
                 let p = pal();
-                for (nom, fg) in [("texte", p.text), ("secondaire", p.muted), ("lien", p.link), ("manquant", p.missing)] {
+                for (nom, fg) in [("texte", p.text), ("secondaire", p.muted), ("lien", p.link), ("manquant", p.missing), ("réussi", p.success), ("attention", p.warning), ("info", p.info)] {
                     for bg in [p.bg, p.panel] {
                         assert!(contrast(fg, bg) >= 4.5, "{nom} sombre={dark} hc={hc} : {:.2}", contrast(fg, bg));
                     }
@@ -481,6 +506,6 @@ mod tests {
             }
         }
         set_access(false, false);
-        IS_DARK.store(false, Ordering::Relaxed);
+        set_theme("rose");
     }
 }

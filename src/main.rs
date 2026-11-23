@@ -450,7 +450,7 @@ impl App {
         self.explorer_open = w.explorer;
         self.view_panels = w.views.clone();
         self.tree = w.layout.clone();
-        theme::set_workspace_accent(w.accent);
+        theme::set_workspace_accent(workspace::accent_of(self.ws.cur()));
         theme::apply(ctx, self.prefs.dark);
         if !tabs {
             return;
@@ -869,7 +869,7 @@ impl App {
             ui.vertical_centered(|ui| {
                 ui.add_space((ui.available_height() * 0.16).max(24.0));
                 ui.set_max_width(520.0);
-                let accent = w.accent.map(|c| egui::Color32::from_rgb(c[0], c[1], c[2])).unwrap_or(p.accent);
+                let accent = workspace::accent_of(&w).map(|c| egui::Color32::from_rgb(c[0], c[1], c[2])).unwrap_or(p.accent);
                 ui.label(RichText::new(crate::i18n::t(&w.name)).size(30.0).family(theme::bold()).color(accent));
                 ui.add_space(6.0);
                 ui.label(RichText::new(crate::i18n::t(subtitle)).color(p.muted));
@@ -994,7 +994,7 @@ impl App {
         let n = self.ws.list.len();
         for i in 0..n {
             let on = i == self.ws.current;
-            let color = self.ws.list[i].accent.map(|c| egui::Color32::from_rgb(c[0], c[1], c[2])).unwrap_or(if on { p.accent } else { p.muted });
+            let color = workspace::accent_of(&self.ws.list[i]).map(|c| egui::Color32::from_rgb(c[0], c[1], c[2])).unwrap_or(if on { theme::theme().p.accent } else { p.muted });
             let label = crate::i18n::t(&self.ws.list[i].name);
             let mut text = egui::text::LayoutJob::default();
             let font = egui::FontId::new(13.0, if on { theme::bold() } else { egui::FontFamily::Proportional });
@@ -1082,7 +1082,7 @@ impl App {
             changed = true;
         }
         if changed {
-            let w = self.ws.cur().accent;
+            let w = workspace::accent_of(self.ws.cur());
             theme::set_workspace_accent(w);
             theme::apply(&ctx, self.prefs.dark);
             self.ws.save();
@@ -1122,7 +1122,7 @@ impl App {
         }
         let kind = self.ws.cur().kind.clone();
         let pages = workspace::pages(&kind);
-        let accent = self.ws.cur().accent.map(|c| egui::Color32::from_rgb(c[0], c[1], c[2])).unwrap_or(p.accent);
+        let accent = workspace::accent_of(self.ws.cur()).map(|c| egui::Color32::from_rgb(c[0], c[1], c[2])).unwrap_or(p.accent);
         egui::Panel::top("workspaces").exact_size(28.0).frame(egui::Frame::new().fill(p.panel).stroke(egui::Stroke::new(1.0, p.line)).inner_margin(egui::Margin::symmetric(12, 0))).show(ui, |ui| {
             ui.horizontal_centered(|ui| {
                 ui.spacing_mut().item_spacing.x = 4.0;
@@ -1598,6 +1598,14 @@ impl App {
 
     fn set_dark(&mut self, ctx: &egui::Context, dark: bool) {
         self.prefs.dark = dark;
+        // Bascule clair / sombre : le thème clair, ou le dernier thème sombre choisi
+        if dark {
+            if self.prefs.theme == "clair" || self.prefs.theme.is_empty() {
+                self.prefs.theme = "rose".into();
+            }
+        } else {
+            self.prefs.theme = "clair".into();
+        }
         self.prefs.save();
         self.prefs.apply(ctx);
     }
@@ -5026,6 +5034,8 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         settings::set_unit(&self.prefs.unit);
+        // Couleur de l'espace courant d'après le thème (il peut changer dans les réglages)
+        theme::set_workspace_accent(workspace::accent_of(self.ws.cur()));
         self.shortcuts(&ctx);
         self.cloud_tick();
 
@@ -5191,7 +5201,7 @@ fn ollama_panel(ui: &mut egui::Ui, local: &ollama::Local, s: &mut ai::Settings, 
     let (dot, status) = if !st.checked {
         (p.muted, "vérification…".to_string())
     } else if st.running {
-        (egui::Color32::from_rgb(0x22, 0xa0, 0x55), format!("en marche · {} modèle(s)", st.models.len()))
+        (p.success, format!("en marche · {} modèle(s)", st.models.len()))
     } else if st.binary.is_some() {
         (p.accent, "installé, arrêté".to_string())
     } else {

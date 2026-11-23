@@ -40,6 +40,9 @@ pub struct Prefs {
     pub reduce_motion: bool,
     /// Navigation 3D : « blender » (molette enfoncée) ou « maya » (Alt + boutons)
     pub nav3d: String,
+    /// Thème de la charte (« rose », « sauge », « lagon », « argile », « graphite », « clair ») ;
+    /// vide = d'après l'ancien réglage clair / sombre
+    pub theme: String,
 }
 
 /// Unités de longueur proposées : nom et nombre d'unités dans un mètre.
@@ -95,6 +98,7 @@ impl Default for Prefs {
             high_contrast: false,
             reduce_motion: false,
             nav3d: "blender".into(),
+            theme: String::new(),
         }
     }
 }
@@ -122,6 +126,7 @@ impl Prefs {
     pub fn apply(&self, ctx: &egui::Context) {
         theme::set_accent(self.accent.map(|[r, g, b]| egui::Color32::from_rgb(r, g, b)));
         theme::set_access(self.high_contrast, self.reduce_motion);
+        theme::set_theme(if self.theme.is_empty() { if self.dark { "rose" } else { "clair" } } else { &self.theme });
         NAV_MAYA.store(self.nav3d == "maya", std::sync::atomic::Ordering::Relaxed);
         theme::apply(ctx, self.dark);
         ctx.set_zoom_factor(self.ui_zoom.clamp(0.6, 2.0));
@@ -257,12 +262,26 @@ impl App {
         });
         ui.add_space(12.0);
         ui.label(caps(&crate::i18n::t("thème")));
-        ui.horizontal(|ui| {
-            if ui.selectable_label(!self.prefs.dark, crate::i18n::t("clair")).clicked() {
-                self.prefs.dark = false;
-            }
-            if ui.selectable_label(self.prefs.dark, crate::i18n::t("sombre")).clicked() {
-                self.prefs.dark = true;
+        // Une vignette par thème : fond, panneau, texte, couleur principale et les couleurs d'espace
+        ui.horizontal_wrapped(|ui| {
+            for t in &theme::THEMES {
+                let on = theme::theme().id == t.id;
+                let (r, resp) = ui.allocate_exact_size(egui::vec2(96.0, 64.0), egui::Sense::click());
+                let pp = &t.p;
+                ui.painter().rect_filled(r, 4.0, pp.bg);
+                ui.painter().rect_filled(egui::Rect::from_min_size(r.min, egui::vec2(24.0, r.height())), egui::CornerRadius { nw: 4, sw: 4, ne: 0, se: 0 }, pp.panel);
+                ui.painter().rect_filled(egui::Rect::from_min_size(r.min + egui::vec2(32.0, 10.0), egui::vec2(36.0, 12.0)), 2.0, pp.accent);
+                for (k, c) in t.ws.iter().enumerate() {
+                    ui.painter().circle_filled(r.min + egui::vec2(34.0 + k as f32 * 8.0, 34.0), 2.6, *c);
+                }
+                ui.painter().text(r.left_bottom() + egui::vec2(30.0, -6.0), egui::Align2::LEFT_BOTTOM, crate::i18n::t(t.name), egui::FontId::proportional(11.0), pp.text);
+                if on {
+                    ui.painter().rect_stroke(r.expand(2.0), 5.0, egui::Stroke::new(2.0, p.accent), egui::StrokeKind::Outside);
+                }
+                if resp.on_hover_text(crate::i18n::t(t.name)).clicked() {
+                    self.prefs.theme = t.id.to_string();
+                    self.prefs.dark = t.dark;
+                }
             }
         });
         ui.add_space(14.0);

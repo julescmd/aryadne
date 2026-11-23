@@ -71,28 +71,33 @@ impl FilesState {
     }
 }
 
+/// Couleur d'un genre de fichier : celle de son espace de travail dans le thème (charte graphique)
+fn ws(kind: &str) -> Color32 {
+    crate::theme::ws_color(kind).unwrap_or(crate::theme::pal().muted)
+}
+
 /// Type de fichier : (icône, couleur, nom du filtre)
 pub fn kind(rel: &str) -> (&'static str, Color32, &'static str) {
     let l = rel.to_lowercase();
     let e = l.rsplit_once('.').map(|(_, e)| e).unwrap_or("");
     if vault::is_md(&l) {
-        ("#", Color32::from_rgb(0xe8, 0x6a, 0x2c), "notes")
+        ("#", ws("notes"), "notes")
     } else if board::is_board(&l) {
-        ("▦", Color32::from_rgb(0xd9, 0xa4, 0x1c), "boards")
+        ("▦", ws("2d"), "boards")
     } else if nodes::is_graph(&l) {
-        ("⬡", Color32::from_rgb(0xd0, 0x4a, 0x84), "nodes")
+        ("⬡", ws("mat"), "nodes")
     } else if l.ends_with(".blend") || model3d::is_model(&l) {
-        ("◆", Color32::from_rgb(0x8a, 0x5c, 0xd6), "3d")
+        ("◆", ws("3d"), "3d")
     } else if video::is_video(&l) {
-        ("▶", Color32::from_rgb(0xd9, 0x48, 0x48), "vidéos")
+        ("▶", ws("video"), "vidéos")
     } else if images::is_image(&l) || matches!(e, "psd" | "kra" | "exr" | "hdr") {
-        ("▣", Color32::from_rgb(0x2a, 0x9d, 0x8f), "images")
+        ("▣", ws("2d"), "images")
     } else if office::is_office(&l) || e == "pdf" {
-        ("▤", Color32::from_rgb(0x3b, 0x7d, 0xd8), "docs")
+        ("▤", crate::theme::pal().info, "docs")
     } else if matches!(e, "rs" | "py" | "js" | "ts" | "tsx" | "jsx" | "html" | "htm" | "css" | "scss" | "c" | "cpp" | "h" | "hpp" | "cs" | "java" | "go" | "lua" | "sh" | "glsl" | "hlsl" | "json" | "toml" | "yaml" | "yml" | "gd" | "rb" | "php" | "sql" | "vue" | "svelte" | "xml" | "svg" | "osl" | "ps1" | "bat") {
-        ("‹›", Color32::from_rgb(0x4f, 0x8a, 0xb8), "code")
+        ("‹›", ws("code"), "code")
     } else {
-        ("·", Color32::from_gray(140), "autres")
+        ("·", crate::theme::pal().muted, "autres")
     }
 }
 

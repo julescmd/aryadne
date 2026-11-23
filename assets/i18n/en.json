@@ -1596,5 +1596,11 @@
  "fermer l'onglet": "close tab",
  "navigation 3D": "3D navigation",
  "Alt + clic gauche : tourner · Alt + clic milieu (ou milieu seul) : déplacer · Alt + clic droit : zoom · molette : zoom": "Alt + left click: orbit · Alt + middle click (or middle alone): pan · Alt + right click: zoom · wheel: zoom",
- "Molette enfoncée : tourner · Maj : déplacer · Ctrl : zoom · Alt + clic gauche : tourner · molette : zoom": "Middle mouse: orbit · Shift: pan · Ctrl: zoom · Alt + left click: orbit · wheel: zoom"
+ "Molette enfoncée : tourner · Maj : déplacer · Ctrl : zoom · Alt + clic gauche : tourner · molette : zoom": "Middle mouse: orbit · Shift: pan · Ctrl: zoom · Alt + left click: orbit · wheel: zoom",
+ "Rose poudré": "Powder rose",
+ "Sauge": "Sage",
+ "Lagon": "Lagoon",
+ "Argile": "Clay",
+ "Graphite": "Graphite",
+ "Clair": "Light"
 }

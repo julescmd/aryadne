@@ -70,6 +70,20 @@ pub const PRESETS: [(&str, Option<[u8; 3]>, &str, bool, &str); 7] = [
     ("matériaux", Some([0xe0, 0x7a, 0x3a]), "files", false, "mat"),
 ];
 
+/// Couleur d'un espace : celle choisie à la main, sinon celle de son genre dans le thème de la
+/// charte (les couleurs vives d'origine des espaces fournis suivent aussi le thème). Les notes
+/// gardent la couleur principale du thème (None).
+pub fn accent_of(w: &Workspace) -> Option<[u8; 3]> {
+    let preset = PRESETS.iter().find(|p| p.4 == w.kind).and_then(|p| p.1);
+    if w.accent.is_some() && w.accent != preset {
+        return w.accent;
+    }
+    if w.kind == "notes" || w.kind.is_empty() {
+        return None;
+    }
+    crate::theme::ws_color(&w.kind).map(|c| [c.r(), c.g(), c.b()])
+}
+
 /// Les genres d'espaces connus d'Aryadne. Un espace d'un autre genre (fait à la main) accepte tout.
 pub const KINDS: [&str; 7] = ["notes", "3d", "2d", "video", "code", "ai", "mat"];
 
