@@ -1569,5 +1569,11 @@
  "vignettes": "thumbnails",
  "élément(s)": "item(s)",
  "▶ Blender": "▶ Blender",
- "＋ titre": "＋ title"
+ "＋ titre": "＋ title",
+ "fermer (Échap)": "close (Esc)",
+ "diapo précédente (←)": "previous slide (←)",
+ "diapo suivante (→)": "next slide (→)",
+ "options de la pile": "stack options",
+ "plus d'options": "more options",
+ "nouveau…": "new…"
 }

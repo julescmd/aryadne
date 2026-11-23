@@ -1291,7 +1291,7 @@ pub fn panel_with(ui: &mut egui::Ui, stack: &mut Vec<Modifier>, applied: bool, r
                     *request = Some(Request::Restore);
                     ui.close();
                 }
-            });
+            }).0.on_hover_text(crate::i18n::t("options de la pile"));
             egui::containers::menu::MenuButton::new(crate::i18n::t("＋ ajouter ▾")).ui(ui, |ui| {
                 ui.set_min_width(300.0);
                 let id = egui::Id::unique("mod-search");

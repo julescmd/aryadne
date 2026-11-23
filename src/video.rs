@@ -637,7 +637,7 @@ impl Viewer {
                 ui.checkbox(&mut self.onion_tint, crate::i18n::t("teinter (avant rouge, après vert)"));
                 ui.checkbox(&mut self.onion_drawings, crate::i18n::t("inclure les dessins"));
                 ui.label(RichText::new(crate::i18n::t("L'écart suit le réglage « en 1s / 2s / 4s ».")).color(p.muted).size(10.5));
-            });
+            }).0.on_hover_text(crate::i18n::t("options"));
             egui::containers::menu::MenuButton::new(crate::i18n::t("repères ▾")).config(stay).ui(ui, |ui| {
                 ui.set_min_width(200.0);
                 ui.checkbox(&mut self.guide_thirds, crate::i18n::t("règle des tiers"));

@@ -243,7 +243,7 @@ impl Dlg {
                         self.out_dir = Some(d);
                     }
                 }
-                if self.out_dir.is_some() && ui.small_button("×").clicked() {
+                if self.out_dir.is_some() && ui.small_button("×").on_hover_text(crate::i18n::t("retirer")).clicked() {
                     self.out_dir = None;
                 }
             });

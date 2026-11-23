@@ -4251,7 +4251,7 @@ impl App {
                     let mut remove = None;
                     for (k, f) in self.send_files.iter().enumerate() {
                         ui.horizontal(|ui| {
-                            if ui.small_button("×").clicked() {
+                            if ui.small_button("×").on_hover_text(crate::i18n::t("retirer")).clicked() {
                                 remove = Some(k);
                             }
                             ui.label(RichText::new(f).size(11.5));

@@ -1398,7 +1398,7 @@ pub fn find_bar(ui: &mut egui::Ui, ed: &mut Editor, text: &mut String, id: Id) -
             }
             ui.toggle_value(&mut f.show_replace, crate::i18n::t("remplacer")).on_hover_text(crate::i18n::t("Ctrl+H"));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.small_button("×").clicked() {
+                if ui.small_button("×").on_hover_text(crate::i18n::t("fermer (Échap)")).clicked() {
                     close = true;
                 }
             });

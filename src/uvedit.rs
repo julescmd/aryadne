@@ -1958,7 +1958,7 @@ impl Edit {
                     s.material.clear();
                     assign = Some(usize::MAX);
                 }
-                if k > 0 && ui.small_button("×").clicked() {
+                if k > 0 && ui.small_button("×").on_hover_text(crate::i18n::t("retirer")).clicked() {
                     remove = Some(k);
                 }
             });

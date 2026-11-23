@@ -1606,7 +1606,7 @@ impl App {
                     ui.add(egui::Spinner::new().size(10.0));
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    close = ui.small_button("×").clicked();
+                    close = ui.small_button("×").on_hover_text(crate::i18n::t("fermer")).clicked();
                     if running {
                         stop = ui.small_button(crate::i18n::t("arrêter")).clicked();
                     } else {

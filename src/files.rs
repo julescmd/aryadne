@@ -151,7 +151,7 @@ impl App {
                                     self.selected = Some(d);
                                 }
                             }
-                        });
+                        }).0.on_hover_text(crate::i18n::t("plus d'options"));
                         if ui.add(egui::Button::new(if g { "▦" } else { "≣" }).frame(false)).on_hover_text(if g { "vue en grille (clic : liste)" } else { "vue en liste (clic : grille avec miniatures)" }).clicked() {
                             self.files.grid = !g;
                             self.files.save();
@@ -182,7 +182,7 @@ impl App {
                             if ui.button(crate::i18n::t("lier un dossier…")).clicked() {
                                 self.pick_import(true);
                             }
-                        });
+                        }).0.on_hover_text(crate::i18n::t("nouveau…"));
                     });
                 });
                 ui.add_space(6.0);

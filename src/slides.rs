@@ -798,11 +798,11 @@ impl Viewer {
         };
         // Barre : navigation + enregistrer
         ui.horizontal(|ui| {
-            if ui.button("‹").clicked() || (self.editing.is_none() && ui.input(|i| i.key_pressed(egui::Key::ArrowLeft) || i.key_pressed(egui::Key::PageUp))) {
+            if ui.button("‹").on_hover_text(crate::i18n::t("diapo précédente (←)")).clicked() || (self.editing.is_none() && ui.input(|i| i.key_pressed(egui::Key::ArrowLeft) || i.key_pressed(egui::Key::PageUp))) {
                 self.current = self.current.saturating_sub(1);
             }
             ui.label(RichText::new(format!("diapo {} / {n}", self.current + 1)).size(12.0));
-            if ui.button("›").clicked() || (self.editing.is_none() && ui.input(|i| i.key_pressed(egui::Key::ArrowRight) || i.key_pressed(egui::Key::PageDown))) {
+            if ui.button("›").on_hover_text(crate::i18n::t("diapo suivante (→)")).clicked() || (self.editing.is_none() && ui.input(|i| i.key_pressed(egui::Key::ArrowRight) || i.key_pressed(egui::Key::PageDown))) {
                 self.current = (self.current + 1).min(n - 1);
             }
             ui.label(RichText::new(crate::i18n::t("double-clic : modifier un texte · glisser : déplacer")).color(p.muted).size(11.0));
