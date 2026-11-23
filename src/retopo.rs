@@ -408,7 +408,6 @@ fn refine_once(pos: Vec<V3>, tris: Vec<[u32; 3]>) -> (Vec<V3>, Vec<[u32; 3]>) {
     refine_n1(pos, tris)
 }
 
-#[cfg(test)]
 /// Bascule d'arêtes de Delaunay : une arête dont les deux angles opposés font plus de 180° est
 /// remplacée par l'autre diagonale, si les deux triangles sont presque dans le même plan (on ne
 /// touche pas aux arêtes vives).
