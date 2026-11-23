@@ -2014,16 +2014,20 @@ fn remesh_core(pos: &[V3], tris: &[[u32; 3]], guides: &[Vec<V3>], opt: &Options,
     let mut q = cur;
     lap("orientation (lissage local)");
     if opt.curvature > 0.0 {
-        // Optimum global : lisse à l'échelle de `ell` quads, collé aux courbures marquées et aux guides
-        let ell: f32 = std::env::var("ELL").ok().and_then(|x| x.parse().ok()).unwrap_or(2.0);
+        // Optimum global : lisse à l'échelle de `ell` quads, collé aux courbures marquées et aux guides.
+        // À 8 quads, les plis fins de la peau (rides, petits replis) ne créent plus de paires de
+        // singularités : deux fois moins de pôles, et presque plus de pôles 3-5 collés (qui font
+        // partir les boucles en spirale)
+        let ell: f32 = std::env::var("ELL").ok().and_then(|x| x.parse().ok()).unwrap_or(8.0);
         let eps_k: f32 = std::env::var("EPSK").ok().and_then(|x| x.parse().ok()).unwrap_or(0.01);
         let lam = 0.87 * (mean_edge / (h * ell)).powi(2) * opt.curvature;
         let mut w: Vec<f32> = levels[0].a.iter().map(|a| a * lam).collect();
         let mut tg = levels[0].c.clone();
-        let gk: f32 = std::env::var("GSOFT").ok().and_then(|x| x.parse().ok()).unwrap_or(200.0);
+        // Les guides gardent la force qu'ils avaient à l'échelle de 2 quads
+        let gk: f32 = std::env::var("GSOFT").ok().and_then(|x| x.parse().ok()).unwrap_or(200.0) * (ell / 2.0).powi(2);
         for i in 0..n_v {
             if fixed[i] {
-                w[i] = lam * 50.0;
+                w[i] = lam * 50.0 * (ell / 2.0).powi(2);
                 tg[i] = q[i];
             } else if let Some((f, t)) = gsoft[i] {
                 let ws = lam * gk * f * f;
@@ -2074,6 +2078,20 @@ fn remesh_core(pos: &[V3], tris: &[[u32; 3]], guides: &[Vec<V3>], opt: &Options,
                 g.w[e as usize] = stiff.sqrt();
             }
         }
+    }
+    if let Ok(fp) = std::env::var("FIELD_ONLY") {
+        use std::io::Write;
+        let mut w = std::fs::File::create(&fp).unwrap();
+        for fi in 0..f.len() {
+            let (c, _, _) = g.closure(&f[fi], fi);
+            if c != 0 {
+                let t = f[fi];
+                let ce = mul(add(add(v[t[0] as usize], v[t[1] as usize]), v[t[2] as usize]), 1.0 / 3.0);
+                writeln!(w, "{} {} {} {}", ce[0], ce[1], ce[2], c).unwrap();
+            }
+        }
+        eprintln!("champ seul : {} singularités", stats.field_sing);
+        std::process::exit(0);
     }
     let mut phi = scale_field(&g, &f, &v, &nrm, &q, opt.adaptive);
     // Densité peinte : les quads rétrécissent (ou grandissent) autour de chaque touche
