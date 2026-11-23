@@ -1274,6 +1274,17 @@ fn place_cones(g: &mut Graph, f: &[[u32; 3]], geo: &[[f64; 2]], u: &mut [[f64; 2
             }
         }
     }
+    if std::env::var("ALIGN").is_ok() {
+        solve_ext(g, geo, u, &[], &mut [], 1500, 1e-9);
+        let n = align_cones(g, f, geo, u, &paths, curves, false);
+        if std::env::var("ALIGN_DBG").is_ok() {
+            solve_ext(g, geo, u, &[], &mut [], 1500, 1e-9);
+            align_cones(g, f, geo, u, &paths, curves, true);
+        }
+        if debug {
+            eprintln!("  singularités alignées sur une voisine : {n}");
+        }
+    }
     for c in curves.iter_mut() {
         c.ok = curve_mismatch(g, c) == Some(0);
     }
@@ -1553,6 +1564,157 @@ fn piece_detail(pos: &[V3], ts: &[[u32; 3]]) -> f32 {
         }
     }
     sum
+}
+
+/// Aligne les pôles voisins : quand deux singularités proches sont décalées d'une seule ligne
+/// de grille, la ligne qui part de l'une passe juste à côté de l'autre et continue sa route
+/// (les boucles qui « se promènent »). On déplace l'une d'un cran pour qu'elles partagent une
+/// ligne : la ligne va alors d'un pôle à l'autre, comme dans une topologie faite à la main.
+fn align_cones(g: &mut Graph, f: &[[u32; 3]], geo: &[[f64; 2]], u: &[[f64; 2]], paths: &[ConePath], curves: &[Curve], dry: bool) -> usize {
+    let reach: f64 = std::env::var("ALIGN_R").ok().and_then(|x| x.parse().ok()).unwrap_or(8.0);
+    let mut adj: Vec<Vec<(u32, u32)>> = vec![vec![]; g.k.len().max(1)];
+    let nv = g.ends.iter().map(|e| e.0.max(e.1) as usize + 1).max().unwrap_or(0);
+    adj.resize(nv, vec![]);
+    for (e, &(i, j)) in g.ends.iter().enumerate() {
+        adj[i as usize].push((j, e as u32));
+        adj[j as usize].push((i, e as u32));
+    }
+    let rf = |k: u8, v: [f64; 2]| -> [f64; 2] {
+        match k & 3 {
+            0 => v,
+            1 => [v[1], -v[0]],
+            2 => [-v[0], -v[1]],
+            _ => [-v[1], v[0]],
+        }
+    };
+    // Position entière d'une singularité : le point de grille le plus proche du premier coin de
+    // sa face (la face est plus petite qu'une case), dans le repère de ce coin. Les déplacements
+    // décidés ici s'ajoutent ensuite (la paramétrisation n'est pas recalculée entre deux).
+    let shift: std::cell::RefCell<HashMap<usize, [i32; 2]>> = std::cell::RefCell::new(HashMap::new());
+    let pos_of = |g: &Graph, fi: usize| -> Option<[i32; 2]> {
+        let (ks, _, _) = g.closure(&f[fi], fi);
+        if ks == 0 || ks == 2 {
+            return None;
+        }
+        let a = u[f[fi][0] as usize];
+        let s = shift.borrow().get(&fi).copied().unwrap_or([0, 0]);
+        Some([a[0].round() as i32 + s[0], a[1].round() as i32 + s[1]])
+    };
+    let cones: Vec<usize> = (0..paths.len()).filter(|&i| paths[i].face != u32::MAX && pos_of(g, paths[i].face as usize).is_some()).collect();
+    let face_of: HashMap<u32, usize> = cones.iter().map(|&i| (f[paths[i].face as usize][0], i)).collect();
+    let mismatch_total = |g: &Graph| -> i32 { curves.iter().filter_map(|c| curve_mismatch(g, c)).map(|m| m.abs()).sum() };
+    // Voisines d'une singularité : (indice, Δ = position de l'autre moins la sienne, dans son repère)
+    let neighbours = |g: &Graph, i: usize| -> Vec<(usize, [i32; 2])> {
+        let fi = paths[i].face as usize;
+        let Some(pa) = pos_of(g, fi) else { return vec![] };
+        let a0 = f[fi][0];
+        let mut seen: HashMap<u32, (u8, [i32; 2], f64)> = HashMap::new();
+        seen.insert(a0, (0, [0, 0], 0.0));
+        let mut queue = std::collections::VecDeque::from([a0]);
+        let mut out = vec![];
+        while let Some(x) = queue.pop_front() {
+            let (kx, dx, dist) = seen[&x];
+            if let Some(&j) = face_of.get(&x) {
+                if j != i {
+                    if let Some(pb) = pos_of(g, paths[j].face as usize) {
+                        let r = trot(kx, pb);
+                        out.push((j, [r[0] + dx[0] - pa[0], r[1] + dx[1] - pa[1]]));
+                    }
+                }
+            }
+            for &(y, e) in &adj[x as usize] {
+                if seen.contains_key(&y) {
+                    continue;
+                }
+                let l = (geo[e as usize][0].powi(2) + geo[e as usize][1].powi(2)).sqrt();
+                if dist + l > reach {
+                    continue;
+                }
+                let (k, d) = g.dir(e, x);
+                let rd = trot(kx, d);
+                seen.insert(y, ((kx + k) & 3, [dx[0] + rd[0], dx[1] + rd[1]], dist + l));
+                queue.push_back(y);
+            }
+        }
+        out
+    };
+    // Score : paires alignées (une coordonnée égale) moins paires décalées d'une ligne
+    let score = |ns: &[(usize, [i32; 2])]| -> i32 {
+        ns.iter()
+            .map(|(_, d)| {
+                if d[0] == 0 && d[1] == 0 {
+                    -10
+                } else if d[0] == 0 || d[1] == 0 {
+                    1
+                } else if d[0].abs() == 1 || d[1].abs() == 1 {
+                    -1
+                } else {
+                    0
+                }
+            })
+            .sum()
+    };
+    if std::env::var("ALIGN_DBG").is_ok() {
+        let mut h = [0usize; 5];
+        for &i in &cones {
+            for (_, d) in neighbours(g, i) {
+                let m = d[0].abs().min(d[1].abs()).min(4) as usize;
+                h[m] += 1;
+            }
+        }
+        eprintln!("  écart min entre singularités voisines (0,1,2,3,4+) : {h:?}");
+    }
+    if dry {
+        return 0;
+    }
+    let mut moved = 0;
+    let mut done: HashSet<usize> = HashSet::new();
+    for &i in &cones {
+        if done.contains(&i) {
+            continue;
+        }
+        let ns = neighbours(g, i);
+        let s0 = score(&ns);
+        let m0 = mismatch_total(g);
+        let fi = paths[i].face as usize;
+        let mut best: Option<([i32; 2], i32)> = None;
+        for &(_, d) in &ns {
+            for dp in [[d[0], 0], [0, d[1]]] {
+                if dp[0].abs() + dp[1].abs() != 1 {
+                    continue;
+                }
+                // Déplacer p de dp : la fermeture change de (I − R)·dp, on pousse l'opposé
+                let (ks, _, _) = g.closure(&f[fi], fi);
+                let r = trot(ks, dp);
+                let sg: i32 = if std::env::var("ALIGN_SIGN").is_ok() { 1 } else { -1 };
+                let delta = [sg * (dp[0] - r[0]), sg * (dp[1] - r[1])];
+                push_path(g, f, &paths[i].steps, delta);
+                let old = shift.borrow().get(&fi).copied().unwrap_or([0, 0]);
+                shift.borrow_mut().insert(fi, [old[0] + dp[0], old[1] + dp[1]]);
+                let s1 = score(&neighbours(g, i));
+                let ok = s1 > s0 && mismatch_total(g) <= m0;
+                shift.borrow_mut().insert(fi, old);
+                push_path(g, f, &paths[i].steps, [-delta[0], -delta[1]]);
+                if ok && best.is_none_or(|b| s1 > b.1) {
+                    best = Some((dp, s1));
+                }
+            }
+        }
+        if let Some((dp, _)) = best {
+            let (ks, _, _) = g.closure(&f[fi], fi);
+            let r = trot(ks, dp);
+            let sg: i32 = if std::env::var("ALIGN_SIGN").is_ok() { 1 } else { -1 };
+            push_path(g, f, &paths[i].steps, [sg * (dp[0] - r[0]), sg * (dp[1] - r[1])]);
+            let old = shift.borrow().get(&fi).copied().unwrap_or([0, 0]);
+            shift.borrow_mut().insert(fi, [old[0] + dp[0], old[1] + dp[1]]);
+            moved += 1;
+            done.insert(i);
+            for (j, _) in neighbours(g, i) {
+                done.insert(j);
+            }
+        }
+    }
+    moved
 }
 
 /// Coefficients de l'écart de chaque boucle : il est linéaire en les décalages entiers d des
