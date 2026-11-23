@@ -2320,6 +2320,10 @@ fn remesh_core(pos: &[V3], tris: &[[u32; 3]], guides: &[Vec<V3>], opt: &Options,
     }
     make_manifold(&mut res);
     fill_holes(&mut res, &orig_v, &orig_f, h);
+    // Expérimental : n'arrive pas encore à défaire les étoiles des pointes (voir banc_stars)
+    if std::env::var("STARS").is_ok() {
+        fix_stars(&mut res);
+    }
     // Pôles : sommets intérieurs dont la valence n'est pas 4
     {
         let mut val = vec![0u32; res.pos.len()];
@@ -2343,6 +2347,140 @@ fn remesh_core(pos: &[V3], tris: &[[u32; 3]], guides: &[Vec<V3>], opt: &Options,
     lap("lissage final");
     progress(1.0);
     res
+}
+
+/// Étoiles : un sommet à 6 arêtes ou plus au bout d'une forme fine (pointe de corne, bout de
+/// doigt), avec ses rayons qui finissent sur des pôles à 3 arêtes (plusieurs singularités sont
+/// tombées sur le même point). On écrase la bande de quads entre deux rayons voisins, du
+/// centre jusqu'aux deux pôles : le centre perd une arête et les deux pôles n'en font plus
+/// qu'un, régulier. On répète jusqu'à un centre à 4 arêtes : un capuchon propre à 4 pôles.
+fn fix_stars(r: &mut Result) {
+    let mut any = false;
+    let mut tried: HashSet<(u32, u32)> = HashSet::new();
+    for _ in 0..200 {
+        let nv = r.pos.len();
+        let mut nb: Vec<HashSet<u32>> = vec![HashSet::new(); nv];
+        let mut ef: HashMap<(u32, u32), Vec<u32>> = HashMap::new();
+        for (fi, f) in r.faces.iter().enumerate() {
+            for k in 0..f.len() {
+                let (a, b) = (f[k], f[(k + 1) % f.len()]);
+                nb[a as usize].insert(b);
+                nb[b as usize].insert(a);
+                ef.entry((a.min(b), a.max(b))).or_default().push(fi as u32);
+            }
+        }
+        let mut border = vec![false; nv];
+        for (&(a, b), fs) in &ef {
+            if fs.len() != 2 {
+                border[a as usize] = true;
+                border[b as usize] = true;
+            }
+        }
+        let val = |i: u32| nb[i as usize].len();
+        let edge_faces = |a: u32, b: u32| ef.get(&(a.min(b), a.max(b))).cloned().unwrap_or_default();
+        // Sommet suivant en ligne droite à travers un sommet régulier
+        let straight = |prev: u32, x: u32| -> Option<u32> {
+            if val(x) != 4 || border[x as usize] {
+                return None;
+            }
+            let fa = edge_faces(prev, x);
+            nb[x as usize].iter().copied().find(|&w| w != prev && !edge_faces(x, w).iter().any(|f| fa.contains(f)))
+        };
+        let quad_with = |a: u32, b: u32, c: u32, d: u32| -> Option<u32> {
+            edge_faces(a, b).into_iter().find(|&f| {
+                let g = &r.faces[f as usize];
+                g.len() == 4 && g.contains(&c) && g.contains(&d)
+            })
+        };
+        let mut plan: Option<(Vec<u32>, Vec<(u32, u32)>, (u32, u32))> = None;
+        'find: for (fi, f) in r.faces.iter().enumerate() {
+            if f.len() != 4 {
+                continue;
+            }
+            for k in 0..4 {
+                let c = f[k];
+                if border[c as usize] || val(c) < 6 || tried.contains(&(c, fi as u32)) {
+                    continue;
+                }
+                let (mut a, mut b) = (f[(k + 1) % 4], f[(k + 3) % 4]);
+                let (mut pa, mut pb) = (c, c);
+                let mut strip = vec![fi as u32];
+                let mut pairs = vec![];
+                for _ in 0..12 {
+                    pairs.push((a, b));
+                    if val(a) == 3 && val(b) == 3 && !border[a as usize] && !border[b as usize] {
+                        plan = Some((strip, pairs, (c, fi as u32)));
+                        break 'find;
+                    }
+                    let (Some(na), Some(nb2)) = (straight(pa, a), straight(pb, b)) else { break };
+                    let Some(q) = quad_with(a, na, b, nb2) else { break };
+                    strip.push(q);
+                    (pa, pb, a, b) = (a, b, na, nb2);
+                }
+                tried.insert((c, fi as u32));
+            }
+        }
+        let Some((strip, pairs, key)) = plan else { break };
+        let saved = (r.pos.clone(), r.faces.clone());
+        let mut strip = strip;
+        strip.sort_unstable();
+        for &fi in strip.iter().rev() {
+            r.faces.swap_remove(fi as usize);
+        }
+        let map: HashMap<u32, u32> = pairs.iter().map(|&(a, b)| (b, a)).collect();
+        for &(a, b) in &pairs {
+            r.pos[a as usize] = mul(add(r.pos[a as usize], r.pos[b as usize]), 0.5);
+        }
+        for f in r.faces.iter_mut() {
+            for x in f.iter_mut() {
+                if let Some(&a) = map.get(x) {
+                    *x = a;
+                }
+            }
+        }
+        // Garde-fou : pas de face dégénérée ni de sommet à moins de 3 arêtes
+        let mut ok = r.faces.iter().all(|f| {
+            let mut g = f.clone();
+            g.sort_unstable();
+            g.dedup();
+            g.len() == f.len()
+        });
+        if ok {
+            let mut nb2: HashMap<u32, HashSet<u32>> = HashMap::new();
+            for f in &r.faces {
+                for k in 0..f.len() {
+                    let (a, b) = (f[k], f[(k + 1) % f.len()]);
+                    if pairs.iter().any(|p| p.0 == a || p.0 == b) {
+                        nb2.entry(a).or_default().insert(b);
+                        nb2.entry(b).or_default().insert(a);
+                    }
+                }
+            }
+            ok = pairs.iter().all(|p| nb2.get(&p.0).is_some_and(|s| s.len() >= 3));
+        }
+        if !ok {
+            (r.pos, r.faces) = saved;
+            tried.insert(key);
+            continue;
+        }
+        any = true;
+        tried.clear();
+    }
+    if any {
+        // Sommets devenus orphelins retirés
+        let mut map = vec![u32::MAX; r.pos.len()];
+        let mut pos = vec![];
+        for f in r.faces.iter_mut() {
+            for x in f.iter_mut() {
+                if map[*x as usize] == u32::MAX {
+                    map[*x as usize] = pos.len() as u32;
+                    pos.push(r.pos[*x as usize]);
+                }
+                *x = map[*x as usize];
+            }
+        }
+        r.pos = pos;
+    }
 }
 
 /// Petits trous laissés par l'extraction (quelques faces manquantes) : refermés par des quads
@@ -4337,6 +4475,23 @@ mod tests {
     }
 
     /// Banc d'essai sur un vrai fichier : RETOPO_IN=a.obj RETOPO_OUT=b.obj RETOPO_FACES=6000
+    #[test]
+    #[ignore]
+    fn banc_stars() {
+        let src = std::fs::read_to_string(std::env::var("RETOPO_IN").unwrap()).unwrap();
+        let mut r = Result { pos: vec![], faces: vec![], stats: Stats::default() };
+        for l in src.lines() {
+            let w: Vec<&str> = l.split_whitespace().collect();
+            match w.first() {
+                Some(&"v") => r.pos.push([w[1].parse().unwrap(), w[2].parse().unwrap(), w[3].parse().unwrap()]),
+                Some(&"f") => r.faces.push(w[1..].iter().map(|t| t.split('/').next().unwrap().parse::<u32>().unwrap() - 1).collect()),
+                _ => {}
+            }
+        }
+        fix_stars(&mut r);
+        export_obj(&r, &|p| p, std::path::Path::new(&std::env::var("RETOPO_OUT").unwrap())).unwrap();
+    }
+
     #[test]
     #[ignore]
     fn banc_simplif() {
