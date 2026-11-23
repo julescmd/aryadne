@@ -2084,6 +2084,16 @@ pub struct Viewer {
     gpu_scene: Option<gputrace::Scene>,
     gpu_batch: u32,
     capture_msg: Option<String>,
+    /// Ouvert depuis une scène pour les UV, matériaux et retopo d'un de ses objets
+    pub embedded: bool,
+    /// Visionneuse de l'objet de la scène en cours d'édition (UV, matériaux, retopo) et son indice
+    sub: Option<(Box<Viewer>, usize)>,
+    /// Entrer dans « UV et matériaux » dès que le modèle est chargé
+    start_edit: bool,
+    /// Demande d'ouvrir les UV, matériaux et retopo de l'objet choisi (scène)
+    uv_request: bool,
+    /// Scène à ouvrir dans un onglet (« ouvrir dans une scène » depuis la visionneuse)
+    pub scene_request: Option<std::path::PathBuf>,
 }
 
 impl Viewer {
@@ -2187,6 +2197,11 @@ impl Viewer {
             gpu_scene: None,
             gpu_batch: 4,
             capture_msg: None,
+            embedded: false,
+            sub: None,
+            start_edit: false,
+            uv_request: false,
+            scene_request: None,
         }
     }
 
@@ -2418,6 +2433,79 @@ impl Viewer {
 
     pub fn is_mesh_edit(&self) -> bool {
         self.mesh.is_some()
+    }
+
+    /// Le maillage propre à la scène de l'objet `k` : une copie en OBJ à côté de la scène,
+    /// créée au besoin (le modèle d'origine n'est jamais modifié)
+    fn own_mesh_file(&mut self, k: usize) -> Result<std::path::PathBuf, String> {
+        let scene = self.scene.as_mut().ok_or_else(|| crate::i18n::t("pas de scène"))?;
+        let o = scene.objects.get(k).filter(|o| crate::scene::kind(o) == crate::scene::Kind::Model).ok_or_else(|| crate::i18n::t("seuls les objets à maillage se modifient"))?;
+        let stem = self.path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "scène".into());
+        let dir = self.path.parent().unwrap_or(std::path::Path::new("")).to_path_buf();
+        let prefix = format!("{stem} - ");
+        if o.file.starts_with(&prefix) && o.file.to_lowercase().ends_with(".obj") {
+            return Ok(crate::scene::resolve(&self.path, &o.file));
+        }
+        let model = crate::scene::source_model(&self.path, o)?;
+        let mesh = crate::meshedit::EMesh::from_model(&model);
+        let mut name = format!("{prefix}{}.obj", o.name);
+        let mut n = 2;
+        while dir.join(&name).exists() {
+            name = format!("{prefix}{} {n}.obj", o.name);
+            n += 1;
+        }
+        let f = dir.join(&name);
+        mesh.write_obj(&f)?;
+        scene.objects[k].file = name;
+        let _ = scene.write(&self.path);
+        self.scene_dirty = true;
+        Ok(f)
+    }
+
+    /// UV, matériaux et retopo de l'objet choisi : sa copie s'ouvre dans la scène, avec les outils
+    fn open_uv_edit(&mut self, ctx: &egui::Context) {
+        let Some(k) = self.scene_sel else {
+            self.capture_msg = Some(crate::i18n::t("choisis d'abord un objet à modifier"));
+            return;
+        };
+        self.mesh = None;
+        match self.own_mesh_file(k) {
+            Ok(f) => {
+                let mut v = Viewer::open(f, ctx);
+                v.embedded = true;
+                v.start_edit = true;
+                v.root = self.root.clone();
+                v.hdr_files = self.hdr_files.clone();
+                v.mat_files = self.mat_files.clone();
+                v.look = self.look.clone();
+                self.sub = Some((Box::new(v), k));
+                self.capture_msg = None;
+            }
+            Err(e) => self.capture_msg = Some(e),
+        }
+    }
+
+    /// « Ouvrir dans une scène » : une scène neuve à côté du modèle, avec lui, une lumière et une caméra
+    fn open_in_scene(&mut self) {
+        let dir = self.path.parent().unwrap_or(std::path::Path::new("")).to_path_buf();
+        let stem = self.path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "modèle".into());
+        let ext = crate::formats::ext("scene");
+        let mut out = dir.join(format!("{stem}.{ext}"));
+        let mut n = 2;
+        while out.exists() {
+            out = dir.join(format!("{stem} {n}.{ext}"));
+            n += 1;
+        }
+        let mut sc = crate::scene::Scene::default();
+        sc.add(&out, &self.path);
+        let l = sc.add_role("soleil", "light");
+        (sc.objects[l].pos, sc.objects[l].rot) = ([4.0, 6.0, 3.0], [35.0, 0.0, -35.0]);
+        let c = sc.add_role("caméra", "camera");
+        (sc.objects[c].pos, sc.objects[c].rot) = ([7.0, 5.0, 7.0], [-28.0, 45.0, 0.0]);
+        match sc.write(&out) {
+            Ok(()) => self.scene_request = Some(out),
+            Err(e) => self.capture_msg = Some(e),
+        }
     }
 
     /// Entre en mode édition sur l'objet actif. Son maillage devient un fichier OBJ à côté de la scène
@@ -3108,6 +3196,11 @@ impl Viewer {
             }
             Err(e) => self.capture_msg = Some(format!("{} : {e}", crate::i18n::t("écriture impossible"))),
         }
+    }
+
+    /// Un modèle ouvert seul est en lecture : on le regarde. On le modifie dans une scène.
+    pub fn can_edit(&self) -> bool {
+        self.embedded
     }
 
     pub fn is_scene(&self) -> bool {
@@ -4035,6 +4128,41 @@ impl Viewer {
 
     pub fn show(&mut self, ui: &mut egui::Ui) {
         let p = theme::pal();
+        if std::mem::take(&mut self.uv_request) {
+            self.open_uv_edit(&ui.ctx().clone());
+        }
+        if let Some((sub, k)) = &mut self.sub {
+            let k = *k;
+            let name = self.scene.as_ref().and_then(|s| s.objects.get(k)).map(|o| o.name.clone()).unwrap_or_default();
+            let mut back = false;
+            ui.horizontal(|ui| {
+                if ui.button(format!("◀ {}", crate::i18n::t("retour à la scène"))).on_hover_text(crate::i18n::t("Les UV et matériaux sont gardés avec la copie de l'objet propre à la scène")).clicked() || (ui.input(|i| i.key_pressed(Key::Escape)) && sub.edit.is_none()) {
+                    back = true;
+                }
+                ui.label(egui::RichText::new(format!("{} · {name}", crate::i18n::t("UV, matériaux et retopo"))).family(theme::bold()));
+            });
+            sub.show(ui);
+            if let Some(f) = sub.open_request.take() {
+                if is_model(&f.to_string_lossy()) {
+                    // Retopo exportée : elle remplace le maillage de l'objet dans la scène
+                    if let Some(scene) = self.scene.as_mut() {
+                        let dir = self.path.parent().unwrap_or(std::path::Path::new(""));
+                        scene.objects[k].file = f.strip_prefix(dir).map(|p| p.to_string_lossy().replace('\\', "/")).unwrap_or_else(|_| f.to_string_lossy().to_string());
+                        let _ = scene.write(&self.path);
+                        self.capture_msg = Some(crate::i18n::t("retopo appliquée à l'objet"));
+                    }
+                    back = true;
+                } else {
+                    self.open_request = Some(f);
+                }
+            }
+            if back {
+                self.sub = None;
+                // L'objet a pu changer (retopo, maillage) : la scène se recharge
+                self.reload_request = true;
+            }
+            return;
+        }
         if let Some((key, modifiers)) = self.hdr_key.take() {
             ui.ctx().input_mut(|i| {
                 i.modifiers = modifiers;
@@ -4082,7 +4210,7 @@ impl Viewer {
         let model = &model;
         let z_up = *self.z_up.get_or_insert(model.z_up);
         // Pile de modificateurs : chargée une fois, recalculée en arrière-plan quand elle change
-        if !self.stack_loaded && !self.root.is_empty() {
+        if !self.stack_loaded && !self.root.is_empty() && self.can_edit() {
             self.stack = std::fs::read_to_string(self.mods_file()).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
             self.applied = crate::modifiers::Mesh::load(&self.mods_file().with_extension("mesh")).map(std::sync::Arc::new);
             self.stack_loaded = true;
@@ -4277,7 +4405,7 @@ impl Viewer {
         // ---------- en-tête de la vue, à la manière de Blender ----------
         // Les éléments viennent d'une liste : en ajouter un, c'est une ligne dans HEADER et un bras dans le match.
         let is_scene = crate::scene::is_scene(&self.path);
-        let mut want_edit: Option<bool> = None;
+        let mut want_edit: Option<bool> = if std::mem::take(&mut self.start_edit) { Some(true) } else { None };
         // L'en-tête flotte par-dessus le haut de la vue, comme dans Blender : la vue garde toute la hauteur
         let vp = self.vp_rect.unwrap_or(ui.available_rect_before_wrap());
         let hdr_area = egui::Area::new(egui::Id::unique(("hdr3d", self.path.to_string_lossy().to_string()))).order(egui::Order::Middle).fixed_pos(vp.min + egui::vec2(6.0, 6.0)).show(ui.ctx(), |ui| {
@@ -4290,6 +4418,11 @@ impl Viewer {
             ui.spacing_mut().item_spacing.x = 3.0;
             for item in HEADER {
                 match item {
+                    Hdr::Mode if !is_scene && !self.can_edit() => {
+                        if ui.add(egui::Button::new(egui::RichText::new(format!("✚ {}", crate::i18n::t("ouvrir dans une scène"))).family(theme::bold()).size(12.0)).fill(p.panel)).on_hover_text(crate::i18n::t("Le modèle seul se regarde. Pour le modifier (édition, modificateurs, UV, retopo), on le place dans une scène.")).clicked() {
+                            self.open_in_scene();
+                        }
+                    }
                     Hdr::Mode => {
                         let mode = if self.mesh.is_some() { "mode édition" } else if self.edit.is_some() { "UV et matériaux" } else { "mode objet" };
                         if let Some(me) = self.mesh.as_mut() {
@@ -4316,6 +4449,10 @@ impl Viewer {
                                     if self.mesh.is_none() {
                                         self.mesh_toggle = true;
                                     }
+                                    ui.close();
+                                }
+                                if ui.selectable_label(false, crate::i18n::t("UV, matériaux et retopo")).on_hover_text(crate::i18n::t("IDs de matériau, coutures, UV et retopo de l'objet choisi")).clicked() {
+                                    self.uv_request = true;
                                     ui.close();
                                 }
                             } else if ui.selectable_label(self.edit.is_some(), crate::i18n::t("UV et matériaux")).on_hover_text(crate::i18n::t("IDs de matériau, coutures, UV, retopo")).clicked() {
@@ -4399,7 +4536,7 @@ impl Viewer {
                                 }
                                 ui.separator();
                             }
-                            if ui.button(crate::i18n::t("modificateurs…")).clicked() {
+                            if (is_scene || self.can_edit()) && ui.button(crate::i18n::t("modificateurs…")).clicked() {
                                 self.show_mods = true;
                                 self.edit = None;
                                 self.prepared = None;
@@ -4585,7 +4722,7 @@ impl Viewer {
                             });
                         }
                     }
-                    Hdr::Modifiers if self.is_scene() => {}
+                    Hdr::Modifiers if self.is_scene() || !self.can_edit() => {}
                     Hdr::Modifiers => {
                         let n_mods = self.stack.iter().filter(|m| m.on).count();
                         let label = if n_mods > 0 { format!("{} ({n_mods})", crate::i18n::t("modificateurs")) } else { crate::i18n::t("modificateurs") };

@@ -2729,6 +2729,12 @@ impl App {
                     if std::mem::take(&mut viewer.reload_request) {
                         self.actions.push(Action::Reload(rel.clone()));
                     }
+                    if let Some(f) = viewer.scene_request.take() {
+                        let root = std::path::PathBuf::from(&viewer.root);
+                        if let Ok(r) = f.strip_prefix(&root) {
+                            self.actions.push(Action::Open(r.to_string_lossy().replace('\\', "/")));
+                        }
+                    }
                 }
                 Content::Image => {
                     let slot = self.images.get(&rel, images::Size::Full);

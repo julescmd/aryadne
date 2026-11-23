@@ -398,3 +398,21 @@ pub mod tests {
         d
     }
 }
+
+#[cfg(test)]
+mod conv {
+    #[test]
+    #[ignore]
+    fn fbx_en_obj() {
+        let i = std::env::var("FBX_IN").unwrap();
+        let m = super::load(&std::fs::read(&i).unwrap()).unwrap();
+        let mut o = String::new();
+        for p in &m.positions {
+            o += &format!("v {} {} {}\n", p[0], p[1], p[2]);
+        }
+        for t in &m.tris {
+            o += &format!("f {} {} {}\n", t[0] + 1, t[1] + 1, t[2] + 1);
+        }
+        std::fs::write(std::env::var("FBX_OUT").unwrap(), o).unwrap();
+    }
+}

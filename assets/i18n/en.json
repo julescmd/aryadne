@@ -1480,5 +1480,14 @@
  "objets séparés": "separate objects",
  "même densité": "same density",
  "selon les détails": "by detail",
- "Chaque objet non relié est retopologisé à part. Plus la force est haute, plus un objet chargé de détails reçoit de quads par rapport à un objet lisse.": "Each unconnected object is retopologized on its own. The higher the strength, the more quads a detailed object gets compared with a smooth one."
+ "Chaque objet non relié est retopologisé à part. Plus la force est haute, plus un objet chargé de détails reçoit de quads par rapport à un objet lisse.": "Each unconnected object is retopologized on its own. The higher the strength, the more quads a detailed object gets compared with a smooth one.",
+ "ouvrir dans une scène": "open in a scene",
+ "Le modèle seul se regarde. Pour le modifier (édition, modificateurs, UV, retopo), on le place dans une scène.": "A model on its own is view-only. To change it (edit mode, modifiers, UVs, retopology), place it in a scene.",
+ "UV, matériaux et retopo": "UVs, materials & retopology",
+ "IDs de matériau, coutures, UV et retopo de l'objet choisi": "Material IDs, seams, UVs and retopology of the selected object",
+ "retour à la scène": "back to the scene",
+ "Les UV et matériaux sont gardés avec la copie de l'objet propre à la scène": "UVs and materials are kept with the scene's own copy of the object",
+ "retopo appliquée à l'objet": "retopology applied to the object",
+ "pas de scène": "no scene",
+ "seuls les objets à maillage se modifient": "only mesh objects can be edited"
 }

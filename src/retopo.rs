@@ -479,6 +479,7 @@ fn delaunay_flips(v: &[V3], mut f: Vec<[u32; 3]>) -> Vec<[u32; 3]> {
     f
 }
 
+#[cfg(test)]
 fn refine_n1(pos: Vec<V3>, tris: Vec<[u32; 3]>) -> (Vec<V3>, Vec<[u32; 3]>) {
     refine_n(pos, tris, &|_| 0.0, 0, usize::MAX)
 }
