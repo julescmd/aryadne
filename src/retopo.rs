@@ -409,6 +409,77 @@ fn refine_once(pos: Vec<V3>, tris: Vec<[u32; 3]>) -> (Vec<V3>, Vec<[u32; 3]>) {
 }
 
 #[cfg(test)]
+/// Bascule d'arêtes de Delaunay : une arête dont les deux angles opposés font plus de 180° est
+/// remplacée par l'autre diagonale, si les deux triangles sont presque dans le même plan (on ne
+/// touche pas aux arêtes vives).
+fn delaunay_flips(v: &[V3], mut f: Vec<[u32; 3]>) -> Vec<[u32; 3]> {
+    let angle = |a: V3, b: V3, c: V3| -> f32 {
+        // angle en a
+        let (u, w) = (sub(b, a), sub(c, a));
+        (dot(u, w) / (len(u) * len(w)).max(1e-20)).clamp(-1.0, 1.0).acos()
+    };
+    let tri_n = |t: &[u32; 3]| norm(cross(sub(v[t[1] as usize], v[t[0] as usize]), sub(v[t[2] as usize], v[t[0] as usize])));
+    let mut total = 0usize;
+    // Seulement les cas nets (aiguilles) : un maillage déjà propre (sculpt) reste tel quel
+    let flip_eps: f32 = std::env::var("FLIP_EPS").ok().and_then(|x| x.parse().ok()).unwrap_or(0.35);
+    for _ in 0..8 {
+        let mut ef: HashMap<(u32, u32), Vec<u32>> = HashMap::default();
+        for (fi, t) in f.iter().enumerate() {
+            for k in 0..3 {
+                let (a, b) = (t[k], t[(k + 1) % 3]);
+                ef.entry((a.min(b), a.max(b))).or_default().push(fi as u32);
+            }
+        }
+        let mut touched = vec![false; f.len()];
+        let mut keys: Vec<(u32, u32)> = ef.iter().filter(|(_, l)| l.len() == 2).map(|(k, _)| *k).collect();
+        keys.sort_unstable();
+        let mut n = 0;
+        for (a, b) in keys {
+            let l = &ef[&(a, b)];
+            let (f1, f2) = (l[0] as usize, l[1] as usize);
+            if touched[f1] || touched[f2] {
+                continue;
+            }
+            let (t1, t2) = (f[f1], f[f2]);
+            let c = *t1.iter().find(|&&x| x != a && x != b).unwrap();
+            let d = *t2.iter().find(|&&x| x != a && x != b).unwrap();
+            if c == d || ef.contains_key(&(c.min(d), c.max(d))) {
+                continue;
+            }
+            if dot(tri_n(&t1), tri_n(&t2)) < 0.985 {
+                continue;
+            }
+            let (pa, pb, pc, pd) = (v[a as usize], v[b as usize], v[c as usize], v[d as usize]);
+            if angle(pc, pa, pb) + angle(pd, pa, pb) <= std::f32::consts::PI + flip_eps {
+                continue;
+            }
+            // Nouvelles faces dans le même sens : t1 contient a → b ou b → a
+            let k1 = (0..3).find(|&k| t1[k] == a && t1[(k + 1) % 3] == b);
+            let (x, y) = if k1.is_some() { (a, b) } else { (b, a) };
+            // t1 = (x, y, c), t2 = (y, x, d) → (x, d, c) et (d, y, c)
+            let n1 = [x, d, c];
+            let n2 = [d, y, c];
+            let old = add(tri_n(&t1), tri_n(&t2));
+            if dot(tri_n(&n1), old) <= 0.0 || dot(tri_n(&n2), old) <= 0.0 {
+                continue;
+            }
+            f[f1] = n1;
+            f[f2] = n2;
+            touched[f1] = true;
+            touched[f2] = true;
+            n += 1;
+        }
+        total += n;
+        if n == 0 {
+            break;
+        }
+    }
+    if std::env::var("RETOPO_DEBUG").is_ok() {
+        eprintln!("bascules de Delaunay : {total}");
+    }
+    f
+}
+
 fn refine_n1(pos: Vec<V3>, tris: Vec<[u32; 3]>) -> (Vec<V3>, Vec<[u32; 3]>) {
     refine_n(pos, tris, &|_| 0.0, 0, usize::MAX)
 }
@@ -2079,6 +2150,10 @@ fn remesh_core(pos: &[V3], tris: &[[u32; 3]], guides: &[Vec<V3>], opt: &Options,
     lap("simplification");
     // Garde-fou : un maillage fait de triangles très allongés ne doit pas exploser en taille
     let (v, f) = refine(pos, tris, h / dens, (target * 60).max(40_000));
+    // Triangles en aiguille (maillage d'origine allongé, coupé en deux encore et encore) : on
+    // bascule les arêtes vers des triangles plus ronds (Delaunay sur les zones presque planes),
+    // sinon courbure et champ y deviennent du bruit et la grille se replie
+    let f = if std::env::var("NOFLIP").is_err() { delaunay_flips(&v, f) } else { f };
     // Zones où plusieurs singularités tombent à moins d'un quad l'une de l'autre (pointe de
     // corne, bout de doigt) : le maillage dense y est trop grossier pour les écarter d'un quad
     // chacune, l'extraction les entasse en une étoile. On y double la finesse.
