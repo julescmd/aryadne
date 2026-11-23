@@ -2258,6 +2258,17 @@ fn remesh_core(pos: &[V3], tris: &[[u32; 3]], guides: &[Vec<V3>], opt: &Options,
             }
         }
     }
+    // Arêtes franches (au-delà de PIN_ANGLE) : en plus d'orienter le champ, elles deviennent des
+    // lignes exactes du maillage. Les arêtes plus douces (pans d'un modèle low-poly) orientent
+    // seulement : les épingler toutes multiplie les contraintes contradictoires.
+    let pin_angle: f32 = std::env::var("PIN_ANGLE").ok().and_then(|x| x.parse().ok()).unwrap_or(0.0);
+    if pin_angle > opt.sharp_angle {
+        let before = ft.edges.len();
+        ft = features(&v, &f, pin_angle, 3.0 * h);
+        if debug {
+            eprintln!("arêtes épinglées : {} sur {before}", ft.edges.len());
+        }
+    }
     let (cdir, cani, kmin) = curvature(&v, &f, &nrm, &adj, h);
 
     // Boucles automatiques : les plis creux qui font le tour de quelque chose (orbite, bouche,
