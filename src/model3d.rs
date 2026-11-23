@@ -3184,7 +3184,7 @@ impl Viewer {
                     if !self.root.is_empty() {
                         let f = self.mods_file();
                         let _ = std::fs::remove_file(f.with_extension("mesh"));
-                        let _ = std::fs::write(&f, "[]");
+                        let _ = crate::vault::atomic_write(&f, "[]");
                     }
                     self.edit = None;
                     self.reload_request = true;
@@ -4830,7 +4830,7 @@ impl Viewer {
             if changed && !self.root.is_empty() {
                 let f = self.mods_file();
                 let _ = std::fs::create_dir_all(f.parent().unwrap());
-                let _ = std::fs::write(f, serde_json::to_string(&self.stack).unwrap_or_default());
+                let _ = crate::vault::atomic_write(f, serde_json::to_string(&self.stack).unwrap_or_default());
             }
         }
         // Annuler / rétablir dans la pile (hors édition des UV, qui a son propre historique)
@@ -4856,7 +4856,7 @@ impl Viewer {
                     if !self.root.is_empty() {
                         let f = self.mods_file();
                         let _ = std::fs::create_dir_all(f.parent().unwrap());
-                        let _ = std::fs::write(f, serde_json::to_string(&self.stack).unwrap_or_default());
+                        let _ = crate::vault::atomic_write(f, serde_json::to_string(&self.stack).unwrap_or_default());
                     }
                 }
             }
@@ -4932,7 +4932,7 @@ impl Viewer {
             self.job = None;
             let f = self.mods_file();
             let _ = std::fs::create_dir_all(f.parent().unwrap());
-            let _ = std::fs::write(f, serde_json::to_string(&self.stack).unwrap_or_default());
+            let _ = crate::vault::atomic_write(f, serde_json::to_string(&self.stack).unwrap_or_default());
             ui.ctx().request_repaint();
         }
         // Fenêtre d'export : la liste des formats, puis l'endroit où enregistrer

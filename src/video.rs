@@ -283,7 +283,7 @@ impl Viewer {
             e.frames = count(&dir);
             e.done = true;
             if ok {
-                let _ = std::fs::write(dir.join("done"), "");
+                let _ = crate::vault::atomic_write(dir.join("done"), "");
             } else if e.frames == 0 {
                 let mut msg = String::new();
                 if let Some(mut err) = child.stderr.take() {
@@ -473,7 +473,7 @@ impl Viewer {
         if let Some(d) = self.notes_path.parent() {
             let _ = std::fs::create_dir_all(d);
         }
-        let _ = std::fs::write(marks_path(&self.notes_path), serde_json::to_string(&self.marks).unwrap_or_default());
+        let _ = crate::vault::atomic_write(marks_path(&self.notes_path), serde_json::to_string(&self.marks).unwrap_or_default());
     }
 
     /// Ajoute ou enlève un signet sur l'image donnée
@@ -497,7 +497,7 @@ impl Viewer {
         if let Some(d) = self.notes_path.parent() {
             let _ = std::fs::create_dir_all(d);
         }
-        let _ = std::fs::write(&self.notes_path, serde_json::to_string(&self.lines).unwrap_or_default());
+        let _ = crate::vault::atomic_write(&self.notes_path, serde_json::to_string(&self.lines).unwrap_or_default());
     }
 
     /// Image réellement affichée : en « 2s », chaque image est tenue deux fois.

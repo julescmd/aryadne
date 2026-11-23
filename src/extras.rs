@@ -932,7 +932,7 @@ fn ensure_templates(root: &str) {
         ("Critique.md", "# {{titre}}\n\n**Date :** {{date}}\n\n## Ce qui marche\n- \n\n## À corriger\n- [ ] \n\n## Idées\n- \n"),
     ];
     for (n, t) in files {
-        let _ = std::fs::write(dir.join(n), t);
+        let _ = crate::vault::atomic_write(dir.join(n), t);
     }
 }
 
@@ -981,11 +981,11 @@ pub fn snapshot(root: &str, rel: &str, text: &str) {
             return;
         }
         if now.saturating_sub(*t) < 120 {
-            let _ = std::fs::write(f, text);
+            let _ = crate::vault::atomic_write(f, text);
             return;
         }
     }
-    let _ = std::fs::write(dir.join(format!("{now}.txt")), text);
+    let _ = crate::vault::atomic_write(dir.join(format!("{now}.txt")), text);
     while files.len() >= 40 {
         let (_, f) = files.remove(0);
         let _ = std::fs::remove_file(f);
@@ -1092,7 +1092,7 @@ fn download_image(root: &str, dir: &str, url: &str) -> Result<String, String> {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    std::fs::write(&path, bytes).map_err(|e| e.to_string())?;
+    crate::vault::atomic_write(&path, bytes).map_err(|e| e.to_string())?;
     Ok(rel)
 }
 
@@ -1136,7 +1136,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("notes")).unwrap();
         let root = dir.to_string_lossy().to_string();
-        std::fs::write(dir.join("notes/a.md"), "# A #perso\n- [ ] sculpter #3d\n  - [x] blocking\n- pas une tâche\ncouleur #ff5a1f\n").unwrap();
+        crate::vault::atomic_write(dir.join("notes/a.md"), "# A #perso\n- [ ] sculpter #3d\n  - [x] blocking\n- pas une tâche\ncouleur #ff5a1f\n").unwrap();
         let entries = vault::scan(&root);
         let t = collect_tasks(&root, &entries, &[]);
         assert_eq!(t.len(), 2);

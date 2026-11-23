@@ -121,7 +121,7 @@ impl EMesh {
             }
             t += "\n";
         }
-        std::fs::write(path, t).map_err(|e| e.to_string())
+        crate::vault::atomic_write(path, t).map_err(|e| e.to_string())
     }
 
     /// Normale d'un polygone (méthode de Newell : juste aussi pour un polygone qui n'est pas tout à fait plat).

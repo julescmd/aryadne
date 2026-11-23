@@ -92,7 +92,7 @@ pub fn save_links(root: &str, l: &Links) -> Result<(), String> {
         *g = l.clone();
     }
     fs::create_dir_all(Path::new(root).join(".app")).map_err(|e| e.to_string())?;
-    fs::write(Path::new(root).join(".app/links.json"), serde_json::to_string_pretty(l).unwrap()).map_err(|e| e.to_string())
+    crate::vault::atomic_write(Path::new(root).join(".app/links.json"), serde_json::to_string_pretty(l).unwrap()).map_err(|e| e.to_string())
 }
 
 /// Chemin hors du coffre (dossier ou fichier lié) ?
@@ -226,7 +226,7 @@ pub fn init(root: &str) -> Result<(), String> {
         fs::create_dir_all(r.join(d)).map_err(|e| e.to_string())?;
     }
     if fresh {
-        fs::write(
+        crate::vault::atomic_write(
             r.join("notes/Bienvenue.md"),
             "# Bienvenue\n\nCeci est ton coffre : un dossier ordinaire sur ton disque.\n\n- Relie tes notes avec des doubles crochets : [[Idées]].\n- Ouvre la vue Cerveau pour voir tout le réseau.\n- Clic droit dans l'explorateur pour créer, renommer ou supprimer.\n- Glisse des fichiers dans la fenêtre pour les importer.\n",
         )
@@ -323,8 +323,35 @@ pub fn read(root: &str, rel: &str) -> Result<String, String> {
     String::from_utf8(bytes).map_err(|_| format!("« {rel} » n'est pas du texte UTF-8."))
 }
 
+/// Écriture sûre : le contenu va d'abord dans un fichier temporaire du même dossier, puis
+/// le remplace d'un coup. Une coupure ou un plantage en plein milieu laisse l'ancienne
+/// version intacte au lieu d'un fichier tronqué. Un lien symbolique est écrit directement.
+pub fn atomic_write(path: impl AsRef<std::path::Path>, contents: impl AsRef<[u8]>) -> std::io::Result<()> {
+    use std::io::Write;
+    let path = path.as_ref();
+    if fs::symlink_metadata(path).map(|m| m.file_type().is_symlink()).unwrap_or(false) {
+        return fs::write(path, contents);
+    }
+    let dir = path.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(std::path::Path::new("."));
+    let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+    let tmp = dir.join(format!(".{name}.{}.tmp", std::process::id()));
+    let res = (|| {
+        let mut f = fs::File::create(&tmp)?;
+        f.write_all(contents.as_ref())?;
+        f.sync_all()?;
+        drop(f);
+        fs::rename(&tmp, path)
+    })();
+    if res.is_err() {
+        let _ = fs::remove_file(&tmp);
+        // Dossier en lecture seule pour les nouveaux fichiers, partage réseau capricieux… : écriture directe
+        return fs::write(path, contents);
+    }
+    res
+}
+
 pub fn write(root: &str, rel: &str, text: &str) -> Result<(), String> {
-    fs::write(safe(root, rel)?, text).map_err(|e| e.to_string())
+    crate::vault::atomic_write(safe(root, rel)?, text).map_err(|e| e.to_string())
 }
 
 /// Crée un fichier vide (ou un titre pour un .md). Ne touche jamais un fichier existant.
@@ -337,7 +364,7 @@ pub fn create_file(root: &str, rel: &str) -> Result<(), String> {
         fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
     let content = if is_md(rel) { format!("# {}\n\n", stem(rel)) } else { String::new() };
-    fs::write(p, content).map_err(|e| e.to_string())
+    crate::vault::atomic_write(p, content).map_err(|e| e.to_string())
 }
 
 pub fn create_dir(root: &str, rel: &str) -> Result<(), String> {
@@ -569,7 +596,7 @@ mod tests {
         trash(&v, "notes/main.rs").unwrap();
         assert!(!dir.join("notes/main.rs").exists());
         let src = std::env::temp_dir().join("aryadne-import.txt");
-        fs::write(&src, "x").unwrap();
+        crate::vault::atomic_write(&src, "x").unwrap();
         assert_eq!(import(&v, "refs", &src, false).unwrap(), "refs/aryadne-import.txt");
         assert_eq!(import(&v, "refs", &src, true).unwrap(), "refs/aryadne-import 2.txt");
         assert!(!src.exists(), "déplacer ne doit pas laisser de doublon");
@@ -580,8 +607,8 @@ mod tests {
         let ext = std::env::temp_dir().join("aryadne-ext");
         let _ = fs::remove_dir_all(&ext);
         fs::create_dir_all(ext.join("sous")).unwrap();
-        fs::write(ext.join("sous/photo.png"), "x").unwrap();
-        fs::write(ext.join("seul.txt"), "salut").unwrap();
+        crate::vault::atomic_write(ext.join("sous/photo.png"), "x").unwrap();
+        crate::vault::atomic_write(ext.join("seul.txt"), "salut").unwrap();
         let d = link_external(&v, &ext).unwrap();
         assert_eq!(d, "@aryadne-ext");
         let f = link_external(&v, &ext.join("seul.txt")).unwrap();
@@ -598,5 +625,21 @@ mod tests {
         trash(&v, "@aryadne-ext").unwrap();
         assert!(ext.join("sous/photo.png").exists());
         assert!(link_list().folders.is_empty() && link_list().files.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod atomic_tests {
+    #[test]
+    fn ecriture_sure() {
+        let d = std::env::temp_dir().join(format!("aryadne-atomic-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        let f = d.join("note.md");
+        super::atomic_write(&f, "un").unwrap();
+        super::atomic_write(&f, "deux").unwrap();
+        assert_eq!(std::fs::read_to_string(&f).unwrap(), "deux");
+        // Aucun fichier temporaire ne reste
+        assert_eq!(std::fs::read_dir(&d).unwrap().count(), 1);
+        std::fs::remove_dir_all(&d).unwrap();
     }
 }

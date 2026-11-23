@@ -352,7 +352,7 @@ impl Scene {
 
     pub fn write(&self, path: &Path) -> Result<(), String> {
         let s = Scene { version: 1, ..self.clone() };
-        std::fs::write(path, serde_json::to_string_pretty(&s).map_err(|e| e.to_string())?).map_err(|e| e.to_string())
+        crate::vault::atomic_write(path, serde_json::to_string_pretty(&s).map_err(|e| e.to_string())?).map_err(|e| e.to_string())
     }
 
     /// Met chaque objet animé dans sa pose de l'image `f`. Renvoie vrai si quelque chose a bougé.
@@ -891,7 +891,7 @@ mod tests {
     fn scene_aller_retour_et_fusion() {
         let dir = std::env::temp_dir().join("aryadne-scene-test");
         let _ = std::fs::create_dir_all(&dir);
-        std::fs::write(dir.join("tri.obj"), "v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n").unwrap();
+        crate::vault::atomic_write(dir.join("tri.obj"), "v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n").unwrap();
         let file = dir.join("essai.arya3");
         let mut s = Scene::default();
         s.add(&file, &dir.join("tri.obj"));

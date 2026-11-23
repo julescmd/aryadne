@@ -486,7 +486,7 @@ impl Graph {
     }
 
     pub fn save(&self, path: &Path) -> Result<(), String> {
-        std::fs::write(path, serde_json::to_string_pretty(self).map_err(|e| e.to_string())?).map_err(|e| e.to_string())
+        crate::vault::atomic_write(path, serde_json::to_string_pretty(self).map_err(|e| e.to_string())?).map_err(|e| e.to_string())
     }
 }
 

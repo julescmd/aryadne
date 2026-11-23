@@ -229,7 +229,7 @@ impl Chat {
         let _ = std::fs::create_dir_all(&dir);
         let s = Saved { title: self.title.clone(), msgs: self.msgs.clone() };
         if let Ok(t) = serde_json::to_string(&s) {
-            let _ = std::fs::write(dir.join(format!("{id}.json")), t);
+            let _ = crate::vault::atomic_write(dir.join(format!("{id}.json")), t);
         }
         self.saved_len = self.msgs.len();
     }
@@ -718,8 +718,8 @@ mod tests {
         let dir = std::env::temp_dir().join("aryadne-chat-test");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("notes")).unwrap();
-        std::fs::write(dir.join("notes/Forêt.md"), "La forêt brumeuse du court métrage, lumière froide.").unwrap();
-        std::fs::write(dir.join("notes/Recette.md"), "Pâtes au pesto, basilic.").unwrap();
+        crate::vault::atomic_write(dir.join("notes/Forêt.md"), "La forêt brumeuse du court métrage, lumière froide.").unwrap();
+        crate::vault::atomic_write(dir.join("notes/Recette.md"), "Pâtes au pesto, basilic.").unwrap();
         let root = dir.to_string_lossy().to_string();
         let entries = vault::scan(&root);
         let hits = search(&root, &entries, "Quelle lumière pour la foret ?");

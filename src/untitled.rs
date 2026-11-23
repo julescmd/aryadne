@@ -114,7 +114,7 @@ pub fn save_to(root: &str, rel: &str, dest: &Path) -> Result<(), String> {
             }
         }
     }
-    std::fs::write(dest, &text).map_err(|e| e.to_string())?;
+    crate::vault::atomic_write(dest, &text).map_err(|e| e.to_string())?;
     discard(root, rel);
     Ok(())
 }
@@ -144,11 +144,11 @@ mod tests {
         let a = new_rel(&r, "arymat");
         assert!(is_untitled(&a) && name(&a) == "untitled.arymat");
         std::fs::create_dir_all(root.join(&a).parent().unwrap()).unwrap();
-        std::fs::write(root.join(&a), "{}").unwrap();
+        crate::vault::atomic_write(root.join(&a), "{}").unwrap();
         assert_eq!(name(&new_rel(&r, "aryscene")), "untitled.aryscene");
         assert_eq!(name(&new_rel(&r, "arymat")), "untitled-2.arymat");
         let h = hash(&r, &a);
-        std::fs::write(root.join(&a), "{ }").unwrap();
+        crate::vault::atomic_write(root.join(&a), "{ }").unwrap();
         assert_ne!(h, hash(&r, &a));
         assert_eq!(leftovers(&r), vec![a.clone()]);
         let dest = root.join("nodes/Bois.arymat");
@@ -158,11 +158,11 @@ mod tests {
         let s = new_rel(&r, "aryscene");
         let dir = root.join(&s).parent().unwrap().to_path_buf();
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(root.join(&s), r#"{"objects":[{"file":"cube.obj"}]}"#).unwrap();
-        std::fs::write(dir.join("cube.obj"), "v 0 0 0").unwrap();
+        crate::vault::atomic_write(root.join(&s), r#"{"objects":[{"file":"cube.obj"}]}"#).unwrap();
+        crate::vault::atomic_write(dir.join("cube.obj"), "v 0 0 0").unwrap();
         assert_eq!(leftovers(&r), vec![s.clone()]);
         std::fs::create_dir_all(root.join("3d")).unwrap();
-        std::fs::write(root.join("3d/cube.obj"), "autre").unwrap();
+        crate::vault::atomic_write(root.join("3d/cube.obj"), "autre").unwrap();
         let dest = root.join("3d/Scène.aryscene");
         save_to(&r, &s, &dest).unwrap();
         assert_eq!(std::fs::read_to_string(&dest).unwrap(), r#"{"objects":[{"file":"cube 2.obj"}]}"#);

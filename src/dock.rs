@@ -75,7 +75,7 @@ fn save() {
         if let Some(dir) = p.parent() {
             let _ = std::fs::create_dir_all(dir);
         }
-        let _ = std::fs::write(p, d);
+        let _ = crate::vault::atomic_write(p, d);
     }
 }
 

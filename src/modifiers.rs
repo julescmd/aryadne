@@ -297,7 +297,7 @@ impl Mesh {
         if let Some(d) = path.parent() {
             std::fs::create_dir_all(d).map_err(|e| e.to_string())?;
         }
-        std::fs::write(path, b).map_err(|e| e.to_string())
+        crate::vault::atomic_write(path, b).map_err(|e| e.to_string())
     }
 
     pub fn load(path: &std::path::Path) -> Option<Mesh> {
@@ -1666,7 +1666,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("aryadne-exp-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let src = dir.join("cube.obj");
-        std::fs::write(&src, "v 0 0 0\nv 1 0 0\nv 1 1 0\nv 0 1 0\nv 0 0 1\nv 1 0 1\nv 1 1 1\nv 0 1 1\nf 1 4 3 2\nf 5 6 7 8\nf 1 2 6 5\nf 2 3 7 6\nf 3 4 8 7\nf 4 1 5 8\n").unwrap();
+        crate::vault::atomic_write(&src, "v 0 0 0\nv 1 0 0\nv 1 1 0\nv 0 1 0\nv 0 0 1\nv 1 0 1\nv 1 1 1\nv 0 1 1\nf 1 4 3 2\nf 5 6 7 8\nf 1 2 6 5\nf 2 3 7 6\nf 3 4 8 7\nf 4 1 5 8\n").unwrap();
         let model = crate::model3d::load(&src).unwrap();
         let mesh = Mesh::from_model(&model, false);
         for f in EXPORT_FORMATS {
@@ -1695,7 +1695,7 @@ mod tests {
         m.save(&f).unwrap();
         let b = Mesh::load(&f).unwrap();
         assert_eq!((b.pos, b.tris, b.colors, b.edges), (m.pos, m.tris, m.colors, m.edges));
-        std::fs::write(&f, b"ARYMxxxx").unwrap();
+        crate::vault::atomic_write(&f, b"ARYMxxxx").unwrap();
         assert!(Mesh::load(&f).is_none());
     }
 

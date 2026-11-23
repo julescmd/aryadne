@@ -101,7 +101,7 @@ fn config(name: &str) -> Option<PathBuf> {
 fn save_config(name: &str, value: &str) {
     if let Some(f) = config(name) {
         let _ = std::fs::create_dir_all(f.parent().unwrap());
-        let _ = std::fs::write(f, value);
+        let _ = crate::vault::atomic_write(f, value);
     }
 }
 
@@ -641,8 +641,8 @@ impl App {
                     let white = o.img_white;
                     self.new_untitled(ext, move |p| paint::Doc::new(w, h, white).save(p));
                 }
-                "code" => self.new_untitled(NF_CODE[o.code].0, |p| std::fs::write(p, "").map_err(|e| e.to_string())),
-                _ => self.new_untitled(ext, |p| std::fs::write(p, "").map_err(|e| e.to_string())),
+                "code" => self.new_untitled(NF_CODE[o.code].0, |p| crate::vault::atomic_write(p, "").map_err(|e| e.to_string())),
+                _ => self.new_untitled(ext, |p| crate::vault::atomic_write(p, "").map_err(|e| e.to_string())),
             }
             return;
         }
@@ -929,7 +929,7 @@ impl App {
                     if let Some(d) = path.parent() {
                         let _ = std::fs::create_dir_all(d);
                     }
-                    std::fs::write(&path, "").map_err(|e| e.to_string())
+                    crate::vault::atomic_write(&path, "").map_err(|e| e.to_string())
                 });
                 if self.report(r).is_none() {
                     return;
@@ -1569,7 +1569,7 @@ impl App {
 
     fn new_note(&mut self) {
         // Ctrl+N : une note sans titre, qui prend son nom au premier Ctrl+S
-        self.new_untitled("md", |p| std::fs::write(p, "").map_err(|e| e.to_string()));
+        self.new_untitled("md", |p| crate::vault::atomic_write(p, "").map_err(|e| e.to_string()));
     }
 
     #[allow(dead_code)]

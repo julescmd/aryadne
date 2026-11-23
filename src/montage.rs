@@ -259,7 +259,7 @@ pub fn bake_luts(p: &Project, project: &Path, root: &str) -> bool {
             if let Some(d) = out.parent() {
                 let _ = std::fs::create_dir_all(d);
             }
-            any |= std::fs::write(&out, prog.lut_cube(33)).is_ok();
+            any |= crate::vault::atomic_write(&out, prog.lut_cube(33)).is_ok();
         }
     }
     any
@@ -461,7 +461,7 @@ impl Project {
     }
 
     pub fn write(&self, path: &Path) -> Result<(), String> {
-        std::fs::write(path, serde_json::to_string_pretty(self).map_err(|e| e.to_string())?).map_err(|e| e.to_string())
+        crate::vault::atomic_write(path, serde_json::to_string_pretty(self).map_err(|e| e.to_string())?).map_err(|e| e.to_string())
     }
 
     pub fn duration(&self) -> f32 {

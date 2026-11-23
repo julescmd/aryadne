@@ -94,7 +94,7 @@ pub fn relink(root: &std::path::Path, renamed: &[(String, String)]) -> (usize, u
             for (a, b) in &names {
                 out = out.replace(a.as_str(), b.as_str());
             }
-            if out != text && std::fs::write(&p, out).is_ok() {
+            if out != text && crate::vault::atomic_write(&p, out).is_ok() {
                 fixed += 1;
             }
         }
@@ -121,8 +121,8 @@ mod tests {
         let dir = std::env::temp_dir().join("aryadne-formats-test");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("3d")).unwrap();
-        std::fs::write(dir.join("3d/Ville.aryscene"), r#"{"objects":[{"material":"nodes/Or.mat.json"}]}"#).unwrap();
-        std::fs::write(dir.join("notes.md"), "voir Or.mat.json").unwrap();
+        crate::vault::atomic_write(dir.join("3d/Ville.aryscene"), r#"{"objects":[{"material":"nodes/Or.mat.json"}]}"#).unwrap();
+        crate::vault::atomic_write(dir.join("notes.md"), "voir Or.mat.json").unwrap();
         let (fixed, _) = relink(&dir, &[("nodes/Or.mat.json".into(), "nodes/Or.arymat".into())]);
         assert_eq!(fixed, 1);
         assert!(std::fs::read_to_string(dir.join("3d/Ville.aryscene")).unwrap().contains("nodes/Or.arymat"));

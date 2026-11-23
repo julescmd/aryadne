@@ -153,7 +153,7 @@ impl Doc {
         }
         // Écrit à côté puis remplace : un plantage pendant l'écriture ne casse pas le fichier
         let tmp = path.with_extension("aryimg.tmp");
-        std::fs::write(&tmp, out).map_err(|e| e.to_string())?;
+        crate::vault::atomic_write(&tmp, out).map_err(|e| e.to_string())?;
         std::fs::rename(&tmp, path).map_err(|e| e.to_string())
     }
 
