@@ -1494,5 +1494,10 @@
  "régénérer": "regenerate",
  "clic : retirer": "click: remove",
  "Reprendre cette question pour la changer : la suite de la conversation est remplacée": "Bring this question back to change it: the rest of the conversation is replaced",
- "Redemander la même chose": "Ask the same thing again"
+ "Redemander la même chose": "Ask the same thing again",
+ "accessibilité": "accessibility",
+ "contraste élevé": "high contrast",
+ "réduire les animations": "reduce motion",
+ "Textes secondaires, bordures et champs plus marqués, contour sur chaque commande": "Stronger secondary text, borders and fields, with an outline on every control",
+ "Pas de fondus ni de défilement animé": "No fades or animated scrolling"
 }

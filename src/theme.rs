@@ -60,6 +60,57 @@ pub const DARK: Palette = Palette {
 };
 
 static IS_DARK: AtomicBool = AtomicBool::new(false);
+/// Contraste élevé : textes secondaires, bordures et champs bien plus marqués (WCAG AA partout)
+static HIGH_CONTRAST: AtomicBool = AtomicBool::new(false);
+/// Animations réduites (préférence d'accessibilité)
+static REDUCE_MOTION: AtomicBool = AtomicBool::new(false);
+
+pub fn set_access(high_contrast: bool, reduce_motion: bool) {
+    HIGH_CONTRAST.store(high_contrast, Ordering::Relaxed);
+    REDUCE_MOTION.store(reduce_motion, Ordering::Relaxed);
+}
+
+pub fn high_contrast() -> bool {
+    HIGH_CONTRAST.load(Ordering::Relaxed)
+}
+
+pub fn reduce_motion() -> bool {
+    REDUCE_MOTION.load(Ordering::Relaxed)
+}
+
+/// Luminance relative (WCAG 2.1)
+fn luminance(c: Color32) -> f32 {
+    let f = |v: u8| {
+        let x = v as f32 / 255.0;
+        if x <= 0.039_28 { x / 12.92 } else { ((x + 0.055) / 1.055).powf(2.4) }
+    };
+    0.2126 * f(c.r()) + 0.7152 * f(c.g()) + 0.0722 * f(c.b())
+}
+
+/// Rapport de contraste WCAG entre deux couleurs (1 à 21)
+pub fn contrast(a: Color32, b: Color32) -> f32 {
+    let (x, y) = (luminance(a), luminance(b));
+    (x.max(y) + 0.05) / (x.min(y) + 0.05)
+}
+
+/// Texte sur une couleur pleine : noir ou blanc, celui qui contraste le plus
+pub fn text_on(c: Color32) -> Color32 {
+    let (dark, light) = (rgb(0x18181b), rgb(0xffffff));
+    if contrast(dark, c) >= contrast(light, c) { dark } else { light }
+}
+
+/// Assombrit (thème clair) ou éclaircit (sombre) une couleur jusqu'au contraste voulu sur `bg`
+pub fn readable(c: Color32, bg: Color32, min: f32) -> Color32 {
+    let mut x = c;
+    let dark_bg = luminance(bg) < 0.2;
+    for _ in 0..40 {
+        if contrast(x, bg) >= min {
+            break;
+        }
+        x = if dark_bg { x.lerp_to_gamma(Color32::WHITE, 0.08) } else { x.lerp_to_gamma(Color32::BLACK, 0.08) };
+    }
+    x
+}
 /// Couleur d'accent choisie dans les réglages (0 = celle du thème).
 static ACCENT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
@@ -81,8 +132,21 @@ pub fn pal() -> Palette {
     let a = if w != 0 { w } else { ACCENT.load(Ordering::Relaxed) };
     if a != 0 {
         p.accent = rgb(a & 0xff_ffff);
-        let lum = 0.2126 * p.accent.r() as f32 + 0.7152 * p.accent.g() as f32 + 0.0722 * p.accent.b() as f32;
-        p.on_accent = if lum > 150.0 { rgb(0x18181b) } else { rgb(0xffffff) };
+    }
+    // Le texte posé sur l'accent : noir ou blanc selon le contraste réel (le blanc sur l'orange
+    // du thème clair n'atteignait que 3,3:1)
+    p.on_accent = text_on(p.accent);
+    if HIGH_CONTRAST.load(Ordering::Relaxed) {
+        let dark = p.bg.r() < 128;
+        p.muted = if dark { rgb(0xd0d2d8) } else { rgb(0x3f3f46) };
+        p.line = if dark { rgb(0x8a8d96) } else { rgb(0x6b6b70) };
+        p.text = if dark { rgb(0xffffff) } else { rgb(0x000000) };
+        p.field = if dark { rgb(0x000000) } else { rgb(0xffffff) };
+        p.bg = if dark { rgb(0x111113) } else { rgb(0xffffff) };
+        p.link = readable(p.link, p.bg, 7.0);
+        p.missing = readable(p.missing, p.bg, 7.0);
+        p.accent = readable(p.accent, p.panel, 4.5);
+        p.on_accent = text_on(p.accent);
     }
     p
 }
@@ -308,6 +372,8 @@ pub fn apply(ctx: &egui::Context, dark: bool) {
         v.window_corner_radius = CornerRadius::ZERO;
         v.menu_corner_radius = CornerRadius::ZERO;
         v.text_cursor.stroke = Stroke::new(2.0, p.accent);
+        // Focus clavier bien visible (Tab) : contour à la couleur de l'accent
+        v.selection.stroke = Stroke::new(if high_contrast() { 2.0 } else { 1.0 }, p.accent);
         for w in [
             &mut v.widgets.noninteractive,
             &mut v.widgets.inactive,
@@ -343,6 +409,16 @@ pub fn apply(ctx: &egui::Context, dark: bool) {
         for w in [&mut v.widgets.inactive, &mut v.widgets.hovered, &mut v.widgets.active, &mut v.widgets.open] {
             w.corner_radius = CornerRadius::same(2);
         }
+        if high_contrast() {
+            // Contraste élevé : chaque commande a un contour visible (3:1 au moins)
+            v.widgets.inactive.bg_stroke = Stroke::new(1.0, p.line);
+            v.widgets.hovered.bg_stroke = Stroke::new(1.5, p.text);
+            v.widgets.noninteractive.bg_stroke = Stroke::new(1.0, p.line);
+            v.window_stroke = Stroke::new(1.5, p.text);
+        }
+        // Animations réduites : plus de fondus ni de défilement animé
+        style.animation_time = if reduce_motion() { 0.0 } else { 1.0 / 12.0 };
+        style.scroll_animation = if reduce_motion() { egui::style::ScrollAnimation::none() } else { egui::style::ScrollAnimation::default() };
     });
 }
 
@@ -379,4 +455,32 @@ pub fn section(text: &str) -> egui::RichText {
         None => String::new(),
     };
     egui::RichText::new(t).size(12.0).color(pal().text).family(bold())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// WCAG AA : textes à 4,5:1, bordures en contraste élevé à 3:1, dans les deux thèmes
+    #[test]
+    fn contrastes_aa() {
+        for dark in [false, true] {
+            for hc in [false, true] {
+                IS_DARK.store(dark, Ordering::Relaxed);
+                set_access(hc, false);
+                let p = pal();
+                for (nom, fg) in [("texte", p.text), ("secondaire", p.muted), ("lien", p.link), ("manquant", p.missing)] {
+                    for bg in [p.bg, p.panel] {
+                        assert!(contrast(fg, bg) >= 4.5, "{nom} sombre={dark} hc={hc} : {:.2}", contrast(fg, bg));
+                    }
+                }
+                assert!(contrast(p.on_accent, p.accent) >= 4.5, "sur l'accent sombre={dark} hc={hc}");
+                if hc {
+                    assert!(contrast(p.line, p.bg) >= 3.0 && contrast(p.line, p.panel) >= 3.0, "bordures sombre={dark}");
+                }
+            }
+        }
+        set_access(false, false);
+        IS_DARK.store(false, Ordering::Relaxed);
+    }
 }

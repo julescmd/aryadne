@@ -35,6 +35,9 @@ pub struct Prefs {
     pub notes_font: String,
     /// Unité de longueur affichée en 3D (« m », « cm », « mm », « km », « in », « ft ») ; la scène reste en mètres
     pub unit: String,
+    /// Accessibilité : contraste élevé et animations réduites
+    pub high_contrast: bool,
+    pub reduce_motion: bool,
 }
 
 /// Unités de longueur proposées : nom et nombre d'unités dans un mètre.
@@ -80,6 +83,8 @@ impl Default for Prefs {
             mono_font: String::new(),
             notes_font: String::new(),
             unit: "m".into(),
+            high_contrast: false,
+            reduce_motion: false,
         }
     }
 }
@@ -106,6 +111,7 @@ impl Prefs {
 
     pub fn apply(&self, ctx: &egui::Context) {
         theme::set_accent(self.accent.map(|[r, g, b]| egui::Color32::from_rgb(r, g, b)));
+        theme::set_access(self.high_contrast, self.reduce_motion);
         theme::apply(ctx, self.dark);
         ctx.set_zoom_factor(self.ui_zoom.clamp(0.6, 2.0));
     }
@@ -293,12 +299,16 @@ impl App {
         ui.add_space(14.0);
         ui.label(caps(&crate::i18n::t("taille de l'interface")));
         ui.horizontal(|ui| {
-            ui.add(egui::Slider::new(&mut self.prefs.ui_zoom, 0.75..=1.6).step_by(0.05).custom_formatter(|v, _| format!("{:.0} %", v * 100.0)));
+            ui.add(egui::Slider::new(&mut self.prefs.ui_zoom, 0.75..=2.0).step_by(0.05).custom_formatter(|v, _| format!("{:.0} %", v * 100.0)));
             if ui.button("100 %").clicked() {
                 self.prefs.ui_zoom = 1.0;
             }
         });
         ui.label(RichText::new(crate::i18n::t("Aussi avec Ctrl + / Ctrl − / Ctrl 0.")).color(p.muted).size(11.0));
+        ui.add_space(14.0);
+        ui.label(caps(&crate::i18n::t("accessibilité")));
+        ui.checkbox(&mut self.prefs.high_contrast, crate::i18n::t("contraste élevé")).on_hover_text(crate::i18n::t("Textes secondaires, bordures et champs plus marqués, contour sur chaque commande"));
+        ui.checkbox(&mut self.prefs.reduce_motion, crate::i18n::t("réduire les animations")).on_hover_text(crate::i18n::t("Pas de fondus ni de défilement animé"));
     }
 
     fn tab_editor(&mut self, ui: &mut egui::Ui) {
