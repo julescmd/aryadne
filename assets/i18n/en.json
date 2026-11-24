@@ -2378,5 +2378,8 @@
   "Horizontales : départ et arrivée en douceur": "Horizontal: ease in and out",
   "La valeur tient jusqu'à la clé suivante": "The value holds until the next key",
   "Lissage": "Easing",
-  "pas encore de clé": "no key yet"
+  "pas encore de clé": "no key yet",
+  "Éditeur de courbes : les clés du clip choisi (position, taille, opacité), tangentes comprises": "Graph editor: the selected clip's keys (position, scale, opacity), tangents included",
+  "Choisis un clip (avec des clés) pour voir ses courbes.": "Select a clip (with keys) to see its curves.",
+  "Chaque courbe entre -1 et 1, pour comparer des grandeurs différentes": "Each curve between -1 and 1, to compare different magnitudes"
 }

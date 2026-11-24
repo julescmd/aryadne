@@ -223,6 +223,83 @@ pub struct PoseKey {
     /// Passage vers la clé suivante (linéaire pour les anciens montages)
     #[serde(default = "linear")]
     pub ease: crate::keys::Ease,
+    /// Tangentes posées dans l'éditeur de courbes, par réglage (x, y, taille, opacité)
+    #[serde(default, skip_serializing_if = "no_tan")]
+    pub tan: [Option<[f32; 4]>; 4],
+}
+
+fn no_tan(t: &[Option<[f32; 4]>; 4]) -> bool {
+    t.iter().all(|x| x.is_none())
+}
+
+impl PoseKey {
+    pub fn get(&self, c: usize) -> f32 {
+        [self.x, self.y, self.scale, self.opacity][c.min(3)]
+    }
+
+    pub fn set(&mut self, c: usize, v: f32) {
+        match c {
+            0 => self.x = v,
+            1 => self.y = v,
+            2 => self.scale = v,
+            _ => self.opacity = v,
+        }
+    }
+}
+
+/// La pose à l'instant `r` (relatif au clip) d'après les clés : lissages, ou Bézier si des tangentes sont posées
+pub fn pose_in(k: &[PoseKey], r: f32) -> Option<PoseKey> {
+    let (first, last) = (k.first()?, k.last()?);
+    if r <= first.t {
+        return Some(*first);
+    }
+    if r >= last.t {
+        return Some(*last);
+    }
+    let i = (0..k.len() - 1).find(|&i| r < k[i + 1].t)?;
+    let (a, b) = (k[i], k[i + 1]);
+    let mut out = PoseKey { t: r, ease: a.ease, tan: [None; 4], ..a };
+    if a.tan.iter().chain(b.tan.iter()).any(|x| x.is_some()) {
+        for c in 0..4 {
+            let curve: Vec<crate::curves::CK> = k.iter().map(|q| crate::curves::CK { t: q.t, v: q.get(c), ease: q.ease, tan: q.tan[c] }).collect();
+            out.set(c, crate::curves::segment(&curve, i, r));
+        }
+    } else {
+        let f = a.ease.apply((r - a.t) / (b.t - a.t).max(1e-4));
+        for c in 0..4 {
+            out.set(c, a.get(c) + (b.get(c) - a.get(c)) * f);
+        }
+    }
+    Some(out)
+}
+
+/// Les courbes d'un clip pour l'éditeur de courbes (liées : une clé porte les quatre réglages)
+pub fn clip_curves(c: &Clip) -> Vec<crate::curves::Curve> {
+    use crate::curves::{Curve, CK, W, X, Y, Z};
+    [("Position X", X), ("Position Y", Y), ("Taille", Z), ("Opacité", W)]
+        .iter()
+        .enumerate()
+        .map(|(i, (name, col))| Curve { label: crate::i18n::t(name), color: *col, keys: c.keys.iter().map(|k| CK { t: k.t, v: k.get(i), ease: k.ease, tan: k.tan[i] }).collect(), link: 0 })
+        .collect()
+}
+
+pub fn apply_clip_curves(c: &mut Clip, curves: &[crate::curves::Curve]) {
+    let Some(first) = curves.first() else { return };
+    c.keys = first
+        .keys
+        .iter()
+        .enumerate()
+        .map(|(i, k)| {
+            let mut pk = PoseKey { t: k.t, x: 0.0, y: 0.0, scale: 1.0, opacity: 1.0, ease: k.ease, tan: [None; 4] };
+            for (ch, cv) in curves.iter().enumerate().take(4) {
+                if let Some(x) = cv.keys.get(i) {
+                    pk.set(ch, x.v);
+                    pk.tan[ch] = x.tan;
+                }
+            }
+            pk
+        })
+        .collect();
 }
 
 fn linear() -> crate::keys::Ease {
@@ -238,6 +315,16 @@ pub fn eased_points(keys: &[PoseKey], offset: f32, f: &dyn Fn(&PoseKey) -> f32) 
         out.push((offset + k.t, f(k)));
         let Some(n) = keys.get(i + 1) else { break };
         let (va, vb) = (f(k), f(n));
+        if k.tan.iter().chain(n.tan.iter()).any(|x| x.is_some()) {
+            // Tangentes : on suit la courbe de près
+            for s in 1..16 {
+                let r = k.t + (n.t - k.t) * s as f32 / 16.0;
+                if let Some(q) = pose_in(keys, r) {
+                    out.push((offset + r, f(&q)));
+                }
+            }
+            continue;
+        }
         match k.ease {
             Ease::Linear => {}
             Ease::Hold => out.push((offset + n.t - 0.001, va)),
@@ -306,28 +393,16 @@ impl Clip {
 
     /// Placement, taille et opacité à l'instant `t` de la timeline, d'après les clés (None sans clé).
     pub fn pose_at(&self, t: f32) -> Option<PoseKey> {
-        let (k, r) = (&self.keys, t - self.start);
-        let (first, last) = (k.first()?, k.last()?);
-        if r <= first.t {
-            return Some(*first);
-        }
-        if r >= last.t {
-            return Some(*last);
-        }
-        let i = (0..k.len() - 1).find(|&i| r < k[i + 1].t)?;
-        let (a, b) = (k[i], k[i + 1]);
-        let f = a.ease.apply((r - a.t) / (b.t - a.t).max(1e-4));
-        let m = |x: f32, y: f32| x + (y - x) * f;
-        Some(PoseKey { t: r, x: m(a.x, b.x), y: m(a.y, b.y), scale: m(a.scale, b.scale), opacity: m(a.opacity, b.opacity), ease: a.ease })
+        pose_in(&self.keys, t - self.start)
     }
 
     /// Pose une clé à l'instant `t` de la timeline avec les réglages actuels.
     pub fn set_key(&mut self, t: f32) {
         let r = ((t - self.start).clamp(0.0, self.len()) * 100.0).round() / 100.0;
         // Une clé neuve part en douceur, comme partout dans l'app
-        let key = PoseKey { t: r, x: self.x, y: self.y, scale: self.scale, opacity: self.opacity, ease: crate::keys::Ease::Smooth };
+        let key = PoseKey { t: r, x: self.x, y: self.y, scale: self.scale, opacity: self.opacity, ease: crate::keys::Ease::Smooth, tan: [None; 4] };
         match self.keys.iter().position(|k| (k.t - r).abs() < 0.021) {
-            Some(i) => self.keys[i] = PoseKey { t: self.keys[i].t, ease: self.keys[i].ease, ..key },
+            Some(i) => self.keys[i] = PoseKey { t: self.keys[i].t, ease: self.keys[i].ease, tan: self.keys[i].tan, ..key },
             None => {
                 self.keys.push(key);
                 self.keys.sort_by(|a, b| a.t.total_cmp(&b.t));

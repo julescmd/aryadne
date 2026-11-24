@@ -130,6 +130,9 @@ pub struct Editor {
     message: Option<String>,
     /// Analyse en cours pour « couper les silences » ou « caler sur le rythme »
     smart_rx: Option<Receiver<Result<Smart, String>>>,
+    /// Éditeur de courbes (fenêtre) pour les clés du clip choisi
+    curves_open: bool,
+    curve_ed: crate::curves::Editor,
     /// Médias glissés sur la fenêtre, à ajouter
     pub add: Vec<PathBuf>,
     root: String,
@@ -222,6 +225,8 @@ impl Editor {
             export_rx: None,
             message: None,
             smart_rx: None,
+            curves_open: false,
+            curve_ed: Default::default(),
             add: vec![],
             root: root.to_string(),
             strips: Strips::default(),

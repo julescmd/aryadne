@@ -114,11 +114,13 @@ pub struct Editor {
     drag: Option<Drag>,
     /// Ce qu'on montre : quand ça change, la vue se recadre
     pub who: String,
+    /// Normaliser : chaque courbe affichée entre -1 et 1 (comme Maya), pour comparer des grandeurs différentes
+    pub normalize: bool,
 }
 
 impl Default for Editor {
     fn default() -> Self {
-        Editor { view: None, sel: vec![], hidden: vec![], drag: None, who: String::new() }
+        Editor { view: None, sel: vec![], hidden: vec![], drag: None, who: String::new(), normalize: false }
     }
 }
 
@@ -138,6 +140,14 @@ impl Editor {
 
     fn fit(&self, curves: &[Curve], range: (f32, f32)) -> [f32; 4] {
         let (mut v0, mut v1, mut t0, mut t1) = (f32::MAX, f32::MIN, range.0, range.1);
+        if self.normalize {
+            for c in curves.iter().filter(|c| !self.hidden.contains(&c.label)) {
+                for k in &c.keys {
+                    (t0, t1) = (t0.min(k.t), t1.max(k.t));
+                }
+            }
+            return [t0 - 0.05, t1 + 0.05, -1.25, 1.25];
+        }
         for c in curves.iter().filter(|c| !self.hidden.contains(&c.label)) {
             for k in &c.keys {
                 (v0, v1, t0, t1) = (v0.min(k.v), v1.max(k.v), t0.min(k.t), t1.max(k.t));
@@ -188,6 +198,9 @@ impl Editor {
             if ui.button(egui::RichText::new(crate::i18n::t("cadrer")).size(11.0)).on_hover_text("F").clicked() {
                 self.view = None;
             }
+            if ui.toggle_value(&mut self.normalize, egui::RichText::new(crate::i18n::t("Normaliser")).size(11.0)).on_hover_text(crate::i18n::t("Chaque courbe entre -1 et 1, pour comparer des grandeurs différentes")).changed() {
+                self.view = None;
+            }
         });
         let (rect, resp) = ui.allocate_exact_size(ui.available_size().max(vec2(200.0, 120.0)), Sense::click_and_drag());
         // ---- Canaux, à gauche
@@ -235,7 +248,20 @@ impl Editor {
         };
         let [t0, t1, v0, v1] = view;
         let x_of = |t: f32| plot.left() + (t - t0) / (t1 - t0) * plot.width();
-        let y_of = |v: f32| plot.bottom() - (v - v0) / (v1 - v0) * plot.height();
+        let y_raw = |v: f32| plot.bottom() - (v - v0) / (v1 - v0) * plot.height();
+        // Normaliser : chaque courbe ramenée entre -1 et 1 (centre et demi-étendue par courbe)
+        let norm: Vec<(f32, f32)> = curves
+            .iter()
+            .map(|c| {
+                if !self.normalize || c.keys.is_empty() {
+                    return (0.0, 1.0);
+                }
+                let (lo, hi) = c.keys.iter().fold((f32::MAX, f32::MIN), |a, k| (a.0.min(k.v), a.1.max(k.v)));
+                ((lo + hi) / 2.0, ((hi - lo) / 2.0).max(1e-3))
+            })
+            .collect();
+        let y_of_c = |ci: usize, v: f32| y_raw((v - norm[ci].0) / norm[ci].1);
+        let y_of = y_raw;
         let t_of = |x: f32| t0 + (x - plot.left()) / plot.width() * (t1 - t0);
         let v_of = |y: f32| v0 + (plot.bottom() - y) / plot.height() * (v1 - v0);
         let pp = ui.painter_at(plot);
@@ -269,27 +295,27 @@ impl Editor {
             }
         }
         // Courbes, clés, tangentes des clés choisies
-        for c in curves.iter().filter(|c| shown(c, &self.hidden)) {
+        for (ci, c) in curves.iter().enumerate().filter(|(_, c)| shown(c, &self.hidden)) {
             if c.keys.is_empty() {
                 continue;
             }
             let pts: Vec<Pos2> = (0..=(plot.width() as usize / 2)).map(|i| {
                 let x = plot.left() + i as f32 * 2.0;
-                pos2(x, y_of(eval(&c.keys, t_of(x))))
+                pos2(x, y_of_c(ci, eval(&c.keys, t_of(x))))
             }).collect();
             pp.add(Shape::line(pts, Stroke::new(1.8, c.color)));
         }
-        let key_pos = |c: &Curve, k: usize| pos2(x_of(c.keys[k].t), y_of(c.keys[k].v));
-        let tan_pts = |c: &Curve, k: usize| {
+        let key_pos = |ci: usize, c: &Curve, k: usize| pos2(x_of(c.keys[k].t), y_of_c(ci, c.keys[k].v));
+        let tan_pts = |ci: usize, c: &Curve, k: usize| {
             let tg = tangents(&c.keys, k);
             let (kt, kv) = (c.keys[k].t, c.keys[k].v);
-            (key_pos(c, k), pos2(x_of(kt + tg[0]), y_of(kv + tg[1])), pos2(x_of(kt + tg[2]), y_of(kv + tg[3])))
+            (key_pos(ci, c, k), pos2(x_of(kt + tg[0]), y_of_c(ci, kv + tg[1])), pos2(x_of(kt + tg[2]), y_of_c(ci, kv + tg[3])))
         };
         for &(ci, k) in &self.sel {
             if !shown(&curves[ci], &self.hidden) {
                 continue;
             }
-            let (kp, l, r) = tan_pts(&curves[ci], k);
+            let (kp, l, r) = tan_pts(ci, &curves[ci], k);
             for h in [l, r] {
                 pp.line_segment([kp, h], Stroke::new(1.0, p.muted));
                 pp.circle_filled(h, 3.5, p.text);
@@ -298,7 +324,7 @@ impl Editor {
         for (ci, c) in curves.iter().enumerate().filter(|(_, c)| shown(c, &self.hidden)) {
             for k in 0..c.keys.len() {
                 let on = self.sel.contains(&(ci, k));
-                let q = key_pos(c, k);
+                let q = key_pos(ci, c, k);
                 pp.circle_filled(q, if on { 4.5 } else { 3.5 }, if on { p.accent } else { Color32::from_gray(30) });
                 pp.circle_stroke(q, if on { 4.5 } else { 3.5 }, Stroke::new(1.0, c.color));
             }
@@ -362,7 +388,7 @@ impl Editor {
             let mut best: Option<((usize, usize), f32)> = None;
             for (ci, c) in curves.iter().enumerate().filter(|(_, c)| shown(c, &hidden)) {
                 for k in 0..c.keys.len() {
-                    let d = (key_pos(c, k) - at).length();
+                    let d = (key_pos(ci, c, k) - at).length();
                     if d < 8.0 && best.is_none_or(|b| d < b.1) {
                         best = Some(((ci, k), d));
                     }
@@ -373,7 +399,7 @@ impl Editor {
         let sel_now = self.sel.clone();
         let near_tan = |curves: &[Curve], at: Pos2| -> Option<(usize, usize, bool)> {
             for &(ci, k) in &sel_now {
-                let (_, l, r) = tan_pts(&curves[ci], k);
+                let (_, l, r) = tan_pts(ci, &curves[ci], k);
                 if (r - at).length() < 7.0 {
                     return Some((ci, k, true));
                 }
@@ -438,7 +464,7 @@ impl Editor {
                 }
                 if !time_only {
                     for &(ci, k) in &self.sel {
-                        next[ci].keys[k].v = orig[ci].keys[k].v + dv;
+                        next[ci].keys[k].v = orig[ci].keys[k].v + dv * norm[ci].1;
                     }
                 }
                 // Les clés restent dans l'ordre, à des instants différents
@@ -450,7 +476,7 @@ impl Editor {
             (Some(Drag::Tan { c, k, right }), Some(at)) if resp.dragged() => {
                 let key = curves[c].keys[k];
                 let mut tg = tangents(&curves[c].keys, k);
-                let h = [t_of(at.x) - key.t, v_of(at.y) - key.v];
+                let h = [t_of(at.x) - key.t, v_of(at.y) * norm[c].1 + norm[c].0 - key.v];
                 // Les deux côtés restent alignés (une tangente lisse), sauf avec Maj (cassée)
                 let broken = ui.input(|i| i.modifiers.shift);
                 if right {
@@ -483,7 +509,7 @@ impl Editor {
                 let b = Rect::from_two_pos(from, at);
                 for (ci, c) in curves.iter().enumerate().filter(|(_, c)| shown(c, &self.hidden)) {
                     for k in 0..c.keys.len() {
-                        if b.contains(key_pos(c, k)) && !self.sel.contains(&(ci, k)) {
+                        if b.contains(key_pos(ci, c, k)) && !self.sel.contains(&(ci, k)) {
                             self.sel.push((ci, k));
                         }
                     }

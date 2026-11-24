@@ -185,7 +185,7 @@ mod tests {
     #[test]
     fn memes_lissages_partout() {
         // Montage : une clé « arrivée douce » donne des points intermédiaires qui suivent la courbe
-        let k = |t: f32, x: f32, ease: Ease| crate::montage::PoseKey { t, x, y: 0.0, scale: 1.0, opacity: 1.0, ease };
+        let k = |t: f32, x: f32, ease: Ease| crate::montage::PoseKey { t, x, y: 0.0, scale: 1.0, opacity: 1.0, ease, tan: [None; 4] };
         let keys = [k(0.0, 0.0, Ease::Out), k(1.0, 100.0, Ease::Linear)];
         let pts = crate::montage::eased_points(&keys, 2.0, &|q| q.x);
         assert_eq!(pts.first(), Some(&(2.0, 0.0)));

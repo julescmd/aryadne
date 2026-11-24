@@ -1320,6 +1320,37 @@ impl Editor {
             self.undo(true);
         }
         hui.add_space(8.0);
+        hui.toggle_value(&mut self.curves_open, RichText::new(format!("{} {}", crate::lucide::SPLINE, crate::i18n::t("Courbes"))).size(12.0)).on_hover_text(crate::i18n::t("Éditeur de courbes : les clés du clip choisi (position, taille, opacité), tangentes comprises"));
+        if self.curves_open {
+            let mut open = true;
+            let pick = self.sel.first().and_then(|id| self.project.index(*id));
+            let name = pick.map(|i| self.project.clips[i].name.clone()).unwrap_or_default();
+            let fps = self.project.fps as f32;
+            egui::Window::new(format!("{} · {name}", crate::i18n::t("Éditeur de courbes"))).id(egui::Id::unique("montage-curves")).open(&mut open).resizable(true).default_size(vec2(780.0, 360.0)).show(&hui.ctx().clone(), |ui| {
+                let Some(i) = pick else {
+                    ui.label(crate::i18n::t("Choisis un clip (avec des clés) pour voir ses courbes."));
+                    return;
+                };
+                let c = &self.project.clips[i];
+                self.curve_ed.show_for(&c.id.to_string());
+                let (start, len) = (c.start, c.len());
+                let mut cv = crate::montage::clip_curves(c);
+                // Les clés sont en temps du clip : la tête de lecture aussi
+                let out = self.curve_ed.ui(ui, &mut cv, self.playhead - start, (0.0, len), fps);
+                if out.changed {
+                    crate::montage::apply_clip_curves(&mut self.project.clips[i], &cv);
+                    self.changed();
+                    self.shown = None;
+                }
+                if let Some(t) = out.seek {
+                    self.playhead = (start + t).max(0.0);
+                    self.shown = None;
+                }
+            });
+            if !open {
+                self.curves_open = false;
+            }
+        }
         // Actions automatiques : les deux premières analysent le son, les deux autres attendent l'Assistant
         self.poll_smart();
         let busy = self.smart_rx.is_some();
