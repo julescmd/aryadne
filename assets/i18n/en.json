@@ -2460,5 +2460,7 @@
   "Cache de piste (comme After Effects) : ce calque n'apparaît qu'à travers le calque juste au-dessus, qui ne se dessine plus": "Track matte (like After Effects): this layer only shows through the layer just above, which is no longer drawn",
   "Arrêt sur image": "Freeze frame",
   "Fige l'image de la tête de lecture pendant 2 secondes ; la suite du montage recule d'autant": "Holds the frame at the playhead for 2 seconds; the rest of the edit moves back by as much",
-  "L'image n'a pas pu être extraite du plan.": "The frame couldn't be extracted from the shot."
+  "L'image n'a pas pu être extraite du plan.": "The frame couldn't be extracted from the shot.",
+  "tampon de duplication (Alt+clic : source)": "clone stamp (Alt+click: source)",
+  "Alt+clic d'abord pour choisir où prendre les pixels": "Alt+click first to pick where to take pixels from"
 }

@@ -770,6 +770,8 @@ pub enum Tool {
     Lasso,
     Wand,
     Brush,
+    /// Tampon de duplication : Alt+clic choisit la source, on peint ce qu'il y a là-bas
+    Clone,
     Eraser,
     Fill,
     Gradient,
@@ -777,13 +779,14 @@ pub enum Tool {
     Picker,
 }
 
-const TOOLS: [(Tool, &str, &str, &str); 11] = [
+const TOOLS: [(Tool, &str, &str, &str); 12] = [
     (Tool::Move, crate::lucide::MOVE, "déplacer le calque", "V"),
     (Tool::Select, crate::lucide::SQUARE_DASHED, "sélection rectangulaire", "M"),
     (Tool::Ellipse, crate::lucide::CIRCLE_DASHED, "sélection elliptique", "O"),
     (Tool::Lasso, crate::lucide::LASSO, "lasso", "L"),
     (Tool::Wand, crate::lucide::WAND_SPARKLES, "baguette magique", "W"),
     (Tool::Brush, crate::lucide::PAINTBRUSH, "pinceau", "B"),
+    (Tool::Clone, crate::lucide::STAMP, "tampon de duplication (Alt+clic : source)", "S"),
     (Tool::Eraser, crate::lucide::ERASER, "gomme", "E"),
     (Tool::Fill, crate::lucide::PAINT_BUCKET, "pot de peinture", "G"),
     (Tool::Gradient, crate::lucide::BLEND, "dégradé", "G"),
@@ -1079,6 +1082,9 @@ pub struct Editor {
     pub text_size: f32,
     /// Transformation libre en cours
     xf: Option<Xf>,
+    /// Tampon : la source (Alt+clic) et le décalage, fixé au premier coup et gardé ensuite (aligné, comme Photoshop)
+    clone_src: Option<Pos2>,
+    clone_off: Option<egui::Vec2>,
 }
 
 /// Texte en cours : point d'ancrage (haut-gauche, px du document) et aperçu rendu
@@ -1146,6 +1152,14 @@ pub fn render_text(text: &str, font: &str, size: f32, color: [u8; 4]) -> Option<
 }
 
 impl Editor {
+    /// Un éditeur sur un document vide (tests)
+    #[cfg(test)]
+    pub fn new_test(w: usize, h: usize) -> Editor {
+        let path = std::env::temp_dir().join(format!("ary-test-{}-{w}x{h}.aryimg", std::process::id()));
+        Doc::new(w, h, false).save(&path).unwrap();
+        Editor::open(path).unwrap()
+    }
+
     pub fn open(path: PathBuf) -> Result<Editor, String> {
         let doc = Doc::load(&path)?;
         let n = doc.w * doc.h * 4;
@@ -1195,6 +1209,8 @@ impl Editor {
             adjust: None,
             renaming: None,
             xf: None,
+            clone_src: None,
+            clone_off: None,
         })
     }
 
@@ -1456,6 +1472,8 @@ impl Editor {
         let (x1, y1) = ((c.x + r).ceil() as i32, (c.y + r).ceil() as i32);
         let hard = self.hardness.clamp(0.0, 0.99);
         let erase = self.tool == Tool::Eraser;
+        // Tampon : chaque pixel prend la couleur du calque d'avant le trait, à l'endroit décalé
+        let clone_off = (self.tool == Tool::Clone).then_some(self.clone_off).flatten().map(|o| (o.x.round() as i32, o.y.round() as i32));
         let sel = self.sel.as_ref();
         let dw = self.doc.w;
         for y in y0..=y1 {
@@ -1500,10 +1518,20 @@ impl Editor {
                     }
                 } else {
                     // Peinture par-dessus le calque d'avant le trait : pas d'accumulation dans un même trait
-                    let a = col.a() as f32 / 255.0 * k;
+                    let (src, src_a) = match clone_off {
+                        Some((ox, oy)) => {
+                            let (sx, sy) = (lx + ox, ly + oy);
+                            if sx < 0 || sy < 0 || sx as usize >= start.w || sy as usize >= start.h {
+                                continue;
+                            }
+                            let j = (sy as usize * start.w + sx as usize) * 4;
+                            ([start.px[j], start.px[j + 1], start.px[j + 2]], start.px[j + 3] as f32 / 255.0)
+                        }
+                        None => ([col.r(), col.g(), col.b()], col.a() as f32 / 255.0),
+                    };
+                    let a = src_a * k;
                     let sa = s[3] as f32 / 255.0;
                     let oa = a + sa * (1.0 - a);
-                    let src = [col.r(), col.g(), col.b()];
                     for ch in 0..3 {
                         let v = if oa > 0.0 { (src[ch] as f32 * a + s[ch] as f32 * sa * (1.0 - a)) / oa } else { 0.0 };
                         l.px[i + ch] = v as u8;
@@ -1960,7 +1988,7 @@ impl Editor {
                 ui.label(egui::RichText::new(format!("{icon}  {}", crate::i18n::t(label))).size(12.5));
             }
             match self.tool {
-                Tool::Brush | Tool::Eraser => {
+                Tool::Brush | Tool::Eraser | Tool::Clone => {
                     ui.add(egui::DragValue::new(&mut self.size).range(0.1..=10000.0).speed(0.5).prefix(format!("{} ", crate::i18n::t("diamètre")))).on_hover_text("[ ]");
                     // Un curseur avec son nom ne passe pas à la ligne tout seul
                     if ui.max_rect().right() - ui.cursor().left() < 190.0 {
@@ -2225,13 +2253,26 @@ impl Editor {
             if self.swallow_click || self.swatch_pick.is_some() {
                 // Fermer le sélecteur de couleur : rien d'autre
             } else if resp.drag_started_by(egui::PointerButton::Primary) {
-                if matches!(self.tool, Tool::Brush | Tool::Eraser | Tool::Move) {
+                if matches!(self.tool, Tool::Brush | Tool::Eraser | Tool::Clone | Tool::Move) {
                     self.locked();
                 }
                 if let Some(at) = ui.input(|i| i.pointer.press_origin()) {
                     let d = to_doc(at);
                     match self.tool {
-                        Tool::Brush | Tool::Eraser if self.doc.layers[self.doc.active].visible && !self.doc.layers[self.doc.active].lock_all => {
+                        Tool::Clone if ui.input(|i| i.modifiers.alt) => {
+                            // Alt+clic : la source du tampon (le décalage se fixe au premier coup de pinceau)
+                            self.clone_src = Some(d);
+                            self.clone_off = None;
+                        }
+                        Tool::Clone if self.clone_src.is_none() => {
+                            self.message = Some(crate::i18n::t("Alt+clic d'abord pour choisir où prendre les pixels"));
+                        }
+                        Tool::Brush | Tool::Eraser | Tool::Clone if self.doc.layers[self.doc.active].visible && !self.doc.layers[self.doc.active].lock_all => {
+                            if self.tool == Tool::Clone && self.clone_off.is_none() {
+                                if let Some(src) = self.clone_src {
+                                    self.clone_off = Some(src - d);
+                                }
+                            }
                             self.checkpoint();
                             self.grow_to_doc();
                             let l = self.target_ref().clone();
@@ -2258,7 +2299,7 @@ impl Editor {
                 if let Some(at) = resp.interact_pointer_pos() {
                     let d = to_doc(at);
                     match self.tool {
-                        Tool::Brush | Tool::Eraser => {
+                        Tool::Brush | Tool::Eraser | Tool::Clone => {
                             // Tampons espacés le long du mouvement
                             if let Some(last) = self.stroke.as_ref().map(|s| s.2) {
                                 let dist = (d - last).length();
@@ -2354,7 +2395,19 @@ impl Editor {
                                 self.color = Color32::from_rgba_unmultiplied(self.comp[i], self.comp[i + 1], self.comp[i + 2], self.comp[i + 3].max(1));
                             }
                         }
-                        Tool::Brush | Tool::Eraser if !self.doc.layers[self.doc.active].lock_all => {
+                        Tool::Clone if ui.input(|i| i.modifiers.alt) => {
+                            self.clone_src = Some(d);
+                            self.clone_off = None;
+                        }
+                        Tool::Clone if self.clone_src.is_none() => {
+                            self.message = Some(crate::i18n::t("Alt+clic d'abord pour choisir où prendre les pixels"));
+                        }
+                        Tool::Brush | Tool::Eraser | Tool::Clone if !self.doc.layers[self.doc.active].lock_all => {
+                            if self.tool == Tool::Clone && self.clone_off.is_none() {
+                                if let Some(src) = self.clone_src {
+                                    self.clone_off = Some(src - d);
+                                }
+                            }
                             self.checkpoint();
                             self.grow_to_doc();
                             let l = self.target_ref().clone();
@@ -2376,7 +2429,7 @@ impl Editor {
                             self.commit_text(ui.ctx());
                             self.text = Some(TextDraft { at: [d.x, d.y], s: String::new(), preview: None, focus: true });
                         }
-                        Tool::Gradient | Tool::Move | Tool::Brush | Tool::Eraser => {}
+                        Tool::Gradient | Tool::Move | Tool::Brush | Tool::Eraser | Tool::Clone => {}
                     }
                 }
             }
@@ -2482,8 +2535,23 @@ impl Editor {
             Some(false) => self.text = None,
             None => {}
         }
+        // Tampon : une croix là où l'on prend les pixels
+        if self.tool == Tool::Clone {
+            let src = match (self.clone_off, hover.filter(|q| rect.contains(*q))) {
+                (Some(o), Some(h)) => Some(to_doc(h) + o),
+                _ => self.clone_src,
+            };
+            if let Some(sd) = src {
+                let q = to_screen(sd.x, sd.y);
+                for (a, b) in [(egui::vec2(-7.0, 0.0), egui::vec2(7.0, 0.0)), (egui::vec2(0.0, -7.0), egui::vec2(0.0, 7.0))] {
+                    painter.line_segment([q + a, q + b], Stroke::new(3.0, Color32::from_black_alpha(140)));
+                    painter.line_segment([q + a, q + b], Stroke::new(1.2, Color32::WHITE));
+                }
+                painter.circle_stroke(q, (self.size * self.zoom / 2.0).max(1.0), Stroke::new(1.0, Color32::from_white_alpha(110)));
+            }
+        }
         // Rond du pinceau sous le pointeur
-        if let (Some(at), true) = (hover.filter(|q| rect.contains(*q)), matches!(self.tool, Tool::Brush | Tool::Eraser)) {
+        if let (Some(at), true) = (hover.filter(|q| rect.contains(*q)), matches!(self.tool, Tool::Brush | Tool::Eraser | Tool::Clone)) {
             painter.circle_stroke(at, (self.size * self.zoom / 2.0).max(1.0), Stroke::new(1.0, Color32::from_black_alpha(160)));
             painter.circle_stroke(at, (self.size * self.zoom / 2.0).max(1.0) + 1.0, Stroke::new(1.0, Color32::from_white_alpha(160)));
             ctx.set_cursor_icon(egui::CursorIcon::Crosshair);
@@ -3568,6 +3636,29 @@ mod tests {
 
 #[cfg(test)]
 mod text_tests {
+    #[test]
+    fn tampon() {
+        use super::*;
+        let mut ed = Editor::new_test(20, 10);
+        // Moitié gauche rouge, moitié droite transparente ; on copie la gauche vers la droite
+        let l = &mut ed.doc.layers[ed.doc.active];
+        for y in 0..l.h {
+            for x in 0..10 {
+                let i = (y * l.w + x) * 4;
+                l.px[i..i + 4].copy_from_slice(&[255, 0, 0, 255]);
+            }
+        }
+        ed.tool = Tool::Clone;
+        (ed.size, ed.hardness, ed.flow) = (4.0, 0.99, 1.0);
+        ed.clone_off = Some(egui::vec2(-10.0, 0.0));
+        let start = ed.doc.layers[ed.doc.active].clone();
+        let n = start.w * start.h;
+        ed.stroke = Some((start, vec![0.0; n], egui::pos2(15.0, 5.0)));
+        ed.dab(egui::pos2(15.0, 5.0));
+        assert_eq!(ed.doc.layers[ed.doc.active].at(15, 5), [255, 0, 0, 255]);
+        assert_eq!(ed.doc.layers[ed.doc.active].at(19, 5)[3], 0);
+    }
+
     #[test]
     fn transformation_libre() {
         use super::*;
