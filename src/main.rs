@@ -3,6 +3,7 @@
 mod cloud;
 mod keymap;
 mod lucide;
+mod hl;
 mod palette;
 mod bridge;
 mod layout;
@@ -2761,6 +2762,21 @@ impl App {
                                     job.append(" / ", 0.0, egui::TextFormat { font_id: egui::FontId::proportional(12.5), color: p.muted, ..Default::default() });
                                 }
                             }
+                            // Code : le symbole où se trouve le curseur, comme la maquette (fichier › fonction)
+                            if !is_md {
+                                if let Content::Text(t) = &self.docs[i].content {
+                                    let st = egui::text_edit::TextEditState::load(ui.ctx(), egui::Id::unique(("code", &rel)));
+                                    if let Some(cr) = st.and_then(|s| s.cursor.char_range()) {
+                                        let at: usize = cr.primary.index.into();
+                                        let line = t.chars().take(at).filter(|c| *c == '\n').count();
+                                        let syms = code::symbols(t, &ext(&rel));
+                                        if let Some(sym) = syms.iter().filter(|s| s.line <= line).max_by_key(|s| (s.line, s.depth)) {
+                                            job.append(&format!("  {}  ", lucide::CHEVRON_RIGHT), 0.0, egui::TextFormat { font_id: egui::FontId::proportional(11.0), color: p.muted, ..Default::default() });
+                                            job.append(&sym.name, 0.0, egui::TextFormat { font_id: egui::FontId::proportional(12.5), color: p.text, ..Default::default() });
+                                        }
+                                    }
+                                }
+                            }
                             ui.add(egui::Label::new(job).truncate()).on_hover_text(&shown);
                         });
                     });
@@ -2973,7 +2989,14 @@ impl App {
                     }
                     let folds = ed.folds.clone();
                     let mut layouter = |ui: &egui::Ui, buf: &dyn egui::TextBuffer, width: f32| {
-                        let mut job = if lang == "md" { md_layout(buf.as_str(), fs) } else { egui_extras::syntax_highlighting::highlight(ui.ctx(), ui.style(), &theme, buf.as_str(), &lang) };
+                        let mut job = if lang == "md" {
+                            md_layout(buf.as_str(), fs)
+                        } else if hl::supports(&lang) {
+                            // Couleurs de la charte (maquette) pour les langages courants
+                            hl::highlight(buf.as_str(), &lang, egui::FontId::monospace(fs), &hl::colors(dark))
+                        } else {
+                            egui_extras::syntax_highlighting::highlight(ui.ctx(), ui.style(), &theme, buf.as_str(), &lang)
+                        };
                         job.wrap.max_width = if wrap { width } else { f32::INFINITY };
                         code::apply_folds(&mut job, &code::hidden_bytes(buf.as_str(), &folds));
                         ui.painter().layout_job(job)
