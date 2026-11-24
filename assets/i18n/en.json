@@ -1749,5 +1749,9 @@
   "Taille": "Scale",
   "maillage": "mesh",
   "Auto-clé": "Auto key",
-  "Courbes": "Curves"
+  "Courbes": "Curves",
+  "Ajouter": "Add",
+  "Aucun modificateur": "No modifiers",
+  "Références": "References",
+  "cliquer pour la poser dans la scène": "click to place it in the scene"
 }

@@ -2363,6 +2363,8 @@ pub struct Viewer {
     /// La vue de la frame précédente (l'en-tête et les outils flottent par-dessus)
     vp_rect: Option<egui::Rect>,
     hdr_h: f32,
+    /// Images à côté de la scène, montrées en références sous la liste (lues une fois)
+    scene_refs: Option<Vec<std::path::PathBuf>>,
     prop_tab: PropTab,
     /// Éditeur de courbes à la place de la timeline
     anim_graph: bool,
@@ -2503,6 +2505,7 @@ impl Viewer {
             anim_job: None,
             vp_rect: None,
             hdr_h: 30.0,
+            scene_refs: None,
             prop_tab: PropTab::Object,
             anim_graph: false,
             graph: Default::default(),
@@ -4918,7 +4921,21 @@ impl Viewer {
             }
             // (index, action) : 0 supprimer, 1 dupliquer
             let mut action: Option<(usize, u8)> = None;
-            egui::ScrollArea::vertical().id_salt("scene-objects").auto_shrink([false, false]).show(ui, |ui| {
+            // Les références prennent le bas du panneau, comme la maquette : la liste garde le reste
+            if self.scene_refs.is_none() {
+                let mut v: Vec<std::path::PathBuf> = vec![];
+                if let Some(dir) = path.parent() {
+                    if let Ok(rd) = std::fs::read_dir(dir) {
+                        v = rd.flatten().map(|e| e.path()).filter(|f| matches!(f.extension().and_then(|e| e.to_str()).map(|e| e.to_lowercase()).as_deref(), Some("png" | "jpg" | "jpeg" | "webp"))).collect();
+                        v.sort();
+                        v.truncate(6);
+                    }
+                }
+                self.scene_refs = Some(v);
+            }
+            let refs = self.scene_refs.clone().unwrap_or_default();
+            let refs_h = if refs.is_empty() { 0.0 } else { 34.0 + ((refs.len() + 2) / 3) as f32 * ((ui.available_width() - 36.0) / 3.0 + 6.0) };
+            egui::ScrollArea::vertical().id_salt("scene-objects").auto_shrink([false, false]).max_height((ui.available_height() - refs_h).max(60.0)).show(ui, |ui| {
                 ui.spacing_mut().item_spacing.y = 0.0;
                 for (i, depth) in scene.tree() {
                     let o = &mut scene.objects[i];
@@ -5003,6 +5020,27 @@ impl Viewer {
                     self.scene_sel = Some(i + 1);
                 }
                 changed = true;
+            }
+            if !refs.is_empty() {
+                let top = ui.max_rect().bottom() - refs_h;
+                ui.painter().hline(ui.max_rect().x_range(), top, Stroke::new(1.0, p.line));
+                let mut rui = ui.new_child(egui::UiBuilder::new().max_rect(egui::Rect::from_min_max(egui::pos2(ui.max_rect().left() + 12.0, top + 10.0), ui.max_rect().right_bottom() - egui::vec2(12.0, 0.0))));
+                rui.label(egui::RichText::new(crate::i18n::t("Références")).size(11.0).color(p.muted));
+                let cell = (rui.available_width() - 12.0) / 3.0;
+                egui::Grid::new("scene-refs").spacing(egui::vec2(6.0, 6.0)).show(&mut rui, |ui| {
+                    for (k, f) in refs.iter().enumerate() {
+                        let img = egui::Image::new(format!("file://{}", f.display())).fit_to_exact_size(egui::vec2(cell, cell)).corner_radius(10).maintain_aspect_ratio(false).sense(egui::Sense::click());
+                        let r = ui.add(img).on_hover_text(format!("{}\n{}", f.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(), crate::i18n::t("cliquer pour la poser dans la scène")));
+                        if r.clicked() {
+                            scene.add(&path, f);
+                            self.scene_sel = Some(scene.objects.len() - 1);
+                            changed = true;
+                        }
+                        if k % 3 == 2 {
+                            ui.end_row();
+                        }
+                    }
+                });
             }
             }
             if part == 1 {
@@ -5125,6 +5163,47 @@ impl Viewer {
                                         row(ui, "Position", &mut o.pos, 0.01, [0.0; 3]);
                                         row(ui, "Rotation", &mut o.rot, 0.5, [0.0; 3]);
                                         row(ui, "Taille", &mut o.scale, 0.005, [1.0; 3]);
+                                        ui.add_space(8.0);
+                                        // Modificateurs en résumé, comme la maquette : une carte par modificateur, l'œil pour l'allumer
+                                        ui.horizontal(|ui| {
+                                            ui.label(egui::RichText::new(crate::i18n::t("Modificateurs")).size(11.0).color(p.muted));
+                                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                                if ui.add(egui::Button::new(egui::RichText::new(format!("{} {}", crate::lucide::PLUS, crate::i18n::t("Ajouter"))).size(12.0)).frame(false)).clicked() {
+                                                    new_tab = PropTab::Modifiers;
+                                                }
+                                            });
+                                        });
+                                        for m in o.mods.iter_mut() {
+                                            let (cr, cresp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 28.0), egui::Sense::click());
+                                            ui.painter().rect(cr, 2.0, p.raised, Stroke::new(1.0, p.line), egui::StrokeKind::Inside);
+                                            ui.painter().text(cr.left_center() + egui::vec2(8.0, 0.0), egui::Align2::LEFT_CENTER, crate::i18n::t(m.kind.name()), egui::FontId::proportional(12.5), if m.on { p.text } else { p.muted });
+                                            let er = egui::Rect::from_center_size(egui::pos2(cr.right() - 14.0, cr.center().y), egui::vec2(20.0, 20.0));
+                                            let eye = ui.interact(er, cresp.id.with("eye"), egui::Sense::click());
+                                            ui.painter().text(er.center(), egui::Align2::CENTER_CENTER, if m.on { crate::lucide::EYE } else { crate::lucide::EYE_OFF }, egui::FontId::proportional(13.0), if eye.hovered() { p.text } else { p.muted });
+                                            if eye.clicked() {
+                                                m.on = !m.on;
+                                                changed = true;
+                                            } else if cresp.clicked() {
+                                                new_tab = PropTab::Modifiers;
+                                            }
+                                        }
+                                        if o.mods.is_empty() {
+                                            ui.label(egui::RichText::new(crate::i18n::t("Aucun modificateur")).size(12.0).color(p.muted));
+                                        }
+                                        ui.add_space(8.0);
+                                        // Matériau en résumé : une pastille, le nom ; un clic ouvre l'onglet Matériau
+                                        ui.label(egui::RichText::new(crate::i18n::t("Matériau")).size(11.0).color(p.muted));
+                                        let mname = if o.material.is_empty() { crate::i18n::t("aucun") } else { crate::formats::strip(o.material.rsplit('/').next().unwrap_or(&o.material)).to_string() };
+                                        let (mr, mresp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 30.0), egui::Sense::click());
+                                        let c = egui::pos2(mr.left() + 14.0, mr.center().y);
+                                        let base = o.color.map(|c| Color32::from_rgb(c[0], c[1], c[2])).unwrap_or(Color32::from_rgb(0x8a, 0x7a, 0x82));
+                                        ui.painter().circle_filled(c, 14.0, base.gamma_multiply(0.55));
+                                        ui.painter().circle_filled(c + egui::vec2(-3.0, -3.0), 9.0, base);
+                                        ui.painter().circle_filled(c + egui::vec2(-5.0, -5.0), 3.5, Color32::from_white_alpha(120));
+                                        ui.painter().text(egui::pos2(mr.left() + 38.0, mr.center().y), egui::Align2::LEFT_CENTER, &mname, egui::FontId::proportional(12.5), if mresp.hovered() { p.text } else { p.text.gamma_multiply(0.9) });
+                                        if mresp.clicked() {
+                                            new_tab = PropTab::Material;
+                                        }
                                         ui.add_space(8.0);
                                         ui.label(egui::RichText::new(crate::i18n::t("Objet")).size(11.0).color(p.muted));
                                         ui.horizontal(|ui| {
@@ -5878,6 +5957,9 @@ impl Viewer {
         ui.set_min_width((vp.width() - 24.0 - 14.0).max(120.0));
         egui::ScrollArea::horizontal().id_salt("hdr3d-scroll").scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden).max_width((vp.width() - 24.0 - 14.0).max(120.0)).show(ui, |ui| ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 3.0;
+            let mut right_x0: Option<f32> = None;
+            let hdr_x0 = ui.cursor().min.x;
+            let hdr_w = (vp.width() - 24.0 - 14.0).max(120.0);
             for item in HEADER {
                 match item {
                     Hdr::Mode if !is_scene && !self.can_edit() => {
@@ -6080,7 +6162,12 @@ impl Viewer {
                         }
                     }
                     Hdr::Fill => {
-                        ui.separator();
+                        // Comme la maquette : l'ombrage et le rendu sont poussés à droite (largeur mesurée à l'image d'avant)
+                        let id = egui::Id::new("hdr3d-right");
+                        let right_w: f32 = ui.ctx().data(|d| d.get_temp(id)).unwrap_or(0.0);
+                        let fill = (hdr_w - (ui.cursor().min.x - hdr_x0) - right_w).max(4.0);
+                        ui.add_space(fill);
+                        right_x0 = Some(ui.cursor().min.x);
                     }
                     Hdr::Shading => {
                         // Ombrage : une pastille par rendu, comme les sphères de Blender ; le nom au survol
@@ -6264,6 +6351,10 @@ impl Viewer {
                     }
                     _ => {}
                 }
+            }
+            if let Some(x0) = right_x0 {
+                let w = ui.min_rect().right() - x0;
+                ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("hdr3d-right"), w + 2.0));
             }
         }));
         });
