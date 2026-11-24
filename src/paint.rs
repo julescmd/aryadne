@@ -161,6 +161,58 @@ fn set_sat(c: [f32; 3], s: f32) -> [f32; 3] {
     c.map(|v| (v - n) * s / (x - n))
 }
 
+/// Calque de réglage : il change la couleur de tout ce qui est dessous (sans toucher aux pixels)
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Debug)]
+pub enum Adj {
+    BrightContrast { b: f32, c: f32 },
+    HueSat { h: f32, s: f32, l: f32 },
+    Levels { black: f32, white: f32, gamma: f32 },
+    Exposure { ev: f32 },
+    Invert,
+    BlackWhite,
+    Threshold { t: f32 },
+    Posterize { levels: f32 },
+}
+
+impl Adj {
+    pub const NEW: [(&'static str, Adj); 8] = [
+        ("Luminosité/Contraste", Adj::BrightContrast { b: 0.0, c: 0.0 }),
+        ("Niveaux", Adj::Levels { black: 0.0, white: 1.0, gamma: 1.0 }),
+        ("Exposition", Adj::Exposure { ev: 0.0 }),
+        ("Teinte/Saturation", Adj::HueSat { h: 0.0, s: 0.0, l: 0.0 }),
+        ("Noir et blanc", Adj::BlackWhite),
+        ("Inverser", Adj::Invert),
+        ("Seuil", Adj::Threshold { t: 0.5 }),
+        ("Isohélie", Adj::Posterize { levels: 4.0 }),
+    ];
+
+    pub fn name(&self) -> &'static str {
+        Adj::NEW.iter().find(|(_, a)| std::mem::discriminant(a) == std::mem::discriminant(self)).map(|x| x.0).unwrap_or("Réglage")
+    }
+
+    pub fn apply(&self, c: [f32; 3]) -> [f32; 3] {
+        match *self {
+            Adj::BrightContrast { b, c: k } => c.map(|x| ((x - 0.5) * (1.0 + k) + 0.5 + b).clamp(0.0, 1.0)),
+            Adj::HueSat { h, s, l } => {
+                let mut hsv = egui::ecolor::Hsva::from_rgb(c);
+                hsv.h = (hsv.h + h).rem_euclid(1.0);
+                hsv.s = (hsv.s * (1.0 + s)).clamp(0.0, 1.0);
+                let o = hsv.to_rgb();
+                if l >= 0.0 { o.map(|x| x + (1.0 - x) * l) } else { o.map(|x| x * (1.0 + l)) }
+            }
+            Adj::Levels { black, white, gamma } => c.map(|x| (((x - black) / (white - black).max(1e-3)).clamp(0.0, 1.0)).powf(1.0 / gamma.max(0.05))),
+            Adj::Exposure { ev } => c.map(|x| (x * 2f32.powf(ev)).clamp(0.0, 1.0)),
+            Adj::Invert => c.map(|x| 1.0 - x),
+            Adj::BlackWhite => [lum(c); 3],
+            Adj::Threshold { t } => [if lum(c) >= t { 1.0 } else { 0.0 }; 3],
+            Adj::Posterize { levels } => {
+                let n = levels.round().max(2.0) - 1.0;
+                c.map(|x| (x * n).round() / n)
+            }
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct Layer {
     pub name: String,
@@ -185,6 +237,8 @@ pub struct Layer {
     pub lock_all: bool,
     /// Masque d'écrêtage : le calque n'apparaît que sur les pixels du calque de dessous
     pub clip: bool,
+    /// Calque de réglage (sans pixels)
+    pub adj: Option<Adj>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -208,6 +262,8 @@ struct LayerHead {
     lock_all: bool,
     #[serde(default)]
     clip: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    adj: Option<Adj>,
 }
 
 fn yes() -> bool {
@@ -229,7 +285,7 @@ struct Head {
 
 impl Layer {
     pub fn blank(name: &str, w: usize, h: usize) -> Layer {
-        Layer { name: name.to_string(), visible: true, opacity: 1.0, blend: Blend::Normal, off: [0, 0], w, h, px: vec![0; w * h * 4], mask: None, mask_on: true, fill: 1.0, lock_alpha: false, lock_all: false, clip: false }
+        Layer { name: name.to_string(), visible: true, opacity: 1.0, blend: Blend::Normal, off: [0, 0], w, h, px: vec![0; w * h * 4], mask: None, mask_on: true, fill: 1.0, lock_alpha: false, lock_all: false, clip: false, adj: None }
     }
 
     pub fn filled(name: &str, w: usize, h: usize, c: [u8; 4]) -> Layer {
@@ -290,7 +346,7 @@ impl Doc {
             w: self.w,
             h: self.h,
             active: self.active,
-            layers: self.layers.iter().map(|l| LayerHead { name: l.name.clone(), visible: l.visible, opacity: l.opacity, blend: l.blend, off: l.off, w: l.w, h: l.h, mask: l.mask.is_some(), mask_on: l.mask_on, fill: l.fill, lock_alpha: l.lock_alpha, lock_all: l.lock_all, clip: l.clip }).collect(),
+            layers: self.layers.iter().map(|l| LayerHead { name: l.name.clone(), visible: l.visible, opacity: l.opacity, blend: l.blend, off: l.off, w: l.w, h: l.h, mask: l.mask.is_some(), mask_on: l.mask_on, fill: l.fill, lock_alpha: l.lock_alpha, lock_all: l.lock_all, clip: l.clip, adj: l.adj }).collect(),
         };
         let json = serde_json::to_vec(&head).map_err(|e| e.to_string())?;
         let mut out = b"ARYIMG1\n".to_vec();
@@ -347,7 +403,7 @@ impl Doc {
             } else {
                 None
             };
-            layers.push(Layer { name: lh.name, visible: lh.visible, opacity: lh.opacity, blend: lh.blend, off: lh.off, w, h, px, mask, mask_on: lh.mask_on, fill: lh.fill, lock_alpha: lh.lock_alpha, lock_all: lh.lock_all, clip: lh.clip });
+            layers.push(Layer { name: lh.name, visible: lh.visible, opacity: lh.opacity, blend: lh.blend, off: lh.off, w, h, px, mask, mask_on: lh.mask_on, fill: lh.fill, lock_alpha: lh.lock_alpha, lock_all: lh.lock_all, clip: lh.clip, adj: lh.adj });
         }
         if layers.is_empty() {
             layers.push(Layer::blank("calque 1", head.w, head.h));
@@ -367,6 +423,22 @@ impl Doc {
                 let mut base_on = false;
                 for l in &self.layers {
                     let (xi, yi) = (x as i32, y as i32);
+                    if let Some(adj) = &l.adj {
+                        // Réglage : la couleur de dessous change, dosée par le masque, l'opacité et le fond
+                        if !l.visible || d[3] <= 0.0 || (l.clip && !base_on) {
+                            continue;
+                        }
+                        let k = l.mask_at(xi, yi) * l.opacity * l.fill * if l.clip { base_a } else { 1.0 };
+                        if k <= 0.0 {
+                            continue;
+                        }
+                        let below = [d[0], d[1], d[2]];
+                        let c = l.blend.mix(below, adj.apply(below));
+                        for ch in 0..3 {
+                            d[ch] = below[ch] + (c[ch] - below[ch]) * k;
+                        }
+                        continue;
+                    }
                     let s = l.at(xi, yi);
                     let mut a = s[3] as f32 / 255.0 * l.mask_at(xi, yi);
                     if l.clip {
@@ -1919,6 +1991,16 @@ impl Editor {
         self.all();
     }
 
+    /// Nouveau calque de réglage au-dessus du calque actif, avec un masque blanc (comme Photoshop)
+    fn new_adjustment(&mut self, a: Adj) {
+        self.checkpoint();
+        let l = Layer { adj: Some(a), mask: Some(Layer::new_mask(self.doc.w, self.doc.h, 255)), ..Layer::blank(&crate::i18n::t(a.name()), 1, 1) };
+        self.doc.layers.insert(self.doc.active + 1, l);
+        self.doc.active += 1;
+        self.edit_mask = true;
+        self.all();
+    }
+
     /// Applique le masque aux pixels du calque (et le retire)
     fn apply_mask(&mut self) {
         self.checkpoint();
@@ -2035,6 +2117,21 @@ impl Editor {
                 });
             });
         }
+        // Propriétés du calque de réglage choisi
+        if let Some(adj) = self.doc.layers[a].adj.as_mut() {
+            ui.add_space(4.0);
+            ui.label(egui::RichText::new(crate::i18n::t(adj.name())).size(12.0).strong());
+            let sl = |ui: &mut egui::Ui, v: &mut f32, r: std::ops::RangeInclusive<f32>, label: &str| ui.add(egui::Slider::new(v, r).text(crate::i18n::t(label))).changed();
+            changed |= match adj {
+                Adj::BrightContrast { b, c } => sl(ui, b, -1.0..=1.0, "luminosité") | sl(ui, c, -1.0..=1.0, "contraste"),
+                Adj::HueSat { h, s, l } => sl(ui, h, -0.5..=0.5, "teinte") | sl(ui, s, -1.0..=1.0, "saturation") | sl(ui, l, -1.0..=1.0, "luminosité"),
+                Adj::Levels { black, white, gamma } => sl(ui, black, 0.0..=0.99, "noirs") | sl(ui, gamma, 0.1..=3.0, "gamma") | sl(ui, white, 0.01..=1.0, "blancs"),
+                Adj::Exposure { ev } => sl(ui, ev, -4.0..=4.0, "exposition (IL)"),
+                Adj::Threshold { t } => sl(ui, t, 0.0..=1.0, "seuil"),
+                Adj::Posterize { levels } => sl(ui, levels, 2.0..=32.0, "niveaux"),
+                Adj::Invert | Adj::BlackWhite => false,
+            };
+        }
         if changed {
             self.all();
         }
@@ -2108,7 +2205,15 @@ impl Editor {
                     r
                 };
                 let editing_mask = on && self.edit_mask && l.mask.is_some();
-                let lr = thumb(&painter, x, (i, false), on && !editing_mask);
+                let lr = if l.adj.is_some() {
+                    // Calque de réglage : son icône à la place de la vignette
+                    let r = egui::Rect::from_min_size(egui::pos2(x, row.center().y - 18.0), vec2(36.0, 36.0));
+                    painter.rect_filled(r, 0.0, p.raised);
+                    painter.text(r.center(), egui::Align2::CENTER_CENTER, crate::lucide::CIRCLE_HALF, egui::FontId::proportional(18.0), p.text);
+                    r
+                } else {
+                    thumb(&painter, x, (i, false), on && !editing_mask)
+                };
                 let lresp = ui.interact(lr, ui.scope_id().with(("lthumb", i)), egui::Sense::click());
                 if lresp.clicked() {
                     pick = Some((i, false));
@@ -2225,7 +2330,8 @@ impl Editor {
                 self.all();
             }
             self.doc.active = i;
-            self.edit_mask = mask;
+            // Un calque de réglage n'a que son masque à peindre
+            self.edit_mask = mask || self.doc.layers[i].adj.is_some();
         }
         if let Some(i) = mask_toggle {
             self.checkpoint();
@@ -2281,10 +2387,20 @@ impl Editor {
                 if b(ui, crate::lucide::COPY, "Dupliquer le calque (Ctrl+J)").clicked() {
                     self.duplicate_layer();
                 }
-                let r = ui.add(egui::Button::new(egui::RichText::new(crate::lucide::CIRCLE_HALF).size(14.0)).frame(false).min_size(vec2(24.0, 22.0))).on_hover_text(crate::i18n::t("Réglage : luminosité et contraste, teinte et saturation"));
-                if r.clicked() {
-                    self.checkpoint();
-                    self.adjust = Some((Adjust::HueSat, self.doc.layers[self.doc.active].clone(), [0.0, 0.0]));
+                let mut new_adj = None;
+                ui.menu_button(egui::RichText::new(crate::lucide::CIRCLE_HALF).size(14.0), |ui| {
+                    ui.label(egui::RichText::new(crate::i18n::t("Nouveau calque de réglage")).size(11.0).color(p.muted));
+                    for (name, a) in Adj::NEW {
+                        if ui.button(crate::i18n::t(name)).clicked() {
+                            new_adj = Some(a);
+                            ui.close();
+                        }
+                    }
+                })
+                .response
+                .on_hover_text(crate::i18n::t("Nouveau calque de réglage (non destructif)"));
+                if let Some(a) = new_adj {
+                    self.new_adjustment(a);
                 }
                 let has_mask = self.doc.layers[self.doc.active].mask.is_some();
                 if b(ui, crate::lucide::SQUARE_DASHED, "Ajouter un masque de fusion (d'après la sélection s'il y en a une)").clicked() && !has_mask {
@@ -2333,6 +2449,18 @@ mod tests {
         let img = e.flatten();
         assert_eq!(img.get_pixel(0, 0).0, [0, 0, 255, 255]);
         assert_eq!(img.get_pixel(1, 0).0[3], 0);
+        // Réglage : inverser tout ce qui est dessous, sauf là où son masque est noir
+        let mut g = Doc::new(2, 1, true);
+        let mut inv = Layer { adj: Some(Adj::Invert), mask: Some(Layer::new_mask(2, 1, 255)), ..Layer::blank("inv", 1, 1) };
+        inv.mask.as_mut().unwrap().px[4..7].copy_from_slice(&[0, 0, 0]);
+        g.layers.push(inv);
+        let path2 = std::env::temp_dir().join(format!("reglage-{}.aryimg", std::process::id()));
+        g.save(&path2).unwrap();
+        let g = Doc::load(&path2).unwrap();
+        let _ = std::fs::remove_file(&path2);
+        let img = g.flatten();
+        assert_eq!(img.get_pixel(0, 0).0, [0, 0, 0, 255]);
+        assert_eq!(img.get_pixel(1, 0).0, [255, 255, 255, 255]);
         // Modes : écran et luminosité
         assert_eq!(Blend::Screen.mix([0.5; 3], [0.5; 3]), [0.75; 3]);
         let l = Blend::Luminosity.mix([1.0, 0.0, 0.0], [0.5, 0.5, 0.5]);

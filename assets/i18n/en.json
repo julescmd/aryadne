@@ -2332,5 +2332,14 @@
   "Dupliquer le calque (Ctrl+J)": "Duplicate Layer (Ctrl+J)",
   "Réglage : luminosité et contraste, teinte et saturation": "Adjustment: brightness/contrast, hue/saturation",
   "Ajouter un masque de fusion (d'après la sélection s'il y en a une)": "Add a layer mask (from the selection if there is one)",
-  "Ce calque est verrouillé.": "This layer is locked."
+  "Ce calque est verrouillé.": "This layer is locked.",
+  "Luminosité/Contraste": "Brightness/Contrast",
+  "Teinte/Saturation": "Hue/Saturation",
+  "Isohélie": "Posterize",
+  "Réglage": "Adjustment",
+  "Nouveau calque de réglage": "New adjustment layer",
+  "Nouveau calque de réglage (non destructif)": "New adjustment layer (non-destructive)",
+  "noirs": "blacks",
+  "blancs": "whites",
+  "exposition (IL)": "exposure (EV)"
 }
