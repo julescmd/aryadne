@@ -664,14 +664,6 @@
   "échelle, rotation, décalage": "scale, rotation, offset",
   "épingler au-dessus des autres fenêtres": "pin above other windows",
   "note": "note",
-  "LECTURE": "READING",
-  "ÉDITION": "EDITING",
-  "BOARD": "BOARD",
-  "CHAT": "CHAT",
-  "TÂCHES": "TASKS",
-  "RECHERCHE": "SEARCH",
-  "CERVEAU": "BRAIN",
-  "REFS": "REFS",
   "lignes": "lines",
   "mots": "words",
   "● modifié": "● modified",
@@ -1735,5 +1727,7 @@
   "3d": "3D",
   "docs": "documents",
   "vidéos": "videos",
-  "autres": "other"
+  "autres": "other",
+  "enregistré": "saved",
+  "lecture": "reading"
 }

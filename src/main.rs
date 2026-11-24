@@ -2234,25 +2234,24 @@ impl App {
                     ui.spacing_mut().item_spacing.x = 14.0;
                     let preview = self.current().is_some_and(|d| d.preview);
                     let (mode, color) = match self.view() {
-                        View::Brain => ("CERVEAU", p.text),
-                        View::Refs => ("REFS", p.text),
-                        View::Boards => ("BOARD", p.text),
-                        View::Chat => ("CHAT", p.link),
-                        View::Tasks => ("TÂCHES", p.text),
-                        View::Search => ("RECHERCHE", p.text),
-                        View::Files if preview => ("LECTURE", p.link),
-                        View::Files => ("ÉDITION", p.accent),
+                        View::Brain => ("cerveau", p.text),
+                        View::Refs => ("références", p.text),
+                        View::Boards => ("board", p.text),
+                        View::Chat => ("chat", p.link),
+                        View::Tasks => ("tâches", p.text),
+                        View::Search => ("recherche", p.text),
+                        View::Files if preview => ("lecture", p.link),
+                        View::Files => ("édition", p.accent),
                     };
-                    egui::Frame::new().fill(color).inner_margin(egui::Margin::symmetric(10, 4)).show(ui, |ui| {
-                        ui.label(RichText::new(crate::i18n::t(mode)).color(p.on_accent).family(theme::bold()).size(11.0));
-                    });
+                    ui.add_space(10.0);
+                    let _ = color;
                     if let Some(d) = self.current() {
-                        ui.label(RichText::new(vault::display_rel(&d.rel)).size(11.5));
+                        ui.label(RichText::new(vault::display_rel(&d.rel)).size(11.0));
                         if let Content::Text(t) = &d.content {
                             let lang = if vault::is_md(&d.rel) { "markdown".to_string() } else if ext(&d.rel).is_empty() { "texte".into() } else { ext(&d.rel) };
                             ui.label(RichText::new(lang).color(p.muted).size(11.5));
                             ui.label(RichText::new(format!("{} {} · {} {}", t.lines().count(), crate::i18n::t_mid("lignes"), t.split_whitespace().count(), crate::i18n::t_mid("mots"))).color(p.muted).size(11.5));
-                            ui.label(RichText::new(crate::i18n::t(if d.dirty_since.is_some() { "● modifié" } else { "sauvé" })).color(p.muted).size(11.5));
+                            ui.label(RichText::new(crate::i18n::t(if d.dirty_since.is_some() { "● modifié" } else { "enregistré" })).color(if d.dirty_since.is_some() { p.warning } else { p.muted }).size(11.0));
                             match &d.code.lsp {
                                 Some(l) => {
                                     let dead = l.server.dead.lock().ok().and_then(|x| x.clone());
@@ -2278,10 +2277,18 @@ impl App {
                             ui.add(egui::Spinner::new().size(10.0));
                             ui.label(RichText::new(crate::i18n::t("sauvegarde…")).color(p.muted).size(11.0));
                         }
-                        // Les touches utiles là où on se trouve, comme la barre d'état de Blender :
-                        // elles prennent la place qui reste et se coupent proprement au besoin (survol : tout le texte)
+                        // Le mode, en texte discret (plus de badge)
+                        ui.label(RichText::new(crate::i18n::t(mode)).color(p.muted).size(11.0));
+                        // Au centre : l'aide du moment, courte (trois touches) ; survol : toutes les touches utiles ici
                         let hints = self.key_hints();
-                        ui.add(egui::Label::new(RichText::new(&hints).color(p.muted).size(11.0)).truncate()).on_hover_text(hints.replace(" · ", "\n"));
+                        let short: Vec<&str> = hints.split(" · ").take(3).collect();
+                        let more = hints.split(" · ").count() > 3;
+                        let text = format!("{}{}", short.join("  ·  "), if more { "  ·  …" } else { "" });
+                        let (r, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 20.0), egui::Sense::hover());
+                        let galley = ui.painter().layout_no_wrap(text, egui::FontId::proportional(11.0), p.muted);
+                        let x = (ui.ctx().content_rect().center().x - galley.size().x / 2.0).clamp(r.left() + 8.0, (r.right() - galley.size().x - 8.0).max(r.left() + 8.0));
+                        ui.painter().with_clip_rect(r).galley(egui::pos2(x, r.center().y - galley.size().y / 2.0), galley, p.muted);
+                        resp.on_hover_text(hints.replace(" · ", "\n"));
                     });
                 });
             });
