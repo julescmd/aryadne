@@ -12,7 +12,9 @@ fn from_polys(positions: Vec<V3>, polys: &[Vec<u32>], z_up: bool) -> Result<Mode
             edges.push(fan_mask(k, n));
         }
     }
-    Model::with_edges(positions, tris, None, Some(edges), z_up)
+    // Sommets dédoublés aux coutures et aux groupes de lissage : refusionnés
+    let (positions, tris, keep) = weld(&positions, &tris);
+    Model::with_edges(positions, tris, None, Some(keep_per_tri(&edges, &keep)), z_up)
 }
 
 // ---------- 3DS ----------

@@ -202,6 +202,50 @@ fn grid_simplify(positions: &[V3], tris_in: &[[u32; 3]], colors_in: &[Color32], 
 
 // ---------- lecture des formats ----------
 
+/// À l'import : les sommets au même endroit ne font plus qu'un. Les exportateurs dédoublent les
+/// sommets le long des coutures d'UV, des arêtes dures et des groupes de lissage ; ici le maillage
+/// redevient continu (Aryadne calcule son propre lissage et ses propres coutures). Les triangles
+/// devenus plats sont retirés ; `keep` dit lesquels restent, pour les données par triangle.
+pub fn weld(positions: &[V3], tris: &[[u32; 3]]) -> (Vec<V3>, Vec<[u32; 3]>, Vec<bool>) {
+    let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
+    for p in positions {
+        for k in 0..3 {
+            lo[k] = lo[k].min(p[k]);
+            hi[k] = hi[k].max(p[k]);
+        }
+    }
+    let diag = ((hi[0] - lo[0]).powi(2) + (hi[1] - lo[1]).powi(2) + (hi[2] - lo[2]).powi(2)).sqrt().max(1e-9);
+    let tol = (diag * 1e-6) as f64;
+    let mut ids: HashMap<[i64; 3], u32> = HashMap::new();
+    let mut out = Vec::with_capacity(positions.len());
+    let remap: Vec<u32> = positions
+        .iter()
+        .map(|p| {
+            let key = [(p[0] as f64 / tol).round() as i64, (p[1] as f64 / tol).round() as i64, (p[2] as f64 / tol).round() as i64];
+            *ids.entry(key).or_insert_with(|| {
+                out.push(*p);
+                (out.len() - 1) as u32
+            })
+        })
+        .collect();
+    let mut nt = Vec::with_capacity(tris.len());
+    let mut keep = Vec::with_capacity(tris.len());
+    for t in tris {
+        let m = [remap[t[0] as usize], remap[t[1] as usize], remap[t[2] as usize]];
+        let ok = m[0] != m[1] && m[1] != m[2] && m[0] != m[2];
+        keep.push(ok);
+        if ok {
+            nt.push(m);
+        }
+    }
+    (out, nt, keep)
+}
+
+/// Garde les données par triangle dont le triangle reste après `weld`
+pub fn keep_per_tri<T: Copy>(v: &[T], keep: &[bool]) -> Vec<T> {
+    v.iter().zip(keep).filter(|(_, k)| **k).map(|(x, _)| *x).collect()
+}
+
 pub fn load(path: &Path) -> Result<Model, String> {
     let ext = path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
     match ext.as_str() {
@@ -214,7 +258,8 @@ pub fn load(path: &Path) -> Result<Model, String> {
         "max" => Err("Les .max se lisent seulement dans 3ds Max : exporte en FBX, OBJ ou 3DS.".into()),
         "fbx" => {
             let m = crate::fbx::load(&std::fs::read(path).map_err(|e| e.to_string())?)?;
-            Model::with_edges(m.positions, m.tris, None, Some(m.edges), false)
+            let (pos, tris, keep) = weld(&m.positions, &m.tris);
+            Model::with_edges(pos, tris, None, Some(keep_per_tri(&m.edges, &keep)), false)
         }
         "glb" | "gltf" => load_gltf(path),
         "arya3" | "aryscene" => crate::scene::build(&crate::scene::Scene::read(path)?, path).0,
@@ -228,9 +273,14 @@ pub fn load_obj(reader: impl BufRead) -> Result<Model, String> {
     let mut tris = vec![];
     let mut edges = vec![];
     let mut poly: Vec<u32> = vec![];
+    // Un OBJ écrit par Aryadne garde ses sommets tels quels (une détache ou une déchirure en dédouble exprès)
+    let mut ours = false;
     for line in reader.lines() {
         let line = line.map_err(|e| e.to_string())?;
         let line = line.trim_start();
+        if line.starts_with('#') && line.contains("Aryadne") {
+            ours = true;
+        }
         if let Some(rest) = line.strip_prefix("v ") {
             let mut it = rest.split_whitespace().filter_map(|x| x.parse::<f32>().ok());
             if let (Some(x), Some(y), Some(z)) = (it.next(), it.next(), it.next()) {
@@ -252,7 +302,12 @@ pub fn load_obj(reader: impl BufRead) -> Result<Model, String> {
             }
         }
     }
-    Model::with_edges(verts, tris, None, Some(edges), false)
+    // OBJ : les « s » (groupes de lissage), « vn » et « vt » sont ignorés ; on refusionne aussi les sommets en double
+    if ours {
+        return Model::with_edges(verts, tris, None, Some(edges), false);
+    }
+    let (verts, tris, keep) = weld(&verts, &tris);
+    Model::with_edges(verts, tris, None, Some(keep_per_tri(&edges, &keep)), false)
 }
 
 /// Arêtes réelles du triangle k d'un polygone de n côtés découpé en éventail depuis le sommet 0.
@@ -362,6 +417,9 @@ fn load_gltf(path: &Path) -> Result<Model, String> {
             stack.push((child, world));
         }
     }
+    // glTF dédouble les sommets aux coutures et aux arêtes dures : on les refusionne
+    let (positions, tris, keep) = weld(&positions, &tris);
+    let colors = keep_per_tri(&colors, &keep);
     Model::new(positions, tris, Some(colors), false)
 }
 
@@ -7872,6 +7930,23 @@ pub fn fmt_n(n: usize) -> String {
         out.push(c);
     }
     out
+}
+
+#[cfg(test)]
+mod tests_weld {
+    use super::*;
+    #[test]
+    fn fusionne_les_coutures() {
+        // Deux triangles d'un carré, exportés avec leurs sommets dédoublés le long de la diagonale
+        let p = vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 1.0, 0.0], [0.0, 0.0, 0.0], [1.0, 1.0, 0.0], [0.0, 1.0, 0.0]];
+        let (pos, tris, keep) = weld(&p, &[[0, 1, 2], [3, 4, 5]]);
+        assert_eq!(pos.len(), 4);
+        assert_eq!(tris.len(), 2);
+        assert!(keep.iter().all(|k| *k));
+        // Un triangle devenu plat disparaît
+        let (_, t, keep) = weld(&[[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [1.0, 0.0, 0.0]], &[[0, 1, 2]]);
+        assert!(t.is_empty() && !keep[0]);
+    }
 }
 
 #[cfg(test)]
