@@ -160,6 +160,12 @@ pub struct Editor {
     monitor_scale: Option<(u64, f32, f32)>,
     /// Panneau de gauche : 0 médias, 1 source
     left_tab: u8,
+    /// Partie choisie sur la carte d'un média (début, fin en secondes de la source)
+    card_trim: std::collections::HashMap<String, (f32, f32)>,
+    /// Dernière carte survolée ou cliquée : E l'ajoute à la fin, Maj+E à la tête de lecture
+    card_focus: Option<String>,
+    /// Filtre des médias : 0 tout, 1 pas encore utilisés, 2 vidéos, 3 images, 4 sons
+    bin_filter: u8,
     folded: HashSet<&'static str>,
     shuttle: f32,
     /// Ajuster le zoom pour voir tout le montage (\\)
@@ -226,6 +232,9 @@ impl Editor {
             monitor_drag: None,
             monitor_scale: None,
             left_tab: 0,
+            card_trim: Default::default(),
+            card_focus: None,
+            bin_filter: 0,
             folded: HashSet::new(),
             shuttle: 0.0,
             fit_zoom: true,

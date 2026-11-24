@@ -1864,5 +1864,19 @@
   "Coupe": "Cut",
   "Fondu": "Dissolve",
   "Étalonner en nodes": "Grade in nodes",
-  "Format de la vidéo": "Video format"
+  "Format de la vidéo": "Video format",
+  "brume, drone, plan large…": "mist, drone, wide shot…",
+  "Tout": "All",
+  "Pas encore utilisés": "Not used yet",
+  "Vidéos": "Videos",
+  "Images": "Images",
+  "Sons": "Sounds",
+  "E : ajouter à la fin · Maj+E : à la tête de lecture · double-clic : source": "E: add at the end · Shift+E: at the playhead · double-click: source",
+  "Ajouter à la fin   E": "Add at the end   E",
+  "Insérer à la tête de lecture   Maj+E": "Insert at the playhead   Shift+E",
+  "Tout le média": "Whole media",
+  "Ouvrir dans la source": "Open in the source",
+  "Survole une carte pour voir le plan. Glisse sur sa barre du bas pour choisir la partie : E l'ajoute à la fin, Maj+E à la tête de lecture.": "Hover a card to see the shot. Drag along its bottom bar to pick the part: E adds it at the end, Shift+E at the playhead.",
+  "Importer": "Import",
+  "Titre": "Title"
 }

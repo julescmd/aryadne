@@ -97,115 +97,212 @@ impl Editor {
         self.top_tab = 1;
     }
 
+    /// Pose la partie choisie d'un média : à la fin de l'histoire (V1), ou insérée à la tête de lecture
+    fn add_from_card(&mut self, file: &str, at_end: bool) {
+        let path = self.media_path(file);
+        let Some(mut clips) = self.media_clips(&path, 0, self.atarget) else { return };
+        if let Some(&(a, b)) = self.card_trim.get(file) {
+            for c in clips.iter_mut() {
+                if c.kind != "image" && b > a + 0.05 {
+                    c.src_in = a;
+                    c.src_out = b.min(c.media.max(b));
+                }
+            }
+        }
+        let at = if at_end { self.project.clips.iter().filter(|c| !c.audio && c.track == 0).map(|c| c.end()).fold(0.0, f32::max) } else { self.playhead };
+        // À la fin : le son va sur la première piste son libre à cet endroit (rien n'est recouvert)
+        if at_end {
+            let len = clips.iter().map(|c| c.len()).fold(0.0, f32::max);
+            let free = |k: usize| !self.project.clips.iter().any(|o| o.audio && o.track == k && o.start < at + len - 1e-3 && o.end() > at + 1e-3);
+            let lane = (0..self.project.lanes(true)).find(|&k| free(k)).unwrap_or(self.project.lanes(true));
+            for c in clips.iter_mut().filter(|c| c.audio) {
+                c.track = lane;
+            }
+        }
+        self.sel = self.place(clips, at, !at_end);
+        let end = self.sel.iter().filter_map(|id| self.project.index(*id)).map(|i| self.project.clips[i].end()).fold(at, f32::max);
+        self.changed();
+        self.seek(if at_end { at } else { end });
+    }
+
+    /// Les médias en cartes, comme la maquette : survoler montre le plan, glisser sur la barre du bas
+    /// choisit la partie, E l'ajoute à la fin, Maj+E à la tête de lecture ; glisser la carte la pose où on veut
     fn bin_panel(&mut self, ui: &mut egui::Ui) {
         let p = crate::theme::pal();
-        let stem = self.path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
         let items = self.bin_items();
+        let ctx = ui.ctx().clone();
+        // Recherche et filtres
         ui.horizontal(|ui| {
-            ui.label(RichText::new(format!("{} : {stem}", crate::i18n::t("Projet"))).size(12.0).family(crate::theme::bold()));
-            ui.label(RichText::new(format!("{} {}", items.len(), crate::i18n::t_mid("élément(s)"))).size(10.5).color(p.muted));
-        });
-        ui.horizontal(|ui| {
-            ui.add(egui::TextEdit::singleline(&mut self.bin_search).hint_text(crate::i18n::t("rechercher")).desired_width((ui.available_width() - 90.0).max(60.0)));
-            if ui.selectable_label(self.bin_grid, "▦").on_hover_text(crate::i18n::t("vignettes")).clicked() {
-                self.bin_grid = true;
-            }
-            if ui.selectable_label(!self.bin_grid, "☰").on_hover_text(crate::i18n::t("liste")).clicked() {
-                self.bin_grid = false;
-            }
+            ui.add(egui::TextEdit::singleline(&mut self.bin_search).hint_text(format!("{}  {}", crate::lucide::SEARCH, crate::i18n::t("brume, drone, plan large…"))).desired_width(ui.available_width()));
         });
         ui.add_space(4.0);
-        let q = self.bin_search.to_lowercase();
-        let shown: Vec<String> = items.into_iter().filter(|f| q.is_empty() || f.to_lowercase().contains(&q)).collect();
-        let foot = 30.0;
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
+            for (k, label) in ["Tout", "Pas encore utilisés", "Vidéos", "Images", "Sons"].iter().enumerate() {
+                let on = self.bin_filter == k as u8;
+                let b = egui::Button::new(RichText::new(crate::i18n::t(label)).size(11.0).color(if on { p.text } else { p.muted })).fill(if on { p.selection } else { Color32::TRANSPARENT }).stroke(Stroke::new(1.0, p.line)).corner_radius(10).min_size(vec2(0.0, 20.0));
+                if ui.add(b).clicked() {
+                    self.bin_filter = k as u8;
+                }
+            }
+        });
+        ui.add_space(8.0);
+        let q = crate::chat::fold(&self.bin_search);
+        let used: HashSet<String> = self.project.clips.iter().map(|c| c.file.clone()).collect();
+        let mut shown: Vec<String> = vec![];
+        for f in items {
+            if !q.is_empty() && !crate::chat::fold(&f).contains(&q) {
+                continue;
+            }
+            let kind = self.media_info(&f).0;
+            let keep = match self.bin_filter {
+                1 => !used.contains(&f),
+                2 => kind == "video",
+                3 => kind == "image",
+                4 => kind == "audio",
+                _ => true,
+            };
+            if keep {
+                shown.push(f);
+            }
+        }
+        let foot = 104.0;
         let mut open: Option<String> = None;
         let mut remove: Option<String> = None;
-        let bg = egui::ScrollArea::vertical().id_salt("bin").max_height((ui.available_height() - foot).max(40.0)).auto_shrink([false, false]).show(ui, |ui| {
-            let ctx = ui.ctx().clone();
+        let mut add: Option<(String, bool)> = None;
+        let bg = egui::ScrollArea::vertical().id_salt("bin").max_height((ui.available_height() - foot).max(60.0)).auto_shrink([false, false]).show(ui, |ui| {
             if shown.is_empty() {
                 ui.add_space(20.0);
                 ui.vertical_centered(|ui| {
-                    ui.label(RichText::new(crate::i18n::t("Importe des médias, ou glisse-les ici depuis l'explorateur.")).size(11.0).color(p.muted));
+                    ui.label(RichText::new(crate::i18n::t("Importe des médias, ou glisse-les ici depuis l'explorateur.")).size(11.5).color(p.muted));
                 });
             }
-            let tile = vec2(112.0, 63.0 + 20.0);
-            let mut draw = |ui: &mut egui::Ui, file: &String, this: &mut Editor| {
-                let (kind, media, _) = this.media_info(file);
-                let name = Path::new(file).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| file.clone());
-                let size = if this.bin_grid { tile } else { vec2(ui.available_width(), 34.0) };
-                let (r, resp) = ui.allocate_exact_size(size, Sense::click_and_drag());
-                resp.dnd_set_drag_payload(Payload::Media(file.clone()));
-                let resp = resp.on_hover_text(file);
-                let on = this.source.as_ref().is_some_and(|s| &s.file == file);
-                if resp.hovered() || on {
-                    ui.painter().rect_filled(r, 3.0, p.line.gamma_multiply(if on { 0.9 } else { 0.5 }));
-                }
-                let th = if this.bin_grid { Rect::from_min_size(r.min + vec2(4.0, 4.0), vec2(r.width() - 8.0, 55.0)) } else { Rect::from_min_size(r.min + vec2(3.0, 3.0), vec2(50.0, 28.0)) };
-                ui.painter().rect_filled(th, 2.0, Color32::from_gray(30));
-                let path = crate::bridge::media(&this.media_path(file));
-                if kind == "audio" {
-                    if let Some(w) = this.strips.wave(&path, &ctx) {
-                        let mid = th.center().y;
-                        let mut x = th.left() + 2.0;
-                        while x < th.right() - 2.0 {
-                            let f = (x - th.left()) / th.width();
-                            let v = w.get((f * w.len() as f32) as usize).copied().unwrap_or(0.0);
-                            ui.painter().line_segment([pos2(x, mid - v * th.height() * 0.4), pos2(x, mid + v * th.height() * 0.4)], Stroke::new(1.0, Color32::from_rgb(96, 186, 146)));
-                            x += 2.0;
+            let gap = 10.0;
+            let w = ((ui.available_width() - gap) / 2.0).floor();
+            let th_h = w * 9.0 / 16.0;
+            let rows = shown.chunks(2).map(|c| c.to_vec()).collect::<Vec<_>>();
+            for row in rows {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = gap;
+                    for file in &row {
+                        let (kind, media, _) = self.media_info(file);
+                        let name = crate::formats::strip(&Path::new(file).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| file.clone())).to_string();
+                        let (r, resp) = ui.allocate_exact_size(vec2(w, th_h + 22.0), Sense::click_and_drag());
+                        let th = Rect::from_min_size(r.min, vec2(w, th_h));
+                        let bar = Rect::from_min_max(pos2(th.left(), th.bottom() - 12.0), th.max);
+                        let hover = resp.hover_pos();
+                        let on_bar = hover.is_some_and(|h| bar.contains(h)) || (resp.dragged() && self.card_trim.contains_key(file) && ui.input(|i| i.pointer.press_origin()).is_some_and(|o| bar.contains(o)));
+                        // Survol : la carte montre l'image sous le pointeur (temps arrondi, pour garder peu de vignettes)
+                        let t_hover = hover.filter(|h| th.contains(*h)).map(|h| ((h.x - th.left()) / th.width()).clamp(0.0, 1.0) * media);
+                        let t = if kind == "image" { 0.0 } else { t_hover.map(|t| (t * 4.0).round() / 4.0).unwrap_or((media * 0.3).min(2.0)) };
+                        let path = crate::bridge::media(&self.media_path(file));
+                        ui.painter().rect_filled(th, 10.0, Color32::from_gray(28));
+                        if kind == "audio" {
+                            if let Some(wv) = self.strips.wave(&path, &ctx) {
+                                let mid = th.center().y;
+                                let mut x = th.left() + 6.0;
+                                while x < th.right() - 6.0 {
+                                    let f = (x - th.left()) / th.width();
+                                    let v = wv.get((f * wv.len() as f32) as usize).copied().unwrap_or(0.0);
+                                    ui.painter().line_segment([pos2(x, mid - v * th.height() * 0.38), pos2(x, mid + v * th.height() * 0.38)], Stroke::new(1.5, Color32::from_rgb(0x83, 0xb9, 0x9e)));
+                                    x += 3.0;
+                                }
+                            }
+                        } else if let Some(tex) = self.strips.thumb(&path, t, &ctx).or_else(|| self.strips.thumb(&path, (media * 0.3).min(2.0), &ctx)) {
+                            ui.painter().add(egui::epaint::RectShape::filled(th, 10.0, Color32::WHITE).with_texture(tex, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0))));
                         }
-                    }
-                } else if let Some(tex) = this.strips.thumb(&path, if kind == "image" { 0.0 } else { (media * 0.3).min(2.0) }, &ctx) {
-                    ui.painter().image(tex, th, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
-                }
-                let col = match kind.as_str() {
-                    "audio" => Color32::from_rgb(96, 186, 146),
-                    "image" => Color32::from_rgb(196, 140, 200),
-                    _ => Color32::from_rgb(132, 140, 226),
-                };
-                if this.bin_grid {
-                    ui.painter().rect_filled(Rect::from_min_size(pos2(th.left(), th.bottom() - 3.0), vec2(th.width(), 3.0)), 0.0, col);
-                    let np = ui.painter().with_clip_rect(Rect::from_min_max(pos2(r.left() + 4.0, th.bottom()), pos2(r.right() - 4.0, r.bottom())));
-                    np.text(pos2(r.left() + 4.0, th.bottom() + 4.0), egui::Align2::LEFT_TOP, &name, egui::FontId::proportional(10.5), p.text);
-                    if media > 0.0 {
-                        let g = ui.painter().layout_no_wrap(timecode(media, this.project.fps), egui::FontId::monospace(9.0), Color32::WHITE);
-                        let tr = Rect::from_min_size(pos2(th.right() - g.size().x - 6.0, th.bottom() - g.size().y - 6.0), g.size() + vec2(4.0, 2.0));
-                        ui.painter().rect_filled(tr, 2.0, Color32::from_black_alpha(150));
-                        ui.painter().galley(tr.min + vec2(2.0, 1.0), g, Color32::WHITE);
-                    }
-                } else {
-                    ui.painter().rect_filled(Rect::from_min_size(pos2(th.left() - 3.0, th.top()), vec2(3.0, th.height())), 0.0, col);
-                    ui.painter().text(pos2(th.right() + 8.0, r.center().y), egui::Align2::LEFT_CENTER, &name, egui::FontId::proportional(11.5), p.text);
-                    if media > 0.0 {
-                        ui.painter().text(pos2(r.right() - 6.0, r.center().y), egui::Align2::RIGHT_CENTER, timecode(media, this.project.fps), egui::FontId::monospace(9.5), p.muted);
-                    }
-                }
-                if resp.double_clicked() {
-                    open = Some(file.clone());
-                }
-                resp.context_menu(|ui| {
-                    if ui.button(crate::i18n::t("ouvrir dans le moniteur Source")).clicked() {
-                        open = Some(file.clone());
-                        ui.close();
-                    }
-                    if this.project.bin.contains(file) && !this.project.clips.iter().any(|c| &c.file == file) && ui.button(crate::i18n::t("retirer du projet")).clicked() {
-                        remove = Some(file.clone());
-                        ui.close();
+                        let focus = self.card_focus.as_deref() == Some(file.as_str());
+                        if focus || resp.hovered() {
+                            ui.painter().rect_stroke(th.expand(1.0), 11.0, Stroke::new(2.0, if focus { Color32::from_rgb(0xaf, 0x9c, 0xc9) } else { p.line }), egui::StrokeKind::Outside);
+                        }
+                        // Partie choisie : barre en bas, poignées, durée
+                        if media > 0.0 && kind != "image" {
+                            let x_of = |t: f32| th.left() + (t / media).clamp(0.0, 1.0) * th.width();
+                            if resp.hovered() || self.card_trim.contains_key(file) {
+                                ui.painter().rect_filled(Rect::from_min_max(pos2(th.left() + 6.0, th.bottom() - 6.0), pos2(th.right() - 6.0, th.bottom() - 3.0)), 1.5, Color32::from_black_alpha(150));
+                            }
+                            if let Some(&(a, b)) = self.card_trim.get(file) {
+                                let (xa, xb) = (x_of(a), x_of(b));
+                                ui.painter().rect_filled(Rect::from_min_max(pos2(xa, th.bottom() - 6.0), pos2(xb, th.bottom() - 3.0)), 1.5, Color32::from_rgb(0xaf, 0x9c, 0xc9));
+                                for x in [xa, xb] {
+                                    ui.painter().rect_filled(Rect::from_center_size(pos2(x, th.center().y), vec2(3.0, th.height() - 8.0)), 1.5, Color32::from_rgb(0xaf, 0x9c, 0xc9));
+                                }
+                                let g = ui.painter().layout_no_wrap(format!("{} → {}", short_time(a), short_time(b)), egui::FontId::monospace(10.0), Color32::WHITE);
+                                let tr = Rect::from_min_size(th.min + vec2(6.0, 6.0), g.size() + vec2(8.0, 2.0));
+                                ui.painter().rect_filled(tr, 2.0, Color32::from_black_alpha(170));
+                                ui.painter().galley(tr.min + vec2(4.0, 1.0), g, Color32::WHITE);
+                            }
+                            if let Some(t) = t_hover {
+                                let x = x_of(t);
+                                ui.painter().vline(x, th.y_range(), Stroke::new(1.0, Color32::WHITE));
+                            }
+                            let g = ui.painter().layout_no_wrap(short_time(media), egui::FontId::monospace(10.0), Color32::WHITE);
+                            let tr = Rect::from_min_size(pos2(th.right() - g.size().x - 14.0, th.bottom() - g.size().y - 12.0), g.size() + vec2(8.0, 2.0));
+                            ui.painter().rect_filled(tr, 2.0, Color32::from_black_alpha(170));
+                            ui.painter().galley(tr.min + vec2(4.0, 1.0), g, Color32::WHITE);
+                        }
+                        if used.contains(file) {
+                            ui.painter().circle_filled(pos2(th.left() + 10.0, th.bottom() - 14.0), 3.0, Color32::from_rgb(0x88, 0xbf, 0x9a));
+                        }
+                        ui.painter().with_clip_rect(r).text(pos2(r.left() + 1.0, th.bottom() + 5.0), egui::Align2::LEFT_TOP, &name, egui::FontId::proportional(12.0), p.text);
+                        if resp.hovered() {
+                            self.card_focus = Some(file.clone());
+                        }
+                        // Glisser sur la barre du bas : choisir la partie ; ailleurs : poser la carte dans la timeline
+                        let press_on_bar = ui.input(|i| i.pointer.press_origin()).is_some_and(|o| bar.expand2(vec2(0.0, 6.0)).contains(o));
+                        if media > 0.0 && kind != "image" && press_on_bar && (resp.dragged() || resp.drag_started()) {
+                            if let (Some(o), Some(at)) = (ui.input(|i| i.pointer.press_origin()), resp.interact_pointer_pos()) {
+                                let ta = ((o.x.min(at.x) - th.left()) / th.width()).clamp(0.0, 1.0) * media;
+                                let tb = ((o.x.max(at.x) - th.left()) / th.width()).clamp(0.0, 1.0) * media;
+                                self.card_trim.insert(file.clone(), (ta, tb.max(ta + 0.1).min(media)));
+                            }
+                        } else {
+                            resp.dnd_set_drag_payload(Payload::Media(file.clone()));
+                        }
+                        let _ = on_bar;
+
+                        if resp.double_clicked() {
+                            open = Some(file.clone());
+                        }
+                        resp.context_menu(|ui| {
+                            if ui.button(crate::i18n::t("Ajouter à la fin   E")).clicked() {
+                                add = Some((file.clone(), true));
+                                ui.close();
+                            }
+                            if ui.button(crate::i18n::t("Insérer à la tête de lecture   Maj+E")).clicked() {
+                                add = Some((file.clone(), false));
+                                ui.close();
+                            }
+                            if self.card_trim.contains_key(file) && ui.button(crate::i18n::t("Tout le média")).clicked() {
+                                self.card_trim.remove(file);
+                                ui.close();
+                            }
+                            if ui.button(crate::i18n::t("Ouvrir dans la source")).clicked() {
+                                open = Some(file.clone());
+                                ui.close();
+                            }
+                            if self.project.bin.contains(file) && !self.project.clips.iter().any(|c| &c.file == file) && ui.button(crate::i18n::t("retirer du projet")).clicked() {
+                                remove = Some(file.clone());
+                                ui.close();
+                            }
+                        });
                     }
                 });
-            };
-            if self.bin_grid {
-                ui.horizontal_wrapped(|ui| {
-                    ui.spacing_mut().item_spacing = vec2(6.0, 6.0);
-                    for f in &shown {
-                        draw(ui, f, self);
-                    }
-                });
-            } else {
-                for f in &shown {
-                    draw(ui, f, self);
-                }
+                ui.add_space(8.0);
             }
         });
+        // E et Maj+E : la carte survolée ou la dernière choisie
+        if !ctx.egui_wants_keyboard_input() {
+            if let Some(f) = self.card_focus.clone().filter(|f| shown.contains(f)) {
+                let (e, shift) = ui.input(|i| (i.key_pressed(egui::Key::E), i.modifiers.shift));
+                if e {
+                    add = Some((f, !shift));
+                }
+            }
+        }
+        if let Some((f, end)) = add {
+            self.add_from_card(&f, end);
+        }
         // Fichiers glissés depuis l'explorateur du coffre : ajoutés au projet
         let drop_zone = ui.interact(bg.inner_rect, ui.scope_id().with("bin-drop"), Sense::hover());
         if let Some(rel) = crate::drop_of::<String>(&drop_zone) {
@@ -218,7 +315,7 @@ impl Editor {
             }
         }
         if drop_zone.dnd_hover_payload::<String>().is_some() {
-            ui.painter().rect_stroke(bg.inner_rect, 2.0, Stroke::new(2.0, p.accent), egui::StrokeKind::Inside);
+            ui.painter().rect_stroke(bg.inner_rect, 6.0, Stroke::new(2.0, p.accent), egui::StrokeKind::Inside);
         }
         if let Some(f) = open {
             self.open_source(&f);
@@ -227,8 +324,14 @@ impl Editor {
             self.project.bin.retain(|x| *x != f);
             self.changed();
         }
+        // Aide et boutons, en bas
+        egui::Frame::new().fill(p.raised).stroke(Stroke::new(1.0, p.line)).corner_radius(6).inner_margin(egui::Margin::symmetric(10, 8)).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.label(RichText::new(crate::i18n::t("Survole une carte pour voir le plan. Glisse sur sa barre du bas pour choisir la partie : E l'ajoute à la fin, Maj+E à la tête de lecture.")).size(11.5).color(p.text));
+        });
+        ui.add_space(6.0);
         ui.horizontal(|ui| {
-            if ui.button(crate::i18n::t("importer…")).on_hover_text(crate::i18n::t("Vidéos, images, sons, images à calques (.aryimg)")).clicked() {
+            if ui.button(format!("{} {}", crate::lucide::PLUS, crate::i18n::t("Importer"))).on_hover_text(crate::i18n::t("Vidéos, images, sons, images à calques (.aryimg)")).clicked() {
                 if let Some(files) = rfd::FileDialog::new().pick_files() {
                     for f in files {
                         if let Ok(c) = import(&self.path, &f, 0, 0.0) {
@@ -240,7 +343,7 @@ impl Editor {
                     self.changed();
                 }
             }
-            if ui.button(crate::i18n::t("＋ titre")).on_hover_text(crate::i18n::t("Ajoute un titre à la tête de lecture (outil Texte : T)")).clicked() {
+            if ui.button(format!("{} {}", crate::lucide::TYPE, crate::i18n::t("Titre"))).on_hover_text(crate::i18n::t("Ajoute un titre à la tête de lecture (outil Texte : T)")).clicked() {
                 self.add_title(self.playhead, None);
             }
         });
@@ -2145,4 +2248,13 @@ impl Editor {
 thread_local! {
     static INFO: std::cell::RefCell<std::collections::HashMap<String, (String, f32, bool)>> = Default::default();
     static CLIPS: std::cell::RefCell<std::collections::HashMap<String, Option<Clip>>> = Default::default();
+}
+
+/// Durée courte pour les cartes : « 0:42 », « 1:10 », « 8 s »
+fn short_time(t: f32) -> String {
+    if t < 10.0 {
+        format!("{:.0} s", t.max(0.0))
+    } else {
+        format!("{}:{:02}", (t / 60.0) as u32, t as u32 % 60)
+    }
 }

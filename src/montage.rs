@@ -507,7 +507,8 @@ impl Project {
         // Plan de V1 sous un instant, dans l'état d'avant
         let host = |at: f32| before.clips.iter().filter(|c| main(c) && c.start - 1e-3 <= at && at < c.end() - 1e-3).map(|c| c.id).next();
         let link_of: Vec<(u32, u64)> = self.clips.iter().filter(|c| main(c) && c.link != 0).map(|c| (c.link, c.id)).collect();
-        for c in self.clips.iter_mut().filter(|c| !main(c)) {
+        let mut shifted: Vec<usize> = vec![];
+        for (ci, c) in self.clips.iter_mut().enumerate().filter(|(_, c)| !main(c)) {
             // Le son lié à un plan de V1 suit ce plan ; le reste suit le plan sous son début (avant le changement)
             let by_link = (c.link != 0).then(|| link_of.iter().find(|(l, _)| *l == c.link).map(|x| x.1)).flatten();
             let old_start = before.clips.iter().find(|b| b.id == c.id).map(|b| b.start).unwrap_or(c.start);
@@ -517,8 +518,14 @@ impl Project {
                 if (c.start - want).abs() > 1e-4 && (c.start - old_start).abs() < 1e-4 {
                     c.start = want;
                     moved = true;
+                    shifted.push(ci);
                 }
             }
+        }
+        // Un clip déplacé qui tombe sur un autre passe sur la piste libre suivante, tout de suite
+        // (sinon c'est la réouverture du montage qui le ferait, par surprise)
+        for i in shifted {
+            self.settle(i);
         }
         moved
     }
