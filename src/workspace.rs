@@ -36,6 +36,9 @@ pub struct Workspace {
     /// Ce à quoi sert l'espace : notes, 3d, 2d, video, code, ai, refs, mat. Décide de l'écran d'accueil.
     #[serde(default)]
     pub kind: String,
+    /// Outil ouvert dans l'espace (voir `tools`) ; vide : le premier
+    #[serde(default)]
+    pub tool: String,
     /// Disposition en cases de l'espace (None : celle de départ)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub layout: Option<crate::layout::Layout>,
@@ -60,15 +63,61 @@ fn path() -> Option<std::path::PathBuf> {
 
 /// Les espaces fournis d'origine : (nom, couleur, vue, assistant ouvert, genre).
 /// Les références ne sont plus un espace à part : chaque espace qui en a besoin a sa page « références ».
-pub const PRESETS: [(&str, Option<[u8; 3]>, &str, bool, &str); 7] = [
+/// Dans l'ordre du pipeline : un espace par étape, ses outils en onglets (voir `tools`).
+/// Les matériaux sont un outil de la 3D, le compositing un outil de la 2D ; l'IA est l'Assistant, partout.
+pub const PRESETS: [(&str, Option<[u8; 3]>, &str, bool, &str); 5] = [
     ("notes", None, "files", false, "notes"),
-    ("3D", Some([0x3d, 0x9b, 0xff]), "files", false, "3d"),
     ("2D", Some([0xe8, 0x5d, 0xa8]), "files", false, "2d"),
+    ("3D", Some([0x3d, 0x9b, 0xff]), "files", false, "3d"),
     ("vidéo", Some([0x9b, 0x6d, 0xff]), "files", false, "video"),
     ("code", Some([0x3f, 0xc9, 0x7e]), "files", false, "code"),
-    ("IA", Some([0xf2, 0xb5, 0x3a]), "chat", true, "ai"),
-    ("matériaux", Some([0xe0, 0x7a, 0x3a]), "files", false, "mat"),
 ];
+
+/// Un outil d'un espace : identifiant, nom, icône, et la page qu'il ouvre (« files » : des fichiers en onglets)
+pub struct Tool {
+    pub id: &'static str,
+    pub label: &'static str,
+    pub icon: &'static str,
+    pub view: &'static str,
+}
+
+/// Les outils de chaque espace, montrés dans l'onglet de l'espace actif
+pub fn tools(kind: &str) -> &'static [Tool] {
+    use crate::lucide as l;
+    const NOTES: [Tool; 3] = [Tool { id: "notes", label: "Notes", icon: l::FILE_TEXT, view: "files" }, Tool { id: "tasks", label: "Tâches", icon: l::LIST_CHECKS, view: "tasks" }, Tool { id: "brain", label: "Cerveau", icon: l::NETWORK, view: "brain" }];
+    const D2: [Tool; 3] = [Tool { id: "board", label: "Moodboard", icon: l::LAYOUT_DASHBOARD, view: "boards" }, Tool { id: "image", label: "Retouche", icon: l::IMAGE, view: "files" }, Tool { id: "comp", label: "Compositing", icon: l::WORKFLOW, view: "files" }];
+    const D3: [Tool; 2] = [Tool { id: "scene", label: "Scène", icon: l::BOX, view: "files" }, Tool { id: "mat", label: "Matériaux", icon: l::BLEND, view: "files" }];
+    const VIDEO: [Tool; 2] = [Tool { id: "seq", label: "Montage", icon: l::CLAPPERBOARD, view: "files" }, Tool { id: "review", label: "Revue", icon: l::MESSAGE_SQUARE, view: "files" }];
+    const CODE_T: [Tool; 1] = [Tool { id: "code", label: "Code", icon: l::CODE, view: "files" }];
+    match kind {
+        "2d" => &D2,
+        "3d" => &D3,
+        "video" => &VIDEO,
+        "code" => &CODE_T,
+        "notes" => &NOTES,
+        _ => &[],
+    }
+}
+
+/// L'outil d'un fichier (dans l'espace qui le possède)
+pub fn tool_of(rel: &str) -> &'static str {
+    let low = rel.to_lowercase();
+    let ext = low.rsplit('.').next().unwrap_or("");
+    match owner(rel) {
+        "2d" if crate::board::is_board(rel) => "board",
+        "2d" if crate::formats::has(rel, "comp") => "comp",
+        "2d" => "image",
+        "3d" if crate::formats::has(rel, "mat") => "mat",
+        "3d" => "scene",
+        "video" if crate::formats::has(rel, "seq") => "seq",
+        "video" => "review",
+        "code" => "code",
+        _ => {
+            let _ = ext;
+            "notes"
+        }
+    }
+}
 
 /// Couleur d'un espace : celle choisie à la main, sinon celle de son genre dans le thème de la
 /// charte (les couleurs vives d'origine des espaces fournis suivent aussi le thème). Les notes
@@ -85,20 +134,23 @@ pub fn accent_of(w: &Workspace) -> Option<[u8; 3]> {
 }
 
 /// Les genres d'espaces connus d'Aryadne. Un espace d'un autre genre (fait à la main) accepte tout.
-pub const KINDS: [&str; 7] = ["notes", "3d", "2d", "video", "code", "ai", "mat"];
+pub const KINDS: [&str; 5] = ["notes", "2d", "3d", "video", "code"];
 
 /// Les pages de chaque espace, dans la deuxième rangée : (libellé, vue). Comme les jeux de menus de Maya,
 /// elles changent avec l'espace ; la première est la page de travail (onglets de fichiers).
 pub fn pages(kind: &str) -> &'static [(&'static str, &'static str)] {
     match kind {
-        "3d" => &[("scène", "files"), ("références", "refs")],
-        "2d" => &[("images", "files"), ("boards", "boards"), ("références", "refs")],
-        "video" => &[("montage", "files"), ("médias", "refs")],
-        "code" => &[("éditeur", "files"), ("recherche", "search")],
-        "ai" => &[("chat", "chat"), ("recherche", "search")],
-        "mat" => &[("nodes", "files"), ("références", "refs")],
-        _ => &[("notes", "files"), ("cerveau", "brain"), ("tâches", "tasks"), ("recherche", "search")],
+        "3d" => &[("fichiers", "files"), ("références", "refs")],
+        "2d" => &[("fichiers", "files"), ("références", "refs")],
+        "video" => &[("fichiers", "files"), ("médias", "refs")],
+        "code" => &[("fichiers", "files"), ("recherche", "search")],
+        _ => &[("fichiers", "files"), ("recherche", "search")],
     }
+}
+
+/// Toutes les pages d'un espace : celles du rail et celles de ses outils
+pub fn has_view(kind: &str, view: &str) -> bool {
+    pages(kind).iter().any(|(_, v)| *v == view) || tools(kind).iter().any(|t| t.view == view)
 }
 
 /// Extensions de code et de texte brut : elles s'ouvrent dans l'espace « code ».
@@ -108,8 +160,10 @@ pub const CODE: [&str; 30] = ["rs", "py", "js", "ts", "tsx", "jsx", "html", "css
 pub fn owner(rel: &str) -> &'static str {
     let low = rel.to_lowercase();
     let ext = low.rsplit('.').next().unwrap_or("");
-    if crate::nodes::is_graph(rel) {
-        "mat"
+    if crate::formats::has(rel, "comp") {
+        "2d"
+    } else if crate::formats::has(rel, "mat") {
+        "3d"
     } else if crate::model3d::is_model(rel) || matches!(ext, "hdr" | "exr") {
         "3d"
     } else if crate::montage::is_project(rel) || crate::video::is_video(rel) || crate::formats::has(rel, "seq") || matches!(ext, "wav" | "mp3" | "ogg" | "flac" | "m4a" | "aac") {
@@ -149,8 +203,15 @@ impl Set {
                 // Première fois : l'espace « notes » reprend la disposition déjà en place
                 let mut list: Vec<Workspace> = (0..PRESETS.len()).map(preset).collect();
                 list[0].places = crate::dock::export();
-                Set { current: 0, list, seeded: 2 }
+                Set { current: 0, list, seeded: 3 }
             });
+        s.migrate();
+        s
+    }
+
+    /// Remet un jeu d'espaces d'une ancienne version à jour
+    pub fn migrate(&mut self) {
+        let s = self;
         // L'ancien espace « références » devient une page des autres espaces
         if s.seeded < 2 {
             let cur = s.list.get(s.current).map(|w| w.name.clone());
@@ -164,16 +225,34 @@ impl Set {
             }
         }
         if s.seeded < 1 {
-            if !s.list.iter().any(|w| w.kind == "mat") {
-                s.list.push(preset(6));
-            }
+            // (ancien espace « matériaux » : devenu un outil de la 3D)
         }
-        s.seeded = s.seeded.max(2);
+        // Espaces d'une étape du pipeline : l'IA et les matériaux ne sont plus des espaces. Les onglets
+        // des matériaux passent dans la 3D (compositing dans la 2D), et les espaces fournis prennent l'ordre
+        // du pipeline (notes, 2D, 3D, vidéo, code) ; les espaces faits à la main suivent
+        if s.seeded < 3 {
+            let cur = s.list.get(s.current).map(|w| w.name.clone());
+            let mut moved: Vec<String> = vec![];
+            for w in s.list.iter().filter(|w| w.kind == "mat" || w.kind == "ai") {
+                moved.extend(w.tabs.iter().cloned());
+            }
+            s.list.retain(|w| w.kind != "mat" && w.kind != "ai");
+            for t in moved {
+                if let Some(w) = s.list.iter_mut().find(|w| w.kind == owner(&t)) {
+                    if !w.tabs.contains(&t) {
+                        w.tabs.push(t);
+                    }
+                }
+            }
+            let rank = |w: &Workspace| KINDS.iter().position(|k| *k == w.kind && PRESETS.iter().any(|p| p.0 == w.name)).unwrap_or(KINDS.len());
+            s.list.sort_by_key(rank);
+            s.current = cur.and_then(|n| s.list.iter().position(|w| w.name == n)).unwrap_or(0);
+        }
+        s.seeded = s.seeded.max(3);
         if s.list.is_empty() {
             s.list.push(preset(0));
         }
         s.current = s.current.min(s.list.len() - 1);
-        s
     }
 
     pub fn save(&self) {
@@ -210,7 +289,27 @@ mod tests {
         // Un ancien fichier sans les champs récents reste lisible
         let old: Set = serde_json::from_str(r#"{"current":5,"list":[{"name":"a"}]}"#).unwrap();
         assert_eq!(old.list[0].view, "");
-        assert_eq!(preset(1).kind, "3d");
+        assert_eq!(preset(2).kind, "3d");
+        // Chaque fichier a son espace et son outil
+        assert_eq!((owner("a/Or.arymat"), tool_of("a/Or.arymat")), ("3d", "mat"));
+        assert_eq!((owner("a/G.arycomp"), tool_of("a/G.arycomp")), ("2d", "comp"));
+        assert_eq!(tool_of("plan.mp4"), "review");
+        assert_eq!(tool_of("Teaser.aryseq"), "seq");
+        assert_eq!(tool_of("robot.glb"), "scene");
+        assert_eq!(tool_of("croquis.png"), "image");
+        assert!(tools("2d").iter().any(|t| t.view == "boards"));
+        assert!(has_view("notes", "brain") && !has_view("3d", "brain"));
+        // Un ancien jeu d'espaces : l'IA et les matériaux disparaissent, leurs onglets passent ailleurs
+        let mut old = Set { current: 0, list: vec![preset(0)], seeded: 2 };
+        let mut mat = Workspace { name: "matériaux".into(), kind: "mat".into(), ..Default::default() };
+        mat.tabs = vec!["nodes/Or.arymat".into()];
+        old.list.push(mat);
+        old.list.push(Workspace { name: "IA".into(), kind: "ai".into(), ..Default::default() });
+        old.list.push(preset(2));
+        old.migrate();
+        let kinds: Vec<&str> = old.list.iter().map(|w| w.kind.as_str()).collect();
+        assert_eq!(kinds, vec!["notes", "3d"]);
+        assert_eq!(old.list[1].tabs, vec!["nodes/Or.arymat".to_string()]);
     }
 }
 

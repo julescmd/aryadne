@@ -152,6 +152,18 @@ fn view_of(id: &str) -> View {
     }
 }
 
+fn view_name(v: View) -> &'static str {
+    match v {
+        View::Files => "files",
+        View::Brain => "brain",
+        View::Refs => "refs",
+        View::Boards => "boards",
+        View::Tasks => "tasks",
+        View::Chat => "chat",
+        View::Search => "search",
+    }
+}
+
 /// Options de la fenêtre « nouveau fichier », gardées d'une fois à l'autre.
 #[derive(Clone)]
 struct NewOpts {
@@ -429,6 +441,43 @@ impl App {
         self.view.unwrap_or(View::Files)
     }
 
+    /// L'outil ouvert dans l'étape en cours (le premier si rien n'est choisi)
+    fn cur_tool(&self) -> &'static str {
+        let w = self.ws.cur();
+        let tools = workspace::tools(&w.kind);
+        // Une page d'outil ouverte (moodboard, tâches, cerveau) : c'est cet outil
+        let v = view_name(self.view());
+        if v != "files" {
+            if let Some(t) = tools.iter().find(|t| t.view == v) {
+                return t.id;
+            }
+        }
+        // Sinon l'outil à fichiers choisi, ou le premier
+        tools.iter().find(|t| t.id == w.tool && t.view == "files").or(tools.iter().find(|t| t.view == "files")).map(|t| t.id).unwrap_or("")
+    }
+
+    /// Choisir un outil de l'étape : sa page, et son dernier fichier ouvert
+    fn set_tool(&mut self, id: &'static str) {
+        let kind = self.ws.cur().kind.clone();
+        let Some(t) = workspace::tools(&kind).iter().find(|t| t.id == id) else { return };
+        let cur = self.ws.current;
+        self.ws.list[cur].tool = id.to_string();
+        self.home_open = false;
+        self.view = Some(view_of(t.view));
+        if t.view == "files" {
+            if let Some(j) = (0..self.docs.len()).rev().find(|&j| workspace::tool_of(&self.docs[j].rel) == id) {
+                self.active = Some(j);
+            }
+        }
+        self.ws.save();
+    }
+
+    /// Ce fichier se montre-t-il dans l'outil en cours ? (une étape à un seul outil montre tout)
+    fn in_tool(&self, rel: &str) -> bool {
+        let kind = &self.ws.cur().kind;
+        workspace::tools(kind).iter().filter(|t| t.view == "files").count() < 2 || workspace::tool_of(rel) == self.cur_tool()
+    }
+
     // ---------- espaces de travail ----------
 
     /// Range l'état actuel (onglets, vue, panneaux) dans l'espace en cours.
@@ -485,7 +534,7 @@ impl App {
         self.split = w.split.filter(|s| tabs.contains(s));
         self.panes = w.panes.into_iter().filter(|s| tabs.contains(s)).collect();
         let pages = workspace::pages(&w.kind);
-        self.view = Some(view_of(if pages.iter().any(|(_, v)| *v == w.view) { w.view.as_str() } else { pages[0].1 }));
+        self.view = Some(view_of(if workspace::has_view(&w.kind, &w.view) { w.view.as_str() } else { pages[0].1 }));
         self.update_backlinks();
         // Espace 3D sans rien d'ouvert : on arrive dans une scène, la dernière utilisée ou une neuve (cube, lumière, caméra)
         if w.kind == "3d" && self.docs.is_empty() && !self.entries.is_empty() && !std::mem::take(&mut self.ws_routing) {
@@ -860,6 +909,78 @@ impl App {
     /// l'Assistant, les raccourcis utiles et les nouveautés. S'affiche quand aucun fichier n'est ouvert,
     /// ou depuis le menu ◆ Aryadne.
     /// Colonne de l'accueil : Assistant, raccourcis, nouveautés
+    /// Un outil de l'étape sans fichier ouvert : ce qu'il fait, de quoi commencer, ses fichiers récents
+    fn tool_landing(&mut self, ui: &mut egui::Ui) {
+        let p = theme::pal();
+        let ctx = ui.ctx().clone();
+        let kind = self.ws.cur().kind.clone();
+        let tool = self.cur_tool();
+        let Some(t) = workspace::tools(&kind).iter().find(|t| t.id == tool) else { return };
+        let accent = workspace::accent_of(self.ws.cur()).map(|c| egui::Color32::from_rgb(c[0], c[1], c[2])).unwrap_or(p.accent);
+        let (about, actions): (&str, Vec<(&str, extras::Cmd)>) = match tool {
+            "image" => ("Peinture et retouche à calques, comme Photoshop. Ouvre une image, ou crée une image à calques.", vec![("Nouvelle image à calques", extras::Cmd::NewFile), ("Importer des images…", extras::Cmd::Import)]),
+            "comp" => ("Retoucher une image en nodes : couleurs, flous, masques, et l'étalonnage des clips du montage.", vec![("Nouveau compositing", extras::Cmd::NewCompositor)]),
+            "scene" => ("Modèles, lumières, caméras et animation. Un modèle ouvert seul arrive dans une scène toute prête.", vec![("Nouvelle scène 3D", extras::Cmd::NewScene), ("Importer des modèles…", extras::Cmd::Import)]),
+            "mat" => ("Les matériaux des modèles : en nodes, ou à calques comme Substance.", vec![("Nouveau matériau (nodes)", extras::Cmd::NewMaterial), ("Nouveau matériau à calques", extras::Cmd::NewLayered)]),
+            "seq" => ("Assembler des plans, des titres et des sons sur une timeline magnétique.", vec![("Nouveau montage", extras::Cmd::NewMontage), ("Importer des fichiers…", extras::Cmd::Import)]),
+            "review" => ("Regarder un plan image par image, l'annoter et le commenter, comme SyncSketch.", vec![("Importer une vidéo…", extras::Cmd::Import)]),
+            "code" => ("Scripts, shaders et pages, avec l'exécution et l'aide d'un serveur de langage.", vec![("Nouveau fichier", extras::Cmd::NewFile)]),
+            _ => ("Écris une note, ou rouvre une note récente.", vec![("Nouvelle note", extras::Cmd::NewNote), ("Note du jour", extras::Cmd::Daily)]),
+        };
+        let mut rec: Vec<(String, u64)> = self.entries.iter().filter(|e| !e.is_dir && workspace::owner(&e.rel) == kind && workspace::tool_of(&e.rel) == tool).map(|e| (e.rel.clone(), e.modified)).collect();
+        rec.sort_by(|a, b| b.1.cmp(&a.1));
+        rec.truncate(8);
+        let mut run = None;
+        let mut open = None;
+        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+            ui.vertical_centered(|ui| {
+                ui.add_space((ui.available_height() * 0.12).max(30.0));
+                ui.set_max_width(640.0);
+                ui.label(RichText::new(t.icon).size(34.0).color(accent));
+                ui.add_space(6.0);
+                ui.label(RichText::new(crate::i18n::t(t.label)).size(24.0).family(theme::bold()));
+                ui.add_space(6.0);
+                ui.label(RichText::new(crate::i18n::t(about)).color(p.muted));
+                ui.add_space(18.0);
+                ui.horizontal(|ui| {
+                    let total = actions.len() as f32 * 220.0;
+                    ui.add_space(((ui.available_width() - total) / 2.0).max(0.0));
+                    for (k, (label, cmd)) in actions.iter().enumerate() {
+                        let text = RichText::new(crate::i18n::t(label)).color(if k == 0 { p.on_accent } else { p.text });
+                        let b = if k == 0 { egui::Button::new(text).fill(accent) } else { egui::Button::new(text) };
+                        if ui.add(b.min_size(egui::vec2(200.0, 32.0))).clicked() {
+                            run = Some(*cmd);
+                        }
+                    }
+                });
+                if !rec.is_empty() {
+                    ui.add_space(28.0);
+                    ui.label(RichText::new(crate::i18n::t("Récents")).size(13.0).family(theme::bold()));
+                    ui.add_space(8.0);
+                    for (rel, _) in &rec {
+                        let (icon, col, _) = files::kind(rel);
+                        let mut job = egui::text::LayoutJob::default();
+                        job.append(&format!("{icon}  "), 0.0, egui::TextFormat { font_id: egui::FontId::proportional(13.0), color: col, ..Default::default() });
+                        job.append(rel.rsplit('/').next().unwrap_or(rel), 0.0, egui::TextFormat { font_id: egui::FontId::proportional(13.0), color: p.text, ..Default::default() });
+                        let dir = vault::parent(rel);
+                        if !dir.is_empty() {
+                            job.append(&format!("   {dir}"), 0.0, egui::TextFormat { font_id: egui::FontId::proportional(11.0), color: p.muted, ..Default::default() });
+                        }
+                        if ui.add(egui::Button::new(job).frame(false)).clicked() {
+                            open = Some(rel.clone());
+                        }
+                    }
+                }
+            });
+        });
+        if let Some(c) = run {
+            self.run_cmd(c, &ctx);
+        }
+        if let Some(r) = open {
+            self.open(r);
+        }
+    }
+
     fn home_side(&mut self, ui: &mut egui::Ui, ask: &mut Option<String>) {
         let p = theme::pal();
         let card = |ui: &mut egui::Ui, body: &mut dyn FnMut(&mut egui::Ui)| {
@@ -1127,6 +1248,12 @@ impl App {
         self.ws_capture();
         self.ws.current = i;
         self.ws_apply(ctx, true);
+        // Première visite d'une étape : son premier outil (la 2D s'ouvre sur le moodboard)
+        if self.ws.cur().tool.is_empty() && !self.ws_routing {
+            if let Some(t) = workspace::tools(&self.ws.cur().kind).first() {
+                self.set_tool(t.id);
+            }
+        }
         self.ws.save();
     }
 
@@ -1177,10 +1304,44 @@ impl App {
             // Comme la maquette : pastille + nom ; l'onglet actif a un fond relevé, un contour et sa couleur en bas
             let galley = ui.painter().layout_no_wrap(label, egui::FontId::proportional(12.5), if on { p.text } else { p.muted });
             let size = egui::vec2(galley.size().x + 10.0 + 8.0 + 7.0 + 10.0, 28.0);
+            let bg = ui.painter().add(egui::Shape::Noop);
             let (rect, r) = ui.allocate_exact_size(size, egui::Sense::click());
             let hov = r.hovered();
+            // L'étape active montre ses outils dans son onglet (2D : Moodboard · Retouche · Compositing)
+            let mut whole = rect;
+            if on {
+                let tools = workspace::tools(&self.ws.list[i].kind);
+                if tools.len() > 1 {
+                    let cur = self.cur_tool();
+                    let mut pick: Option<&'static str> = None;
+                    ui.add_space(0.0);
+                    let (sep, _) = ui.allocate_exact_size(egui::vec2(9.0, 28.0), egui::Sense::hover());
+                    ui.painter().vline(sep.center().x - 3.0, sep.shrink2(egui::vec2(0.0, 7.0)).y_range(), egui::Stroke::new(1.0, p.line));
+                    for t in tools {
+                        let tg = ui.painter().layout_no_wrap(crate::i18n::t(t.label), egui::FontId::proportional(12.0), p.text);
+                        let (cr, cresp) = ui.allocate_exact_size(egui::vec2(tg.size().x + 16.0, 28.0), egui::Sense::click());
+                        let chip = cr.shrink2(egui::vec2(0.0, 4.0));
+                        let active_tool = t.id == cur;
+                        if active_tool {
+                            ui.painter().rect_filled(chip, 2.0, p.selection);
+                        } else if cresp.hovered() {
+                            ui.painter().rect_filled(chip, 2.0, p.line.linear_multiply(0.5));
+                        }
+                        ui.painter().galley_with_override_text_color(egui::pos2(chip.left() + 8.0, chip.center().y - tg.size().y / 2.0), tg, if active_tool || cresp.hovered() { p.text } else { p.muted });
+                        if cresp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                            pick = Some(t.id);
+                        }
+                        whole = whole.union(cr);
+                    }
+                    ui.add_space(4.0);
+                    whole.max.x += 4.0;
+                    if let Some(t) = pick {
+                        self.set_tool(t);
+                    }
+                }
+            }
             if on || hov {
-                ui.painter().rect(rect, 2.0, p.raised, egui::Stroke::new(1.0, if on { p.line } else { egui::Color32::TRANSPARENT }), egui::StrokeKind::Inside);
+                ui.painter().set(bg, egui::Shape::Rect(egui::epaint::RectShape::new(whole, 2.0, p.raised, egui::Stroke::new(1.0, if on { p.line } else { egui::Color32::TRANSPARENT }), egui::StrokeKind::Inside)));
             }
             let dot = egui::pos2(rect.left() + 10.0 + 4.0, rect.center().y);
             ui.painter().circle_filled(dot, 4.0, color);
@@ -1189,7 +1350,7 @@ impl App {
             if on {
                 // La barre de couleur touche le bas de la barre du haut
                 let bottom = ui.max_rect().bottom() + 6.0;
-                ui.painter().rect_filled(egui::Rect::from_min_max(egui::pos2(rect.left() + 8.0, bottom - 2.0), egui::pos2(rect.right() - 8.0, bottom)), 0.0, color);
+                ui.painter().rect_filled(egui::Rect::from_min_max(egui::pos2(whole.left() + 8.0, bottom - 2.0), egui::pos2(whole.right() - 8.0, bottom)), 0.0, color);
             }
             let r = r.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(crate::i18n::t("clic droit : renommer, couleur, dupliquer"));
             if r.clicked() {
@@ -1300,9 +1461,9 @@ impl App {
         // Une vue qui n'appartient pas à l'espace (raccourci comme Ctrl+G) : on passe à l'espace qui l'a,
         // sinon on revient à la première page
         let want = view_id(self.view());
-        if !pages.iter().any(|(_, v)| *v == want) {
+        if !workspace::has_view(&kind, want) {
             let ctx = ui.ctx().clone();
-            match self.ws.list.iter().position(|w| workspace::KINDS.contains(&w.kind.as_str()) && workspace::pages(&w.kind).iter().any(|(_, v)| *v == want)) {
+            match self.ws.list.iter().position(|w| workspace::KINDS.contains(&w.kind.as_str()) && workspace::has_view(&w.kind, want)) {
                 Some(i) => {
                     let v = self.view();
                     self.ws_switch(i, &ctx);
@@ -1700,6 +1861,12 @@ impl App {
 
     fn open_here(&mut self, rel: String) {
         self.view = Some(View::Files);
+        // L'outil de l'étape suit le fichier ouvert (un matériau ouvre l'outil Matériaux de la 3D)
+        let tool = workspace::tool_of(&rel);
+        let cur = self.ws.current;
+        if workspace::tools(&self.ws.list[cur].kind).iter().any(|t| t.id == tool) {
+            self.ws.list[cur].tool = tool.to_string();
+        }
         self.selected = Some(rel.clone());
         self.files.reveal(&rel);
         self.files.touch(&rel);
@@ -2551,6 +2718,9 @@ impl App {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 0.0;
                     for (i, d) in self.docs.iter().enumerate() {
+                        if !self.in_tool(&d.rel) {
+                            continue;
+                        }
                         let active = Some(i) == self.active;
                         let name = d.rel.rsplit('/').next().unwrap_or(&d.rel);
                         let mark = if d.dirty_since.is_some() { " ●" } else { "" };
@@ -2783,14 +2953,29 @@ impl App {
         let mut open_material: Option<PathBuf> = None;
         self.feed_project_words();
         egui::CentralPanel::default().frame(egui::Frame::new().fill(p.bg)).show(ui, |ui| {
-            if self.docs.is_empty() || self.home_open {
+            if self.home_open || (self.docs.is_empty() && self.ws.cur().tool.is_empty()) {
                 self.home(ui);
+                return;
+            }
+            if self.docs.is_empty() {
+                // Un outil choisi, rien d'ouvert : l'écran de l'outil
+                self.tool_landing(ui);
                 return;
             }
             let y0 = ui.cursor().min.y;
             self.tabs(ui);
             let tab_rect = egui::Rect::from_min_max(egui::pos2(ui.max_rect().left(), y0), egui::pos2(ui.max_rect().right(), ui.cursor().min.y));
             self.zones_next.push(("tabs", tab_rect));
+            // Le fichier actif n'est pas de l'outil choisi : son dernier fichier, sinon l'écran de l'outil
+            if self.active.is_none_or(|a| a >= self.docs.len() || !self.in_tool(&self.docs[a].rel)) {
+                match (0..self.docs.len()).rev().find(|&j| self.in_tool(&self.docs[j].rel)) {
+                    Some(j) => self.active = Some(j),
+                    None => {
+                        self.tool_landing(ui);
+                        return;
+                    }
+                }
+            }
             let Some(i) = self.active else { return };
             let root = self.root();
             let dark = theme::is_dark();
