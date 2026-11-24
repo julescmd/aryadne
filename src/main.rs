@@ -15,7 +15,6 @@ mod formats;
 mod boardlive;
 mod gizmo;
 mod paint;
-mod graph;
 mod untitled;
 mod meshedit;
 mod montage;

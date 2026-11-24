@@ -1008,3 +1008,122 @@ mod tests {
         assert!(m.is_ok() && errs[1].is_some());
     }
 }
+
+/// Les courbes d'un objet pour l'éditeur de courbes commun : une par canal (position, rotation, taille ; X Y Z),
+/// en secondes. Les poignées automatiques sont données telles quelles ; elles restent automatiques au retour
+/// tant qu'on ne les tire pas.
+pub fn object_curves(keys: &[Key], fps: f32) -> Vec<crate::curves::Curve> {
+    use crate::curves::{Curve, CK, X, Y, Z};
+    let fps = fps.max(1.0);
+    CHANNELS
+        .iter()
+        .enumerate()
+        .map(|(c, (group, axis))| Curve {
+            label: format!("{} {axis}", crate::i18n::t(group)),
+            color: [X, Y, Z][c % 3],
+            link: 0,
+            keys: (0..keys.len())
+                .map(|i| {
+                    let k = &keys[i];
+                    let (ease, tan) = match k.mode() {
+                        "bezier" => {
+                            let (l, r) = handles_of(keys, i, c);
+                            (crate::keys::Ease::Smooth, Some([l[0] / fps, l[1], r[0] / fps, r[1]]))
+                        }
+                        m => (crate::keys::Ease::from_word(m).unwrap_or(crate::keys::Ease::Linear), None),
+                    };
+                    CK { t: k.frame as f32 / fps, v: k.get(c), ease, tan }
+                })
+                .collect(),
+        })
+        .collect()
+}
+
+/// Remet les courbes éditées dans les clés de l'objet
+pub fn apply_object_curves(keys: &mut Vec<Key>, curves: &[crate::curves::Curve], fps: f32) {
+    let fps = fps.max(1.0);
+    let before = object_curves(keys, fps);
+    let Some(first) = curves.first() else { return };
+    let mut out = vec![];
+    for i in 0..first.keys.len() {
+        let frame = (first.keys[i].t * fps).round() as i32;
+        let mut k = keys.iter().find(|x| x.frame == frame).cloned().or_else(|| keys.get(i).cloned()).unwrap_or(Key { frame, pos: [0.0; 3], rot: [0.0; 3], scale: [1.0; 3], ease: true, interp: String::new(), handle: 0, handles: vec![] });
+        k.frame = frame;
+        for (c, cv) in curves.iter().enumerate().take(9) {
+            if let Some(x) = cv.keys.get(i) {
+                k.set(c, x.v);
+            }
+        }
+        // Passage : Bézier (poignées auto ou tirées), sinon le lissage choisi
+        let ck = first.keys[i];
+        let custom: Vec<Option<[f32; 4]>> = curves
+            .iter()
+            .enumerate()
+            .take(9)
+            .map(|(c, cv)| {
+                let t = cv.keys.get(i)?.tan?;
+                let was = before.get(c).and_then(|b| b.keys.get(i)).and_then(|b| b.tan);
+                // Inchangée depuis qu'on l'a donnée : elle reste automatique
+                if was.is_some_and(|w| (0..4).all(|j| (w[j] - t[j]).abs() < 1e-4)) && keys.get(i).is_some_and(|o| o.frame == frame) {
+                    None
+                } else {
+                    Some(t)
+                }
+            })
+            .collect();
+        let bezier = ck.tan.is_some() || (ck.tan.is_none() && ck.ease == crate::keys::Ease::Smooth);
+        if bezier {
+            if k.mode() != "bezier" {
+                k.interp = "bezier".into();
+            }
+            if custom.iter().any(|x| x.is_some()) {
+                k.handle = 2;
+                k.handles = (0..9)
+                    .map(|c| {
+                        let t = curves.get(c).and_then(|cv| cv.keys.get(i)).and_then(|x| x.tan).unwrap_or([-1.0 / fps, 0.0, 1.0 / fps, 0.0]);
+                        [t[0] * fps, t[1], t[2] * fps, t[3]]
+                    })
+                    .collect();
+            } else if k.handle == 2 && curves.iter().any(|cv| cv.keys.get(i).is_some_and(|x| x.tan.is_none())) {
+                // Remis en « auto » dans l'éditeur
+                k.handle = 0;
+                k.handles.clear();
+            }
+        } else {
+            k.interp = ck.ease.word().to_string();
+            k.handle = 0;
+            k.handles.clear();
+        }
+        out.push(k);
+    }
+    *keys = out;
+}
+
+#[cfg(test)]
+mod curve_tests {
+    use super::*;
+
+    #[test]
+    fn courbes_de_scene_aller_retour() {
+        let k = |frame: i32, x: f32| Key { frame, pos: [x, 0.0, 0.0], rot: [0.0; 3], scale: [1.0; 3], ease: true, interp: String::new(), handle: 0, handles: vec![] };
+        let mut keys = vec![k(0, 0.0), k(12, 4.0), k(24, 0.0)];
+        let orig = keys.clone();
+        let cv = object_curves(&keys, 24.0);
+        // Sans rien toucher : les clés reviennent identiques (poignées auto comprises)
+        apply_object_curves(&mut keys, &cv, 24.0);
+        assert_eq!(keys, orig);
+        // La courbe donne la même valeur que la scène
+        for f in [3.0f32, 9.0, 17.0] {
+            assert!((crate::curves::eval(&cv[0].keys, f / 24.0) - channel_at(&orig, 0, f)).abs() < 1e-3);
+        }
+        // Une valeur changée garde des poignées automatiques ; un passage linéaire devient « linear »
+        let mut cv2 = cv.clone();
+        cv2[0].keys[1].v = 6.0;
+        cv2[0].keys[0].ease = crate::keys::Ease::Linear;
+        cv2[0].keys[0].tan = None;
+        apply_object_curves(&mut keys, &cv2, 24.0);
+        assert_eq!(keys[1].pos[0], 6.0);
+        assert_eq!(keys[1].handle, 0);
+        assert_eq!(keys[0].mode(), "linear");
+    }
+}

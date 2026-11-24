@@ -2545,7 +2545,7 @@ pub struct Viewer {
     key_sel: Option<(usize, i32)>,
     key_drag: Option<(usize, i32, i32)>,
     key_menu: Option<(usize, i32)>,
-    graph: crate::graph::Graph,
+    curve_ed: crate::curves::Editor,
     /// Action d'un menu de l'en-tête, rejouée comme sa touche à l'image suivante (une seule logique pour les deux)
     hdr_key: Option<(Key, egui::Modifiers)>,
     /// Objet à ajouter depuis le menu « ajouter »
@@ -2736,7 +2736,7 @@ impl Viewer {
             key_sel: None,
             key_drag: None,
             key_menu: None,
-            graph: Default::default(),
+            curve_ed: Default::default(),
             hdr_key: None,
             hdr_add: None,
             stats_text: String::new(),
@@ -5693,7 +5693,6 @@ impl Viewer {
                 ui.toggle_value(&mut self.anim_auto, egui::RichText::new(crate::lucide::CIRCLE_DOT).size(14.0).color(rec_col)).on_hover_text(crate::i18n::t("Chaque déplacement pose une clé à l'image courante"));
                 ui.toggle_value(&mut self.anim_tools, egui::RichText::new(crate::lucide::WAND_SPARKLES).size(14.0)).on_hover_text(crate::i18n::t("Outils d'animation : tweener, décaler les clés, poses, miroir…"));
                 if ui.toggle_value(&mut self.anim_graph, egui::RichText::new(crate::lucide::SPLINE).size(14.0)).on_hover_text(crate::i18n::t("Éditeur de courbes : clés et poignées de Bézier par canal (Maj+F6)")).changed() {
-                    self.graph.reset_view();
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     changed |= ui.add(egui::DragValue::new(&mut scene.fps).range(1.0..=1000.0).suffix(" i/s")).changed();
@@ -5840,25 +5839,24 @@ impl Viewer {
                 }
             }
             if self.anim_graph {
+                // L'éditeur de courbes commun (le même qu'au Motion et au montage)
                 let sel = self.scene_sel.filter(|&k| k < scene.objects.len());
-                if self.graph.who != sel {
-                    self.graph.who = sel;
-                    self.graph.reset_view();
-                }
                 match sel {
                     Some(k) => {
-                        let mut keys = std::mem::take(&mut scene.objects[k].keys);
-                        let out = self.graph.ui(ui, &mut keys, self.anim_frame, (scene.start, scene.end));
-                        scene.objects[k].keys = keys;
+                        let fps = scene.fps.max(1.0);
+                        self.curve_ed.show_for(&format!("{}-{k}", scene.objects[k].name));
+                        let mut cv = crate::scene::object_curves(&scene.objects[k].keys, fps);
+                        let out = self.curve_ed.ui(ui, &mut cv, self.anim_frame / fps, (scene.start as f32 / fps, scene.end as f32 / fps), fps);
                         if out.changed {
+                            crate::scene::apply_object_curves(&mut scene.objects[k].keys, &cv, fps);
                             // La pose suit la courbe à l'image courante
                             if let Some((pos, rot, scale)) = scene.objects[k].pose_at(self.anim_frame) {
                                 (scene.objects[k].pos, scene.objects[k].rot, scene.objects[k].scale) = (pos, rot, scale);
                             }
                             changed = true;
                         }
-                        if out.seek.is_some() {
-                            seek = out.seek;
+                        if let Some(t) = out.seek {
+                            seek = Some((t * fps).round());
                         }
                     }
                     None => {
