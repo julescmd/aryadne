@@ -32,6 +32,8 @@ pub struct Editor {
     sounds: audio::Sounds,
     error: Option<String>,
     message: Option<(String, Instant)>,
+    /// Cible de « Normaliser la sonie » (LUFS)
+    loud_target: f32,
     time: f64,
     /// Lecture : départ, instant de départ, et le mixage joué (pour les vumètres)
     playing: Option<(Instant, f64, Arc<Vec<f32>>)>,
@@ -107,6 +109,7 @@ impl Editor {
             sounds: audio::Sounds::new(root),
             error,
             message: None,
+            loud_target: -14.0,
             time: 0.0,
             playing: None,
             player: None,
@@ -1095,6 +1098,32 @@ impl Editor {
                 }
                 self.changed();
             }
+            // Sonie (LUFS) : la cible des plateformes, la crête gardée sous -1 dB
+            ui.horizontal(|ui| {
+                let cur = audio::LOUDNESS.iter().find(|l| l.0 == self.loud_target).map(|l| format!("{:.0} LUFS · {}", l.0, crate::i18n::t(l.1))).unwrap_or_else(|| format!("{:.0} LUFS", self.loud_target));
+                egui::ComboBox::from_id_salt("loud-target").width(ui.available_width() - 40.0).selected_text(cur).show_ui(ui, |ui| {
+                    for (v, name) in audio::LOUDNESS {
+                        ui.selectable_value(&mut self.loud_target, v, format!("{v:.0} LUFS · {}", crate::i18n::t(name)));
+                    }
+                });
+                let go = ui.add_enabled(has, egui::Button::new(egui::RichText::new(crate::lucide::AUDIO_LINES).size(15.0))).on_hover_text(crate::i18n::t("Normaliser la sonie : chaque clip choisi atteint la cible, crête sous -1 dB"));
+                if go.clicked() {
+                    let mut notes = vec![];
+                    for (ti, ci) in self.fx_targets() {
+                        let c = self.session.tracks[ti].clips[ci].clone();
+                        if let Some(b) = self.sounds.ready(&c) {
+                            if let Some((g, measured, limited)) = audio::loudness_gain(&c, &b, self.loud_target) {
+                                self.session.tracks[ti].clips[ci].gain = g;
+                                notes.push(format!("{:.1} → {:.1} LUFS{}", measured, measured + g, if limited { format!(" ({})", crate::i18n::t("limité par la crête")) } else { String::new() }));
+                            }
+                        }
+                    }
+                    if !notes.is_empty() {
+                        self.message = Some((notes.join(" · "), Instant::now()));
+                        self.changed();
+                    }
+                }
+            });
             if fx_btn(ui, "Fondu entrant et sortant", "une demi-seconde de chaque côté") {
                 for (ti, ci) in self.fx_targets() {
                     let c = &mut self.session.tracks[ti].clips[ci];

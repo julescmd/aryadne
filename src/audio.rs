@@ -576,6 +576,64 @@ pub fn cut_silences(s: &mut Session, ti: usize, ci: usize, buf: &Buffer) -> f64 
     saved
 }
 
+/// Sonie intégrée (LUFS, UIT-R BS.1770 / EBU R128) d'un son stéréo entrelacé à 48 kHz : filtre de pondération K,
+/// blocs de 400 ms qui se chevauchent de 75 %, portes absolue (-70 LUFS) et relative (-10 LU). None : silence.
+pub fn lufs(data: &[f32]) -> Option<f32> {
+    // Pondération K à 48 kHz : plateau des aigus puis coupe-bas (coefficients de la norme)
+    const S: ([f64; 3], [f64; 2]) = ([1.53512485958697, -2.69169618940638, 1.19839281085285], [-1.69065929318241, 0.73248077421585]);
+    const H: ([f64; 3], [f64; 2]) = ([1.0, -2.0, 1.0], [-1.99004745483398, 0.99007225036621]);
+    let frames = data.len() / 2;
+    let mut sq = vec![0.0f64; frames];
+    for ch in 0..2 {
+        let mut st = [[0.0f64; 4]; 2];
+        for i in 0..frames {
+            let mut x = data[i * 2 + ch] as f64;
+            for (k, (b, a)) in [S, H].iter().enumerate() {
+                let z = &mut st[k];
+                let y = b[0] * x + b[1] * z[0] + b[2] * z[1] - a[0] * z[2] - a[1] * z[3];
+                z[1] = z[0];
+                z[0] = x;
+                z[3] = z[2];
+                z[2] = y;
+                x = y;
+            }
+            sq[i] += x * x;
+        }
+    }
+    let (block, step) = ((RATE as usize * 4) / 10, RATE as usize / 10);
+    if frames < block {
+        return None;
+    }
+    // Somme glissante : puissance moyenne de chaque bloc
+    let mut pre = vec![0.0f64; frames + 1];
+    for i in 0..frames {
+        pre[i + 1] = pre[i] + sq[i];
+    }
+    let z: Vec<f64> = (0..=(frames - block) / step).map(|b| (pre[b * step + block] - pre[b * step]) / block as f64).collect();
+    let loud = |m: f64| -0.691 + 10.0 * m.max(1e-20).log10();
+    let abs: Vec<f64> = z.iter().copied().filter(|&m| loud(m) > -70.0).collect();
+    if abs.is_empty() {
+        return None;
+    }
+    let rel = loud(abs.iter().sum::<f64>() / abs.len() as f64) - 10.0;
+    let gated: Vec<f64> = abs.into_iter().filter(|&m| loud(m) > rel).collect();
+    Some(loud(gated.iter().sum::<f64>() / gated.len().max(1) as f64) as f32)
+}
+
+/// Cibles de sonie courantes
+pub const LOUDNESS: [(f32, &str); 4] = [(-14.0, "YouTube, Spotify"), (-16.0, "Apple Music, podcasts"), (-23.0, "Télé (EBU R128)"), (-19.0, "Podcast en mono")];
+
+/// Le gain qui amène la sonie du clip à `target` LUFS, sans que sa crête dépasse -1 dB.
+/// Retourne aussi la sonie mesurée, et si la crête a limité le gain.
+pub fn loudness_gain(c: &Clip, buf: &Buffer, target: f32) -> Option<(f32, f32, bool)> {
+    let (i, j) = (((c.offset * RATE as f64) as usize * 2).min(buf.data.len()), (((c.offset + c.len) * RATE as f64) as usize * 2).min(buf.data.len()));
+    let l = lufs(&buf.data[i..j.max(i)])?;
+    let want = target - l;
+    let pk = buf.peak(c.offset, c.offset + c.len);
+    let ceiling = if pk > 1e-5 { -1.0 - to_db(pk) } else { want };
+    Some((want.min(ceiling), l, want > ceiling + 0.05))
+}
+
 /// Le gain qui amène la crête du clip à `target` dB
 pub fn normalize_gain(c: &Clip, buf: &Buffer, target: f32) -> f32 {
     let pk = buf.peak(c.offset, c.offset + c.len);
@@ -694,6 +752,11 @@ mod tests {
         let m = mix(&s, &sounds, 0.0, 2.0, false);
         assert!(m[..RATE as usize * 2 - 200].iter().all(|v| *v == 0.0));
         assert!(m[RATE as usize * 2 + 200..].iter().any(|v| v.abs() > 0.4));
+        // Sonie : un sinus de 997 Hz à pleine échelle sur les deux canaux vaut 0 LUFS, à -20 dB il vaut -20
+        let sine = |amp: f32| -> Vec<f32> { (0..RATE as usize * 3).flat_map(|i| { let v = amp * (i as f32 * 997.0 * std::f32::consts::TAU / RATE as f32).sin(); [v, v] }).collect() };
+        assert!(lufs(&sine(1.0)).unwrap().abs() < 0.1, "{:?}", lufs(&sine(1.0)));
+        assert!((lufs(&sine(0.1)).unwrap() + 20.0).abs() < 0.1);
+        assert!(lufs(&vec![0.0; 96_000]).is_none());
         // Normaliser à -1 dB : 0,5 de crête → +5 dB environ
         let buf = sounds.ready(&s.tracks[0].clips[0]).unwrap();
         let g = normalize_gain(&s.tracks[0].clips[0], &buf, -1.0);

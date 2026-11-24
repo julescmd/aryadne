@@ -2426,5 +2426,9 @@
   "annuler (Échap)": "cancel (Esc)",
   "Ce calque ne se transforme pas (réglage, verrouillé ou masque)": "This layer can't be transformed (adjustment, locked or mask)",
   "Le calque est vide": "The layer is empty",
-  "Pelure d'oignon : l'objet choisi aux clés d'avant (rouge) et d'après (vert)": "Onion skin: the selected object at the previous (red) and next (green) keys"
+  "Pelure d'oignon : l'objet choisi aux clés d'avant (rouge) et d'après (vert)": "Onion skin: the selected object at the previous (red) and next (green) keys",
+  "Normaliser la sonie : chaque clip choisi atteint la cible, crête sous -1 dB": "Normalize loudness: each selected clip reaches the target, peak under -1 dB",
+  "limité par la crête": "limited by the peak",
+  "Télé (EBU R128)": "TV (EBU R128)",
+  "Podcast en mono": "Mono podcast"
 }
