@@ -1900,6 +1900,9 @@ impl App {
         if keymap::pressed(ctx, "palette") {
             self.palette = Some((String::new(), 0));
         }
+        if keymap::pressed(ctx, "settings") {
+            self.run_cmd(extras::Cmd::Settings(settings::Tab::Appearance), ctx);
+        }
         if keymap::pressed(ctx, "switcher") {
             self.switcher = Some((String::new(), 0));
         }
@@ -2020,22 +2023,27 @@ impl App {
         let mut cmd: Option<extras::Cmd> = None;
         let mut open_vault: Option<String> = None;
         egui::Panel::top("top")
-            .exact_size(38.0)
-            .frame(egui::Frame::new().fill(p.bg).stroke(egui::Stroke::new(1.0, p.line)).inner_margin(egui::Margin::symmetric(12, 0)))
+            .exact_size(40.0)
+            .frame(egui::Frame::new().fill(p.panel).stroke(egui::Stroke::new(1.0, p.line)).inner_margin(egui::Margin::symmetric(10, 0)))
             .show(ui, |ui| {
                 ui.horizontal_centered(|ui| {
-                    theme::mark(ui, 16.0);
-                    ui.label(RichText::new(crate::i18n::t("aryadne")).family(theme::bold()));
-                    // Menu du coffre : tout ce qui concerne les fichiers et le dossier
+                    // Menu ◆ Aryadne : le coffre (nouveau, importer, sauvegarder…), la fenêtre et les réglages
                     let path = self.root();
                     let short = path.split(['/', '\\']).filter(|s| !s.is_empty()).last().unwrap_or("").to_string();
-                    let (r, _) = egui::containers::menu::MenuButton::from_button(egui::Button::new(RichText::new(format!("~/{short} ▾")).color(p.muted)).frame(false)).ui(ui, |ui| {
+                    theme::mark(ui, 16.0);
+                    let mut job = egui::text::LayoutJob::default();
+                    job.append(&crate::i18n::t("aryadne"), 0.0, egui::TextFormat { font_id: egui::FontId::new(13.0, theme::bold()), color: p.text, ..Default::default() });
+                    job.append(&format!("{short}  ▾"), 8.0, egui::TextFormat { font_id: egui::FontId::proportional(11.5), color: p.muted, ..Default::default() });
+                    let (r, _) = egui::containers::menu::MenuButton::from_button(egui::Button::new(job).frame(false)).ui(ui, |ui| {
                         ui.set_min_width(240.0);
                         ui.label(RichText::new(&path).color(p.muted).size(10.5));
                         ui.separator();
+                        for (label, key, c) in [("nouvelle note", "new_note", extras::Cmd::NewNote), ("note du jour", "daily", extras::Cmd::Daily)] {
+                            if ui.add(egui::Button::new(crate::i18n::t(label)).shortcut_text(keymap::text(key))).clicked() {
+                                cmd = Some(c);
+                            }
+                        }
                         for (label, c) in [
-                            ("nouvelle note   Ctrl+N", extras::Cmd::NewNote),
-                            ("note du jour   Ctrl+J", extras::Cmd::Daily),
                             ("depuis un modèle…", extras::Cmd::FromTemplate),
                             ("scène 3D", extras::Cmd::NewScene),
                             ("montage vidéo", extras::Cmd::NewMontage),
@@ -2080,91 +2088,34 @@ impl App {
                                 cmd = Some(c);
                             }
                         }
+                        ui.separator();
+                        ui.menu_button(crate::i18n::t("fenêtre"), |ui| self.window_menu(ui, &mut cmd, &ctx));
+                        if ui.add(egui::Button::new(crate::i18n::t("réglages")).shortcut_text(keymap::text("settings"))).clicked() {
+                            cmd = Some(extras::Cmd::Settings(settings::Tab::Appearance));
+                        }
                     });
                     r.on_hover_text(format!("{path}"));
                     ui.add_space(18.0);
                     self.ws_items(ui);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.button(crate::i18n::t("réglages")).clicked() {
-                            cmd = Some(extras::Cmd::Settings(settings::Tab::Appearance));
-                        }
-                        // Fenêtre : thème, épingler, compact
-                        let (r, _) = egui::containers::menu::MenuButton::new(crate::i18n::t("fenêtre ▾")).ui(ui, |ui| {
-                            ui.set_min_width(260.0);
-                            // Panneaux : on les ouvre et ferme d'ici, puis on les place par leur en-tête
-                            ui.label(caps(&crate::i18n::t("panneaux")));
-                            ui.checkbox(&mut self.explorer_open, format!("{}   Ctrl+B", crate::i18n::t("fichiers")));
-                            let mut side = !self.side_hidden;
-                            if ui.checkbox(&mut side, crate::i18n::t("structure et liens")).changed() {
-                                self.side_hidden = !side;
-                            }
-                            ui.checkbox(&mut self.assistant_open, format!("{}   Ctrl+L", crate::i18n::t("assistant")));
-                            let mut term = self.terminal.is_some();
-                            if ui.checkbox(&mut term, format!("{}   Ctrl+`", crate::i18n::t("terminal"))).changed() {
-                                self.toggle_terminal();
-                            }
-                            // Panneaux de l'éditeur affiché : dans l'éditeur, ou dans leur propre case de la disposition
-                            let offered = layout::offered();
-                            if !offered.is_empty() {
-                                ui.separator();
-                                ui.label(caps(&crate::i18n::t("panneaux de l'éditeur, dans leur case")));
-                                let in_tree: Vec<String> = self.tree.as_ref().map(layout::panes).unwrap_or_default();
-                                for (id, title) in offered {
-                                    let mut on = in_tree.contains(&id);
-                                    if ui.checkbox(&mut on, crate::i18n::t(&title)).on_hover_text(crate::i18n::t("Coché : le panneau a sa propre case, qu'on glisse où on veut. Décoché : il revient dans l'éditeur.")).changed() {
-                                        self.dock_editor_panes.push((id, on));
-                                    }
-                                }
-                            }
-                            ui.separator();
-                            // Nouvelles fenêtres : autant qu'on veut, chacune se place par son en-tête
-                            ui.label(caps(&crate::i18n::t("ajouter une fenêtre")));
-                            for (label, kind) in VIEW_WINDOWS {
-                                if ui.button(format!("＋ {}", crate::i18n::t(label))).clicked() {
-                                    self.add_view_panel(kind);
-                                    ui.close();
-                                }
-                            }
-                            if let Some(rel) = self.current().map(|d| d.rel.clone()) {
-                                if ui.button(format!("＋ {}", crate::i18n::t("le fichier ouvert, à part"))).clicked() {
-                                    let at = ctx.content_rect().center() - egui::vec2(320.0, 230.0);
-                                    self.tear_tab(rel, dock::Side::Float, at);
-                                    ui.close();
-                                }
-                            }
-                            if ui.button(crate::i18n::t("réinitialiser la disposition")).clicked() {
-                                dock::reset();
-                                self.reset_layout = true;
-                                self.view_panels.clear();
-                                self.explorer_open = true;
-                                self.side_hidden = false;
-                                ui.close();
-                            }
-                            ui.separator();
-                            if ui.button(if theme::is_dark() { "thème clair" } else { "thème sombre" }).clicked() {
-                                cmd = Some(extras::Cmd::Theme);
-                            }
-                            let mut pinned = self.pinned;
-                            if ui.checkbox(&mut pinned, crate::i18n::t("épingler au-dessus")).on_hover_text(crate::i18n::t("Garder Aryadne au-dessus de Blender et des autres fenêtres")).changed() {
-                                cmd = Some(extras::Cmd::Pin);
-                            }
-                            if ui.button(crate::i18n::t("mode compact   Ctrl+Maj+M")).clicked() {
-                                cmd = Some(extras::Cmd::Compact);
-                            }
-                            ui.separator();
-                            if ui.button(if cfg!(windows) { "ajouter au menu Démarrer" } else { "ajouter au menu des applications" }).clicked() {
-                                cmd = Some(extras::Cmd::MenuEntry);
-                            }
-                        });
-                        if self.pinned {
-                            r.on_hover_text(crate::i18n::t("épinglé"));
-                        }
-                        let ai_btn = egui::Button::new(if self.assistant_open { RichText::new(crate::i18n::t("assistant")).color(p.on_accent) } else { RichText::new(crate::i18n::t("assistant")) }).fill(if self.assistant_open { p.accent } else { p.bg });
-                        if ui.add(ai_btn).on_hover_text(crate::i18n::t("Assistant IA à côté de tout (Ctrl+L)")).clicked() {
+                        let ai_btn = egui::Button::new(if self.assistant_open { RichText::new(format!("✦ {}", crate::i18n::t("assistant"))).color(p.on_accent) } else { RichText::new(format!("✦ {}", crate::i18n::t("assistant"))) }).fill(if self.assistant_open { p.accent } else { p.panel }).min_size(egui::vec2(0.0, 28.0));
+                        if ui.add(ai_btn).on_hover_text(format!("{} ({})", crate::i18n::t("Assistant IA à côté de tout"), keymap::text("assistant"))).clicked() {
                             cmd = Some(extras::Cmd::Assistant);
                         }
-                        let pal = egui::Button::new(RichText::new(crate::i18n::t("⌘ commandes")).color(p.muted)).fill(p.panel);
-                        if ui.add(pal).on_hover_text(crate::i18n::t("Toutes les actions (Ctrl+Maj+P)")).clicked() {
+                        // Le champ de recherche toujours visible : ouvre la palette (fichiers, commandes, Assistant)
+                        let w = ui.available_width().clamp(160.0, 320.0);
+                        let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, 28.0), egui::Sense::click());
+                        let hov = resp.hovered();
+                        ui.painter().rect(rect, 2.0, p.field, egui::Stroke::new(1.0, if hov { p.accent } else { p.line }), egui::StrokeKind::Inside);
+                        ui.painter().text(rect.left_center() + egui::vec2(10.0, 0.0), egui::Align2::LEFT_CENTER, format!("⌕  {}", crate::i18n::t("rechercher ou lancer une commande")), egui::FontId::proportional(12.5), p.muted);
+                        let k = keymap::text("palette").split(" / ").next().unwrap_or("").to_string();
+                        let kg = ui.painter().layout_no_wrap(k.clone(), egui::FontId::monospace(11.0), p.muted);
+                        let kr = egui::Rect::from_min_size(rect.right_center() - egui::vec2(kg.size().x + 18.0, kg.size().y / 2.0 + 2.0), kg.size() + egui::vec2(10.0, 4.0));
+                        if rect.width() > 260.0 {
+                            ui.painter().rect_stroke(kr, 2.0, egui::Stroke::new(1.0, p.line), egui::StrokeKind::Inside);
+                            ui.painter().galley(kr.min + egui::vec2(5.0, 2.0), kg, p.muted);
+                        }
+                        if resp.on_hover_text(crate::i18n::t("Fichiers, commandes et Assistant au même endroit")).on_hover_cursor(egui::CursorIcon::Text).clicked() {
                             self.palette = Some((String::new(), 0));
                         }
                         if let Some(r) = self.updater.update_available() {
@@ -2181,6 +2132,77 @@ impl App {
         }
         if let Some(v) = open_vault {
             self.load_vault(v);
+        }
+    }
+
+    /// Menu Fenêtre (dans le menu ◆ Aryadne) : panneaux, nouvelles fenêtres, disposition, thème.
+    fn window_menu(&mut self, ui: &mut egui::Ui, cmd: &mut Option<extras::Cmd>, ctx: &egui::Context) {
+        let p = theme::pal();
+        let _ = &p;
+        ui.set_min_width(260.0);
+        // Panneaux : on les ouvre et ferme d'ici, puis on les place par leur en-tête
+        ui.label(caps(&crate::i18n::t("panneaux")));
+        ui.checkbox(&mut self.explorer_open, format!("{}   Ctrl+B", crate::i18n::t("fichiers")));
+        let mut side = !self.side_hidden;
+        if ui.checkbox(&mut side, crate::i18n::t("structure et liens")).changed() {
+            self.side_hidden = !side;
+        }
+        ui.checkbox(&mut self.assistant_open, format!("{}   Ctrl+L", crate::i18n::t("assistant")));
+        let mut term = self.terminal.is_some();
+        if ui.checkbox(&mut term, format!("{}   Ctrl+`", crate::i18n::t("terminal"))).changed() {
+            self.toggle_terminal();
+        }
+        // Panneaux de l'éditeur affiché : dans l'éditeur, ou dans leur propre case de la disposition
+        let offered = layout::offered();
+        if !offered.is_empty() {
+            ui.separator();
+            ui.label(caps(&crate::i18n::t("panneaux de l'éditeur, dans leur case")));
+            let in_tree: Vec<String> = self.tree.as_ref().map(layout::panes).unwrap_or_default();
+            for (id, title) in offered {
+                let mut on = in_tree.contains(&id);
+                if ui.checkbox(&mut on, crate::i18n::t(&title)).on_hover_text(crate::i18n::t("Coché : le panneau a sa propre case, qu'on glisse où on veut. Décoché : il revient dans l'éditeur.")).changed() {
+                    self.dock_editor_panes.push((id, on));
+                }
+            }
+        }
+        ui.separator();
+        // Nouvelles fenêtres : autant qu'on veut, chacune se place par son en-tête
+        ui.label(caps(&crate::i18n::t("ajouter une fenêtre")));
+        for (label, kind) in VIEW_WINDOWS {
+            if ui.button(format!("＋ {}", crate::i18n::t(label))).clicked() {
+                self.add_view_panel(kind);
+                ui.close();
+            }
+        }
+        if let Some(rel) = self.current().map(|d| d.rel.clone()) {
+            if ui.button(format!("＋ {}", crate::i18n::t("le fichier ouvert, à part"))).clicked() {
+                let at = ctx.content_rect().center() - egui::vec2(320.0, 230.0);
+                self.tear_tab(rel, dock::Side::Float, at);
+                ui.close();
+            }
+        }
+        if ui.button(crate::i18n::t("réinitialiser la disposition")).clicked() {
+            dock::reset();
+            self.reset_layout = true;
+            self.view_panels.clear();
+            self.explorer_open = true;
+            self.side_hidden = false;
+            ui.close();
+        }
+        ui.separator();
+        if ui.button(crate::i18n::t(if theme::is_dark() { "thème clair" } else { "thème sombre" })).clicked() {
+            *cmd = Some(extras::Cmd::Theme);
+        }
+        let mut pinned = self.pinned;
+        if ui.checkbox(&mut pinned, crate::i18n::t("épingler au-dessus")).on_hover_text(crate::i18n::t("Garder Aryadne au-dessus de Blender et des autres fenêtres")).changed() {
+            *cmd = Some(extras::Cmd::Pin);
+        }
+        if ui.button(crate::i18n::t("mode compact   Ctrl+Maj+M")).clicked() {
+            *cmd = Some(extras::Cmd::Compact);
+        }
+        ui.separator();
+        if ui.button(crate::i18n::t(if cfg!(windows) { "ajouter au menu Démarrer" } else { "ajouter au menu des applications" })).clicked() {
+            *cmd = Some(extras::Cmd::MenuEntry);
         }
     }
 

@@ -26,6 +26,7 @@ pub const ACTIONS: &[Action] = &[
     Action { id: "compact", label: "mode compact", default: &[(CS, Key::M)] },
     Action { id: "terminal", label: "terminal", default: &[(C, Key::Backtick)] },
     Action { id: "save_copy", label: "enregistrer une copie sous…", default: &[(CS, Key::S)] },
+    Action { id: "settings", label: "réglages", default: &[(C, Key::Comma)] },
     Action { id: "close_tab", label: "fermer l'onglet", default: &[(C, Key::W)] },
     Action { id: "next_tab", label: "onglet suivant", default: &[(C, Key::Tab)] },
     Action { id: "prev_tab", label: "onglet précédent", default: &[(CS, Key::Tab)] },
@@ -93,7 +94,19 @@ fn save(u: &BTreeMap<String, Vec<String>>) {
 
 /// Raccourcis affichés (« Ctrl+Maj+P »), plusieurs séparés par « ou ».
 pub fn text(id: &str) -> String {
-    bindings(id).iter().map(format).collect::<Vec<_>>().join(" / ")
+    bindings(id).iter().map(|b| shown(&format(b))).collect::<Vec<_>>().join(" / ")
+}
+
+/// Comme on le lit sur le clavier (« Ctrl+, » plutôt que « Ctrl+Comma ») ; l'enregistrement garde les noms.
+fn shown(s: &str) -> String {
+    let mut out = s.to_string();
+    for (name, sym) in [("Comma", ","), ("Period", "."), ("Backtick", "`"), ("Backslash", "\\"), ("Slash", "/"), ("Semicolon", ";"), ("Minus", "−"), ("Equals", "=")] {
+        if out.ends_with(name) {
+            out.truncate(out.len() - name.len());
+            out.push_str(sym);
+        }
+    }
+    out
 }
 
 /// Texte d'un raccourci, aussi utilisé comme format d'enregistrement.

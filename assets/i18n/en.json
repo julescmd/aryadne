@@ -1718,5 +1718,15 @@
   "décalage": "offset",
   "travée": "span",
   "remplir en grille : choisis une seule boucle de bord, avec un nombre pair de sommets": "grid fill: select a single border loop with an even number of vertices",
-  "aimanter sur les sommets (Maj+Tab) : pendant G, le sommet choisi le plus proche se pose sur le sommet visé": "snap to vertices (Shift+Tab): during G, the closest selected vertex lands on the target vertex"
+  "aimanter sur les sommets (Maj+Tab) : pendant G, le sommet choisi le plus proche se pose sur le sommet visé": "snap to vertices (Shift+Tab): during G, the closest selected vertex lands on the target vertex",
+  "fenêtre": "window",
+  "rechercher ou lancer une commande": "search or run a command",
+  "Fichiers, commandes et Assistant au même endroit": "Files, commands and Assistant in one place",
+  "Assistant IA à côté de tout": "AI assistant next to everything",
+  "image depuis une URL…": "image from a URL…",
+  "transfert entre ordinateurs…": "transfer between computers…",
+  "thème clair": "light theme",
+  "thème sombre": "dark theme",
+  "ajouter au menu Démarrer": "add to the Start menu",
+  "ajouter au menu des applications": "add to the applications menu"
 }
