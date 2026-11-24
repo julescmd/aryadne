@@ -2,7 +2,7 @@
 //! opacité, fond, modes de fusion, visibilité, écrêtage et noms (Unicode). Écrit à partir de la
 //! spécification publique du format ; aucune bibliothèque.
 
-use crate::paint::{Blend, Doc, Group, Layer};
+use crate::paint::{Adj, Blend, Doc, Group, Layer};
 
 const BLENDS: [(Blend, &[u8; 4]); 23] = [
     (Blend::Normal, b"norm"),
@@ -36,6 +36,91 @@ fn blend_key(b: Blend) -> [u8; 4] {
 
 fn blend_of(k: &[u8]) -> Option<Blend> {
     BLENDS.iter().find(|x| x.1 == k).map(|x| x.0)
+}
+
+// ---------- Calques de réglage ----------
+
+const HUE_RANGES: [[i16; 4]; 6] = [[315, 345, 15, 45], [15, 45, 75, 105], [75, 105, 135, 165], [135, 165, 195, 225], [195, 225, 255, 285], [255, 285, 315, 345]];
+
+/// Le bloc Photoshop d'un réglage (clé, données) ; None pour ceux pas encore pris en charge
+fn adj_block(a: &Adj) -> Option<([u8; 4], Vec<u8>)> {
+    let mut w = W(vec![]);
+    let key = match *a {
+        Adj::Invert => *b"nvrt",
+        Adj::Threshold { t } => {
+            w.u16((t * 255.0).round().clamp(1.0, 255.0) as u16);
+            w.u16(0);
+            *b"thrs"
+        }
+        Adj::Posterize { levels } => {
+            w.u16(levels.round().clamp(2.0, 255.0) as u16);
+            w.u16(0);
+            *b"post"
+        }
+        Adj::BrightContrast { b, c } => {
+            w.u16(((b * 150.0).round().clamp(-150.0, 150.0) as i16) as u16);
+            w.u16(((c * 100.0).round().clamp(-50.0, 100.0) as i16) as u16);
+            w.u16(127);
+            w.u8(0);
+            w.u8(0);
+            *b"brit"
+        }
+        Adj::Exposure { ev } => {
+            w.u16(1);
+            w.0.extend(ev.to_be_bytes());
+            w.0.extend(0f32.to_be_bytes());
+            w.0.extend(1f32.to_be_bytes());
+            *b"expA"
+        }
+        Adj::HueSat { h, s, l } => {
+            w.u16(2);
+            w.u8(0);
+            w.u8(0);
+            for _ in 0..3 {
+                w.u16(0);
+            }
+            for v in [h * 360.0, s * 100.0, l * 100.0] {
+                w.u16((v.round().clamp(-180.0, 180.0) as i16) as u16);
+            }
+            for r in HUE_RANGES {
+                for v in r {
+                    w.u16(v as u16);
+                }
+                for _ in 0..3 {
+                    w.u16(0);
+                }
+            }
+            *b"hue2"
+        }
+        Adj::Levels { black, white, gamma } => {
+            w.u16(2);
+            for k in 0..29 {
+                let (lo, hi, g) = if k == 0 { ((black * 255.0).round() as u16, (white * 255.0).round() as u16, (gamma * 100.0).round() as u16) } else { (0, 255, 100) };
+                for v in [lo, hi, 0, 255, g] {
+                    w.u16(v);
+                }
+            }
+            *b"levl"
+        }
+        Adj::BlackWhite => return None,
+    };
+    Some((key, w.0))
+}
+
+fn adj_of(key: &[u8], d: &[u8]) -> Option<Adj> {
+    let u = |i: usize| d.get(i..i + 2).map(|b| u16::from_be_bytes([b[0], b[1]]));
+    let i = |k: usize| u(k).map(|v| v as i16 as f32);
+    let f = |k: usize| d.get(k..k + 4).map(|b| f32::from_be_bytes([b[0], b[1], b[2], b[3]]));
+    Some(match key {
+        b"nvrt" => Adj::Invert,
+        b"thrs" => Adj::Threshold { t: u(0)? as f32 / 255.0 },
+        b"post" => Adj::Posterize { levels: u(0)? as f32 },
+        b"brit" => Adj::BrightContrast { b: i(0)? / 150.0, c: i(2)? / 100.0 },
+        b"expA" => Adj::Exposure { ev: f(2)? },
+        b"hue2" => Adj::HueSat { h: i(10)? / 360.0, s: i(12)? / 100.0, l: i(14)? / 100.0 },
+        b"levl" => Adj::Levels { black: u(2)? as f32 / 255.0, white: u(4)? as f32 / 255.0, gamma: u(10)? as f32 / 100.0 },
+        _ => return None,
+    })
 }
 
 // ---------- Lecture ----------
@@ -125,6 +210,7 @@ struct Rec {
     section: u32,
     pass: bool,
     fill: u8,
+    adj: Option<Adj>,
 }
 
 pub fn read(bytes: &[u8]) -> Result<Doc, String> {
@@ -188,6 +274,7 @@ pub fn read(bytes: &[u8]) -> Result<Doc, String> {
                 let pad = (4 - (nl + 1) % 4) % 4;
                 r.take(pad)?;
                 let (mut section, mut pass, mut fill) = (0, false, 255u8);
+                let mut adj = None;
                 while r.at + 12 <= end {
                     let sig = r.take(4)?;
                     if sig != b"8BIM" && sig != b"8B64" {
@@ -210,12 +297,16 @@ pub fn read(bytes: &[u8]) -> Result<Doc, String> {
                             }
                         }
                         b"iOpa" => fill = r.u8()?,
-                        _ => {}
+                        k => {
+                            if let Some(a) = adj_of(k, r.b.get(r.at..data_end).unwrap_or(&[])) {
+                                adj = Some(a);
+                            }
+                        }
                     }
                     r.at = data_end;
                 }
                 r.at = end;
-                recs.push(Rec { rect, chans, blend: blend_of(&key).unwrap_or_default(), opacity, clip, hidden: flags & 2 != 0, name, mask, section, pass, fill });
+                recs.push(Rec { rect, chans, blend: blend_of(&key).unwrap_or_default(), opacity, clip, hidden: flags & 2 != 0, name, mask, section, pass, fill, adj });
             }
             // Pixels de chaque calque, dans l'ordre des enregistrements
             let mut stack: Vec<u32> = vec![];
@@ -283,6 +374,11 @@ pub fn read(bytes: &[u8]) -> Result<Doc, String> {
                         layer.blend = rec.blend;
                         layer.clip = rec.clip;
                         layer.group = *stack.last().unwrap_or(&0);
+                        if rec.adj.is_some() {
+                            layer.adj = rec.adj;
+                            layer.px = vec![0; 4];
+                            (layer.w, layer.h, layer.off) = (1, 1, [0, 0]);
+                        }
                         if let Some(m) = mask_px {
                             layer.mask_on = !rec.mask.is_some_and(|m| m.2);
                             layer.mask = Some(Box::new(m));
@@ -381,6 +477,7 @@ struct Out {
     name: String,
     mask: Option<([i32; 4], bool)>,
     section: Option<(u32, bool, Blend)>,
+    adj: Option<([u8; 4], Vec<u8>)>,
 }
 
 fn record(w: &mut W, o: &Out) {
@@ -435,6 +532,15 @@ fn record(w: &mut W, o: &Out) {
     extra.u32(4);
     extra.u8(o.fill);
     extra.bytes(&[0, 0, 0]);
+    if let Some((key, data)) = &o.adj {
+        extra.bytes(b"8BIM");
+        extra.bytes(key);
+        extra.u32((data.len() + data.len() % 2) as u32);
+        extra.bytes(data);
+        if data.len() % 2 == 1 {
+            extra.u8(0);
+        }
+    }
     if let Some((kind, pass, b)) = o.section {
         extra.bytes(b"8BIMlsct");
         extra.u32(12);
@@ -473,9 +579,10 @@ pub fn write(doc: &Doc) -> (Vec<u8>, Vec<String>) {
             name: l.name.clone(),
             mask,
             section: None,
+            adj: None,
         }
     };
-    let empty = |name: &str, section: (u32, bool, Blend), hidden: bool, opacity: u8| Out { rect: [0; 4], chans: vec![(-1, vec![]), (0, vec![]), (1, vec![]), (2, vec![])], blend: section.2, opacity, fill: 255, clip: false, hidden, name: name.to_string(), mask: None, section: Some(section) };
+    let empty = |name: &str, section: (u32, bool, Blend), hidden: bool, opacity: u8| Out { rect: [0; 4], chans: vec![(-1, vec![]), (0, vec![]), (1, vec![]), (2, vec![])], blend: section.2, opacity, fill: 255, clip: false, hidden, name: name.to_string(), mask: None, section: Some(section), adj: None };
     while i < doc.layers.len() {
         let gid = doc.layers[i].group;
         let mut j = i + 1;
@@ -487,8 +594,20 @@ pub fn write(doc: &Doc) -> (Vec<u8>, Vec<String>) {
             outs.push(empty("</Layer group>", (3, false, Blend::Normal), false, 255));
         }
         for l in &doc.layers[i..j] {
-            if l.adj.is_some() {
-                lost.push(format!("{} ({})", l.name, crate::i18n::t("calque de réglage")));
+            if let Some(a) = &l.adj {
+                match adj_block(a) {
+                    Some(block) => {
+                        // Calque de réglage : pas de pixels, son masque et son bloc de réglage
+                        let mut o = to_out(l);
+                        o.rect = [0; 4];
+                        for c in o.chans.iter_mut().filter(|c| c.0 != -2) {
+                            c.1.clear();
+                        }
+                        o.adj = Some(block);
+                        outs.push(o);
+                    }
+                    None => lost.push(format!("{} ({})", l.name, crate::i18n::t("calque de réglage"))),
+                }
                 continue;
             }
             if l.fx.active() {
@@ -558,10 +677,20 @@ mod tests {
         top.group = 3;
         d.layers.push(top);
         d.groups.push(Group { id: 3, name: "Dossier".into(), visible: true, opacity: 1.0, blend: None, collapsed: false });
+        d.layers.push(Layer { adj: Some(Adj::HueSat { h: 0.25, s: 0.5, l: 0.0 }), mask: Some(Layer::new_mask(6, 4, 255)), ..Layer::blank("Teinte", 1, 1) });
+        d.layers.push(Layer { adj: Some(Adj::Levels { black: 0.1, white: 0.9, gamma: 1.2 }), ..Layer::blank("Niveaux", 1, 1) });
         let (bytes, lost) = write(&d);
-        assert!(lost.is_empty());
-        let back = read(&bytes).unwrap();
-        assert_eq!((back.w, back.h, back.layers.len()), (6, 4, 2));
+        assert!(lost.is_empty(), "{lost:?}");
+        d.layers.truncate(2);
+        let mut back = read(&bytes).unwrap();
+        assert_eq!((back.w, back.h, back.layers.len()), (6, 4, 4));
+        match back.layers[2].adj {
+            Some(Adj::HueSat { h, s, .. }) => assert!((h - 0.25).abs() < 0.01 && (s - 0.5).abs() < 0.01),
+            ref o => panic!("{o:?}"),
+        }
+        assert!(back.layers[2].mask.is_some());
+        assert_eq!(back.layers[3].adj, Some(Adj::Levels { black: 26.0 / 255.0, white: 230.0 / 255.0, gamma: 1.2 }));
+        back.layers.truncate(2);
         let l = &back.layers[1];
         assert_eq!(l.name, "Rouge été");
         assert_eq!((l.off, l.w, l.h), ([1, 1], 3, 2));
