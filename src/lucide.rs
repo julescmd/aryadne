@@ -155,3 +155,4 @@ pub const CIRCLE_DASHED: &str = "\u{f04b0}";
 pub const LASSO: &str = "\u{f01ce}";
 pub const PAINTBRUSH: &str = "\u{f02e7}";
 pub const PAINT_BUCKET: &str = "\u{f02e6}";
+pub const CHECK: &str = "\u{f006c}";

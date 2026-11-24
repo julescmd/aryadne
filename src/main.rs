@@ -3493,18 +3493,28 @@ impl App {
                 }
                 Content::Text(text) if doc.preview => {
                     let mut goto = None;
+                    let mut toggle = None;
                     egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
                         ui.with_layout(egui::Layout::top_down(egui::Align::Center), |ui| {
                             ui.set_max_width((680.0 + 64.0_f32).min(ui.available_width()));
                             egui::Frame::new().inner_margin(egui::Margin { left: 32, right: 32, top: 40, bottom: 80 }).show(ui, |ui| {
                                 ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
-                                    goto = preview::show(ui, text, &existing, &paths);
+                                    match preview::show_doc(ui, text, &existing, &paths) {
+                                        Some(preview::Out::Open(n)) => goto = Some(n),
+                                        Some(preview::Out::Toggle(l)) => toggle = Some(l),
+                                        None => {}
+                                    }
                                 });
                             });
                         });
                     });
                     if let Some(n) = goto {
                         self.actions.push(Action::OpenLink(n));
+                    }
+                    // Une case cochée en lecture est cochée dans la note
+                    if let Some(nt) = toggle.and_then(|l| preview::toggle_task(text, l)) {
+                        *text = nt;
+                        doc.dirty_since = Some(Instant::now());
                     }
                 }
                 Content::Text(text) => {
