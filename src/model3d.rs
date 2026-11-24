@@ -2519,6 +2519,11 @@ pub struct Viewer {
     prop_tab: PropTab,
     /// Éditeur de courbes à la place de la timeline
     anim_graph: bool,
+    /// Barre d'outils d'animation (tweener, décaler, poses…)
+    anim_tools: bool,
+    tween_w: f32,
+    /// Pose copiée, par nom d'objet
+    pose_clip: Vec<(String, crate::animtools::Pose)>,
     /// Clé choisie dans la timeline (objet, image), clé qu'on glisse (objet, image de départ, image actuelle)
     key_sel: Option<(usize, i32)>,
     key_drag: Option<(usize, i32, i32)>,
@@ -2708,6 +2713,9 @@ impl Viewer {
             scene_refs: None,
             prop_tab: PropTab::Object,
             anim_graph: false,
+            anim_tools: false,
+            tween_w: 0.5,
+            pose_clip: vec![],
             key_sel: None,
             key_drag: None,
             key_menu: None,
@@ -5665,6 +5673,7 @@ impl Viewer {
                 }
                 let auto_col = if self.anim_auto { p.text } else { p.muted };
                 ui.toggle_value(&mut self.anim_auto, egui::RichText::new(crate::i18n::t("Auto-clé")).size(11.0).color(auto_col)).on_hover_text(crate::i18n::t("Chaque déplacement pose une clé à l'image courante"));
+                ui.toggle_value(&mut self.anim_tools, egui::RichText::new(format!("{} {}", crate::lucide::WAND_SPARKLES, crate::i18n::t("Outils"))).size(12.5)).on_hover_text(crate::i18n::t("Outils d'animation : tweener, décaler les clés, poses, miroir…"));
                 if ui.toggle_value(&mut self.anim_graph, egui::RichText::new(crate::i18n::t("Courbes")).size(12.5)).on_hover_text(crate::i18n::t("Éditeur de courbes : clés et poignées de Bézier par canal (Maj+F6)")).changed() {
                     self.graph.reset_view();
                 }
@@ -5674,6 +5683,145 @@ impl Viewer {
                     changed |= ui.add(egui::DragValue::new(&mut scene.start).prefix(format!("{} ", crate::i18n::t("début")))).changed();
                 });
             });
+            if self.anim_tools {
+                let (r2, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 30.0), egui::Sense::hover());
+                ui.painter().rect_filled(r2, 0.0, p.bg.gamma_multiply(0.6));
+                ui.painter().hline(r2.x_range(), r2.bottom() - 0.5, Stroke::new(1.0, p.line));
+                let mut tu = ui.new_child(egui::UiBuilder::new().max_rect(r2.shrink2(egui::vec2(8.0, 0.0))).layout(egui::Layout::left_to_right(egui::Align::Center)));
+                tu.spacing_mut().button_padding = egui::vec2(6.0, 2.0);
+                tu.spacing_mut().item_spacing.x = 4.0;
+                let here = self.anim_frame.round() as i32;
+                // Les objets visés : la sélection (l'actif compris)
+                let mut targets: Vec<usize> = self.scene_multi.iter().cloned().chain(self.scene_sel).filter(|&k| k < scene.objects.len()).collect();
+                targets.sort();
+                targets.dedup();
+                let any = !targets.is_empty();
+                let sep = |ui: &mut egui::Ui| {
+                    ui.add_space(4.0);
+                    ui.separator();
+                    ui.add_space(4.0);
+                };
+                use crate::animtools as at;
+                let mut moved_to: Option<i32> = None;
+                tu.add_enabled_ui(any, |ui| {
+                  egui::ScrollArea::horizontal().id_salt("anim-tools").scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden).show(ui, |ui| {
+                  ui.horizontal_centered(|ui| {
+                    // Tweener : la pose entre la clé d'avant et celle d'après, avec dépassement possible
+                    ui.label(egui::RichText::new(crate::i18n::t("Tweener")).size(11.5).color(p.muted));
+                    ui.spacing_mut().slider_width = 90.0;
+                    let r = ui.add(egui::Slider::new(&mut self.tween_w, -0.5..=1.5).show_value(false)).on_hover_text(format!("{} · {:.0} %", crate::i18n::t("Entre la clé d'avant (0 %) et celle d'après (100 %) ; au-delà : dépassement"), self.tween_w * 100.0));
+                    let mut apply = r.changed();
+                    for (lab, w) in [("0", 0.0), ("¼", 0.25), ("½", 0.5), ("¾", 0.75), ("1", 1.0)] {
+                        if ui.small_button(lab).clicked() {
+                            self.tween_w = w;
+                            apply = true;
+                        }
+                    }
+                    if apply {
+                        let mut n = 0;
+                        for &k in &targets {
+                            n += at::tween(&mut scene.objects[k], here, self.tween_w) as usize;
+                        }
+                        if n > 0 {
+                            changed = true;
+                        } else {
+                            crate::notify(crate::i18n::t("Le tweener a besoin d'une clé avant et d'une clé après l'image courante"));
+                        }
+                    }
+                    sep(ui);
+                    // Décaler les clés de l'image courante (Alt+← / Alt+→), la tête de lecture suit
+                    for (icon, d, tip) in [(crate::lucide::CHEVRON_LEFT, -1, "Avancer d'une image les clés de l'image courante (Alt+←)"), (crate::lucide::CHEVRON_RIGHT, 1, "Reculer d'une image les clés de l'image courante (Alt+→)")] {
+                        let alt_key = !ui.ctx().egui_wants_keyboard_input() && ui.input(|i| i.modifiers.alt && !i.modifiers.shift && i.key_pressed(if d < 0 { Key::ArrowLeft } else { Key::ArrowRight }));
+                        if ui.small_button(icon).on_hover_text(crate::i18n::t(tip)).clicked() || alt_key {
+                            let mut ok = false;
+                            for &k in &targets {
+                                ok |= at::nudge(&mut scene.objects[k], &[here], d).contains(&(here + d));
+                            }
+                            if ok {
+                                moved_to = Some(here + d);
+                                changed = true;
+                            }
+                        }
+                    }
+                    sep(ui);
+                    // Ajouter ou retirer une image après l'image courante (Alt+Maj+→ / ←)
+                    for (lab, d, tip) in [("−1", -1, "Retirer une image après l'image courante : la suite se rapproche (Alt+Maj+←)"), ("+1", 1, "Ajouter une image après l'image courante : la suite s'éloigne (Alt+Maj+→)")] {
+                        let k_ = !ui.ctx().egui_wants_keyboard_input() && ui.input(|i| i.modifiers.alt && i.modifiers.shift && i.key_pressed(if d < 0 { Key::ArrowLeft } else { Key::ArrowRight }));
+                        if ui.small_button(lab).on_hover_text(crate::i18n::t(tip)).clicked() || k_ {
+                            for &k in &targets {
+                                at::shift_after(&mut scene.objects[k], here, d);
+                            }
+                            changed = true;
+                        }
+                    }
+                    sep(ui);
+                    // Poses : copier, coller, coller en miroir, miroir, repos
+                    if ui.small_button(crate::lucide::COPY).on_hover_text(crate::i18n::t("Copier la pose")).clicked() {
+                        self.pose_clip = targets.iter().map(|&k| (scene.objects[k].name.clone(), at::Pose::of(&scene.objects[k]))).collect();
+                        crate::notify(format!("{} · {}", crate::i18n::t("Pose copiée"), self.pose_clip.len()));
+                    }
+                    let can_paste = !self.pose_clip.is_empty();
+                    for (icon, mirrored, tip) in [(crate::lucide::CLIPBOARD_PASTE, false, "Coller la pose (et poser une clé)"), (crate::lucide::FLIP_HORIZONTAL_2, true, "Coller la pose en miroir")] {
+                        if ui.add_enabled(can_paste, egui::Button::new(icon).small()).on_hover_text(crate::i18n::t(tip)).clicked() {
+                            for (n, &k) in targets.iter().enumerate() {
+                                // Même nom d'abord ; sinon dans l'ordre
+                                let name = scene.objects[k].name.clone();
+                                let src = self.pose_clip.iter().find(|(nm, _)| *nm == name).or(self.pose_clip.get(n.min(self.pose_clip.len() - 1))).map(|x| x.1);
+                                if let Some(pz) = src {
+                                    at::put(&mut scene.objects[k], here, if mirrored { at::mirror(pz) } else { pz });
+                                }
+                            }
+                            changed = true;
+                        }
+                    }
+                    if ui.small_button(crate::lucide::FLIP_HORIZONTAL).on_hover_text(crate::i18n::t("Miroir gauche-droite de la pose (et clé)")).clicked() {
+                        for &k in &targets {
+                            let pz = at::mirror(at::Pose::of(&scene.objects[k]));
+                            at::put(&mut scene.objects[k], here, pz);
+                        }
+                        changed = true;
+                    }
+                    if ui.small_button(crate::lucide::ROTATE_CCW).on_hover_text(crate::i18n::t("Pose de repos : sans rotation, taille 1 (Maj : aussi à l'origine)")).clicked() {
+                        let all = ui.input(|i| i.modifiers.shift);
+                        for &k in &targets {
+                            let pz = at::rest(at::Pose::of(&scene.objects[k]), all);
+                            at::put(&mut scene.objects[k], here, pz);
+                        }
+                        changed = true;
+                    }
+                    sep(ui);
+                    // Toute l'animation
+                    if ui.small_button(crate::i18n::t("Partager")).on_hover_text(crate::i18n::t("Chaque objet choisi reçoit une clé partout où l'un d'eux en a une")).clicked() {
+                        let mut objs: Vec<&mut crate::scene::Object> = scene.objects.iter_mut().enumerate().filter(|(i, _)| targets.contains(i)).map(|(_, o)| o).collect();
+                        let n = at::share_keys(&mut objs);
+                        crate::notify(format!("{} · {n}", crate::i18n::t("Clés ajoutées")));
+                        changed |= n > 0;
+                    }
+                    if ui.small_button(crate::i18n::t("Alléger")).on_hover_text(crate::i18n::t("Retire les clés que les voisines redonnent déjà (l'animation ne change pas)")).clicked() {
+                        let n: usize = targets.iter().map(|&k| at::reduce(&mut scene.objects[k], 1e-3)).sum();
+                        crate::notify(format!("{} · {n}", crate::i18n::t("Clés retirées")));
+                        changed |= n > 0;
+                    }
+                    let mut off = 0i32;
+                    let r = ui.add(egui::DragValue::new(&mut off).speed(0.15).prefix(format!("{} ", crate::i18n::t("décaler"))).suffix(crate::i18n::t_mid(" im."))).on_hover_text(crate::i18n::t("Glisser : décale toute l'animation des objets choisis"));
+                    if r.changed() && off != 0 {
+                        for &k in &targets {
+                            at::offset_all(&mut scene.objects[k], off);
+                        }
+                        changed = true;
+                    }
+                  });
+                  });
+                });
+                if changed {
+                    // La pose suit l'animation à l'image (éventuellement nouvelle) de la tête de lecture
+                    let f = moved_to.map(|x| x as f32).unwrap_or(self.anim_frame);
+                    scene.apply_frame(f);
+                    if let Some(m) = moved_to {
+                        seek = Some(m as f32);
+                    }
+                }
+            }
             if self.anim_graph {
                 let sel = self.scene_sel.filter(|&k| k < scene.objects.len());
                 if self.graph.who != sel {
