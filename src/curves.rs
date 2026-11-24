@@ -116,11 +116,15 @@ pub struct Editor {
     pub who: String,
     /// Normaliser : chaque courbe affichée entre -1 et 1 (comme Maya), pour comparer des grandeurs différentes
     pub normalize: bool,
+    /// Courbes tampon (comme Maya) : une copie pour comparer, qu'on peut échanger avec les courbes
+    buffer: Option<(String, Vec<Curve>)>,
+    /// Tweener sur les clés choisies (0 : clé d'avant, 1 : clé d'après)
+    tween: f32,
 }
 
 impl Default for Editor {
     fn default() -> Self {
-        Editor { view: None, sel: vec![], hidden: vec![], drag: None, who: String::new(), normalize: false }
+        Editor { view: None, sel: vec![], hidden: vec![], drag: None, who: String::new(), normalize: false, buffer: None, tween: 0.5 }
     }
 }
 
@@ -174,34 +178,267 @@ impl Editor {
         let mut out = Out { changed: false, seek: None };
         self.sel.retain(|&(c, k)| curves.get(c).is_some_and(|cv| k < cv.keys.len()));
         let snap = |t: f32| if fps > 0.0 { (t * fps).round() / fps } else { t };
-        // ---- Barre : types de tangente (comme Maya), lissages, cadrer
+        // ---- Barre d'icônes : tangentes, clés, outils façon Animbot, courbes tampon, vue
         let mut set_tan: Option<&str> = None;
         let mut set_ease: Option<Ease> = None;
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 3.0;
-            let any = !self.sel.is_empty();
-            ui.label(egui::RichText::new(crate::i18n::t("tangentes")).size(10.5).color(p.muted));
-            for (id, label, tip) in [("auto", "Auto", "Plates aux sommets, sinon suivent les voisines"), ("spline", "Spline", "Lisses : suivent la pente des voisines"), ("linear", "Linéaire", "Droites vers les clés voisines"), ("flat", "Plate", "Horizontales : départ et arrivée en douceur"), ("step", "Escalier", "La valeur tient jusqu'à la clé suivante")] {
-                if ui.add_enabled(any, egui::Button::new(egui::RichText::new(crate::i18n::t(label)).size(11.0))).on_hover_text(crate::i18n::t(tip)).clicked() {
+        let mut act: Option<&str> = None;
+        let any = !self.sel.is_empty();
+        let mut tween_changed = false;
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing.x = 2.0;
+            ui.spacing_mut().button_padding = vec2(4.0, 2.0);
+            let icon = |ui: &mut egui::Ui, on: bool, i: &str, tip: &str| ui.add_enabled(on, egui::Button::new(egui::RichText::new(i).size(14.0)).frame(false).min_size(vec2(24.0, 22.0))).on_hover_text(crate::i18n::t(tip)).clicked();
+            // Tangentes : un petit dessin de la courbe, comme les icônes de Maya
+            for (id, tip) in [("auto", "Tangentes auto (plates aux sommets)"), ("spline", "Tangentes spline (lisses)"), ("linear", "Tangentes linéaires"), ("flat", "Tangentes plates"), ("step", "Tangentes en escalier")] {
+                let (r, resp) = ui.allocate_exact_size(vec2(24.0, 22.0), if any { Sense::click() } else { Sense::hover() });
+                let col = if !any { p.muted.gamma_multiply(0.5) } else if resp.hovered() { p.text } else { p.muted };
+                if resp.hovered() && any {
+                    ui.painter().rect_filled(r, 3.0, p.raised);
+                }
+                let g = r.shrink2(vec2(5.0, 5.0));
+                let pt = |x: f32, y: f32| pos2(g.left() + g.width() * x, g.bottom() - g.height() * y);
+                let pts: Vec<Pos2> = match id {
+                    "linear" => vec![pt(0.0, 0.0), pt(1.0, 1.0)],
+                    "step" => vec![pt(0.0, 0.0), pt(0.6, 0.0), pt(0.6, 1.0), pt(1.0, 1.0)],
+                    "flat" => (0..=12).map(|k| { let x = k as f32 / 12.0; pt(x, x * x * (3.0 - 2.0 * x)) }).collect(),
+                    "spline" => (0..=12).map(|k| { let x = k as f32 / 12.0; pt(x, 0.5 - 0.5 * (x * std::f32::consts::PI).cos()) }).collect(),
+                    _ => (0..=12).map(|k| { let x = k as f32 / 12.0; pt(x, (x * 1.6).min(1.0).powf(0.8) * if x > 0.62 { 1.0 } else { 0.97 }) }).collect(),
+                };
+                ui.painter().add(Shape::line(pts, Stroke::new(1.5, col)));
+                if resp.on_hover_text(crate::i18n::t(tip)).clicked() {
                     set_tan = Some(id);
                 }
             }
-            ui.separator();
+            if icon(ui, any, crate::lucide::LINK, "Unifier les tangentes (les deux côtés alignés)") {
+                act = Some("unify");
+            }
             ui.add_enabled_ui(any, |ui| {
-                ui.menu_button(egui::RichText::new(format!("{} ▾", crate::i18n::t("Lissage"))).size(11.0), |ui| {
+                ui.menu_button(egui::RichText::new(crate::lucide::CHART_SPLINE).size(14.0), |ui| {
                     if let Some(Some(e)) = crate::keys::menu(ui, None, false) {
                         set_ease = Some(e);
                     }
-                });
+                })
+                .response
+                .on_hover_text(crate::i18n::t("Lissages de l'app (doux, rebond, ressort…)"));
             });
             ui.separator();
-            if ui.button(egui::RichText::new(crate::i18n::t("cadrer")).size(11.0)).on_hover_text("F").clicked() {
+            // Clés : poser, caler sur les images, supprimer
+            if icon(ui, true, crate::lucide::DIAMOND_PLUS, "Poser une clé à la tête de lecture sur les courbes affichées (I)") {
+                act = Some("insert");
+            }
+            if icon(ui, any, crate::lucide::MAGNET, "Caler les clés choisies sur des images entières") {
+                act = Some("snap");
+            }
+            if icon(ui, any, crate::lucide::ERASER, "Supprimer les clés choisies (Suppr)") {
+                act = Some("delete");
+            }
+            ui.separator();
+            // Façon Animbot : tweener, décaler, adoucir, alléger, filtre d'Euler
+            ui.spacing_mut().slider_width = 70.0;
+            let r = ui.add_enabled(any, egui::Slider::new(&mut self.tween, -0.5..=1.5).show_value(false)).on_hover_text(format!("{} · {:.0} %", crate::i18n::t("Tweener : les clés choisies entre leur voisine d'avant (0 %) et d'après (100 %)"), self.tween * 100.0));
+            tween_changed = r.changed();
+            if icon(ui, any, crate::lucide::CHEVRON_LEFT, "Avancer les clés choisies d'une image") {
+                act = Some("nudge-");
+            }
+            if icon(ui, any, crate::lucide::CHEVRON_RIGHT, "Reculer les clés choisies d'une image") {
+                act = Some("nudge+");
+            }
+            if icon(ui, any, crate::lucide::WAVES, "Adoucir les clés choisies (moyenne avec les voisines)") {
+                act = Some("smooth");
+            }
+            if icon(ui, true, crate::lucide::MINIMIZE_2, "Alléger : retirer les clés que les voisines redonnent déjà") {
+                act = Some("simplify");
+            }
+            if icon(ui, true, crate::lucide::ROTATE_CCW, "Filtre d'Euler : rotations sans sauts de 360°") {
+                act = Some("euler");
+            }
+            ui.separator();
+            // Courbes tampon (Maya) : garder une copie, l'échanger
+            if icon(ui, true, crate::lucide::HISTORY, "Courbes tampon : garder une copie des courbes pour comparer") {
+                act = Some("snapshot");
+            }
+            if icon(ui, self.buffer.as_ref().is_some_and(|b| b.0 == self.who), crate::lucide::REPEAT, "Échanger avec les courbes tampon") {
+                act = Some("swap");
+            }
+            ui.separator();
+            if icon(ui, true, crate::lucide::SCAN, "Cadrer (F)") {
                 self.view = None;
             }
-            if ui.toggle_value(&mut self.normalize, egui::RichText::new(crate::i18n::t("Normaliser")).size(11.0)).on_hover_text(crate::i18n::t("Chaque courbe entre -1 et 1, pour comparer des grandeurs différentes")).changed() {
+            let r = ui.add(egui::Button::new(egui::RichText::new(crate::lucide::SIGMA).size(14.0)).frame(false).selected(self.normalize).min_size(vec2(24.0, 22.0))).on_hover_text(crate::i18n::t("Normaliser : chaque courbe entre -1 et 1"));
+            if r.clicked() {
+                self.normalize = !self.normalize;
                 self.view = None;
+            }
+            // Valeurs exactes de la clé choisie (comme les champs de Maya)
+            if let [(ci, k)] = self.sel[..] {
+                ui.separator();
+                let key = curves[ci].keys[k];
+                let mut f = key.t * fps.max(1.0);
+                let mut v = key.v;
+                let rf = ui.add(egui::DragValue::new(&mut f).speed(0.2).max_decimals(1).prefix(format!("{} ", crate::lucide::CLOCK))).on_hover_text(crate::i18n::t("Image de la clé"));
+                let rv = ui.add(egui::DragValue::new(&mut v).speed(0.05).max_decimals(3)).on_hover_text(crate::i18n::t("Valeur de la clé"));
+                if rv.changed() {
+                    curves[ci].keys[k].v = v;
+                    out.changed = true;
+                }
+                if rf.changed() {
+                    let nt = (f / fps.max(1.0)).max(0.0);
+                    let link = curves[ci].link;
+                    let ok = curves.iter().filter(|c| c.link == link).all(|c| c.keys.iter().enumerate().all(|(j, x)| j == k || (x.t - nt).abs() > 1e-4) && (k == 0 || c.keys[k - 1].t < nt) && c.keys.get(k + 1).is_none_or(|n| n.t > nt));
+                    if ok {
+                        for c in curves.iter_mut().filter(|c| c.link == link) {
+                            c.keys[k].t = nt;
+                        }
+                        out.changed = true;
+                    }
+                }
             }
         });
+        // Les actions de la barre
+        let step = 1.0 / if fps > 0.0 { fps } else { 24.0 };
+        if tween_changed {
+            for &(ci, k) in &self.sel {
+                let ks = &curves[ci].keys;
+                if k > 0 && k + 1 < ks.len() {
+                    let (a, b) = (ks[k - 1].v, ks[k + 1].v);
+                    curves[ci].keys[k].v = a + (b - a) * self.tween;
+                    out.changed = true;
+                }
+            }
+        }
+        // Les clés choisies regroupées par lien (leur instant est commun)
+        let mut linked: Vec<(u32, usize)> = self.sel.iter().map(|&(ci, k)| (curves[ci].link, k)).collect();
+        linked.sort();
+        linked.dedup();
+        match act {
+            Some("unify") => {
+                for &(ci, k) in &self.sel {
+                    let tg = tangents(&curves[ci].keys, k);
+                    let s = (tg[1] / tg[0].min(-1e-4) + tg[3] / tg[2].max(1e-4)) / 2.0;
+                    curves[ci].keys[k].tan = Some([tg[0], s * tg[0], tg[2], s * tg[2]]);
+                }
+                out.changed = true;
+            }
+            Some("insert") => {
+                let links: Vec<u32> = curves.iter().filter(|c| !self.hidden.contains(&c.label)).map(|c| c.link).collect();
+                for c in curves.iter_mut().filter(|c| links.contains(&c.link)) {
+                    if c.keys.iter().any(|k| (k.t - now).abs() < 1e-4) {
+                        continue;
+                    }
+                    let v = eval(&c.keys, now);
+                    let at = c.keys.iter().position(|k| k.t > now).unwrap_or(c.keys.len());
+                    c.keys.insert(at, CK { t: now, v, ease: Ease::Smooth, tan: None });
+                }
+                self.sel.clear();
+                out.changed = true;
+            }
+            Some("snap") | Some("nudge-") | Some("nudge+") => {
+                let before: Vec<Curve> = curves.to_vec();
+                for &(link, k) in &linked {
+                    for c in curves.iter_mut().filter(|c| c.link == link) {
+                        if let Some(key) = c.keys.get_mut(k) {
+                            key.t = match act {
+                                Some("snap") => (key.t / step).round() * step,
+                                Some("nudge-") => (key.t - step).max(0.0),
+                                _ => key.t + step,
+                            };
+                        }
+                    }
+                }
+                // Pas de clés qui se croisent ou se superposent : sinon on revient en arrière
+                if curves.iter().all(|c| c.keys.windows(2).all(|w| w[0].t < w[1].t - 1e-4)) {
+                    out.changed = true;
+                } else {
+                    curves.clone_from_slice(&before);
+                }
+            }
+            Some("delete") => {
+                for c in curves.iter_mut() {
+                    let link = c.link;
+                    let mut i = 0;
+                    c.keys.retain(|_| {
+                        let keep = !linked.contains(&(link, i));
+                        i += 1;
+                        keep
+                    });
+                }
+                self.sel.clear();
+                out.changed = true;
+            }
+            Some("smooth") => {
+                let orig: Vec<Curve> = curves.to_vec();
+                for &(ci, k) in &self.sel {
+                    let ks = &orig[ci].keys;
+                    if k > 0 && k + 1 < ks.len() {
+                        curves[ci].keys[k].v = (ks[k - 1].v + 2.0 * ks[k].v + ks[k + 1].v) / 4.0;
+                    }
+                }
+                out.changed = true;
+            }
+            Some("simplify") => {
+                // Une clé part seulement si toutes les courbes de son lien peuvent s'en passer
+                let mut links: Vec<u32> = curves.iter().map(|c| c.link).collect();
+                links.sort();
+                links.dedup();
+                for link in links {
+                    let mut i = 1;
+                    loop {
+                        let idx: Vec<usize> = (0..curves.len()).filter(|&c| curves[c].link == link).collect();
+                        let n = idx.first().map(|&c| curves[c].keys.len()).unwrap_or(0);
+                        if i + 1 >= n {
+                            break;
+                        }
+                        let removable = idx.iter().all(|&c| {
+                            let ks = &curves[c].keys;
+                            let span = ks.iter().fold((f32::MAX, f32::MIN), |a, k| (a.0.min(k.v), a.1.max(k.v)));
+                            let tol = ((span.1 - span.0) * 0.005).max(1e-4);
+                            let mut without = ks.clone();
+                            let k = without.remove(i);
+                            (eval(&without, k.t) - k.v).abs() <= tol
+                        });
+                        if removable {
+                            for &c in &idx {
+                                curves[c].keys.remove(i);
+                            }
+                            out.changed = true;
+                        } else {
+                            i += 1;
+                        }
+                    }
+                }
+                self.sel.clear();
+            }
+            Some("euler") => {
+                for c in curves.iter_mut().filter(|c| c.label.to_lowercase().contains("rotation")) {
+                    for k in 1..c.keys.len() {
+                        let prev = c.keys[k - 1].v;
+                        while c.keys[k].v - prev > 180.0 {
+                            c.keys[k].v -= 360.0;
+                            out.changed = true;
+                        }
+                        while c.keys[k].v - prev < -180.0 {
+                            c.keys[k].v += 360.0;
+                            out.changed = true;
+                        }
+                    }
+                }
+            }
+            Some("snapshot") => self.buffer = Some((self.who.clone(), curves.to_vec())),
+            Some("swap") => {
+                if let Some((who, b)) = self.buffer.take() {
+                    if b.len() == curves.len() {
+                        let now_curves = curves.to_vec();
+                        curves.clone_from_slice(&b);
+                        self.buffer = Some((who, now_curves));
+                        self.sel.clear();
+                        out.changed = true;
+                    } else {
+                        self.buffer = Some((who, b));
+                    }
+                }
+            }
+            _ => {}
+        }
         let (rect, resp) = ui.allocate_exact_size(ui.available_size().max(vec2(200.0, 120.0)), Sense::click_and_drag());
         // ---- Canaux, à gauche
         let list = Rect::from_min_max(rect.min, pos2(rect.left() + 128.0, rect.bottom()));
@@ -295,6 +532,21 @@ impl Editor {
             }
         }
         // Courbes, clés, tangentes des clés choisies
+        // Courbes tampon : en gris, sous les courbes
+        if let Some((who, buf)) = &self.buffer {
+            if *who == self.who {
+                for (ci, c) in buf.iter().enumerate().filter(|(_, c)| shown(c, &self.hidden)) {
+                    if c.keys.is_empty() || ci >= norm.len() {
+                        continue;
+                    }
+                    let pts: Vec<Pos2> = (0..=(plot.width() as usize / 3)).map(|i| {
+                        let x = plot.left() + i as f32 * 3.0;
+                        pos2(x, y_of_c(ci, eval(&c.keys, t_of(x))))
+                    }).collect();
+                    pp.extend(Shape::dashed_line(&pts, Stroke::new(1.2, p.muted.gamma_multiply(0.7)), 5.0, 4.0));
+                }
+            }
+        }
         for (ci, c) in curves.iter().enumerate().filter(|(_, c)| shown(c, &self.hidden)) {
             if c.keys.is_empty() {
                 continue;
@@ -436,6 +688,7 @@ impl Editor {
             }
         }
         let cur = resp.interact_pointer_pos().or(ui.input(|i| i.pointer.hover_pos()));
+        let mut return_after_scale = false;
         match (self.drag.clone(), cur) {
             (Some(Drag::Pan { last }), Some(at)) if resp.dragged() => {
                 let d = at - last;
@@ -449,6 +702,35 @@ impl Editor {
                 let dv = -(at.y - from.y) / plot.height() * (v1 - v0);
                 let time_only = ui.input(|i| i.modifiers.command);
                 let mut next = orig.clone();
+                // S enfoncé : mettre à l'échelle autour du centre de la sélection (temps et valeur), comme Maya
+                if ui.input(|i| i.key_down(egui::Key::S)) {
+                    let n = self.sel.len().max(1) as f32;
+                    let pt = self.sel.iter().map(|&(ci, k)| orig[ci].keys[k].t).sum::<f32>() / n;
+                    let kt = (1.0 + (at.x - from.x) / 200.0).max(0.05);
+                    let kv = 1.0 - (at.y - from.y) / 200.0;
+                    let mut moved: Vec<(u32, usize)> = self.sel.iter().map(|&(ci, k)| (orig[ci].link, k)).collect();
+                    moved.sort();
+                    moved.dedup();
+                    for c in next.iter_mut() {
+                        for &(link, k) in &moved {
+                            if c.link == link {
+                                if let Some(key) = c.keys.get_mut(k) {
+                                    key.t = snap(pt + (key.t - pt) * kt).max(0.0);
+                                }
+                            }
+                        }
+                    }
+                    for &(ci, k) in &self.sel {
+                        let sel_in: Vec<f32> = self.sel.iter().filter(|s| s.0 == ci).map(|&(_, kk)| orig[ci].keys[kk].v).collect();
+                        let pv = sel_in.iter().sum::<f32>() / sel_in.len().max(1) as f32;
+                        next[ci].keys[k].v = pv + (orig[ci].keys[k].v - pv) * kv;
+                    }
+                    if next.iter().all(|c| c.keys.windows(2).all(|w| w[0].t < w[1].t - 1e-4)) {
+                        curves.clone_from_slice(&next);
+                        out.changed = true;
+                    }
+                    return_after_scale = true;
+                }
                 // Le temps bouge pour tout le lien ; la valeur seulement pour la courbe choisie
                 let mut moved: Vec<(u32, usize)> = self.sel.iter().map(|&(ci, k)| (orig[ci].link, k)).collect();
                 moved.sort();
@@ -468,7 +750,7 @@ impl Editor {
                     }
                 }
                 // Les clés restent dans l'ordre, à des instants différents
-                if next.iter().all(|c| c.keys.windows(2).all(|w| w[0].t < w[1].t - 1e-4)) {
+                if !return_after_scale && next.iter().all(|c| c.keys.windows(2).all(|w| w[0].t < w[1].t - 1e-4)) {
                     curves.clone_from_slice(&next);
                     out.changed = true;
                 }
@@ -561,6 +843,19 @@ impl Editor {
             }
             if fit {
                 self.view = None;
+            }
+            if ui.input(|i| !i.modifiers.any() && i.key_pressed(egui::Key::I)) {
+                let links: Vec<u32> = curves.iter().filter(|c| !self.hidden.contains(&c.label)).map(|c| c.link).collect();
+                for c in curves.iter_mut().filter(|c| links.contains(&c.link)) {
+                    if c.keys.iter().any(|k| (k.t - now).abs() < 1e-4) {
+                        continue;
+                    }
+                    let v = eval(&c.keys, now);
+                    let at = c.keys.iter().position(|k| k.t > now).unwrap_or(c.keys.len());
+                    c.keys.insert(at, CK { t: now, v, ease: Ease::Smooth, tan: None });
+                }
+                self.sel.clear();
+                out.changed = true;
             }
             if del && !self.sel.is_empty() {
                 let mut gone: Vec<(u32, usize)> = self.sel.iter().map(|&(ci, k)| (curves[ci].link, k)).collect();
