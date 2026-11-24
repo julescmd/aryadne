@@ -1707,6 +1707,70 @@ impl EMesh {
         }).collect()
     }
 
+    /// Remplissage en grille : la boucle de bord choisie (nombre pair de sommets) se remplit de
+    /// quadrilatères. `span` : sommets sur un côté court ; `offset` : où commence le premier coin.
+    pub fn grid_fill(&mut self, sel: &[bool], span: u32, offset: u32) -> Result<Vec<bool>, &'static str> {
+        let loops = self.border_loops(sel);
+        if loops.len() != 1 {
+            return Err("remplir en grille : choisis une seule boucle de bord (un trou)");
+        }
+        let mut r = loops[0].clone();
+        let n = r.len();
+        if n < 4 || n % 2 != 0 {
+            return Err("remplir en grille : il faut un nombre pair de sommets (4 ou plus)");
+        }
+        // Les nouvelles faces tournent dans l'autre sens que la face voisine du bord
+        r.reverse();
+        r.rotate_left(offset as usize % n);
+        let u = (span as usize).clamp(1, n / 2 - 1);
+        let v = n / 2 - u;
+        let mut g = vec![vec![u32::MAX; v + 1]; u + 1];
+        for j in 0..=v {
+            g[0][j] = r[j];
+        }
+        for i in 0..=u {
+            g[i][v] = r[(v + i) % n];
+        }
+        for j in 0..=v {
+            g[u][v - j] = r[(v + u + j) % n];
+        }
+        for i in 0..=u {
+            g[u - i][0] = r[(2 * v + u + i) % n];
+        }
+        let p = |x: u32, pos: &Vec<V3>| pos[x as usize];
+        for i in 1..u {
+            for j in 1..v {
+                let (s, t) = (j as f32 / v as f32, i as f32 / u as f32);
+                let (b, tp, l, rt) = (p(g[0][j], &self.pos), p(g[u][j], &self.pos), p(g[i][0], &self.pos), p(g[i][v], &self.pos));
+                let (c00, c0v, cu0, cuv) = (p(g[0][0], &self.pos), p(g[0][v], &self.pos), p(g[u][0], &self.pos), p(g[u][v], &self.pos));
+                let q = [0, 1, 2].map(|k| {
+                    (1.0 - t) * b[k] + t * tp[k] + (1.0 - s) * l[k] + s * rt[k]
+                        - ((1.0 - s) * (1.0 - t) * c00[k] + s * (1.0 - t) * c0v[k] + (1.0 - s) * t * cu0[k] + s * t * cuv[k])
+                });
+                self.pos.push(q);
+                g[i][j] = self.pos.len() as u32 - 1;
+            }
+        }
+        for i in 0..u {
+            for j in 0..v {
+                self.polys.push(vec![g[i][j], g[i][j + 1], g[i + 1][j + 1], g[i + 1][j]]);
+            }
+        }
+        let mut out = vec![false; self.pos.len()];
+        for row in &g {
+            for &x in row {
+                out[x as usize] = true;
+            }
+        }
+        Ok(out)
+    }
+
+    /// Nombre de sommets de la boucle de bord choisie (0 s'il n'y en a pas exactement une).
+    pub fn border_loop_len(&self, sel: &[bool]) -> usize {
+        let l = self.border_loops(sel);
+        if l.len() == 1 { l[0].len() } else { 0 }
+    }
+
     /// Tout ce qui touche la sélection par des faces (L / Ctrl+L) : la pièce entière.
     pub fn linked(&self, sel: &[bool]) -> Vec<bool> {
         let mut out: Vec<bool> = (0..self.pos.len()).map(|i| sel.get(i).copied().unwrap_or(false)).collect();
@@ -2009,6 +2073,26 @@ mod tests {
         }
         let mm = m.mirror_map();
         assert!(mm.iter().enumerate().all(|(i, j)| j.is_some_and(|j| (m.pos[j as usize][0] + m.pos[i][0]).abs() < 1e-5)));
+    }
+
+    #[test]
+    fn remplir_en_grille() {
+        // Un cube dont on a retiré le dessus subdivisé : un trou de 8 sommets, rempli en 2 x 2
+        let mut m = cube();
+        assert!(m.subdivide(&[true; 8], 1).is_some());
+        let top: Vec<usize> = (0..m.pos.len()).filter(|&i| (m.pos[i][2] - 1.0).abs() < 1e-6).collect();
+        let mut sel = vec![false; m.pos.len()];
+        for &i in &top {
+            sel[i] = true;
+        }
+        m.delete_faces(&sel).unwrap();
+        let sel: Vec<bool> = (0..m.pos.len()).map(|i| (m.pos[i][2] - 1.0).abs() < 1e-6).collect();
+        assert_eq!(m.border_loop_len(&sel), 8);
+        let n = m.polys.len();
+        assert!(m.grid_fill(&sel, 2, 0).is_ok());
+        assert_eq!(m.polys.len(), n + 4);
+        assert!(ferme(&m), "{:?}", m.polys);
+        assert!((m.volume() - 1.0).abs() < 1e-4);
     }
 
     #[test]

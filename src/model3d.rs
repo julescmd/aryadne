@@ -1952,6 +1952,8 @@ struct MeshEdit {
     prop_d: (Option<Pos2>, Vec<f32>),
     /// Édition en miroir sur X (dans le repère de l'objet), et le reflet de chaque sommet
     mirror: bool,
+    /// Aimantation sur les sommets pendant G
+    snap_v: bool,
     mirror_m: (Option<Pos2>, Vec<Option<u32>>),
     /// Couteau (K) en cours : les points déjà posés
     knife: Option<Vec<crate::meshedit::KnifePoint>>,
@@ -1995,12 +1997,13 @@ impl ParamOp {
                 }
                 ((hi[0] - lo[0]).max(hi[1] - lo[1]).max(hi[2] - lo[2]) * 0.1).max(1e-6)
             }
+            7 => me.mesh.border_loop_len(&me.sel) as f32,
             _ => 1.0,
         };
         let mut op = ParamOp { kind, base: me.mesh.clone(), base_sel: me.sel.clone(), from, center, amount: 0.0, segments: 1, typed: String::new(), ring: vec![], limit, result_sel: vec![], alt: false };
         op.amount = op.default_amount();
         op.segments = match kind {
-            5 => 1,
+            7 => ((limit as u32) / 4).max(1),
             _ => 1,
         };
         op
@@ -2015,6 +2018,7 @@ impl ParamOp {
             3 => m.bevel_verts(&self.base_sel, self.amount * self.limit)?,
             4 => m.subdivide(&self.base_sel, self.segments)?,
             5 => m.smooth(&self.base_sel, self.amount, self.segments)?,
+            7 => m.grid_fill(&self.base_sel, self.segments, self.amount.round().max(0.0) as u32).ok()?,
             _ => m.merge_by_distance(&self.base_sel, self.amount * self.limit)?,
         };
         Some((m, s))
@@ -2032,7 +2036,7 @@ impl ParamOp {
         matches!(self.kind, 0 | 1 | 2 | 3)
     }
     fn name(&self) -> &'static str {
-        ["incruster", "biseau", "coupe en boucle", "biseau des sommets", "subdiviser", "lisser les sommets", "fusionner par distance"][self.kind.min(6) as usize]
+        ["incruster", "biseau", "coupe en boucle", "biseau des sommets", "subdiviser", "lisser les sommets", "fusionner par distance", "remplir en grille"][self.kind.min(7) as usize]
     }
     fn amount_label(&self) -> &'static str {
         match self.kind {
@@ -2041,6 +2045,7 @@ impl ParamOp {
             2 => "glissement :",
             5 => "force :",
             6 => "distance :",
+            7 => "décalage :",
             _ => "",
         }
     }
@@ -2049,6 +2054,7 @@ impl ParamOp {
             1 => Some("segments"),
             2 | 4 => Some("coupes"),
             5 => Some("répétitions"),
+            7 => Some("travée"),
             _ => None,
         }
     }
@@ -2063,6 +2069,7 @@ impl ParamOp {
         match self.kind {
             2 => v.clamp(-1.0, 1.0),
             5 => v.clamp(0.0, 1.0),
+            7 => v.round().clamp(0.0, self.limit),
             0 if self.alt => v.clamp(0.01, 0.95),
             _ => (v / self.limit.max(1e-9)).clamp(0.0, if self.kind == 0 { 4.0 } else { 1.0 }),
         }
@@ -2074,6 +2081,7 @@ impl ParamOp {
             0 => (0.0, self.limit * 4.0, self.limit * 0.005),
             2 => (-1.0, 1.0, 0.01),
             5 => (0.0, 1.0, 0.01),
+            7 => (0.0, self.limit, 0.1),
             _ => (0.0, self.limit, self.limit * 0.005),
         }
     }
@@ -3156,7 +3164,7 @@ impl Viewer {
             (f, mesh)
         };
         let n = mesh.pos.len();
-        self.mesh = Some(MeshEdit { obj: k, file, mesh, sel: vec![false; n], hist: vec![], redo: vec![], modal: None, boxing: None, skip_click: false, mode: 0, active: None, vis: None, op: None, last: None, loopcut: None, menu: None, trigger: None, split: None, prop: false, prop_r: 0.0, prop_d: (None, vec![]), mirror: false, mirror_m: (None, vec![]), knife: None });
+        self.mesh = Some(MeshEdit { obj: k, file, mesh, sel: vec![false; n], hist: vec![], redo: vec![], modal: None, boxing: None, skip_click: false, mode: 0, active: None, vis: None, op: None, last: None, loopcut: None, menu: None, trigger: None, split: None, prop: false, prop_r: 0.0, prop_d: (None, vec![]), mirror: false, snap_v: false, mirror_m: (None, vec![]), knife: None });
         self.scene_multi.clear();
         self.capture_msg = None;
     }
@@ -3170,8 +3178,10 @@ impl Viewer {
         let p = theme::pal();
         let typing = ui.ctx().egui_wants_keyboard_input();
         // Tab : egui s'en sert pour passer d'un champ à l'autre ; sur la vue, sans champ actif, il change de mode
-        let tab = resp.hovered() && !self.kb_busy && self.modal.is_none() && ui.input(|i| i.key_pressed(Key::Tab));
-        if tab {
+        let any_tab = resp.hovered() && !self.kb_busy && self.modal.is_none() && ui.input(|i| i.key_pressed(Key::Tab));
+        let tab = any_tab && !ui.input(|i| i.modifiers.shift);
+        let shift_tab = any_tab && !tab;
+        if any_tab {
             ui.ctx().memory_mut(|m| {
                 if let Some(id) = m.focused() {
                     m.surrender_focus(id);
@@ -3179,7 +3189,7 @@ impl Viewer {
             });
         }
         self.kb_busy = ui.ctx().memory(|m| m.focused().is_some());
-        let typing = typing && !tab;
+        let typing = typing && !any_tab;
         if std::mem::take(&mut self.mesh_toggle) || tab {
             if self.mesh.take().is_none() {
                 self.enter_mesh_edit();
@@ -3585,6 +3595,13 @@ impl Viewer {
             // Ctrl : par crans (distance ronde, 5°, dixièmes)
             let snap = ui.input(|i| i.modifiers.command);
             let step = 10f32.powf((longest * 0.02).log10().floor());
+            // Aimantation sur les sommets (bouton ⌖, Maj+Tab) : le sommet choisi le plus proche se pose
+            // sur le sommet visé, sans tenir compte de la souris entre les deux
+            let snap_target: Option<V3> = if me.snap_v && kind == 0 {
+                cur.and_then(|at| (0..me.mesh.pos.len()).filter(|&i| !me.sel.get(i).copied().unwrap_or(false)).filter_map(|i| project_v(me, i).map(|s| (i, (s - at).length()))).filter(|x| x.1 < 18.0).min_by(|a, b| a.1.total_cmp(&b.1))).map(|(i, _)| to_world(orig[i]))
+            } else {
+                None
+            };
             for (kk, k) in [(Key::X, 0usize), (Key::Y, 2), (Key::Z, 1)] {
                 if ui.input(|i| i.key_pressed(kk)) {
                     let mut e = [0.0f32; 3];
@@ -3608,7 +3625,24 @@ impl Viewer {
             } else if let Some(cur) = cur {
                 let d = cur - from;
                 let toward = cam.unrotate([0.0, 0.0, 1.0]);
+                let snap_mv: Option<V3> = snap_target.and_then(|t| {
+                    let base = worlds.iter().min_by(|a, b| dot(sub(**a, t), sub(**a, t)).total_cmp(&dot(sub(**b, t), sub(**b, t))))?;
+                    let mv = sub(t, *base);
+                    Some(match axis {
+                        Some(a) => {
+                            let k = dot(mv, a);
+                            [a[0] * k, a[1] * k, a[2] * k]
+                        }
+                        None => mv,
+                    })
+                });
+                if let Some(t) = snap_target.and_then(|t| project(t)) {
+                    ui.painter_at(rect).circle_stroke(t, 7.0, Stroke::new(2.0, Color32::from_rgb(255, 214, 80)));
+                }
                 let xf = |w: &V3| -> V3 {
+                    if let (0, Some(m)) = (kind, snap_mv) {
+                        return [w[0] + m[0], w[1] + m[1], w[2] + m[2]];
+                    }
                     match kind {
                         0 => {
                             let per_px = if cam.ortho { cam.dist / focal } else { (-q[2]).max(0.05) / focal } * longest;
@@ -3939,6 +3973,8 @@ impl Viewer {
                 Some(5)
             } else if trig == Some("fusionner par distance") {
                 Some(6)
+            } else if trig == Some("remplir en grille") {
+                Some(7)
             } else {
                 None
             };
@@ -3952,6 +3988,7 @@ impl Viewer {
                             0 | 4 => "il faut au moins une face dont tous les sommets sont choisis",
                             1 => "biseau : choisis au moins une arête entre deux faces",
                             6 => "fusionner par distance : rien d'assez proche",
+                            7 => "remplir en grille : choisis une seule boucle de bord, avec un nombre pair de sommets",
                             _ => "rien à faire avec cette sélection",
                         }));
                     }
@@ -4007,6 +4044,9 @@ impl Viewer {
             }
             if key(Key::O) {
                 me.prop = !me.prop;
+            }
+            if shift_tab {
+                me.snap_v = !me.snap_v;
             }
             // Ctrl+Z annuler, Ctrl+Maj+Z ou Ctrl+Y rétablir
             let (z, y) = ui.input(|i| (i.modifiers.command && !i.modifiers.shift && i.key_pressed(Key::Z), i.modifiers.command && (i.modifiers.shift && i.key_pressed(Key::Z) || i.key_pressed(Key::Y))));
@@ -4186,7 +4226,7 @@ impl Viewer {
                     let tools: &[(&str, &[(&'static str, &str)])] = &[
                         ("SOMMETS", &[("fusionner au centre", "M"), ("fusionner par distance", ""), ("biseau des sommets", "Ctrl+Maj+B"), ("lisser les sommets", "")]),
                         ("ARÊTES", &[("biseau", "Ctrl+B"), ("coupe en boucle", "Ctrl+R"), ("pont entre boucles", "")]),
-                        ("FACES", &[("extruder", "E"), ("incruster", "I"), ("subdiviser", ""), ("remplir", "F")]),
+                        ("FACES", &[("extruder", "E"), ("incruster", "I"), ("subdiviser", ""), ("remplir", "F"), ("remplir en grille", "")]),
                         ("MAILLAGE", &[("couteau", "K"), ("déchirer", "V"), ("détacher", "Y"), ("séparer la sélection", "P"), ("supprimer ou dissoudre…", "X")]),
                         ("SÉLECTION", &[("tout choisir", "A"), ("inverser la sélection", "Ctrl+I")]),
                     ];
@@ -5783,6 +5823,13 @@ impl Viewer {
                             if ui.add_enabled(self.mesh.is_some(), pb).on_hover_text(crate::i18n::t("édition proportionnelle (O) : les sommets voisins suivent ; molette pendant G R S pour le rayon")).clicked() {
                                 if let Some(m) = self.mesh.as_mut() {
                                     m.prop = !m.prop;
+                                }
+                            }
+                            let on = self.mesh.as_ref().is_some_and(|m| m.snap_v);
+                            let sb = egui::Button::new(egui::RichText::new("⌖").size(13.0).color(if on { p.on_accent } else { p.text })).fill(if on { p.accent } else { p.panel }).min_size(egui::vec2(24.0, 20.0));
+                            if ui.add_enabled(self.mesh.is_some(), sb).on_hover_text(crate::i18n::t("aimanter sur les sommets (Maj+Tab) : pendant G, le sommet choisi le plus proche se pose sur le sommet visé")).clicked() {
+                                if let Some(m) = self.mesh.as_mut() {
+                                    m.snap_v = !m.snap_v;
                                 }
                             }
                             let on = self.mesh.as_ref().is_some_and(|m| m.mirror);

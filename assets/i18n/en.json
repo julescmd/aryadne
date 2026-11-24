@@ -1712,5 +1712,11 @@
   "couteau : chaque segment doit traverser une face (d'un bord à l'autre)": "knife: each segment must cross a face (edge to edge)",
   "détacher : choisis au moins une face": "split: select at least one face",
   "déchirer : rien à séparer ici (choisis des sommets entre des faces)": "rip: nothing to tear here (select vertices between faces)",
-  "miroir X : en déplaçant un sommet, son reflet de l'autre côté de l'objet suit": "X mirror: moving a vertex also moves its mirror on the other side"
+  "miroir X : en déplaçant un sommet, son reflet de l'autre côté de l'objet suit": "X mirror: moving a vertex also moves its mirror on the other side",
+  "remplir en grille": "grid fill",
+  "décalage :": "offset:",
+  "décalage": "offset",
+  "travée": "span",
+  "remplir en grille : choisis une seule boucle de bord, avec un nombre pair de sommets": "grid fill: select a single border loop with an even number of vertices",
+  "aimanter sur les sommets (Maj+Tab) : pendant G, le sommet choisi le plus proche se pose sur le sommet visé": "snap to vertices (Shift+Tab): during G, the closest selected vertex lands on the target vertex"
 }
