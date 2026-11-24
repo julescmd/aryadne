@@ -517,6 +517,113 @@ pub fn backlinks(root: &str, entries: &[Entry], target_rel: &str) -> Vec<Backlin
     out
 }
 
+
+/// Note qui écrit le nom d'une autre note sans en faire un lien [[ ]].
+#[derive(Clone)]
+pub struct Mention {
+    pub rel: String,
+    pub name: String,
+    pub count: usize,
+    pub excerpt: String,
+}
+
+/// Positions (en octets) des mentions non liées de `name` dans `text` : mot entier, sans tenir
+/// compte de la casse, hors liens [[ ]], hors blocs de code et hors `code`.
+pub fn unlinked_spans(text: &str, name: &str) -> Vec<(usize, usize)> {
+    let want: Vec<char> = name.chars().flat_map(|c| c.to_lowercase()).collect();
+    if want.len() < 3 {
+        return vec![];
+    }
+    let mut masked = vec![false; text.len()];
+    for m in WIKILINK.find_iter(text) {
+        masked[m.start()..m.end()].iter_mut().for_each(|b| *b = true);
+    }
+    // Blocs ``` et code en ligne
+    let mut at = 0;
+    let mut fence = false;
+    for line in text.split_inclusive('\n') {
+        let t = line.trim_start();
+        if t.starts_with("```") {
+            fence = !fence;
+            masked[at..at + line.len()].iter_mut().for_each(|b| *b = true);
+        } else if fence {
+            masked[at..at + line.len()].iter_mut().for_each(|b| *b = true);
+        } else {
+            let mut open = None;
+            for (i, c) in line.char_indices() {
+                if c == '`' {
+                    match open.take() {
+                        None => open = Some(i),
+                        Some(o) => masked[at + o..at + i + 1].iter_mut().for_each(|b| *b = true),
+                    }
+                }
+            }
+        }
+        at += line.len();
+    }
+    let word = |c: char| c.is_alphanumeric() || c == '_';
+    let mut out = Vec::new();
+    let mut prev: Option<char> = None;
+    let mut skip_until = 0;
+    for (i, c) in text.char_indices() {
+        if i >= skip_until && !masked[i] && !prev.is_some_and(word) {
+            let mut it = text[i..].char_indices();
+            let mut ok = true;
+            let mut end = i;
+            let mut k = 0;
+            while k < want.len() {
+                match it.next() {
+                    Some((j, ch)) => {
+                        for lc in ch.to_lowercase() {
+                            if want.get(k) != Some(&lc) {
+                                ok = false;
+                            }
+                            k += 1;
+                        }
+                        end = i + j + ch.len_utf8();
+                        if !ok {
+                            break;
+                        }
+                    }
+                    None => {
+                        ok = false;
+                        break;
+                    }
+                }
+            }
+            if ok && k == want.len() && !text[end..].chars().next().is_some_and(word) && !masked[i..end].iter().any(|b| *b) {
+                out.push((i, end));
+                skip_until = end;
+            }
+        }
+        prev = Some(c);
+    }
+    out
+}
+
+/// Transforme la mention `n` (dans l'ordre du texte) en lien : [[Nom]] si la casse est la même, sinon [[Nom|texte]].
+pub fn link_mention(text: &str, name: &str, n: usize) -> Option<String> {
+    let (a, b) = *unlinked_spans(text, name).get(n)?;
+    let seen = &text[a..b];
+    let link = if seen == name { format!("[[{name}]]") } else { format!("[[{name}|{seen}]]") };
+    Some(format!("{}{}{}", &text[..a], link, &text[b..]))
+}
+
+pub fn mentions(root: &str, entries: &[Entry], target_rel: &str, open: &dyn Fn(&str) -> Option<String>) -> Vec<Mention> {
+    let name = stem(target_rel);
+    let mut out = Vec::new();
+    for e in entries.iter().filter(|e| !e.is_dir && is_md(&e.rel) && e.rel != target_rel) {
+        let text = open(&e.rel).unwrap_or_else(|| read(root, &e.rel).unwrap_or_default());
+        let spans = unlinked_spans(&text, &name);
+        if let Some(&(a, b)) = spans.first() {
+            let ls = text[..a].rfind('\n').map(|i| i + 1).unwrap_or(0);
+            let le = text[b..].find('\n').map(|i| b + i).unwrap_or(text.len());
+            out.push(Mention { rel: e.rel.clone(), name: stem(&e.rel), count: spans.len(), excerpt: text[ls..le].trim().chars().take(140).collect() });
+        }
+    }
+    out
+}
+
 /// Graphe du coffre. Nœuds : notes (et dossiers si demandé). Arêtes : liens [[ ]] (+ appartenance).
 pub struct Graph {
     pub nodes: Vec<GraphNode>,
@@ -574,6 +681,23 @@ pub fn graph(root: &str, entries: &[Entry], with_folders: bool, with_files: bool
         }
     }
     Graph { nodes, edges }
+}
+
+#[cfg(test)]
+mod mention_tests {
+    use super::*;
+    #[test]
+    fn mentions_non_liees() {
+        let t = "Voir Aurore et [[Aurore]], pas aurores.\n```\nAurore\n```\nl'aurore `Aurore` ok";
+        let s = unlinked_spans(t, "Aurore");
+        assert_eq!(s.len(), 2);
+        assert_eq!(&t[s[0].0..s[0].1], "Aurore");
+        assert_eq!(&t[s[1].0..s[1].1], "aurore");
+        let l = link_mention(t, "Aurore", 1).unwrap();
+        assert!(l.contains("l'[[Aurore|aurore]] `Aurore`"));
+        assert!(unlinked_spans("Él", "Él").is_empty());
+        assert_eq!(unlinked_spans("Une Étoile.", "étoile").len(), 1);
+    }
 }
 
 #[cfg(test)]

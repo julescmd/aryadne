@@ -40,6 +40,154 @@ pub struct Editor {
     /// Client LSP (complétion, erreurs, définition) si un serveur est installé.
     pub lsp: Option<crate::lsp::Doc>,
     pub lsp_tried: bool,
+    /// Version de référence pour les marques de modifications (dernier commit git, sinon le texte à l'ouverture)
+    pub base: Option<std::sync::Arc<String>>,
+    pub base_git: bool,
+    pub base_rx: Option<std::sync::mpsc::Receiver<Option<String>>>,
+    changes: Option<(u64, std::sync::Arc<String>, Vec<Hunk>)>,
+    hunk_open: Option<usize>,
+    /// Texte complet à remettre dans l'éditeur (bloc restauré)
+    pub revert: Option<String>,
+}
+
+// ---------- marques de modifications ----------
+
+/// Bloc de lignes changé : `old` dans la référence, `new` dans le texte actuel (lignes, fin exclue).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Hunk {
+    pub old: std::ops::Range<usize>,
+    pub new: std::ops::Range<usize>,
+}
+
+impl Hunk {
+    /// 0 ajouté, 1 modifié, 2 supprimé
+    pub fn kind(&self) -> u8 {
+        if self.old.is_empty() { 0 } else if self.new.is_empty() { 2 } else { 1 }
+    }
+}
+
+/// Différence ligne à ligne (plus longue sous-suite commune, après les débuts et fins communs).
+pub fn line_diff(old: &str, new: &str) -> Vec<Hunk> {
+    let a: Vec<&str> = old.lines().collect();
+    let b: Vec<&str> = new.lines().collect();
+    let mut pre = 0;
+    while pre < a.len() && pre < b.len() && a[pre] == b[pre] {
+        pre += 1;
+    }
+    let mut suf = 0;
+    while suf < a.len() - pre && suf < b.len() - pre && a[a.len() - 1 - suf] == b[b.len() - 1 - suf] {
+        suf += 1;
+    }
+    let (am, bm) = (&a[pre..a.len() - suf], &b[pre..b.len() - suf]);
+    if am.is_empty() && bm.is_empty() {
+        return vec![];
+    }
+    // Trop gros pour la table : un seul bloc
+    if am.len().saturating_mul(bm.len()) > 4_000_000 || am.is_empty() || bm.is_empty() {
+        return vec![Hunk { old: pre..pre + am.len(), new: pre..pre + bm.len() }];
+    }
+    let (n, m) = (am.len(), bm.len());
+    let mut t = vec![0u32; (n + 1) * (m + 1)];
+    for i in (0..n).rev() {
+        for j in (0..m).rev() {
+            t[i * (m + 1) + j] = if am[i] == bm[j] { t[(i + 1) * (m + 1) + j + 1] + 1 } else { t[(i + 1) * (m + 1) + j].max(t[i * (m + 1) + j + 1]) };
+        }
+    }
+    let mut out = Vec::new();
+    let (mut i, mut j) = (0, 0);
+    let (mut oi, mut oj) = (0, 0);
+    let mut open = false;
+    let flush = |out: &mut Vec<Hunk>, oi: usize, i: usize, oj: usize, j: usize| out.push(Hunk { old: pre + oi..pre + i, new: pre + oj..pre + j });
+    while i < n || j < m {
+        if i < n && j < m && am[i] == bm[j] {
+            if open {
+                flush(&mut out, oi, i, oj, j);
+                open = false;
+            }
+            i += 1;
+            j += 1;
+            continue;
+        }
+        if !open {
+            (oi, oj, open) = (i, j, true);
+        }
+        if j < m && (i == n || t[i * (m + 1) + j + 1] >= t[(i + 1) * (m + 1) + j]) {
+            j += 1;
+        } else {
+            i += 1;
+        }
+    }
+    if open {
+        flush(&mut out, oi, i, oj, j);
+    }
+    out
+}
+
+/// Remet les lignes de référence d'un bloc dans le texte.
+pub fn revert_hunk(old: &str, new: &str, h: &Hunk) -> String {
+    let a: Vec<&str> = old.lines().collect();
+    let b: Vec<&str> = new.lines().collect();
+    let mut out: Vec<&str> = Vec::with_capacity(b.len());
+    out.extend_from_slice(&b[..h.new.start.min(b.len())]);
+    out.extend_from_slice(&a[h.old.start.min(a.len())..h.old.end.min(a.len())]);
+    out.extend_from_slice(&b[h.new.end.min(b.len())..]);
+    let mut s = out.join("\n");
+    if new.ends_with('\n') || (new.is_empty() && old.ends_with('\n')) {
+        s.push('\n');
+    }
+    s
+}
+
+/// Version du fichier au dernier commit git, si le fichier est suivi.
+pub fn git_base(path: &std::path::Path) -> Option<String> {
+    let dir = path.parent()?;
+    let name = path.file_name()?.to_string_lossy().to_string();
+    let mut cmd = std::process::Command::new("git");
+    cmd.arg("-C").arg(dir).arg("show").arg(format!("HEAD:./{name}"));
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000);
+    }
+    let out = cmd.stderr(std::process::Stdio::null()).output().ok()?;
+    out.status.success().then(|| String::from_utf8_lossy(&out.stdout).replace("\r\n", "\n"))
+}
+
+#[cfg(test)]
+mod diff_tests {
+    use super::*;
+    #[test]
+    fn blocs() {
+        let old = "a\nb\nc\nd\ne\n";
+        let new = "a\nB\nc\nx\ny\nd\n";
+        let h = line_diff(old, new);
+        assert_eq!(h, vec![Hunk { old: 1..2, new: 1..2 }, Hunk { old: 3..3, new: 3..5 }, Hunk { old: 4..5, new: 6..6 }]);
+        assert_eq!(h.iter().map(|x| x.kind()).collect::<Vec<_>>(), vec![1, 0, 2]);
+        let mut t = new.to_string();
+        for x in line_diff(old, &t).iter().rev() {
+            t = revert_hunk(old, &t, x);
+        }
+        assert_eq!(t, old);
+        assert!(line_diff(old, old).is_empty());
+    }
+
+    #[test]
+    fn reference_git() {
+        let dir = std::env::temp_dir().join(format!("ary-git-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let git = |args: &[&str]| std::process::Command::new("git").arg("-C").arg(&dir).args(args).output();
+        if git(&["init", "-q"]).is_err() {
+            return;
+        }
+        std::fs::write(dir.join("a.py"), "x = 1\n").unwrap();
+        let _ = git(&["add", "."]);
+        let _ = git(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "i"]);
+        std::fs::write(dir.join("a.py"), "x = 2\n").unwrap();
+        assert_eq!(git_base(&dir.join("a.py")).as_deref(), Some("x = 1\n"));
+        assert_eq!(git_base(&dir.join("b.py")), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -1474,6 +1622,7 @@ fn set_sel(ctx: &egui::Context, id: Id, text: &str, (a, b): (usize, usize)) {
 
 pub struct View {
     pub minimap: bool,
+    pub changes: bool,
     pub gutter: bool,
     pub font_size: f32,
     pub bg: egui::layers::ShapeIdx,
@@ -1504,6 +1653,43 @@ pub fn after(ui: &mut egui::Ui, ed: &mut Editor, text: &str, lang: &str, out: &e
         // Le curseur ne doit pas rester dans un bloc replié
         ed.folds.retain(|f| fold_at.get(f).is_none_or(|&e| !(cur_line > *f && cur_line <= e)) && fold_at.contains_key(f));
         let gutter_hover = ui.input(|i| i.pointer.hover_pos()).is_some_and(|p| p.x < origin.x && p.x > clip.left() - 80.0);
+        // Marques de modifications : différence avec la référence, recalculée quand le texte change
+        if let Some(rx) = &ed.base_rx {
+            if let Ok(r) = rx.try_recv() {
+                ed.base_rx = None;
+                if let Some(b) = r {
+                    ed.base = Some(std::sync::Arc::new(b));
+                    ed.base_git = true;
+                    ed.changes = None;
+                }
+            }
+        }
+        let hunks: Vec<Hunk> = match (&ed.base, view.changes) {
+            (Some(base), true) => {
+                use std::hash::{Hash, Hasher};
+                let mut hs = std::collections::hash_map::DefaultHasher::new();
+                text.hash(&mut hs);
+                let key = hs.finish();
+                if !ed.changes.as_ref().is_some_and(|c| c.0 == key && std::sync::Arc::ptr_eq(&c.1, base)) {
+                    ed.changes = Some((key, base.clone(), line_diff(base, text)));
+                }
+                ed.changes.as_ref().map(|c| c.2.clone()).unwrap_or_default()
+            }
+            _ => vec![],
+        };
+        let mut marks: HashMap<usize, (u8, usize)> = HashMap::new();
+        for (k, h) in hunks.iter().enumerate() {
+            if h.new.is_empty() {
+                marks.entry(h.new.start).or_insert((2, k));
+            } else {
+                for l in h.new.clone() {
+                    marks.insert(l, (h.kind(), k));
+                }
+            }
+        }
+        let last_line = lines.len().saturating_sub(1);
+        let mut hunk_click = None;
+        let mut hunk_anchor = None;
         let mut toggle = None;
         let mut fold_fg: Vec<(egui::Pos2, String, egui::Color32)> = vec![];
         for row in &out.galley.rows {
@@ -1554,6 +1740,28 @@ pub fn after(ui: &mut egui::Ui, ed: &mut Editor, text: &str, lang: &str, out: &e
                         bg.push(egui::Shape::line_segment([egui::pos2(x, r.top()), egui::pos2(x, r.bottom())], egui::Stroke::new(1.0, p.line.gamma_multiply(0.8))));
                         k += unit_cols;
                     }
+                    // Ligne ajoutée (vert), modifiée (bleu) ; lignes supprimées : petit triangle rouge
+                    let mark = marks.get(&line).copied().or_else(|| (line == last_line).then(|| marks.get(&(line + 1)).copied()).flatten().map(|(_, k)| (3, k)));
+                    if let Some((kind, k)) = mark {
+                        let x = origin.x - 15.5;
+                        let hit = egui::Rect::from_x_y_ranges(x - 2.0..=x + 5.0, r.y_range());
+                        let resp = ui.interact(hit, Id::unique(("hunk", line)), egui::Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
+                        let hot = resp.hovered() || ed.hunk_open == Some(k);
+                        let col = [p.success, p.info, p.missing, p.missing][kind as usize];
+                        match kind {
+                            0 | 1 => bg.push(egui::Shape::rect_filled(egui::Rect::from_x_y_ranges(x..=x + if hot { 4.0 } else { 3.0 }, r.top()..=r.bottom()), 0.0, col)),
+                            _ => {
+                                let y = if kind == 2 { r.top() } else { r.bottom() };
+                                bg.push(egui::Shape::convex_polygon(vec![egui::pos2(x, y - 4.0), egui::pos2(x + 5.0, y), egui::pos2(x, y + 4.0)], col, egui::Stroke::NONE));
+                            }
+                        }
+                        if resp.clicked() {
+                            hunk_click = Some(k);
+                        }
+                        if ed.hunk_open == Some(k) && hunk_anchor.is_none() {
+                            hunk_anchor = Some(egui::pos2(origin.x, r.top()));
+                        }
+                    }
                     if view.gutter {
                         let col = if line == cur_line { p.text } else { p.muted.gamma_multiply(0.75) };
                         fg.push((egui::pos2(origin.x - 18.0, r.center().y), (line + 1).to_string(), col));
@@ -1586,6 +1794,50 @@ pub fn after(ui: &mut egui::Ui, ed: &mut Editor, text: &str, lang: &str, out: &e
             }
         }
         ui.painter().set(view.bg, egui::Shape::Vec(bg));
+        if let Some(k) = hunk_click {
+            ed.hunk_open = if ed.hunk_open == Some(k) { None } else { Some(k) };
+        }
+        if ed.hunk_open.is_some_and(|k| k >= hunks.len()) {
+            ed.hunk_open = None;
+        }
+        // Bulle du bloc cliqué : les lignes d'avant, et de quoi les remettre
+        if let (Some(k), Some(at), Some(base)) = (ed.hunk_open, hunk_anchor, ed.base.clone()) {
+            let h = hunks[k].clone();
+            let old_lines: Vec<&str> = base.lines().skip(h.old.start).take(h.old.len()).collect();
+            let mut close = false;
+            egui::Area::new(Id::unique("hunk-pop")).order(egui::Order::Foreground).fixed_pos(at + egui::vec2(4.0, -6.0)).pivot(egui::Align2::LEFT_BOTTOM).show(ui.ctx(), |ui| {
+                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    ui.set_max_width(560.0);
+                    ui.horizontal(|ui| {
+                        let what = [crate::i18n::t("lignes ajoutées"), crate::i18n::t("lignes modifiées"), crate::i18n::t("lignes supprimées")][h.kind() as usize].clone();
+                        let since = crate::i18n::t(if ed.base_git { "depuis le dernier commit" } else { "depuis l'ouverture" });
+                        ui.label(RichText::new(format!("{what} · {since}")).color(p.muted).size(11.5));
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.small_button("✕").clicked() {
+                                close = true;
+                            }
+                            if ui.button(crate::i18n::t("restaurer")).on_hover_text(crate::i18n::t("Remettre ces lignes comme avant")).clicked() {
+                                ed.revert = Some(revert_hunk(&base, text, &h));
+                                close = true;
+                            }
+                        });
+                    });
+                    if !old_lines.is_empty() {
+                        egui::Frame::new().fill(p.missing.gamma_multiply(0.12)).inner_margin(6).show(ui, |ui| {
+                            for l in old_lines.iter().take(30) {
+                                ui.label(RichText::new(format!("- {l}")).monospace().size(view.font_size - 2.0).color(p.text));
+                            }
+                            if old_lines.len() > 30 {
+                                ui.label(RichText::new(format!("… +{}", old_lines.len() - 30)).color(p.muted).size(11.0));
+                            }
+                        });
+                    }
+                });
+            });
+            if close || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                ed.hunk_open = None;
+            }
+        }
         // Mini-carte à droite : tout le fichier en miniature, clic pour y aller
         let total = lines.len();
         if view.minimap && total > 40 {

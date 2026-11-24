@@ -296,6 +296,7 @@ struct App {
     files: files::FilesState,
     selected: Option<String>,
     backlinks: Vec<vault::Backlink>,
+    mentions: Vec<vault::Mention>,
     actions: Vec<Action>,
     dialog: Option<Dialog>,
     dialog_text: String,
@@ -1889,6 +1890,42 @@ impl App {
             Some(d) if vault::is_md(&d.rel) => vault::backlinks(&self.root(), &self.entries, &d.rel),
             _ => vec![],
         };
+        // Les notes ouvertes comptent avec leur texte en cours, pas celui du disque
+        let open: HashMap<String, String> = self.docs.iter().filter_map(|d| if let Content::Text(t) = &d.content { Some((d.rel.clone(), t.clone())) } else { None }).collect();
+        self.mentions = match self.current() {
+            Some(d) if vault::is_md(&d.rel) => vault::mentions(&self.root(), &self.entries, &d.rel, &|r| open.get(r).cloned()),
+            _ => vec![],
+        };
+    }
+
+    /// Change en lien [[ ]] la première mention (ou toutes) de la note courante dans `rel`
+    fn link_mention(&mut self, rel: &str, all: bool) {
+        let Some(name) = self.current().map(|d| vault::stem(&d.rel)) else { return };
+        let link_all = |mut t: String| {
+            let mut changed = false;
+            while let Some(nt) = vault::link_mention(&t, &name, 0) {
+                t = nt;
+                changed = true;
+                if !all {
+                    break;
+                }
+            }
+            changed.then_some(t)
+        };
+        if let Some(doc) = self.docs.iter_mut().find(|d| d.rel == rel) {
+            if let Content::Text(t) = &mut doc.content {
+                if let Some(nt) = link_all(t.clone()) {
+                    *t = nt;
+                    doc.dirty_since = Some(Instant::now());
+                }
+            }
+        } else {
+            let root = self.root();
+            if let Some(nt) = vault::read(&root, rel).ok().and_then(link_all) {
+                self.report(vault::write(&root, rel, &nt));
+            }
+        }
+        self.update_backlinks();
     }
 
     fn current(&self) -> Option<&Doc> {
@@ -2105,7 +2142,23 @@ impl App {
                     Err(e) => Content::Unreadable(e),
                 }
             };
-            self.docs.push(Doc { rel, content, dirty_since: None, preview: false, code: code::Editor::default() });
+            let mut code = code::Editor::default();
+            // Référence des marques de modifications : le texte à l'ouverture, puis le dernier commit git s'il existe
+            if let Content::Text(t) = &content {
+                code.base = Some(std::sync::Arc::new(t.clone()));
+                if let Ok(path) = vault::safe(&self.root(), &rel) {
+                    let (tx, rx) = std::sync::mpsc::channel();
+                    let ctx = self.ctx.clone();
+                    std::thread::spawn(move || {
+                        let _ = tx.send(code::git_base(&path));
+                        if let Some(c) = ctx {
+                            c.request_repaint();
+                        }
+                    });
+                    code.base_rx = Some(rx);
+                }
+            }
+            self.docs.push(Doc { rel, content, dirty_since: None, preview: false, code });
             self.active = Some(self.docs.len() - 1);
         }
         self.update_backlinks();
@@ -3604,10 +3657,14 @@ impl App {
                                 .layouter(&mut layouter);
                             let out = edit.show(ui);
                             changed |= out.response.changed();
-                            code::after(ui, ed, text, &lang, &out, &notes, typed_now && out.response.changed(), code::View { minimap: !is_md && self.prefs.minimap, gutter: numbers, font_size: fs, bg });
+                            code::after(ui, ed, text, &lang, &out, &notes, typed_now && out.response.changed(), code::View { minimap: !is_md && self.prefs.minimap, changes: !is_md, gutter: numbers, font_size: fs, bg });
                         });
                         });
                     });
+                    if let Some(nt) = doc.code.revert.take() {
+                        *text = nt;
+                        changed = true;
+                    }
                     if changed {
                         doc.dirty_since = Some(Instant::now());
                         if let Some(l) = &mut doc.code.lsp {
@@ -3704,6 +3761,37 @@ impl App {
                                 self.actions.push(Action::Open(b.rel.clone()));
                             }
                             ui.add_space(4.0);
+                        }
+                        ui.add_space(14.0);
+                        // Mentions non liées : le nom de la note écrit ailleurs, sans [[ ]]
+                        ui.label(caps(&format!("{} · {}", crate::i18n::t("mentions non liées"), self.mentions.len())));
+                        ui.add_space(4.0);
+                        if self.mentions.is_empty() {
+                            ui.label(RichText::new(crate::i18n::t("aucune autre note n'écrit ce nom")).color(p.muted).size(11.5));
+                        }
+                        let mut link = None;
+                        for m in self.mentions.clone() {
+                            egui::Frame::new().fill(p.bg).stroke(egui::Stroke::new(1.0, p.line)).inner_margin(8).show(ui, |ui| {
+                                ui.set_width(ui.available_width());
+                                ui.horizontal(|ui| {
+                                    if ui.add(egui::Button::new(RichText::new(&m.name).family(theme::bold()).size(12.5)).frame(false)).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                                        self.actions.push(Action::Open(m.rel.clone()));
+                                    }
+                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                        if m.count > 1 && ui.small_button(crate::i18n::t("tout lier")).on_hover_text(format!("{} {}", m.count, crate::i18n::t_mid("mentions"))).clicked() {
+                                            link = Some((m.rel.clone(), true));
+                                        }
+                                        if ui.small_button(crate::i18n::t("lier")).on_hover_text(crate::i18n::t("Changer la première mention en lien [[ ]]")).clicked() {
+                                            link = Some((m.rel.clone(), false));
+                                        }
+                                    });
+                                });
+                                ui.label(RichText::new(&m.excerpt).color(p.muted).size(11.0));
+                            });
+                            ui.add_space(4.0);
+                        }
+                        if let Some((rel, all)) = link {
+                            self.link_mention(&rel, all);
                         }
                         ui.add_space(16.0);
                     }

@@ -2223,5 +2223,18 @@
   "Arrivée douce": "Ease out",
   "retirer la clé": "remove key",
   "Passage vers la clé suivante": "Transition to the next key",
-  "Bézier": "Bézier"
+  "Bézier": "Bézier",
+  "mentions non liées": "unlinked mentions",
+  "aucune autre note n'écrit ce nom": "no other note writes this name",
+  "tout lier": "link all",
+  "lier": "link",
+  "mentions": "mentions",
+  "Changer la première mention en lien [[ ]]": "Turn the first mention into a [[ ]] link",
+  "lignes ajoutées": "added lines",
+  "lignes modifiées": "changed lines",
+  "lignes supprimées": "deleted lines",
+  "depuis le dernier commit": "since the last commit",
+  "depuis l'ouverture": "since the file was opened",
+  "restaurer": "restore",
+  "Remettre ces lignes comme avant": "Put these lines back as they were"
 }
