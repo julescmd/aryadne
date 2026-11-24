@@ -2302,6 +2302,19 @@ thread_local! {
 const ROW: f32 = 22.0;
 const HEAD: f32 = 24.0;
 const THUMB: f32 = 96.0;
+/// Couleur d'une catégorie de nodes (bande du haut, pastilles de la bibliothèque), d'après la maquette
+pub fn cat_color(cat: &str) -> Color32 {
+    match cat {
+        "sortie" => theme::pal().accent,
+        "entrée" | "motif" => Color32::from_rgb(0xc6, 0x95, 0x80),
+        "usure" => Color32::from_rgb(0xa6, 0x7f, 0x6f),
+        "couleur" => Color32::from_rgb(0x94, 0xb0, 0xd1),
+        "filtre" => Color32::from_rgb(0x7f, 0xb8, 0xbd),
+        "shader" => Color32::from_rgb(0x83, 0xb9, 0x9e),
+        _ => Color32::from_rgb(0x94, 0x8e, 0x91),
+    }
+}
+
 const CATS: [&str; 8] = ["entrée", "motif", "usure", "couleur", "math", "filtre", "shader", "sortie"];
 
 struct AddMenu {
@@ -2316,6 +2329,8 @@ struct AddMenu {
 }
 
 pub struct Editor {
+    /// Filtre de la bibliothèque de nodes (panneau de gauche)
+    lib_filter: String,
     pub path: PathBuf,
     root: String,
     pub graph: Graph,
@@ -2407,6 +2422,7 @@ impl Editor {
         let graph = Graph::load(&path)?;
         let program = Program::compile(&graph.effective(), root, 1024);
         let mut ed = Editor {
+            lib_filter: String::new(),
             path,
             root: root.to_string(),
             last: graph.clone(),
@@ -2712,11 +2728,122 @@ impl Editor {
             return;
         }
         let kind = self.graph.kind;
-        // Barre
+        // Disposition de la maquette : bibliothèque à gauche, aperçu et réglages à droite, graphe au centre
         let mut add_now: Option<&'static str> = None;
         let mut preset: Option<&'static str> = None;
-        ui.horizontal(|ui| {
-            egui::containers::menu::MenuButton::new(crate::i18n::t("＋ ajouter ▾")).ui(ui, |ui| {
+        let avail = ui.available_rect_before_wrap();
+        let lib_w = 240.0f32.min(avail.width() * 0.22);
+        let insp_w = 290.0f32.min(avail.width() * 0.28);
+        let lib_rect = Rect::from_min_size(avail.min, vec2(lib_w, avail.height()));
+        let insp_rect = Rect::from_min_max(pos2(avail.right() - insp_w, avail.top()), avail.max);
+        let graph_rect = Rect::from_min_max(pos2(lib_rect.right(), avail.top()), pos2(insp_rect.left(), avail.bottom()));
+        for r in [lib_rect, insp_rect] {
+            ui.painter().rect_filled(r, 0.0, p.panel);
+        }
+        ui.painter().vline(lib_rect.right() - 0.5, lib_rect.y_range(), Stroke::new(1.0, p.line));
+        ui.painter().vline(insp_rect.left() + 0.5, insp_rect.y_range(), Stroke::new(1.0, p.line));
+        // ---- Bibliothèque de nodes : chercher, puis une rangée par node, rangés par catégorie
+        {
+            let mut lui = ui.new_child(egui::UiBuilder::new().max_rect(lib_rect).layout(egui::Layout::top_down(egui::Align::Min)));
+            lui.set_clip_rect(lib_rect);
+            let (hr, _) = lui.allocate_exact_size(vec2(lib_rect.width(), 34.0), Sense::hover());
+            lui.painter().hline(hr.x_range(), hr.bottom() - 0.5, Stroke::new(1.0, p.line));
+            lui.painter().text(hr.left_center() + vec2(12.0, 0.0), egui::Align2::LEFT_CENTER, crate::i18n::t("Nodes"), egui::FontId::new(13.0, theme::bold()), p.text);
+            lui.add_space(10.0);
+            lui.horizontal(|ui| {
+                ui.add_space(12.0);
+                ui.add(egui::TextEdit::singleline(&mut self.lib_filter).hint_text(format!("{}  {}", crate::lucide::SEARCH, crate::i18n::t("Chercher un node"))).desired_width(lib_rect.width() - 24.0));
+            });
+            lui.add_space(4.0);
+            let f = crate::chat::fold(&self.lib_filter);
+            egui::ScrollArea::vertical().id_salt("node-lib").auto_shrink([false, false]).show(&mut lui, |ui| {
+                ui.spacing_mut().item_spacing.y = 0.0;
+                for cat in CATS {
+                    let items: Vec<&Def> = DEFS.iter().filter(|d| d.cat == cat && if kind == GraphKind::Material { d.mat } else { d.comp }).filter(|d| f.is_empty() || crate::chat::fold(&crate::i18n::t(d.label)).contains(&f)).collect();
+                    if items.is_empty() {
+                        continue;
+                    }
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        ui.add_space(12.0);
+                        ui.label(RichText::new(crate::i18n::sentence(&crate::i18n::t(cat))).size(11.0).color(p.muted));
+                    });
+                    ui.add_space(2.0);
+                    for d in items {
+                        let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 26.0), Sense::click_and_drag());
+                        if resp.hovered() {
+                            ui.painter().rect_filled(r, 0.0, p.line.linear_multiply(0.45));
+                        }
+                        ui.painter().rect_filled(Rect::from_center_size(pos2(r.left() + 16.0, r.center().y), vec2(8.0, 8.0)), 2.0, cat_color(cat));
+                        ui.painter().text(pos2(r.left() + 28.0, r.center().y), egui::Align2::LEFT_CENTER, crate::i18n::t(d.label), egui::FontId::proportional(12.5), p.text);
+                        if resp.on_hover_text(crate::i18n::t("cliquer pour l'ajouter au centre du graphe")).clicked() {
+                            add_now = Some(d.op);
+                        }
+                    }
+                }
+            });
+        }
+        // ---- Inspecteur : aperçu carré, puis le node choisi
+        let prev_rect = Rect::from_min_size(insp_rect.min + vec2(12.0, 46.0), vec2(insp_rect.width() - 24.0, insp_rect.width() - 24.0));
+        {
+            let (hr, _) = (Rect::from_min_size(insp_rect.min, vec2(insp_rect.width(), 34.0)), ());
+            ui.painter().hline(hr.x_range(), hr.bottom() - 0.5, Stroke::new(1.0, p.line));
+            let chip = Rect::from_min_size(hr.left_center() + vec2(6.0, -12.0), vec2(70.0, 24.0));
+            ui.painter().rect(chip, 2.0, p.raised, Stroke::new(1.0, p.line), egui::StrokeKind::Inside);
+            ui.painter().text(chip.center(), egui::Align2::CENTER_CENTER, crate::i18n::t(if kind == GraphKind::Material { "Matériau" } else { "Image" }), egui::FontId::proportional(12.5), p.text);
+        }
+        self.preview_ui(ui, prev_rect, &ctx);
+        {
+            let below = Rect::from_min_max(pos2(insp_rect.left() + 12.0, prev_rect.bottom() + 40.0), insp_rect.max - vec2(12.0, 8.0));
+            let mut iui = ui.new_child(egui::UiBuilder::new().max_rect(below).layout(egui::Layout::top_down(egui::Align::Min)));
+            iui.set_clip_rect(below);
+            iui.spacing_mut().item_spacing.y = 6.0;
+            if let Some(n) = self.selected.iter().next().and_then(|id| self.graph.nodes.iter().find(|n| n.id == *id)) {
+                if let Some(d) = DEFS.iter().find(|d| d.op == n.op) {
+                    iui.horizontal(|ui| {
+                        let (r, _) = ui.allocate_exact_size(vec2(10.0, 10.0), Sense::hover());
+                        ui.painter().rect_filled(r, 2.0, cat_color(d.cat));
+                        let title = if n.label.is_empty() { crate::i18n::t(d.label) } else { n.label.clone() };
+                        ui.label(RichText::new(title).size(15.0).family(theme::bold()));
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.label(RichText::new(crate::i18n::t(d.cat)).size(11.0).color(p.muted));
+                        });
+                    });
+                    iui.label(RichText::new(crate::i18n::t("Ses réglages sont sur le node. F2 : renommer · M : muet · P : miniature.")).size(11.5).color(p.muted));
+                }
+            } else {
+                iui.label(RichText::new(crate::i18n::t("Choisis un node pour voir son nom et sa catégorie ici.")).size(11.5).color(p.muted));
+            }
+            if let Err((_, e)) = &self.program {
+                iui.label(RichText::new(format!("⚠ {e}")).color(p.missing).size(11.5));
+            }
+            if let Some(m) = &self.message {
+                iui.label(RichText::new(m).color(p.muted).size(11.0));
+            }
+        }
+        if let Some(g) = preset.and_then(material_preset) {
+            self.graph = g;
+            self.scene = Rect::ZERO;
+            self.changed();
+        }
+        ui.painter().rect_filled(graph_rect, 0.0, p.bg);
+        // ---- En-tête flottant du graphe (une zone au-dessus du graphe, qui garde ses clics)
+        let hdr_w = (graph_rect.width() - 24.0).max(120.0);
+        egui::Area::new(ui.scope_id().with("node-hdr")).order(egui::Order::Middle).fixed_pos(graph_rect.min + vec2(12.0, 10.0)).show(&ctx, |ui| {
+            {
+                let v = &mut ui.style_mut().visuals.widgets;
+                v.inactive.weak_bg_fill = Color32::TRANSPARENT;
+                v.inactive.bg_stroke = Stroke::NONE;
+                v.hovered.weak_bg_fill = p.raised;
+                v.hovered.bg_stroke = Stroke::NONE;
+                v.open.weak_bg_fill = p.raised;
+            }
+            ui.spacing_mut().button_padding = vec2(6.0, 2.0);
+            egui::Frame::new().fill(p.panel).corner_radius(6).stroke(Stroke::new(1.0, p.line)).inner_margin(egui::Margin::symmetric(6, 5)).show(ui, |ui| {
+            ui.set_width(hdr_w - 14.0);
+            ui.set_clip_rect(Rect::from_min_size(graph_rect.min + vec2(12.0, 10.0), vec2(hdr_w, 40.0)));
+            ui.horizontal(|ui| {
+            egui::containers::menu::MenuButton::new(crate::i18n::t("Ajouter")).ui(ui, |ui| {
                 for cat in CATS {
                     let items: Vec<&Def> = DEFS.iter().filter(|d| d.cat == cat && if kind == GraphKind::Material { d.mat } else { d.comp }).collect();
                     if items.is_empty() {
@@ -2732,7 +2859,7 @@ impl Editor {
                 }
             });
             if kind == GraphKind::Material {
-                egui::containers::menu::MenuButton::new(crate::i18n::t("préréglages ▾")).ui(ui, |ui| {
+                egui::containers::menu::MenuButton::new(crate::i18n::t("Préréglages")).ui(ui, |ui| {
                     for name in MATERIAL_PRESETS {
                         if ui.button(name).on_hover_text(crate::i18n::t("remplace le graphe actuel")).clicked() {
                             preset = Some(name);
@@ -2740,49 +2867,38 @@ impl Editor {
                     }
                 });
             }
-            if ui.add_enabled(!self.undo.is_empty(), egui::Button::new("↶")).on_hover_text(crate::i18n::t("annuler (Ctrl+Z)")).clicked() {
-                self.undo();
-            }
-            if ui.add_enabled(!self.redo.is_empty(), egui::Button::new("↷")).on_hover_text(crate::i18n::t("rétablir (Ctrl+Maj+Z)")).clicked() {
-                self.redo();
-            }
-            egui::containers::menu::MenuButton::new(crate::i18n::t("aide ▾")).ui(ui, |ui| {
-                ui.label(RichText::new(crate::i18n::t("Maj+A ou clic droit : ajouter\nglisser dans le vide : sélection en rectangle (Maj : ajouter)\nclic molette ou clic droit glissé : se déplacer · molette : zoom\nglisser une sortie dans le vide : ajouter un node déjà relié\nCtrl+clic sur un lien : le couper\nA : tout · Alt+A : rien · X / Suppr : effacer\nMaj+D : dupliquer · Ctrl+C / Ctrl+V : copier, coller\nM : muet · H : réduire · P : miniature · F2 : renommer\nF : cadrer la sélection · Origine : tout cadrer\nCtrl+Z / Ctrl+Maj+Z : annuler, rétablir\nGlisser des images depuis l'ordinateur : nodes texture")).size(11.0));
-            });
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if kind == GraphKind::Compositor && ui.button(crate::i18n::t("exporter PNG")).clicked() {
-                    self.export();
-                }
-                if ui.button(crate::i18n::t("recadrer")).clicked() {
+            egui::containers::menu::MenuButton::new(crate::i18n::t("Vue")).ui(ui, |ui| {
+                if ui.button(crate::i18n::t("Tout cadrer   Origine")).clicked() {
                     self.scene = Rect::ZERO;
                 }
                 let all_on = self.graph.nodes.iter().filter(|n| n.op != "mat_out" && n.op != "comp_out").all(|n| n.preview);
-                if ui.selectable_label(all_on, crate::i18n::t("miniatures")).on_hover_text(crate::i18n::t("aperçu sous chaque node")).clicked() {
+                if ui.button(crate::i18n::t(if all_on { "Cacher les miniatures" } else { "Montrer les miniatures" })).clicked() {
                     for n in self.graph.nodes.iter_mut().filter(|n| n.op != "mat_out" && n.op != "comp_out") {
                         n.preview = !all_on;
                     }
                     self.changed();
                 }
-                if let Some(m) = &self.message {
-                    ui.label(RichText::new(m).color(p.muted).size(11.0));
+                ui.separator();
+                if ui.add_enabled(!self.undo.is_empty(), egui::Button::new(crate::i18n::t("Annuler   Ctrl+Z"))).clicked() {
+                    self.undo();
+                }
+                if ui.add_enabled(!self.redo.is_empty(), egui::Button::new(crate::i18n::t("Rétablir   Ctrl+Maj+Z"))).clicked() {
+                    self.redo();
                 }
             });
+            egui::containers::menu::MenuButton::new(crate::i18n::t("Aide")).ui(ui, |ui| {
+                ui.label(RichText::new(crate::i18n::t("Maj+A ou clic droit : ajouter\nglisser dans le vide : sélection en rectangle (Maj : ajouter)\nclic molette ou clic droit glissé : se déplacer · molette : zoom\nglisser une sortie dans le vide : ajouter un node déjà relié\nCtrl+clic sur un lien : le couper\nA : tout · Alt+A : rien · X / Suppr : effacer\nMaj+D : dupliquer · Ctrl+C / Ctrl+V : copier, coller\nM : muet · H : réduire · P : miniature · F2 : renommer\nF : cadrer la sélection · Origine : tout cadrer\nCtrl+Z / Ctrl+Maj+Z : annuler, rétablir\nGlisser des images depuis l'ordinateur : nodes texture")).size(11.0));
+            });
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if kind == GraphKind::Compositor && ui.button(crate::i18n::t("Exporter PNG")).clicked() {
+                    self.export();
+                }
+                let name = self.path.file_name().map(|n| crate::formats::strip(&n.to_string_lossy()).to_string()).unwrap_or_default();
+                ui.label(RichText::new(format!("{name} · {} {}", self.graph.nodes.len(), crate::i18n::t_mid("nodes"))).size(11.0).color(p.muted));
+            });
+            });
+            });
         });
-        if let Some(g) = preset.and_then(material_preset) {
-            self.graph = g;
-            self.scene = Rect::ZERO;
-            self.changed();
-        }
-        if let Err((_, e)) = &self.program {
-            ui.label(RichText::new(format!("⚠ {e}")).color(p.missing).size(11.5));
-        }
-        // Aperçu à gauche, graphe à droite
-        let avail = ui.available_rect_before_wrap();
-        let pw = (avail.width() * 0.3).clamp(200.0, 440.0);
-        let prev_rect = Rect::from_min_size(avail.min, vec2(pw, pw.min(avail.height())));
-        let graph_rect = Rect::from_min_max(pos2(avail.min.x + pw + 8.0, avail.min.y), avail.max);
-        self.preview_ui(ui, prev_rect, &ctx);
-        ui.painter().rect_filled(graph_rect, 0.0, p.panel);
         let mut child = ui.new_child(egui::UiBuilder::new().max_rect(graph_rect));
         let over_graph = ctx.pointer_latest_pos().is_some_and(|pt| graph_rect.contains(pt));
         // Cadrage : tout (premier affichage, « recadrer », Origine) ou la sélection (F)
@@ -3336,10 +3452,11 @@ impl Editor {
             let fr = self.graph.frames[k].clone();
             let r = Rect::from_min_size(pos2(fr.rect[0], fr.rect[1]), vec2(fr.rect[2], fr.rect[3]));
             let col = Color32::from_rgb(fr.color[0], fr.color[1], fr.color[2]);
-            painter.rect_filled(r, 2.0, col.gamma_multiply(0.12));
-            painter.rect_stroke(r, 2.0, Stroke::new(1.0, col.gamma_multiply(0.6)), egui::StrokeKind::Inside);
+            // Groupe comme la maquette : fond à peine teinté, contour en pointillés, titre discret
+            painter.rect_filled(r, 10.0, col.gamma_multiply(0.06));
+            let pts = vec![r.left_top(), r.right_top(), r.right_bottom(), r.left_bottom(), r.left_top()];
+            painter.extend(egui::Shape::dashed_line(&pts, Stroke::new(1.0, col.gamma_multiply(0.7)), 5.0, 4.0));
             let title = Rect::from_min_size(r.min, vec2(r.width(), 26.0));
-            painter.rect_filled(title, 2.0, col.gamma_multiply(0.35));
             match &mut self.frame_rename {
                 Some((fk, text)) if *fk == k => {
                     let mut child = ui.new_child(egui::UiBuilder::new().max_rect(title.shrink(3.0)));
@@ -3352,7 +3469,7 @@ impl Editor {
                     }
                 }
                 _ => {
-                    painter.text(title.left_center() + vec2(8.0, 0.0), egui::Align2::LEFT_CENTER, &fr.label, egui::FontId::monospace(13.0), p.text);
+                    painter.text(title.left_center() + vec2(10.0, 0.0), egui::Align2::LEFT_CENTER, format!("{} · {}", crate::i18n::t("Groupe"), fr.label), egui::FontId::proportional(12.0), p.muted);
                 }
             }
             let tr = ui.interact(title, ui.scope_id().with(("frame-title", k)), Sense::click_and_drag());
@@ -3471,27 +3588,21 @@ impl Editor {
             let ni = ids.iter().position(|x| x == id).unwrap();
             let selected = self.selected.contains(id);
             let (muted, is_collapsed, preview_on) = (self.graph.nodes[ni].muted, self.graph.nodes[ni].collapsed, self.graph.nodes[ni].preview);
-            let cat_col = match d.cat {
-                "sortie" => p.accent,
-                "entrée" => Color32::from_rgb(70, 130, 200),
-                "motif" => Color32::from_rgb(140, 100, 190),
-                "couleur" => Color32::from_rgb(200, 150, 50),
-                "filtre" => Color32::from_rgb(60, 160, 120),
-                "shader" => Color32::from_rgb(210, 70, 110),
-                _ => Color32::from_rgb(120, 120, 130),
-            };
+            let cat_col = cat_color(d.cat);
             let cat_col = if muted { Color32::from_gray(130) } else { cat_col };
             let hover_node = pointer.is_some_and(|pt| r.contains(pt));
-            painter.rect_filled(r.translate(vec2(3.0, 3.0)), 0.0, Color32::from_black_alpha(30));
-            painter.rect_filled(*r, 0.0, if muted { p.panel } else { p.bg });
+            // Comme la maquette : carte du panneau, coins de 6 px, bande de couleur de 3 px en haut
+            painter.rect_filled(r.translate(vec2(0.0, 3.0)), 6.0, Color32::from_black_alpha(40));
+            painter.rect_filled(*r, 6.0, if muted { p.bg } else { p.panel });
             // Tout le node est cliquable (déclaré avant ses réglages et ses prises, qui gardent la priorité)
             let body = ui.interact(*r, ui.scope_id().with(("node-body", *id)), Sense::click_and_drag());
             let head = Rect::from_min_size(r.min, vec2(r.width(), HEAD));
-            painter.rect_filled(head, 0.0, cat_col.gamma_multiply(0.85));
+            painter.rect_filled(Rect::from_min_size(head.min, vec2(head.width(), 3.0)), egui::CornerRadius { nw: 6, ne: 6, sw: 0, se: 0 }, cat_col);
+            painter.hline(head.x_range(), head.bottom() - 0.5, Stroke::new(1.0, p.line));
             // Flèche réduire, titre, miniature
             let arrow = Rect::from_min_size(head.min, vec2(20.0, HEAD));
             let ar = ui.interact(arrow, ui.scope_id().with(("node-arrow", *id)), Sense::click());
-            painter.text(arrow.center(), egui::Align2::CENTER_CENTER, if is_collapsed { "▸" } else { "▾" }, egui::FontId::monospace(11.0), Color32::WHITE);
+            painter.text(arrow.center() + vec2(1.0, 1.0), egui::Align2::CENTER_CENTER, if is_collapsed { crate::lucide::CHEVRON_RIGHT } else { crate::lucide::CHEVRON_DOWN }, egui::FontId::proportional(12.0), p.muted);
             if ar.clicked() {
                 actions.push(Act::Node(*id, NodeOp::Collapse));
             }
@@ -3499,7 +3610,7 @@ impl Editor {
             let eye = Rect::from_min_size(pos2(head.right() - 22.0, head.top()), vec2(22.0, HEAD));
             if has_out && d.cat != "sortie" {
                 let er = ui.interact(eye, ui.scope_id().with(("node-eye", *id)), Sense::click()).on_hover_text(crate::i18n::t("miniature (P)"));
-                painter.text(eye.center(), egui::Align2::CENTER_CENTER, if preview_on { "◉" } else { "○" }, egui::FontId::monospace(11.0), Color32::WHITE);
+                painter.text(eye.center() + vec2(0.0, 1.0), egui::Align2::CENTER_CENTER, if preview_on { crate::lucide::EYE } else { crate::lucide::EYE_OFF }, egui::FontId::proportional(12.0), p.muted);
                 if er.clicked() {
                     actions.push(Act::Node(*id, NodeOp::Preview));
                 }
@@ -3511,14 +3622,14 @@ impl Editor {
             match &mut self.rename {
                 Some((rid, text)) if rid == id => {
                     let mut child = ui.new_child(egui::UiBuilder::new().max_rect(title_rect.shrink(2.0)));
-                    let te = child.add(egui::TextEdit::singleline(text).desired_width(title_rect.width() - 6.0).font(egui::FontId::monospace(11.0)));
+                    let te = child.add(egui::TextEdit::singleline(text).desired_width(title_rect.width() - 6.0).font(egui::FontId::proportional(11.0)));
                     te.request_focus();
                     if te.lost_focus() || child.input(|i| i.key_pressed(egui::Key::Enter)) {
                         rename_done = Some((*id, text.clone()));
                     }
                 }
                 _ => {
-                    painter.with_clip_rect(title_rect).text(title_rect.left_center(), egui::Align2::LEFT_CENTER, title, egui::FontId::monospace(12.0), Color32::WHITE);
+                    painter.with_clip_rect(title_rect).text(title_rect.left_center() + vec2(0.0, 1.0), egui::Align2::LEFT_CENTER, title, egui::FontId::new(12.5, theme::bold()), p.text);
                 }
             }
             let border = if err_node == Some(*id) {
@@ -3530,7 +3641,7 @@ impl Editor {
             } else {
                 Stroke::new(1.0, p.line)
             };
-            painter.rect_stroke(*r, 0.0, border, egui::StrokeKind::Outside);
+            painter.rect_stroke(*r, 6.0, border, egui::StrokeKind::Outside);
             let alt = ui.input(|i| i.modifiers.alt);
             let hr = ui.interact(title_rect, ui.scope_id().with(("node-head", *id)), Sense::click_and_drag());
             for resp in [&hr, &body] {
@@ -3580,7 +3691,7 @@ impl Editor {
             for (k, (name, sock)) in d.outputs.iter().enumerate() {
                 let sp = out_pos[&(*id, k)];
                 if !is_collapsed {
-                    painter.text(pos2(r.right() - 12.0, sp.y), egui::Align2::RIGHT_CENTER, crate::i18n::t(name), egui::FontId::monospace(11.0), p.text);
+                    painter.text(pos2(r.right() - 12.0, sp.y), egui::Align2::RIGHT_CENTER, crate::i18n::t(name), egui::FontId::proportional(11.0), p.text);
                 }
                 let hov = pointer.is_some_and(|pt| sp.distance(pt) < 9.0);
                 painter.circle(sp, if hov { 6.5 } else { 5.0 }, sock_color(*sock), Stroke::new(1.0, p.bg));
@@ -3611,10 +3722,10 @@ impl Editor {
                 let y = sp.y;
                 let row = Rect::from_min_size(pos2(r.left() + 10.0, y - ROW * 0.5 + 1.0), vec2(NW - 20.0, ROW - 2.0));
                 if linked {
-                    painter.text(row.left_center(), egui::Align2::LEFT_CENTER, crate::i18n::t(name), egui::FontId::monospace(11.0), p.text);
+                    painter.text(row.left_center(), egui::Align2::LEFT_CENTER, crate::i18n::t(name), egui::FontId::proportional(11.0), p.text);
                 } else if *name == "coordonnées" {
                     // Rien à régler à la main : sans lien, le motif suit la surface
-                    painter.text(row.left_center(), egui::Align2::LEFT_CENTER, crate::i18n::t(name), egui::FontId::monospace(11.0), p.muted);
+                    painter.text(row.left_center(), egui::Align2::LEFT_CENTER, crate::i18n::t(name), egui::FontId::proportional(11.0), p.muted);
                 } else {
                     while node.values.len() <= k {
                         node.values.push(d.inputs[node.values.len()].2);
@@ -3696,12 +3807,12 @@ impl Editor {
                         let prompt = self.ai_prompt.entry(*id).or_default();
                         let busy = self.ai_rx.is_some();
                         child.horizontal(|ui| {
-                            ui.add(egui::TextEdit::singleline(prompt).hint_text(crate::i18n::t("décris l'effet…")).desired_width(NW - 64.0).font(egui::FontId::monospace(10.5)));
+                            ui.add(egui::TextEdit::singleline(prompt).hint_text(crate::i18n::t("décris l'effet…")).desired_width(NW - 64.0).font(egui::FontId::proportional(10.5)));
                             if ui.add_enabled(!busy && !prompt.trim().is_empty(), egui::Button::new(RichText::new(if busy { "…" } else { "IA" }).size(10.5))).on_hover_text(crate::i18n::t("L'IA écrit le shader")).clicked() {
                                 self.ai_request = Some((*id, prompt.trim().to_string()));
                             }
                         });
-                        let te = egui::TextEdit::multiline(code).code_editor().desired_width(NW - 18.0).desired_rows(7).font(egui::FontId::monospace(10.5));
+                        let te = egui::TextEdit::multiline(code).code_editor().desired_width(NW - 18.0).desired_rows(7).font(egui::FontId::proportional(10.5));
                         if child.add(te).changed() {
                             actions.push(Act::Changed);
                         }
@@ -3948,7 +4059,7 @@ impl Editor {
                         painter.image(t.id(), ir, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
                     }
                     None => {
-                        painter.text(tr.center(), egui::Align2::CENTER_CENTER, "…", egui::FontId::monospace(11.0), p.muted);
+                        painter.text(tr.center(), egui::Align2::CENTER_CENTER, "…", egui::FontId::proportional(11.0), p.muted);
                     }
                 }
             }

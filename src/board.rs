@@ -199,6 +199,7 @@ impl Tool {
 }
 
 /// Les outils de dessin, dans l'ordre de la barre : (outil, icône, nom, touche).
+#[allow(dead_code)]
 pub const DRAW_TOOLS: [(Tool, &str, &str, &str); 6] = [
     (Tool::Pen, "✎", "pinceau", "B"),
     (Tool::Eraser, "⌫", "gomme", "E"),

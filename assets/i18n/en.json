@@ -1816,5 +1816,18 @@
   "Ouvrir": "Open",
   "Médias": "Media",
   "Clip": "Clip",
-  "Effets": "Effects"
+  "Effets": "Effects",
+  "Nodes": "Nodes",
+  "Chercher un node": "Search nodes",
+  "cliquer pour l'ajouter au centre du graphe": "click to add it at the center of the graph",
+  "Ses réglages sont sur le node. F2 : renommer · M : muet · P : miniature.": "Its settings are on the node. F2: rename · M: mute · P: thumbnail.",
+  "Choisis un node pour voir son nom et sa catégorie ici.": "Select a node to see its name and category here.",
+  "Préréglages": "Presets",
+  "Tout cadrer   Origine": "Frame all   Home",
+  "Cacher les miniatures": "Hide thumbnails",
+  "Montrer les miniatures": "Show thumbnails",
+  "Rétablir   Ctrl+Maj+Z": "Redo   Ctrl+Shift+Z",
+  "Aide": "Help",
+  "Exporter PNG": "Export PNG",
+  "Groupe": "Group"
 }

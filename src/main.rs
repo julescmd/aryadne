@@ -2626,7 +2626,7 @@ impl App {
 
             // Barre du document, comme la maquette : 34 px, chemin à gauche, actions sans cadre à droite
             // La 3D n'a pas de barre de document dans la maquette : la vue prend tout
-            let show_bar = !matches!(self.docs[i].content, Content::Model(_) | Content::Montage(_));
+            let show_bar = !matches!(self.docs[i].content, Content::Model(_) | Content::Montage(_) | Content::Nodes(_));
             if show_bar {
             let bar = egui::Frame::new().inner_margin(egui::Margin::symmetric(12, 0)).show(ui, |ui| {
                 ui.set_width(ui.available_width());
@@ -2842,7 +2842,7 @@ impl App {
                     egui::Frame::new().inner_margin(egui::Margin::symmetric(12, 8)).show(ui, |ui| ed.show(ui));
                 }
                 Content::Nodes(ed) => {
-                    egui::Frame::new().inner_margin(egui::Margin::symmetric(12, 8)).show(ui, |ui| ed.show(ui));
+                    ed.show(ui);
                     if let Some(path) = ed.open_request.take() {
                         open_material = Some(path);
                     }
