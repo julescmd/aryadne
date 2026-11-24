@@ -2351,5 +2351,11 @@
   "Couleur d'arrière-plan": "Background color",
   "Couleur de premier plan": "Foreground color",
   "Échanger les couleurs (X)": "Swap colors (X)",
-  "Noir et blanc par défaut (D)": "Default black and white (D)"
+  "Noir et blanc par défaut (D)": "Default black and white (D)",
+  "Options de fusion (styles)…": "Blending Options (styles)…",
+  "Styles de calque : ombre portée, lueur, incrustation, contour": "Layer styles: drop shadow, glow, overlay, stroke",
+  "Style de calque": "Layer Style",
+  "Styles actifs": "Styles on",
+  "Lueur externe": "Outer Glow",
+  "Incrustation couleur": "Color Overlay"
 }

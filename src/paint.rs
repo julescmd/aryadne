@@ -213,6 +213,143 @@ impl Adj {
     }
 }
 
+/// Styles de calque (comme Photoshop) : ombre portée, lueur externe, incrustation couleur, contour
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug, Default)]
+pub struct Fx {
+    #[serde(default)]
+    pub on: bool,
+    pub shadow: Option<FxShadow>,
+    pub glow: Option<FxGlow>,
+    pub overlay: Option<FxOverlay>,
+    pub stroke: Option<FxStroke>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Debug)]
+pub struct FxShadow {
+    pub dx: f32,
+    pub dy: f32,
+    pub blur: f32,
+    pub color: [u8; 3],
+    pub opacity: f32,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Debug)]
+pub struct FxGlow {
+    pub size: f32,
+    pub color: [u8; 3],
+    pub opacity: f32,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Debug)]
+pub struct FxOverlay {
+    pub color: [u8; 3],
+    pub opacity: f32,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Debug)]
+pub struct FxStroke {
+    pub size: f32,
+    pub color: [u8; 3],
+    pub opacity: f32,
+}
+
+impl Fx {
+    fn is_plain(&self) -> bool {
+        *self == Fx::default()
+    }
+
+    pub fn active(&self) -> bool {
+        self.on && (self.shadow.is_some() || self.glow.is_some() || self.overlay.is_some() || self.stroke.is_some())
+    }
+
+    /// Ce qui demande les pixels voisins (à précalculer)
+    fn needs_maps(&self) -> bool {
+        self.on && (self.shadow.is_some() || self.glow.is_some() || self.stroke.is_some())
+    }
+}
+
+/// Couvertures précalculées des effets, à la taille du document (0..255)
+#[derive(Default)]
+pub struct FxMaps {
+    w: usize,
+    shadow: Vec<u8>,
+    glow: Vec<u8>,
+    stroke: Vec<u8>,
+}
+
+impl FxMaps {
+    fn get(v: &[u8], w: usize, x: i32, y: i32) -> f32 {
+        if v.is_empty() || x < 0 || y < 0 || x as usize >= w {
+            return 0.0;
+        }
+        v.get(y as usize * w + x as usize).map(|a| *a as f32 / 255.0).unwrap_or(0.0)
+    }
+}
+
+/// Maximum glissant (rayon r) en deux passes : épaissit une couverture
+fn dilate(a: &[f32], w: usize, h: usize, r: usize) -> Vec<f32> {
+    if r == 0 {
+        return a.to_vec();
+    }
+    let mut t = vec![0.0f32; w * h];
+    for y in 0..h {
+        for x in 0..w {
+            let (x0, x1) = (x.saturating_sub(r), (x + r).min(w - 1));
+            t[y * w + x] = a[y * w + x0..=y * w + x1].iter().cloned().fold(0.0, f32::max);
+        }
+    }
+    let mut o = vec![0.0f32; w * h];
+    for x in 0..w {
+        for y in 0..h {
+            let (y0, y1) = (y.saturating_sub(r), (y + r).min(h - 1));
+            o[y * w + x] = (y0..=y1).map(|k| t[k * w + x]).fold(0.0, f32::max);
+        }
+    }
+    o
+}
+
+/// Flou (trois passes de moyenne glissante, proche d'un flou gaussien)
+fn blur(a: &[f32], w: usize, h: usize, radius: f32) -> Vec<f32> {
+    let r = (radius / 3.0).round() as usize;
+    if r == 0 {
+        return a.to_vec();
+    }
+    let mut cur = a.to_vec();
+    for _ in 0..3 {
+        let mut t = vec![0.0f32; w * h];
+        for y in 0..h {
+            let row = &cur[y * w..(y + 1) * w];
+            let mut acc = 0.0f32;
+            let n = (2 * r + 1) as f32;
+            for k in 0..=r.min(w - 1) {
+                acc += row[k];
+            }
+            acc += row[0] * r as f32;
+            for x in 0..w {
+                t[y * w + x] = acc / n;
+                let add = row[(x + r + 1).min(w - 1)];
+                let sub = row[x.saturating_sub(r)];
+                acc += add - sub;
+            }
+        }
+        let mut o = vec![0.0f32; w * h];
+        for x in 0..w {
+            let mut acc = 0.0f32;
+            let n = (2 * r + 1) as f32;
+            for k in 0..=r.min(h - 1) {
+                acc += t[k * w + x];
+            }
+            acc += t[x] * r as f32;
+            for y in 0..h {
+                o[y * w + x] = acc / n;
+                acc += t[(y + r + 1).min(h - 1) * w + x] - t[y.saturating_sub(r) * w + x];
+            }
+        }
+        cur = o;
+    }
+    cur
+}
+
 #[derive(Clone)]
 pub struct Layer {
     pub name: String,
@@ -241,6 +378,9 @@ pub struct Layer {
     pub adj: Option<Adj>,
     /// Groupe du calque (0 : aucun)
     pub group: u32,
+    /// Styles de calque, et leurs couvertures précalculées
+    pub fx: Fx,
+    pub fx_maps: Option<std::sync::Arc<FxMaps>>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -268,6 +408,8 @@ struct LayerHead {
     adj: Option<Adj>,
     #[serde(default)]
     group: u32,
+    #[serde(default, skip_serializing_if = "Fx::is_plain")]
+    fx: Fx,
 }
 
 fn yes() -> bool {
@@ -291,7 +433,7 @@ struct Head {
 
 impl Layer {
     pub fn blank(name: &str, w: usize, h: usize) -> Layer {
-        Layer { name: name.to_string(), visible: true, opacity: 1.0, blend: Blend::Normal, off: [0, 0], w, h, px: vec![0; w * h * 4], mask: None, mask_on: true, fill: 1.0, lock_alpha: false, lock_all: false, clip: false, adj: None, group: 0 }
+        Layer { name: name.to_string(), visible: true, opacity: 1.0, blend: Blend::Normal, off: [0, 0], w, h, px: vec![0; w * h * 4], mask: None, mask_on: true, fill: 1.0, lock_alpha: false, lock_all: false, clip: false, adj: None, group: 0, fx: Fx::default(), fx_maps: None }
     }
 
     pub fn filled(name: &str, w: usize, h: usize, c: [u8; 4]) -> Layer {
@@ -324,6 +466,45 @@ impl Layer {
             }
             _ => 1.0,
         }
+    }
+
+    /// Précalcule les couvertures des styles (ombre, lueur, contour) pour un document w × h
+    pub fn bake_fx(&mut self, w: usize, h: usize) {
+        if !self.fx.needs_maps() || w == 0 || h == 0 {
+            self.fx_maps = None;
+            return;
+        }
+        let mut a = vec![0.0f32; w * h];
+        for y in 0..h {
+            for x in 0..w {
+                a[y * w + x] = self.at(x as i32, y as i32)[3] as f32 / 255.0 * self.mask_at(x as i32, y as i32);
+            }
+        }
+        let q = |v: Vec<f32>| v.into_iter().map(|x| (x.clamp(0.0, 1.0) * 255.0).round() as u8).collect::<Vec<u8>>();
+        let mut m = FxMaps { w, ..Default::default() };
+        if let Some(sh) = self.fx.shadow {
+            // Décalée puis floue
+            let (dx, dy) = (sh.dx.round() as i32, sh.dy.round() as i32);
+            let mut moved = vec![0.0f32; w * h];
+            for y in 0..h as i32 {
+                for x in 0..w as i32 {
+                    let (sx, sy) = (x - dx, y - dy);
+                    if sx >= 0 && sy >= 0 && (sx as usize) < w && (sy as usize) < h {
+                        moved[y as usize * w + x as usize] = a[sy as usize * w + sx as usize];
+                    }
+                }
+            }
+            m.shadow = q(blur(&moved, w, h, sh.blur));
+        }
+        if let Some(g) = self.fx.glow {
+            m.glow = q(blur(&dilate(&a, w, h, (g.size * 0.3).round() as usize), w, h, g.size));
+        }
+        if let Some(st) = self.fx.stroke {
+            // Contour extérieur : ce que l'épaississement ajoute autour
+            let d = dilate(&a, w, h, st.size.round().max(1.0) as usize);
+            m.stroke = q(d.iter().zip(a.iter()).map(|(d, a)| (d - a).max(0.0)).collect());
+        }
+        self.fx_maps = Some(std::sync::Arc::new(m));
     }
 
     /// Un masque blanc (tout montrer) ou noir, à la taille du document
@@ -383,7 +564,28 @@ fn stack(d: &mut [f32; 4], layers: &[&Layer], x: i32, y: i32, mul: f32) {
         if !l.visible {
             continue;
         }
-        over(d, [s[0] as f32 / 255.0, s[1] as f32 / 255.0, s[2] as f32 / 255.0], a * l.opacity * l.fill * mul, l.blend);
+        let mut sc = [s[0] as f32 / 255.0, s[1] as f32 / 255.0, s[2] as f32 / 255.0];
+        if l.fx.active() {
+            let maps = l.fx_maps.as_deref();
+            let col = |c: [u8; 3]| c.map(|v| v as f32 / 255.0);
+            let op = l.opacity * mul;
+            if let (Some(sh), Some(m)) = (l.fx.shadow, maps) {
+                over(d, col(sh.color), FxMaps::get(&m.shadow, m.w, x, y) * sh.opacity * op, Blend::Multiply);
+            }
+            if let (Some(g), Some(m)) = (l.fx.glow, maps) {
+                over(d, col(g.color), FxMaps::get(&m.glow, m.w, x, y) * g.opacity * op, Blend::Screen);
+            }
+            if let Some(o) = l.fx.overlay {
+                let oc = col(o.color);
+                sc = [0, 1, 2].map(|k| sc[k] + (oc[k] - sc[k]) * o.opacity);
+            }
+            over(d, sc, a * l.opacity * l.fill * mul, l.blend);
+            if let (Some(st), Some(m)) = (l.fx.stroke, maps) {
+                over(d, col(st.color), FxMaps::get(&m.stroke, m.w, x, y) * st.opacity * op, Blend::Normal);
+            }
+            continue;
+        }
+        over(d, sc, a * l.opacity * l.fill * mul, l.blend);
     }
 }
 
@@ -425,7 +627,7 @@ impl Doc {
             w: self.w,
             h: self.h,
             active: self.active,
-            layers: self.layers.iter().map(|l| LayerHead { name: l.name.clone(), visible: l.visible, opacity: l.opacity, blend: l.blend, off: l.off, w: l.w, h: l.h, mask: l.mask.is_some(), mask_on: l.mask_on, fill: l.fill, lock_alpha: l.lock_alpha, lock_all: l.lock_all, clip: l.clip, adj: l.adj, group: l.group }).collect(),
+            layers: self.layers.iter().map(|l| LayerHead { name: l.name.clone(), visible: l.visible, opacity: l.opacity, blend: l.blend, off: l.off, w: l.w, h: l.h, mask: l.mask.is_some(), mask_on: l.mask_on, fill: l.fill, lock_alpha: l.lock_alpha, lock_all: l.lock_all, clip: l.clip, adj: l.adj, group: l.group, fx: l.fx.clone() }).collect(),
             groups: self.groups.clone(),
         };
         let json = serde_json::to_vec(&head).map_err(|e| e.to_string())?;
@@ -483,7 +685,7 @@ impl Doc {
             } else {
                 None
             };
-            layers.push(Layer { name: lh.name, visible: lh.visible, opacity: lh.opacity, blend: lh.blend, off: lh.off, w, h, px, mask, mask_on: lh.mask_on, fill: lh.fill, lock_alpha: lh.lock_alpha, lock_all: lh.lock_all, clip: lh.clip, adj: lh.adj, group: lh.group });
+            layers.push(Layer { name: lh.name, visible: lh.visible, opacity: lh.opacity, blend: lh.blend, off: lh.off, w, h, px, mask, mask_on: lh.mask_on, fill: lh.fill, lock_alpha: lh.lock_alpha, lock_all: lh.lock_all, clip: lh.clip, adj: lh.adj, group: lh.group, fx: lh.fx, fx_maps: None });
         }
         if layers.is_empty() {
             layers.push(Layer::blank("calque 1", head.w, head.h));
@@ -530,7 +732,18 @@ impl Doc {
 
     pub fn flatten(&self) -> image::RgbaImage {
         let mut out = vec![0u8; self.w * self.h * 4];
-        self.composite(&mut out, [0, 0, self.w, self.h]);
+        // Les styles ont besoin de leurs couvertures : calculées ici si elles manquent
+        if self.layers.iter().any(|l| l.fx.needs_maps() && l.fx_maps.is_none()) {
+            let mut d = self.clone();
+            for l in &mut d.layers {
+                if l.fx.needs_maps() && l.fx_maps.is_none() {
+                    l.bake_fx(d.w, d.h);
+                }
+            }
+            d.composite(&mut out, [0, 0, self.w, self.h]);
+        } else {
+            self.composite(&mut out, [0, 0, self.w, self.h]);
+        }
         image::RgbaImage::from_raw(self.w as u32, self.h as u32, out).unwrap_or_default()
     }
 }
@@ -705,6 +918,9 @@ pub struct Editor {
     pub bg_color: Color32,
     /// Sélecteur de couleur ouvert (arrière-plan ?) et sa place
     swatch_pick: Option<bool>,
+    /// Styles de calque à recalculer ; fenêtre des styles ouverte (calque)
+    fx_due: bool,
+    fx_window: Option<usize>,
     swallow_click: bool,
     swatch_at: Pos2,
     pub size: f32,
@@ -831,6 +1047,8 @@ impl Editor {
             tool: Tool::Brush,
             bg_color: Color32::WHITE,
             swatch_pick: None,
+            fx_due: true,
+            fx_window: None,
             swallow_click: false,
             swatch_at: Pos2::ZERO,
             text: None,
@@ -886,6 +1104,7 @@ impl Editor {
         });
         self.save_due = Some(Instant::now());
         self.thumbs_due = true;
+        self.fx_due = true;
     }
 
     fn all(&mut self) {
@@ -1592,6 +1811,23 @@ impl Editor {
             }
             y = canvas.top() + (row + 1) as f32 * cell;
             row += 1;
+        }
+        // Styles : leurs couvertures sont recalculées quand un calque change (pas pendant un trait)
+        if self.fx_due && self.stroke.is_none() && self.drag_from.is_none() {
+            self.fx_due = false;
+            let (w, h) = (self.doc.w, self.doc.h);
+            let mut any = false;
+            for l in &mut self.doc.layers {
+                if l.fx.needs_maps() {
+                    l.bake_fx(w, h);
+                    any = true;
+                } else {
+                    l.fx_maps = None;
+                }
+            }
+            if any {
+                self.dirty = Some([0, 0, w, h]);
+            }
         }
         // Recomposer ce qui a changé, puis envoyer à la carte graphique
         if let Some(d) = self.dirty.take() {
@@ -2504,6 +2740,14 @@ impl Editor {
                     if l.lock_all || l.lock_alpha {
                         painter.text(egui::pos2(row.right() - 8.0, row.center().y), egui::Align2::RIGHT_CENTER, crate::lucide::LOCK, egui::FontId::proportional(11.0), p.muted);
                     }
+                    if l.fx.active() {
+                        // « fx » comme dans Photoshop ; clic : ouvrir les styles
+                        let fr = egui::Rect::from_center_size(egui::pos2(row.right() - 26.0, row.center().y), vec2(18.0, 16.0));
+                        painter.text(fr.center(), egui::Align2::CENTER_CENTER, "fx", egui::FontId::proportional(11.5), p.text);
+                        if ui.interact(fr, ui.scope_id().with(("fxbadge", i)), egui::Sense::click()).clicked() {
+                            self.fx_window = Some(i);
+                        }
+                    }
                 }
                 if resp.clicked() && pick.is_none() && toggle.is_none() {
                     pick = Some((i, false));
@@ -2527,6 +2771,7 @@ impl Editor {
                         ("Supprimer le masque", has_mask),
                         ("", true),
                         (if self.doc.layers[i].clip { "Annuler le masque d'écrêtage" } else { "Créer un masque d'écrêtage" }, i > 0),
+                        ("Options de fusion (styles)…", self.doc.layers[i].adj.is_none()),
                         ("", true),
                         ("Grouper le calque (Ctrl+G)", self.doc.layers[i].group == 0),
                         ("Sortir du groupe", self.doc.layers[i].group != 0),
@@ -2628,6 +2873,7 @@ impl Editor {
                     self.all();
                 }
                 "Appliquer le masque" => self.apply_mask(),
+                "Options de fusion (styles)…" => self.fx_window = Some(i),
                 "Grouper le calque (Ctrl+G)" => self.group_active(),
                 "Sortir du groupe" => {
                     self.checkpoint();
@@ -2658,6 +2904,85 @@ impl Editor {
                 }
             }
         }
+        // Fenêtre des styles du calque
+        if let Some(i) = self.fx_window.filter(|&i| i < self.doc.layers.len()) {
+            let mut open = true;
+            let mut ch = false;
+            let name = self.doc.layers[i].name.clone();
+            egui::Window::new(format!("{} · {name}", crate::i18n::t("Style de calque"))).id(egui::Id::unique("paint-fx")).pivot(egui::Align2::RIGHT_TOP).default_pos(ctx.content_rect().right_top() + vec2(-300.0, 140.0)).open(&mut open).resizable(false).collapsible(false).show(&ctx, |ui| {
+                let fx = &mut self.doc.layers[i].fx;
+                ch |= ui.checkbox(&mut fx.on, crate::i18n::t("Styles actifs")).changed();
+                ui.separator();
+                let rgb = |ui: &mut egui::Ui, c: &mut [u8; 3]| ui.color_edit_button_srgb(c).changed();
+                let pct = |ui: &mut egui::Ui, v: &mut f32| {
+                    let mut o = (*v * 100.0).round();
+                    let r = ui.add(egui::DragValue::new(&mut o).range(0.0..=100.0).suffix(" %")).changed();
+                    if r {
+                        *v = o / 100.0;
+                    }
+                    r
+                };
+                let mut on = fx.shadow.is_some();
+                if ui.checkbox(&mut on, crate::i18n::t("Ombre portée")).changed() {
+                    fx.shadow = on.then_some(FxShadow { dx: 6.0, dy: 8.0, blur: 10.0, color: [0, 0, 0], opacity: 0.6 });
+                    fx.on = true;
+                    ch = true;
+                }
+                if let Some(sh) = &mut fx.shadow {
+                    ui.horizontal(|ui| {
+                        ch |= rgb(ui, &mut sh.color);
+                        ch |= pct(ui, &mut sh.opacity);
+                        ch |= ui.add(egui::DragValue::new(&mut sh.dx).speed(0.5).prefix("x ")).changed();
+                        ch |= ui.add(egui::DragValue::new(&mut sh.dy).speed(0.5).prefix("y ")).changed();
+                        ch |= ui.add(egui::DragValue::new(&mut sh.blur).speed(0.3).range(0.0..=200.0).prefix(crate::i18n::t("taille ")).suffix(" px")).changed();
+                    });
+                }
+                let mut on = fx.glow.is_some();
+                if ui.checkbox(&mut on, crate::i18n::t("Lueur externe")).changed() {
+                    fx.glow = on.then_some(FxGlow { size: 14.0, color: [255, 236, 170], opacity: 0.75 });
+                    fx.on = true;
+                    ch = true;
+                }
+                if let Some(g) = &mut fx.glow {
+                    ui.horizontal(|ui| {
+                        ch |= rgb(ui, &mut g.color);
+                        ch |= pct(ui, &mut g.opacity);
+                        ch |= ui.add(egui::DragValue::new(&mut g.size).speed(0.3).range(1.0..=200.0).prefix(crate::i18n::t("taille ")).suffix(" px")).changed();
+                    });
+                }
+                let mut on = fx.overlay.is_some();
+                if ui.checkbox(&mut on, crate::i18n::t("Incrustation couleur")).changed() {
+                    fx.overlay = on.then_some(FxOverlay { color: [220, 60, 60], opacity: 1.0 });
+                    fx.on = true;
+                    ch = true;
+                }
+                if let Some(o) = &mut fx.overlay {
+                    ui.horizontal(|ui| {
+                        ch |= rgb(ui, &mut o.color);
+                        ch |= pct(ui, &mut o.opacity);
+                    });
+                }
+                let mut on = fx.stroke.is_some();
+                if ui.checkbox(&mut on, crate::i18n::t("Contour")).changed() {
+                    fx.stroke = on.then_some(FxStroke { size: 3.0, color: [0, 0, 0], opacity: 1.0 });
+                    fx.on = true;
+                    ch = true;
+                }
+                if let Some(st) = &mut fx.stroke {
+                    ui.horizontal(|ui| {
+                        ch |= rgb(ui, &mut st.color);
+                        ch |= pct(ui, &mut st.opacity);
+                        ch |= ui.add(egui::DragValue::new(&mut st.size).speed(0.2).range(1.0..=100.0).prefix(crate::i18n::t("taille ")).suffix(" px")).changed();
+                    });
+                }
+            });
+            if ch {
+                self.all();
+            }
+            if !open {
+                self.fx_window = None;
+            }
+        }
         // Barre du bas, comme Photoshop : masque, réglage, nouveau calque, supprimer
         ui.separator();
         ui.horizontal(|ui| {
@@ -2665,6 +2990,9 @@ impl Editor {
                 let b = |ui: &mut egui::Ui, icon: &str, tip: &str| ui.add(egui::Button::new(egui::RichText::new(icon).size(14.0)).frame(false).min_size(vec2(24.0, 22.0))).on_hover_text(crate::i18n::t(tip));
                 if b(ui, crate::lucide::TRASH_2, "Supprimer le calque").clicked() {
                     self.delete_layer();
+                }
+                if ui.add(egui::Button::new(egui::RichText::new("fx").size(12.0).italics().strong()).frame(false).min_size(vec2(24.0, 22.0))).on_hover_text(crate::i18n::t("Styles de calque : ombre portée, lueur, incrustation, contour")).clicked() && self.doc.layers[self.doc.active].adj.is_none() {
+                    self.fx_window = Some(self.doc.active);
                 }
                 if b(ui, crate::lucide::FOLDER, "Grouper le calque (Ctrl+G)").clicked() && self.doc.layers[self.doc.active].group == 0 {
                     self.group_active();
@@ -2756,6 +3084,20 @@ mod tests {
         assert_eq!(h.flatten().get_pixel(0, 0).0, [255, 128, 128, 255]);
         h.groups[0].visible = false;
         assert_eq!(h.flatten().get_pixel(0, 0).0, [255, 255, 255, 255]);
+        // Styles : un contour noir apparaît autour d'un carré rouge, et l'ombre se pose dessous
+        let mut st = Doc::new(12, 12, true);
+        let mut sq = Layer::blank("carré", 12, 12);
+        for y in 4..8 {
+            for x in 4..8 {
+                sq.px[(y * 12 + x) * 4..(y * 12 + x) * 4 + 4].copy_from_slice(&[255, 0, 0, 255]);
+            }
+        }
+        sq.fx = Fx { on: true, stroke: Some(FxStroke { size: 2.0, color: [0, 0, 0], opacity: 1.0 }), ..Default::default() };
+        st.layers.push(sq);
+        let img = st.flatten();
+        assert_eq!(img.get_pixel(5, 5).0, [255, 0, 0, 255]);
+        assert_eq!(img.get_pixel(3, 5).0, [0, 0, 0, 255], "contour autour");
+        assert_eq!(img.get_pixel(0, 0).0, [255, 255, 255, 255]);
         // Modes : écran et luminosité
         assert_eq!(Blend::Screen.mix([0.5; 3], [0.5; 3]), [0.75; 3]);
         let l = Blend::Luminosity.mix([1.0, 0.0, 0.0], [0.5, 0.5, 0.5]);
