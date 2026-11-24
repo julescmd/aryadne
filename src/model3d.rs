@@ -2498,6 +2498,8 @@ pub struct Viewer {
     mesh: Option<MeshEdit>,
     /// Mode édition : sommets déplacés pendant le geste, affichés sur place ; écrits au relâché
     mesh_moved: bool,
+    /// Trajectoire de l'objet choisi : signature, points (une image sur deux au plus) et positions des clés
+    motion_path: Option<(String, Vec<V3>, Vec<(i32, V3)>)>,
     mesh_unsaved: bool,
     /// Correspondance sommets affichés → sommets du maillage édité (objet, nombre de sommets, liste)
     mesh_map: Option<(usize, usize, Vec<(u32, u32)>)>,
@@ -2694,6 +2696,7 @@ impl Viewer {
             box_sel: None,
             mesh: None,
             mesh_moved: false,
+            motion_path: None,
             mesh_unsaved: false,
             mesh_map: None,
             mesh_toggle: false,
@@ -7912,6 +7915,65 @@ impl Viewer {
                     self.box_sel = None;
                 }
                 ui.ctx().request_repaint();
+            }
+            // Trajectoire de l'objet animé choisi : son chemin dans l'espace, ses clés, l'image actuelle
+            if let Some(k) = self.scene_sel.filter(|&k| k < scene.objects.len()) {
+                // L'objet ou un de ses parents bouge : la signature réunit leurs clés
+                let mut chain = vec![k];
+                while let Some(pk) = scene.parent_of(*chain.last().unwrap()).filter(|p| !chain.contains(p)) {
+                    chain.push(pk);
+                }
+                let animated = chain.iter().any(|&i| scene.objects[i].keys.len() >= 2);
+                if animated {
+                    let sig = format!("{k}|{}|{}|{}", scene.start, scene.end, chain.iter().map(|&i| serde_json::to_string(&scene.objects[i].keys).unwrap_or_default() + &format!("{:?}", scene.objects[i].parent)).collect::<String>());
+                    if self.motion_path.as_ref().is_none_or(|m| m.0 != sig) {
+                        let mut sc = scene.clone();
+                        let (a, b) = (scene.start, scene.end.max(scene.start + 1));
+                        let step = (((b - a) as f32) / 400.0).max(0.25);
+                        let mut pts = vec![];
+                        let mut f = a as f32;
+                        while f <= b as f32 + 1e-3 {
+                            sc.apply_frame(f);
+                            pts.push(sc.world(k, [0.0; 3]));
+                            f += step;
+                        }
+                        let mut frames: Vec<i32> = chain.iter().flat_map(|&i| scene.objects[i].keys.iter().map(|x| x.frame)).collect();
+                        frames.sort();
+                        frames.dedup();
+                        let keys = frames
+                            .into_iter()
+                            .map(|kf| {
+                                sc.apply_frame(kf as f32);
+                                (kf, sc.world(k, [0.0; 3]))
+                            })
+                            .collect();
+                        self.motion_path = Some((sig, pts, keys));
+                    }
+                    if let Some((_, pts, keys)) = &self.motion_path {
+                        let line: Vec<Pos2> = pts.iter().filter_map(|v| project(*v)).collect();
+                        if line.len() > 1 {
+                            over.add(egui::Shape::line(line.clone(), Stroke::new(3.0, Color32::from_black_alpha(90))));
+                            over.add(egui::Shape::line(line, Stroke::new(1.5, p.warning.gamma_multiply(0.85))));
+                        }
+                        // Petits points : une image sur cinq, pour lire la vitesse (serrés = lent)
+                        let step = ((scene.end - scene.start).max(1) as f32 / (pts.len().max(2) - 1) as f32).max(1e-3);
+                        let every = (5.0 / step).round().max(1.0) as usize;
+                        for v in pts.iter().step_by(every) {
+                            if let Some(q) = project(*v) {
+                                over.circle_filled(q, 1.6, p.warning.gamma_multiply(0.7));
+                            }
+                        }
+                        for (kf, v) in keys {
+                            if let Some(q) = project(*v) {
+                                let col = if (*kf as f32 - self.anim_frame).abs() < 0.5 { p.accent } else { p.warning };
+                                crate::keys::draw(&over, q, 4.5, None, col, true, false);
+                                over.text(q + egui::vec2(7.0, -7.0), egui::Align2::LEFT_BOTTOM, kf.to_string(), egui::FontId::proportional(10.0), p.muted);
+                            }
+                        }
+                    }
+                } else {
+                    self.motion_path = None;
+                }
             }
             let mut in_box: Vec<usize> = vec![];
             for (k, o) in scene.objects.iter().enumerate() {
