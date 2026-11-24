@@ -172,6 +172,19 @@ mod diff_tests {
     }
 
     #[test]
+    fn menu_slash() {
+        let t = "intro\n/tab";
+        let p = suggest(t, t.chars().count(), "md", &[], &[], false).unwrap();
+        assert_eq!(p.items[0].0, "Tableau");
+        let t = "  /tâ";
+        assert_eq!(suggest(t, t.chars().count(), "md", &[], &[], false).unwrap().items[0].0, "Tâche");
+        // Pas dans le code, ni au milieu d'une phrase
+        assert!(suggest("/tab", 4, "py", &[], &[], false).is_none_or(|p| p.items.iter().all(|i| i.1 != "commande")));
+        assert!(suggest("a /tab", 6, "md", &[], &[], false).is_none_or(|p| p.items.iter().all(|i| i.1 != "commande")));
+        assert!(slash_body("Date du jour").unwrap().starts_with("20"));
+    }
+
+    #[test]
     fn en_tetes_collants() {
         let t = "fn a() {\n    if x {\n        y();\n        z();\n    }\n}\nfn b() {}";
         assert_eq!(sticky_headers(t, 3, 3), vec![0, 1]);
@@ -778,6 +791,14 @@ fn accept(c: &mut Ctx, p: &Popup, i: usize, lang: &str) {
     let y = byte_of(c.text, p.cursor).max(x);
     let mut ins = word.clone();
     let mut back = 0;
+    if kind == &"commande" {
+        if let Some(body) = slash_body(word) {
+            let cur = body.find("$0").unwrap_or(body.len());
+            let body = body.replace("$0", "");
+            c.set(x, y, &body, (x + cur, x + cur));
+            return;
+        }
+    }
     if kind == &"note" {
         // [[note]] : on ferme les crochets s'ils ne le sont pas déjà
         if !c.text[y..].starts_with("]]") {
@@ -2105,10 +2126,54 @@ fn matching_bracket(text: &str, b: usize) -> Option<(usize, usize)> {
     check(b).or_else(|| b.checked_sub(1).and_then(check))
 }
 
+/// Le menu « / » des notes : (nom, texte inséré, où va le curseur : $0)
+const SLASH: &[(&str, &str)] = &[
+    ("Titre 1", "# $0"),
+    ("Titre 2", "## $0"),
+    ("Titre 3", "### $0"),
+    ("Liste à puces", "- $0"),
+    ("Liste numérotée", "1. $0"),
+    ("Tâche", "- [ ] $0"),
+    ("Citation", "> $0"),
+    ("Encadré", "> [!note] $0\n> "),
+    ("Encadré astuce", "> [!astuce] $0\n> "),
+    ("Encadré attention", "> [!attention] $0\n> "),
+    ("Tableau", "| $0 |  |\n|---|---|\n|  |  |"),
+    ("Bloc de code", "```\n$0\n```"),
+    ("Séparateur", "---\n$0"),
+    ("Lien vers une note", "[[$0]]"),
+    ("Note intégrée", "![[$0]]"),
+    ("Image", "![[$0]]"),
+    ("Date du jour", "@date$0"),
+    ("Propriétés", "---\ntags: [$0]\n---\n"),
+];
+
+/// Le texte d'une commande « / », date du jour comprise
+fn slash_body(name: &str) -> Option<String> {
+    let (_, body) = SLASH.iter().find(|(n, _)| *n == name)?;
+    Some(body.replace("@date", &chrono::Local::now().format("%Y-%m-%d").to_string()))
+}
+
 fn suggest(text: &str, ci: usize, lang: &str, notes: &[String], project: &[String], force: bool) -> Option<Popup> {
     let b = byte_of(text, ci);
     let ls = line_start(text, b);
     let line = &text[ls..b];
+    // « / » en début de ligne d'une note : le menu d'insertion
+    if lang == "md" {
+        let t = line.trim_start();
+        if let Some(q) = t.strip_prefix('/').filter(|q| !q.contains(' ') || q.chars().count() < 14) {
+            if !q.contains('/') {
+                let ql = crate::chat::fold(q);
+                let mut items: Vec<(String, &'static str)> = SLASH.iter().filter(|(n, _)| crate::chat::fold(n).contains(&ql)).map(|(n, _)| (n.to_string(), "commande")).collect();
+                // Ce qui commence par la saisie d'abord
+                items.sort_by_key(|(n, _)| !crate::chat::fold(n).starts_with(&ql));
+                if !items.is_empty() {
+                    let at = ls + (line.len() - t.len());
+                    return Some(Popup { items, sel: 0, start: char_of(text, at), cursor: ci });
+                }
+            }
+        }
+    }
     // [[note : suggestions de notes
     if let Some(i) = line.rfind("[[") {
         let q = &line[i + 2..];
