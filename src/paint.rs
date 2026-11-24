@@ -26,38 +26,139 @@ pub enum Blend {
     Darken,
     Lighten,
     Difference,
+    ColorBurn,
+    LinearBurn,
+    ColorDodge,
+    SoftLight,
+    HardLight,
+    VividLight,
+    LinearLight,
+    PinLight,
+    Exclusion,
+    Subtract,
+    Divide,
+    Hue,
+    Saturation,
+    Color,
+    Luminosity,
 }
 
 impl Blend {
-    pub const ALL: [(Blend, &'static str); 8] = [
-        (Blend::Normal, "fusion normale"),
-        (Blend::Multiply, "produit"),
-        (Blend::Screen, "superposition (écran)"),
-        (Blend::Overlay, "incrustation"),
-        (Blend::Add, "addition"),
-        (Blend::Darken, "obscurcir"),
-        (Blend::Lighten, "éclaircir"),
-        (Blend::Difference, "différence"),
+    /// Dans l'ordre de Photoshop, par groupes (un `None` sépare les groupes)
+    pub const MENU: [Option<(Blend, &'static str)>; 28] = [
+        Some((Blend::Normal, "Normal")),
+        None,
+        Some((Blend::Darken, "Obscurcir")),
+        Some((Blend::Multiply, "Produit")),
+        Some((Blend::ColorBurn, "Densité couleur +")),
+        Some((Blend::LinearBurn, "Densité linéaire +")),
+        None,
+        Some((Blend::Lighten, "Éclaircir")),
+        Some((Blend::Screen, "Superposition")),
+        Some((Blend::ColorDodge, "Densité couleur -")),
+        Some((Blend::Add, "Densité linéaire - (ajout)")),
+        None,
+        Some((Blend::Overlay, "Incrustation")),
+        Some((Blend::SoftLight, "Lumière tamisée")),
+        Some((Blend::HardLight, "Lumière crue")),
+        Some((Blend::VividLight, "Lumière vive")),
+        Some((Blend::LinearLight, "Lumière linéaire")),
+        Some((Blend::PinLight, "Lumière ponctuelle")),
+        None,
+        Some((Blend::Difference, "Différence")),
+        Some((Blend::Exclusion, "Exclusion")),
+        Some((Blend::Subtract, "Soustraction")),
+        Some((Blend::Divide, "Division")),
+        None,
+        Some((Blend::Hue, "Teinte")),
+        Some((Blend::Saturation, "Saturation")),
+        Some((Blend::Color, "Couleur")),
+        Some((Blend::Luminosity, "Luminosité")),
     ];
 
-    fn mix(self, d: f32, s: f32) -> f32 {
+    pub fn name(self) -> &'static str {
+        Blend::MENU.iter().flatten().find(|b| b.0 == self).map(|b| b.1).unwrap_or("Normal")
+    }
+
+    /// Mélange une couleur `s` (calque) sur `d` (dessous), en 0..1
+    fn mix(self, d: [f32; 3], s: [f32; 3]) -> [f32; 3] {
+        let ch = |f: fn(f32, f32) -> f32| [f(d[0], s[0]), f(d[1], s[1]), f(d[2], s[2])];
         match self {
             Blend::Normal => s,
-            Blend::Multiply => d * s,
-            Blend::Screen => 1.0 - (1.0 - d) * (1.0 - s),
-            Blend::Overlay => {
-                if d < 0.5 {
-                    2.0 * d * s
+            Blend::Multiply => ch(|d, s| d * s),
+            Blend::Screen => ch(|d, s| 1.0 - (1.0 - d) * (1.0 - s)),
+            Blend::Overlay => ch(|d, s| if d < 0.5 { 2.0 * d * s } else { 1.0 - 2.0 * (1.0 - d) * (1.0 - s) }),
+            Blend::Add => ch(|d, s| (d + s).min(1.0)),
+            Blend::Darken => ch(f32::min),
+            Blend::Lighten => ch(f32::max),
+            Blend::Difference => ch(|d, s| (d - s).abs()),
+            Blend::ColorBurn => ch(|d, s| if d >= 1.0 { 1.0 } else if s <= 0.0 { 0.0 } else { 1.0 - ((1.0 - d) / s).min(1.0) }),
+            Blend::LinearBurn => ch(|d, s| (d + s - 1.0).max(0.0)),
+            Blend::ColorDodge => ch(|d, s| if d <= 0.0 { 0.0 } else if s >= 1.0 { 1.0 } else { (d / (1.0 - s)).min(1.0) }),
+            Blend::SoftLight => ch(|d, s| {
+                if s <= 0.5 {
+                    d - (1.0 - 2.0 * s) * d * (1.0 - d)
                 } else {
-                    1.0 - 2.0 * (1.0 - d) * (1.0 - s)
+                    let g = if d <= 0.25 { ((16.0 * d - 12.0) * d + 4.0) * d } else { d.sqrt() };
+                    d + (2.0 * s - 1.0) * (g - d)
                 }
-            }
-            Blend::Add => (d + s).min(1.0),
-            Blend::Darken => d.min(s),
-            Blend::Lighten => d.max(s),
-            Blend::Difference => (d - s).abs(),
+            }),
+            Blend::HardLight => ch(|d, s| if s < 0.5 { 2.0 * d * s } else { 1.0 - 2.0 * (1.0 - d) * (1.0 - s) }),
+            Blend::VividLight => ch(|d, s| {
+                if s < 0.5 {
+                    if s <= 0.0 { 0.0 } else { (1.0 - (1.0 - d) / (2.0 * s)).max(0.0) }
+                } else if s >= 1.0 {
+                    1.0
+                } else {
+                    (d / (2.0 * (1.0 - s))).min(1.0)
+                }
+            }),
+            Blend::LinearLight => ch(|d, s| (d + 2.0 * s - 1.0).clamp(0.0, 1.0)),
+            Blend::PinLight => ch(|d, s| if s < 0.5 { d.min(2.0 * s) } else { d.max(2.0 * s - 1.0) }),
+            Blend::Exclusion => ch(|d, s| d + s - 2.0 * d * s),
+            Blend::Subtract => ch(|d, s| (d - s).max(0.0)),
+            Blend::Divide => ch(|d, s| if s <= 0.0 { 1.0 } else { (d / s).min(1.0) }),
+            Blend::Hue => set_lum(set_sat(s, sat(d)), lum(d)),
+            Blend::Saturation => set_lum(set_sat(d, sat(s)), lum(d)),
+            Blend::Color => set_lum(s, lum(d)),
+            Blend::Luminosity => set_lum(d, lum(s)),
         }
     }
+}
+
+// Modes non séparables (teinte, saturation, couleur, luminosité), comme dans la norme de mélange des PDF
+fn lum(c: [f32; 3]) -> f32 {
+    0.3 * c[0] + 0.59 * c[1] + 0.11 * c[2]
+}
+
+fn clip_color(c: [f32; 3]) -> [f32; 3] {
+    let l = lum(c);
+    let (n, x) = (c[0].min(c[1]).min(c[2]), c[0].max(c[1]).max(c[2]));
+    let mut c = c;
+    if n < 0.0 {
+        c = c.map(|v| l + (v - l) * l / (l - n).max(1e-6));
+    }
+    if x > 1.0 {
+        c = c.map(|v| l + (v - l) * (1.0 - l) / (x - l).max(1e-6));
+    }
+    c
+}
+
+fn set_lum(c: [f32; 3], l: f32) -> [f32; 3] {
+    let d = l - lum(c);
+    clip_color(c.map(|v| v + d))
+}
+
+fn sat(c: [f32; 3]) -> f32 {
+    c[0].max(c[1]).max(c[2]) - c[0].min(c[1]).min(c[2])
+}
+
+fn set_sat(c: [f32; 3], s: f32) -> [f32; 3] {
+    let (n, x) = (c[0].min(c[1]).min(c[2]), c[0].max(c[1]).max(c[2]));
+    if x - n <= 1e-6 {
+        return [0.0; 3];
+    }
+    c.map(|v| (v - n) * s / (x - n))
 }
 
 #[derive(Clone)]
@@ -72,6 +173,18 @@ pub struct Layer {
     pub h: usize,
     /// RGBA, alpha non prémultiplié
     pub px: Vec<u8>,
+    /// Masque de fusion : un calque gris (blanc montre, noir cache), à la taille du document
+    pub mask: Option<Box<Layer>>,
+    /// Masque actif (Maj+clic sur sa vignette le désactive : croix rouge)
+    pub mask_on: bool,
+    /// Fond (comme dans Photoshop : l'opacité du contenu, sans les effets)
+    pub fill: f32,
+    /// Verrou de la transparence : on ne peint que là où il y a déjà des pixels
+    pub lock_alpha: bool,
+    /// Verrou complet : ni peinture ni déplacement
+    pub lock_all: bool,
+    /// Masque d'écrêtage : le calque n'apparaît que sur les pixels du calque de dessous
+    pub clip: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -83,6 +196,26 @@ struct LayerHead {
     off: [i32; 2],
     w: usize,
     h: usize,
+    #[serde(default)]
+    mask: bool,
+    #[serde(default = "yes")]
+    mask_on: bool,
+    #[serde(default = "one")]
+    fill: f32,
+    #[serde(default)]
+    lock_alpha: bool,
+    #[serde(default)]
+    lock_all: bool,
+    #[serde(default)]
+    clip: bool,
+}
+
+fn yes() -> bool {
+    true
+}
+
+fn one() -> f32 {
+    1.0
 }
 
 #[derive(Serialize, Deserialize)]
@@ -96,7 +229,7 @@ struct Head {
 
 impl Layer {
     pub fn blank(name: &str, w: usize, h: usize) -> Layer {
-        Layer { name: name.to_string(), visible: true, opacity: 1.0, blend: Blend::Normal, off: [0, 0], w, h, px: vec![0; w * h * 4] }
+        Layer { name: name.to_string(), visible: true, opacity: 1.0, blend: Blend::Normal, off: [0, 0], w, h, px: vec![0; w * h * 4], mask: None, mask_on: true, fill: 1.0, lock_alpha: false, lock_all: false, clip: false }
     }
 
     pub fn filled(name: &str, w: usize, h: usize, c: [u8; 4]) -> Layer {
@@ -115,6 +248,25 @@ impl Layer {
         }
         let i = (ly as usize * self.w + lx as usize) * 4;
         [self.px[i], self.px[i + 1], self.px[i + 2], self.px[i + 3]]
+    }
+
+    /// Ce que le masque laisse voir aux coordonnées du document (1 sans masque ; blanc hors du masque)
+    pub fn mask_at(&self, x: i32, y: i32) -> f32 {
+        match (&self.mask, self.mask_on) {
+            (Some(m), true) => {
+                let (lx, ly) = (x - m.off[0], y - m.off[1]);
+                if lx < 0 || ly < 0 || lx as usize >= m.w || ly as usize >= m.h {
+                    return 1.0;
+                }
+                m.px[(ly as usize * m.w + lx as usize) * 4] as f32 / 255.0
+            }
+            _ => 1.0,
+        }
+    }
+
+    /// Un masque blanc (tout montrer) ou noir, à la taille du document
+    pub fn new_mask(w: usize, h: usize, v: u8) -> Box<Layer> {
+        Box::new(Layer::filled("masque", w, h, [v, v, v, 255]))
     }
 }
 
@@ -138,18 +290,21 @@ impl Doc {
             w: self.w,
             h: self.h,
             active: self.active,
-            layers: self.layers.iter().map(|l| LayerHead { name: l.name.clone(), visible: l.visible, opacity: l.opacity, blend: l.blend, off: l.off, w: l.w, h: l.h }).collect(),
+            layers: self.layers.iter().map(|l| LayerHead { name: l.name.clone(), visible: l.visible, opacity: l.opacity, blend: l.blend, off: l.off, w: l.w, h: l.h, mask: l.mask.is_some(), mask_on: l.mask_on, fill: l.fill, lock_alpha: l.lock_alpha, lock_all: l.lock_all, clip: l.clip }).collect(),
         };
         let json = serde_json::to_vec(&head).map_err(|e| e.to_string())?;
         let mut out = b"ARYIMG1\n".to_vec();
         out.extend((json.len() as u32).to_le_bytes());
         out.extend(json);
+        // Chaque calque en PNG, suivi de son masque s'il en a un
         for l in &self.layers {
-            let mut png = vec![];
-            let img = image::RgbaImage::from_raw(l.w as u32, l.h as u32, l.px.clone()).ok_or("calque invalide")?;
-            img.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).map_err(|e| e.to_string())?;
-            out.extend((png.len() as u32).to_le_bytes());
-            out.extend(png);
+            for part in std::iter::once(l).chain(l.mask.as_deref()) {
+                let mut png = vec![];
+                let img = image::RgbaImage::from_raw(part.w as u32, part.h as u32, part.px.clone()).ok_or("calque invalide")?;
+                img.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).map_err(|e| e.to_string())?;
+                out.extend((png.len() as u32).to_le_bytes());
+                out.extend(png);
+            }
         }
         // Écrit à côté puis remplace : un plantage pendant l'écriture ne casse pas le fichier
         let tmp = path.with_extension("aryimg.tmp");
@@ -178,12 +333,21 @@ impl Doc {
         let head: Head = serde_json::from_slice(b.get(at..at + n).ok_or("fichier coupé")?).map_err(|e| e.to_string())?;
         at += n;
         let mut layers = vec![];
+        let png = |at: &mut usize| -> Result<(usize, usize, Vec<u8>), String> {
+            let n = rd(at)?;
+            let img = image::load_from_memory(b.get(*at..*at + n).ok_or("fichier coupé")?).map_err(|e| e.to_string())?.to_rgba8();
+            *at += n;
+            Ok((img.width() as usize, img.height() as usize, img.into_raw()))
+        };
         for lh in head.layers {
-            let n = rd(&mut at)?;
-            let img = image::load_from_memory(b.get(at..at + n).ok_or("fichier coupé")?).map_err(|e| e.to_string())?.to_rgba8();
-            at += n;
-            let (w, h) = (img.width() as usize, img.height() as usize);
-            layers.push(Layer { name: lh.name, visible: lh.visible, opacity: lh.opacity, blend: lh.blend, off: lh.off, w, h, px: img.into_raw() });
+            let (w, h, px) = png(&mut at)?;
+            let mask = if lh.mask {
+                let (mw, mh, mpx) = png(&mut at)?;
+                Some(Box::new(Layer { px: mpx, ..Layer::blank("masque", mw, mh) }))
+            } else {
+                None
+            };
+            layers.push(Layer { name: lh.name, visible: lh.visible, opacity: lh.opacity, blend: lh.blend, off: lh.off, w, h, px, mask, mask_on: lh.mask_on, fill: lh.fill, lock_alpha: lh.lock_alpha, lock_all: lh.lock_all, clip: lh.clip });
         }
         if layers.is_empty() {
             layers.push(Layer::blank("calque 1", head.w, head.h));
@@ -191,25 +355,41 @@ impl Doc {
         Ok(Doc { w: head.w, h: head.h, active: head.active.min(layers.len() - 1), layers })
     }
 
-    /// Mélange les calques visibles dans `out` (RGBA du document) pour la zone `r` (x0, y0, x1, y1).
+    /// Mélange les calques visibles dans `out` (RGBA du document) pour la zone `r` (x0, y0, x1, y1) :
+    /// opacité × fond × masque, masques d'écrêtage, modes de fusion de Photoshop.
     pub fn composite(&self, out: &mut [u8], r: [usize; 4]) {
         let [x0, y0, x1, y1] = r;
         for y in y0..y1.min(self.h) {
             for x in x0..x1.min(self.w) {
                 let mut d = [0.0f32; 4];
-                for l in self.layers.iter().filter(|l| l.visible && l.opacity > 0.0) {
-                    let s = l.at(x as i32, y as i32);
-                    if s[3] == 0 {
+                // Couverture du dernier calque de base (pour les calques écrêtés posés dessus)
+                let mut base_a = 0.0f32;
+                let mut base_on = false;
+                for l in &self.layers {
+                    let (xi, yi) = (x as i32, y as i32);
+                    let s = l.at(xi, yi);
+                    let mut a = s[3] as f32 / 255.0 * l.mask_at(xi, yi);
+                    if l.clip {
+                        if !base_on {
+                            continue;
+                        }
+                        a *= base_a;
+                    } else {
+                        base_a = if l.visible { a } else { 0.0 };
+                        base_on = l.visible;
+                    }
+                    if !l.visible {
                         continue;
                     }
-                    let a = s[3] as f32 / 255.0 * l.opacity;
-                    let sc = [s[0] as f32 / 255.0, s[1] as f32 / 255.0, s[2] as f32 / 255.0];
-                    let mut c = [0.0f32; 3];
-                    for k in 0..3 {
-                        // Sur du vide, le mode de fusion n'a rien à mélanger : on garde la couleur du calque
-                        let b = if d[3] > 0.0 { l.blend.mix(d[k], sc[k]) } else { sc[k] };
-                        c[k] = b;
+                    let a = a * l.opacity * l.fill;
+                    if a <= 0.0 {
+                        continue;
                     }
+                    let sc = [s[0] as f32 / 255.0, s[1] as f32 / 255.0, s[2] as f32 / 255.0];
+                    // Sur du vide, le mode de fusion n'a rien à mélanger : on garde la couleur du calque
+                    let c = if d[3] > 0.0 { l.blend.mix([d[0], d[1], d[2]], sc) } else { sc };
+                    // Le résultat du mode ne vaut que là où il y a du dessous
+                    let c = [0, 1, 2].map(|k| sc[k] + (c[k] - sc[k]) * d[3]);
                     let oa = a + d[3] * (1.0 - a);
                     for k in 0..3 {
                         d[k] = if oa > 0.0 { (c[k] * a + d[k] * d[3] * (1.0 - a)) / oa } else { 0.0 };
@@ -429,6 +609,16 @@ pub struct Editor {
     text: Option<TextDraft>,
     /// Largeur du panneau des calques à la dernière image
     panel_w: f32,
+    /// On peint dans le masque du calque actif (sa vignette est encadrée)
+    edit_mask: bool,
+    /// Alt+clic sur la vignette du masque : on ne voit que le masque, en gris
+    mask_view: bool,
+    /// Vignettes des calques et des masques (calque, masque ?) et l'instant du dernier calcul
+    thumbs: std::collections::HashMap<(usize, bool), egui::TextureHandle>,
+    thumbs_due: bool,
+    thumbs_at: Option<Instant>,
+    /// Calque qu'on glisse dans la liste (pour le changer de place)
+    drag_layer: Option<usize>,
     pub text_font: usize,
     pub text_size: f32,
 }
@@ -509,6 +699,12 @@ impl Editor {
             tool: Tool::Brush,
             text: None,
             panel_w: 230.0,
+            edit_mask: false,
+            mask_view: false,
+            thumbs: Default::default(),
+            thumbs_due: true,
+            thumbs_at: None,
+            drag_layer: None,
             text_font: 0,
             text_size: 64.0,
             color: Color32::from_rgb(30, 30, 34),
@@ -552,6 +748,7 @@ impl Editor {
             None => r,
         });
         self.save_due = Some(Instant::now());
+        self.thumbs_due = true;
     }
 
     fn all(&mut self) {
@@ -597,13 +794,19 @@ impl Editor {
 
     /// Un tampon du pinceau (ou de la gomme) centré en `c` (coordonnées du document).
     fn dab(&mut self, c: Pos2) {
+        let edit_mask = self.painting_mask();
+        let lock_alpha = !edit_mask && self.doc.layers[self.doc.active].lock_alpha;
+        let col = self.paint_color();
         let Some((start, cover, _)) = self.stroke.as_mut() else { return };
-        let l = &mut self.doc.layers[self.doc.active];
+        let la = &mut self.doc.layers[self.doc.active];
+        let l: &mut Layer = match la.mask.as_deref_mut() {
+            Some(m) if edit_mask => m,
+            _ => la,
+        };
         let r = self.size / 2.0;
         let (x0, y0) = ((c.x - r).floor() as i32, (c.y - r).floor() as i32);
         let (x1, y1) = ((c.x + r).ceil() as i32, (c.y + r).ceil() as i32);
         let hard = self.hardness.clamp(0.0, 0.99);
-        let col = self.color;
         let erase = self.tool == Tool::Eraser;
         let sel = self.sel.as_ref();
         let dw = self.doc.w;
@@ -631,8 +834,22 @@ impl Editor {
                 cover[idx] = k;
                 let i = idx * 4;
                 let s = [start.px[i], start.px[i + 1], start.px[i + 2], start.px[i + 3]];
-                if erase {
-                    l.px[i + 3] = (s[3] as f32 * (1.0 - k)) as u8;
+                if erase && edit_mask {
+                    // Gomme dans un masque : on y peint du blanc (on remontre)
+                    for ch in 0..3 {
+                        l.px[i + ch] = (s[ch] as f32 + (255.0 - s[ch] as f32) * k) as u8;
+                    }
+                } else if erase {
+                    if !lock_alpha {
+                        l.px[i + 3] = (s[3] as f32 * (1.0 - k)) as u8;
+                    }
+                } else if lock_alpha {
+                    // Transparence verrouillée : la couleur change, la couverture reste
+                    let a = col.a() as f32 / 255.0 * k;
+                    let src = [col.r(), col.g(), col.b()];
+                    for ch in 0..3 {
+                        l.px[i + ch] = (src[ch] as f32 * a + s[ch] as f32 * (1.0 - a)) as u8;
+                    }
                 } else {
                     // Peinture par-dessus le calque d'avant le trait : pas d'accumulation dans un même trait
                     let a = col.a() as f32 / 255.0 * k;
@@ -654,16 +871,20 @@ impl Editor {
 
     fn fill(&mut self, at: [i32; 2]) {
         let tol = self.tolerance;
-        let l = &self.doc.layers[self.doc.active];
+        if self.locked() {
+            return;
+        }
+        let l = self.target_ref();
         let (lx, ly) = (at[0] - l.off[0], at[1] - l.off[1]);
         if lx < 0 || ly < 0 || lx as usize >= l.w || ly as usize >= l.h || !self.in_sel(at[0], at[1]) {
             return;
         }
         self.checkpoint();
-        let col = [self.color.r(), self.color.g(), self.color.b(), self.color.a()];
+        let pc = self.paint_color();
+        let col = [pc.r(), pc.g(), pc.b(), pc.a()];
         let sel = self.sel.clone();
         let dw = self.doc.w;
-        let l = &mut self.doc.layers[self.doc.active];
+        let l = self.target();
         let (w, h) = (l.w, l.h);
         let off = l.off;
         let i0 = (ly as usize * w + lx as usize) * 4;
@@ -740,10 +961,13 @@ impl Editor {
             return;
         }
         self.checkpoint();
-        let col = self.color;
+        if self.locked() {
+            return;
+        }
+        let col = self.paint_color();
         let dw = self.doc.w;
         let sel = self.sel.clone();
-        let l = &mut self.doc.layers[self.doc.active];
+        let l = self.target();
         for y in 0..l.h {
             for x in 0..l.w {
                 let (dx, dy) = (x as i32 + l.off[0], y as i32 + l.off[1]);
@@ -1186,6 +1410,22 @@ impl Editor {
                 self.comp = vec![0; self.doc.w * self.doc.h * 4];
             }
             self.doc.composite(&mut self.comp, d);
+            // Alt+clic sur la vignette du masque : on voit le masque seul, en gris
+            if self.mask_view {
+                let l = &self.doc.layers[self.doc.active];
+                if l.mask.is_some() {
+                    for y in d[1]..d[3].min(self.doc.h) {
+                        for x in d[0]..d[2].min(self.doc.w) {
+                            let v = match &l.mask {
+                                Some(m) => m.at(x as i32, y as i32)[0],
+                                _ => 255,
+                            };
+                            let i = (y * self.doc.w + x) * 4;
+                            self.comp[i..i + 4].copy_from_slice(&[v, v, v, 255]);
+                        }
+                    }
+                }
+            }
             match &mut self.tex {
                 Some(t) if d[2] > d[0] && d[3] > d[1] && !(d[0] == 0 && d[1] == 0 && d[2] == self.doc.w && d[3] == self.doc.h) => {
                     let (w, h) = (d[2] - d[0], d[3] - d[1]);
@@ -1213,17 +1453,20 @@ impl Editor {
             self.pan += resp.drag_delta();
         } else {
             if resp.drag_started_by(egui::PointerButton::Primary) {
+                if matches!(self.tool, Tool::Brush | Tool::Eraser | Tool::Move) {
+                    self.locked();
+                }
                 if let Some(at) = ui.input(|i| i.pointer.press_origin()) {
                     let d = to_doc(at);
                     match self.tool {
-                        Tool::Brush | Tool::Eraser if self.doc.layers[self.doc.active].visible => {
+                        Tool::Brush | Tool::Eraser if self.doc.layers[self.doc.active].visible && !self.doc.layers[self.doc.active].lock_all => {
                             self.checkpoint();
-                            let l = self.doc.layers[self.doc.active].clone();
+                            let l = self.target_ref().clone();
                             let n = l.w * l.h;
                             self.stroke = Some((l, vec![0.0; n], d));
                             self.dab(d);
                         }
-                        Tool::Move => {
+                        Tool::Move if !self.doc.layers[self.doc.active].lock_all => {
                             self.checkpoint();
                             self.drag_from = Some((d, self.doc.layers[self.doc.active].off));
                         }
@@ -1262,7 +1505,12 @@ impl Editor {
                         Tool::Move => {
                             if let Some((from, off)) = self.drag_from {
                                 let l = &mut self.doc.layers[self.doc.active];
-                                l.off = [off[0] + (d.x - from.x).round() as i32, off[1] + (d.y - from.y).round() as i32];
+                                let new = [off[0] + (d.x - from.x).round() as i32, off[1] + (d.y - from.y).round() as i32];
+                                // Le masque est lié au calque (la chaîne) : il suit
+                                if let Some(m) = l.mask.as_deref_mut() {
+                                    m.off = [m.off[0] + new[0] - l.off[0], m.off[1] + new[1] - l.off[1]];
+                                }
+                                l.off = new;
                                 self.all();
                             }
                         }
@@ -1331,9 +1579,9 @@ impl Editor {
                                 self.color = Color32::from_rgba_unmultiplied(self.comp[i], self.comp[i + 1], self.comp[i + 2], self.comp[i + 3].max(1));
                             }
                         }
-                        Tool::Brush | Tool::Eraser => {
+                        Tool::Brush | Tool::Eraser if !self.doc.layers[self.doc.active].lock_all => {
                             self.checkpoint();
-                            let l = self.doc.layers[self.doc.active].clone();
+                            let l = self.target_ref().clone();
                             let n = l.w * l.h;
                             self.stroke = Some((l, vec![0.0; n], d));
                             self.dab(d);
@@ -1352,7 +1600,7 @@ impl Editor {
                             self.commit_text(ui.ctx());
                             self.text = Some(TextDraft { at: [d.x, d.y], s: String::new(), preview: None, focus: true });
                         }
-                        Tool::Gradient | Tool::Move => {}
+                        Tool::Gradient | Tool::Move | Tool::Brush | Tool::Eraser => {}
                     }
                 }
             }
@@ -1544,7 +1792,7 @@ impl Editor {
         let Some((px, w, h, off)) = render_text(&t.s, font, self.text_size, self.color.to_srgba_unmultiplied()) else { return };
         self.checkpoint();
         let name: String = t.s.lines().next().unwrap_or("").chars().take(24).collect();
-        let layer = Layer { name: format!("T {name}"), visible: true, opacity: 1.0, blend: Blend::Normal, off: [t.at[0].round() as i32 + off[0], t.at[1].round() as i32 + off[1]], w, h, px };
+        let layer = Layer { off: [t.at[0].round() as i32 + off[0], t.at[1].round() as i32 + off[1]], px, ..Layer::blank(&format!("T {name}"), w, h) };
         self.doc.layers.insert(self.doc.active + 1, layer);
         self.doc.active += 1;
         self.all();
@@ -1585,113 +1833,511 @@ impl Editor {
             return;
         }
         self.checkpoint();
-        let pair = Doc { w: self.doc.w, h: self.doc.h, layers: vec![self.doc.layers[a - 1].clone(), self.doc.layers[a].clone()], active: 1 };
+        // Comme Photoshop : l'opacité, le masque et le mode du calque d'en dessous sont appliqués au résultat
+        let mut base = self.doc.layers[a - 1].clone();
+        base.blend = Blend::Normal;
+        let mut top = self.doc.layers[a].clone();
+        top.clip = false;
+        let pair = Doc { w: self.doc.w, h: self.doc.h, layers: vec![base, top], active: 1 };
         let mut out = vec![0u8; self.doc.w * self.doc.h * 4];
         pair.composite(&mut out, [0, 0, self.doc.w, self.doc.h]);
         let below = &self.doc.layers[a - 1];
-        let merged = Layer { name: below.name.clone(), visible: true, opacity: 1.0, blend: below.blend, off: [0, 0], w: self.doc.w, h: self.doc.h, px: out };
+        let merged = Layer { px: out, clip: below.clip, ..Layer::blank(&below.name, self.doc.w, self.doc.h) };
         self.doc.layers[a - 1] = merged;
         self.doc.layers.remove(a);
         self.doc.active = a - 1;
         self.all();
     }
 
+    /// Le calque où l'on peint : le masque du calque actif s'il est choisi, sinon ses pixels
+    fn target(&mut self) -> &mut Layer {
+        let a = self.doc.active;
+        let edit_mask = self.edit_mask && self.doc.layers[a].mask.is_some();
+        let l = &mut self.doc.layers[a];
+        if edit_mask {
+            l.mask.as_deref_mut().unwrap()
+        } else {
+            l
+        }
+    }
+
+    fn target_ref(&self) -> &Layer {
+        let l = &self.doc.layers[self.doc.active];
+        match (&l.mask, self.edit_mask) {
+            (Some(m), true) => m,
+            _ => l,
+        }
+    }
+
+    /// La couleur de peinture : dans un masque, son gris (noir cache, blanc montre)
+    fn paint_color(&self) -> Color32 {
+        if self.painting_mask() {
+            let c = self.color;
+            let g = (0.3 * c.r() as f32 + 0.59 * c.g() as f32 + 0.11 * c.b() as f32).round() as u8;
+            Color32::from_rgba_unmultiplied(g, g, g, c.a())
+        } else {
+            self.color
+        }
+    }
+
+    /// Le calque actif est verrouillé : on le dit et on ne touche à rien
+    fn locked(&mut self) -> bool {
+        let l = &self.doc.layers[self.doc.active];
+        if l.lock_all {
+            self.message = Some(crate::i18n::t("Ce calque est verrouillé."));
+            return true;
+        }
+        false
+    }
+
+    fn painting_mask(&self) -> bool {
+        self.edit_mask && self.doc.layers[self.doc.active].mask.is_some()
+    }
+
+    /// Ajoute un masque au calque actif : tout montrer, ou montrer (ou cacher) la sélection
+    fn add_mask(&mut self, from_sel: Option<bool>) {
+        self.checkpoint();
+        let (w, h) = (self.doc.w, self.doc.h);
+        let mut m = Layer::new_mask(w, h, if from_sel.is_some() { 0 } else { 255 });
+        if let (Some(reveal), Some(sel)) = (from_sel, &self.sel) {
+            for y in 0..h {
+                for x in 0..w {
+                    let k = sel.at(w, x as i32, y as i32);
+                    let v = if reveal { k } else { 1.0 - k };
+                    let i = (y * w + x) * 4;
+                    let g = (v * 255.0).round() as u8;
+                    m.px[i..i + 3].copy_from_slice(&[g, g, g]);
+                }
+            }
+        } else if from_sel.is_some() {
+            m = Layer::new_mask(w, h, 255);
+        }
+        let l = &mut self.doc.layers[self.doc.active];
+        l.mask = Some(m);
+        l.mask_on = true;
+        self.edit_mask = true;
+        self.all();
+    }
+
+    /// Applique le masque aux pixels du calque (et le retire)
+    fn apply_mask(&mut self) {
+        self.checkpoint();
+        let l = &mut self.doc.layers[self.doc.active];
+        if l.mask.is_some() {
+            let keep = l.mask_on;
+            l.mask_on = true;
+            for ly in 0..l.h {
+                for lx in 0..l.w {
+                    let k = l.mask_at(lx as i32 + l.off[0], ly as i32 + l.off[1]);
+                    let i = (ly * l.w + lx) * 4 + 3;
+                    l.px[i] = (l.px[i] as f32 * if keep { k } else { 1.0 }).round() as u8;
+                }
+            }
+            l.mask = None;
+        }
+        self.edit_mask = false;
+        self.mask_view = false;
+        self.all();
+    }
+
+    /// Vignettes 40 × 40 (proportions du document) sur un damier ; recalculées au plus quatre fois par seconde
+    fn refresh_thumbs(&mut self, ctx: &egui::Context) {
+        if !self.thumbs_due || self.thumbs_at.is_some_and(|t| t.elapsed().as_millis() < 250) || self.stroke.is_some() {
+            return;
+        }
+        self.thumbs_due = false;
+        self.thumbs_at = Some(Instant::now());
+        let (dw, dh) = (self.doc.w.max(1), self.doc.h.max(1));
+        let k = 40.0 / dw.max(dh) as f32;
+        let (tw, th) = (((dw as f32 * k).round() as usize).max(1), ((dh as f32 * k).round() as usize).max(1));
+        self.thumbs.retain(|(i, _), _| *i < self.doc.layers.len());
+        for (i, l) in self.doc.layers.iter().enumerate() {
+            for part in [false, true] {
+                let src: &Layer = match (part, &l.mask) {
+                    (false, _) => l,
+                    (true, Some(m)) => m,
+                    (true, None) => {
+                        self.thumbs.remove(&(i, true));
+                        continue;
+                    }
+                };
+                let mut img = egui::ColorImage::new([tw, th], vec![Color32::WHITE; tw * th]);
+                for y in 0..th {
+                    for x in 0..tw {
+                        let (dx, dy) = (((x as f32 + 0.5) / k) as i32, ((y as f32 + 0.5) / k) as i32);
+                        let c = src.at(dx, dy);
+                        let chk = if ((x / 4) + (y / 4)) % 2 == 0 { 255.0 } else { 204.0 };
+                        let a = c[3] as f32 / 255.0;
+                        let px = |v: u8| (v as f32 * a + chk * (1.0 - a)) as u8;
+                        img.pixels[y * tw + x] = Color32::from_rgb(px(c[0]), px(c[1]), px(c[2]));
+                    }
+                }
+                match self.thumbs.get_mut(&(i, part)) {
+                    Some(t) => t.set(img, egui::TextureOptions::LINEAR),
+                    None => {
+                        let t = ctx.load_texture(format!("paint-thumb-{i}-{part}"), img, egui::TextureOptions::LINEAR);
+                        self.thumbs.insert((i, part), t);
+                    }
+                }
+            }
+        }
+    }
+
     fn layers_panel(&mut self, ui: &mut egui::Ui) {
         let p = theme::pal();
+        let ctx = ui.ctx().clone();
+        self.refresh_thumbs(&ctx);
         ui.label(crate::theme::section(&crate::i18n::t("CALQUES")));
-        // Réglages du calque actif
         let a = self.doc.active;
         let mut changed = false;
+        // Comme Photoshop : mode de fusion et opacité, puis verrous et fond
         {
             let l = &mut self.doc.layers[a];
             ui.horizontal(|ui| {
-                let cur = Blend::ALL.iter().find(|b| b.0 == l.blend).map(|b| b.1).unwrap_or("fusion normale");
-                egui::ComboBox::from_id_salt("paint-blend").selected_text(crate::i18n::t(cur)).width(140.0).show_ui(ui, |ui| {
-                    for (b, name) in Blend::ALL {
-                        if ui.selectable_label(l.blend == b, crate::i18n::t(name)).clicked() {
-                            l.blend = b;
-                            changed = true;
+                egui::ComboBox::from_id_salt("paint-blend").selected_text(crate::i18n::t(l.blend.name())).width(118.0).show_ui(ui, |ui| {
+                    for item in Blend::MENU {
+                        match item {
+                            Some((b, name)) => {
+                                if ui.selectable_label(l.blend == b, crate::i18n::t(name)).clicked() {
+                                    l.blend = b;
+                                    changed = true;
+                                }
+                            }
+                            None => {
+                                ui.separator();
+                            }
                         }
                     }
                 });
+                let mut o = (l.opacity * 100.0).round();
+                if ui.add(egui::DragValue::new(&mut o).range(0.0..=100.0).speed(0.5).suffix(" %").prefix(crate::i18n::t("Opacité : "))).changed() {
+                    l.opacity = o / 100.0;
+                    changed = true;
+                }
             });
-            changed |= ui.add(egui::Slider::new(&mut l.opacity, 0.0..=1.0).text(crate::i18n::t("opacité"))).changed();
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new(crate::i18n::t("Verrou :")).size(11.5).color(p.muted));
+                let lock = |ui: &mut egui::Ui, on: &mut bool, icon: &str, tip: &str| -> bool {
+                    let r = ui.add(egui::Button::new(egui::RichText::new(icon).size(12.0).color(if *on { p.on_accent } else { p.text })).fill(if *on { p.accent } else { Color32::TRANSPARENT }).min_size(vec2(22.0, 20.0))).on_hover_text(crate::i18n::t(tip));
+                    if r.clicked() {
+                        *on = !*on;
+                    }
+                    r.clicked()
+                };
+                changed |= lock(ui, &mut l.lock_alpha, crate::lucide::GRID_2X2, "Verrouiller les pixels transparents");
+                changed |= lock(ui, &mut l.lock_all, crate::lucide::LOCK, "Tout verrouiller");
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let mut f = (l.fill * 100.0).round();
+                    if ui.add(egui::DragValue::new(&mut f).range(0.0..=100.0).speed(0.5).suffix(" %").prefix(crate::i18n::t("Fond : "))).changed() {
+                        l.fill = f / 100.0;
+                        changed = true;
+                    }
+                });
+            });
         }
         if changed {
             self.all();
         }
-        ui.horizontal(|ui| {
-            if ui.small_button("＋").on_hover_text(crate::i18n::t("nouveau calque")).clicked() {
-                self.new_layer();
-            }
-            if ui.small_button("⧉").on_hover_text(crate::i18n::t("dupliquer")).clicked() {
-                self.duplicate_layer();
-            }
-            if ui.small_button("⤓").on_hover_text(crate::i18n::t("fusionner avec le dessous")).clicked() {
-                self.merge_down();
-            }
-            if ui.small_button("▲").on_hover_text(crate::i18n::t("monter")).clicked() && a + 1 < self.doc.layers.len() {
-                self.checkpoint();
-                self.doc.layers.swap(a, a + 1);
-                self.doc.active = a + 1;
-                self.all();
-            }
-            if ui.small_button("▼").on_hover_text(crate::i18n::t("descendre")).clicked() && a > 0 {
-                self.checkpoint();
-                self.doc.layers.swap(a, a - 1);
-                self.doc.active = a - 1;
-                self.all();
-            }
-            if ui.small_button("✕").on_hover_text(crate::i18n::t("supprimer")).clicked() {
-                self.delete_layer();
-            }
-        });
         ui.separator();
-        // La liste : le calque du haut en premier, comme dans Photoshop
+        // La liste : le calque du haut en premier ; chaque ligne a son œil, sa vignette, celle de son masque et son nom
         let mut toggle = None;
-        let mut pick = None;
-        egui::ScrollArea::vertical().id_salt("paint-layer-list").show(ui, |ui| {
-            for i in (0..self.doc.layers.len()).rev() {
+        let mut pick: Option<(usize, bool)> = None;
+        let mut mask_toggle = None;
+        let mut mask_view = None;
+        let mut menu_act: Option<(usize, &'static str)> = None;
+        let mut drop_at: Option<usize> = None;
+        let row_h = 46.0;
+        let n = self.doc.layers.len();
+        let pointer = ui.input(|i| i.pointer.interact_pos());
+        let released = ui.input(|i| i.pointer.any_released());
+        egui::ScrollArea::vertical().id_salt("paint-layer-list").max_height(ui.available_height() - 40.0).show(ui, |ui| {
+            for i in (0..n).rev() {
                 let on = i == self.doc.active;
-                ui.horizontal(|ui| {
-                    let l = &mut self.doc.layers[i];
-                    if ui.add(egui::Button::new(egui::RichText::new(if l.visible { "◉" } else { "○" }).size(13.0)).frame(false)).on_hover_text(crate::i18n::t("afficher / masquer")).clicked() {
-                        toggle = Some(i);
+                let (row, resp) = ui.allocate_exact_size(vec2(ui.available_width(), row_h), egui::Sense::click_and_drag());
+                let painter = ui.painter_at(row);
+                if on {
+                    painter.rect_filled(row, 2.0, p.accent.gamma_multiply(0.28));
+                } else if resp.hovered() {
+                    painter.rect_filled(row, 2.0, p.raised);
+                }
+                painter.hline(row.x_range(), row.bottom() - 0.5, Stroke::new(1.0, p.line.gamma_multiply(0.7)));
+                // Glisser une ligne : un trait montre où elle ira
+                if resp.drag_started() {
+                    self.drag_layer = Some(i);
+                }
+                if let (Some(_), Some(pt)) = (self.drag_layer, pointer) {
+                    if row.contains(pt) {
+                        let above = pt.y < row.center().y;
+                        let y = if above { row.top() } else { row.bottom() };
+                        ui.painter().hline(row.x_range(), y, Stroke::new(2.0, p.accent));
+                        if released {
+                            // Au-dessus d'une ligne = plus haut dans la pile
+                            drop_at = Some(if above { i + 1 } else { i });
+                        }
                     }
-                    if self.renaming == Some(i) {
-                        let r = ui.add(egui::TextEdit::singleline(&mut l.name).desired_width(130.0));
-                        r.request_focus();
-                        if r.lost_focus() {
-                            self.renaming = None;
-                            self.save_due = Some(Instant::now());
+                }
+                let l = &self.doc.layers[i];
+                let mut x = row.left() + 4.0;
+                // Œil
+                let eye = egui::Rect::from_min_size(egui::pos2(x, row.center().y - 10.0), vec2(20.0, 20.0));
+                let er = ui.interact(eye, ui.scope_id().with(("eye", i)), egui::Sense::click());
+                painter.text(eye.center(), egui::Align2::CENTER_CENTER, if l.visible { crate::lucide::EYE } else { "" }, egui::FontId::proportional(13.0), if er.hovered() { p.text } else { p.muted });
+                painter.rect_stroke(eye.shrink(1.0), 1.0, Stroke::new(1.0, p.line), egui::StrokeKind::Inside);
+                if er.clicked() {
+                    toggle = Some(i);
+                }
+                x += 26.0;
+                // Écrêtage : petite flèche coudée et retrait
+                if l.clip {
+                    painter.text(egui::pos2(x + 4.0, row.center().y), egui::Align2::LEFT_CENTER, "↳", egui::FontId::proportional(14.0), p.muted);
+                    x += 16.0;
+                }
+                // Vignettes : calque, puis masque (avec la chaîne)
+                let thumb = |painter: &egui::Painter, x: f32, key: (usize, bool), framed: bool| -> egui::Rect {
+                    let r = egui::Rect::from_min_size(egui::pos2(x, row.center().y - 18.0), vec2(36.0, 36.0));
+                    painter.rect_filled(r, 0.0, Color32::from_gray(60));
+                    if let Some(t) = self.thumbs.get(&key) {
+                        let sz = t.size_vec2();
+                        let k = (36.0 / sz.x.max(sz.y)).min(36.0);
+                        let ir = egui::Rect::from_center_size(r.center(), sz * k);
+                        painter.image(t.id(), ir, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), Color32::WHITE);
+                    }
+                    if framed {
+                        painter.rect_stroke(r.expand(2.0), 0.0, Stroke::new(1.5, p.text), egui::StrokeKind::Outside);
+                    }
+                    r
+                };
+                let editing_mask = on && self.edit_mask && l.mask.is_some();
+                let lr = thumb(&painter, x, (i, false), on && !editing_mask);
+                let lresp = ui.interact(lr, ui.scope_id().with(("lthumb", i)), egui::Sense::click());
+                if lresp.clicked() {
+                    pick = Some((i, false));
+                }
+                x += 40.0;
+                if l.mask.is_some() {
+                    painter.text(egui::pos2(x + 4.0, row.center().y), egui::Align2::CENTER_CENTER, crate::lucide::LINK, egui::FontId::proportional(10.0), p.muted);
+                    x += 10.0;
+                    let mr = thumb(&painter, x, (i, true), editing_mask);
+                    if !l.mask_on {
+                        // Masque désactivé : croix rouge, comme dans Photoshop
+                        let red = Stroke::new(2.0, Color32::from_rgb(220, 40, 40));
+                        painter.line_segment([mr.left_top(), mr.right_bottom()], red);
+                        painter.line_segment([mr.right_top(), mr.left_bottom()], red);
+                    }
+                    let mresp = ui.interact(mr, ui.scope_id().with(("mthumb", i)), egui::Sense::click()).on_hover_text(crate::i18n::t("Clic : peindre dans le masque · Alt+clic : voir le masque seul · Maj+clic : activer ou désactiver"));
+                    if mresp.clicked() {
+                        let (alt, shift) = ui.input(|k| (k.modifiers.alt, k.modifiers.shift));
+                        if shift {
+                            mask_toggle = Some(i);
+                        } else if alt {
+                            mask_view = Some(i);
+                        } else {
+                            pick = Some((i, true));
                         }
-                    } else {
-                        let r = ui.add(egui::Button::selectable(on, egui::RichText::new(&l.name).size(12.0)).min_size(vec2(150.0, 22.0)));
-                        if r.clicked() {
-                            pick = Some(i);
-                        }
-                        if r.double_clicked() {
-                            self.renaming = Some(i);
+                    }
+                    x += 40.0;
+                }
+                x += 4.0;
+                // Nom (double-clic : renommer)
+                let name_r = egui::Rect::from_min_max(egui::pos2(x, row.top()), egui::pos2(row.right() - 4.0, row.bottom()));
+                if self.renaming == Some(i) {
+                    let mut name = self.doc.layers[i].name.clone();
+                    let mut cu = ui.new_child(egui::UiBuilder::new().max_rect(name_r).layout(egui::Layout::left_to_right(egui::Align::Center)));
+                    let r = cu.add(egui::TextEdit::singleline(&mut name).desired_width(name_r.width()));
+                    r.request_focus();
+                    self.doc.layers[i].name = name;
+                    if r.lost_focus() {
+                        self.renaming = None;
+                        self.save_due = Some(Instant::now());
+                    }
+                } else {
+                    let l = &self.doc.layers[i];
+                    let font = egui::FontId::proportional(12.5);
+                    let col = if l.visible { p.text } else { p.muted };
+                    let galley = painter.layout(l.name.clone(), font, col, name_r.width());
+                    painter.galley(egui::pos2(name_r.left(), row.center().y - galley.size().y / 2.0), galley, col);
+                    if l.lock_all || l.lock_alpha {
+                        painter.text(egui::pos2(row.right() - 8.0, row.center().y), egui::Align2::RIGHT_CENTER, crate::lucide::LOCK, egui::FontId::proportional(11.0), p.muted);
+                    }
+                }
+                if resp.clicked() && pick.is_none() && toggle.is_none() {
+                    pick = Some((i, false));
+                }
+                if resp.double_clicked() {
+                    self.renaming = Some(i);
+                }
+                // Clic droit : le menu du calque
+                resp.context_menu(|ui| {
+                    let has_mask = self.doc.layers[i].mask.is_some();
+                    let items: Vec<(&'static str, bool)> = vec![
+                        ("Dupliquer le calque", true),
+                        ("Supprimer le calque", n > 1),
+                        ("Fusionner avec le calque inférieur", i > 0),
+                        ("", true),
+                        ("Ajouter un masque (tout montrer)", !has_mask),
+                        ("Ajouter un masque (montrer la sélection)", !has_mask && self.sel.is_some()),
+                        ("Ajouter un masque (cacher la sélection)", !has_mask && self.sel.is_some()),
+                        ("Activer / désactiver le masque", has_mask),
+                        ("Appliquer le masque", has_mask),
+                        ("Supprimer le masque", has_mask),
+                        ("", true),
+                        (if self.doc.layers[i].clip { "Annuler le masque d'écrêtage" } else { "Créer un masque d'écrêtage" }, i > 0),
+                    ];
+                    for (label, enabled) in items {
+                        if label.is_empty() {
+                            ui.separator();
+                        } else if ui.add_enabled(enabled, egui::Button::new(crate::i18n::t(label))).clicked() {
+                            menu_act = Some((i, label));
+                            ui.close();
                         }
                     }
                 });
             }
         });
+        if released {
+            if let (Some(from), Some(to)) = (self.drag_layer, drop_at) {
+                let to = if to > from { to - 1 } else { to };
+                if to != from && to < n {
+                    self.checkpoint();
+                    let l = self.doc.layers.remove(from);
+                    self.doc.layers.insert(to, l);
+                    self.doc.active = to;
+                    self.all();
+                }
+            }
+            self.drag_layer = None;
+        }
         if let Some(i) = toggle {
-            self.doc.layers[i].visible = !self.doc.layers[i].visible;
+            // Alt+clic sur l'œil : ne montrer que ce calque (ou tout remontrer)
+            if ui.input(|k| k.modifiers.alt) {
+                let solo = self.doc.layers.iter().enumerate().all(|(k, l)| l.visible == (k == i));
+                for (k, l) in self.doc.layers.iter_mut().enumerate() {
+                    l.visible = solo || k == i;
+                }
+            } else {
+                self.doc.layers[i].visible = !self.doc.layers[i].visible;
+            }
             self.all();
         }
-        if let Some(i) = pick {
+        if let Some((i, mask)) = pick {
+            if self.doc.active != i || self.edit_mask != mask {
+                self.mask_view = false;
+                self.all();
+            }
             self.doc.active = i;
+            self.edit_mask = mask;
         }
-        ui.add_space(6.0);
-        ui.label(egui::RichText::new(crate::i18n::t("double-clic : renommer")).size(10.0).color(p.muted));
+        if let Some(i) = mask_toggle {
+            self.checkpoint();
+            self.doc.layers[i].mask_on = !self.doc.layers[i].mask_on;
+            self.all();
+        }
+        if let Some(i) = mask_view {
+            self.doc.active = i;
+            self.edit_mask = true;
+            self.mask_view = !self.mask_view;
+            self.all();
+        }
+        if let Some((i, act)) = menu_act {
+            self.doc.active = i;
+            match act {
+                "Dupliquer le calque" => self.duplicate_layer(),
+                "Supprimer le calque" => self.delete_layer(),
+                "Fusionner avec le calque inférieur" => self.merge_down(),
+                "Ajouter un masque (tout montrer)" => self.add_mask(None),
+                "Ajouter un masque (montrer la sélection)" => self.add_mask(Some(true)),
+                "Ajouter un masque (cacher la sélection)" => self.add_mask(Some(false)),
+                "Activer / désactiver le masque" => {
+                    self.checkpoint();
+                    self.doc.layers[i].mask_on ^= true;
+                    self.all();
+                }
+                "Appliquer le masque" => self.apply_mask(),
+                "Supprimer le masque" => {
+                    self.checkpoint();
+                    self.doc.layers[i].mask = None;
+                    self.edit_mask = false;
+                    self.mask_view = false;
+                    self.all();
+                }
+                _ => {
+                    self.checkpoint();
+                    self.doc.layers[i].clip ^= true;
+                    self.all();
+                }
+            }
+        }
+        // Barre du bas, comme Photoshop : masque, réglage, nouveau calque, supprimer
+        ui.separator();
+        ui.horizontal(|ui| {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let b = |ui: &mut egui::Ui, icon: &str, tip: &str| ui.add(egui::Button::new(egui::RichText::new(icon).size(14.0)).frame(false).min_size(vec2(24.0, 22.0))).on_hover_text(crate::i18n::t(tip));
+                if b(ui, crate::lucide::TRASH_2, "Supprimer le calque").clicked() {
+                    self.delete_layer();
+                }
+                if b(ui, crate::lucide::SQUARE_PLUS, "Nouveau calque (Ctrl+Maj+N)").clicked() {
+                    self.new_layer();
+                }
+                if b(ui, crate::lucide::COPY, "Dupliquer le calque (Ctrl+J)").clicked() {
+                    self.duplicate_layer();
+                }
+                let r = ui.add(egui::Button::new(egui::RichText::new(crate::lucide::CIRCLE_HALF).size(14.0)).frame(false).min_size(vec2(24.0, 22.0))).on_hover_text(crate::i18n::t("Réglage : luminosité et contraste, teinte et saturation"));
+                if r.clicked() {
+                    self.checkpoint();
+                    self.adjust = Some((Adjust::HueSat, self.doc.layers[self.doc.active].clone(), [0.0, 0.0]));
+                }
+                let has_mask = self.doc.layers[self.doc.active].mask.is_some();
+                if b(ui, crate::lucide::SQUARE_DASHED, "Ajouter un masque de fusion (d'après la sélection s'il y en a une)").clicked() && !has_mask {
+                    let from_sel = self.sel.is_some().then_some(true);
+                    self.add_mask(from_sel);
+                }
+            });
+        });
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn masques_ecretage_et_modes() {
+        let mut d = Doc::new(4, 1, true);
+        // Un calque rouge avec un masque qui cache la moitié droite
+        let mut r = Layer::filled("rouge", 4, 1, [255, 0, 0, 255]);
+        let mut m = Layer::new_mask(4, 1, 255);
+        for x in 2..4 {
+            m.px[x * 4..x * 4 + 3].copy_from_slice(&[0, 0, 0]);
+        }
+        r.mask = Some(m);
+        d.layers.push(r);
+        let img = d.flatten();
+        assert_eq!(img.get_pixel(0, 0).0, [255, 0, 0, 255]);
+        assert_eq!(img.get_pixel(3, 0).0, [255, 255, 255, 255], "le noir du masque cache");
+        // Désactivé : tout se voit ; enregistré puis relu : le masque revient
+        d.layers[1].mask_on = false;
+        assert_eq!(d.flatten().get_pixel(3, 0).0, [255, 0, 0, 255]);
+        let path = std::env::temp_dir().join(format!("masque-{}.aryimg", std::process::id()));
+        d.save(&path).unwrap();
+        let back = Doc::load(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert!(back.layers[1].mask.is_some() && !back.layers[1].mask_on);
+        // Écrêtage : un calque bleu n'apparaît que sur le pixel couvert du calque du dessous
+        let mut e = Doc::new(2, 1, false);
+        let mut base = Layer::blank("base", 2, 1);
+        base.px[0..4].copy_from_slice(&[0, 255, 0, 255]);
+        e.layers[0] = base;
+        let mut blue = Layer::filled("bleu", 2, 1, [0, 0, 255, 255]);
+        blue.clip = true;
+        e.layers.push(blue);
+        let img = e.flatten();
+        assert_eq!(img.get_pixel(0, 0).0, [0, 0, 255, 255]);
+        assert_eq!(img.get_pixel(1, 0).0[3], 0);
+        // Modes : écran et luminosité
+        assert_eq!(Blend::Screen.mix([0.5; 3], [0.5; 3]), [0.75; 3]);
+        let l = Blend::Luminosity.mix([1.0, 0.0, 0.0], [0.5, 0.5, 0.5]);
+        assert!((lum(l) - 0.5).abs() < 1e-4 && l[0] > l[1]);
+    }
 
     #[test]
     fn calques_aller_retour_et_fusion() {
