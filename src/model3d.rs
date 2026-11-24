@@ -1941,8 +1941,11 @@ struct MeshEdit {
     /// Coupe en boucle qui attend qu'on choisisse l'anneau : nombre de coupes
     loopcut: Option<u32>,
     /// Menu du clic droit ouvert, et l'outil qu'on y a choisi (appliqué à l'image suivante)
-    menu: Option<Pos2>,
+    /// (position, 0 menu des outils, 1 menu « supprimer » de X)
+    menu: Option<(Pos2, u8)>,
     trigger: Option<&'static str>,
+    /// Faces séparées (P) qui attendent de devenir un objet
+    split: Option<crate::meshedit::EMesh>,
     /// Édition proportionnelle (O), son rayon (dans la scène), et la distance de chaque sommet à la sélection
     prop: bool,
     prop_r: f32,
@@ -2294,6 +2297,11 @@ pub struct Viewer {
     /// Menu du clic droit sur un objet de la scène, et la commande choisie dedans
     obj_menu: Option<Pos2>,
     obj_action: Option<&'static str>,
+    /// Ctrl+J : joindre les objets choisis à l'actif (fait au début de l'image suivante)
+    join_request: bool,
+    /// Tourner autour de la sélection (comme l'option de Blender), et le point retenu pour ce geste
+    orbit_sel: bool,
+    orbit_pivot: Option<V3>,
     scene_errors: Vec<Option<String>>,
     scene_rx: Option<Receiver<(Result<Model, String>, Vec<Option<String>>, Vec<(usize, usize, usize)>)>>,
     /// Triangles de chaque objet dans le modèle réuni (objet, début, fin)
@@ -2456,6 +2464,9 @@ impl Viewer {
             scene_sel: None,
             obj_menu: None,
             obj_action: None,
+            join_request: false,
+            orbit_sel: true,
+            orbit_pivot: None,
             scene_errors: vec![],
             scene_rx: None,
             scene_ranges: vec![],
@@ -2835,16 +2846,92 @@ impl Viewer {
         }
     }
 
-    /// Cadre la vue sur la sélection (objets choisis, ou sommets choisis en mode édition) ; sans
-    /// sélection, toute la scène.
-    fn frame_selection(&mut self) {
-        let Some((lo, hi)) = self.scene_frame else {
-            self.cam = Camera { ortho: self.cam.ortho, ..Default::default() };
-            return;
+    /// Joindre (Ctrl+J) : les objets choisis entrent dans le maillage de l'objet actif, à leur place
+    /// dans la scène, puis disparaissent de la liste.
+    fn join_selected(&mut self) {
+        let Some(a) = self.scene_sel else { return };
+        let others: Vec<usize> = {
+            let Some(scene) = self.scene.as_ref() else { return };
+            let mut v: Vec<usize> = self.scene_multi.iter().copied().filter(|&k| k != a && k < scene.objects.len() && crate::scene::kind(&scene.objects[k]) == crate::scene::Kind::Model).collect();
+            v.sort_unstable();
+            v
         };
+        if others.is_empty() {
+            self.capture_msg = Some(crate::i18n::t("joindre : choisis au moins deux objets à maillage (Maj+clic), l'actif en dernier"));
+            return;
+        }
+        let file = match self.own_mesh_file(a) {
+            Ok(f) => f,
+            Err(e) => {
+                self.capture_msg = Some(e);
+                return;
+            }
+        };
+        let Some(scene) = self.scene.as_mut() else { return };
+        let Ok(mut base) = crate::meshedit::EMesh::read_obj(&file) else { return };
+        let origin = scene.world(a, [0.0; 3]);
+        let cols = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]].map(|e| sub(scene.world(a, e), origin));
+        let Some(inv) = crate::meshedit::inverse(cols) else { return };
+        for &k in &others {
+            let o = &scene.objects[k];
+            let prefix = format!("{} - ", self.path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default());
+            let m = if o.file.starts_with(&prefix) && o.file.to_lowercase().ends_with(".obj") {
+                crate::meshedit::EMesh::read_obj(&crate::scene::resolve(&self.path, &o.file)).ok()
+            } else {
+                crate::scene::source_model(&self.path, o).ok().map(|m| crate::meshedit::EMesh::from_model(&m))
+            };
+            let Some(mut m) = m else { continue };
+            for p in m.pos.iter_mut() {
+                let w = scene.world(k, *p);
+                *p = crate::meshedit::apply(&inv, sub(w, origin));
+            }
+            base.append(&m);
+        }
+        if let Err(e) = base.write_obj(&file) {
+            self.capture_msg = Some(e);
+            return;
+        }
+        for &k in others.iter().rev() {
+            scene.remove(k);
+        }
+        let shift = others.iter().filter(|&&k| k < a).count();
+        self.scene_sel = Some(a - shift);
+        self.scene_multi.clear();
+        let _ = scene.write(&self.path);
+        self.scene_dirty = true;
+    }
+
+    /// Séparer (P) : les faces choisies en mode édition deviennent un nouvel objet, au même endroit.
+    fn add_split_object(&mut self, obj: usize, mesh: crate::meshedit::EMesh) {
+        let Some(scene) = self.scene.as_mut() else { return };
+        let Some(o) = scene.objects.get(obj) else { return };
+        let stem = self.path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "scène".into());
+        let dir = self.path.parent().unwrap_or(std::path::Path::new("")).to_path_buf();
+        let base = format!("{} {}", o.name, crate::i18n::t_mid("(séparé)"));
+        let (mut name, mut n) = (base.clone(), 2);
+        while dir.join(format!("{stem} - {name}.obj")).exists() || scene.objects.iter().any(|x| x.name == name) {
+            name = format!("{base} {n}");
+            n += 1;
+        }
+        let file = format!("{stem} - {name}.obj");
+        if let Err(e) = mesh.write_obj(&dir.join(&file)) {
+            self.capture_msg = Some(e);
+            return;
+        }
+        let mut o2 = o.clone();
+        o2.name = name;
+        o2.file = file;
+        scene.objects.push(o2);
+        let _ = scene.write(&self.path);
+        self.scene_dirty = true;
+    }
+
+    /// Points de la sélection en espace normalisé (celui de la caméra) : sommets choisis en mode
+    /// édition, sinon les objets choisis.
+    fn selection_points(&self) -> Vec<V3> {
+        let Some((lo, hi)) = self.scene_frame else { return vec![] };
         let longest = (hi[0] - lo[0]).max(hi[1] - lo[1]).max(hi[2] - lo[2]).max(1e-9);
         let c = [(lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0, (lo[2] + hi[2]) / 2.0];
-        // Points en espace normalisé (celui de la caméra)
         let mut pts: Vec<V3> = vec![];
         if let (Some(me), Some(scene)) = (self.mesh.as_ref(), self.scene.as_ref()) {
             for (i, v) in me.mesh.pos.iter().enumerate() {
@@ -2866,6 +2953,27 @@ impl Viewer {
                 }
             }
         }
+        pts
+    }
+
+    /// Centre de la sélection (espace normalisé), s'il y en a une.
+    fn selection_center(&self) -> Option<V3> {
+        let pts = self.selection_points();
+        let n = pts.len() as f32;
+        (n > 0.0).then(|| pts.iter().fold([0.0f32; 3], |a, p| [a[0] + p[0] / n, a[1] + p[1] / n, a[2] + p[2] / n]))
+    }
+
+    /// Cadre la vue sur la sélection (objets choisis, ou sommets choisis en mode édition) ; sans
+    /// sélection, toute la scène.
+    fn frame_selection(&mut self) {
+        let Some((lo, hi)) = self.scene_frame else {
+            self.cam = Camera { ortho: self.cam.ortho, ..Default::default() };
+            return;
+        };
+        let longest = (hi[0] - lo[0]).max(hi[1] - lo[1]).max(hi[2] - lo[2]).max(1e-9);
+        let c = [(lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0, (lo[2] + hi[2]) / 2.0];
+        let _ = (longest, c);
+        let pts = self.selection_points();
         if pts.is_empty() {
             self.cam = Camera { ortho: self.cam.ortho, ..Default::default() };
             return;
@@ -3029,7 +3137,7 @@ impl Viewer {
             (f, mesh)
         };
         let n = mesh.pos.len();
-        self.mesh = Some(MeshEdit { obj: k, file, mesh, sel: vec![false; n], hist: vec![], redo: vec![], modal: None, boxing: None, skip_click: false, mode: 0, active: None, vis: None, op: None, last: None, loopcut: None, menu: None, trigger: None, prop: false, prop_r: 0.0, prop_d: (None, vec![]) });
+        self.mesh = Some(MeshEdit { obj: k, file, mesh, sel: vec![false; n], hist: vec![], redo: vec![], modal: None, boxing: None, skip_click: false, mode: 0, active: None, vis: None, op: None, last: None, loopcut: None, menu: None, trigger: None, split: None, prop: false, prop_r: 0.0, prop_d: (None, vec![]) });
         self.scene_multi.clear();
         self.capture_msg = None;
     }
@@ -3163,7 +3271,6 @@ impl Viewer {
         };
         let mut dirty = false;
         let hovered = resp.hovered();
-        MESH_KEYS.store(hovered, std::sync::atomic::Ordering::Relaxed);
         let (pressed, secondary, cur) = ui.input(|i| (i.pointer.primary_pressed(), i.pointer.secondary_pressed(), i.pointer.hover_pos().or(i.pointer.latest_pos())));
         let key = |k: Key| !typing && ui.input(|i| i.key_pressed(k) && !i.modifiers.any());
         let snapshot = |me: &mut MeshEdit| {
@@ -3175,7 +3282,7 @@ impl Viewer {
         };
         let idle = me.op.is_none() && me.modal.is_none() && me.loopcut.is_none() && me.boxing.is_none();
         if idle && hovered && secondary && !ui.input(|i| i.modifiers.shift) {
-            me.menu = cur;
+            me.menu = cur.map(|c| (c, 0));
         }
         // ---- Outil interactif en cours (biseau, incrustation, coupe en boucle) : la souris règle la
         // valeur, la molette les segments, on peut taper un nombre ; clic ou Entrée valide, clic droit
@@ -3544,7 +3651,50 @@ impl Viewer {
                     }
                 }
             }
-            if (key(Key::X) || key(Key::Delete) || trig == Some("supprimer")) && any {
+            if (key(Key::X) || trig == Some("supprimer ou dissoudre…")) && any {
+                me.menu = Some((cur.unwrap_or(rc), 1));
+            }
+            // Supprimer, dissoudre, pont, séparer : appliqués tout de suite, annulables
+            let direct = match trig {
+                Some(t @ ("supprimer les arêtes" | "supprimer les faces" | "dissoudre les sommets" | "dissoudre les arêtes" | "dissoudre les faces" | "pont entre boucles")) => Some(t),
+                _ => None,
+            };
+            if let (Some(t), true) = (direct, any) {
+                let mut m = me.mesh.clone();
+                let r: Result<Vec<bool>, &'static str> = match t {
+                    "supprimer les arêtes" => m.delete_edges(&me.sel).ok_or("aucune arête choisie (ses deux bouts)"),
+                    "supprimer les faces" => m.delete_faces(&me.sel).ok_or("aucune face choisie (tous ses sommets)"),
+                    "dissoudre les sommets" => m.dissolve_verts(&me.sel).ok_or("rien à dissoudre ici"),
+                    "dissoudre les arêtes" => m.dissolve_edges(&me.sel).ok_or("rien à dissoudre ici"),
+                    "dissoudre les faces" => m.dissolve_faces(&me.sel).ok_or("choisis au moins deux faces voisines"),
+                    _ => m.bridge(&me.sel),
+                };
+                match r {
+                    Ok(sl) => {
+                        snapshot(me);
+                        me.mesh = m;
+                        me.sel = sl;
+                        me.sel.resize(me.mesh.pos.len(), false);
+                        dirty = true;
+                    }
+                    Err(e) => self.capture_msg = Some(crate::i18n::t(e)),
+                }
+            }
+            // P : les faces choisies deviennent un autre objet
+            if (key(Key::P) || trig == Some("séparer la sélection")) && any {
+                let mut m = me.mesh.clone();
+                match m.split_off(&me.sel) {
+                    Some(other) => {
+                        snapshot(me);
+                        me.mesh = m;
+                        me.sel = vec![false; me.mesh.pos.len()];
+                        me.split = Some(other);
+                        dirty = true;
+                    }
+                    None => self.capture_msg = Some(crate::i18n::t("séparer : choisis au moins une face")),
+                }
+            }
+            if (key(Key::Delete) || trig == Some("supprimer les sommets")) && any {
                 snapshot(me);
                 let sel = std::mem::take(&mut me.sel);
                 me.mesh.delete(&sel);
@@ -3837,17 +3987,23 @@ impl Viewer {
             }
         }
         // Menu du clic droit : tous les outils du mode édition, avec leur raccourci
-        if let Some(at) = me.menu {
+        if let Some((at, menu_kind)) = me.menu {
             let mut close = false;
             let area = egui::Area::new(ui.id().with("menu-edition")).order(egui::Order::Foreground).fixed_pos(at).constrain(true).show(ui.ctx(), |ui| {
                 egui::Frame::popup(ui.style()).show(ui, |ui| {
                     ui.set_min_width(230.0);
-                    let groups: [(&str, &[(&'static str, &str)]); 4] = [
+                    let tools: &[(&str, &[(&'static str, &str)])] = &[
                         ("SOMMETS", &[("fusionner au centre", "M"), ("fusionner par distance", ""), ("biseau des sommets", "Ctrl+Maj+B"), ("lisser les sommets", "")]),
-                        ("ARÊTES", &[("biseau", "Ctrl+B"), ("coupe en boucle", "Ctrl+R")]),
+                        ("ARÊTES", &[("biseau", "Ctrl+B"), ("coupe en boucle", "Ctrl+R"), ("pont entre boucles", "")]),
                         ("FACES", &[("extruder", "E"), ("incruster", "I"), ("subdiviser", ""), ("remplir", "F")]),
-                        ("SÉLECTION", &[("tout choisir", "A"), ("inverser la sélection", "Ctrl+I"), ("supprimer", "X")]),
+                        ("MAILLAGE", &[("séparer la sélection", "P"), ("supprimer ou dissoudre…", "X")]),
+                        ("SÉLECTION", &[("tout choisir", "A"), ("inverser la sélection", "Ctrl+I")]),
                     ];
+                    let del: &[(&str, &[(&'static str, &str)])] = &[
+                        ("SUPPRIMER", &[("supprimer les sommets", "Suppr"), ("supprimer les arêtes", ""), ("supprimer les faces", "")]),
+                        ("DISSOUDRE", &[("dissoudre les sommets", ""), ("dissoudre les arêtes", ""), ("dissoudre les faces", "")]),
+                    ];
+                    let groups = if menu_kind == 1 { del } else { tools };
                     for (gi, (title, items)) in groups.iter().enumerate() {
                         if gi > 0 {
                             ui.separator();
@@ -3863,7 +4019,7 @@ impl Viewer {
                     }
                 });
             });
-            if close || ui.input(|i| i.key_pressed(Key::Escape)) || (ui.input(|i| i.pointer.any_pressed()) && !area.response.contains_pointer() && me.menu != cur) {
+            if close || ui.input(|i| i.key_pressed(Key::Escape)) || (ui.input(|i| i.pointer.any_pressed()) && !area.response.contains_pointer() && Some(at) != cur) {
                 me.menu = None;
                 me.skip_click = true;
             }
@@ -3933,6 +4089,10 @@ impl Viewer {
             let _ = me.mesh.write_obj(&me.file);
             self.scene_dirty = true;
             ui.ctx().request_repaint();
+        }
+        let split = me.split.take().map(|m| (me.obj, m));
+        if let Some((obj, m)) = split {
+            self.add_split_object(obj, m);
         }
     }
 
@@ -4377,6 +4537,9 @@ impl Viewer {
             });
             // Commande choisie dans le menu du clic droit
             let act = self.obj_action.take();
+            if act == Some("join") || ui.input(|i| i.modifiers.command && !i.modifiers.shift && i.key_pressed(Key::J)) {
+                self.join_request = true;
+            }
             match act {
                 Some("delete") => del = true,
                 Some("duplicate") => dup = true,
@@ -5086,6 +5249,9 @@ impl Viewer {
         if std::mem::take(&mut self.uv_request) {
             self.open_uv_edit(&ui.ctx().clone());
         }
+        if std::mem::take(&mut self.join_request) {
+            self.join_selected();
+        }
         if let Some((sub, k)) = &mut self.sub {
             let k = *k;
             let name = self.scene.as_ref().and_then(|s| s.objects.get(k)).map(|o| o.name.clone()).unwrap_or_default();
@@ -5462,6 +5628,7 @@ impl Viewer {
                             if ui.button(crate::i18n::t("cadrer la sélection (Maj+F)")).clicked() {
                                 self.frame_selection();
                             }
+                            ui.checkbox(&mut self.orbit_sel, crate::i18n::t("tourner autour de la sélection"));
 
                         let mut z = z_up;
                         if ui.checkbox(&mut z, crate::i18n::t("axe Z vers le haut")).changed() {
@@ -6090,6 +6257,7 @@ impl Viewer {
                             ("redimensionner", "S", "scale", true),
                             ("remettre à zéro (position, rotation, taille)", "", "reset", true),
                             ("dupliquer", "Maj+D", "duplicate", true),
+                            ("joindre à l'actif", "Ctrl+J", "join", true),
                             ("cacher", "H", "hide", true),
                             ("tout montrer", "Alt+H", "show-all", false),
                             ("retirer le matériau", "", "no-material", true),
@@ -6691,8 +6859,19 @@ impl Viewer {
                 self.cam.pan[0] += d.x * k;
                 self.cam.pan[1] -= d.y * k;
             } else {
+                // Tourner autour de la sélection : le point choisi garde sa place à l'écran
+                if resp.drag_started() {
+                    self.orbit_pivot = if self.orbit_sel { self.selection_center() } else { None };
+                }
+                let before = self.orbit_pivot.map(|m| self.cam.rotate(m));
                 self.cam.yaw -= d.x * 0.008;
                 self.cam.pitch = (self.cam.pitch + d.y * 0.008).clamp(-1.57, 1.57);
+                if let (Some(m), Some(r0)) = (self.orbit_pivot, before) {
+                    let r1 = self.cam.rotate(m);
+                    self.cam.pan[0] += r0[0] - r1[0];
+                    self.cam.pan[1] += r0[1] - r1[1];
+                    self.cam.dist -= r0[2] - r1[2];
+                }
             }
         }
         if resp.hovered() {
@@ -6877,6 +7056,8 @@ impl Viewer {
                 painter.line_segment([s + d * 13.0, s + d * 20.0], Stroke::new(1.0, Color32::from_gray(20)));
             }
         }
+        // Raccourcis de la vue 3D d'une scène (Ctrl+B, Ctrl+J, Ctrl+R…) avant ceux de l'app
+        MESH_KEYS.store(resp.hovered() && crate::scene::is_scene(&self.path), std::sync::atomic::Ordering::Relaxed);
         self.mesh_edit_ui(ui, rect, &resp);
         // Repères des lumières et des caméras de la scène
         if let (Some(scene), Some((lo, hi)), true) = (self.scene.as_ref(), self.scene_frame, self.edit.is_none()) {

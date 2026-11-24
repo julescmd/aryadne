@@ -1223,6 +1223,308 @@ impl EMesh {
         Some(self.compact(out))
     }
 
+    /// Supprime les arêtes choisies (deux bouts choisis) et les faces qui les touchent.
+    pub fn delete_edges(&mut self, sel: &[bool]) -> Option<Vec<bool>> {
+        let on = |v: u32| sel.get(v as usize).copied().unwrap_or(false);
+        let before = self.polys.len();
+        self.polys.retain(|p| !(0..p.len()).any(|k| on(p[k]) && on(p[(k + 1) % p.len()])));
+        if self.polys.len() == before {
+            return None;
+        }
+        Some(self.compact(vec![]))
+    }
+
+    /// Supprime les faces choisies ; les sommets et arêtes qui restent utiles à d'autres faces restent.
+    pub fn delete_faces(&mut self, sel: &[bool]) -> Option<Vec<bool>> {
+        let faces: HashSet<usize> = self.faces_in(sel).into_iter().collect();
+        if faces.is_empty() {
+            return None;
+        }
+        let mut k = 0;
+        self.polys.retain(|_| {
+            k += 1;
+            !faces.contains(&(k - 1))
+        });
+        Some(self.compact(vec![]))
+    }
+
+    /// Remplace chaque groupe de faces par une seule face, son contour, quand ce contour est une
+    /// seule boucle. Renvoie le nombre de groupes fusionnés.
+    fn merge_groups(&mut self, groups: Vec<Vec<usize>>, drop: &HashSet<u32>) -> usize {
+        let mut gone: HashSet<usize> = HashSet::new();
+        let mut added = vec![];
+        for g in groups {
+            if g.len() < 2 && drop.is_empty() {
+                continue;
+            }
+            let mut dir: HashSet<(u32, u32)> = HashSet::new();
+            for &f in &g {
+                let p = &self.polys[f];
+                for k in 0..p.len() {
+                    dir.insert((p[k], p[(k + 1) % p.len()]));
+                }
+            }
+            let border: Vec<(u32, u32)> = dir.iter().copied().filter(|&(a, b)| !dir.contains(&(b, a))).collect();
+            let mut next: HashMap<u32, u32> = HashMap::new();
+            let mut ok = true;
+            for &(a, b) in &border {
+                if next.insert(a, b).is_some() {
+                    ok = false;
+                }
+            }
+            if !ok || border.is_empty() {
+                continue;
+            }
+            let start = border[0].0;
+            let mut loop_ = vec![start];
+            let mut cur = next[&start];
+            while cur != start && loop_.len() <= border.len() {
+                loop_.push(cur);
+                match next.get(&cur) {
+                    Some(&n) => cur = n,
+                    None => break,
+                }
+            }
+            if loop_.len() != border.len() {
+                continue; // plusieurs contours (un trou) : on n'y touche pas
+            }
+            loop_.retain(|v| !drop.contains(v));
+            if loop_.len() < 3 {
+                continue;
+            }
+            gone.extend(g.iter().copied());
+            added.push(loop_);
+        }
+        let n = added.len();
+        let mut k = 0;
+        self.polys.retain(|_| {
+            k += 1;
+            !gone.contains(&(k - 1))
+        });
+        self.polys.extend(added);
+        n
+    }
+
+    /// Groupes de faces reliées par des arêtes qui disparaissent.
+    fn groups_by_edges(&self, dissolve: &HashSet<(u32, u32)>) -> Vec<Vec<usize>> {
+        let mut parent: Vec<usize> = (0..self.polys.len()).collect();
+        fn find(p: &mut [usize], x: usize) -> usize {
+            let mut r = x;
+            while p[r] != r {
+                p[r] = p[p[r]];
+                r = p[r];
+            }
+            r
+        }
+        let mut by_edge: HashMap<(u32, u32), Vec<usize>> = HashMap::new();
+        for (f, p) in self.polys.iter().enumerate() {
+            for k in 0..p.len() {
+                let (a, b) = (p[k], p[(k + 1) % p.len()]);
+                if dissolve.contains(&(a.min(b), a.max(b))) {
+                    by_edge.entry((a.min(b), a.max(b))).or_default().push(f);
+                }
+            }
+        }
+        let mut touched: HashSet<usize> = HashSet::new();
+        for fs in by_edge.values() {
+            if fs.len() == 2 {
+                let (x, y) = (find(&mut parent, fs[0]), find(&mut parent, fs[1]));
+                parent[x] = y;
+                touched.insert(fs[0]);
+                touched.insert(fs[1]);
+            }
+        }
+        let mut groups: HashMap<usize, Vec<usize>> = HashMap::new();
+        for f in touched {
+            let r = find(&mut parent, f);
+            groups.entry(r).or_default().push(f);
+        }
+        groups.into_values().collect()
+    }
+
+    /// Dissoudre les faces choisies : chaque région devient une seule face.
+    pub fn dissolve_faces(&mut self, sel: &[bool]) -> Option<Vec<bool>> {
+        let faces = self.faces_in(sel);
+        if faces.len() < 2 {
+            return None;
+        }
+        let set: HashSet<usize> = faces.iter().copied().collect();
+        let mut inner: HashSet<(u32, u32)> = HashSet::new();
+        let mut seen: HashMap<(u32, u32), usize> = HashMap::new();
+        for &f in &faces {
+            let p = &self.polys[f];
+            for k in 0..p.len() {
+                let (a, b) = (p[k], p[(k + 1) % p.len()]);
+                *seen.entry((a.min(b), a.max(b))).or_default() += 1;
+            }
+        }
+        for (e, n) in seen {
+            if n == 2 {
+                inner.insert(e);
+            }
+        }
+        let groups: Vec<Vec<usize>> = self.groups_by_edges(&inner).into_iter().map(|g| g.into_iter().filter(|f| set.contains(f)).collect()).collect();
+        if self.merge_groups(groups, &HashSet::new()) == 0 {
+            return None;
+        }
+        let keep: Vec<bool> = sel.to_vec();
+        Some(self.compact(keep))
+    }
+
+    /// Dissoudre les arêtes choisies : les faces de part et d'autre se fondent en une.
+    pub fn dissolve_edges(&mut self, sel: &[bool]) -> Option<Vec<bool>> {
+        let on = |v: u32| sel.get(v as usize).copied().unwrap_or(false);
+        let mut edges: HashSet<(u32, u32)> = HashSet::new();
+        for p in &self.polys {
+            for k in 0..p.len() {
+                let (a, b) = (p[k], p[(k + 1) % p.len()]);
+                if on(a) && on(b) {
+                    edges.insert((a.min(b), a.max(b)));
+                }
+            }
+        }
+        let groups = self.groups_by_edges(&edges);
+        // Les sommets choisis qui ne gardent que deux arêtes après coup disparaissent aussi
+        if self.merge_groups(groups, &HashSet::new()) == 0 {
+            return None;
+        }
+        self.drop_two_valent(sel);
+        Some(self.compact(sel.to_vec()))
+    }
+
+    /// Dissoudre les sommets choisis : les faces autour de chacun se fondent en une, sans lui.
+    pub fn dissolve_verts(&mut self, sel: &[bool]) -> Option<Vec<bool>> {
+        let on = |v: u32| sel.get(v as usize).copied().unwrap_or(false);
+        let mut edges: HashSet<(u32, u32)> = HashSet::new();
+        for p in &self.polys {
+            for k in 0..p.len() {
+                let (a, b) = (p[k], p[(k + 1) % p.len()]);
+                if on(a) || on(b) {
+                    edges.insert((a.min(b), a.max(b)));
+                }
+            }
+        }
+        let drop: HashSet<u32> = (0..self.pos.len() as u32).filter(|&v| on(v)).collect();
+        let groups = self.groups_by_edges(&edges);
+        let n = self.merge_groups(groups, &drop);
+        let m = self.drop_two_valent(sel);
+        if n == 0 && m == 0 {
+            return None;
+        }
+        Some(self.compact(vec![]))
+    }
+
+    /// Retire des faces les sommets choisis qui n'ont plus que deux voisins (au milieu d'un côté droit).
+    fn drop_two_valent(&mut self, sel: &[bool]) -> usize {
+        let nb = self.neighbors();
+        let mut n = 0;
+        for p in &mut self.polys {
+            let before = p.len();
+            p.retain(|&v| !(sel.get(v as usize).copied().unwrap_or(false) && nb[v as usize].len() == 2));
+            n += before - p.len();
+        }
+        self.polys.retain(|p| p.len() >= 3);
+        n
+    }
+
+    /// Boucles du bord formées d'arêtes choisies (chaque arête n'a qu'une face), dans le sens de leur face.
+    fn border_loops(&self, sel: &[bool]) -> Vec<Vec<u32>> {
+        let on = |v: u32| sel.get(v as usize).copied().unwrap_or(false);
+        let mut dir: HashSet<(u32, u32)> = HashSet::new();
+        for p in &self.polys {
+            for k in 0..p.len() {
+                dir.insert((p[k], p[(k + 1) % p.len()]));
+            }
+        }
+        let mut next: HashMap<u32, u32> = HashMap::new();
+        for &(a, b) in &dir {
+            if !dir.contains(&(b, a)) && on(a) && on(b) {
+                next.insert(a, b);
+            }
+        }
+        let mut used: HashSet<u32> = HashSet::new();
+        let mut loops = vec![];
+        let mut keys: Vec<u32> = next.keys().copied().collect();
+        keys.sort_unstable();
+        for s in keys {
+            if used.contains(&s) {
+                continue;
+            }
+            let mut l = vec![s];
+            used.insert(s);
+            let mut cur = next[&s];
+            let mut closed = false;
+            while let Some(&n) = next.get(&cur) {
+                if cur == s {
+                    closed = true;
+                    break;
+                }
+                if used.contains(&cur) {
+                    break;
+                }
+                used.insert(cur);
+                l.push(cur);
+                cur = n;
+            }
+            if closed || cur == s {
+                loops.push(l);
+            }
+        }
+        loops
+    }
+
+    /// Pont entre deux boucles de bord choisies, de même nombre de sommets : un tube de quadrilatères.
+    pub fn bridge(&mut self, sel: &[bool]) -> Result<Vec<bool>, &'static str> {
+        let loops = self.border_loops(sel);
+        if loops.len() != 2 {
+            return Err("pont : choisis deux boucles de bord (deux trous)");
+        }
+        let (a, b) = (&loops[0], &loops[1]);
+        if a.len() != b.len() {
+            return Err("pont : les deux boucles doivent avoir le même nombre de sommets");
+        }
+        let n = a.len();
+        // a_i va avec b_(off - i) : les deux bords se font face, leur sens est inverse
+        let d2 = |x: u32, y: u32| {
+            let e = sub(self.pos[x as usize], self.pos[y as usize]);
+            e[0] * e[0] + e[1] * e[1] + e[2] * e[2]
+        };
+        let best = (0..n).min_by(|&o1, &o2| {
+            let c = |o: usize| (0..n).map(|i| d2(a[i], b[(o + n - i) % n])).sum::<f32>();
+            c(o1).total_cmp(&c(o2))
+        }).unwrap_or(0);
+        let sig = |i: usize| b[(best + n * 2 - i) % n];
+        for i in 0..n {
+            let j = (i + 1) % n;
+            self.polys.push(vec![a[j], a[i], sig(i), sig(j)]);
+        }
+        Ok(sel.to_vec())
+    }
+
+    /// Sépare les faces choisies : elles partent dans un autre maillage (rendu), retirées d'ici.
+    pub fn split_off(&mut self, sel: &[bool]) -> Option<EMesh> {
+        let faces: HashSet<usize> = self.faces_in(sel).into_iter().collect();
+        if faces.is_empty() {
+            return None;
+        }
+        let mut other = EMesh { pos: self.pos.clone(), polys: vec![] };
+        let mut keep = vec![];
+        for (f, p) in std::mem::take(&mut self.polys).into_iter().enumerate() {
+            if faces.contains(&f) { other.polys.push(p) } else { keep.push(p) }
+        }
+        self.polys = keep;
+        self.compact(vec![]);
+        other.compact(vec![]);
+        Some(other)
+    }
+
+    /// Ajoute un autre maillage (déjà dans le même repère) à celui-ci.
+    pub fn append(&mut self, other: &EMesh) {
+        let off = self.pos.len() as u32;
+        self.pos.extend(&other.pos);
+        self.polys.extend(other.polys.iter().map(|p| p.iter().map(|v| v + off).collect()));
+    }
+
     /// Tout ce qui touche la sélection par des faces (L / Ctrl+L) : la pièce entière.
     pub fn linked(&self, sel: &[bool]) -> Vec<bool> {
         let mut out: Vec<bool> = (0..self.pos.len()).map(|i| sel.get(i).copied().unwrap_or(false)).collect();
@@ -1440,6 +1742,55 @@ mod tests {
         let mut m = cube();
         assert!(m.smooth(&[true; 8], 0.5, 2).is_some());
         assert!(m.volume() < 1.0);
+    }
+
+    #[test]
+    fn dissoudre_pont_separer() {
+        // Dissoudre l'arête entre deux faces : 5 faces, toujours fermé
+        let mut m = cube();
+        let mut sel = vec![false; 8];
+        sel[0] = true;
+        sel[1] = true;
+        assert!(m.dissolve_edges(&sel).is_some());
+        assert_eq!(m.polys.len(), 5);
+        assert!(ferme(&m));
+        // Dissoudre deux faces voisines en une : même résultat
+        let mut m = cube();
+        let mut sel = vec![false; 8];
+        for v in [0, 1, 2, 3, 6, 7] {
+            sel[v] = true;
+        }
+        assert!(m.dissolve_faces(&sel).is_some());
+        assert_eq!(m.polys.len(), 5);
+        assert!(ferme(&m));
+        // Dissoudre un sommet de grille 2x2 : une seule face reste
+        let mut m = cube();
+        assert!(m.subdivide(&[true; 8], 1).is_some());
+        let mut sel = vec![false; m.pos.len()];
+        let centre = (0..m.pos.len()).find(|&i| m.pos[i] == [0.5, 0.5, 0.0]).unwrap();
+        sel[centre] = true;
+        let n = m.polys.len();
+        assert!(m.dissolve_verts(&sel).is_some());
+        assert_eq!(m.polys.len(), n - 3);
+        assert!(ferme(&m));
+        // Pont : le dessous et le dessus du cube, seuls ; reliés, ils refont un cube fermé
+        let mut t = cube();
+        t.polys = vec![t.polys[0].clone(), t.polys[1].clone()];
+        assert!(t.bridge(&[true; 8]).is_ok());
+        assert_eq!(t.polys.len(), 6);
+        assert!(ferme(&t), "{:?}", t.polys);
+        assert!((t.volume() - 1.0).abs() < 1e-4);
+        // Séparer : la face du haut part, les deux restent cohérents
+        let mut m = cube();
+        let mut sel = vec![false; 8];
+        for v in [4, 5, 7, 6] {
+            sel[v] = true;
+        }
+        let other = m.split_off(&sel).unwrap();
+        assert_eq!((m.polys.len(), other.polys.len(), other.pos.len()), (5, 1, 4));
+        let mut j = m.clone();
+        j.append(&other);
+        assert_eq!(j.polys.len(), 6);
     }
 
     #[test]

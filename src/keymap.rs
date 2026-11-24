@@ -53,6 +53,11 @@ pub fn bindings(id: &str) -> Vec<KeyboardShortcut> {
 
 /// Vrai (et la touche est consommée) si un raccourci de l'action vient d'être pressé.
 pub fn pressed(ctx: &egui::Context, id: &str) -> bool {
+    // Souris sur la vue 3D d'une scène : ses raccourcis (Ctrl+B biseau, Ctrl+J joindre, Ctrl+L
+    // pièces liées, Ctrl+N…) passent avant ceux de l'app ; ouvrir, chercher et les onglets restent
+    if crate::model3d::mesh_keys() && matches!(id, "explorer" | "daily" | "assistant" | "new_note" | "split" | "compact" | "terminal") {
+        return false;
+    }
     let b = bindings(id);
     ctx.input_mut(|i| b.iter().any(|s| i.consume_shortcut(s)))
 }

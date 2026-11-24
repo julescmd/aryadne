@@ -1903,7 +1903,7 @@ impl App {
         if keymap::pressed(ctx, "switcher") {
             self.switcher = Some((String::new(), 0));
         }
-        if keymap::pressed(ctx, "daily") {
+        if !crate::model3d::mesh_keys() && keymap::pressed(ctx, "daily") {
             self.daily_note();
         }
         if keymap::pressed(ctx, "split") {
