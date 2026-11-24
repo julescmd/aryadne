@@ -1050,6 +1050,84 @@ fn mulm(m: &[V3; 3], v: V3) -> V3 {
     [m[0][0] * v[0] + m[1][0] * v[1] + m[2][0] * v[2], m[0][1] * v[0] + m[1][1] * v[1] + m[2][1] * v[2], m[0][2] * v[0] + m[1][2] * v[1] + m[2][2] * v[2]]
 }
 
+/// Mode édition : pour chaque sommet affiché de l'objet (triangles t0..t1), le sommet du maillage édité
+/// au même endroit (positions d'avant le geste, en espace normalisé). None si un sommet n'a pas de jumeau.
+fn map_edit_vertices(prep: &Prepared, t0: usize, t1: usize, before: &[V3]) -> Option<Vec<(u32, u32)>> {
+    let tris = prep.tris.get(t0..t1)?;
+    let mut lo = [f32::MAX; 3];
+    let mut hi = [f32::MIN; 3];
+    for p in before {
+        for k in 0..3 {
+            lo[k] = lo[k].min(p[k]);
+            hi[k] = hi[k].max(p[k]);
+        }
+    }
+    let diag = ((hi[0] - lo[0]).powi(2) + (hi[1] - lo[1]).powi(2) + (hi[2] - lo[2]).powi(2)).sqrt().max(1e-9);
+    let eps = diag * 1e-4;
+    let cell = |p: V3| [(p[0] / eps).floor() as i64, (p[1] / eps).floor() as i64, (p[2] / eps).floor() as i64];
+    let mut grid: std::collections::HashMap<[i64; 3], Vec<u32>> = Default::default();
+    for (i, p) in before.iter().enumerate() {
+        grid.entry(cell(*p)).or_default().push(i as u32);
+    }
+    let mut seen = std::collections::HashSet::new();
+    let mut out = vec![];
+    for t in tris {
+        for &v in t {
+            if !seen.insert(v) {
+                continue;
+            }
+            let p = prep.pos[v as usize];
+            let c = cell(p);
+            let mut best: Option<(f32, u32)> = None;
+            for dx in -1..=1 {
+                for dy in -1..=1 {
+                    for dz in -1..=1 {
+                        for &i in grid.get(&[c[0] + dx, c[1] + dy, c[2] + dz]).map(|v| v.as_slice()).unwrap_or(&[]) {
+                            let q = before[i as usize];
+                            let d = (q[0] - p[0]).powi(2) + (q[1] - p[1]).powi(2) + (q[2] - p[2]).powi(2);
+                            if best.is_none_or(|b| d < b.0) {
+                                best = Some((d, i));
+                            }
+                        }
+                    }
+                }
+            }
+            let (d, i) = best?;
+            if d > eps * eps * 4.0 {
+                return None;
+            }
+            out.push((v, i));
+        }
+    }
+    Some(out)
+}
+
+/// Le maillage affiché avec les sommets de l'objet aux positions `now` (et leurs normales refaites)
+fn patch_vertices(prep: &Prepared, t0: usize, t1: usize, map: &[(u32, u32)], now: &[V3]) -> Prepared {
+    let mut pos = prep.pos.clone();
+    let mut nrm = prep.nrm.clone();
+    for &(v, i) in map {
+        if let Some(p) = now.get(i as usize) {
+            pos[v as usize] = *p;
+        }
+        nrm[v as usize] = [0.0; 3];
+    }
+    if let Some(tris) = prep.tris.get(t0..t1) {
+        for t in tris {
+            let (a, b, c) = (pos[t[0] as usize], pos[t[1] as usize], pos[t[2] as usize]);
+            let n = cross(sub(b, a), sub(c, a));
+            for &v in t {
+                let x = &mut nrm[v as usize];
+                *x = [x[0] + n[0], x[1] + n[1], x[2] + n[2]];
+            }
+        }
+    }
+    for &(v, _) in map {
+        nrm[v as usize] = norm(nrm[v as usize]);
+    }
+    Prepared { pos, nrm, tris: prep.tris.clone(), colors: prep.colors.clone(), edges: prep.edges.clone(), floor: prep.floor, uv: prep.uv.clone(), mat: prep.mat.clone(), curv: std::sync::OnceLock::new(), bvh: std::sync::OnceLock::new() }
+}
+
 /// Déplacement rapide : si seules les poses des objets ont changé depuis `built`, renvoie le
 /// maillage affiché avec les sommets des objets déplacés transformés sur place.
 fn fast_move(built: &crate::scene::Scene, scene: &crate::scene::Scene, ranges: &[(usize, usize, usize)], prep: &Prepared, m: &Model) -> Option<Prepared> {
@@ -2418,6 +2496,11 @@ pub struct Viewer {
     box_sel: Option<Option<Pos2>>,
     /// Mode édition (Tab) : le maillage de l'objet actif, modifiable sommet par sommet
     mesh: Option<MeshEdit>,
+    /// Mode édition : sommets déplacés pendant le geste, affichés sur place ; écrits au relâché
+    mesh_moved: bool,
+    mesh_unsaved: bool,
+    /// Correspondance sommets affichés → sommets du maillage édité (objet, nombre de sommets, liste)
+    mesh_map: Option<(usize, usize, Vec<(u32, u32)>)>,
     /// Demande d'entrer ou de sortir du mode édition (bouton du panneau)
     mesh_toggle: bool,
     /// Scène créée pour un modèle ouvert seul : la vue cadre le modèle, pas une scène de 12 m
@@ -2606,6 +2689,9 @@ impl Viewer {
             multi_follow: None,
             box_sel: None,
             mesh: None,
+            mesh_moved: false,
+            mesh_unsaved: false,
+            mesh_map: None,
             mesh_toggle: false,
             tight_frame: false,
             want_anim: false,
@@ -4427,8 +4513,15 @@ impl Viewer {
             }
         }
         if dirty {
-            let _ = me.mesh.write_obj(&me.file);
-            self.scene_dirty = true;
+            // Un geste en cours (G, R, S, glisser) : affichage sur place, écriture à la fin du geste
+            let gesture = me.modal.is_some() && me.mesh.pos.len() == me.hist.last().map(|h| h.0.pos.len()).unwrap_or(0);
+            if gesture {
+                self.mesh_moved = true;
+            } else {
+                let _ = me.mesh.write_obj(&me.file);
+                self.scene_dirty = true;
+                self.mesh_map = None;
+            }
             ui.ctx().request_repaint();
         }
         let split = me.split.take().map(|m| (me.obj, m));
@@ -5743,6 +5836,61 @@ impl Viewer {
                 }
             }
         }
+        // Mode édition : les sommets déplacés pendant le geste remplacent ceux de l'affichage, sans reconstruire
+        if self.mesh_moved {
+            self.mesh_moved = false;
+            self.mesh_unsaved = true;
+            let ok = match (&self.mesh, &self.prepared, &self.state) {
+                (Some(me), Some(prep), State::Ready(m)) if self.scene_rx.is_none() && !prep.0 => {
+                    let range = self.scene_ranges.iter().find(|r| r.0 == me.obj).map(|r| (r.1, r.2));
+                    let before = me.hist.last().map(|h| &h.0.pos);
+                    match (range, before) {
+                        (Some((t0, t1)), Some(before)) if before.len() == me.mesh.pos.len() => {
+                            let s = m.size();
+                            let scale = 1.0 / s[0].max(s[1]).max(s[2]).max(1e-9);
+                            let c = [(m.min[0] + m.max[0]) / 2.0, (m.min[1] + m.max[1]) / 2.0, (m.min[2] + m.max[2]) / 2.0];
+                            let norm = |w: V3| [(w[0] - c[0]) * scale, (w[1] - c[1]) * scale, (w[2] - c[2]) * scale];
+                            let world = |v: V3| scene.world(me.obj, v);
+                            // La correspondance se cherche une fois par geste, sur les positions d'avant
+                            let fresh = self.mesh_map.as_ref().is_some_and(|mm| mm.0 == me.obj && mm.1 == me.mesh.pos.len());
+                            if !fresh {
+                                self.mesh_map = map_edit_vertices(&prep.2, t0, t1, &before.iter().map(|v| norm(world(*v))).collect::<Vec<_>>()).map(|l| (me.obj, me.mesh.pos.len(), l));
+                            }
+                            match &self.mesh_map {
+                                Some((_, _, list)) => {
+                                    let now: Vec<V3> = me.mesh.pos.iter().map(|v| norm(world(*v))).collect();
+                                    let np = patch_vertices(&prep.2, t0, t1, list, &now);
+                                    self.prepared = Some((prep.0, prep.1, std::sync::Arc::new(np)));
+                                    self.last = None;
+                                    self.trace = None;
+                                    true
+                                }
+                                None => false,
+                            }
+                        }
+                        _ => false,
+                    }
+                }
+                _ => false,
+            };
+            if !ok {
+                // Pas de correspondance sûre : on reconstruit comme avant
+                if let Some(me) = &self.mesh {
+                    let _ = me.mesh.write_obj(&me.file);
+                }
+                self.mesh_unsaved = false;
+                self.scene_dirty = true;
+            }
+        }
+        let gesture = self.gizmo_hold.is_some() || self.mesh.as_ref().is_some_and(|m| m.modal.is_some()) || down;
+        if self.mesh_unsaved && !gesture {
+            self.mesh_unsaved = false;
+            self.mesh_map = None;
+            if let Some(me) = &self.mesh {
+                let _ = me.mesh.write_obj(&me.file);
+            }
+            self.scene_dirty = true;
+        }
         if self.scene_moving && !down {
             self.scene_moving = false;
             self.scene_dirty = true;
@@ -6451,11 +6599,8 @@ impl Viewer {
                             self.prepared = None;
                         }
                     }
-                    Hdr::Busy => {
-                        if self.job.is_some() {
-                            ui.spinner();
-                        }
-                    }
+                    // Le calcul en arrière-plan se signale dans la ligne d'infos du bas, pas ici : l'en-tête ne bouge plus
+                    Hdr::Busy => {}
                     _ => {}
                 }
             }
@@ -6495,7 +6640,8 @@ impl Viewer {
                 format!("{} triangles{shown} · {} sommets · {:.2} × {:.2} × {:.2} {un}", fmt_n(model.total_tris), fmt_n(model.total_vertices), s[0] * uf, s[2] * uf, s[1] * uf)
             }
         };
-        self.stats_text = stats;
+        // Un calcul en cours (modificateurs, scène) : un mot discret à la fin de la ligne d'infos
+        self.stats_text = if self.job.is_some() || self.scene_rx.is_some() { format!("{stats} · {}", crate::i18n::t_mid("calcul…")) } else { stats };
         if let Some(path) = pick_hdr.or(self.pending_hdr.take()) {
             self.load_env(path, &ctx);
         }
@@ -7356,8 +7502,8 @@ impl Viewer {
                                     None => false,
                                 };
                                 if moved {
-                                    let _ = me.mesh.write_obj(&me.file);
-                                    self.scene_dirty = true;
+                                    // Affiché tout de suite sur place ; écrit et reconstruit au relâché
+                                    self.mesh_moved = true;
                                 }
                                 self.gizmo_hold = Some((h, cur, start, acc));
                             }

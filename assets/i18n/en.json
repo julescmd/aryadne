@@ -2215,5 +2215,6 @@
   "refait la surface en quads réguliers, pour sculpter": "rebuilds the surface as even quads, for sculpting",
   "taille des voxels": "voxel size",
   "lissage": "smoothing",
-  "Plus petit : plus de détails et plus de faces.": "Smaller: more detail and more faces."
+  "Plus petit : plus de détails et plus de faces.": "Smaller: more detail and more faces.",
+  "calcul…": "computing…"
 }
