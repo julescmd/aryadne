@@ -17,50 +17,8 @@ pub fn is_compo(rel: &str) -> bool {
     crate::formats::has(rel, "motion")
 }
 
-/// Lissage d'une clé vers la suivante
-#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, Debug, Hash)]
-pub enum Ease {
-    Linear,
-    #[default]
-    Smooth,
-    Out,
-    Bounce,
-    Spring,
-    /// La valeur reste jusqu'à la clé suivante
-    Hold,
-}
-
-pub const EASES: [(Ease, &str); 5] = [(Ease::Linear, "Linéaire"), (Ease::Smooth, "Doux"), (Ease::Bounce, "Rebond"), (Ease::Spring, "Ressort"), (Ease::Hold, "Constant")];
-
-impl Ease {
-    /// De 0 à 1 ; peut dépasser 1 en chemin (rebond, ressort) mais arrive toujours à 1
-    pub fn apply(self, x: f32) -> f32 {
-        let x = x.clamp(0.0, 1.0);
-        match self {
-            Ease::Linear => x,
-            Ease::Smooth => {
-                if x < 0.5 {
-                    4.0 * x * x * x
-                } else {
-                    1.0 - (-2.0 * x + 2.0).powi(3) / 2.0
-                }
-            }
-            Ease::Out => 1.0 - (1.0 - x).powi(3),
-            Ease::Bounce => {
-                let (c1, c3) = (1.70158, 2.70158);
-                1.0 + c3 * (x - 1.0).powi(3) + c1 * (x - 1.0).powi(2)
-            }
-            Ease::Spring => 1.0 - (-6.0 * x).exp() * (4.5 * std::f32::consts::PI * x).cos(),
-            Ease::Hold => {
-                if x >= 1.0 {
-                    1.0
-                } else {
-                    0.0
-                }
-            }
-        }
-    }
-}
+/// Les lissages sont ceux de toute l'app (voir keys.rs)
+pub use crate::keys::{Ease, EASES};
 
 #[derive(Clone, PartialEq, Serialize, Deserialize, Debug)]
 pub struct Key {

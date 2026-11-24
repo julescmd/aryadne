@@ -453,7 +453,8 @@ impl Editor {
             ui.painter().rect_filled(Rect::from_min_max(pos2(x_of(c.start), r.top() + 3.0), pos2(x_of(c.end()), r.bottom() - 3.0)), 2.0, clip_color(&c).gamma_multiply(0.35));
             for k in &c.keys {
                 let x = x_of(c.start + k.t);
-                ui.painter().add(egui::Shape::convex_polygon(vec![pos2(x, r.top() + 5.0), pos2(x + 5.0, r.center().y), pos2(x, r.bottom() - 5.0), pos2(x - 5.0, r.center().y)], p.text, Stroke::NONE));
+                let here = (c.start + k.t - head).abs() < 0.021;
+                crate::keys::draw(ui.painter(), pos2(x, r.center().y), 5.0, Some(k.ease), p.text, true, here);
             }
             if head >= c.start && head <= c.end() {
                 let x = x_of(head);
@@ -461,7 +462,31 @@ impl Editor {
             }
             if let Some(at) = resp.interact_pointer_pos().filter(|_| resp.dragged() || resp.clicked()) {
                 let t = c.start + ((at.x - r.left() - 6.0) / (r.width() - 12.0)).clamp(0.0, 1.0) * c.len();
-                self.seek(t);
+                // Un clic sur une clé y va tout juste
+                let on_key = c.keys.iter().find(|k| (x_of(c.start + k.t) - at.x).abs() < 7.0).map(|k| c.start + k.t);
+                self.seek(on_key.unwrap_or(t));
+            }
+            // Clic droit sur une clé : son lissage (le même menu que la 3D et le Motion)
+            if resp.secondary_clicked() {
+                self.key_menu = resp.interact_pointer_pos().and_then(|at| c.keys.iter().position(|k| (x_of(c.start + k.t) - at.x).abs() < 7.0)).map(|k| (s, k));
+            }
+            if let Some((ci, ki)) = self.key_menu.filter(|m| m.0 == s) {
+                let cur = c.keys.get(ki).map(|k| k.ease);
+                let mut picked = None;
+                if cur.is_some() {
+                    resp.context_menu(|ui| {
+                        if let Some(Some(e)) = crate::keys::menu(ui, cur, false) {
+                            picked = Some(e);
+                        }
+                    });
+                }
+                if let Some(e) = picked {
+                    if let Some(k) = self.project.clips.get_mut(ci).and_then(|c| c.keys.get_mut(ki)) {
+                        k.ease = e;
+                    }
+                    self.key_menu = None;
+                    self.changed();
+                }
             }
         }
         ui.add_space(4.0);
@@ -1688,7 +1713,7 @@ impl Editor {
             for k in &c.keys {
                 let x = g.x_of(c.start + k.t);
                 let y = r.bottom() - 5.0;
-                clip_p.add(egui::Shape::convex_polygon(vec![pos2(x, y - 3.5), pos2(x + 3.5, y), pos2(x, y + 3.5), pos2(x - 3.5, y)], Color32::WHITE, Stroke::new(1.0, Color32::from_black_alpha(150))));
+                crate::keys::draw(&clip_p, pos2(x, y), 3.5, Some(k.ease), Color32::WHITE, true, false);
             }
             painter.rect_stroke(r, 6.0, Stroke::new(if on { 2.0 } else { 1.0 }, if on { p.text } else { base.gamma_multiply(0.55) }), egui::StrokeKind::Inside);
             if on {

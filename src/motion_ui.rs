@@ -68,6 +68,8 @@ pub struct Editor {
     /// Propriété montrée dans la courbe, à droite de la timeline
     curve: Prop,
     tl_scroll: f32,
+    /// Clé sous le clic droit (calque, propriété, instant)
+    ctx_key: Option<(usize, Prop, f32)>,
     /// Message affiché et depuis quand (il s'efface après quelques secondes)
     msg_seen: Option<(String, Instant)>,
     /// Son de la composition analysé (chemin, résultat attendu d'un fil)
@@ -163,6 +165,7 @@ impl Editor {
             export_prog: Arc::new(AtomicU32::new(0)),
             curve: Prop::Pos,
             tl_scroll: 0.0,
+            ctx_key: None,
             msg_seen: None,
             wave_job: None,
             sound: None,
@@ -1229,6 +1232,7 @@ impl Editor {
         let mut y = top0;
         let t_now = self.time;
         let mut clicked_layer = None;
+        let mut pending_ease: Option<(usize, Prop, f32, motion::Ease)> = None;
         let mut toggles: Vec<(usize, Prop)> = vec![];
         let mut eye = None;
         let n = self.compo.layers.len();
@@ -1264,7 +1268,9 @@ impl Editor {
             let bar_r = Rect::from_min_max(pos2(x_of(lay.start), r.top() + 6.0), pos2(x_of(lay.end), r.bottom() - 6.0));
             painter.rect_filled(bar_r, 3.0, c.gamma_multiply(if sel { 0.45 } else { 0.3 }));
             for kt in lay.key_times() {
-                diamond(&painter, pos2(x_of(kt), r.center().y), 4.5, Some(if sel { p.text } else { c }), p.code_bg);
+                let ease = PROPS.iter().find_map(|(pr, _)| lay.track(*pr).key_at(kt).map(|k| lay.track(*pr).keys[k].ease));
+                let here = (kt - t_now).abs() < motion::KEY_EPS;
+                crate::keys::draw(&painter, pos2(x_of(kt), r.center().y), 4.5, ease, if sel { p.text } else { c }, true, here);
             }
             let br = ui.interact(bar_r.expand2(vec2(3.0, 0.0)).intersect(rows_clip), ui.scope_id().with(("motion-bar", i)), Sense::click_and_drag());
             if let Some(h) = br.hover_pos() {
@@ -1331,7 +1337,7 @@ impl Editor {
                     painter.hline(body.x_range(), r.bottom() - 0.5, Stroke::new(1.0, p.line.gamma_multiply(0.35)));
                     for k in &tr.keys {
                         let chosen = self.sel_key.is_some_and(|s| s.0 == i && s.1 == pr && (s.2 - k.t).abs() < motion::KEY_EPS);
-                        diamond(&painter, pos2(x_of(k.t), r.center().y), 4.0, Some(if chosen { p.text } else { p.accent }), p.code_bg);
+                        crate::keys::draw(&painter, pos2(x_of(k.t), r.center().y), 4.0, Some(k.ease), p.accent, true, chosen);
                     }
                     let kr = ui.interact(Rect::from_min_max(pos2(tracks.left(), r.top()), r.max).intersect(rows_clip), ui.scope_id().with(("motion-keys", i, label)), Sense::click_and_drag());
                     let hit = |h: Pos2| tr.keys.iter().map(|k| k.t).find(|kt| (x_of(*kt) - h.x).abs() < 6.0);
@@ -1347,6 +1353,25 @@ impl Editor {
                                 None => self.sel_key = None,
                             }
                         }
+                    }
+                    // Clic droit sur une clé : son lissage (le même menu partout dans l'app)
+                    if kr.secondary_clicked() {
+                        if let Some(kt) = kr.interact_pointer_pos().and_then(hit) {
+                            self.ctx_key = Some((i, pr, kt));
+                            self.sel_key = Some((i, pr, kt));
+                        }
+                    }
+                    let cur = self.ctx_key.filter(|c| c.0 == i && c.1 == pr).and_then(|c| tr.key_at(c.2).map(|k| tr.keys[k].ease));
+                    let mut picked = None;
+                    if cur.is_some() {
+                        kr.context_menu(|ui| {
+                            if let Some(Some(e)) = crate::keys::menu(ui, cur, false) {
+                                picked = Some(e);
+                            }
+                        });
+                    }
+                    if let (Some(e), Some((li, lp, kt))) = (picked, self.ctx_key) {
+                        pending_ease = Some((li, lp, kt, e));
                     }
                     if kr.drag_started() {
                         if let Some(kt) = kr.interact_pointer_pos().and_then(hit) {
@@ -1498,6 +1523,15 @@ impl Editor {
         }
         if let Some(i) = eye {
             self.compo.layers[i].visible ^= true;
+            self.changed();
+        }
+        if let Some((li, pr, kt, e)) = pending_ease {
+            if let Some(tr) = self.compo.layers.get_mut(li).map(|l| l.track_mut(pr)) {
+                if let Some(k) = tr.key_at(kt) {
+                    tr.keys[k].ease = e;
+                }
+            }
+            self.ctx_key = None;
             self.changed();
         }
         if !toggles.is_empty() {

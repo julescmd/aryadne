@@ -219,6 +219,37 @@ pub struct PoseKey {
     pub y: f32,
     pub scale: f32,
     pub opacity: f32,
+    /// Passage vers la clé suivante (linéaire pour les anciens montages)
+    #[serde(default = "linear")]
+    pub ease: crate::keys::Ease,
+}
+
+fn linear() -> crate::keys::Ease {
+    crate::keys::Ease::Linear
+}
+
+/// Les points (instant, valeur) d'un réglage animé, avec des points en plus là où le passage n'est pas
+/// linéaire : l'expression ffmpeg (en lignes droites) suit alors la courbe
+pub fn eased_points(keys: &[PoseKey], offset: f32, f: &dyn Fn(&PoseKey) -> f32) -> Vec<(f32, f32)> {
+    use crate::keys::Ease;
+    let mut out = vec![];
+    for (i, k) in keys.iter().enumerate() {
+        out.push((offset + k.t, f(k)));
+        let Some(n) = keys.get(i + 1) else { break };
+        let (va, vb) = (f(k), f(n));
+        match k.ease {
+            Ease::Linear => {}
+            Ease::Hold => out.push((offset + n.t - 0.001, va)),
+            e => {
+                let steps = 12;
+                for s in 1..steps {
+                    let x = s as f32 / steps as f32;
+                    out.push((offset + k.t + (n.t - k.t) * x, va + (vb - va) * e.apply(x)));
+                }
+            }
+        }
+    }
+    out
 }
 
 /// Expression ffmpeg qui suit des points (instant, valeur) en ligne droite de l'un à l'autre.
@@ -284,17 +315,18 @@ impl Clip {
         }
         let i = (0..k.len() - 1).find(|&i| r < k[i + 1].t)?;
         let (a, b) = (k[i], k[i + 1]);
-        let f = (r - a.t) / (b.t - a.t).max(1e-4);
+        let f = a.ease.apply((r - a.t) / (b.t - a.t).max(1e-4));
         let m = |x: f32, y: f32| x + (y - x) * f;
-        Some(PoseKey { t: r, x: m(a.x, b.x), y: m(a.y, b.y), scale: m(a.scale, b.scale), opacity: m(a.opacity, b.opacity) })
+        Some(PoseKey { t: r, x: m(a.x, b.x), y: m(a.y, b.y), scale: m(a.scale, b.scale), opacity: m(a.opacity, b.opacity), ease: a.ease })
     }
 
     /// Pose une clé à l'instant `t` de la timeline avec les réglages actuels.
     pub fn set_key(&mut self, t: f32) {
         let r = ((t - self.start).clamp(0.0, self.len()) * 100.0).round() / 100.0;
-        let key = PoseKey { t: r, x: self.x, y: self.y, scale: self.scale, opacity: self.opacity };
+        // Une clé neuve part en douceur, comme partout dans l'app
+        let key = PoseKey { t: r, x: self.x, y: self.y, scale: self.scale, opacity: self.opacity, ease: crate::keys::Ease::Smooth };
         match self.keys.iter().position(|k| (k.t - r).abs() < 0.021) {
-            Some(i) => self.keys[i] = PoseKey { t: self.keys[i].t, ..key },
+            Some(i) => self.keys[i] = PoseKey { t: self.keys[i].t, ease: self.keys[i].ease, ..key },
             None => {
                 self.keys.push(key);
                 self.keys.sort_by(|a, b| a.t.total_cmp(&b.t));
@@ -775,7 +807,7 @@ pub fn graph(p: &Project, project: &Path, from: f32, w: u32, h: u32, realtime: b
         }
         if w > 0 && c.visual() && p.audible(c) && (c.opacity > 0.0 || !c.keys.is_empty()) {
             // Clés : chaque réglage animé devient une expression du temps de la timeline
-            let pts = |f: &dyn Fn(&PoseKey) -> f32| -> Vec<(f32, f32)> { c.keys.iter().map(|q| (c.start + q.t - from, f(q))).collect() };
+            let pts = |f: &dyn Fn(&PoseKey) -> f32| -> Vec<(f32, f32)> { eased_points(&c.keys, c.start - from, f) };
             let animated = c.keys.len() > 1;
             filter += &format!("[{n}:v]fps={},setpts=(PTS-STARTPTS)/{:.4}+{st:.3}/TB", p.fps, c.speed.max(0.01));
             if !c.grade.is_empty() {

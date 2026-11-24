@@ -2216,5 +2216,12 @@
   "taille des voxels": "voxel size",
   "lissage": "smoothing",
   "Plus petit : plus de détails et plus de faces.": "Smaller: more detail and more faces.",
-  "calcul…": "computing…"
+  "calcul…": "computing…",
+  "Vers la clé suivante": "Toward the next key",
+  "Bézier (poignées)": "Bézier (handles)",
+  "Départ doux": "Ease in",
+  "Arrivée douce": "Ease out",
+  "retirer la clé": "remove key",
+  "Passage vers la clé suivante": "Transition to the next key",
+  "Bézier": "Bézier"
 }

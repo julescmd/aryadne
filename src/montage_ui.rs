@@ -134,6 +134,8 @@ pub struct Editor {
     strips: Strips,
     /// Dernier rendu de composition vu (voir motion::generation)
     motion_gen: u64,
+    /// Clé sous le clic droit : (clip, indice de la clé)
+    pub(crate) key_menu: Option<(usize, usize)>,
     /// Graphe d'étalonnage à ouvrir dans l'éditeur de nodes
     pub open_request: Option<PathBuf>,
     saved: Project,
@@ -213,6 +215,7 @@ impl Editor {
             root: root.to_string(),
             strips: Strips::default(),
             motion_gen: crate::motion::generation(),
+            key_menu: None,
             open_request: None,
             saved: project.clone(),
             history: vec![],

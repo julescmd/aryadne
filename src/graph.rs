@@ -86,14 +86,19 @@ impl Graph {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 3.0;
             ui.label(egui::RichText::new(crate::i18n::t("passage")).size(10.5).color(p.muted));
-            for (m, l, tip) in [("bezier", "∿", "Bézier : courbe douce, réglable par les poignées"), ("linear", "╱", "linéaire : vitesse constante"), ("constant", "⌐", "constant : saute d'une clé à l'autre")] {
-                if ui.add_enabled(!self.sel.is_empty(), egui::Button::new(egui::RichText::new(l).size(13.0))).on_hover_text(crate::i18n::t(tip)).clicked() {
-                    for &(k, _) in &self.sel {
-                        keys[k].interp = m.to_string();
+            // Le même choix de lissages que partout dans l'app
+            let cur = self.sel.first().and_then(|(k, _)| keys.get(*k)).map(|x| if x.mode() == "bezier" { None } else { x.ease() }).unwrap_or(None);
+            let enabled = !self.sel.is_empty();
+            ui.add_enabled_ui(enabled, |ui| {
+                ui.menu_button(format!("{} ▾", crate::i18n::t(cur.map(|e| e.name()).unwrap_or("Bézier"))), |ui| {
+                    if let Some(c) = crate::keys::menu(ui, cur, true) {
+                        for &(k, _) in &self.sel {
+                            keys[k].interp = c.map(|e| e.word()).unwrap_or("bezier").to_string();
+                        }
+                        out.changed = true;
                     }
-                    out.changed = true;
-                }
-            }
+                });
+            });
             ui.separator();
             ui.label(egui::RichText::new(crate::i18n::t("poignées")).size(10.5).color(p.muted));
             for (h, l) in [(0u8, "auto"), (1, "alignées"), (2, "libres"), (3, "vecteur")] {

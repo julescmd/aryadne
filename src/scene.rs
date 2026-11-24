@@ -136,6 +136,11 @@ impl Key {
         }
     }
 
+    /// Le lissage commun (None : Bézier, avec ses poignées)
+    pub fn ease(&self) -> Option<crate::keys::Ease> {
+        crate::keys::Ease::from_word(self.mode())
+    }
+
     /// Mode de passage vers la clé suivante
     pub fn mode(&self) -> &str {
         match self.interp.as_str() {
@@ -196,6 +201,8 @@ pub fn channel_at(keys: &[Key], c: usize, f: f32) -> f32 {
     match a.mode() {
         "constant" => va,
         "linear" => va + (vb - va) * (f - fa) / (fb - fa).max(1e-6),
+        // Les lissages communs à toute l'app (départ doux, rebond…)
+        m if crate::keys::Ease::from_word(m).is_some() => va + (vb - va) * crate::keys::Ease::from_word(m).unwrap().apply((f - fa) / (fb - fa).max(1e-6)),
         _ => {
             let (_, r) = handles_of(keys, i, c);
             let (l, _) = handles_of(keys, i + 1, c);

@@ -2517,6 +2517,10 @@ pub struct Viewer {
     prop_tab: PropTab,
     /// Éditeur de courbes à la place de la timeline
     anim_graph: bool,
+    /// Clé choisie dans la timeline (objet, image), clé qu'on glisse (objet, image de départ, image actuelle)
+    key_sel: Option<(usize, i32)>,
+    key_drag: Option<(usize, i32, i32)>,
+    key_menu: Option<(usize, i32)>,
     graph: crate::graph::Graph,
     /// Action d'un menu de l'en-tête, rejouée comme sa touche à l'image suivante (une seule logique pour les deux)
     hdr_key: Option<(Key, egui::Modifiers)>,
@@ -2701,6 +2705,9 @@ impl Viewer {
             scene_refs: None,
             prop_tab: PropTab::Object,
             anim_graph: false,
+            key_sel: None,
+            key_drag: None,
+            key_menu: None,
             graph: Default::default(),
             hdr_key: None,
             hdr_add: None,
@@ -5642,16 +5649,16 @@ impl Viewer {
                     }
                 }
                 if let Some(key) = sel.and_then(|k| scene.objects[k].keys.iter_mut().find(|x| x.frame == here)) {
-                    // Passage vers la clé suivante
-                    let cur = key.mode().to_string();
-                    egui::ComboBox::from_id_salt("key-interp").width(90.0).selected_text(crate::i18n::t(match cur.as_str() { "linear" => "linéaire", "constant" => "constant", _ => "Bézier" })).show_ui(ui, |ui| {
-                        for (m, l) in [("bezier", "Bézier"), ("linear", "linéaire"), ("constant", "constant")] {
-                            if ui.selectable_label(cur == m, crate::i18n::t(l)).clicked() {
-                                key.interp = m.to_string();
-                                changed = true;
-                            }
+                    // Passage vers la clé suivante : le même menu que partout dans l'app
+                    let cur = key.ease();
+                    let label = if key.mode() == "bezier" { crate::i18n::t("Bézier") } else { crate::i18n::t(cur.map(|e| e.name()).unwrap_or("Bézier")) };
+                    let r = ui.menu_button(label, |ui| {
+                        if let Some(choice) = crate::keys::menu(ui, if key.mode() == "bezier" { None } else { cur }, true) {
+                            key.interp = choice.map(|e| e.word()).unwrap_or("bezier").to_string();
+                            changed = true;
                         }
                     });
+                    r.response.on_hover_text(crate::i18n::t("Passage vers la clé suivante"));
                 }
                 let auto_col = if self.anim_auto { p.text } else { p.muted };
                 ui.toggle_value(&mut self.anim_auto, egui::RichText::new(crate::i18n::t("Auto-clé")).size(11.0).color(auto_col)).on_hover_text(crate::i18n::t("Chaque déplacement pose une clé à l'image courante"));
@@ -5709,6 +5716,8 @@ impl Viewer {
                 f += step;
             }
             let mut y = r.top() + 26.0;
+            // Les clés : forme selon le lissage, clic pour choisir, glisser pour déplacer, clic droit pour le lissage
+            let mut hits: Vec<(usize, i32, egui::Pos2)> = vec![];
             for (k, o) in scene.objects.iter().enumerate() {
                 if o.keys.is_empty() || y + 10.0 > full.bottom() {
                     continue;
@@ -5716,16 +5725,116 @@ impl Viewer {
                 let on = self.scene_sel == Some(k);
                 painter.text(egui::pos2(r.left() - 8.0, y), egui::Align2::RIGHT_CENTER, &o.name, egui::FontId::proportional(11.0), if on { p.text } else { p.muted });
                 for key in &o.keys {
-                    let c = egui::pos2(x_of(key.frame as f32), y);
-                    let d = 5.0;
-                    painter.add(egui::Shape::convex_polygon(vec![c + egui::vec2(0.0, -d), c + egui::vec2(d, 0.0), c + egui::vec2(0.0, d), c + egui::vec2(-d, 0.0)], if on { p.accent } else { p.muted }, Stroke::NONE));
+                    let frame = match self.key_drag {
+                        Some((dk, from, cur)) if dk == k && from == key.frame => cur,
+                        _ => key.frame,
+                    };
+                    let c = egui::pos2(x_of(frame as f32), y);
+                    let chosen = self.key_sel == Some((k, key.frame));
+                    let ease = if key.mode() == "bezier" { None } else { key.ease() };
+                    crate::keys::draw(&painter, c, 5.0, ease, if on { p.accent } else { p.muted }, true, chosen);
+                    hits.push((k, key.frame, c));
                 }
                 y += 22.0;
             }
             let x = x_of(self.anim_frame);
             painter.line_segment([egui::pos2(x, full.top()), egui::pos2(x, full.bottom())], Stroke::new(1.0, p.accent));
-            if let Some(at) = resp.interact_pointer_pos().filter(|_| resp.dragged() || resp.clicked()) {
-                seek = Some((a + (b - a) * ((at.x - r.left() - 6.0) / (r.width() - 12.0)).clamp(0.0, 1.0)).round());
+            let frame_at = |px: f32| (a + (b - a) * ((px - r.left() - 6.0) / (r.width() - 12.0)).clamp(0.0, 1.0)).round();
+            let key_under = |pt: egui::Pos2| hits.iter().filter(|h| (h.2 - pt).length() < 8.0).min_by(|u, v| (u.2 - pt).length().total_cmp(&(v.2 - pt).length())).map(|h| (h.0, h.1));
+            if resp.drag_started() {
+                if let Some((k, f)) = ui.input(|i| i.pointer.press_origin()).and_then(key_under) {
+                    self.key_drag = Some((k, f, f));
+                    self.key_sel = Some((k, f));
+                    self.scene_sel = Some(k);
+                }
+            }
+            match self.key_drag {
+                Some((k, from, _)) if resp.dragged() => {
+                    if let Some(at) = resp.interact_pointer_pos() {
+                        let to = frame_at(at.x) as i32;
+                        // Pas deux clés sur la même image
+                        let free = scene.objects.get(k).is_some_and(|o| to == from || !o.keys.iter().any(|x| x.frame == to));
+                        if free {
+                            self.key_drag = Some((k, from, to));
+                        }
+                    }
+                }
+                Some((k, from, to)) if !resp.dragged() => {
+                    self.key_drag = None;
+                    if from != to {
+                        if let Some(key) = scene.objects.get_mut(k).and_then(|o| o.keys.iter_mut().find(|x| x.frame == from)) {
+                            key.frame = to;
+                        }
+                        if let Some(o) = scene.objects.get_mut(k) {
+                            o.keys.sort_by_key(|x| x.frame);
+                        }
+                        self.key_sel = Some((k, to));
+                        seek = Some(to as f32);
+                        changed = true;
+                    }
+                }
+                _ => {
+                    if let Some(at) = resp.interact_pointer_pos().filter(|_| resp.dragged() || resp.clicked()) {
+                        match key_under(at).filter(|_| resp.clicked()) {
+                            Some((k, f)) => {
+                                self.key_sel = Some((k, f));
+                                self.scene_sel = Some(k);
+                                seek = Some(f as f32);
+                            }
+                            None => {
+                                self.key_sel = None;
+                                seek = Some(frame_at(at.x));
+                            }
+                        }
+                    }
+                }
+            }
+            if resp.secondary_clicked() {
+                self.key_menu = resp.interact_pointer_pos().and_then(key_under);
+                if let Some(km) = self.key_menu {
+                    self.key_sel = Some(km);
+                }
+            }
+            if let Some((k, f)) = self.key_menu {
+                let cur = scene.objects.get(k).and_then(|o| o.keys.iter().find(|x| x.frame == f)).map(|x| if x.mode() == "bezier" { None } else { x.ease() });
+                let mut picked = None;
+                let mut remove = false;
+                if let Some(cur) = cur {
+                    resp.context_menu(|ui| {
+                        if let Some(c) = crate::keys::menu(ui, cur, true) {
+                            picked = Some(c);
+                        }
+                        ui.separator();
+                        if ui.button(crate::i18n::t("retirer la clé")).clicked() {
+                            remove = true;
+                            ui.close();
+                        }
+                    });
+                }
+                if let Some(c) = picked {
+                    if let Some(key) = scene.objects.get_mut(k).and_then(|o| o.keys.iter_mut().find(|x| x.frame == f)) {
+                        key.interp = c.map(|e| e.word()).unwrap_or("bezier").to_string();
+                        changed = true;
+                    }
+                    self.key_menu = None;
+                }
+                if remove {
+                    if let Some(o) = scene.objects.get_mut(k) {
+                        o.keys.retain(|x| x.frame != f);
+                        changed = true;
+                    }
+                    self.key_menu = None;
+                    self.key_sel = None;
+                }
+            }
+            // Suppr : retire la clé choisie (la souris sur la timeline)
+            if resp.hovered() && ui.input(|i| i.key_pressed(Key::Delete) || i.key_pressed(Key::Backspace)) {
+                if let Some((k, f)) = self.key_sel.take() {
+                    if let Some(o) = scene.objects.get_mut(k) {
+                        o.keys.retain(|x| x.frame != f);
+                        changed = true;
+                    }
+                }
             }
         };
         if let Some(sub_r) = crate::layout::offer("3d-timeline", "timeline 3D") {
