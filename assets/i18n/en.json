@@ -2177,5 +2177,9 @@
   "flou ": "blur ",
   "Lueur": "Glow",
   "rayon ": "radius ",
-  "force ": "strength "
+  "force ": "strength ",
+  "Spectre": "Spectrum",
+  "En direct": "Live",
+  "Lance la lecture, ou choisis un clip ou une plage.": "Start playback, or pick a clip or a range.",
+  "Pic": "Peak"
 }

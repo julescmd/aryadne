@@ -51,6 +51,8 @@ pub struct Editor {
     redo: Vec<Session>,
     insp_tab: u8,
     export_rx: Option<std::sync::mpsc::Receiver<Result<PathBuf, String>>>,
+    /// Dernier spectre calculé (ce qu'il décrit, ses bandes)
+    spec: Option<(String, Vec<f32>)>,
 }
 
 impl Drop for Editor {
@@ -119,6 +121,7 @@ impl Editor {
             redo: vec![],
             insp_tab: 0,
             export_rx: None,
+            spec: None,
         }
     }
 
@@ -1031,7 +1034,7 @@ impl Editor {
 
     fn inspector(&mut self, ui: &mut egui::Ui) {
         let p = crate::theme::pal();
-        if let Some(k) = crate::montage_ui::tab_chips(ui, self.insp_tab, &[&crate::i18n::t("Effets"), &crate::i18n::t("Clip")]) {
+        if let Some(k) = crate::montage_ui::tab_chips(ui, self.insp_tab, &[&crate::i18n::t("Effets"), &crate::i18n::t("Clip"), &crate::i18n::t("Spectre")]) {
             self.insp_tab = k;
         }
         egui::Frame::new().inner_margin(12).show(ui, |ui| {
@@ -1046,6 +1049,10 @@ impl Editor {
             ui.label(egui::RichText::new(what).size(11.5).color(p.muted));
             if self.insp_tab == 1 {
                 self.clip_props(ui);
+                return;
+            }
+            if self.insp_tab == 2 {
+                self.spectrum_view(ui);
                 return;
             }
             let has = self.range.is_some() || self.sel_clip.is_some();
@@ -1112,6 +1119,74 @@ impl Editor {
                 self.delete_selection();
             }
         });
+    }
+
+    /// Le spectre : en direct pendant la lecture, sinon celui de la plage ou du clip choisi
+    fn spectrum_view(&mut self, ui: &mut egui::Ui) {
+        let p = crate::theme::pal();
+        let bands = 96;
+        let live = self.playing.as_ref().map(|(t0, _, data)| {
+            let f = (t0.elapsed().as_secs_f64() * RATE as f64) as usize;
+            let a = f.saturating_sub(4096).min(data.len() / 2);
+            let b = (a + 4096).min(data.len() / 2);
+            audio::Buffer::from_samples(data[a * 2..b * 2].to_vec())
+        });
+        let (what, sp) = if let Some(buf) = live {
+            ui.ctx().request_repaint();
+            (crate::i18n::t("En direct"), audio::spectrum(&buf, 0.0, buf.secs(), bands))
+        } else {
+            // La source : le clip choisi, ou le premier clip sous la plage
+            let src = match (self.range, self.sel_clip) {
+                (Some((a, b, t0, _)), _) => self.session.tracks.get(t0).and_then(|t| t.clips.iter().find(|c| c.end() > a && c.start < b)).map(|c| (c.clone(), c.offset + (a - c.start).max(0.0), c.offset + (b.min(c.end()) - c.start))),
+                (None, Some((ti, ci))) => self.session.tracks.get(ti).and_then(|t| t.clips.get(ci)).map(|c| (c.clone(), c.offset, c.offset + c.len)),
+                _ => None,
+            };
+            let Some((c, a, b)) = src else {
+                ui.label(egui::RichText::new(crate::i18n::t("Lance la lecture, ou choisis un clip ou une plage.")).size(11.5).color(p.muted));
+                return;
+            };
+            let key = format!("{}|{}|{a:.3}|{b:.3}", c.src, c.fx_key());
+            if self.spec.as_ref().is_none_or(|(k, _)| *k != key) {
+                match self.sounds.ready(&c) {
+                    Some(buf) => self.spec = Some((key.clone(), audio::spectrum(&buf, a, b, bands))),
+                    None => {
+                        ui.label(egui::RichText::new(crate::i18n::t("lecture du son…")).color(p.muted));
+                        return;
+                    }
+                }
+            }
+            (format!("{} · {:.1} s", c.src.rsplit('/').next().unwrap_or(""), b - a), self.spec.as_ref().map(|s| s.1.clone()).unwrap_or_default())
+        };
+        ui.label(egui::RichText::new(what).size(11.5).color(p.muted));
+        let w = ui.available_width();
+        let (r, _) = ui.allocate_exact_size(vec2(w, 170.0), Sense::hover());
+        let pt = ui.painter_at(r);
+        pt.rect(r, 3.0, p.code_bg, Stroke::new(1.0, p.line), egui::StrokeKind::Inside);
+        let g = r.shrink2(vec2(6.0, 14.0));
+        let (lo, hi) = (-90.0f32, 0.0f32);
+        let x_of = |f: f64| g.left() + g.width() * ((f / 20.0).log10() / 3.0) as f32;
+        for (f, label) in [(100.0, "100"), (1000.0, "1k"), (10000.0, "10k")] {
+            let x = x_of(f);
+            pt.vline(x, g.y_range(), Stroke::new(1.0, p.line.gamma_multiply(0.6)));
+            pt.text(pos2(x + 3.0, r.bottom() - 7.0), egui::Align2::LEFT_CENTER, label, egui::FontId::monospace(9.5), p.muted);
+        }
+        for db in [-60.0f32, -30.0] {
+            let y = g.bottom() - (db - lo) / (hi - lo) * g.height();
+            pt.hline(g.x_range(), y, Stroke::new(1.0, p.line.gamma_multiply(0.4)));
+            pt.text(pos2(g.left() + 2.0, y - 6.0), egui::Align2::LEFT_CENTER, format!("{db:.0}"), egui::FontId::monospace(9.5), p.muted);
+        }
+        let n = sp.len().max(1);
+        let pts: Vec<Pos2> = sp.iter().enumerate().map(|(j, v)| pos2(g.left() + g.width() * (j as f32 + 0.5) / n as f32, g.bottom() - ((v.clamp(lo, hi) - lo) / (hi - lo)) * g.height())).collect();
+        // Remplissage en bandes verticales (le polygone n'est pas convexe)
+        for w2 in pts.windows(2) {
+            pt.add(egui::Shape::convex_polygon(vec![w2[0], w2[1], pos2(w2[1].x, g.bottom()), pos2(w2[0].x, g.bottom())], p.accent.gamma_multiply(0.18), Stroke::NONE));
+        }
+        pt.add(egui::Shape::line(pts, Stroke::new(1.5, p.accent)));
+        // Ce qui domine
+        if let Some((j, v)) = sp.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)) {
+            let f = 20.0 * 1000f64.powf((j as f64 + 0.5) / n as f64);
+            ui.label(egui::RichText::new(format!("{} ≈ {} Hz · {:.0} dB", crate::i18n::t("Pic"), f.round(), v)).size(11.5));
+        }
     }
 
     fn delete_selection(&mut self) {

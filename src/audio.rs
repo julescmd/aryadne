@@ -373,6 +373,79 @@ pub fn mix(s: &Session, sounds: &Sounds, a: f64, b: f64, wait: bool) -> Vec<f32>
     out
 }
 
+/// Spectre moyen d'un passage (en secondes du son) : `bands` valeurs en dB sur une échelle de fréquences
+/// logarithmique de 20 Hz à 20 kHz, calculées par FFT de 4096 points avec fenêtre de Hann
+pub fn spectrum(buf: &Buffer, a: f64, b: f64, bands: usize) -> Vec<f32> {
+    const N: usize = 4096;
+    let (i0, i1) = (((a * RATE as f64) as usize).min(buf.frames()), ((b * RATE as f64) as usize).min(buf.frames()));
+    let mut power = vec![0.0f64; N / 2];
+    let mut count = 0;
+    let hann: Vec<f64> = (0..N).map(|k| 0.5 - 0.5 * (std::f64::consts::TAU * k as f64 / N as f64).cos()).collect();
+    // Au plus 64 fenêtres réparties sur le passage
+    let windows = ((i1.saturating_sub(i0)) / N).clamp(1, 64);
+    let step = ((i1.saturating_sub(i0 + N)) / windows.max(1)).max(N / 2);
+    let mut start = i0;
+    while start + N <= i1.max(i0 + N).min(buf.frames()) && count < 64 {
+        let mut re: Vec<f64> = (0..N).map(|k| ((buf.data[(start + k) * 2] + buf.data[(start + k) * 2 + 1]) * 0.5) as f64 * hann[k]).collect();
+        let mut im = vec![0.0f64; N];
+        fft(&mut re, &mut im);
+        for k in 0..N / 2 {
+            power[k] += re[k] * re[k] + im[k] * im[k];
+        }
+        count += 1;
+        start += step;
+    }
+    if count == 0 {
+        return vec![-120.0; bands];
+    }
+    let bin_hz = RATE as f64 / N as f64;
+    (0..bands)
+        .map(|j| {
+            let f0 = 20.0 * 1000f64.powf(j as f64 / bands as f64);
+            let f1 = 20.0 * 1000f64.powf((j + 1) as f64 / bands as f64);
+            let (k0, k1) = ((f0 / bin_hz) as usize, ((f1 / bin_hz).ceil() as usize).max(f0 as usize / bin_hz as usize + 1).min(N / 2));
+            let k0 = k0.min(k1.saturating_sub(1));
+            let p = power[k0..k1].iter().cloned().fold(0.0, f64::max) / count as f64;
+            // Normalisé : un sinus plein donne 0 dB
+            (10.0 * (p.max(1e-20) / (N as f64 * N as f64 / 16.0)).log10()) as f32
+        })
+        .collect()
+}
+
+/// FFT en place (Cooley-Tukey, taille puissance de deux)
+fn fft(re: &mut [f64], im: &mut [f64]) {
+    let n = re.len();
+    let mut j = 0;
+    for i in 1..n {
+        let mut bit = n >> 1;
+        while j & bit != 0 {
+            j ^= bit;
+            bit >>= 1;
+        }
+        j |= bit;
+        if i < j {
+            re.swap(i, j);
+            im.swap(i, j);
+        }
+    }
+    let mut len = 2;
+    while len <= n {
+        let ang = -std::f64::consts::TAU / len as f64;
+        for s in (0..n).step_by(len) {
+            for k in 0..len / 2 {
+                let (wr, wi) = ((ang * k as f64).cos(), (ang * k as f64).sin());
+                let (a, b) = (s + k, s + k + len / 2);
+                let (xr, xi) = (re[b] * wr - im[b] * wi, re[b] * wi + im[b] * wr);
+                re[b] = re[a] - xr;
+                im[b] = im[a] - xi;
+                re[a] += xr;
+                im[a] += xi;
+            }
+        }
+        len <<= 1;
+    }
+}
+
 /// Les passages de silence d'un son entre deux instants (sous `floor_db` pendant au moins `min_len` s), en secondes du son
 pub fn silences(buf: &Buffer, a: f64, b: f64, floor_db: f32, min_len: f64) -> Vec<(f64, f64)> {
     let win = (RATE as f64 * 0.02) as usize;
@@ -486,6 +559,17 @@ mod tests {
             d.push(v);
         }
         Buffer::from_samples(d)
+    }
+
+    #[test]
+    fn spectre_d_un_la() {
+        // Un la 440 Hz : le pic du spectre tombe dans la bande qui contient 440 Hz
+        let b = tone(1.0, 0.5, &[]);
+        let sp = spectrum(&b, 0.0, 1.0, 120);
+        let (best, _) = sp.iter().enumerate().fold((0, f32::MIN), |m, (i, v)| if *v > m.1 { (i, *v) } else { m });
+        let f = |j: usize| 20.0 * 1000f64.powf(j as f64 / 120.0);
+        assert!(f(best) <= 440.0 && f(best + 1) >= 430.0, "pic à {} Hz", f(best));
+        assert!(sp[best] - sp[110] > 40.0, "les aigus sont loin dessous");
     }
 
     #[test]

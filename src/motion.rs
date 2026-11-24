@@ -397,11 +397,6 @@ impl Xform {
         [self.a * l[0] + self.c * l[1] + self.e, self.b * l[0] + self.d * l[1] + self.f]
     }
 
-    /// Un déplacement (sans la translation)
-    pub fn apply_vec(&self, v: [f32; 2]) -> [f32; 2] {
-        [self.a * v[0] + self.c * v[1], self.b * v[0] + self.d * v[1]]
-    }
-
     fn det(&self) -> f32 {
         self.a * self.d - self.b * self.c
     }
