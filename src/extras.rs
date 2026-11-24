@@ -89,6 +89,7 @@ pub enum Cmd {
     NewScene,
     NewMontage,
     NewMotion,
+    NewAudio,
     NewFile,
     UpgradeExtensions,
     NewCompositor,
@@ -117,6 +118,7 @@ impl App {
             ("nouvelle scène 3D", "", Cmd::NewScene),
             ("nouveau montage vidéo", "", Cmd::NewMontage),
             ("nouvelle composition animée (motion)", "", Cmd::NewMotion),
+            ("nouvelle session audio", "", Cmd::NewAudio),
             ("nouveau matériau à calques (atelier)", "", Cmd::NewLayered),
             ("nouveau matériau (nodes)", "", Cmd::NewMaterial),
             ("nouveau compositing (nodes)", "", Cmd::NewCompositor),
@@ -270,6 +272,7 @@ impl App {
                 }
             }
             Cmd::NewMontage => self.new_untitled(crate::formats::ext("seq"), |p| crate::montage::Project::default().write(p)),
+            Cmd::NewAudio => self.new_untitled(crate::formats::ext("audio"), |p| crate::audio::Session::starter().write(p)),
             Cmd::NewMotion => self.new_untitled(crate::formats::ext("motion"), |p| crate::motion::Compo::default().write(p)),
             Cmd::NewScene => self.new_untitled(crate::formats::ext("scene"), |p| crate::scene::Scene::starter().write(p)),
             Cmd::NewMaterial => self.new_untitled(crate::formats::ext("mat"), |p| nodes::Graph::new_material().save(p)),

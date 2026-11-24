@@ -82,6 +82,10 @@ pub fn ws_color(kind: &str) -> Option<Color32> {
     if kind == "motion" {
         return Some(theme().p.warning);
     }
+    // Le son prend la case de l'ancien espace IA
+    if kind == "son" {
+        return Some(theme().ws[5]);
+    }
     let k = ["notes", "3d", "2d", "video", "code", "ai", "mat"].iter().position(|x| *x == kind)?;
     Some(theme().ws[k])
 }

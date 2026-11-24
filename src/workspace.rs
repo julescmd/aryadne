@@ -84,12 +84,13 @@ pub struct Disposition {
 
 /// Dans l'ordre du pipeline : un espace par étape, ses outils en onglets (voir `tools`).
 /// Les matériaux sont un outil de la 3D, le compositing un outil de la 2D ; l'IA est l'Assistant, partout.
-pub const PRESETS: [(&str, Option<[u8; 3]>, &str, bool, &str); 6] = [
+pub const PRESETS: [(&str, Option<[u8; 3]>, &str, bool, &str); 7] = [
     ("notes", None, "files", false, "notes"),
     ("2D", Some([0xe8, 0x5d, 0xa8]), "files", false, "2d"),
     ("3D", Some([0x3d, 0x9b, 0xff]), "files", false, "3d"),
     ("motion", Some([0xd1, 0xaf, 0x75]), "files", false, "motion"),
     ("vidéo", Some([0x9b, 0x6d, 0xff]), "files", false, "video"),
+    ("son", Some([0x7f, 0xb8, 0xbd]), "files", false, "son"),
     ("code", Some([0x3f, 0xc9, 0x7e]), "files", false, "code"),
 ];
 
@@ -109,12 +110,14 @@ pub fn tools(kind: &str) -> &'static [Tool] {
     const D3: [Tool; 2] = [Tool { id: "scene", label: "Scène", icon: l::BOX, view: "files" }, Tool { id: "mat", label: "Matériaux", icon: l::BLEND, view: "files" }];
     const MOTION: [Tool; 1] = [Tool { id: "motion", label: "Compos", icon: l::SPLINE, view: "files" }];
     const VIDEO: [Tool; 2] = [Tool { id: "seq", label: "Montage", icon: l::CLAPPERBOARD, view: "files" }, Tool { id: "review", label: "Revue", icon: l::MESSAGE_SQUARE, view: "files" }];
+    const SON: [Tool; 1] = [Tool { id: "audio", label: "Audio", icon: l::AUDIO_LINES, view: "files" }];
     const CODE_T: [Tool; 1] = [Tool { id: "code", label: "Code", icon: l::CODE, view: "files" }];
     match kind {
         "2d" => &D2,
         "3d" => &D3,
         "motion" => &MOTION,
         "video" => &VIDEO,
+        "son" => &SON,
         "code" => &CODE_T,
         "notes" => &NOTES,
         _ => &[],
@@ -134,6 +137,7 @@ pub fn tool_of(rel: &str) -> &'static str {
         "motion" => "motion",
         "video" if crate::formats::has(rel, "seq") => "seq",
         "video" => "review",
+        "son" => "audio",
         "code" => "code",
         _ => {
             let _ = ext;
@@ -157,7 +161,7 @@ pub fn accent_of(w: &Workspace) -> Option<[u8; 3]> {
 }
 
 /// Les genres d'espaces connus d'Aryadne. Un espace d'un autre genre (fait à la main) accepte tout.
-pub const KINDS: [&str; 6] = ["notes", "2d", "3d", "motion", "video", "code"];
+pub const KINDS: [&str; 7] = ["notes", "2d", "3d", "motion", "video", "son", "code"];
 
 /// Les pages de chaque espace, dans la deuxième rangée : (libellé, vue). Comme les jeux de menus de Maya,
 /// elles changent avec l'espace ; la première est la page de travail (onglets de fichiers).
@@ -167,6 +171,7 @@ pub fn pages(kind: &str) -> &'static [(&'static str, &'static str)] {
         "2d" => &[("fichiers", "files"), ("références", "refs")],
         "video" => &[("fichiers", "files"), ("médias", "refs")],
         "motion" => &[("fichiers", "files"), ("références", "refs")],
+        "son" => &[("fichiers", "files"), ("recherche", "search")],
         "code" => &[("fichiers", "files"), ("recherche", "search")],
         _ => &[("fichiers", "files"), ("recherche", "search")],
     }
@@ -188,6 +193,8 @@ pub fn owner(rel: &str) -> &'static str {
         "2d"
     } else if crate::formats::has(rel, "motion") {
         "motion"
+    } else if crate::formats::has(rel, "audio") || crate::audio::is_audio(rel) {
+        "son"
     } else if crate::formats::has(rel, "mat") {
         "3d"
     } else if crate::model3d::is_model(rel) || matches!(ext, "hdr" | "exr") {
@@ -211,7 +218,7 @@ pub fn accepts(kind: &str, rel: &str) -> bool {
 pub fn preset(i: usize) -> Workspace {
     let (name, accent, view, assistant, kind) = PRESETS[i];
     // La 3D et le motion gardent toute la place pour la vue : l'explorateur s'ouvre au besoin (Ctrl+B)
-    Workspace { name: name.to_string(), accent, view: view.to_string(), assistant, kind: kind.to_string(), explorer: !matches!(kind, "3d" | "motion"), ..Default::default() }
+    Workspace { name: name.to_string(), accent, view: view.to_string(), assistant, kind: kind.to_string(), explorer: !matches!(kind, "3d" | "motion" | "son"), ..Default::default() }
 }
 
 impl Default for Set {
@@ -229,7 +236,7 @@ impl Set {
                 // Première fois : l'espace « notes » reprend la disposition déjà en place
                 let mut list: Vec<Workspace> = (0..PRESETS.len()).map(preset).collect();
                 list[0].places = crate::dock::export();
-                Set { current: 0, list, seeded: 4 }
+                Set { current: 0, list, seeded: 5 }
             });
         s.migrate();
         s
@@ -285,6 +292,16 @@ impl Set {
             }
             s.seeded = 4;
         }
+        // Nouvelle étape Son, entre la vidéo et le code
+        if s.seeded < 5 {
+            if !s.list.iter().any(|w| w.kind == "son") {
+                let at = s.list.iter().position(|w| w.kind == "code").unwrap_or(s.list.len());
+                let cur = s.list.get(s.current).map(|w| w.name.clone());
+                s.list.insert(at, preset(PRESETS.iter().position(|p| p.4 == "son").unwrap_or(0)));
+                s.current = cur.and_then(|n| s.list.iter().position(|w| w.name == n)).unwrap_or(0);
+            }
+            s.seeded = 5;
+        }
         if s.list.is_empty() {
             s.list.push(preset(0));
         }
@@ -332,6 +349,7 @@ mod tests {
         assert_eq!(tool_of("plan.mp4"), "review");
         assert_eq!(tool_of("Teaser.aryseq"), "seq");
         assert_eq!((owner("Intro.arymotion"), tool_of("Intro.arymotion")), ("motion", "motion"));
+        assert_eq!((owner("voix.wav"), tool_of("Voix.aryaudio")), ("son", "audio"));
         assert_eq!(tool_of("robot.glb"), "scene");
         assert_eq!(tool_of("croquis.png"), "image");
         assert!(tools("2d").iter().any(|t| t.view == "boards"));
@@ -346,7 +364,7 @@ mod tests {
         old.migrate();
         let kinds: Vec<&str> = old.list.iter().map(|w| w.kind.as_str()).collect();
         // … et l'étape Motion arrive après la 3D
-        assert_eq!(kinds, vec!["notes", "3d", "motion"]);
+        assert_eq!(kinds, vec!["notes", "3d", "motion", "son"]);
         assert_eq!(old.list[1].tabs, vec!["nodes/Or.arymat".to_string()]);
     }
 }
