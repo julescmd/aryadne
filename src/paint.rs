@@ -427,6 +427,8 @@ pub struct Editor {
     renaming: Option<usize>,
     /// Texte en cours de saisie, avant d'être posé en calque
     text: Option<TextDraft>,
+    /// Largeur du panneau des calques à la dernière image
+    panel_w: f32,
     pub text_font: usize,
     pub text_size: f32,
 }
@@ -506,6 +508,7 @@ impl Editor {
             doc,
             tool: Tool::Brush,
             text: None,
+            panel_w: 230.0,
             text_font: 0,
             text_size: 64.0,
             color: Color32::from_rgb(30, 30, 34),
@@ -946,7 +949,11 @@ impl Editor {
         let p = theme::pal();
         let ctx = ui.ctx().clone();
         // ---- Barre du haut : outil, réglages de l'outil, menus
+        // Elle passe à la ligne avant le panneau des calques (sinon elle l'écarte hors de la fenêtre)
+        let docked = crate::layout::offer("paint-layers", "calques (retouche)").is_some();
+        let bar_w = (ui.available_width() - if docked { 0.0 } else { self.panel_w + 12.0 }).max(200.0);
         ui.horizontal_wrapped(|ui| {
+            ui.set_max_width(bar_w);
             ui.spacing_mut().item_spacing.x = 4.0;
             egui::containers::menu::MenuButton::new(crate::i18n::t("image ▾")).ui(ui, |ui| {
                 ui.set_min_width(230.0);
@@ -1043,10 +1050,20 @@ impl Editor {
             match self.tool {
                 Tool::Brush | Tool::Eraser => {
                     ui.add(egui::DragValue::new(&mut self.size).range(0.1..=10000.0).speed(0.5).prefix(format!("{} ", crate::i18n::t("diamètre")))).on_hover_text("[ ]");
+                    // Un curseur avec son nom ne passe pas à la ligne tout seul
+                    if ui.max_rect().right() - ui.cursor().left() < 190.0 {
+                        ui.end_row();
+                    }
                     ui.add(egui::Slider::new(&mut self.hardness, 0.0..=1.0).text(crate::i18n::t("dureté")).show_value(false));
+                    if ui.max_rect().right() - ui.cursor().left() < 190.0 {
+                        ui.end_row();
+                    }
                     ui.add(egui::Slider::new(&mut self.flow, 0.05..=1.0).text(crate::i18n::t("opacité")).show_value(false));
                 }
                 Tool::Fill | Tool::Wand => {
+                    if ui.max_rect().right() - ui.cursor().left() < 220.0 {
+                        ui.end_row();
+                    }
                     ui.add(egui::Slider::new(&mut self.tolerance, 0.0..=1.0).text(crate::i18n::t("tolérance")));
                 }
                 Tool::Gradient => {
@@ -1082,7 +1099,10 @@ impl Editor {
         match crate::layout::offer("paint-layers", "calques (retouche)") {
             Some(r) => crate::layout::draw_in(ui, r, p.panel, 8.0, |ui| self.layers_panel(ui)),
             None => {
-                egui::Panel::right(egui::Id::unique(("paint-layers", self.path.to_string_lossy().to_string()))).resizable(true).max_size(480.0).default_size(230.0).min_size(180.0).frame(egui::Frame::new().fill(p.panel).stroke(Stroke::new(1.0, p.line)).inner_margin(8)).show(ui, |ui| self.layers_panel(ui));
+                egui::Panel::right(egui::Id::unique(("paint-layers", self.path.to_string_lossy().to_string()))).resizable(true).max_size(480.0).default_size(230.0).min_size(180.0).frame(egui::Frame::new().fill(p.panel).stroke(Stroke::new(1.0, p.line)).inner_margin(8)).show(ui, |ui| {
+                    self.panel_w = ui.max_rect().width() + 16.0;
+                    self.layers_panel(ui)
+                });
             }
         }
         // ---- Réglage en cours : fenêtre avec aperçu en direct
