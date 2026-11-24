@@ -540,12 +540,30 @@ pub struct Compo {
     /// Musique de la composition (chemin dans le coffre), jouée à l'export
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub music: Option<String>,
+    /// Flou de mouvement (comme After Effects) : None, il est coupé
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blur: Option<MotionBlur>,
+}
+
+/// Flou de mouvement : l'image est la moyenne de plusieurs instants pendant que l'obturateur est ouvert
+#[derive(Clone, Copy, PartialEq, Serialize, Deserialize, Debug)]
+pub struct MotionBlur {
+    /// Angle d'obturateur en degrés (180 : la moitié de la durée d'une image, comme au cinéma)
+    pub angle: f32,
+    /// Nombre d'instants moyennés
+    pub samples: u32,
+}
+
+impl Default for MotionBlur {
+    fn default() -> Self {
+        MotionBlur { angle: 180.0, samples: 8 }
+    }
 }
 
 impl Default for Compo {
     /// Une composition neuve : un titre qui entre lettre par lettre, souligné d'un trait qui s'étire
     fn default() -> Compo {
-        let mut c = Compo { w: 1920, h: 1080, fps: 30.0, duration: 6.0, bg: [0x14, 0x10, 0x1a], layers: vec![], music: None };
+        let mut c = Compo { w: 1920, h: 1080, fps: 30.0, duration: 6.0, bg: [0x14, 0x10, 0x1a], layers: vec![], music: None, blur: None };
         let mut title = Layer::new("Titre", Kind::Text { text: "Titre".into(), size: 140.0, color: [0xf4, 0xee, 0xf1], font: "inter-bold".into(), tracking: -2.0, align: 1 }, &c);
         title.reveal = Some(Reveal::default());
         title.pos.v = [960.0, 500.0];
@@ -1063,6 +1081,34 @@ fn sample(img: &image::RgbaImage, x: f32, y: f32) -> [f32; 4] {
 
 /// L'image de la composition à l'instant `t`, à l'échelle `scale` (1 : taille réelle)
 pub fn render(c: &Compo, t: f32, scale: f32, cache: &mut Cache) -> image::RgbaImage {
+    // Flou de mouvement : seulement s'il y a quelque chose qui bouge
+    if let Some(b) = c.blur.filter(|b| b.samples > 1 && b.angle > 0.0) {
+        let moving = c.layers.iter().any(|l| l.live(t) && (l.pos.animated() || l.scale.animated() || l.rot.animated() || l.wiggle.is_some() || !l.cycle.is_none()));
+        if moving {
+            let open = b.angle.min(720.0) / 360.0 / c.fps.max(1.0);
+            let n = b.samples.min(64);
+            let mut acc: Vec<u32> = vec![];
+            let mut size = (0, 0);
+            for i in 0..n {
+                // Obturateur centré sur l'image (comme la phase -angle/2 d'After Effects)
+                let ti = t + open * (i as f32 / (n - 1) as f32 - 0.5);
+                let img = render_one(c, ti, scale, cache);
+                if acc.is_empty() {
+                    acc = vec![0; img.as_raw().len()];
+                    size = img.dimensions();
+                }
+                for (a, v) in acc.iter_mut().zip(img.as_raw()) {
+                    *a += *v as u32;
+                }
+            }
+            let raw: Vec<u8> = acc.iter().map(|a| ((*a + n / 2) / n) as u8).collect();
+            return image::RgbaImage::from_raw(size.0, size.1, raw).unwrap_or_default();
+        }
+    }
+    render_one(c, t, scale, cache)
+}
+
+fn render_one(c: &Compo, t: f32, scale: f32, cache: &mut Cache) -> image::RgbaImage {
     use rayon::prelude::*;
     let (w, h) = (((c.w as f32 * scale).round() as u32).max(1), ((c.h as f32 * scale).round() as u32).max(1));
     let mut out = image::RgbaImage::from_pixel(w, h, image::Rgba([c.bg[0], c.bg[1], c.bg[2], 255]));
@@ -1384,6 +1430,24 @@ fn fade(l: &mut Layer, t: f32, d: f32, enter: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn flou_de_mouvement() {
+        let mut c = Compo { layers: vec![], ..Compo::default() };
+        (c.w, c.h, c.bg) = (200, 40, [0, 0, 0]);
+        let mut r = Layer::new("r", Kind::Rect { w: 10.0, h: 10.0, radius: 0.0, color: [255, 255, 255] }, &c);
+        r.pos.keys = vec![Key { t: 0.0, v: [10.0, 20.0], ease: Ease::Linear, tan: vec![] }, Key { t: 0.1, v: [190.0, 20.0], ease: Ease::Linear, tan: vec![] }];
+        c.layers = vec![r];
+        let mut cache = Cache::new(Path::new("."));
+        let sharp = render(&c, 0.05, 1.0, &mut cache);
+        c.blur = Some(MotionBlur::default());
+        let soft = render(&c, 0.05, 1.0, &mut cache);
+        // Net : le carré blanc fait 10 px ; flou : la traînée s'étale, plus large et moins blanche
+        let lit = |img: &image::RgbaImage| (0..200).filter(|&x| img.get_pixel(x, 20)[0] > 8).count();
+        assert!(lit(&sharp) <= 12, "{}", lit(&sharp));
+        assert!(lit(&soft) > 12, "{}", lit(&soft));
+        assert!(soft.get_pixel(100, 20)[0] < 255);
+    }
 
     #[test]
     fn tremblement() {

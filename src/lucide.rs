@@ -75,6 +75,7 @@ pub const SCALE_3D_ICON: &str = "\u{f02eb}";
 pub const REPLACE: &str = "\u{f03db}";
 pub const REPLACE_ALL: &str = "\u{f03dc}";
 pub const CORNER_DOWN_RIGHT: &str = "\u{f00a2}";
+pub const WIND: &str = "\u{f01b0}";
 pub const FLIP_HORIZONTAL_2: &str = "\u{f035e}";
 pub const GLOBE: &str = "\u{f00e8}";
 pub const UNDO_2: &str = "\u{f02a1}";

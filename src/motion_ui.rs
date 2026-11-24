@@ -1233,6 +1233,24 @@ impl Editor {
             }
         }
         child.toggle_value(&mut self.onion, egui::RichText::new(l::LAYERS).size(14.0)).on_hover_text(crate::i18n::t("Pelure d'oignon : le calque choisi aux images d'avant (rouge) et d'après (vert)"));
+        // Flou de mouvement : un clic l'allume, un clic droit règle l'obturateur
+        let mut on = self.compo.blur.is_some();
+        let r = child.toggle_value(&mut on, egui::RichText::new(l::WIND).size(14.0)).on_hover_text(crate::i18n::t("Flou de mouvement (comme After Effects) · clic droit : angle d'obturateur et qualité"));
+        if r.changed() {
+            self.compo.blur = on.then(motion::MotionBlur::default);
+            self.changed();
+        }
+        r.context_menu(|ui| {
+            let mut b = self.compo.blur.unwrap_or_default();
+            let mut ch = false;
+            ch |= ui.add(egui::Slider::new(&mut b.angle, 1.0..=720.0).suffix("°").text(crate::i18n::t("angle d'obturateur"))).changed();
+            ch |= ui.add(egui::Slider::new(&mut b.samples, 2..=32).text(crate::i18n::t("échantillons"))).changed();
+            ui.label(egui::RichText::new(crate::i18n::t("180° : le flou du cinéma ; plus d'échantillons : plus lisse, plus lent")).small());
+            if ch {
+                self.compo.blur = Some(b);
+                self.changed();
+            }
+        });
         child.toggle_value(&mut self.curves_open, egui::RichText::new(l::SPLINE).size(14.0)).on_hover_text(crate::i18n::t("Éditeur de courbes : toutes les clés du calque, tangentes comprises (comme le Graph Editor de Maya)"));
         child.toggle_value(&mut self.anim_tools, egui::RichText::new(l::WAND_SPARKLES).size(14.0)).on_hover_text(crate::i18n::t("Outils d'animation : tweener, décaler les clés, poses, miroir…"));
         let wide = bar.width() > 900.0;
