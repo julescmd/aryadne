@@ -316,6 +316,12 @@ struct App {
     proj_words: HashMap<String, (Instant, std::sync::Arc<Vec<String>>)>,
     run: Option<extras::Run>,
     auto_query: String,
+    /// Accueil : ouvert par-dessus les fichiers (menu ◆ Aryadne), filtre des récents, question à l'Assistant
+    home_open: bool,
+    home_filter: u8,
+    home_ask: String,
+    /// Le prochain affichage de l'Assistant envoie le message déjà écrit (venu de l'accueil)
+    chat_autosend: bool,
     /// Inspecteur du board : réglages du générateur de palettes, onglet (0 couleurs, 1 propriétés)
     pal_gen: palette::Settings,
     board_tab: u8,
@@ -364,8 +370,6 @@ struct App {
     zones_last: Vec<(&'static str, egui::Rect)>,
     zones_next: Vec<(&'static str, egui::Rect)>,
     ws_name: String,
-    /// Nom tapé dans l'écran d'accueil (nouveau fichier de code)
-    landing_name: String,
     /// Fenêtre « nouveau fichier » : genre choisi et nom tapé
     new_file: Option<(usize, String)>,
     /// Explorateur : éléments choisis en plus de `selected` (Ctrl + clic, Maj + clic)
@@ -852,101 +856,267 @@ impl App {
     }
 
     /// Écran d'accueil de l'espace de travail, quand rien n'est ouvert : de quoi créer, et les fichiers récents du bon genre.
-    fn landing(&mut self, ui: &mut egui::Ui) {
+    /// Accueil, comme la maquette : reprendre, commencer (modèles), récents en vignettes, et à droite
+    /// l'Assistant, les raccourcis utiles et les nouveautés. S'affiche quand aucun fichier n'est ouvert,
+    /// ou depuis le menu ◆ Aryadne.
+    /// Colonne de l'accueil : Assistant, raccourcis, nouveautés
+    fn home_side(&mut self, ui: &mut egui::Ui, ask: &mut Option<String>) {
         let p = theme::pal();
-        let ctx = ui.ctx().clone();
-        let w = self.ws.cur().clone();
-        const CODE: [&str; 28] = ["rs", "py", "js", "ts", "tsx", "jsx", "html", "css", "json", "toml", "yaml", "yml", "c", "h", "cpp", "hpp", "java", "go", "lua", "sh", "glsl", "wgsl", "cs", "php", "rb", "swift", "kt", "sql"];
-        let ext = |rel: &str| rel.rsplit('.').next().unwrap_or("").to_lowercase();
-        type Pick = fn(&str) -> bool;
-        let (subtitle, actions, pick): (&str, Vec<(&str, extras::Cmd)>, Pick) = match w.kind.as_str() {
-            "3d" => ("Une scène réunit des modèles, des lumières et des caméras. Une scène neuve arrive avec un cube, une lumière et une caméra.", vec![("nouvelle scène 3D", extras::Cmd::NewScene), ("importer des fichiers…", extras::Cmd::Import)], |r| model3d::is_model(r)),
-            "video" => ("Un montage assemble des vidéos, des images, des sons et des titres sur une timeline.", vec![("nouveau montage vidéo", extras::Cmd::NewMontage), ("importer des fichiers…", extras::Cmd::Import)], |r| montage::is_project(r) || video::is_video(r)),
-            "mat" => ("Un matériau en nodes s'applique aux modèles et aux objets d'une scène ; un compositing retouche une image ou étalonne un clip.", vec![("nouveau matériau à calques (atelier)", extras::Cmd::NewLayered), ("nouveau matériau (nodes)", extras::Cmd::NewMaterial), ("nouveau compositing (nodes)", extras::Cmd::NewCompositor)], |r| nodes::is_graph(r)),
-            "2d" => ("Images, croquis et planches.", vec![("nouveau board", extras::Cmd::NewBoard), ("importer des fichiers…", extras::Cmd::Import)], |r| images::is_image(r)),
-            "code" => ("Crée un fichier en lui donnant son nom, ou rouvre un fichier récent.", vec![], |_| false),
-            _ => ("Écris une note, ou rouvre un fichier récent.", vec![("nouvelle note", extras::Cmd::NewNote), ("note du jour", extras::Cmd::Daily)], |r| r.to_lowercase().ends_with(".md")),
+        let card = |ui: &mut egui::Ui, body: &mut dyn FnMut(&mut egui::Ui)| {
+            egui::Frame::new().fill(p.panel).stroke(egui::Stroke::new(1.0, p.line)).inner_margin(16).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.spacing_mut().item_spacing.y = 8.0;
+                body(ui);
+            });
+            ui.add_space(20.0);
         };
-        let mut recent: Vec<(String, u64)> = self.entries.iter().filter(|e| !e.is_dir && if w.kind == "code" { CODE.contains(&ext(&e.rel).as_str()) && !nodes::is_graph(&e.rel) && formats::of(&e.rel).is_none() } else { pick(&e.rel) }).map(|e| (e.rel.clone(), e.modified)).collect();
-        recent.sort_by(|a, b| b.1.cmp(&a.1));
-        recent.truncate(10);
-        let mut run: Option<extras::Cmd> = None;
-        let mut open: Option<String> = None;
-        let mut create: Option<String> = None;
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            ui.vertical_centered(|ui| {
-                ui.add_space((ui.available_height() * 0.16).max(24.0));
-                ui.set_max_width(520.0);
-                let accent = workspace::accent_of(&w).map(|c| egui::Color32::from_rgb(c[0], c[1], c[2])).unwrap_or(p.accent);
-                ui.label(RichText::new(crate::i18n::t(&w.name)).size(30.0).family(theme::bold()).color(accent));
-                ui.add_space(6.0);
-                ui.label(RichText::new(crate::i18n::t(subtitle)).color(p.muted));
-                ui.add_space(18.0);
-                if w.kind == "code" {
-                    ui.horizontal(|ui| {
-                        ui.add_space((ui.available_width() - 380.0).max(0.0) / 2.0);
-                        let r = ui.add(egui::TextEdit::singleline(&mut self.landing_name).hint_text(crate::i18n::t("nom du fichier, par exemple main.py")).desired_width(260.0));
-                        let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                        if (ui.add(egui::Button::new(RichText::new(crate::i18n::t("créer")).color(p.on_accent)).fill(accent)).clicked() || enter) && !self.landing_name.trim().is_empty() {
-                            create = Some(self.landing_name.trim().to_string());
-                        }
-                    });
+        card(ui, &mut |ui| {
+            ui.label(RichText::new(format!("{}  {}", lucide::SPARKLES, crate::i18n::t("Demander à l'Assistant"))).family(theme::bold()));
+            ui.label(RichText::new(crate::i18n::t("Il voit ton coffre et peut t'aider : ranger, résumer, proposer une palette. Tu confirmes avant chaque changement.")).size(12.5).color(p.muted));
+            let r = ui.add(egui::TextEdit::singleline(&mut self.home_ask).hint_text(crate::i18n::t("Range mes téléchargements par projet…")).desired_width(f32::INFINITY).min_size(egui::vec2(0.0, 30.0)));
+            if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) && !self.home_ask.trim().is_empty() {
+                *ask = Some(std::mem::take(&mut self.home_ask));
+            }
+        });
+        card(ui, &mut |ui| {
+            ui.label(RichText::new(crate::i18n::t("Raccourcis utiles")).family(theme::bold()));
+            for (label, key) in [("Tout chercher, tout lancer", "palette"), ("Ouvrir un fichier", "switcher"), ("Côte à côte", "split"), ("Assistant", "assistant"), ("Réglages", "settings")] {
+                let k = keymap::text(key);
+                if k.is_empty() {
+                    continue;
                 }
                 ui.horizontal(|ui| {
-                    let total: f32 = actions.len() as f32 * 190.0;
-                    ui.add_space((ui.available_width() - total).max(0.0) / 2.0);
-                    for (k, (label, cmd)) in actions.iter().enumerate() {
-                        let text = RichText::new(crate::i18n::t(label)).color(if k == 0 { p.on_accent } else { p.text });
-                        let b = if k == 0 { egui::Button::new(text).fill(accent) } else { egui::Button::new(text) };
-                        if ui.add(b.min_size(egui::vec2(170.0, 30.0))).clicked() {
-                            run = Some(*cmd);
-                        }
-                    }
+                    ui.label(RichText::new(crate::i18n::t(label)).size(12.5));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(RichText::new(k.split(" / ").next().unwrap_or("")).monospace().size(11.0).background_color(p.field));
+                    });
                 });
-                ui.add_space(22.0);
-                if !recent.is_empty() {
-                    ui.label(caps(&crate::i18n::t("récents")));
-                    ui.add_space(4.0);
-                    for (rel, _) in &recent {
-                        let name = rel.rsplit('/').next().unwrap_or(rel);
-                        let dir = rel.rsplit_once('/').map(|x| x.0).unwrap_or("");
-                        let mut job = egui::text::LayoutJob::default();
-                        job.append(name, 0.0, egui::TextFormat { font_id: egui::FontId::proportional(13.0), color: p.text, ..Default::default() });
-                        if !dir.is_empty() {
-                            job.append(&format!("   {dir}"), 0.0, egui::TextFormat { font_id: egui::FontId::proportional(11.0), color: p.muted, ..Default::default() });
-                        }
-                        if ui.add(egui::Button::new(job).frame(false)).clicked() {
-                            open = Some(rel.clone());
-                        }
-                    }
-                }
-                ui.add_space(18.0);
-                ui.label(RichText::new(crate::i18n::t("^P ouvrir un fichier · glisse des fichiers ici pour les importer")).size(11.0).color(p.muted));
-            });
+            }
         });
+        card(ui, &mut |ui| {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(format!("{} {}", crate::i18n::t("Nouveau dans"), env!("CARGO_PKG_VERSION"))).family(theme::bold()));
+            });
+            for line in ["Montage repensé : un moniteur, timeline magnétique, médias qu'on découpe sur la carte", "Générateur de palettes dans le moodboard", "Nouvelle interface : 3D, notes, matériaux et code comme la maquette", "Biseau, couteau et coupe en boucle à la souris, curseur 3D"] {
+                ui.label(RichText::new(format!("•  {}", crate::i18n::t(line))).size(12.5).color(p.muted));
+            }
+        });
+    }
+
+    fn home(&mut self, ui: &mut egui::Ui) {
+        let p = theme::pal();
+        let ctx = ui.ctx().clone();
+        let mut run: Option<extras::Cmd> = None;
+        let mut open: Option<String> = None;
+        let mut reopen = false;
+        let mut ask: Option<String> = None;
+        let files = self.entries.iter().filter(|e| !e.is_dir).count();
+        let tabs_n = self.ws.cur().tabs.len();
+        let vault = std::path::Path::new(&self.root()).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+        let ago = |t: u64| -> String {
+            let s = now.saturating_sub(t);
+            if s < 3600 {
+                crate::i18n::t_mid("il y a {}").replace("{}", &format!("{} min", (s / 60).max(1)))
+            } else if s < 86_400 {
+                crate::i18n::t_mid("il y a {}").replace("{}", &format!("{} h", s / 3600))
+            } else if s < 2 * 86_400 {
+                crate::i18n::t("hier")
+            } else {
+                crate::i18n::t_mid("il y a {}").replace("{}", &format!("{} {}", s / 86_400, crate::i18n::t_mid("j")))
+            }
+        };
+        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+            let full = ui.available_width();
+            let content_w = full.min(1180.0);
+            ui.horizontal(|ui| {
+                ui.add_space(((full - content_w) / 2.0).max(0.0) + 40.0);
+                let side_w = if content_w > 900.0 { 300.0 } else { 0.0 };
+                let main_w = content_w - 80.0 - if side_w > 0.0 { side_w + 40.0 } else { 0.0 };
+                ui.vertical(|ui| {
+                    ui.set_width(main_w);
+                    ui.add_space(40.0);
+                    // ---- Reprendre
+                    ui.horizontal(|ui| {
+                        ui.vertical(|ui| {
+                            ui.label(RichText::new(crate::i18n::t("Reprendre où tu étais")).size(22.0).family(theme::bold()));
+                            ui.label(RichText::new(format!("{} {vault} · {files} {}", crate::i18n::t("Coffre"), crate::i18n::t_mid("fichiers"))).color(p.muted));
+                        });
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if tabs_n > 0 && ui.add(egui::Button::new(RichText::new(format!("{} {tabs_n} {}", crate::i18n::t("Rouvrir les"), crate::i18n::t_mid("onglets"))).color(p.on_accent).family(theme::bold())).fill(p.accent).min_size(egui::vec2(0.0, 32.0))).clicked() {
+                                reopen = true;
+                            }
+                            if ui.add(egui::Button::new(crate::i18n::t("Ouvrir un autre coffre")).min_size(egui::vec2(0.0, 32.0))).clicked() {
+                                run = Some(extras::Cmd::ChangeVault);
+                            }
+                        });
+                    });
+                    ui.add_space(32.0);
+                    // ---- Commencer : un modèle par genre de fichier, dessiné
+                    ui.label(RichText::new(crate::i18n::t("Commencer")).size(15.0).family(theme::bold()));
+                    ui.add_space(12.0);
+                    let tpls: [(&str, &str, &str, extras::Cmd, u8); 7] = [
+                        ("Note", "page vide", "notes", extras::Cmd::NewNote, 0),
+                        ("Note du jour", "journal", "notes", extras::Cmd::Daily, 0),
+                        ("Moodboard", "toile libre", "2d", extras::Cmd::NewBoard, 1),
+                        ("Scène 3D", "cube, lumière, caméra", "3d", extras::Cmd::NewScene, 2),
+                        ("Montage", "vidéo et son", "video", extras::Cmd::NewMontage, 3),
+                        ("Matériau", "nodes", "mat", extras::Cmd::NewMaterial, 4),
+                        ("Fichier de code", "script, shader, page", "code", extras::Cmd::NewFile, 5),
+                    ];
+                    let gap = 14.0;
+                    let n = tpls.len() as f32;
+                    let cw = ((main_w - gap * (n - 1.0)) / n).floor();
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = gap;
+                        for (name, sub, ws, cmd, shape) in tpls {
+                            let col = theme::ws_color(ws).unwrap_or(p.accent);
+                            let (r, resp) = ui.allocate_exact_size(egui::vec2(cw, cw * 0.75 + 40.0), egui::Sense::click());
+                            let art = egui::Rect::from_min_size(r.min, egui::vec2(cw, cw * 0.75));
+                            ui.painter().rect(art, 10.0, if resp.hovered() { p.raised } else { p.panel }, egui::Stroke::new(1.0, if resp.hovered() { col } else { p.line }), egui::StrokeKind::Inside);
+                            let c = art.center();
+                            let pt = ui.painter();
+                            match shape {
+                                0 => {
+                                    for (k, w) in [0.9f32, 0.7, 0.85, 0.4].iter().enumerate() {
+                                        pt.rect_filled(egui::Rect::from_min_size(egui::pos2(c.x - 30.0, c.y - 14.0 + k as f32 * 8.0), egui::vec2(60.0 * w, 3.0)), 1.0, p.muted);
+                                    }
+                                }
+                                1 => {
+                                    for (k, cc) in [theme::ws_color("2d"), theme::ws_color("3d"), theme::ws_color("mat"), theme::ws_color("notes")].iter().enumerate() {
+                                        let o = egui::vec2((k % 2) as f32 * 22.0 - 11.0, (k / 2) as f32 * 22.0 - 11.0);
+                                        pt.rect_filled(egui::Rect::from_center_size(c + o, egui::vec2(18.0, 18.0)), 3.0, cc.unwrap_or(p.accent).gamma_multiply(0.6));
+                                    }
+                                }
+                                2 => {
+                                    pt.text(c, egui::Align2::CENTER_CENTER, lucide::BOX, egui::FontId::proportional(34.0), col);
+                                }
+                                3 => {
+                                    pt.rect_filled(egui::Rect::from_min_size(c + egui::vec2(-35.0, -12.0), egui::vec2(56.0, 8.0)), 2.0, col.gamma_multiply(0.6));
+                                    pt.rect_filled(egui::Rect::from_min_size(c + egui::vec2(-14.0, -1.0), egui::vec2(38.0, 8.0)), 2.0, col.gamma_multiply(0.4));
+                                    pt.rect_filled(egui::Rect::from_min_size(c + egui::vec2(-35.0, 10.0), egui::vec2(70.0, 6.0)), 2.0, theme::ws_color("code").unwrap_or(p.accent).gamma_multiply(0.5));
+                                }
+                                4 => {
+                                    pt.circle_filled(c, 19.0, col.gamma_multiply(0.55));
+                                    pt.circle_filled(c + egui::vec2(-5.0, -5.0), 12.0, col);
+                                    pt.circle_filled(c + egui::vec2(-8.0, -8.0), 4.0, egui::Color32::from_white_alpha(140));
+                                }
+                                _ => {
+                                    pt.text(c, egui::Align2::CENTER_CENTER, lucide::CODE, egui::FontId::proportional(32.0), col);
+                                }
+                            }
+                            pt.circle_filled(egui::pos2(art.left() + 4.0, art.bottom() + 14.0), 3.5, col);
+                            pt.text(egui::pos2(art.left() + 13.0, art.bottom() + 14.0), egui::Align2::LEFT_CENTER, crate::i18n::t(name), egui::FontId::proportional(12.5), p.text);
+                            pt.text(egui::pos2(art.left(), art.bottom() + 30.0), egui::Align2::LEFT_CENTER, crate::i18n::t(sub), egui::FontId::proportional(11.0), p.muted);
+                            if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                                run = Some(cmd);
+                            }
+                        }
+                    });
+                    ui.add_space(28.0);
+                    // ---- Récents, avec filtres par genre
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(crate::i18n::t("Récents")).size(15.0).family(theme::bold()));
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            for (k, label) in [(6u8, "Code"), (5, "Notes"), (4, "Vidéo"), (3, "Matériaux"), (2, "2D"), (1, "3D"), (0, "Tout")] {
+                                let on = self.home_filter == k;
+                                let b = egui::Button::new(RichText::new(crate::i18n::t(label)).size(12.5).color(if on { p.text } else { p.muted })).fill(if on { p.raised } else { egui::Color32::TRANSPARENT }).stroke(egui::Stroke::new(1.0, if on { p.line } else { egui::Color32::TRANSPARENT }));
+                                if ui.add(b).clicked() {
+                                    self.home_filter = k;
+                                }
+                            }
+                        });
+                    });
+                    ui.add_space(12.0);
+                    let want = self.home_filter;
+                    let mut rec: Vec<(String, u64)> = self.entries.iter().filter(|e| !e.is_dir).filter(|e| {
+                        let (_, _, f) = files::kind(&e.rel);
+                        match want {
+                            1 => f == "3d",
+                            2 => f == "images" || f == "boards",
+                            3 => f == "nodes",
+                            4 => f == "vidéos" || montage::is_project(&e.rel),
+                            5 => f == "notes",
+                            6 => f == "code",
+                            _ => true,
+                        }
+                    }).map(|e| (e.rel.clone(), e.modified)).collect();
+                    rec.sort_by(|a, b| b.1.cmp(&a.1));
+                    let per_row = 6usize;
+                    rec.truncate(per_row * 2);
+                    let rw = ((main_w - gap * (per_row as f32 - 1.0)) / per_row as f32).floor();
+                    for row in rec.chunks(per_row) {
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = gap;
+                            for (rel, modified) in row {
+                                let (icon, col, _) = files::kind(rel);
+                                let (r, resp) = ui.allocate_exact_size(egui::vec2(rw, rw * 0.625 + 42.0), egui::Sense::click());
+                                let art = egui::Rect::from_min_size(r.min, egui::vec2(rw, rw * 0.625));
+                                ui.painter().rect_filled(art, 10.0, col.gamma_multiply(0.16));
+                                if images::is_image(rel) {
+                                    if let images::Slot::Ready(l) = self.images.get(rel, images::Size::Thumb) {
+                                        ui.painter().add(egui::epaint::RectShape::filled(art, 10.0, egui::Color32::WHITE).with_texture(l.tex.id(), egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0))));
+                                    }
+                                } else {
+                                    ui.painter().text(art.center(), egui::Align2::CENTER_CENTER, icon, egui::FontId::proportional(30.0), col.gamma_multiply(0.8));
+                                }
+                                ui.painter().rect_stroke(art, 10.0, egui::Stroke::new(1.0, if resp.hovered() { col } else { p.line }), egui::StrokeKind::Inside);
+                                let name = rel.rsplit('/').next().unwrap_or(rel);
+                                let clip = ui.painter().with_clip_rect(r);
+                                clip.circle_filled(egui::pos2(art.left() + 4.0, art.bottom() + 14.0), 3.5, col);
+                                clip.text(egui::pos2(art.left() + 13.0, art.bottom() + 14.0), egui::Align2::LEFT_CENTER, name, egui::FontId::proportional(12.5), p.text);
+                                let dir = vault::parent(rel);
+                                clip.text(egui::pos2(art.left(), art.bottom() + 31.0), egui::Align2::LEFT_CENTER, format!("{} · {}", if dir.is_empty() { "/".to_string() } else { dir }, ago(*modified)), egui::FontId::proportional(11.0), p.muted);
+                                if resp.on_hover_text(rel).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                                    open = Some(rel.clone());
+                                }
+                            }
+                        });
+                        ui.add_space(14.0);
+                    }
+                    if rec.is_empty() {
+                        ui.label(RichText::new(crate::i18n::t("Rien ici pour l'instant.")).color(p.muted));
+                    }
+                    ui.add_space(30.0);
+                });
+                // ---- Colonne de droite (sous le reste quand la place manque)
+                if side_w > 0.0 {
+                    ui.add_space(40.0);
+                    ui.vertical(|ui| {
+                        ui.set_width(side_w);
+                        ui.add_space(40.0);
+                        self.home_side(ui, &mut ask);
+                    });
+                }
+            });
+            if content_w <= 900.0 {
+                ui.horizontal(|ui| {
+                    ui.add_space(((full - content_w) / 2.0).max(0.0) + 40.0);
+                    ui.vertical(|ui| {
+                        ui.set_width((content_w - 80.0).min(520.0));
+                        self.home_side(ui, &mut ask);
+                    });
+                });
+            }
+        });
+        if reopen {
+            self.home_open = false;
+            self.ws_apply(&ctx, true);
+        }
         if let Some(c) = run {
+            self.home_open = false;
             self.run_cmd(c, &ctx);
         }
         if let Some(rel) = open {
+            self.home_open = false;
             self.open(rel);
         }
-        if let Some(name) = create {
-            // Un nom sans extension devient un fichier texte ; un nom déjà pris est simplement rouvert
-            let rel = if name.contains('.') { name } else { format!("{name}.txt") };
-            if !self.entries.iter().any(|e| e.rel == rel) {
-                let r = vault::safe(&self.root(), &rel).and_then(|path| {
-                    if let Some(d) = path.parent() {
-                        let _ = std::fs::create_dir_all(d);
-                    }
-                    crate::vault::atomic_write(&path, "").map_err(|e| e.to_string())
-                });
-                if self.report(r).is_none() {
-                    return;
-                }
-                self.refresh();
+        if let Some(q) = ask {
+            self.chat.input = q;
+            self.chat_autosend = true;
+            if !self.assistant_open && !(self.side_wanted() && self.insp_tab == 2) {
+                self.toggle_assistant();
             }
-            self.landing_name.clear();
-            self.open(rel);
         }
     }
 
@@ -1515,6 +1685,7 @@ impl App {
     /// Ouvre un fichier dans l'espace où il a sa place : un montage dans l'espace vidéo, une scène dans l'espace 3D…
     /// On y passe tout seul, comme Maya change de menus avec le mode.
     fn open(&mut self, rel: String) {
+        self.home_open = false;
         let here = self.ws.cur().kind.clone();
         let want = workspace::owner(&rel);
         if !workspace::accepts(&here, &rel) {
@@ -2150,6 +2321,10 @@ impl App {
                         }
                         ui.separator();
                         ui.menu_button(crate::i18n::t("fenêtre"), |ui| self.window_menu(ui, &mut cmd, &ctx));
+                        if ui.add(egui::Button::new(format!("{}  {}", lucide::HOUSE, crate::i18n::t("Accueil")))).clicked() {
+                            self.home_open = true;
+                            ui.close();
+                        }
                         if ui.add(egui::Button::new(crate::i18n::t("réglages")).shortcut_text(keymap::text("settings"))).clicked() {
                             cmd = Some(extras::Cmd::Settings(settings::Tab::Appearance));
                         }
@@ -2608,8 +2783,8 @@ impl App {
         let mut open_material: Option<PathBuf> = None;
         self.feed_project_words();
         egui::CentralPanel::default().frame(egui::Frame::new().fill(p.bg)).show(ui, |ui| {
-            if self.docs.is_empty() {
-                self.landing(ui);
+            if self.docs.is_empty() || self.home_open {
+                self.home(ui);
                 return;
             }
             let y0 = ui.cursor().min.y;
@@ -4664,6 +4839,7 @@ impl App {
             let ctx = ui.ctx().clone();
             self.apply_chat_bar(b, &ctx);
         }
+        let send = send || std::mem::take(&mut self.chat_autosend);
         if send && !self.chat.busy() && !self.chat.input.trim().is_empty() {
             self.flush_all();
             let open = if self.chat.include_open {
