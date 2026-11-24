@@ -1320,21 +1320,43 @@ impl Editor {
             self.undo(true);
         }
         hui.add_space(8.0);
-        // L'IA du montage : montrée, mais pas encore branchée
-        let ai = ["Couper les silences", "Couper sur le rythme", "Sous-titres", "Version 9:16"];
+        // Actions automatiques : les deux premières analysent le son, les deux autres attendent l'Assistant
+        self.poll_smart();
+        let busy = self.smart_rx.is_some();
+        let tips = [
+            "Retire les passages sans voix du clip choisi (et de son son lié) ; la suite de ces pistes se resserre",
+            "Choisis la musique : les plans de V1 sont mis bout à bout et chaque coupe tombe sur un temps fort",
+        ];
         let soon = crate::i18n::t("Pas encore branché : viendra avec l'Assistant qui agit dans l'application");
+        let mut run: Option<usize> = None;
         if hui.available_width() > 640.0 {
-            for label in ai {
-                let b = egui::Button::new(RichText::new(format!("{} {}", crate::lucide::SPARKLES, crate::i18n::t(label))).size(12.0)).stroke(Stroke::new(1.0, p.line)).corner_radius(13).min_size(vec2(0.0, 26.0));
-                hui.add_enabled(false, b).on_disabled_hover_text(&soon);
+            for (k, label) in ["Couper les silences", "Couper sur le rythme", "Sous-titres", "Version 9:16"].into_iter().enumerate() {
+                let txt = if busy && k < 2 { format!("{} {}", crate::lucide::LOADER, crate::i18n::t(label)) } else { format!("{} {}", crate::lucide::SPARKLES, crate::i18n::t(label)) };
+                let b = egui::Button::new(RichText::new(txt).size(12.0)).stroke(Stroke::new(1.0, p.line)).corner_radius(13).min_size(vec2(0.0, 26.0));
+                if k < 2 {
+                    if hui.add_enabled(!busy, b).on_hover_text(crate::i18n::t(tips[k])).clicked() {
+                        run = Some(k);
+                    }
+                } else {
+                    hui.add_enabled(false, b).on_disabled_hover_text(&soon);
+                }
             }
         } else {
-            // Peu de place : les actions IA dans un menu
-            egui::containers::menu::MenuButton::new(RichText::new(format!("{} {} {}", crate::lucide::SPARKLES, crate::i18n::t("IA"), crate::lucide::CHEVRON_DOWN)).size(12.0)).ui(&mut hui, |ui| {
-                for label in ai {
+            // Peu de place : dans un menu
+            egui::containers::menu::MenuButton::new(RichText::new(format!("{} {} {}", crate::lucide::SPARKLES, crate::i18n::t("Auto"), crate::lucide::CHEVRON_DOWN)).size(12.0)).ui(&mut hui, |ui| {
+                for (k, label) in ["Couper les silences", "Couper sur le rythme"].into_iter().enumerate() {
+                    if ui.add_enabled(!busy, egui::Button::new(crate::i18n::t(label))).on_hover_text(crate::i18n::t(tips[k])).clicked() {
+                        run = Some(k);
+                        ui.close();
+                    }
+                }
+                for label in ["Sous-titres", "Version 9:16"] {
                     ui.add_enabled(false, egui::Button::new(crate::i18n::t(label))).on_disabled_hover_text(&soon);
                 }
             });
+        }
+        if let Some(k) = run {
+            self.start_smart(k == 1, &hui.ctx().clone());
         }
         if hui.available_width() > 150.0 {
         hui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -2287,5 +2309,65 @@ fn short_time(t: f32) -> String {
         format!("{:.0} s", t.max(0.0))
     } else {
         format!("{}:{:02}", (t / 60.0) as u32, t as u32 % 60)
+    }
+}
+
+
+impl Editor {
+    /// Lance l'analyse du son : du clip choisi (silences) ou de la musique (temps forts)
+    fn start_smart(&mut self, beats: bool, ctx: &egui::Context) {
+        let pick = self.sel.iter().filter_map(|id| self.project.index(*id)).find(|&i| self.project.clips[i].sounds());
+        let i = match (pick, beats) {
+            (Some(i), _) => Some(i),
+            // Sans choix, pour le rythme : la plus longue musique du montage
+            (None, true) => (0..self.project.clips.len()).filter(|&i| self.project.clips[i].kind == "audio").max_by(|&a, &b| self.project.clips[a].len().total_cmp(&self.project.clips[b].len())),
+            (None, false) => None,
+        };
+        let Some(i) = i else {
+            self.message = Some(crate::i18n::t(if beats { "Choisis la musique (un clip son) dans la timeline." } else { "Choisis le clip qui parle dans la timeline." }));
+            return;
+        };
+        let c = self.project.clips[i].clone();
+        let path = resolve(&self.path, &c.file);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let r = if beats {
+                crate::motion::analyse(&path).map(|w| {
+                    let sp = c.speed.max(1e-3);
+                    Smart::Beats(w.beats.into_iter().filter(|b| *b >= c.src_in && *b <= c.src_out).map(|b| c.start + (b - c.src_in) / sp).collect())
+                })
+            } else {
+                crate::audio::decode(&path, "").map(|b| Smart::Silences(c.id, b))
+            };
+            let _ = tx.send(r);
+            ctx.request_repaint();
+        });
+        self.smart_rx = Some(rx);
+        self.message = Some(crate::i18n::t("Analyse du son…"));
+    }
+
+    fn poll_smart(&mut self) {
+        let Some(rx) = &self.smart_rx else { return };
+        let Ok(r) = rx.try_recv() else { return };
+        self.smart_rx = None;
+        match r {
+            Err(e) => self.message = Some(e),
+            Ok(Smart::Silences(id, buf)) => {
+                let Some(i) = self.project.index(id) else { return };
+                let saved = self.project.cut_silences(i, &buf);
+                self.message = Some(if saved > 0.05 { format!("{} {saved:.1} s", crate::i18n::t("Silences retirés :")) } else { crate::i18n::t("Aucun silence assez long dans ce clip.") });
+                self.changed();
+            }
+            Ok(Smart::Beats(beats)) => {
+                if beats.len() < 2 {
+                    self.message = Some(crate::i18n::t("Pas assez de temps forts dans cette musique."));
+                    return;
+                }
+                let n = self.project.fit_to_beats(0, &beats, 0.6);
+                self.message = Some(format!("{} {n} · {} {}", crate::i18n::t("Plans calés sur le rythme :"), beats.len(), crate::i18n::t_mid("temps forts")));
+                self.changed();
+            }
+        }
     }
 }

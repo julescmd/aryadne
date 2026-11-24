@@ -2253,5 +2253,16 @@
   "position ": "position ",
   "rotation ": "rotation ",
   "échelle ": "scale ",
-  "Autre tirage": "New random seed"
+  "Autre tirage": "New random seed",
+  "Retire les passages sans voix du clip choisi (et de son son lié) ; la suite de ces pistes se resserre": "Removes the parts without voice from the selected clip (and its linked audio); what follows on those tracks closes up",
+  "Choisis la musique : les plans de V1 sont mis bout à bout et chaque coupe tombe sur un temps fort": "Select the music: V1 shots are laid end to end and each cut lands on a beat",
+  "Auto": "Auto",
+  "Choisis la musique (un clip son) dans la timeline.": "Select the music (an audio clip) in the timeline.",
+  "Choisis le clip qui parle dans la timeline.": "Select the speaking clip in the timeline.",
+  "Analyse du son…": "Analyzing audio…",
+  "Silences retirés :": "Silences removed:",
+  "Aucun silence assez long dans ce clip.": "No silence long enough in this clip.",
+  "Pas assez de temps forts dans cette musique.": "Not enough beats in this music.",
+  "Plans calés sur le rythme :": "Shots fitted to the beat:",
+  "temps forts": "beats"
 }

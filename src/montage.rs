@@ -4,6 +4,7 @@
 //! filtres pour l'aperçu, la lecture et l'export : ce qu'on voit est ce qu'on exporte.
 
 use crate::ffmpeg;
+use std::collections::HashMap;
 use eframe::egui;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -696,6 +697,98 @@ impl Project {
         self.ensure_ids();
         Some(self.clips.len() - 1)
     }
+
+    /// Coupe à `t` les clips d'identifiants `ids` ; les moitiés droites de clips liés restent liées entre elles
+    pub fn split_linked(&mut self, ids: &[u64], t: f32) {
+        let mut new_links: HashMap<u32, u32> = HashMap::new();
+        for &id in ids {
+            let Some(i) = self.index(id) else { continue };
+            if let Some(k) = self.split(i, t) {
+                let l = self.clips[k].link;
+                if l != 0 {
+                    let next = self.next_link();
+                    let nl = *new_links.entry(l).or_insert(next);
+                    self.clips[k].link = nl;
+                }
+            }
+        }
+    }
+
+    /// Retire [a, b) de la timeline sur les pistes `lanes` (piste son ?, numéro) : ce qui est dedans part,
+    /// ce qui suit sur ces pistes recule d'autant. Les autres pistes ne bougent pas.
+    pub fn cut_range(&mut self, lanes: &[(bool, usize)], a: f32, b: f32) {
+        if b <= a + 1e-3 {
+            return;
+        }
+        let on = |c: &Clip| lanes.contains(&(c.audio, c.track));
+        let ids: Vec<u64> = self.clips.iter().filter(|c| on(c)).map(|c| c.id).collect();
+        self.split_linked(&ids, b);
+        let ids: Vec<u64> = self.clips.iter().filter(|c| on(c)).map(|c| c.id).collect();
+        self.split_linked(&ids, a);
+        let eps = 1e-3;
+        self.clips.retain(|c| !(on(c) && c.start >= a - eps && c.end() <= b + eps));
+        for c in self.clips.iter_mut().filter(|c| lanes.contains(&(c.audio, c.track))) {
+            if c.start >= b - eps {
+                c.start -= b - a;
+            }
+        }
+    }
+
+    /// Retire les silences du clip `i` (et de ses clips liés), en gardant un peu d'air ; rend le temps gagné
+    pub fn cut_silences(&mut self, i: usize, buf: &crate::audio::Buffer) -> f32 {
+        let Some(c) = self.clips.get(i).cloned() else { return 0.0 };
+        let mut lanes: Vec<(bool, usize)> = self.linked(i).iter().map(|&k| (self.clips[k].audio, self.clips[k].track)).collect();
+        lanes.dedup();
+        let pad = 0.12f32;
+        let speed = c.speed.max(1e-3);
+        let gaps: Vec<(f32, f32)> = crate::audio::silences(buf, c.src_in as f64, c.src_out as f64, -42.0, 0.45)
+            .into_iter()
+            .map(|(x, y)| (c.start + (x as f32 - c.src_in) / speed + pad, c.start + (y as f32 - c.src_in) / speed - pad))
+            .filter(|(x, y)| y - x > 0.05)
+            .collect();
+        let mut saved = 0.0;
+        for (x, y) in gaps.into_iter().rev() {
+            self.cut_range(&lanes, x, y);
+            saved += y - x;
+        }
+        saved
+    }
+
+    /// Cale les clips visuels de la piste `track` sur les temps forts : mis bout à bout depuis le premier,
+    /// chacun finit sur le temps fort le plus proche de sa fin (au moins `min` s par plan). Les clips liés
+    /// (le son des vidéos) suivent. Rend le nombre de plans calés.
+    pub fn fit_to_beats(&mut self, track: usize, beats: &[f32], min: f32) -> usize {
+        let mut order: Vec<usize> = (0..self.clips.len()).filter(|&i| !self.clips[i].audio && self.clips[i].track == track).collect();
+        order.sort_by(|&x, &y| self.clips[x].start.total_cmp(&self.clips[y].start));
+        let Some(&first) = order.first() else { return 0 };
+        let mut cur = self.clips[first].start;
+        let mut n = 0;
+        let ids: Vec<u64> = order.iter().map(|&i| self.clips[i].id).collect();
+        for id in ids {
+            let Some(i) = self.index(id) else { continue };
+            let c = self.clips[i].clone();
+            let speed = c.speed.max(1e-3);
+            // Ce que la source permet au plus (une image n'a pas de limite)
+            let max_len = if c.media > 0.0 { (c.media - c.src_in) / speed } else { f32::INFINITY };
+            let want = cur + c.len();
+            let end = beats.iter().cloned().filter(|b| *b >= cur + min && *b - cur <= max_len + 1e-3).min_by(|a, b| (a - want).abs().total_cmp(&(b - want).abs()));
+            let len = match end {
+                Some(e) => {
+                    n += 1;
+                    e - cur
+                }
+                None => c.len().min(max_len),
+            };
+            for k in self.linked(i) {
+                let lk = &mut self.clips[k];
+                lk.start = cur;
+                lk.src_out = lk.src_in + len * lk.speed.max(1e-3);
+                lk.xfade = 0.0;
+            }
+            cur += len;
+        }
+        n
+    }
 }
 
 pub fn resolve(project: &Path, file: &str) -> PathBuf {
@@ -1054,6 +1147,48 @@ mod tests {
         p.magnetize(&before);
         assert_eq!(at(&p, 1), 0.0);
         assert!(!p.clone().magnetize(&p));
+    }
+
+    fn clip(name: &str, start: f32, len: f32, media: f32) -> Clip {
+        let mut c = Clip::test();
+        c.name = name.into();
+        c.start = start;
+        c.src_in = 0.0;
+        c.src_out = len;
+        c.media = media;
+        c
+    }
+
+    #[test]
+    fn retirer_une_plage_et_caler_sur_le_rythme() {
+        let mut p = Project::default();
+        // V1 : une vidéo de 10 s et son son lié sur A1 ; V2 : un titre qui ne doit pas bouger
+        let mut v = clip("v", 0.0, 10.0, 10.0);
+        v.link = 1;
+        let mut a = v.clone();
+        a.audio = true;
+        a.kind = "audio".into();
+        let mut titre = clip("t", 5.0, 2.0, 0.0);
+        titre.track = 1;
+        p.clips = vec![v, a, titre];
+        p.ensure_ids();
+        p.cut_range(&[(false, 0), (true, 0)], 3.0, 5.0);
+        let mut v1: Vec<(f32, f32, f32)> = p.clips.iter().filter(|c| !c.audio && c.track == 0).map(|c| (c.start, c.src_in, c.src_out)).collect();
+        v1.sort_by(|x, y| x.0.total_cmp(&y.0));
+        assert_eq!(v1, vec![(0.0, 0.0, 3.0), (3.0, 5.0, 10.0)]);
+        assert_eq!(p.clips.iter().filter(|c| c.audio).count(), 2);
+        assert_eq!(p.clips.iter().find(|c| c.name == "t").unwrap().start, 5.0, "les autres pistes restent");
+        // Les moitiés droites de la vidéo et du son restent liées entre elles
+        let right = p.clips.iter().position(|c| !c.audio && c.start == 3.0).unwrap();
+        assert_eq!(p.linked(right).len(), 2);
+        // Rythme : temps forts à 0,5 s d'écart ; deux plans calés sur ceux près de leur fin
+        let mut q = Project::default();
+        q.clips = vec![clip("a", 0.0, 2.2, 10.0), clip("b", 2.2, 1.9, 10.0)];
+        q.ensure_ids();
+        let beats: Vec<f32> = (1..20).map(|k| k as f32 * 0.5).collect();
+        assert_eq!(q.fit_to_beats(0, &beats, 0.5), 2);
+        assert_eq!((q.clips[0].start, q.clips[0].len()), (0.0, 2.0));
+        assert_eq!((q.clips[1].start, q.clips[1].len()), (2.0, 2.0));
     }
 
     #[test]

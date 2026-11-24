@@ -128,6 +128,8 @@ pub struct Editor {
     play: Option<Playback>,
     export_rx: Option<Receiver<Result<PathBuf, String>>>,
     message: Option<String>,
+    /// Analyse en cours pour « couper les silences » ou « caler sur le rythme »
+    smart_rx: Option<Receiver<Result<Smart, String>>>,
     /// Médias glissés sur la fenêtre, à ajouter
     pub add: Vec<PathBuf>,
     root: String,
@@ -176,6 +178,14 @@ pub struct Editor {
     fit_zoom: bool,
 }
 
+/// Résultat d'une analyse du son, faite en arrière-plan
+enum Smart {
+    /// Le son décodé du clip (son identifiant)
+    Silences(u64, crate::audio::Buffer),
+    /// Temps forts de la musique, en temps de la timeline
+    Beats(Vec<f32>),
+}
+
 impl Drop for Editor {
     fn drop(&mut self) {
         self.stop();
@@ -211,6 +221,7 @@ impl Editor {
             play: None,
             export_rx: None,
             message: None,
+            smart_rx: None,
             add: vec![],
             root: root.to_string(),
             strips: Strips::default(),
