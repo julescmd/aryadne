@@ -101,7 +101,29 @@ pub fn kind(rel: &str) -> (&'static str, Color32, &'static str) {
     }
 }
 
-const FILTERS: [(&str, &str); 9] = [("notes", "#"), ("images", "▣"), ("3d", "◆"), ("code", "‹›"), ("docs", "▤"), ("vidéos", "▶"), ("boards", "▦"), ("nodes", "⬡"), ("autres", "·")];
+const FILTERS: [(&str, &str); 9] = [("notes", crate::lucide::FILE_TEXT), ("images", crate::lucide::IMAGE), ("3d", crate::lucide::BOX), ("code", crate::lucide::CODE), ("docs", crate::lucide::BOOK_OPEN), ("vidéos", crate::lucide::FILM), ("boards", crate::lucide::LAYOUT_DASHBOARD), ("nodes", crate::lucide::WORKFLOW), ("autres", crate::lucide::FILE)];
+
+/// Couleur du genre de fichier d'un filtre (celle de son espace).
+fn filter_color(k: &str) -> egui::Color32 {
+    kind(match k {
+        "notes" => "a.md",
+        "images" => "a.png",
+        "3d" => "a.obj",
+        "code" => "a.py",
+        "docs" => "a.pptx",
+        "vidéos" => "a.mp4",
+        "boards" => "a.aryboard",
+        "nodes" => "a.arymat",
+        _ => "a",
+    })
+    .1
+}
+
+/// Petit bouton icône, sans cadre, avec son infobulle.
+fn icon_btn(ui: &mut egui::Ui, icon: &str, tip: &str) -> egui::Response {
+    let p = theme::pal();
+    ui.add(egui::Button::new(RichText::new(icon).size(15.0).color(p.muted)).frame(false).min_size(egui::vec2(24.0, 24.0))).on_hover_text(tip)
+}
 
 impl App {
     pub(super) fn explorer(&mut self, ui: &mut egui::Ui) {
@@ -117,13 +139,40 @@ impl App {
         }
         crate::dock::show_ex(ui, "explorer", &crate::i18n::t("fichiers"), crate::dock::Side::Left, 260.0, 180.0, egui::Frame::new().fill(p.panel).stroke(egui::Stroke::new(1.0, p.line)).inner_margin(egui::Margin::symmetric(0, 8)), true, |ui| {
                 self.explorer_rect = Some(ui.max_rect().expand(8.0));
-                // En-tête : titre, « + » (créer / importer) et « ⋯ » (affichage)
-                // Le titre est dans l'en-tête du panneau : ici, juste les boutons
+                // En-tête : filtre « Type ▾ » nommé à gauche ; liste ou grille, « + » et « ⋯ » à droite
                 ui.horizontal(|ui| {
+                    ui.add_space(8.0);
+                    let present: HashSet<&str> = self.entries.iter().filter(|e| !e.is_dir).map(|e| kind(&e.rel).2).collect();
+                    let cur = self.files.kind;
+                    let label = match cur {
+                        Some(k) => format!("{}  {}", crate::i18n::t(k), crate::lucide::CHEVRON_DOWN),
+                        None => format!("{}  {}", crate::i18n::t("tous les types"), crate::lucide::CHEVRON_DOWN),
+                    };
+                    egui::containers::menu::MenuButton::from_button(egui::Button::new(RichText::new(label).size(12.5).color(if cur.is_some() { p.text } else { p.muted })).frame(false)).ui(ui, |ui| {
+                        ui.set_min_width(190.0);
+                        if ui.selectable_label(cur.is_none(), crate::i18n::t("tous les types")).clicked() {
+                            self.files.kind = None;
+                            ui.close();
+                        }
+                        ui.separator();
+                        for (k, icon) in FILTERS {
+                            if !present.contains(k) {
+                                continue;
+                            }
+                            let mut job = egui::text::LayoutJob::default();
+                            job.append(icon, 0.0, egui::TextFormat { font_id: egui::FontId::proportional(14.0), color: filter_color(k), ..Default::default() });
+                            job.append(&crate::i18n::t(k), 8.0, egui::TextFormat { font_id: egui::FontId::proportional(12.5), color: p.text, ..Default::default() });
+                            if ui.selectable_label(cur == Some(k), job).clicked() {
+                                self.files.kind = if cur == Some(k) { None } else { Some(k) };
+                                ui.close();
+                            }
+                        }
+                    });
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.add_space(8.0);
+                        ui.add_space(6.0);
+                        ui.spacing_mut().item_spacing.x = 0.0;
                         let g = self.files.grid;
-                        egui::containers::menu::MenuButton::new("⋯").ui(ui, |ui| {
+                        egui::containers::menu::MenuButton::from_button(egui::Button::new(RichText::new(crate::lucide::ELLIPSIS).size(15.0).color(p.muted)).frame(false).min_size(egui::vec2(24.0, 24.0))).ui(ui, |ui| {
                             ui.set_min_width(200.0);
                             ui.label(RichText::new(crate::i18n::t("trier")).color(p.muted).size(11.0));
                             for (k, l) in [(0u8, "par nom"), (1, "modifiés récemment"), (2, "par type")] {
@@ -157,11 +206,11 @@ impl App {
                                 }
                             }
                         }).0.on_hover_text(crate::i18n::t("plus d'options"));
-                        if ui.add(egui::Button::new(if g { "▦" } else { "≣" }).frame(false)).on_hover_text(if g { "vue en grille (clic : liste)" } else { "vue en liste (clic : grille avec miniatures)" }).clicked() {
+                        if icon_btn(ui, if g { crate::lucide::LIST } else { crate::lucide::GRID_2X2 }, &crate::i18n::t(if g { "afficher en liste" } else { "afficher en grille, avec miniatures" })).clicked() {
                             self.files.grid = !g;
                             self.files.save();
                         }
-                        egui::containers::menu::MenuButton::new("+").ui(ui, |ui| {
+                        egui::containers::menu::MenuButton::from_button(egui::Button::new(RichText::new(crate::lucide::PLUS).size(15.0).color(p.muted)).frame(false).min_size(egui::vec2(24.0, 24.0))).ui(ui, |ui| {
                             ui.set_min_width(210.0);
                             let dir = self.target_dir(&self.notes_dir());
                             if ui.button(crate::i18n::t("note")).clicked() {
@@ -190,52 +239,20 @@ impl App {
                         }).0.on_hover_text(crate::i18n::t("nouveau…"));
                     });
                 });
-                ui.add_space(6.0);
+                ui.add_space(4.0);
                 // Recherche
                 ui.horizontal(|ui| {
                     ui.add_space(10.0);
-                    egui::Frame::new().fill(p.bg).stroke(egui::Stroke::new(1.0, p.line)).inner_margin(egui::Margin::symmetric(8, 4)).show(ui, |ui| {
+                    egui::Frame::new().fill(p.field).stroke(egui::Stroke::new(1.0, p.line)).corner_radius(2.0).inner_margin(egui::Margin::symmetric(8, 3)).show(ui, |ui| {
                         ui.set_width(ui.available_width() - 10.0);
                         ui.horizontal(|ui| {
-                            ui.label(RichText::new("⌕").color(p.muted));
-                            ui.add(egui::TextEdit::singleline(&mut self.filter).hint_text(crate::i18n::t("chercher un fichier")).frame(egui::Frame::NONE).margin(egui::Margin::ZERO).desired_width(ui.available_width() - 16.0));
-                            if !self.filter.is_empty() && ui.add(egui::Button::new(RichText::new("×").color(p.muted)).frame(false)).clicked() {
+                            ui.label(RichText::new(crate::lucide::SEARCH).size(13.0).color(p.muted));
+                            ui.add(egui::TextEdit::singleline(&mut self.filter).hint_text(crate::i18n::t("chercher un fichier")).frame(egui::Frame::NONE).margin(egui::Margin::ZERO).desired_width(ui.available_width() - 20.0));
+                            if !self.filter.is_empty() && ui.add(egui::Button::new(RichText::new(crate::lucide::X).size(12.0).color(p.muted)).frame(false)).on_hover_text(crate::i18n::t("effacer")).clicked() {
                                 self.filter.clear();
                             }
                         });
                     });
-                });
-                // Filtres par type (icônes)
-                ui.add_space(4.0);
-                ui.horizontal_wrapped(|ui| {
-                    ui.add_space(10.0);
-                    ui.spacing_mut().item_spacing.x = 2.0;
-                    let all = self.files.kind.is_none();
-                    if ui.add(egui::Button::new(RichText::new(crate::i18n::t("tout")).size(11.0).color(if all { p.on_accent } else { p.muted })).fill(if all { p.accent } else { p.panel }).stroke(egui::Stroke::NONE)).clicked() {
-                        self.files.kind = None;
-                    }
-                    let present: HashSet<&str> = self.entries.iter().filter(|e| !e.is_dir).map(|e| kind(&e.rel).2).collect();
-                    for (k, icon) in FILTERS {
-                        if !present.contains(k) {
-                            continue;
-                        }
-                        let on = self.files.kind == Some(k);
-                        let col = kind(match k {
-                            "notes" => "a.md",
-                            "images" => "a.png",
-                            "3d" => "a.obj",
-                            "code" => "a.py",
-                            "docs" => "a.pptx",
-                            "vidéos" => "a.mp4",
-                            "boards" => "a.aryboard",
-                            "nodes" => "a.arymat",
-                            _ => "a",
-                        }).1;
-                        let b = egui::Button::new(RichText::new(icon).size(12.0).color(if on { p.on_accent } else { col })).fill(if on { col } else { p.panel }).stroke(egui::Stroke::NONE).min_size(egui::vec2(24.0, 18.0));
-                        if ui.add(b).on_hover_text(k).clicked() {
-                            self.files.kind = if on { None } else { Some(k) };
-                        }
-                    }
                 });
                 ui.add_space(6.0);
                 ui.painter().hline(ui.max_rect().x_range(), ui.cursor().top(), egui::Stroke::new(1.0, p.line));

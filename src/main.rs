@@ -2,6 +2,7 @@
 
 mod cloud;
 mod keymap;
+mod lucide;
 mod bridge;
 mod layout;
 mod icons;
@@ -1132,13 +1133,13 @@ impl App {
                     let on = view == self.view();
                     let v: &str = v;
                     let icon = match v {
-                        "files" => "▤",
-                        "brain" => "◎",
-                        "refs" => "▦",
-                        "boards" => "◫",
-                        "tasks" => "✓",
-                        "chat" => "✦",
-                        _ => "⌕",
+                        "files" => lucide::FOLDER,
+                        "brain" => lucide::NETWORK,
+                        "refs" => lucide::IMAGES,
+                        "boards" => lucide::LAYOUT_DASHBOARD,
+                        "tasks" => lucide::LIST_CHECKS,
+                        "chat" => lucide::MESSAGES_SQUARE,
+                        _ => lucide::SEARCH,
                     };
                     let (r, resp) = ui.allocate_exact_size(egui::vec2(32.0, 32.0), egui::Sense::click());
                     if on || resp.hovered() {
@@ -1148,7 +1149,7 @@ impl App {
                         ui.painter().rect_filled(egui::Rect::from_min_size(egui::pos2(r.left() - 6.0, r.top() + 6.0), egui::vec2(2.0, r.height() - 12.0)), 0.0, accent);
                     }
                     let col = if on { p.text } else if resp.hovered() { p.text } else { p.muted };
-                    ui.painter().text(r.center(), egui::Align2::CENTER_CENTER, icon, egui::FontId::proportional(16.0), col);
+                    ui.painter().text(r.center(), egui::Align2::CENTER_CENTER, icon, egui::FontId::proportional(17.0), col);
                     let tip = if v == "files" { format!("{}  ({})", crate::i18n::t(label), keymap::text("explorer")) } else { crate::i18n::t(label) };
                     if resp.on_hover_text(tip).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
                         if on && v == "files" {
@@ -1304,7 +1305,7 @@ impl App {
         let ctx = ui.ctx().clone();
         let dragged = tree.dragged_id(&ctx).and_then(|t| tree.tiles.get_pane(&t).cloned()).filter(|p| p != layout::MAIN);
         let area = egui::CentralPanel::default()
-            .frame(egui::Frame::new().fill(theme::gutter()).inner_margin(3))
+            .frame(egui::Frame::new().fill(theme::pal().line).inner_margin(0))
             .show(ui, |ui| {
                 let main_tile = layout::find(&tree, layout::MAIN);
                 let mut b = Panes { app: self, main_tile };
@@ -2050,7 +2051,7 @@ impl App {
                     theme::mark(ui, 16.0);
                     let mut job = egui::text::LayoutJob::default();
                     job.append(&crate::i18n::t("aryadne"), 0.0, egui::TextFormat { font_id: egui::FontId::new(13.0, theme::bold()), color: p.text, ..Default::default() });
-                    job.append(&format!("{short}  ▾"), 8.0, egui::TextFormat { font_id: egui::FontId::proportional(11.5), color: p.muted, ..Default::default() });
+                    job.append(&format!("{short}  {}", lucide::CHEVRON_DOWN), 8.0, egui::TextFormat { font_id: egui::FontId::proportional(11.5), color: p.muted, ..Default::default() });
                     let (r, _) = egui::containers::menu::MenuButton::from_button(egui::Button::new(job).frame(false)).ui(ui, |ui| {
                         ui.set_min_width(240.0);
                         ui.label(RichText::new(&path).color(p.muted).size(10.5));
@@ -2115,7 +2116,7 @@ impl App {
                     ui.add_space(18.0);
                     self.ws_items(ui);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let ai_btn = egui::Button::new(if self.assistant_open { RichText::new(format!("✦ {}", crate::i18n::t("assistant"))).color(p.on_accent) } else { RichText::new(format!("✦ {}", crate::i18n::t("assistant"))) }).fill(if self.assistant_open { p.accent } else { p.panel }).min_size(egui::vec2(0.0, 28.0));
+                        let ai_btn = egui::Button::new(if self.assistant_open { RichText::new(format!("{} {}", lucide::SPARKLES, crate::i18n::t("assistant"))).color(p.on_accent) } else { RichText::new(format!("{} {}", lucide::SPARKLES, crate::i18n::t("assistant"))) }).fill(if self.assistant_open { p.accent } else { p.panel }).min_size(egui::vec2(0.0, 28.0));
                         if ui.add(ai_btn).on_hover_text(format!("{} ({})", crate::i18n::t("Assistant IA à côté de tout"), keymap::text("assistant"))).clicked() {
                             cmd = Some(extras::Cmd::Assistant);
                         }
@@ -2124,7 +2125,7 @@ impl App {
                         let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, 28.0), egui::Sense::click());
                         let hov = resp.hovered();
                         ui.painter().rect(rect, 2.0, p.field, egui::Stroke::new(1.0, if hov { p.accent } else { p.line }), egui::StrokeKind::Inside);
-                        ui.painter().text(rect.left_center() + egui::vec2(10.0, 0.0), egui::Align2::LEFT_CENTER, format!("⌕  {}", crate::i18n::t("rechercher ou lancer une commande")), egui::FontId::proportional(12.5), p.muted);
+                        ui.painter().text(rect.left_center() + egui::vec2(10.0, 0.0), egui::Align2::LEFT_CENTER, format!("{}  {}", lucide::SEARCH, crate::i18n::t("rechercher ou lancer une commande")), egui::FontId::proportional(12.5), p.muted);
                         let k = keymap::text("palette").split(" / ").next().unwrap_or("").to_string();
                         let kg = ui.painter().layout_no_wrap(k.clone(), egui::FontId::monospace(11.0), p.muted);
                         let kr = egui::Rect::from_min_size(rect.right_center() - egui::vec2(kg.size().x + 18.0, kg.size().y / 2.0 + 2.0), kg.size() + egui::vec2(10.0, 4.0));
@@ -5548,22 +5549,18 @@ impl egui_tiles::Behavior<String> for Panes<'_> {
         !(tabs.children.len() == 1 && Some(tabs.children[0]) == self.main_tile)
     }
 
+    /// Panneaux nets, séparés par une ligne de 1 px (la charte : pas de coins arrondis entre les cases)
     fn gap_width(&self, _style: &egui::Style) -> f32 {
-        3.0
+        1.0
     }
 
-    /// Les interstices restent sombres ; ils s'allument au survol pour montrer qu'on peut les tirer.
+    /// La ligne de séparation s'allume au survol pour montrer qu'on peut la tirer.
     fn resize_stroke(&self, _style: &egui::Style, state: egui_tiles::ResizeState) -> egui::Stroke {
         match state {
-            egui_tiles::ResizeState::Idle => egui::Stroke::new(3.0, theme::gutter()),
-            egui_tiles::ResizeState::Hovering => egui::Stroke::new(3.0, theme::pal().muted),
-            egui_tiles::ResizeState::Dragging => egui::Stroke::new(3.0, theme::pal().accent),
+            egui_tiles::ResizeState::Idle => egui::Stroke::new(1.0, theme::pal().line),
+            egui_tiles::ResizeState::Hovering => egui::Stroke::new(2.0, theme::pal().muted),
+            egui_tiles::ResizeState::Dragging => egui::Stroke::new(2.0, theme::pal().accent),
         }
-    }
-
-    /// Coins arrondis : un trait de la couleur des interstices autour de chaque case.
-    fn paint_on_top_of_tile(&self, painter: &egui::Painter, _style: &egui::Style, _tile: egui_tiles::TileId, rect: egui::Rect) {
-        painter.rect_stroke(rect, 5.0, egui::Stroke::new(3.0, theme::gutter()), egui::StrokeKind::Outside);
     }
 
     fn min_size(&self) -> f32 {

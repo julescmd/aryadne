@@ -1728,5 +1728,12 @@
   "thème clair": "light theme",
   "thème sombre": "dark theme",
   "ajouter au menu Démarrer": "add to the Start menu",
-  "ajouter au menu des applications": "add to the applications menu"
+  "ajouter au menu des applications": "add to the applications menu",
+  "tous les types": "all types",
+  "afficher en liste": "show as a list",
+  "afficher en grille, avec miniatures": "show as a grid, with thumbnails",
+  "3d": "3D",
+  "docs": "documents",
+  "vidéos": "videos",
+  "autres": "other"
 }

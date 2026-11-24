@@ -4220,7 +4220,7 @@ impl Viewer {
         // Menu du clic droit : tous les outils du mode édition, avec leur raccourci
         if let Some((at, menu_kind)) = me.menu {
             let mut close = false;
-            let area = egui::Area::new(ui.id().with("menu-edition")).order(egui::Order::Foreground).fixed_pos(at).constrain(true).show(ui.ctx(), |ui| {
+            let area = egui::Area::new(ui.scope_id().with("menu-edition")).order(egui::Order::Foreground).fixed_pos(at).constrain(true).show(ui.ctx(), |ui| {
                 egui::Frame::popup(ui.style()).show(ui, |ui| {
                     ui.set_min_width(230.0);
                     let tools: &[(&str, &[(&'static str, &str)])] = &[
@@ -4265,7 +4265,7 @@ impl Viewer {
                 let mut changed = false;
                 let mut close = false;
                 let at = rect.left_bottom() + egui::vec2(12.0, -34.0);
-                egui::Area::new(ui.id().with("derniere-op")).order(egui::Order::Foreground).pivot(egui::Align2::LEFT_BOTTOM).fixed_pos(at).show(ui.ctx(), |ui| {
+                egui::Area::new(ui.scope_id().with("derniere-op")).order(egui::Order::Foreground).pivot(egui::Align2::LEFT_BOTTOM).fixed_pos(at).show(ui.ctx(), |ui| {
                     egui::Frame::popup(ui.style()).show(ui, |ui| {
                         ui.set_max_width(220.0);
                         ui.horizontal(|ui| {

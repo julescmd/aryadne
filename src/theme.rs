@@ -311,7 +311,10 @@ pub fn install_fonts(ctx: &egui::Context, chosen: &Fonts) {
         l.clear();
     }
     // Les polices de secours d'egui (symboles, émojis) restent derrière chaque famille
-    let fallback: Vec<String> = fonts.families[&FontFamily::Proportional].clone();
+    let mut fallback: Vec<String> = fonts.families[&FontFamily::Proportional].clone();
+    // Icônes Lucide : en secours de toutes les familles (zone privée de l'Unicode, aucun conflit)
+    fonts.font_data.insert("lucide".into(), Arc::new(egui::FontData::from_static(include_bytes!("../assets/fonts/Lucide.ttf"))));
+    fallback.insert(0, "lucide".into());
     let add = |fonts: &mut egui::FontDefinitions, spec: &str| -> Option<[String; 4]> {
         let v = variants(spec)?;
         if let Ok(mut l) = LOADED.lock() {
