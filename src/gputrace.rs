@@ -615,7 +615,7 @@ pub fn reset(s: &mut Scene) {
 pub fn passes(s: &mut Scene, m: &Prepared, cam: &Camera, look: &Look, set: &Settings, n: u32, out: &mut Accum) {
     let Some(g) = gpu() else { return };
     let (w, h) = (s.w, s.h);
-    let lamps: Vec<Lamp> = if look.lamps.is_empty() { vec![Lamp::simple(false, look.light.dir(), look.light.color, look.light.intensity, 0.0)] } else { look.lamps.clone() };
+    let lamps: Vec<Lamp> = if look.lamps.is_empty() { super::pathtrace::rig_lamps(set.rig, look) } else { look.lamps.clone() };
     let mut gl = [GLamp { at: [0.0; 4], color: [0.0; 4], extra: [0.0; 4], axis: [0.0; 4], h0: [0.0; 4], h1: [0.0; 4] }; 16];
     for (k, l) in lamps.iter().take(16).enumerate() {
         let v4 = |v: [f32; 3]| [v[0], v[1], v[2], 0.0];

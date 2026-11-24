@@ -17,6 +17,9 @@ pub struct Accum {
     pub spp: u32,
     /// Rendu des couleurs AgX à l'affichage
     pub agx: bool,
+    /// Contraste (0 : AgX de base, 1 : « punchy » de Blender) et saturation (1 : inchangée)
+    pub contrast: f32,
+    pub saturation: f32,
 }
 
 #[derive(Clone, Copy)]
@@ -39,17 +42,27 @@ pub struct Settings {
     pub agx: bool,
     /// Garder le tracé de chemins pendant qu'on bouge la vue (sinon l'aperçu rapide prend le relais)
     pub live: bool,
+    /// Éclairage quand la scène n'a pas ses propres lumières : 0 la lumière de la vue,
+    /// 1 studio (clé, contre et débouchage), 2 extérieur (soleil et ciel)
+    pub rig: u8,
+    /// Sol visible qui se fond dans le fond au loin (plus de ligne d'horizon)
+    pub backdrop: bool,
+    /// Contraste et saturation de l'image (voir Accum)
+    pub contrast: f32,
+    pub saturation: f32,
+    /// Fond de studio : gris uni (lumière linéaire) au lieu du ciel, quand le sol se fond au loin
+    pub backdrop_gray: f32,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { bounces: 6, floor: false, clamp: 12.0, floor_visible: false, denoise: true, gpu: true, aperture: 0.0, focus: 0.0, agx: true, live: true }
+        Settings { bounces: 6, floor: true, clamp: 12.0, floor_visible: false, denoise: true, gpu: true, aperture: 0.0, focus: 0.0, agx: true, live: true, rig: 1, backdrop: true, contrast: 0.5, saturation: 1.1, backdrop_gray: 0.045 }
     }
 }
 
 impl Accum {
     pub fn new(w: usize, h: usize) -> Accum {
-        Accum { w, h, sum: vec![[0.0; 3]; w * h], cover: vec![0.0; w * h], nrm: vec![[0.0; 3]; w * h], alb: vec![[0.0; 3]; w * h], spp: 0, agx: true }
+        Accum { w, h, sum: vec![[0.0; 3]; w * h], cover: vec![0.0; w * h], nrm: vec![[0.0; 3]; w * h], alb: vec![[0.0; 3]; w * h], spp: 0, agx: true, contrast: 0.0, saturation: 1.0 }
     }
 
     /// Lumière moyenne de chaque pixel (couleur non prémultipliée) et couverture.
@@ -137,7 +150,7 @@ impl Accum {
             if cover[i] <= 0.0 {
                 return;
             }
-            o[..3].copy_from_slice(&if self.agx { agx(col[i], e) } else { tone(col[i], e) });
+            o[..3].copy_from_slice(&if self.agx { agx_look(col[i], e, self.contrast, self.saturation) } else { tone(col[i], e) });
             o[3] = (cover[i] * 255.0) as u8;
         });
         out
@@ -167,6 +180,8 @@ impl Job {
         std::thread::spawn(move || {
             let mut acc = Accum::new(w, h);
             acc.agx = set.agx;
+            acc.contrast = set.contrast;
+            acc.saturation = set.saturation;
             let mut last = std::time::Instant::now();
             let mut gpu = None;
             let on_gpu = set.gpu && super::gputrace::hardware() && super::gputrace::prepare(&mut gpu, &m, &look, 0xF12, w, h);
@@ -222,6 +237,40 @@ pub fn agx(c: [f32; 3], exposure: f32) -> [u8; 3] {
         out[k] = (y.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
     }
     out
+}
+
+/// AgX avec un « look » : contraste (0 base, 1 punchy) et saturation, comme les looks de Blender.
+pub fn agx_look(c: [f32; 3], exposure: f32, contrast: f32, saturation: f32) -> [u8; 3] {
+    let base = agx(c, exposure);
+    if contrast.abs() < 1e-3 && (saturation - 1.0).abs() < 1e-3 {
+        return base;
+    }
+    let mut x = base.map(|v| v as f32 / 255.0);
+    // Contraste : courbe en S autour du gris moyen (sans boucher les noirs ni brûler les blancs)
+    let k = 1.0 + 0.6 * contrast;
+    for v in x.iter_mut() {
+        let t = v.clamp(0.0, 1.0);
+        *v = if t < 0.5 { 0.5 * (2.0 * t).powf(k) } else { 1.0 - 0.5 * (2.0 * (1.0 - t)).powf(k) };
+    }
+    let l = 0.2126 * x[0] + 0.7152 * x[1] + 0.0722 * x[2];
+    x.map(|v| ((l + (v - l) * saturation).clamp(0.0, 1.0) * 255.0 + 0.5) as u8)
+}
+
+/// Éclairage tout fait quand la scène n'a pas de lumières : studio trois points ou extérieur.
+/// Les directions vont vers la lumière ; le modèle est vu de face (−z vers la caméra par défaut).
+pub fn rig_lamps(rig: u8, look: &Look) -> Vec<Lamp> {
+    let n = |v: V3| norm(v);
+    match rig {
+        // Studio : clé chaude en haut à gauche, contre-jour qui détache la silhouette, débouchage froid
+        1 => vec![
+            Lamp::simple(false, n([-0.85, 0.6, 0.2]), [1.0, 0.95, 0.88], 1.5 * look.light.intensity.max(0.1), 0.0),
+            Lamp::simple(false, n([0.35, 0.55, -0.85]), [1.0, 1.0, 1.0], 1.3 * look.light.intensity.max(0.1), 0.0),
+            Lamp::simple(false, n([0.8, 0.25, 0.45]), [0.85, 0.92, 1.0], 0.2 * look.light.intensity.max(0.1), 0.0),
+        ],
+        // Extérieur : soleil chaud et franc, le ciel fait le reste
+        2 => vec![Lamp::simple(false, n([-0.4, 0.8, 0.35]), [1.0, 0.93, 0.82], 3.5 * look.light.intensity.max(0.1), 0.0)],
+        _ => vec![Lamp::simple(false, look.light.dir(), look.light.color, look.light.intensity, 0.0)],
+    }
 }
 
 /// Petit générateur pseudo-aléatoire (rapide, sans état partagé entre pixels).
@@ -493,6 +542,23 @@ fn sky(look: &Look, d: V3) -> V3 {
     scale(c, look.env_strength)
 }
 
+/// Part du ciel dans l'éclairage : en studio, les lampes dessinent la forme et le ciel ne fait
+/// que déboucher les ombres
+fn env_k(set: &Settings) -> f32 {
+    if set.rig == 1 { 0.18 } else { 1.0 }
+}
+
+/// Ce qu'on voit derrière le modèle : le gris du studio, ou le ciel
+fn background(look: &Look, set: &Settings, d: V3) -> V3 {
+    if set.backdrop && set.rig == 1 {
+        // Léger dégradé : un peu plus clair vers le haut
+        let g = set.backdrop_gray * (0.8 + 0.4 * d[1].clamp(-1.0, 1.0).max(0.0));
+        [g, g, g * 1.04]
+    } else {
+        sky(look, d)
+    }
+}
+
 /// Lumière qui revient le long d'un rayon de caméra. Renvoie la couleur et si le rayon a touché quelque chose.
 #[allow(clippy::too_many_arguments)]
 fn radiance(m: &Prepared, bvh: &crate::bvh::Bvh, look: &Look, lamps: &[Lamp], set: &Settings, mut o: V3, mut d: V3, r: &mut Rng, res: [f32; 2]) -> (V3, f32, V3, V3) {
@@ -503,6 +569,7 @@ fn radiance(m: &Prepared, bvh: &crate::bvh::Bvh, look: &Look, lamps: &[Lamp], se
     let mut last_pdf = 0.0f32;
     let mut through = [1.0f32; 3];
     let mut hit_any = false;
+    let (mut fade, mut fade_dir) = (0.0f32, [0.0f32; 3]);
     for bounce in 0..=set.bounces {
         let hit = bvh.closest(o, d, 1e-4, 1e9);
         // Sol : un plan sous le modèle
@@ -535,7 +602,16 @@ fn radiance(m: &Prepared, bvh: &crate::bvh::Bvh, look: &Look, lamps: &[Lamp], se
             }
             (_, Some(ft)) => {
                 let p = add(o, scale(d, ft));
-                (p, Surf { albedo: [0.55; 3], rough: 0.9, metal: 0.0, emit: [0.0; 3], n: [0.0, 1.0, 0.0], trans: 0.0, ior: 1.45, entering: true })
+                // Fond de studio : au loin, le sol se fond dans le fond (pas de ligne d'horizon)
+                if bounce == 0 && set.backdrop {
+                    let r = (p[0] * p[0] + p[2] * p[2]).sqrt();
+                    let t = ((r - 0.7) / 1.8).clamp(0.0, 1.0);
+                    fade = t * t * (3.0 - 2.0 * t);
+                    fade_dir = d;
+                }
+                // Sol de studio : gris moyen, pour que l'ombre et le modèle ressortent
+                let fa = if set.backdrop && set.rig == 1 { 0.16 } else { 0.55 };
+                (p, Surf { albedo: [fa; 3], rough: 0.9, metal: 0.0, emit: [0.0; 3], n: [0.0, 1.0, 0.0], trans: 0.0, ior: 1.45, entering: true })
             }
             _ => {
                 // Rien : le ciel (caché derrière le modèle si on ne montre pas le fond)
@@ -547,7 +623,8 @@ fn radiance(m: &Prepared, bvh: &crate::bvh::Bvh, look: &Look, lamps: &[Lamp], se
                     } else {
                         1.0
                     };
-                    l = add(l, scale(mul(through, sky(look, d)), wgt));
+                    let sk = if bounce == 0 { background(look, set, d) } else { scale(sky(look, d), env_k(set)) };
+                    l = add(l, scale(mul(through, sk), wgt));
                 }
                 break;
             }
@@ -576,7 +653,7 @@ fn radiance(m: &Prepared, bvh: &crate::bvh::Bvh, look: &Look, lamps: &[Lamp], se
                 let f = brdf_cos(&s, wo, dir);
                 let pb = pdf(&s, wo, dir);
                 let wgt = pl * pl / (pl * pl + pb * pb);
-                l = add(l, scale(mul(through, mul(f, sky(look, dir))), wgt * (1.0 - s.trans) / pl));
+                l = add(l, scale(mul(through, mul(f, sky(look, dir))), wgt * (1.0 - s.trans) * env_k(set) / pl));
             }
         }
         // Verre : réflexion ou réfraction selon Fresnel, autour d'une micro-normale (verre dépoli si rugueux)
@@ -620,6 +697,14 @@ fn radiance(m: &Prepared, bvh: &crate::bvh::Bvh, look: &Look, lamps: &[Lamp], se
     if k > set.clamp {
         l = scale(l, set.clamp / k);
     }
+    if fade > 0.0 {
+        let bg = if look.show_bg { background(look, set, fade_dir) } else { [0.0; 3] };
+        l = add(scale(l, 1.0 - fade), scale(bg, fade));
+        // Sans fond affiché : le sol devient transparent au loin
+        if !look.show_bg {
+            return (l, 1.0 - fade, first.0, first.1);
+        }
+    }
     (l, if hit_any { 1.0 } else { 0.0 }, first.0, first.1)
 }
 
@@ -627,7 +712,7 @@ fn radiance(m: &Prepared, bvh: &crate::bvh::Bvh, look: &Look, lamps: &[Lamp], se
 pub fn pass(m: &Prepared, cam: &Camera, look: &Look, set: &Settings, acc: &mut Accum) {
     let (w, h) = (acc.w, acc.h);
     let bvh = m.bvh.get_or_init(|| crate::bvh::Bvh::new(&m.pos, &m.tris));
-    let lamps: Vec<Lamp> = if look.lamps.is_empty() { vec![Lamp::simple(false, look.light.dir(), look.light.color, look.light.intensity, 0.0)] } else { look.lamps.clone() };
+    let lamps: Vec<Lamp> = if look.lamps.is_empty() { rig_lamps(set.rig, look) } else { look.lamps.clone() };
     let focal = w.min(h) as f32 * 1.2;
     let ortho_scale = focal / cam.dist;
     let (cx, cy) = (w as f32 / 2.0, h as f32 / 2.0);
@@ -715,5 +800,37 @@ mod look_test {
         image::RgbaImage::from_raw(320, 240, acc.image_ex(0.0, true, true)).unwrap().save("/tmp/trace_ai.png").unwrap();
         image::RgbaImage::from_raw(320, 240, acc.image(0.0, false)).unwrap().save("/tmp/trace.png").unwrap();
         image::RgbaImage::from_raw(320, 240, acc.image(0.0, true)).unwrap().save("/tmp/trace_dn.png").unwrap();
+    }
+}
+
+#[cfg(test)]
+mod banc_rendu {
+    use super::*;
+    /// `REND_IN=modele.obj REND_OUT=img.png SPP=64 cargo test --release rendu_obj -- --ignored`
+    #[test]
+    #[ignore]
+    fn rendu_obj() {
+        let Ok(inp) = std::env::var("REND_IN") else { return };
+        let out = std::env::var("REND_OUT").unwrap_or("/tmp/rendu.png".into());
+        let spp: u32 = std::env::var("SPP").ok().and_then(|x| x.parse().ok()).unwrap_or(64);
+        let model = crate::model3d::load(std::path::Path::new(&inp)).unwrap();
+        let prep = Prepared::new(&model, false, 0);
+        let mut look = Look { shadows: true, ..Default::default() };
+        if let Ok(m) = std::env::var("REND_MAT") {
+            look.material = Material::ALL.iter().find(|x| format!("{:?}", x.0).to_lowercase() == m).map(|x| x.0).unwrap_or(look.material);
+        }
+        look.show_bg = std::env::var("REND_BG").is_ok();
+        let cam = Camera::default();
+        let mut set = Settings::default();
+        set.floor = true;
+        set.floor_visible = std::env::var("REND_FLOOR").is_ok();
+        let (w, h) = (640, 480);
+        let mut acc = Accum::new(w, h);
+        let t = std::time::Instant::now();
+        for _ in 0..spp {
+            pass(&prep, &cam, &look, &set, &mut acc);
+        }
+        eprintln!("{spp} passes en {:.1} s", t.elapsed().as_secs_f32());
+        image::RgbaImage::from_raw(w as u32, h as u32, acc.image(0.0, true)).unwrap().save(&out).unwrap();
     }
 }

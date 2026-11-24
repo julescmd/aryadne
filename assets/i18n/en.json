@@ -1604,5 +1604,13 @@
  "Graphite": "Graphite",
  "Clair": "Light",
  "vous": "you",
- "rayons X (Alt+Z) : voir et choisir aussi les sommets cachés derrière le maillage": "X-ray (Alt+Z): see and select vertices hidden behind the mesh too"
+ "rayons X (Alt+Z) : voir et choisir aussi les sommets cachés derrière le maillage": "X-ray (Alt+Z): see and select vertices hidden behind the mesh too",
+ "éclairage du rendu": "render lighting",
+ "studio": "studio",
+ "extérieur": "outdoor",
+ "La lumière de la vue (menu éclairage)": "The view's light (lighting menu)",
+ "Clé, contre-jour et débouchage, sur un fond gris : idéal pour présenter un modèle": "Key, rim and fill lights on a gray backdrop: ideal to present a model",
+ "Un soleil franc et le ciel de l'environnement": "A strong sun and the environment's sky",
+ "fond de studio (le sol se fond au loin)": "studio backdrop (the floor fades into the distance)",
+ "clarté du fond": "backdrop brightness"
 }

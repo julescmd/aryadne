@@ -4786,6 +4786,23 @@ impl Viewer {
                             if self.engine == 1 {
                                 ui.separator();
                                 let mut ch = false;
+                                // Éclairage tout fait, quand la scène n'a pas ses propres lumières
+                                ui.label(egui::RichText::new(crate::i18n::t("éclairage du rendu")).color(p.muted).size(11.0));
+                                ui.horizontal(|ui| {
+                                    for (k, l, tip) in [(0u8, "vue", "La lumière de la vue (menu éclairage)"), (1, "studio", "Clé, contre-jour et débouchage, sur un fond gris : idéal pour présenter un modèle"), (2, "extérieur", "Un soleil franc et le ciel de l'environnement")] {
+                                        if ui.selectable_label(self.trace_set.rig == k, crate::i18n::t(l)).on_hover_text(crate::i18n::t(tip)).clicked() {
+                                            self.trace_set.rig = k;
+                                            ch = true;
+                                        }
+                                    }
+                                });
+                                ch |= ui.checkbox(&mut self.trace_set.backdrop, crate::i18n::t("fond de studio (le sol se fond au loin)")).changed();
+                                if self.trace_set.backdrop && self.trace_set.rig == 1 {
+                                    ch |= ui.add(egui::Slider::new(&mut self.trace_set.backdrop_gray, 0.0..=0.6).text(crate::i18n::t("clarté du fond"))).changed();
+                                }
+                                ch |= ui.add(egui::Slider::new(&mut self.trace_set.contrast, -0.5..=1.0).text(crate::i18n::t("contraste"))).changed();
+                                ch |= ui.add(egui::Slider::new(&mut self.trace_set.saturation, 0.0..=2.0).text(crate::i18n::t("saturation"))).changed();
+                                ui.separator();
                                 ch |= ui.add(egui::Slider::new(&mut self.trace_set.bounces, 1..=16).clamping(egui::SliderClamping::Never).text(crate::i18n::t("rebonds"))).changed();
                                 ch |= ui.add(egui::Slider::new(&mut self.trace_max, 16..=4096).clamping(egui::SliderClamping::Never).logarithmic(true).text(crate::i18n::t("échantillons"))).changed();
                                 ch |= ui.checkbox(&mut self.trace_set.floor, crate::i18n::t("sol (ombres et rebonds)")).changed();
@@ -5889,6 +5906,8 @@ impl Viewer {
                         // L'IA (plus lente) passe quand l'image est finie et toutes les 16 passes ; le filtre rapide entre-temps
                         let ai = acc.spp >= self.trace_max || acc.spp / 16 != before / 16;
                         acc.agx = self.trace_set.agx;
+                        acc.contrast = self.trace_set.contrast;
+                        acc.saturation = self.trace_set.saturation;
                         let img = egui::ColorImage::from_rgba_unmultiplied([acc.w, acc.h], &acc.image_ex(look.exposure, self.trace_set.denoise, ai));
                         match &mut self.tex {
                             Some(t) => t.set(img, egui::TextureOptions::LINEAR),
