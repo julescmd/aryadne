@@ -172,6 +172,14 @@ mod diff_tests {
     }
 
     #[test]
+    fn en_tetes_collants() {
+        let t = "fn a() {\n    if x {\n        y();\n        z();\n    }\n}\nfn b() {}";
+        assert_eq!(sticky_headers(t, 3, 3), vec![0, 1]);
+        assert_eq!(sticky_headers(t, 4, 1), vec![0]);
+        assert!(sticky_headers(t, 6, 3).is_empty());
+    }
+
+    #[test]
     fn reference_git() {
         let dir = std::env::temp_dir().join(format!("ary-git-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -1893,6 +1901,7 @@ pub fn after(ui: &mut egui::Ui, ed: &mut Editor, text: &str, lang: &str, out: &e
             });
         }
     }
+    sticky_scroll(ui, ed, text, out, view.font_size);
     let rect_of = |a: usize, b: usize| -> egui::Rect {
         let r1 = out.galley.pos_from_cursor(CCursor::new(char_of(text, a)));
         let r2 = out.galley.pos_from_cursor(CCursor::new(char_of(text, b)));
@@ -2353,6 +2362,62 @@ pub fn fold_all(ed: &mut Editor, text: &str, fold: bool) {
 
 /// Blocs repliables : (ligne de début, dernière ligne cachée), selon l'indentation.
 /// Une ligne ouvre un bloc si la suivante (non vide) est plus indentée.
+/// Les en-têtes des blocs qui contiennent la ligne `top` (du plus extérieur au plus intérieur), au plus `max`
+pub fn sticky_headers(text: &str, top: usize, max: usize) -> Vec<usize> {
+    let mut hs: Vec<usize> = fold_ranges(text).into_iter().filter(|&(a, b)| a < top && top <= b).map(|(a, _)| a).collect();
+    hs.sort();
+    hs.dedup();
+    let n = hs.len();
+    hs.into_iter().skip(n.saturating_sub(max)).collect()
+}
+
+/// Défilement collant (comme VS Code) : les lignes d'en-tête des blocs où l'on se trouve restent en haut ;
+/// un clic y ramène
+fn sticky_scroll(ui: &mut egui::Ui, ed: &mut Editor, text: &str, out: &egui::text_edit::TextEditOutput, font_size: f32) {
+    let p = theme::pal();
+    let clip = ui.clip_rect();
+    let origin = out.galley_pos;
+    // Première ligne entièrement visible
+    let (mut line, mut top, mut row_h) = (0usize, None, font_size * 1.3);
+    for row in &out.galley.rows {
+        let r = row.rect().translate(origin.to_vec2());
+        if r.height() >= 2.0 {
+            row_h = r.height();
+        }
+        if r.height() >= 2.0 && r.top() >= clip.top() - 0.5 {
+            top = Some(line);
+            break;
+        }
+        if row.ends_with_newline {
+            line += 1;
+        }
+    }
+    let Some(top) = top.filter(|&t| t > 0) else { return };
+    let heads = sticky_headers(text, top, 3);
+    if heads.is_empty() {
+        return;
+    }
+    let lines: Vec<&str> = text.split('\n').collect();
+    let band = egui::Rect::from_min_size(egui::pos2(clip.left(), clip.top()), egui::vec2(clip.width(), row_h * heads.len() as f32));
+    let painter = ui.painter_at(clip);
+    painter.rect_filled(band, 0.0, p.panel);
+    painter.line_segment([band.left_bottom(), band.right_bottom()], egui::Stroke::new(1.0, p.line));
+    let font = egui::FontId::monospace(font_size);
+    for (k, &l) in heads.iter().enumerate() {
+        let r = egui::Rect::from_min_size(egui::pos2(clip.left(), clip.top() + k as f32 * row_h), egui::vec2(clip.width(), row_h));
+        let resp = ui.interact(r, Id::unique(("sticky", k)), egui::Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
+        if resp.hovered() {
+            painter.rect_filled(r, 0.0, p.selection.gamma_multiply(0.5));
+        }
+        painter.text(egui::pos2(origin.x - 22.0, r.center().y), egui::Align2::RIGHT_CENTER, format!("{}", l + 1), egui::FontId::monospace((font_size - 1.0).max(8.0)), p.muted);
+        painter.text(egui::pos2(origin.x, r.center().y), egui::Align2::LEFT_CENTER, lines.get(l).copied().unwrap_or("").trim_end(), font.clone(), p.text);
+        if resp.clicked() {
+            let b: usize = lines.iter().take(l).map(|x| x.len() + 1).sum();
+            ed.scroll_to = Some((b, b));
+        }
+    }
+}
+
 pub fn fold_ranges(text: &str) -> Vec<(usize, usize)> {
     let lines: Vec<&str> = text.split('\n').collect();
     let ind: Vec<Option<usize>> = lines.iter().map(|l| if l.trim().is_empty() { None } else { Some(leading_cols(l)) }).collect();
