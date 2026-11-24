@@ -27,6 +27,7 @@ mod music;
 mod music_ui;
 mod midi;
 mod animtools;
+mod psd;
 mod keys;
 mod remesh;
 mod motion_ui;

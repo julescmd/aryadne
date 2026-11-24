@@ -11,6 +11,10 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
+pub fn is_psd(p: &Path) -> bool {
+    p.extension().is_some_and(|e| e.eq_ignore_ascii_case("psd"))
+}
+
 pub fn is_image_doc(rel: &str) -> bool {
     crate::formats::has(rel, "image")
 }
@@ -622,6 +626,13 @@ impl Doc {
     }
 
     pub fn save(&self, path: &Path) -> Result<(), String> {
+        // Un .psd reste un .psd : enregistré au format Photoshop
+        if is_psd(path) {
+            let (bytes, _) = crate::psd::write(self);
+            let tmp = path.with_extension("psd.tmp");
+            crate::vault::atomic_write(&tmp, bytes).map_err(|e| e.to_string())?;
+            return std::fs::rename(&tmp, path).map_err(|e| e.to_string());
+        }
         let head = Head {
             version: 1,
             w: self.w,
@@ -652,6 +663,9 @@ impl Doc {
 
     pub fn load(path: &Path) -> Result<Doc, String> {
         let b = std::fs::read(path).map_err(|e| e.to_string())?;
+        if is_psd(path) && b.starts_with(b"8BPS") {
+            return crate::psd::read(&b);
+        }
         if b.is_empty() {
             return Ok(Doc::new(1920, 1080, true));
         }
@@ -918,6 +932,7 @@ pub struct Editor {
     pub bg_color: Color32,
     /// Sélecteur de couleur ouvert (arrière-plan ?) et sa place
     swatch_pick: Option<bool>,
+    psd_warned: Vec<String>,
     /// Styles de calque à recalculer ; fenêtre des styles ouverte (calque)
     fx_due: bool,
     fx_window: Option<usize>,
@@ -1047,6 +1062,7 @@ impl Editor {
             tool: Tool::Brush,
             bg_color: Color32::WHITE,
             swatch_pick: None,
+            psd_warned: vec![],
             fx_due: true,
             fx_window: None,
             swallow_click: false,
@@ -1089,6 +1105,14 @@ impl Editor {
     pub fn save_if_due(&mut self, force: bool) {
         if let Some(t) = self.save_due {
             if force || t.elapsed().as_secs_f32() > 1.5 {
+                // En PSD, ce que Photoshop ne recevra pas est dit une fois
+                if is_psd(&self.path) {
+                    let (_, lost) = crate::psd::write(&self.doc);
+                    if !lost.is_empty() && self.psd_warned != lost {
+                        self.message = Some(format!("{} {}", crate::i18n::t("Pas encore transmis au PSD :"), lost.join(", ")));
+                        self.psd_warned = lost;
+                    }
+                }
                 if let Err(e) = self.doc.save(&self.path) {
                     self.message = Some(e);
                 }
@@ -1471,7 +1495,7 @@ impl Editor {
 
     fn export(&mut self) {
         let stem = self.path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "image".into());
-        let mut d = rfd::FileDialog::new().set_title(crate::i18n::t("exporter l'image")).set_file_name(format!("{stem}.png")).add_filter("PNG", &["png"]).add_filter("JPEG", &["jpg", "jpeg"]).add_filter("WebP", &["webp"]);
+        let mut d = rfd::FileDialog::new().set_title(crate::i18n::t("exporter l'image")).set_file_name(format!("{stem}.png")).add_filter("PNG", &["png"]).add_filter("JPEG", &["jpg", "jpeg"]).add_filter("WebP", &["webp"]).add_filter("Photoshop (calques)", &["psd"]);
         if let Some(dir) = self.path.parent() {
             if !dir.to_string_lossy().contains(".app/untitled") {
                 d = d.set_directory(dir);
@@ -1481,8 +1505,18 @@ impl Editor {
         if out.extension().is_none() {
             out.set_extension("png");
         }
-        let img = self.doc.flatten();
         let ext = out.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+        if ext == "psd" {
+            // Photoshop : les calques, masques et groupes partent tels quels
+            let (bytes, lost) = crate::psd::write(&self.doc);
+            self.message = Some(match std::fs::write(&out, bytes) {
+                Ok(()) if lost.is_empty() => format!("{} {}", crate::i18n::t("exporté :"), out.to_string_lossy()),
+                Ok(()) => format!("{} {} · {} {}", crate::i18n::t("exporté :"), out.to_string_lossy(), crate::i18n::t("pas encore transmis :"), lost.join(", ")),
+                Err(e) => e.to_string(),
+            });
+            return;
+        }
+        let img = self.doc.flatten();
         let r = if ext == "jpg" || ext == "jpeg" {
             // Le JPEG n'a pas de transparence : fond blanc
             let mut rgb = image::RgbImage::new(img.width(), img.height());
@@ -1560,7 +1594,7 @@ impl Editor {
                     ui.close();
                 }
                 ui.separator();
-                if ui.button(crate::i18n::t("exporter en PNG, JPG ou WebP…")).clicked() {
+                if ui.button(crate::i18n::t("exporter en PNG, JPG, WebP ou PSD…")).clicked() {
                     self.export();
                     ui.close();
                 }

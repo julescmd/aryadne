@@ -2357,5 +2357,10 @@
   "Style de calque": "Layer Style",
   "Styles actifs": "Styles on",
   "Lueur externe": "Outer Glow",
-  "Incrustation couleur": "Color Overlay"
+  "Incrustation couleur": "Color Overlay",
+  "Pas encore transmis au PSD :": "Not carried to the PSD yet:",
+  "pas encore transmis :": "not carried yet:",
+  "exporter en PNG, JPG, WebP ou PSD…": "export as PNG, JPG, WebP or PSD…",
+  "calque de réglage": "adjustment layer",
+  "styles": "styles"
 }
