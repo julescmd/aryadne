@@ -20,6 +20,8 @@ mod untitled;
 mod meshedit;
 mod montage;
 mod montage_ui;
+mod motion;
+mod motion_ui;
 mod scene;
 mod workspace;
 mod retopo;
@@ -213,6 +215,8 @@ enum Content {
     Office(office::Viewer),
     Video(Box<video::Viewer>),
     Montage(Box<montage::Editor>),
+    /// Composition animée (.arymotion)
+    Motion(Box<motion_ui::Editor>),
     Nodes(Box<nodes::Editor>),
     /// Image à calques (.aryimg)
     Paint(Box<paint::Editor>),
@@ -890,6 +894,7 @@ impl App {
             "arymat" | "arycomp" => "nodes".to_string(),
             "aryscene" => "3d".to_string(),
             "aryseq" => "montage".to_string(),
+            "arymotion" => "motion".to_string(),
             _ => String::new(),
         };
         let start = std::path::Path::new(&root).join(self.target_dir(&fallback));
@@ -1071,6 +1076,7 @@ impl App {
             "comp" => ("Retoucher une image en nodes : couleurs, flous, masques, et l'étalonnage des clips du montage.", vec![("Nouveau compositing", extras::Cmd::NewCompositor)]),
             "scene" => ("Modèles, lumières, caméras et animation. Un modèle ouvert seul arrive dans une scène toute prête.", vec![("Nouvelle scène 3D", extras::Cmd::NewScene), ("Importer des modèles…", extras::Cmd::Import)]),
             "mat" => ("Les matériaux des modèles : en nodes, ou à calques comme Substance.", vec![("Nouveau matériau (nodes)", extras::Cmd::NewMaterial), ("Nouveau matériau à calques", extras::Cmd::NewLayered)]),
+            "motion" => ("Titres, formes et images animés par clés, avec des préréglages, puis exportés en MP4.", vec![("Nouvelle composition", extras::Cmd::NewMotion)]),
             "seq" => ("Assembler des plans, des titres et des sons sur une timeline magnétique.", vec![("Nouveau montage", extras::Cmd::NewMontage), ("Importer des fichiers…", extras::Cmd::Import)]),
             "review" => ("Regarder un plan image par image, l'annoter et le commenter, comme SyncSketch.", vec![("Importer une vidéo…", extras::Cmd::Import)]),
             "code" => ("Scripts, shaders et pages, avec l'exécution et l'aide d'un serveur de langage.", vec![("Nouveau fichier", extras::Cmd::NewFile)]),
@@ -2026,6 +2032,11 @@ impl App {
                     Ok(e) => Content::Nodes(Box::new(e)),
                     Err(e) => Content::Unreadable(e),
                 }
+            } else if motion::is_compo(&rel) {
+                match vault::safe(&self.root(), &rel) {
+                    Ok(p) => Content::Motion(Box::new(motion_ui::Editor::open(p, &self.root()))),
+                    Err(e) => Content::Unreadable(e),
+                }
             } else if montage::is_project(&rel) {
                 if ffmpeg::find("ffmpeg").is_none() {
                     Content::NeedFfmpeg(None)
@@ -2355,6 +2366,7 @@ impl App {
             Some(Content::Model(v)) if v.is_mesh_edit() => t("MODE ÉDITION · 1 2 3 : sommets, arêtes, faces · glisser : rectangle (Maj ajoute, Ctrl retire) · Ctrl+clic : chemin · Alt+clic : boucle · Ctrl+plus / moins · Ctrl+I inverser · G R S · E extruder · I incruster · M fusionner · L pièce liée · X supprimer · Ctrl+Z"),
             Some(Content::Model(v)) if v.is_scene() => t("molette enfoncée : tourner (Maj : déplacer) · glisser : rectangle · G R S : déplacer, tourner, taille (X Y Z : axe) · Maj+clic, A, B : sélection · Maj+A ajouter · X supprimer · Maj+D dupliquer · P parent · H cacher · I clé · Tab édition · Espace lecture · Ctrl+Z annuler"),
             Some(Content::Model(_)) => t("glisser : tourner · Maj+glisser : déplacer · molette : zoom · 1 3 7 : vues · 5 : perspective · L + glisser : lumière · H + glisser : HDRI · F2 renommer le fichier"),
+            Some(Content::Motion(_)) => t("Espace lecture · ← → image par image · K clé de position · V Q E T outils · Maj : contraindre · Ctrl+molette : zoom · Suppr calque ou clé"),
             Some(Content::Montage(_)) => t("Espace / J K L lecture · V C B N R Y H Z T outils · I O entrée sortie · , insérer · . recouvrir · Ctrl+K couper · Maj+Suppr supprimer et refermer · Q W propager · M repère · S magnétisme · Alt+molette : zoom"),
             Some(Content::Nodes(_)) => t("clic droit : ajouter · Q aligner · Suppr supprimer · F2 renommer la node · molette : zoom · Ctrl+Z annuler"),
             Some(Content::Paint(_)) => t("B pinceau · E gomme · G pot · I pipette · M sélection · V déplacer · [ ] taille · Ctrl+A / Ctrl+D sélection · Ctrl+J dupliquer · Ctrl+E fusionner · Ctrl+Z annuler · Espace+glisser : déplacer la vue"),
@@ -2555,6 +2567,7 @@ impl App {
                             ("depuis un modèle…", extras::Cmd::FromTemplate),
                             ("scène 3D", extras::Cmd::NewScene),
                             ("montage vidéo", extras::Cmd::NewMontage),
+                            ("composition animée (motion)", extras::Cmd::NewMotion),
                             ("matériau en nodes", extras::Cmd::NewMaterial),
                             ("matériau à calques (atelier)", extras::Cmd::NewLayered),
                             ("compositing en nodes", extras::Cmd::NewCompositor),
@@ -3109,7 +3122,7 @@ impl App {
 
             // Barre du document, comme la maquette : 34 px, chemin à gauche, actions sans cadre à droite
             // La 3D n'a pas de barre de document dans la maquette : la vue prend tout
-            let show_bar = !matches!(self.docs[i].content, Content::Model(_) | Content::Montage(_) | Content::Nodes(_));
+            let show_bar = !matches!(self.docs[i].content, Content::Model(_) | Content::Montage(_) | Content::Motion(_) | Content::Nodes(_));
             if show_bar {
             let bar = egui::Frame::new().inner_margin(egui::Margin::symmetric(12, 0)).show(ui, |ui| {
                 ui.set_width(ui.available_width());
@@ -3290,6 +3303,13 @@ impl App {
                     m.show(ui);
                     if let Some(path) = m.open_request.take() {
                         open_material = Some(path);
+                    }
+                }
+                Content::Motion(m) => {
+                    m.comps = self.entries.iter().filter(|e| !e.is_dir && motion::is_compo(&e.rel)).map(|e| e.rel.clone()).collect();
+                    m.show(ui);
+                    if let Some(r) = m.open_request.take() {
+                        self.actions.push(Action::Open(r));
                     }
                 }
                 Content::NeedFfmpeg(job) => {

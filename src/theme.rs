@@ -78,6 +78,10 @@ pub fn theme() -> &'static ThemeDef {
 
 /// Couleur d'un genre d'espace de travail dans le thème courant (notes, 3d, 2d, video, code, ai, mat)
 pub fn ws_color(kind: &str) -> Option<Color32> {
+    // Motion n'a pas de case dans les thèmes : la teinte « avertissement » (ambre) lui va
+    if kind == "motion" {
+        return Some(theme().p.warning);
+    }
     let k = ["notes", "3d", "2d", "video", "code", "ai", "mat"].iter().position(|x| *x == kind)?;
     Some(theme().ws[k])
 }

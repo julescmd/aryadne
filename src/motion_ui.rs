@@ -1,0 +1,1334 @@
+//! L'éditeur de l'étape Motion : projet à gauche, la composition au centre avec ses poignées,
+//! l'inspecteur à droite, et la timeline des calques et de leurs clés en bas.
+
+use crate::lucide as l;
+use crate::motion::{self, Compo, Kind, Layer, Prop, PROPS};
+use eframe::egui::{self, pos2, vec2, Color32, Pos2, Rect, Sense, Stroke};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::mpsc::Receiver;
+use std::sync::Arc;
+use std::time::Instant;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Tool {
+    Select,
+    Rect,
+    Ellipse,
+    Text,
+}
+
+/// Ce qu'on tire dans la composition
+enum ViewDrag {
+    Move { start: Pos2, from: [f32; 2] },
+    Scale { from: [f32; 2], d0: f32 },
+    Rotate { from: f32, a0: f32 },
+    Draw { a: [f32; 2], b: [f32; 2] },
+}
+
+/// Ce qu'on tire dans la timeline
+enum TlDrag {
+    Scrub,
+    /// Toutes les clés d'un calque à cet instant
+    Keys { layer: usize, t0: f32, prop: Option<Prop> },
+    Bar { layer: usize, grab: f32, part: u8, start: f32, end: f32 },
+}
+
+pub struct Editor {
+    pub path: PathBuf,
+    pub compo: Compo,
+    /// Compositions du coffre, données par la fenêtre à chaque image (panneau Projet)
+    pub comps: Vec<String>,
+    /// Composition à ouvrir (clic dans le panneau Projet)
+    pub open_request: Option<String>,
+    root: String,
+    error: Option<String>,
+    message: Option<String>,
+    time: f32,
+    playing: Option<(Instant, f32)>,
+    sel: Option<usize>,
+    /// Clé choisie : calque, propriété, instant
+    sel_key: Option<(usize, Prop, f32)>,
+    tool: Tool,
+    cache: motion::Cache,
+    tex: Option<egui::TextureHandle>,
+    shown: Option<(f32, u64, u32)>,
+    rev: u64,
+    saved: Compo,
+    history: Vec<Compo>,
+    redo: Vec<Compo>,
+    last_change: Option<Instant>,
+    view_drag: Option<ViewDrag>,
+    tl_drag: Option<TlDrag>,
+    insp_tab: u8,
+    /// Zoom de la vue : None = ajusté à la place
+    zoom: Option<f32>,
+    export_rx: Option<Receiver<Result<PathBuf, String>>>,
+    export_prog: Arc<AtomicU32>,
+    /// Propriété montrée dans la courbe, à droite de la timeline
+    curve: Prop,
+}
+
+fn tc(t: f32, fps: f32) -> String {
+    let f = (t * fps).round() as i64;
+    let fps_i = fps.round().max(1.0) as i64;
+    format!("{}:{:02}:{:02}", f / fps_i / 60, (f / fps_i) % 60, f % fps_i)
+}
+
+/// Couleur d'un calque dans la timeline, selon son genre
+fn layer_color(k: &Kind) -> Color32 {
+    let p = crate::theme::pal();
+    match k {
+        Kind::Text { .. } => crate::theme::ws_color("2d").unwrap_or(p.accent),
+        Kind::Rect { .. } | Kind::Ellipse { .. } => p.accent,
+        Kind::Image { .. } => crate::theme::ws_color("3d").unwrap_or(p.info),
+    }
+}
+
+fn layer_icon(k: &Kind) -> &'static str {
+    match k {
+        Kind::Text { .. } => l::TYPE,
+        Kind::Rect { .. } => l::SQUARE,
+        Kind::Ellipse { .. } => l::CIRCLE,
+        Kind::Image { .. } => l::IMAGE,
+    }
+}
+
+fn diamond(painter: &egui::Painter, c: Pos2, r: f32, fill: Option<Color32>, stroke: Color32) {
+    let pts = vec![pos2(c.x, c.y - r), pos2(c.x + r, c.y), pos2(c.x, c.y + r), pos2(c.x - r, c.y)];
+    painter.add(egui::Shape::convex_polygon(pts, fill.unwrap_or(Color32::TRANSPARENT), Stroke::new(1.0, stroke)));
+}
+
+fn flat(ui: &mut egui::Ui) {
+    let p = crate::theme::pal();
+    let v = &mut ui.style_mut().visuals.widgets;
+    v.inactive.weak_bg_fill = Color32::TRANSPARENT;
+    v.inactive.bg_stroke = Stroke::NONE;
+    v.hovered.weak_bg_fill = p.raised;
+    v.hovered.bg_stroke = Stroke::NONE;
+    v.open.weak_bg_fill = p.raised;
+}
+
+fn section(ui: &mut egui::Ui, title: &str) {
+    ui.add_space(6.0);
+    ui.label(egui::RichText::new(crate::i18n::t(title)).size(11.5).color(crate::theme::pal().muted));
+    ui.add_space(2.0);
+}
+
+impl Editor {
+    pub fn open(path: PathBuf, root: &str) -> Editor {
+        let (compo, error) = match Compo::read(&path) {
+            Ok(c) => (c, None),
+            Err(e) => (Compo::default(), Some(e)),
+        };
+        Editor {
+            path,
+            saved: compo.clone(),
+            sel: if compo.layers.is_empty() { None } else { Some(0) },
+            compo,
+            comps: vec![],
+            open_request: None,
+            root: root.to_string(),
+            error,
+            message: None,
+            time: 2.0,
+            playing: None,
+            sel_key: None,
+            tool: Tool::Select,
+            cache: motion::Cache::new(std::path::Path::new(root)),
+            tex: None,
+            shown: None,
+            rev: 0,
+            history: vec![],
+            redo: vec![],
+            last_change: None,
+            view_drag: None,
+            tl_drag: None,
+            insp_tab: 0,
+            zoom: None,
+            export_rx: None,
+            export_prog: Arc::new(AtomicU32::new(0)),
+            curve: Prop::Pos,
+        }
+    }
+
+    /// Après une modification : historique (les changements rapprochés d'un même geste n'en font qu'un) et enregistrement
+    fn changed(&mut self) {
+        if self.saved == self.compo {
+            return;
+        }
+        for l in &mut self.compo.layers {
+            for (p, _) in PROPS {
+                l.track_mut(p).sort();
+            }
+        }
+        let recent = self.last_change.is_some_and(|t| t.elapsed().as_secs_f32() < 0.6);
+        let prev = std::mem::replace(&mut self.saved, self.compo.clone());
+        if !recent || self.history.is_empty() {
+            self.history.push(prev);
+            if self.history.len() > 200 {
+                self.history.remove(0);
+            }
+        }
+        self.redo.clear();
+        self.last_change = Some(Instant::now());
+        self.rev += 1;
+        if self.error.is_none() {
+            if let Err(e) = self.compo.write(&self.path) {
+                self.message = Some(e);
+            }
+        }
+    }
+
+    fn undo(&mut self, forward: bool) {
+        let (from, to) = if forward { (&mut self.redo, &mut self.history) } else { (&mut self.history, &mut self.redo) };
+        if let Some(c) = from.pop() {
+            to.push(std::mem::replace(&mut self.compo, c));
+            self.saved = self.compo.clone();
+            self.last_change = None;
+            self.sel = self.sel.filter(|&i| i < self.compo.layers.len());
+            self.sel_key = None;
+            self.rev += 1;
+            let _ = self.compo.write(&self.path);
+        }
+    }
+
+    fn add_layer(&mut self, kind: Kind, at: Option<[f32; 2]>) {
+        let base = match &kind {
+            Kind::Text { .. } => "Texte",
+            Kind::Rect { .. } => "Rectangle",
+            Kind::Ellipse { .. } => "Ellipse",
+            Kind::Image { .. } => "Image",
+        };
+        let name = self.compo.fresh_name(&crate::i18n::t(base));
+        let mut layer = Layer::new(&name, kind, &self.compo);
+        if let Some(p) = at {
+            layer.pos.v = p;
+        }
+        self.compo.layers.insert(0, layer);
+        self.sel = Some(0);
+        self.sel_key = None;
+        self.changed();
+    }
+
+    fn add_image(&mut self) {
+        let Some(f) = rfd::FileDialog::new().add_filter("image", &["png", "jpg", "jpeg", "webp", "gif", "bmp", "tga"]).pick_file() else { return };
+        match self.vault_path(&f) {
+            Ok(rel) => self.add_layer(Kind::Image { path: rel }, None),
+            Err(e) => self.message = Some(e),
+        }
+    }
+
+    /// Le chemin d'un fichier dans le coffre ; un fichier d'ailleurs est copié à côté de la composition
+    fn vault_path(&self, f: &std::path::Path) -> Result<String, String> {
+        if let Some(rel) = crate::vault::inside(&self.root, f) {
+            return Ok(rel);
+        }
+        let here = crate::vault::inside(&self.root, &self.path).map(|r| crate::vault::parent(&r)).unwrap_or_default();
+        crate::vault::import(&self.root, &here, f, false)
+    }
+
+    fn keyboard(&mut self, ui: &egui::Ui) {
+        if ui.ctx().memory(|m| m.focused().is_some()) {
+            return;
+        }
+        let (mut del, mut play, mut undo, mut redo, mut step, mut home, mut key) = (false, false, false, false, 0i32, false, false);
+        let mut tool = None;
+        ui.input(|i| {
+            del = i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace);
+            play = i.key_pressed(egui::Key::Space);
+            undo = i.modifiers.command && !i.modifiers.shift && i.key_pressed(egui::Key::Z);
+            redo = i.modifiers.command && (i.key_pressed(egui::Key::Y) || (i.modifiers.shift && i.key_pressed(egui::Key::Z)));
+            home = i.key_pressed(egui::Key::Home);
+            if i.key_pressed(egui::Key::ArrowRight) {
+                step = if i.modifiers.shift { 10 } else { 1 };
+            }
+            if i.key_pressed(egui::Key::ArrowLeft) {
+                step = if i.modifiers.shift { -10 } else { -1 };
+            }
+            if !i.modifiers.command {
+                key = i.key_pressed(egui::Key::K);
+                for (k, t) in [(egui::Key::V, Tool::Select), (egui::Key::Q, Tool::Rect), (egui::Key::E, Tool::Ellipse), (egui::Key::T, Tool::Text)] {
+                    if i.key_pressed(k) {
+                        tool = Some(t);
+                    }
+                }
+            }
+        });
+        if let Some(t) = tool {
+            self.tool = t;
+        }
+        if undo || redo {
+            self.undo(redo);
+        }
+        if play {
+            self.toggle_play();
+        }
+        if home {
+            self.time = 0.0;
+            self.playing = None;
+        }
+        if step != 0 {
+            self.playing = None;
+            self.time = (self.time + step as f32 / self.compo.fps).clamp(0.0, self.compo.duration);
+        }
+        // K : une clé de position à la tête de lecture
+        if key {
+            if let Some(i) = self.sel {
+                let t = self.time;
+                self.compo.layers[i].pos.toggle_key(t);
+                self.changed();
+            }
+        }
+        if del {
+            if let Some((li, p, t)) = self.sel_key.take() {
+                if let Some(tr) = self.compo.layers.get_mut(li).map(|l| l.track_mut(p)) {
+                    if let Some(k) = tr.key_at(t) {
+                        tr.toggle_key(tr.keys[k].t);
+                    }
+                }
+                self.changed();
+            } else if let Some(i) = self.sel.take() {
+                self.compo.layers.remove(i);
+                self.changed();
+            }
+        }
+    }
+
+    fn toggle_play(&mut self) {
+        if self.playing.is_some() {
+            self.playing = None;
+        } else {
+            if self.time >= self.compo.duration - 1e-3 {
+                self.time = 0.0;
+            }
+            self.playing = Some((Instant::now(), self.time));
+        }
+    }
+
+    fn export(&mut self) {
+        let out = self.path.with_extension("mp4");
+        let c = self.compo.clone();
+        let root = PathBuf::from(&self.root);
+        let prog = self.export_prog.clone();
+        prog.store(0, Ordering::Relaxed);
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.export_rx = Some(rx);
+        std::thread::spawn(move || {
+            let r = motion::export(&c, &out, &root, |f| prog.store((f * 1000.0) as u32, Ordering::Relaxed));
+            let _ = tx.send(r);
+        });
+    }
+
+    pub fn show(&mut self, ui: &mut egui::Ui) {
+        let p = crate::theme::pal();
+        if let Some((t0, from)) = self.playing {
+            let t = from + t0.elapsed().as_secs_f32();
+            self.time = if t >= self.compo.duration { 0.0 } else { t };
+            if t >= self.compo.duration {
+                self.playing = Some((Instant::now(), 0.0));
+            }
+            ui.ctx().request_repaint();
+        }
+        if let Some(rx) = &self.export_rx {
+            match rx.try_recv() {
+                Ok(r) => {
+                    self.message = Some(match r {
+                        Ok(f) => format!("{} : {}", crate::i18n::t("exporté"), f.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()),
+                        Err(e) => e,
+                    });
+                    self.export_rx = None;
+                }
+                Err(_) => ui.ctx().request_repaint_after(std::time::Duration::from_millis(100)),
+            }
+        }
+        self.keyboard(ui);
+        let frame = egui::Frame::new().fill(p.panel).stroke(Stroke::new(1.0, p.line));
+        let full_h = ui.available_height();
+        egui::Panel::left("motion-project").resizable(true).default_size(240.0).min_size(190.0).max_size(420.0).frame(frame).show(ui, |ui| self.project_panel(ui));
+        egui::Panel::right("motion-inspector").resizable(true).default_size(290.0).min_size(240.0).max_size(460.0).frame(frame).show(ui, |ui| {
+            egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| self.inspector(ui));
+        });
+        egui::Panel::bottom("motion-timeline").resizable(true).default_size((full_h * 0.36).clamp(230.0, 320.0)).min_size(160.0).max_size((full_h * 0.7).max(200.0)).frame(frame).show(ui, |ui| self.timeline(ui));
+        egui::CentralPanel::default().frame(egui::Frame::new().fill(p.code_bg)).show(ui, |ui| self.viewer(ui));
+    }
+
+    // ---------- Projet ----------
+
+    fn project_panel(&mut self, ui: &mut egui::Ui) {
+        let p = crate::theme::pal();
+        ui.set_min_height(ui.available_height());
+        crate::montage_ui::pane_head(ui, &crate::i18n::t("Projet"), None);
+        egui::Frame::new().inner_margin(egui::Margin::symmetric(8, 6)).show(ui, |ui| {
+            section(ui, "Compositions");
+            let me = crate::vault::inside(&self.root, &self.path).unwrap_or_default();
+            let mut comps = self.comps.clone();
+            if !comps.contains(&me) && !me.is_empty() {
+                comps.insert(0, me.clone());
+            }
+            for rel in comps {
+                let on = rel == me;
+                let name = crate::formats::strip(rel.rsplit('/').next().unwrap_or(&rel)).to_string();
+                let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 24.0), Sense::click());
+                if on {
+                    ui.painter().rect_filled(r, 2.0, p.selection);
+                } else if resp.hovered() {
+                    ui.painter().rect_filled(r, 2.0, p.raised);
+                }
+                ui.painter().text(pos2(r.left() + 8.0, r.center().y), egui::Align2::LEFT_CENTER, l::SPLINE, egui::FontId::proportional(13.0), p.muted);
+                ui.painter().text(pos2(r.left() + 28.0, r.center().y), egui::Align2::LEFT_CENTER, &name, egui::FontId::proportional(12.5), p.text);
+                if on {
+                    ui.painter().text(pos2(r.right() - 6.0, r.center().y), egui::Align2::RIGHT_CENTER, format!("{} s", self.compo.duration), egui::FontId::proportional(11.0), p.muted);
+                }
+                if resp.clicked() && !on {
+                    self.open_request = Some(rel.clone());
+                }
+            }
+            section(ui, "Ajouter un calque");
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
+                let c = (self.compo.w as f32 / 2.0, self.compo.h as f32 / 2.0);
+                if ui.button(format!("{}  {}", l::TYPE, crate::i18n::t("Texte"))).clicked() {
+                    self.add_layer(Kind::Text { text: crate::i18n::t("Texte"), size: 120.0, color: [0xf4, 0xee, 0xf1], font: "inter-bold".into(), tracking: 0.0, align: 1 }, Some([c.0, c.1]));
+                }
+                if ui.button(format!("{}  {}", l::SQUARE, crate::i18n::t("Forme"))).clicked() {
+                    self.add_layer(Kind::Rect { w: 400.0, h: 240.0, radius: 12.0, color: [0xcc, 0xac, 0xb9] }, Some([c.0, c.1]));
+                }
+                if ui.button(format!("{}  {}", l::CIRCLE, crate::i18n::t("Ellipse"))).clicked() {
+                    self.add_layer(Kind::Ellipse { w: 260.0, h: 260.0, color: [0x8b, 0xa8, 0xc6] }, Some([c.0, c.1]));
+                }
+                if ui.button(format!("{}  {}", l::IMAGE_PLUS, crate::i18n::t("Image…"))).clicked() {
+                    self.add_image();
+                }
+            });
+            section(ui, "Préréglages d'animation");
+            let has_sel = self.sel.is_some();
+            for name in motion::PRESETS {
+                let is_text = self.sel.and_then(|i| self.compo.layers.get(i)).is_some_and(|l| matches!(l.kind, Kind::Text { .. }));
+                let ok = has_sel && (name != "Entrée lettre par lettre" || is_text);
+                let b = ui.add_enabled(ok, egui::Button::new(crate::i18n::t(name)).min_size(vec2(ui.available_width(), 26.0)));
+                if b.clicked() {
+                    if let Some(i) = self.sel {
+                        let t = self.time;
+                        motion::apply_preset(&mut self.compo.layers[i], name, t);
+                        self.changed();
+                    }
+                }
+            }
+            if !has_sel {
+                ui.label(egui::RichText::new(crate::i18n::t("Choisis un calque pour l'animer.")).size(11.5).color(p.muted));
+            }
+        });
+    }
+
+    // ---------- Vue ----------
+
+    fn viewer(&mut self, ui: &mut egui::Ui) {
+        let p = crate::theme::pal();
+        let full = ui.max_rect();
+        let area = full.shrink2(vec2(56.0, 0.0)).with_min_y(full.top() + 52.0).with_max_y(full.bottom() - 16.0);
+        let (cw, ch) = (self.compo.w as f32, self.compo.h as f32);
+        let fit = (area.width() / cw).min(area.height() / ch).max(0.01);
+        let s = self.zoom.unwrap_or(fit);
+        let comp_r = Rect::from_center_size(area.center(), vec2(cw * s, ch * s));
+        let resp = ui.interact(full, ui.scope_id().with("motion-view"), Sense::click_and_drag());
+        let painter = ui.painter_at(full);
+        // L'image : recalculée quand l'instant, la composition ou la taille changent
+        let ppp = ui.ctx().pixels_per_point();
+        let rs = (s * ppp).min(1600.0 / cw).max(0.05);
+        let key = (self.time, self.rev, (rs * 1000.0) as u32);
+        if self.shown != Some(key) || self.tex.is_none() {
+            let img = motion::render(&self.compo, self.time, rs, &mut self.cache);
+            let ci = egui::ColorImage::from_rgba_unmultiplied([img.width() as usize, img.height() as usize], img.as_raw());
+            match &mut self.tex {
+                Some(t) => t.set(ci, egui::TextureOptions::LINEAR),
+                None => self.tex = Some(ui.ctx().load_texture("motion-frame", ci, egui::TextureOptions::LINEAR)),
+            }
+            self.shown = Some(key);
+        }
+        painter.rect_filled(comp_r.expand(1.0), 0.0, p.line);
+        if let Some(t) = &self.tex {
+            painter.image(t.id(), comp_r, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+        }
+        let to_screen = |q: [f32; 2]| pos2(comp_r.left() + q[0] * s, comp_r.top() + q[1] * s);
+        let to_comp = |q: Pos2| [(q.x - comp_r.left()) / s, (q.y - comp_r.top()) / s];
+
+        // Sélection : cadre, trajet de la position, poignées
+        let mut handles: Vec<(Pos2, u8)> = vec![];
+        if let Some(i) = self.sel.filter(|&i| i < self.compo.layers.len()) {
+            let lay = &self.compo.layers[i];
+            if lay.pos.animated() {
+                let (a, b) = (lay.pos.keys[0].t, lay.pos.keys[lay.pos.keys.len() - 1].t);
+                let n = ((b - a) * self.compo.fps).ceil().max(1.0) as usize;
+                let pts: Vec<Pos2> = (0..=n).map(|k| to_screen(lay.pos.at(a + (b - a) * k as f32 / n as f32))).collect();
+                painter.extend(egui::Shape::dashed_line(&pts, Stroke::new(1.2, p.warning), 2.0, 4.0));
+                for k in &lay.pos.keys {
+                    painter.circle_filled(to_screen(k.v), 3.0, p.warning);
+                }
+            }
+            if lay.live(self.time) || lay.visible {
+                let c = motion::corners(lay, self.time, &mut self.cache).map(to_screen);
+                let mut pts = c.to_vec();
+                pts.push(c[0]);
+                painter.extend(egui::Shape::dashed_line(&pts, Stroke::new(1.0, p.accent), 3.0, 3.0));
+                for q in c {
+                    handles.push((q, 0));
+                }
+                let top = pos2((c[0].x + c[1].x) / 2.0, (c[0].y + c[1].y) / 2.0);
+                let center = to_screen(lay.pos.at(self.time));
+                let dir = (top - center).normalized();
+                let rot = top + dir * 22.0;
+                painter.line_segment([top, rot], Stroke::new(1.0, p.accent));
+                handles.push((rot, 1));
+                for (q, kind) in &handles {
+                    if *kind == 0 {
+                        painter.rect(Rect::from_center_size(*q, vec2(7.0, 7.0)), 0.0, p.accent, Stroke::new(1.0, p.code_bg), egui::StrokeKind::Outside);
+                    } else {
+                        painter.circle(*q, 4.0, p.code_bg, Stroke::new(1.5, p.accent));
+                    }
+                }
+            }
+        }
+
+        // Souris
+        let hover = resp.hover_pos();
+        let near = |q: Pos2| hover.is_some_and(|h| h.distance(q) < 9.0);
+        if self.tool == Tool::Select {
+            if let Some((_, k)) = handles.iter().find(|(q, _)| near(*q)) {
+                ui.ctx().set_cursor_icon(if *k == 0 { egui::CursorIcon::ResizeNwSe } else { egui::CursorIcon::Alias });
+            }
+        } else if resp.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
+        }
+        if resp.drag_started() {
+            if let Some(m) = resp.interact_pointer_pos() {
+                let cp = to_comp(m);
+                match self.tool {
+                    Tool::Rect | Tool::Ellipse => self.view_drag = Some(ViewDrag::Draw { a: cp, b: cp }),
+                    Tool::Text => {}
+                    Tool::Select => {
+                        let handle = handles.iter().find(|(q, _)| q.distance(m) < 9.0).map(|(_, k)| *k);
+                        if let (Some(k), Some(i)) = (handle, self.sel) {
+                            let lay = &self.compo.layers[i];
+                            let c = lay.pos.at(self.time);
+                            let d = ((cp[0] - c[0]).hypot(cp[1] - c[1])).max(1.0);
+                            self.view_drag = Some(if k == 0 {
+                                ViewDrag::Scale { from: lay.scale.at(self.time), d0: d }
+                            } else {
+                                ViewDrag::Rotate { from: lay.rot.at(self.time)[0], a0: (cp[1] - c[1]).atan2(cp[0] - c[0]) }
+                            });
+                        } else {
+                            self.sel = motion::pick(&self.compo, self.time, cp, &mut self.cache);
+                            self.sel_key = None;
+                            if let Some(i) = self.sel {
+                                self.view_drag = Some(ViewDrag::Move { start: m, from: self.compo.layers[i].pos.at(self.time) });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if resp.dragged() {
+            if let (Some(m), Some(d)) = (resp.interact_pointer_pos(), &mut self.view_drag) {
+                let cp = to_comp(m);
+                let t = self.time;
+                match d {
+                    ViewDrag::Draw { b, .. } => *b = cp,
+                    ViewDrag::Move { start, from } => {
+                        if let Some(i) = self.sel {
+                            let mut v = [from[0] + (m.x - start.x) / s, from[1] + (m.y - start.y) / s];
+                            if ui.input(|i| i.modifiers.shift) {
+                                if (m.x - start.x).abs() > (m.y - start.y).abs() {
+                                    v[1] = from[1];
+                                } else {
+                                    v[0] = from[0];
+                                }
+                            }
+                            self.compo.layers[i].pos.set(t, v);
+                            self.rev += 1;
+                        }
+                    }
+                    ViewDrag::Scale { from, d0 } => {
+                        if let Some(i) = self.sel {
+                            let c = self.compo.layers[i].pos.at(t);
+                            let f = (cp[0] - c[0]).hypot(cp[1] - c[1]) / *d0;
+                            self.compo.layers[i].scale.set(t, [from[0] * f, from[1] * f]);
+                            self.rev += 1;
+                        }
+                    }
+                    ViewDrag::Rotate { from, a0 } => {
+                        if let Some(i) = self.sel {
+                            let c = self.compo.layers[i].pos.at(t);
+                            let mut a = *from + ((cp[1] - c[1]).atan2(cp[0] - c[0]) - *a0).to_degrees();
+                            if ui.input(|i| i.modifiers.shift) {
+                                a = (a / 15.0).round() * 15.0;
+                            }
+                            self.compo.layers[i].rot.set(t, [a, 0.0]);
+                            self.rev += 1;
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(ViewDrag::Draw { a, b }) = &self.view_drag {
+            let r = Rect::from_two_pos(to_screen(*a), to_screen(*b));
+            if self.tool == Tool::Ellipse {
+                painter.add(egui::Shape::ellipse_stroke(r.center(), r.size() / 2.0, Stroke::new(1.0, p.accent)));
+            } else {
+                painter.rect_stroke(r, 0.0, Stroke::new(1.0, p.accent), egui::StrokeKind::Inside);
+            }
+        }
+        if resp.drag_stopped() {
+            if let Some(ViewDrag::Draw { a, b }) = self.view_drag.take() {
+                let (w, h) = ((b[0] - a[0]).abs().max(8.0), (b[1] - a[1]).abs().max(8.0));
+                let c = [(a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0];
+                let kind = if self.tool == Tool::Ellipse { Kind::Ellipse { w, h, color: [0x8b, 0xa8, 0xc6] } } else { Kind::Rect { w, h, radius: 0.0, color: [0xcc, 0xac, 0xb9] } };
+                self.add_layer(kind, Some(c));
+                self.tool = Tool::Select;
+            } else {
+                self.view_drag = None;
+                self.changed();
+            }
+        }
+        if resp.clicked() {
+            if let Some(m) = resp.interact_pointer_pos() {
+                let cp = to_comp(m);
+                match self.tool {
+                    Tool::Text => {
+                        self.add_layer(Kind::Text { text: crate::i18n::t("Texte"), size: 120.0, color: [0xf4, 0xee, 0xf1], font: "inter-bold".into(), tracking: 0.0, align: 1 }, Some(cp));
+                        self.tool = Tool::Select;
+                    }
+                    _ => {
+                        self.sel = motion::pick(&self.compo, self.time, cp, &mut self.cache);
+                        self.sel_key = None;
+                    }
+                }
+            }
+        }
+        if resp.hovered() {
+            let (scroll, ctrl) = ui.input(|i| (i.smooth_scroll_delta.y, i.modifiers.command));
+            if ctrl && scroll != 0.0 {
+                self.zoom = Some((s * (1.0 + scroll * 0.002)).clamp(0.05, 4.0));
+            }
+        }
+
+        // Outils, à gauche
+        let tools = [(Tool::Select, l::MOUSE_POINTER_2, "Sélectionner (V)"), (Tool::Rect, l::SQUARE, "Rectangle (Q)"), (Tool::Ellipse, l::CIRCLE, "Ellipse (E)"), (Tool::Text, l::TYPE, "Texte (T)")];
+        let strip = Rect::from_min_size(pos2(full.left() + 12.0, full.top() + 56.0), vec2(38.0, 8.0 + 32.0 * tools.len() as f32));
+        painter.rect(strip, 6.0, p.panel, Stroke::new(1.0, p.line), egui::StrokeKind::Inside);
+        for (k, (t, icon, tip)) in tools.iter().enumerate() {
+            let r = Rect::from_min_size(pos2(strip.left() + 4.0, strip.top() + 4.0 + 32.0 * k as f32), vec2(30.0, 30.0));
+            let b = ui.interact(r, ui.scope_id().with(("motion-tool", k)), Sense::click()).on_hover_text(crate::i18n::t(tip));
+            let on = self.tool == *t;
+            if on {
+                painter.rect_filled(r, 4.0, p.accent);
+            } else if b.hovered() {
+                painter.rect_filled(r, 4.0, p.raised);
+            }
+            painter.text(r.center(), egui::Align2::CENTER_CENTER, *icon, egui::FontId::proportional(15.0), if on { p.on_accent } else { p.text });
+            if b.clicked() {
+                self.tool = *t;
+            }
+        }
+
+        // En-tête flottant
+        let head = Rect::from_min_max(pos2(full.left() + 12.0, full.top() + 10.0), pos2(full.right() - 12.0, full.top() + 44.0));
+        painter.rect(head, 6.0, p.panel, Stroke::new(1.0, p.line), egui::StrokeKind::Inside);
+        let mut child = ui.new_child(egui::UiBuilder::new().max_rect(head.shrink2(vec2(6.0, 3.0))).layout(egui::Layout::left_to_right(egui::Align::Center)));
+        flat(&mut child);
+        let ui = &mut child;
+        ui.menu_button(crate::i18n::t("Calque"), |ui| {
+            let c = [self.compo.w as f32 / 2.0, self.compo.h as f32 / 2.0];
+            if ui.button(crate::i18n::t("nouveau texte")).clicked() {
+                self.add_layer(Kind::Text { text: crate::i18n::t("Texte"), size: 120.0, color: [0xf4, 0xee, 0xf1], font: "inter-bold".into(), tracking: 0.0, align: 1 }, Some(c));
+            }
+            if ui.button(crate::i18n::t("nouveau rectangle")).clicked() {
+                self.add_layer(Kind::Rect { w: 400.0, h: 240.0, radius: 12.0, color: [0xcc, 0xac, 0xb9] }, Some(c));
+            }
+            if ui.button(crate::i18n::t("nouvelle ellipse")).clicked() {
+                self.add_layer(Kind::Ellipse { w: 260.0, h: 260.0, color: [0x8b, 0xa8, 0xc6] }, Some(c));
+            }
+            if ui.button(crate::i18n::t("image…")).clicked() {
+                self.add_image();
+            }
+            ui.separator();
+            let sel = self.sel;
+            if ui.add_enabled(sel.is_some(), egui::Button::new(crate::i18n::t("dupliquer"))).clicked() {
+                if let Some(i) = sel {
+                    let mut d = self.compo.layers[i].clone();
+                    d.name = self.compo.fresh_name(&d.name);
+                    self.compo.layers.insert(i, d);
+                    self.changed();
+                }
+            }
+            if ui.add_enabled(sel.is_some_and(|i| i > 0), egui::Button::new(crate::i18n::t("monter"))).clicked() {
+                if let Some(i) = sel {
+                    self.compo.layers.swap(i, i - 1);
+                    self.sel = Some(i - 1);
+                    self.changed();
+                }
+            }
+            if ui.add_enabled(sel.is_some_and(|i| i + 1 < self.compo.layers.len()), egui::Button::new(crate::i18n::t("descendre"))).clicked() {
+                if let Some(i) = sel {
+                    self.compo.layers.swap(i, i + 1);
+                    self.sel = Some(i + 1);
+                    self.changed();
+                }
+            }
+            if ui.add_enabled(sel.is_some(), egui::Button::new(crate::i18n::t("supprimer"))).clicked() {
+                if let Some(i) = sel {
+                    self.compo.layers.remove(i);
+                    self.sel = None;
+                    self.changed();
+                }
+            }
+        });
+        ui.menu_button(crate::i18n::t("Animation"), |ui| {
+            for name in motion::PRESETS {
+                if ui.add_enabled(self.sel.is_some(), egui::Button::new(crate::i18n::t(name))).clicked() {
+                    if let Some(i) = self.sel {
+                        let t = self.time;
+                        motion::apply_preset(&mut self.compo.layers[i], name, t);
+                        self.changed();
+                    }
+                }
+            }
+        });
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let busy = self.export_rx.is_some();
+            let label = if busy { format!("{} {} %", crate::i18n::t("Export"), self.export_prog.load(Ordering::Relaxed) / 10) } else { crate::i18n::t("Exporter MP4") };
+            if ui.add_enabled(!busy, egui::Button::new(format!("{}  {}", l::FILM, label))).clicked() {
+                self.export();
+            }
+            ui.add_space(4.0);
+            let zl = match self.zoom {
+                None => crate::i18n::t("Ajusté"),
+                Some(z) => format!("{} %", (z * 100.0).round()),
+            };
+            ui.menu_button(zl, |ui| {
+                if ui.button(crate::i18n::t("ajuster")).clicked() {
+                    self.zoom = None;
+                }
+                for z in [0.25, 0.5, 1.0] {
+                    if ui.button(format!("{} %", z * 100.0)).clicked() {
+                        self.zoom = Some(z);
+                    }
+                }
+            });
+            ui.label(egui::RichText::new(format!("{} × {}", self.compo.w, self.compo.h)).size(11.5).color(p.muted));
+        });
+        if let Some(m) = self.message.clone().or(self.error.clone()) {
+            let r = Rect::from_min_size(pos2(full.left() + 64.0, full.bottom() - 40.0), vec2(full.width() - 128.0, 26.0));
+            painter.rect_filled(r, 4.0, p.raised);
+            painter.text(r.left_center() + vec2(10.0, 0.0), egui::Align2::LEFT_CENTER, &m, egui::FontId::proportional(12.0), p.text);
+        }
+    }
+
+    // ---------- Inspecteur ----------
+
+    fn inspector(&mut self, ui: &mut egui::Ui) {
+        let p = crate::theme::pal();
+        if let Some(k) = crate::montage_ui::tab_chips(ui, self.insp_tab, &[&crate::i18n::t("Propriétés"), &crate::i18n::t("Composition")]) {
+            self.insp_tab = k;
+        }
+        let mut changed = false;
+        egui::Frame::new().inner_margin(12).show(ui, |ui| {
+            if self.insp_tab == 1 {
+                changed |= self.compo_settings(ui);
+                return;
+            }
+            let Some(i) = self.sel.filter(|&i| i < self.compo.layers.len()) else {
+                ui.label(egui::RichText::new(crate::i18n::t("Clique un calque dans la vue ou la timeline.")).color(p.muted));
+                return;
+            };
+            let t = self.time;
+            let lay = &mut self.compo.layers[i];
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new(layer_icon(&lay.kind)).size(15.0).color(layer_color(&lay.kind)));
+                changed |= ui.add(egui::TextEdit::singleline(&mut lay.name).frame(egui::Frame::NONE).font(egui::FontId::new(15.0, crate::theme::bold())).desired_width(ui.available_width() - 70.0)).changed();
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| ui.label(egui::RichText::new(crate::i18n::t(lay.kind.label())).size(11.5).color(p.muted)));
+            });
+            section(ui, "Transformer");
+            for (prop, label) in PROPS {
+                let tr = lay.track(prop);
+                let at = tr.key_at(t).is_some();
+                let anim = tr.animated();
+                let mut v = tr.at(t);
+                let row = ui.horizontal(|ui| {
+                    let (r, b) = ui.allocate_exact_size(vec2(16.0, 22.0), Sense::click());
+                    diamond(ui.painter(), r.center(), 4.5, if at { Some(p.accent) } else if anim { Some(p.accent.gamma_multiply(0.35)) } else { None }, if anim { p.accent } else { p.muted });
+                    let b = b.on_hover_text(crate::i18n::t(if at { "Retirer la clé à cet instant" } else { "Poser une clé à cet instant (anime la propriété)" }));
+                    ui.add_sized(vec2(64.0, 22.0), egui::Label::new(egui::RichText::new(crate::i18n::t(label)).color(p.muted)));
+                    let mut ch = false;
+                    match prop {
+                        Prop::Pos => {
+                            ch |= ui.add(egui::DragValue::new(&mut v[0]).speed(1.0).max_decimals(1).prefix("x ")).changed();
+                            ch |= ui.add(egui::DragValue::new(&mut v[1]).speed(1.0).max_decimals(1).prefix("y ")).changed();
+                        }
+                        Prop::Scale => {
+                            let mut u = v[0];
+                            if ui.add(egui::DragValue::new(&mut u).speed(0.5).max_decimals(1).suffix(" %")).changed() {
+                                let r = if v[0].abs() > 1e-3 { v[1] / v[0] } else { 1.0 };
+                                v = [u, u * r];
+                                ch = true;
+                            }
+                            ch |= ui.add(egui::DragValue::new(&mut v[1]).speed(0.5).max_decimals(1).prefix("y ").suffix(" %")).changed();
+                        }
+                        Prop::Rot => ch |= ui.add(egui::DragValue::new(&mut v[0]).speed(0.5).max_decimals(1).suffix("°")).changed(),
+                        Prop::Opacity => ch |= ui.add(egui::DragValue::new(&mut v[0]).speed(0.5).range(0.0..=100.0).max_decimals(0).suffix(" %")).changed(),
+                    }
+                    (b.clicked(), ch)
+                });
+                let (toggle, ch) = row.inner;
+                if toggle {
+                    lay.track_mut(prop).toggle_key(t);
+                    changed = true;
+                }
+                if ch {
+                    lay.track_mut(prop).set(t, v);
+                    changed = true;
+                }
+            }
+            match &mut lay.kind {
+                Kind::Text { text, size, color, font, tracking, align } => {
+                    section(ui, "Texte");
+                    changed |= ui.add(egui::TextEdit::multiline(text).desired_rows(2).desired_width(f32::INFINITY)).changed();
+                    ui.horizontal(|ui| {
+                        egui::ComboBox::from_id_salt("motion-font").selected_text(motion::FONTS.iter().find(|f| f.0 == font).map(|f| f.1).unwrap_or("Inter gras")).show_ui(ui, |ui| {
+                            for (id, name) in motion::FONTS {
+                                if ui.selectable_label(font == id, name).clicked() {
+                                    *font = id.to_string();
+                                    changed = true;
+                                }
+                            }
+                        });
+                        changed |= ui.color_edit_button_srgb(color).changed();
+                    });
+                    ui.horizontal(|ui| {
+                        changed |= ui.add(egui::DragValue::new(size).speed(1.0).range(4.0..=1000.0).prefix(crate::i18n::t("taille ")).suffix(" px")).changed();
+                        changed |= ui.add(egui::DragValue::new(tracking).speed(0.2).range(-50.0..=200.0).prefix(crate::i18n::t("espace "))).changed();
+                    });
+                    ui.horizontal(|ui| {
+                        for (k, (icon, tip)) in [(l::ALIGN_LEFT, "à gauche"), (l::ALIGN_CENTER, "centré"), (l::ALIGN_RIGHT, "à droite")].iter().enumerate() {
+                            if ui.selectable_label(*align == k as u8, egui::RichText::new(*icon)).on_hover_text(crate::i18n::t(tip)).clicked() {
+                                *align = k as u8;
+                                changed = true;
+                            }
+                        }
+                    });
+                }
+                Kind::Rect { w, h, radius, color } => {
+                    section(ui, "Forme");
+                    ui.horizontal(|ui| {
+                        changed |= ui.add(egui::DragValue::new(w).speed(1.0).range(1.0..=10000.0).prefix("l ")).changed();
+                        changed |= ui.add(egui::DragValue::new(h).speed(1.0).range(1.0..=10000.0).prefix("h ")).changed();
+                        changed |= ui.color_edit_button_srgb(color).changed();
+                    });
+                    changed |= ui.add(egui::DragValue::new(radius).speed(0.5).range(0.0..=5000.0).prefix(crate::i18n::t("coins "))).changed();
+                }
+                Kind::Ellipse { w, h, color } => {
+                    section(ui, "Forme");
+                    ui.horizontal(|ui| {
+                        changed |= ui.add(egui::DragValue::new(w).speed(1.0).range(1.0..=10000.0).prefix("l ")).changed();
+                        changed |= ui.add(egui::DragValue::new(h).speed(1.0).range(1.0..=10000.0).prefix("h ")).changed();
+                        changed |= ui.color_edit_button_srgb(color).changed();
+                    });
+                }
+                Kind::Image { path } => {
+                    section(ui, "Image");
+                    ui.label(egui::RichText::new(path.as_str()).size(11.5).color(p.muted));
+                }
+            }
+            if matches!(lay.kind, Kind::Text { .. }) {
+                section(ui, "Animateur de texte");
+                let mut on = lay.reveal.is_some();
+                if ui.checkbox(&mut on, crate::i18n::t("Entrée morceau par morceau")).changed() {
+                    lay.reveal = on.then(motion::Reveal::default);
+                    changed = true;
+                }
+                if let Some(r) = &mut lay.reveal {
+                    ui.horizontal(|ui| {
+                        for (u, name) in [(motion::Unit::Letter, "Lettre"), (motion::Unit::Word, "Mot"), (motion::Unit::Line, "Ligne")] {
+                            if ui.selectable_label(r.by == u, crate::i18n::t(name)).clicked() {
+                                r.by = u;
+                                changed = true;
+                            }
+                        }
+                    });
+                    let mut ms = r.delay * 1000.0;
+                    ui.horizontal(|ui| {
+                        if ui.add(egui::DragValue::new(&mut ms).speed(1.0).range(0.0..=2000.0).prefix(crate::i18n::t("décalage ")).suffix(" ms")).changed() {
+                            r.delay = ms / 1000.0;
+                            changed = true;
+                        }
+                        changed |= ui.add(egui::DragValue::new(&mut r.rise).speed(1.0).range(-1000.0..=1000.0).prefix(crate::i18n::t("départ y ")).suffix(" px")).changed();
+                    });
+                    ui.horizontal(|ui| {
+                        changed |= ui.add(egui::DragValue::new(&mut r.dur).speed(0.01).range(0.05..=5.0).prefix(crate::i18n::t("durée ")).suffix(" s")).changed();
+                        egui::ComboBox::from_id_salt("motion-reveal-ease").selected_text(crate::i18n::t(motion::EASES.iter().find(|e| e.0 == r.ease).map(|e| e.1).unwrap_or("Doux"))).show_ui(ui, |ui| {
+                            for (e, name) in motion::EASES {
+                                if ui.selectable_label(r.ease == e, crate::i18n::t(name)).clicked() {
+                                    r.ease = e;
+                                    changed = true;
+                                }
+                            }
+                        });
+                    });
+                }
+            }
+            section(ui, "Lisser les clés");
+            let target = self.sel_key.filter(|k| k.0 == i);
+            ui.label(egui::RichText::new(crate::i18n::t(if target.is_some() { "La clé choisie, vers la suivante" } else { "Toutes les clés du calque" })).size(11.0).color(p.muted));
+            let cur = target.and_then(|(_, pr, kt)| lay.track(pr).key_at(kt).map(|k| lay.track(pr).keys[k].ease));
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
+                for (e, name) in motion::EASES {
+                    if ui.selectable_label(cur == Some(e), crate::i18n::t(name)).clicked() {
+                        match target {
+                            Some((_, pr, kt)) => {
+                                let tr = lay.track_mut(pr);
+                                if let Some(k) = tr.key_at(kt) {
+                                    tr.keys[k].ease = e;
+                                }
+                            }
+                            None => {
+                                for (pr, _) in PROPS {
+                                    for k in &mut lay.track_mut(pr).keys {
+                                        k.ease = e;
+                                    }
+                                }
+                            }
+                        }
+                        changed = true;
+                    }
+                }
+            });
+            section(ui, "Calque");
+            ui.horizontal(|ui| {
+                changed |= ui.add(egui::DragValue::new(&mut lay.start).speed(0.02).range(0.0..=lay.end).max_decimals(2).prefix(crate::i18n::t("début ")).suffix(" s")).changed();
+                let d = self.compo.duration;
+                changed |= ui.add(egui::DragValue::new(&mut lay.end).speed(0.02).range(lay.start..=d.max(lay.start)).max_decimals(2).prefix(crate::i18n::t("fin ")).suffix(" s")).changed();
+            });
+            changed |= ui.checkbox(&mut lay.visible, crate::i18n::t("Visible")).changed();
+        });
+        if changed {
+            self.changed();
+        }
+    }
+
+    fn compo_settings(&mut self, ui: &mut egui::Ui) -> bool {
+        let p = crate::theme::pal();
+        let c = &mut self.compo;
+        let mut changed = false;
+        section(ui, "Format");
+        ui.horizontal_wrapped(|ui| {
+            for (w, h, name) in [(1920, 1080, "16:9"), (1080, 1920, "9:16"), (1080, 1080, "1:1"), (3840, 2160, "4K")] {
+                if ui.selectable_label(c.w == w && c.h == h, name).clicked() {
+                    // Les calques gardent leur place relative au centre
+                    let (dx, dy) = ((w as f32 - c.w as f32) / 2.0, (h as f32 - c.h as f32) / 2.0);
+                    for l in &mut c.layers {
+                        l.pos.v = [l.pos.v[0] + dx, l.pos.v[1] + dy];
+                        for k in &mut l.pos.keys {
+                            k.v = [k.v[0] + dx, k.v[1] + dy];
+                        }
+                    }
+                    (c.w, c.h) = (w, h);
+                    changed = true;
+                }
+            }
+        });
+        ui.horizontal(|ui| {
+            changed |= ui.add(egui::DragValue::new(&mut c.w).speed(2.0).range(16..=8192).prefix("l ")).changed();
+            changed |= ui.add(egui::DragValue::new(&mut c.h).speed(2.0).range(16..=8192).prefix("h ")).changed();
+        });
+        section(ui, "Temps");
+        ui.horizontal(|ui| {
+            egui::ComboBox::from_id_salt("motion-fps").selected_text(format!("{} i/s", c.fps)).show_ui(ui, |ui| {
+                for f in [24.0, 25.0, 30.0, 50.0, 60.0] {
+                    if ui.selectable_label(c.fps == f, format!("{f} i/s")).clicked() {
+                        c.fps = f;
+                        changed = true;
+                    }
+                }
+            });
+            let before = c.duration;
+            if ui.add(egui::DragValue::new(&mut c.duration).speed(0.05).range(0.5..=600.0).max_decimals(2).prefix(crate::i18n::t("durée ")).suffix(" s")).changed() {
+                // Les calques qui allaient jusqu'au bout suivent
+                for l in &mut c.layers {
+                    if (l.end - before).abs() < 1e-3 || l.end > c.duration {
+                        l.end = c.duration;
+                    }
+                }
+                changed = true;
+            }
+        });
+        section(ui, "Fond");
+        changed |= ui.color_edit_button_srgb(&mut c.bg).changed();
+        section(ui, "Musique");
+        match c.music.clone() {
+            Some(m) => {
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new(format!("{}  {}", l::MUSIC, m.rsplit('/').next().unwrap_or(&m))).size(12.0));
+                    if ui.small_button(crate::i18n::t("retirer")).clicked() {
+                        c.music = None;
+                        changed = true;
+                    }
+                });
+            }
+            None => {
+                if ui.button(crate::i18n::t("Choisir un son…")).clicked() {
+                    if let Some(f) = rfd::FileDialog::new().add_filter("son", &["wav", "mp3", "ogg", "flac", "m4a", "aac"]).pick_file() {
+                        match self.vault_path(&f) {
+                            Ok(rel) => {
+                                self.compo.music = Some(rel);
+                                changed = true;
+                            }
+                            Err(e) => self.message = Some(e),
+                        }
+                    }
+                }
+                ui.label(egui::RichText::new(crate::i18n::t("Jouée à l'export MP4.")).size(11.0).color(p.muted));
+            }
+        }
+        changed
+    }
+
+    // ---------- Timeline ----------
+
+    fn timeline(&mut self, ui: &mut egui::Ui) {
+        let p = crate::theme::pal();
+        let fps = self.compo.fps;
+        let dur = self.compo.duration;
+        // Barre : lecture, temps, image
+        let (bar, _) = ui.allocate_exact_size(vec2(ui.available_width(), 32.0), Sense::hover());
+        ui.painter().hline(bar.x_range(), bar.bottom() - 0.5, Stroke::new(1.0, p.line));
+        let mut child = ui.new_child(egui::UiBuilder::new().max_rect(bar.shrink2(vec2(8.0, 0.0))).layout(egui::Layout::left_to_right(egui::Align::Center)));
+        flat(&mut child);
+        let icon = if self.playing.is_some() { l::PAUSE } else { l::PLAY };
+        if child.button(egui::RichText::new(icon).size(14.0)).on_hover_text(crate::i18n::t("Lire (Espace)")).clicked() {
+            self.toggle_play();
+        }
+        child.label(egui::RichText::new(tc(self.time, fps)).monospace().size(12.5));
+        child.label(egui::RichText::new(format!("{} {} / {} · {} i/s", crate::i18n::t("image"), (self.time * fps).round() as u32, self.compo.frames(), fps)).size(11.5).color(p.muted));
+        let wide = bar.width() > 900.0;
+        child.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if !wide {
+                return;
+            }
+            let cur = self.curve;
+            for (pr, name) in PROPS.iter().rev() {
+                if ui.selectable_label(cur == *pr, crate::i18n::t(name)).clicked() {
+                    self.curve = *pr;
+                }
+            }
+            ui.label(egui::RichText::new(crate::i18n::t("Courbe")).size(11.5).color(p.muted));
+        });
+
+        let body = ui.available_rect_before_wrap();
+        // Le panneau garde toute sa hauteur (sinon il se resserre sur son contenu)
+        ui.allocate_rect(body, Sense::hover());
+        let names_w = 250.0f32.min(body.width() * 0.4);
+        let curve_w = if body.width() > 900.0 { 260.0 } else { 0.0 };
+        let tracks = Rect::from_min_max(pos2(body.left() + names_w, body.top()), pos2(body.right() - curve_w, body.bottom()));
+        let ruler = Rect::from_min_max(tracks.left_top(), pos2(tracks.right(), tracks.top() + 26.0));
+        let x_of = |t: f32| tracks.left() + 10.0 + (t / dur.max(0.01)) * (tracks.width() - 20.0);
+        let t_of = |x: f32| ((x - tracks.left() - 10.0) / (tracks.width() - 20.0) * dur).clamp(0.0, dur);
+        let snap = |t: f32| (t * fps).round() / fps;
+        let painter = ui.painter_at(body);
+        painter.vline(tracks.left(), body.y_range(), Stroke::new(1.0, p.line));
+        if curve_w > 0.0 {
+            painter.vline(tracks.right(), body.y_range(), Stroke::new(1.0, p.line));
+        }
+        painter.hline(body.x_range(), ruler.bottom(), Stroke::new(1.0, p.line));
+        painter.text(pos2(body.left() + 10.0, ruler.center().y), egui::Align2::LEFT_CENTER, crate::i18n::t("Calques"), egui::FontId::proportional(11.5), p.muted);
+        // Règle : une graduation par seconde (ou plus espacée)
+        let step = [0.25f32, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0, 60.0].into_iter().find(|s| (x_of(*s) - x_of(0.0)) > 56.0).unwrap_or(60.0);
+        let mut s = 0.0;
+        while s <= dur + 1e-3 {
+            let x = x_of(s);
+            painter.vline(x, ruler.bottom() - 8.0..=ruler.bottom(), Stroke::new(1.0, p.line));
+            painter.text(pos2(x + 3.0, ruler.top() + 8.0), egui::Align2::LEFT_CENTER, if step < 1.0 { format!("{s:.2}s") } else { format!("{s:.0}s") }, egui::FontId::monospace(10.5), p.muted);
+            s += step;
+        }
+        let rr = ui.interact(ruler, ui.scope_id().with("motion-ruler"), Sense::click_and_drag());
+        if rr.drag_started() || rr.clicked() {
+            self.tl_drag = Some(TlDrag::Scrub);
+        }
+
+        // Rangées : un calque, puis ses propriétés quand il est choisi
+        let row_h = 28.0;
+        let sub_h = 22.0;
+        let mut y = ruler.bottom();
+        let t_now = self.time;
+        let mut clicked_layer = None;
+        let mut toggles: Vec<(usize, Prop)> = vec![];
+        let mut eye = None;
+        let n = self.compo.layers.len();
+        for i in 0..n {
+            let lay = &self.compo.layers[i];
+            let sel = self.sel == Some(i);
+            let r = Rect::from_min_max(pos2(body.left(), y), pos2(tracks.right(), y + row_h));
+            if r.top() > body.bottom() {
+                break;
+            }
+            if sel {
+                painter.rect_filled(Rect::from_min_max(r.min, pos2(tracks.left(), r.bottom())), 0.0, p.selection);
+                painter.rect_filled(Rect::from_min_max(pos2(tracks.left(), r.top()), r.max), 0.0, p.raised);
+            }
+            painter.hline(body.x_range(), r.bottom() - 0.5, Stroke::new(1.0, p.line.gamma_multiply(0.6)));
+            let c = layer_color(&lay.kind);
+            painter.rect_filled(Rect::from_min_size(pos2(r.left() + 8.0, r.center().y - 8.0), vec2(3.0, 16.0)), 0.0, c);
+            painter.text(pos2(r.left() + 20.0, r.center().y), egui::Align2::LEFT_CENTER, layer_icon(&lay.kind), egui::FontId::proportional(13.0), p.muted);
+            let name_r = Rect::from_min_max(pos2(r.left() + 40.0, r.top()), pos2(tracks.left() - 30.0, r.bottom()));
+            painter.with_clip_rect(name_r).text(name_r.left_center(), egui::Align2::LEFT_CENTER, &lay.name, egui::FontId::proportional(12.5), if lay.visible { p.text } else { p.muted });
+            let eye_r = Rect::from_center_size(pos2(tracks.left() - 16.0, r.center().y), vec2(20.0, 20.0));
+            let er = ui.interact(eye_r, ui.scope_id().with(("motion-eye", i)), Sense::click());
+            painter.text(eye_r.center(), egui::Align2::CENTER_CENTER, if lay.visible { l::EYE } else { l::EYE_OFF }, egui::FontId::proportional(13.0), if er.hovered() { p.text } else { p.muted });
+            if er.clicked() {
+                eye = Some(i);
+            }
+            let nr = ui.interact(Rect::from_min_max(r.min, pos2(tracks.left() - 30.0, r.bottom())), ui.scope_id().with(("motion-name", i)), Sense::click());
+            if nr.clicked() {
+                clicked_layer = Some(i);
+            }
+            // Barre du calque et ses clés
+            let bar_r = Rect::from_min_max(pos2(x_of(lay.start), r.top() + 6.0), pos2(x_of(lay.end), r.bottom() - 6.0));
+            painter.rect_filled(bar_r, 3.0, c.gamma_multiply(if sel { 0.45 } else { 0.3 }));
+            for kt in lay.key_times() {
+                diamond(&painter, pos2(x_of(kt), r.center().y), 4.5, Some(if sel { p.text } else { c }), p.code_bg);
+            }
+            let br = ui.interact(bar_r.expand2(vec2(3.0, 0.0)), ui.scope_id().with(("motion-bar", i)), Sense::click_and_drag());
+            if let Some(h) = br.hover_pos() {
+                let edge = (h.x - bar_r.left()).abs() < 6.0 || (h.x - bar_r.right()).abs() < 6.0;
+                if edge {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+                }
+            }
+            if br.clicked() {
+                clicked_layer = Some(i);
+                // Clic sur un losange : on va à cette clé
+                if let Some(h) = br.interact_pointer_pos() {
+                    if let Some(kt) = lay.key_times().into_iter().find(|kt| (x_of(*kt) - h.x).abs() < 6.0) {
+                        self.time = kt;
+                        self.playing = None;
+                    }
+                }
+            }
+            if br.drag_started() {
+                if let Some(h) = br.interact_pointer_pos() {
+                    clicked_layer = Some(i);
+                    if let Some(kt) = lay.key_times().into_iter().find(|kt| (x_of(*kt) - h.x).abs() < 6.0) {
+                        self.tl_drag = Some(TlDrag::Keys { layer: i, t0: kt, prop: None });
+                    } else {
+                        let part = if (h.x - bar_r.left()).abs() < 6.0 {
+                            1
+                        } else if (h.x - bar_r.right()).abs() < 6.0 {
+                            2
+                        } else {
+                            0
+                        };
+                        self.tl_drag = Some(TlDrag::Bar { layer: i, grab: t_of(h.x), part, start: lay.start, end: lay.end });
+                    }
+                }
+            }
+            y += row_h;
+            if sel {
+                for (pr, label) in PROPS {
+                    let r = Rect::from_min_max(pos2(body.left(), y), pos2(tracks.right(), y + sub_h));
+                    if r.top() > body.bottom() {
+                        break;
+                    }
+                    let lay = &self.compo.layers[i];
+                    let tr = lay.track(pr);
+                    let at = tr.key_at(t_now).is_some();
+                    let dr = Rect::from_center_size(pos2(r.left() + 30.0, r.center().y), vec2(16.0, 16.0));
+                    let dresp = ui.interact(dr, ui.scope_id().with(("motion-dia", i, label)), Sense::click()).on_hover_text(crate::i18n::t("Poser ou retirer une clé à cet instant"));
+                    diamond(&painter, dr.center(), 4.0, if at { Some(p.accent) } else { None }, if tr.animated() { p.accent } else { p.muted });
+                    if dresp.clicked() {
+                        toggles.push((i, pr));
+                    }
+                    painter.text(pos2(r.left() + 44.0, r.center().y), egui::Align2::LEFT_CENTER, crate::i18n::t(label), egui::FontId::proportional(12.0), if tr.animated() { p.text } else { p.muted });
+                    let v = tr.at(t_now);
+                    let val = match pr {
+                        Prop::Pos => format!("{:.0}, {:.0}", v[0], v[1]),
+                        Prop::Scale => format!("{:.0} %", v[0]),
+                        Prop::Rot => format!("{:.1}°", v[0]),
+                        Prop::Opacity => format!("{:.0} %", v[0]),
+                    };
+                    if names_w >= 200.0 {
+                        painter.text(pos2(tracks.left() - 12.0, r.center().y), egui::Align2::RIGHT_CENTER, val, egui::FontId::monospace(11.0), p.muted);
+                    }
+                    painter.hline(body.x_range(), r.bottom() - 0.5, Stroke::new(1.0, p.line.gamma_multiply(0.35)));
+                    for k in &tr.keys {
+                        let chosen = self.sel_key.is_some_and(|s| s.0 == i && s.1 == pr && (s.2 - k.t).abs() < motion::KEY_EPS);
+                        diamond(&painter, pos2(x_of(k.t), r.center().y), 4.0, Some(if chosen { p.text } else { p.accent }), p.code_bg);
+                    }
+                    let kr = ui.interact(Rect::from_min_max(pos2(tracks.left(), r.top()), r.max), ui.scope_id().with(("motion-keys", i, label)), Sense::click_and_drag());
+                    let hit = |h: Pos2| tr.keys.iter().map(|k| k.t).find(|kt| (x_of(*kt) - h.x).abs() < 6.0);
+                    if kr.clicked() {
+                        if let Some(h) = kr.interact_pointer_pos() {
+                            match hit(h) {
+                                Some(kt) => {
+                                    self.sel_key = Some((i, pr, kt));
+                                    self.curve = pr;
+                                    self.time = kt;
+                                    self.playing = None;
+                                }
+                                None => self.sel_key = None,
+                            }
+                        }
+                    }
+                    if kr.drag_started() {
+                        if let Some(kt) = kr.interact_pointer_pos().and_then(hit) {
+                            self.sel_key = Some((i, pr, kt));
+                            self.tl_drag = Some(TlDrag::Keys { layer: i, t0: kt, prop: Some(pr) });
+                        } else {
+                            self.tl_drag = Some(TlDrag::Scrub);
+                        }
+                    }
+                    y += sub_h;
+                }
+            }
+        }
+        if n == 0 {
+            painter.text(pos2(tracks.center().x, ruler.bottom() + 30.0), egui::Align2::CENTER_CENTER, crate::i18n::t("Pas encore de calque : ajoute un texte ou une forme."), egui::FontId::proportional(12.0), p.muted);
+        }
+        // Clic dans le vide des pistes : la tête de lecture y va
+        let empty = Rect::from_min_max(pos2(tracks.left(), y), tracks.max);
+        if empty.height() > 4.0 {
+            let er = ui.interact(empty, ui.scope_id().with("motion-empty"), Sense::click_and_drag());
+            if er.drag_started() || er.clicked() {
+                self.tl_drag = Some(TlDrag::Scrub);
+                if er.clicked() {
+                    self.sel = None;
+                    self.sel_key = None;
+                }
+            }
+        }
+        // Glisser
+        let mut commit = false;
+        if let (Some(d), Some(m)) = (self.tl_drag.take(), ui.input(|i| i.pointer.interact_pos())) {
+            let t = snap(t_of(m.x));
+            let mut next = None;
+            match &d {
+                TlDrag::Scrub => {
+                    self.time = t;
+                    self.playing = None;
+                }
+                TlDrag::Keys { layer, t0, prop } => {
+                    let (li, t0, prop) = (*layer, *t0, *prop);
+                    if (t - t0).abs() > 1e-4 {
+                        if let Some(lay) = self.compo.layers.get_mut(li) {
+                            for (pr, _) in PROPS {
+                                if prop.is_some_and(|q| q != pr) {
+                                    continue;
+                                }
+                                let tr = lay.track_mut(pr);
+                                if let Some(k) = tr.key_at(t0) {
+                                    if tr.key_at(t).is_none() {
+                                        tr.keys[k].t = t;
+                                        tr.sort();
+                                    }
+                                }
+                            }
+                        }
+                        if let Some(sk) = &mut self.sel_key {
+                            if sk.0 == li && (sk.2 - t0).abs() < motion::KEY_EPS {
+                                sk.2 = t;
+                            }
+                        }
+                        next = Some(TlDrag::Keys { layer: li, t0: t, prop });
+                        self.time = t;
+                        self.rev += 1;
+                    }
+                }
+                TlDrag::Bar { layer, grab, part, start, end } => {
+                    let (li, dt, part, start, end) = (*layer, t - snap(*grab), *part, *start, *end);
+                    if let Some(lay) = self.compo.layers.get_mut(li) {
+                        match part {
+                            1 => lay.start = (start + dt).clamp(0.0, lay.end - 1.0 / fps),
+                            2 => lay.end = (end + dt).clamp(lay.start + 1.0 / fps, dur),
+                            _ => {
+                                // Le calque glisse avec toutes ses clés
+                                let dt = dt.clamp(-start, dur - end);
+                                let shift = start + dt - lay.start;
+                                lay.start = start + dt;
+                                lay.end = end + dt;
+                                for (pr, _) in PROPS {
+                                    for k in &mut lay.track_mut(pr).keys {
+                                        k.t += shift;
+                                    }
+                                }
+                            }
+                        }
+                        self.rev += 1;
+                    }
+                }
+            }
+            if !ui.input(|i| i.pointer.any_down()) {
+                commit = !matches!(d, TlDrag::Scrub);
+            } else {
+                self.tl_drag = Some(next.unwrap_or(d));
+            }
+        }
+        if commit {
+            self.changed();
+        }
+        if let Some(i) = clicked_layer {
+            if self.sel != Some(i) {
+                self.sel_key = None;
+            }
+            self.sel = Some(i);
+        }
+        if let Some(i) = eye {
+            self.compo.layers[i].visible ^= true;
+            self.changed();
+        }
+        if !toggles.is_empty() {
+            for (i, pr) in toggles {
+                let t = self.time;
+                self.compo.layers[i].track_mut(pr).toggle_key(t);
+            }
+            self.changed();
+        }
+        // Tête de lecture
+        let x = x_of(self.time);
+        painter.vline(x, ruler.top()..=body.bottom(), Stroke::new(1.0, p.accent));
+        painter.add(egui::Shape::convex_polygon(vec![pos2(x - 5.0, ruler.top() + 14.0), pos2(x + 5.0, ruler.top() + 14.0), pos2(x, ruler.top() + 20.0)], p.accent, Stroke::NONE));
+
+        // Courbe de la propriété choisie
+        if curve_w > 0.0 {
+            let cr = Rect::from_min_max(pos2(tracks.right() + 10.0, body.top() + 8.0), pos2(body.right() - 10.0, body.bottom() - 10.0));
+            let pr = self.curve;
+            let label = PROPS.iter().find(|x| x.0 == pr).map(|x| x.1).unwrap_or("");
+            let lay = self.sel.and_then(|i| self.compo.layers.get(i));
+            let ease = lay.and_then(|l| self.sel_key.filter(|k| k.1 == pr).and_then(|k| l.track(pr).key_at(k.2).map(|j| l.track(pr).keys[j].ease)));
+            painter.text(cr.left_top(), egui::Align2::LEFT_TOP, format!("{} · {}", crate::i18n::t("Courbe"), crate::i18n::t(label).to_lowercase()), egui::FontId::proportional(11.5), p.muted);
+            if let Some(e) = ease {
+                painter.text(cr.right_top(), egui::Align2::RIGHT_TOP, crate::i18n::t(motion::EASES.iter().find(|x| x.0 == e).map(|x| x.1).unwrap_or("")).to_lowercase(), egui::FontId::proportional(11.5), p.muted);
+            }
+            let g = Rect::from_min_max(pos2(cr.left(), cr.top() + 20.0), cr.max);
+            painter.rect(g, 2.0, p.code_bg, Stroke::new(1.0, p.line), egui::StrokeKind::Inside);
+            if let Some(tr) = lay.map(|l| l.track(pr)).filter(|t| t.animated()) {
+                // Valeur (x ou seule valeur) au fil de la composition, mise à l'échelle de la case
+                let n = 120;
+                let vals: Vec<f32> = (0..=n).map(|k| tr.at(dur * k as f32 / n as f32)[0]).collect();
+                let (lo, hi) = vals.iter().fold((f32::MAX, f32::MIN), |(a, b), v| (a.min(*v), b.max(*v)));
+                let span = (hi - lo).max(1e-3);
+                let inner = g.shrink(8.0);
+                let pt = |k: usize, v: f32| pos2(inner.left() + inner.width() * k as f32 / n as f32, inner.bottom() - (v - lo) / span * inner.height());
+                let pts: Vec<Pos2> = vals.iter().enumerate().map(|(k, v)| pt(k, *v)).collect();
+                painter.add(egui::Shape::line(pts, Stroke::new(1.5, p.accent)));
+                for k in &tr.keys {
+                    let kx = inner.left() + inner.width() * k.t / dur.max(0.01);
+                    let ky = inner.bottom() - (k.v[0] - lo) / span * inner.height();
+                    diamond(&painter, pos2(kx, ky), 3.5, Some(p.warning), p.code_bg);
+                }
+                let px = inner.left() + inner.width() * self.time / dur.max(0.01);
+                painter.vline(px, inner.y_range(), Stroke::new(1.0, p.accent.gamma_multiply(0.6)));
+            } else {
+                painter.text(g.center(), egui::Align2::CENTER_CENTER, crate::i18n::t("Pas de clé sur cette propriété"), egui::FontId::proportional(11.5), p.muted);
+            }
+        }
+    }
+}

@@ -18,9 +18,10 @@ pub struct Format {
     pub ready: bool,
 }
 
-pub const ALL: [Format; 6] = [
+pub const ALL: [Format; 7] = [
     Format { id: "scene", ext: "aryscene", legacy: &["arya3"], label: "scène 3D", help: "Modèles, lumières, caméras et animation ; arrive avec un cube, une lumière et une caméra", ready: true },
     Format { id: "seq", ext: "aryseq", legacy: &["aryav"], label: "montage vidéo", help: "Timeline de vidéos, d'images, de sons et de titres", ready: true },
+    Format { id: "motion", ext: "arymotion", legacy: &[], label: "composition animée", help: "Motion design : titres, formes et images animés par clés, exportés en MP4", ready: true },
     Format { id: "mat", ext: "arymat", legacy: &["mat.json"], label: "matériau en nodes", help: "Matériau pour les modèles et les objets d'une scène", ready: true },
     Format { id: "comp", ext: "arycomp", legacy: &["comp.json"], label: "compositing en nodes", help: "Retouche d'image ou étalonnage d'un clip", ready: true },
     Format { id: "board", ext: "aryboard", legacy: &["board.json"], label: "board", help: "Planche d'images, de notes et de liens", ready: true },

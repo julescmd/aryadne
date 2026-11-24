@@ -84,10 +84,11 @@ pub struct Disposition {
 
 /// Dans l'ordre du pipeline : un espace par étape, ses outils en onglets (voir `tools`).
 /// Les matériaux sont un outil de la 3D, le compositing un outil de la 2D ; l'IA est l'Assistant, partout.
-pub const PRESETS: [(&str, Option<[u8; 3]>, &str, bool, &str); 5] = [
+pub const PRESETS: [(&str, Option<[u8; 3]>, &str, bool, &str); 6] = [
     ("notes", None, "files", false, "notes"),
     ("2D", Some([0xe8, 0x5d, 0xa8]), "files", false, "2d"),
     ("3D", Some([0x3d, 0x9b, 0xff]), "files", false, "3d"),
+    ("motion", Some([0xd1, 0xaf, 0x75]), "files", false, "motion"),
     ("vidéo", Some([0x9b, 0x6d, 0xff]), "files", false, "video"),
     ("code", Some([0x3f, 0xc9, 0x7e]), "files", false, "code"),
 ];
@@ -106,11 +107,13 @@ pub fn tools(kind: &str) -> &'static [Tool] {
     const NOTES: [Tool; 3] = [Tool { id: "notes", label: "Notes", icon: l::FILE_TEXT, view: "files" }, Tool { id: "tasks", label: "Tâches", icon: l::LIST_CHECKS, view: "tasks" }, Tool { id: "brain", label: "Cerveau", icon: l::NETWORK, view: "brain" }];
     const D2: [Tool; 3] = [Tool { id: "board", label: "Moodboard", icon: l::LAYOUT_DASHBOARD, view: "boards" }, Tool { id: "image", label: "Retouche", icon: l::IMAGE, view: "files" }, Tool { id: "comp", label: "Compositing", icon: l::WORKFLOW, view: "files" }];
     const D3: [Tool; 2] = [Tool { id: "scene", label: "Scène", icon: l::BOX, view: "files" }, Tool { id: "mat", label: "Matériaux", icon: l::BLEND, view: "files" }];
+    const MOTION: [Tool; 1] = [Tool { id: "motion", label: "Compos", icon: l::SPLINE, view: "files" }];
     const VIDEO: [Tool; 2] = [Tool { id: "seq", label: "Montage", icon: l::CLAPPERBOARD, view: "files" }, Tool { id: "review", label: "Revue", icon: l::MESSAGE_SQUARE, view: "files" }];
     const CODE_T: [Tool; 1] = [Tool { id: "code", label: "Code", icon: l::CODE, view: "files" }];
     match kind {
         "2d" => &D2,
         "3d" => &D3,
+        "motion" => &MOTION,
         "video" => &VIDEO,
         "code" => &CODE_T,
         "notes" => &NOTES,
@@ -128,6 +131,7 @@ pub fn tool_of(rel: &str) -> &'static str {
         "2d" => "image",
         "3d" if crate::formats::has(rel, "mat") => "mat",
         "3d" => "scene",
+        "motion" => "motion",
         "video" if crate::formats::has(rel, "seq") => "seq",
         "video" => "review",
         "code" => "code",
@@ -153,7 +157,7 @@ pub fn accent_of(w: &Workspace) -> Option<[u8; 3]> {
 }
 
 /// Les genres d'espaces connus d'Aryadne. Un espace d'un autre genre (fait à la main) accepte tout.
-pub const KINDS: [&str; 5] = ["notes", "2d", "3d", "video", "code"];
+pub const KINDS: [&str; 6] = ["notes", "2d", "3d", "motion", "video", "code"];
 
 /// Les pages de chaque espace, dans la deuxième rangée : (libellé, vue). Comme les jeux de menus de Maya,
 /// elles changent avec l'espace ; la première est la page de travail (onglets de fichiers).
@@ -162,6 +166,7 @@ pub fn pages(kind: &str) -> &'static [(&'static str, &'static str)] {
         "3d" => &[("fichiers", "files"), ("références", "refs")],
         "2d" => &[("fichiers", "files"), ("références", "refs")],
         "video" => &[("fichiers", "files"), ("médias", "refs")],
+        "motion" => &[("fichiers", "files"), ("références", "refs")],
         "code" => &[("fichiers", "files"), ("recherche", "search")],
         _ => &[("fichiers", "files"), ("recherche", "search")],
     }
@@ -181,6 +186,8 @@ pub fn owner(rel: &str) -> &'static str {
     let ext = low.rsplit('.').next().unwrap_or("");
     if crate::formats::has(rel, "comp") {
         "2d"
+    } else if crate::formats::has(rel, "motion") {
+        "motion"
     } else if crate::formats::has(rel, "mat") {
         "3d"
     } else if crate::model3d::is_model(rel) || matches!(ext, "hdr" | "exr") {
@@ -203,8 +210,8 @@ pub fn accepts(kind: &str, rel: &str) -> bool {
 
 pub fn preset(i: usize) -> Workspace {
     let (name, accent, view, assistant, kind) = PRESETS[i];
-    // La 3D garde toute la place pour la scène : l'explorateur s'ouvre au besoin (Ctrl+B)
-    Workspace { name: name.to_string(), accent, view: view.to_string(), assistant, kind: kind.to_string(), explorer: kind != "3d", ..Default::default() }
+    // La 3D et le motion gardent toute la place pour la vue : l'explorateur s'ouvre au besoin (Ctrl+B)
+    Workspace { name: name.to_string(), accent, view: view.to_string(), assistant, kind: kind.to_string(), explorer: !matches!(kind, "3d" | "motion"), ..Default::default() }
 }
 
 impl Default for Set {
@@ -222,7 +229,7 @@ impl Set {
                 // Première fois : l'espace « notes » reprend la disposition déjà en place
                 let mut list: Vec<Workspace> = (0..PRESETS.len()).map(preset).collect();
                 list[0].places = crate::dock::export();
-                Set { current: 0, list, seeded: 3 }
+                Set { current: 0, list, seeded: 4 }
             });
         s.migrate();
         s
@@ -268,6 +275,16 @@ impl Set {
             s.current = cur.and_then(|n| s.list.iter().position(|w| w.name == n)).unwrap_or(0);
         }
         s.seeded = s.seeded.max(3);
+        // Nouvelle étape Motion, entre la 3D et la vidéo
+        if s.seeded < 4 {
+            if !s.list.iter().any(|w| w.kind == "motion") {
+                let at = s.list.iter().position(|w| w.kind == "video" || w.kind == "code").unwrap_or(s.list.len());
+                let cur = s.list.get(s.current).map(|w| w.name.clone());
+                s.list.insert(at, preset(PRESETS.iter().position(|p| p.4 == "motion").unwrap_or(0)));
+                s.current = cur.and_then(|n| s.list.iter().position(|w| w.name == n)).unwrap_or(0);
+            }
+            s.seeded = 4;
+        }
         if s.list.is_empty() {
             s.list.push(preset(0));
         }
@@ -314,6 +331,7 @@ mod tests {
         assert_eq!((owner("a/G.arycomp"), tool_of("a/G.arycomp")), ("2d", "comp"));
         assert_eq!(tool_of("plan.mp4"), "review");
         assert_eq!(tool_of("Teaser.aryseq"), "seq");
+        assert_eq!((owner("Intro.arymotion"), tool_of("Intro.arymotion")), ("motion", "motion"));
         assert_eq!(tool_of("robot.glb"), "scene");
         assert_eq!(tool_of("croquis.png"), "image");
         assert!(tools("2d").iter().any(|t| t.view == "boards"));
@@ -327,7 +345,8 @@ mod tests {
         old.list.push(preset(2));
         old.migrate();
         let kinds: Vec<&str> = old.list.iter().map(|w| w.kind.as_str()).collect();
-        assert_eq!(kinds, vec!["notes", "3d"]);
+        // … et l'étape Motion arrive après la 3D
+        assert_eq!(kinds, vec!["notes", "3d", "motion"]);
         assert_eq!(old.list[1].tabs, vec!["nodes/Or.arymat".to_string()]);
     }
 }
