@@ -18,6 +18,13 @@ fn unit(a: V3) -> V3 {
     if l > 1e-12 { [a[0] / l, a[1] / l, a[2] / l] } else { [0.0, 1.0, 0.0] }
 }
 
+/// Un point du couteau : un sommet, ou un point sur une arête (a, b) à la fraction t.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum KnifePoint {
+    Vert(u32),
+    Edge(u32, u32, f32),
+}
+
 #[derive(Clone, PartialEq, Debug, Default)]
 pub struct EMesh {
     pub pos: Vec<V3>,
@@ -1525,6 +1532,181 @@ impl EMesh {
         self.polys.extend(other.polys.iter().map(|p| p.iter().map(|v| v + off).collect()));
     }
 
+    /// Coupe l'arête (a, b) à `t` (de a vers b) : le nouveau sommet entre dans toutes les faces qui la portent.
+    pub fn split_edge(&mut self, a: u32, b: u32, t: f32) -> u32 {
+        let (pa, pb) = (self.pos[a as usize], self.pos[b as usize]);
+        self.pos.push([0, 1, 2].map(|k| pa[k] + (pb[k] - pa[k]) * t));
+        let n = self.pos.len() as u32 - 1;
+        for p in &mut self.polys {
+            let len = p.len();
+            if let Some(k) = (0..len).find(|&k| (p[k] == a && p[(k + 1) % len] == b) || (p[k] == b && p[(k + 1) % len] == a)) {
+                p.insert(k + 1, n);
+            }
+        }
+        n
+    }
+
+    /// Coupe une face en deux par la corde (u, v), deux de ses sommets non voisins. Faux si impossible.
+    pub fn split_face(&mut self, u: u32, v: u32) -> bool {
+        let Some(f) = self.polys.iter().position(|p| {
+            let (Some(i), Some(j)) = (p.iter().position(|&x| x == u), p.iter().position(|&x| x == v)) else { return false };
+            let d = (i as i64 - j as i64).unsigned_abs() as usize;
+            d > 1 && d < p.len() - 1
+        }) else {
+            return false;
+        };
+        let p = self.polys[f].clone();
+        let i = p.iter().position(|&x| x == u).unwrap();
+        let j = p.iter().position(|&x| x == v).unwrap();
+        let (lo, hi) = (i.min(j), i.max(j));
+        let first: Vec<u32> = p[lo..=hi].to_vec();
+        let mut second: Vec<u32> = p[hi..].to_vec();
+        second.extend(&p[..=lo]);
+        self.polys[f] = first;
+        self.polys.push(second);
+        true
+    }
+
+    /// Couteau : une suite de points (sommets existants, ou points sur des arêtes) ; chaque paire qui
+    /// partage une face la coupe. Renvoie la sélection des sommets de la coupe, ou None si rien n'a coupé.
+    pub fn knife(&mut self, pts: &[KnifePoint]) -> Option<Vec<bool>> {
+        let mut verts: Vec<u32> = vec![];
+        for kp in pts {
+            let v = match *kp {
+                KnifePoint::Vert(v) => v,
+                KnifePoint::Edge(a, b, t) => {
+                    // L'arête a pu être déjà coupée par un point précédent : on retrouve le bon morceau
+                    let (mut a, mut b, mut t) = (a, b, t);
+                    loop {
+                        let edge_exists = self.polys.iter().any(|p| (0..p.len()).any(|k| {
+                            let (x, y) = (p[k], p[(k + 1) % p.len()]);
+                            (x == a && y == b) || (x == b && y == a)
+                        }));
+                        if edge_exists {
+                            break;
+                        }
+                        // Le sommet ajouté entre a et b : on choisit le morceau qui contient t
+                        let mid = verts.iter().copied().find(|&m| {
+                            self.polys.iter().any(|p| (0..p.len()).any(|k| {
+                                let (x, y) = (p[k], p[(k + 1) % p.len()]);
+                                (x == a && y == m) || (x == m && y == a)
+                            })) && self.polys.iter().any(|p| (0..p.len()).any(|k| {
+                                let (x, y) = (p[k], p[(k + 1) % p.len()]);
+                                (x == b && y == m) || (x == m && y == b)
+                            }))
+                        });
+                        let Some(m) = mid else { break };
+                        let (pa, pb, pm) = (self.pos[a as usize], self.pos[b as usize], self.pos[m as usize]);
+                        let ab = sub(pb, pa);
+                        let tm = {
+                            let am = sub(pm, pa);
+                            (am[0] * ab[0] + am[1] * ab[1] + am[2] * ab[2]) / (ab[0] * ab[0] + ab[1] * ab[1] + ab[2] * ab[2]).max(1e-12)
+                        };
+                        if t < tm {
+                            b = m;
+                            t /= tm.max(1e-6);
+                        } else {
+                            a = m;
+                            t = (t - tm) / (1.0 - tm).max(1e-6);
+                        }
+                    }
+                    self.split_edge(a, b, t.clamp(0.0, 1.0))
+                }
+            };
+            if verts.last() != Some(&v) {
+                verts.push(v);
+            }
+        }
+        let mut cut = false;
+        for w in verts.windows(2) {
+            cut |= self.split_face(w[0], w[1]);
+        }
+        if !cut {
+            return None;
+        }
+        let mut out = vec![false; self.pos.len()];
+        for v in verts {
+            out[v as usize] = true;
+        }
+        Some(out)
+    }
+
+    /// Détacher (Y) : les faces choisies prennent leurs propres sommets, sans faces de côté.
+    pub fn detach(&mut self, sel: &[bool]) -> Option<Vec<bool>> {
+        let faces = self.faces_in(sel);
+        if faces.is_empty() {
+            return None;
+        }
+        self.rip_faces(&faces, None)
+    }
+
+    /// Donne aux faces `faces` des copies de leurs sommets qui touchent aussi d'autres faces (seulement
+    /// ceux de `only` s'il est donné ; la sélection rendue est alors celle des copies).
+    pub fn rip_faces(&mut self, faces: &[usize], only: Option<&[bool]>) -> Option<Vec<bool>> {
+        let set: HashSet<usize> = faces.iter().copied().collect();
+        let mut outside: HashSet<u32> = HashSet::new();
+        for (f, p) in self.polys.iter().enumerate() {
+            if !set.contains(&f) {
+                outside.extend(p.iter().copied());
+            }
+        }
+        let mut copy: HashMap<u32, u32> = HashMap::new();
+        for &f in faces {
+            for k in 0..self.polys[f].len() {
+                let v = self.polys[f][k];
+                if !outside.contains(&v) || only.is_some_and(|o| !o.get(v as usize).copied().unwrap_or(false)) {
+                    continue;
+                }
+                let n = *copy.entry(v).or_insert_with(|| {
+                    self.pos.push(self.pos[v as usize]);
+                    self.pos.len() as u32 - 1
+                });
+                self.polys[f][k] = n;
+            }
+        }
+        if copy.is_empty() {
+            return None;
+        }
+        let mut out = vec![false; self.pos.len()];
+        if only.is_some() {
+            for &n in copy.values() {
+                out[n as usize] = true;
+            }
+            return Some(out);
+        }
+        for &f in faces {
+            for &v in &self.polys[f] {
+                out[v as usize] = true;
+            }
+        }
+        Some(out)
+    }
+
+    /// Pour chaque sommet, son reflet de l'autre côté du plan X = 0 (s'il existe).
+    pub fn mirror_map(&self) -> Vec<Option<u32>> {
+        let size = self.pos.iter().flatten().fold(0.0f32, |a, x| a.max(x.abs())).max(1e-6);
+        let tol = size * 1e-4;
+        let q = |p: V3| p.map(|x| (x / tol).round() as i64);
+        let mut at: HashMap<[i64; 3], u32> = HashMap::new();
+        for (i, p) in self.pos.iter().enumerate() {
+            at.insert(q(*p), i as u32);
+        }
+        self.pos.iter().map(|p| {
+            let m = q([-p[0], p[1], p[2]]);
+            // Le voisinage immédiat aussi, pour les arrondis du quadrillage
+            for dx in -1..=1 {
+                for dy in -1..=1 {
+                    for dz in -1..=1 {
+                        if let Some(&j) = at.get(&[m[0] + dx, m[1] + dy, m[2] + dz]) {
+                            return Some(j);
+                        }
+                    }
+                }
+            }
+            None
+        }).collect()
+    }
+
     /// Tout ce qui touche la sélection par des faces (L / Ctrl+L) : la pièce entière.
     pub fn linked(&self, sel: &[bool]) -> Vec<bool> {
         let mut out: Vec<bool> = (0..self.pos.len()).map(|i| sel.get(i).copied().unwrap_or(false)).collect();
@@ -1791,6 +1973,42 @@ mod tests {
         let mut j = m.clone();
         j.append(&other);
         assert_eq!(j.polys.len(), 6);
+    }
+
+    #[test]
+    fn couteau_et_detacher() {
+        // Couper la face du dessous par le milieu de deux côtés opposés : 7 faces, fermé
+        let mut m = cube();
+        let r = m.knife(&[KnifePoint::Edge(0, 2, 0.5), KnifePoint::Edge(3, 1, 0.5)]);
+        assert!(r.is_some());
+        assert_eq!(m.polys.len(), 7);
+        assert!(ferme(&m), "{:?}", m.polys);
+        // Couper en passant par deux faces : trois points, deux faces coupées
+        let mut m = cube();
+        let r = m.knife(&[KnifePoint::Edge(0, 2, 0.5), KnifePoint::Edge(1, 3, 0.5), KnifePoint::Edge(5, 7, 0.5)]);
+        assert!(r.is_some());
+        assert_eq!(m.polys.len(), 8);
+        assert!(ferme(&m), "{:?}", m.polys);
+        // Couper un sommet vers un autre en diagonale
+        let mut m = cube();
+        assert!(m.knife(&[KnifePoint::Vert(0), KnifePoint::Vert(3)]).is_some());
+        assert_eq!(m.polys.len(), 7);
+        assert!(ferme(&m));
+        // Détacher la face du dessus : 4 sommets de plus, plus fermé (c'est voulu)
+        let mut m = cube();
+        let mut sel = vec![false; 8];
+        for v in [4, 5, 7, 6] {
+            sel[v] = true;
+        }
+        assert!(m.detach(&sel).is_some());
+        assert_eq!(m.pos.len(), 12);
+        // Miroir : sur un cube centré, chaque sommet a son reflet
+        let mut m = cube();
+        for p in m.pos.iter_mut() {
+            p[0] -= 0.5;
+        }
+        let mm = m.mirror_map();
+        assert!(mm.iter().enumerate().all(|(i, j)| j.is_some_and(|j| (m.pos[j as usize][0] + m.pos[i][0]).abs() < 1e-5)));
     }
 
     #[test]

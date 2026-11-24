@@ -1950,6 +1950,11 @@ struct MeshEdit {
     prop: bool,
     prop_r: f32,
     prop_d: (Option<Pos2>, Vec<f32>),
+    /// Édition en miroir sur X (dans le repère de l'objet), et le reflet de chaque sommet
+    mirror: bool,
+    mirror_m: (Option<Pos2>, Vec<Option<u32>>),
+    /// Couteau (K) en cours : les points déjà posés
+    knife: Option<Vec<crate::meshedit::KnifePoint>>,
 }
 
 /// Outil réglé à la souris (biseau, incrustation, coupe en boucle), rejoué depuis le maillage de
@@ -2891,8 +2896,22 @@ impl Viewer {
             self.capture_msg = Some(e);
             return;
         }
+        // Les maillages propres à cette scène des objets absorbés vont à la corbeille du coffre
+        // (récupérables), sauf si un autre objet s'en sert encore
+        let stem_prefix = format!("{} - ", self.path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default());
+        let absorbed: Vec<String> = others.iter().map(|&k| scene.objects[k].file.clone()).filter(|f| f.starts_with(&stem_prefix) && f.to_lowercase().ends_with(".obj")).collect();
         for &k in others.iter().rev() {
             scene.remove(k);
+        }
+        let root = crate::nodes::vault_root();
+        for f in absorbed {
+            if scene.objects.iter().any(|o| o.file == f) {
+                continue;
+            }
+            let path = crate::scene::resolve(&self.path, &f);
+            if let Some(rel) = crate::vault::inside(&root, &path) {
+                let _ = crate::vault::trash(&root, &rel);
+            }
         }
         let shift = others.iter().filter(|&&k| k < a).count();
         self.scene_sel = Some(a - shift);
@@ -3137,7 +3156,7 @@ impl Viewer {
             (f, mesh)
         };
         let n = mesh.pos.len();
-        self.mesh = Some(MeshEdit { obj: k, file, mesh, sel: vec![false; n], hist: vec![], redo: vec![], modal: None, boxing: None, skip_click: false, mode: 0, active: None, vis: None, op: None, last: None, loopcut: None, menu: None, trigger: None, split: None, prop: false, prop_r: 0.0, prop_d: (None, vec![]) });
+        self.mesh = Some(MeshEdit { obj: k, file, mesh, sel: vec![false; n], hist: vec![], redo: vec![], modal: None, boxing: None, skip_click: false, mode: 0, active: None, vis: None, op: None, last: None, loopcut: None, menu: None, trigger: None, split: None, prop: false, prop_r: 0.0, prop_d: (None, vec![]), mirror: false, mirror_m: (None, vec![]), knife: None });
         self.scene_multi.clear();
         self.capture_msg = None;
     }
@@ -3280,13 +3299,86 @@ impl Viewer {
                 me.hist.remove(0);
             }
         };
-        let idle = me.op.is_none() && me.modal.is_none() && me.loopcut.is_none() && me.boxing.is_none();
+        let idle = me.op.is_none() && me.modal.is_none() && me.loopcut.is_none() && me.boxing.is_none() && me.knife.is_none();
         if idle && hovered && secondary && !ui.input(|i| i.modifiers.shift) {
             me.menu = cur.map(|c| (c, 0));
         }
         // ---- Outil interactif en cours (biseau, incrustation, coupe en boucle) : la souris règle la
         // valeur, la molette les segments, on peut taper un nombre ; clic ou Entrée valide, clic droit
         // prend la valeur par défaut, Échap annule.
+        if let Some(mut pts) = me.knife.take() {
+            // Couteau : on pose des points sur les sommets ou les arêtes ; chaque segment coupe la face
+            // qu'il traverse. Clic : poser ; Retour arrière : enlever le dernier ; Entrée, Espace ou clic
+            // droit : couper ; Échap : annuler
+            use crate::meshedit::KnifePoint;
+            let at_screen = |me: &MeshEdit, kp: &KnifePoint| -> Option<Pos2> {
+                match *kp {
+                    KnifePoint::Vert(v) => project(to_world(me.mesh.pos[v as usize])),
+                    KnifePoint::Edge(a, b, t) => {
+                        let (pa, pb) = (me.mesh.pos[a as usize], me.mesh.pos[b as usize]);
+                        project(to_world([0, 1, 2].map(|k| pa[k] + (pb[k] - pa[k]) * t)))
+                    }
+                }
+            };
+            let target = cur.and_then(|at| {
+                let vert = (0..me.mesh.pos.len()).filter_map(|i| project_v(me, i).map(|s| (i, (s - at).length()))).filter(|x| x.1 < 6.0).min_by(|a, b| a.1.total_cmp(&b.1));
+                if let Some((i, _)) = vert {
+                    return Some(KnifePoint::Vert(i as u32));
+                }
+                me.mesh.edges().into_iter().filter_map(|(a, b)| {
+                    let (sa, sb) = (project_v(me, a as usize)?, project_v(me, b as usize)?);
+                    let ab = sb - sa;
+                    let t = ((at - sa).dot(ab) / ab.length_sq().max(1e-6)).clamp(0.02, 0.98);
+                    let d = (sa + ab * t - at).length();
+                    (d < 14.0).then_some((KnifePoint::Edge(a, b, t), d))
+                }).min_by(|x, y| x.1.total_cmp(&y.1)).map(|x| x.0)
+            });
+            let (back, finish, esc) = ui.input(|i| (i.key_pressed(Key::Backspace), i.key_pressed(Key::Enter) || i.key_pressed(Key::Space), i.key_pressed(Key::Escape)));
+            if back {
+                pts.pop();
+            }
+            if pressed {
+                if let Some(t) = target {
+                    pts.push(t);
+                }
+                me.skip_click = true;
+            }
+            if esc {
+                me.skip_click = true;
+            } else if finish || secondary {
+                me.skip_click = true;
+                let mut m = me.mesh.clone();
+                match m.knife(&pts) {
+                    Some(sl) => {
+                        snapshot(me);
+                        me.mesh = m;
+                        me.sel = sl;
+                        dirty = true;
+                    }
+                    None => self.capture_msg = Some(crate::i18n::t("couteau : chaque segment doit traverser une face (d'un bord à l'autre)")),
+                }
+            } else {
+                let painter = ui.painter_at(rect);
+                let col = Color32::from_rgb(120, 230, 120);
+                let scr: Vec<Pos2> = pts.iter().filter_map(|k| at_screen(me, k)).collect();
+                for w in scr.windows(2) {
+                    painter.line_segment([w[0], w[1]], Stroke::new(2.0, col));
+                }
+                for s in &scr {
+                    painter.circle_filled(*s, 3.5, col);
+                }
+                let tgt = target.as_ref().and_then(|k| at_screen(me, k));
+                if let (Some(last), Some(c)) = (scr.last(), tgt.or(cur)) {
+                    painter.line_segment([*last, c], Stroke::new(1.2, col.gamma_multiply(0.7)));
+                }
+                if let Some(t) = tgt {
+                    painter.circle_stroke(t, 6.0, Stroke::new(1.5, Color32::WHITE));
+                }
+                tool_hint(ui, rect, format!("{}   ·   {}   ·   {}   ·   {}   ·   {}", crate::i18n::t("couteau"), crate::i18n::t("clic : poser un point sur un sommet ou une arête"), crate::i18n::t("Retour arrière : enlever le dernier"), crate::i18n::t("Entrée ou clic droit : couper"), crate::i18n::t("Échap : annuler")));
+                me.knife = Some(pts);
+                ui.ctx().request_repaint();
+            }
+        } else
         if let Some(cuts) = me.loopcut {
             // Coupe en boucle, premier temps : l'anneau sous la souris se montre, la molette règle le nombre
             let wheel = ui.input(wheel_of);
@@ -3485,6 +3577,14 @@ impl Viewer {
             if ui.input(|i| i.key_pressed(Key::O) && !i.modifiers.any()) {
                 me.prop = !me.prop;
             }
+            // G une seconde fois : les sommets glissent le long de leurs arêtes
+            let mut kind = kind;
+            if kind == 0 && ui.input(|i| i.key_pressed(Key::G) && !i.modifiers.any()) {
+                kind = 3;
+            }
+            // Ctrl : par crans (distance ronde, 5°, dixièmes)
+            let snap = ui.input(|i| i.modifiers.command);
+            let step = 10f32.powf((longest * 0.02).log10().floor());
             for (kk, k) in [(Key::X, 0usize), (Key::Y, 2), (Key::Z, 1)] {
                 if ui.input(|i| i.key_pressed(kk)) {
                     let mut e = [0.0f32; 3];
@@ -3524,6 +3624,7 @@ impl Viewer {
                                 }
                                 None => mv,
                             };
+                            let mv = if snap { mv.map(|x| (x / step).round() * step) } else { mv };
                             [w[0] + mv[0], w[1] + mv[1], w[2] + mv[2]]
                         }
                         1 => {
@@ -3540,6 +3641,7 @@ impl Viewer {
                                 turn += std::f32::consts::TAU;
                             }
                             let th = -turn * if dot(a, toward) >= 0.0 { 1.0 } else { -1.0 };
+                            let th = if snap { (th.to_degrees() / 5.0).round() * 5f32.to_radians() } else { th };
                             // Rotation autour de l'axe (formule de Rodrigues)
                             let v = sub(*w, pivot);
                             let (cs, sn) = (th.cos(), th.sin());
@@ -3548,6 +3650,7 @@ impl Viewer {
                         }
                         _ => {
                             let f = ((cur - center).length() / (from - center).length().max(8.0)).max(0.001);
+                            let f = if snap { ((f * 10.0).round() / 10.0).max(0.1) } else { f };
                             let v = sub(*w, pivot);
                             match axis {
                                 Some(a) => {
@@ -3559,11 +3662,58 @@ impl Viewer {
                         }
                     }
                 };
-                for (&i, w) in chosen.iter().zip(&worlds) {
-                    me.mesh.pos[i] = to_local(xf(w));
+                if kind == 3 {
+                    // Glisser : chaque sommet suit l'arête (vers un voisin non choisi) qui va le plus
+                    // dans le sens de la souris, sans jamais la quitter
+                    let nb = me.mesh.neighbors();
+                    let dn = if d.length() > 1.0 { d.normalized() } else { egui::Vec2::ZERO };
+                    for &i in &chosen {
+                        me.mesh.pos[i] = orig[i];
+                        let Some(si) = project(to_world(orig[i])) else { continue };
+                        let best = nb[i].iter().filter(|&&j| !me.sel.get(j as usize).copied().unwrap_or(false)).filter_map(|&j| {
+                            let sj = project(to_world(orig[j as usize]))?;
+                            let e = sj - si;
+                            (e.length() > 0.5).then(|| (j, e, e.normalized().dot(dn)))
+                        }).max_by(|a, b| a.2.total_cmp(&b.2));
+                        if let Some((j, e, al)) = best {
+                            if al > 0.0 {
+                                let t = (d.dot(e) / e.length_sq()).clamp(0.0, 1.0);
+                                let t = if snap { (t * 10.0).round() / 10.0 } else { t };
+                                let pj = orig[j as usize];
+                                me.mesh.pos[i] = [0, 1, 2].map(|k| orig[i][k] + (pj[k] - orig[i][k]) * t);
+                            }
+                        }
+                    }
+                } else {
+                    for (&i, w) in chosen.iter().zip(&worlds) {
+                        me.mesh.pos[i] = to_local(xf(w));
+                    }
+                }
+                // Miroir X : le reflet de chaque sommet bouge en même temps, de l'autre côté
+                if me.mirror {
+                    if me.mirror_m.0 != Some(from) || me.mirror_m.1.len() != orig.len() {
+                        let mut tmp = me.mesh.clone();
+                        tmp.pos = orig.clone();
+                        me.mirror_m = (Some(from), tmp.mirror_map());
+                    }
+                    for i in 0..orig.len() {
+                        if !me.sel.get(i).copied().unwrap_or(false) {
+                            continue;
+                        }
+                        if let Some(j) = me.mirror_m.1[i] {
+                            let j = j as usize;
+                            if j == i {
+                                // Sur le plan de symétrie : il y reste
+                                me.mesh.pos[i][0] = 0.0;
+                            } else if !me.sel.get(j).copied().unwrap_or(false) {
+                                let q = me.mesh.pos[i];
+                                me.mesh.pos[j] = [-q[0], q[1], q[2]];
+                            }
+                        }
+                    }
                 }
                 // Édition proportionnelle : les sommets voisins suivent, de moins en moins avec la distance
-                if me.prop {
+                if me.prop && kind != 3 {
                     let r = me.prop_r.max(1e-6);
                     if me.prop_d.0 != Some(from) || me.prop_d.1.len() != orig.len() {
                         let mut dmin = vec![f32::MAX; orig.len()];
@@ -3605,7 +3755,7 @@ impl Viewer {
             } else {
                 me.modal = Some((kind, axis, orig, from));
             }
-            let what = [crate::i18n::t("déplacer"), crate::i18n::t("tourner"), crate::i18n::t("taille")][kind.min(2) as usize].clone();
+            let what = [crate::i18n::t("déplacer"), crate::i18n::t("tourner"), crate::i18n::t("taille"), crate::i18n::t("glisser (G G)")][kind.min(3) as usize].clone();
             // Axe imposé : sa ligne traverse la vue, à sa couleur
             if let Some(e) = axis {
                 let k = (0..3).max_by(|a, b| e[*a].abs().total_cmp(&e[*b].abs())).unwrap_or(0);
@@ -3621,7 +3771,7 @@ impl Viewer {
                     last = q;
                 }
             }
-            let prop_txt = if me.prop { format!("   ·   {} {:.3} ({})", crate::i18n::t("proportionnel, rayon"), me.prop_r, crate::i18n::t("molette")) } else { format!("   ·   O : {}", crate::i18n::t("proportionnel")) };
+            let prop_txt = format!("{}   ·   Ctrl : {}", if kind == 0 { format!("   ·   G : {}", crate::i18n::t("glisser")) } else { String::new() }, crate::i18n::t("par crans")) + &if me.prop { format!("   ·   {} {:.3} ({})", crate::i18n::t("proportionnel, rayon"), me.prop_r, crate::i18n::t("molette")) } else { format!("   ·   O : {}", crate::i18n::t("proportionnel")) };
             tool_hint(ui, rect, format!("{what}   ·   X Y Z : {}{prop_txt}   ·   {}   ·   {}", crate::i18n::t("imposer un axe"), crate::i18n::t("clic : valider"), crate::i18n::t("Échap : annuler")));
             ui.ctx().request_repaint();
         } else if hovered || me.boxing.is_some() || me.trigger.is_some() {
@@ -3678,6 +3828,47 @@ impl Viewer {
                         dirty = true;
                     }
                     Err(e) => self.capture_msg = Some(crate::i18n::t(e)),
+                }
+            }
+            // K : couteau
+            if key(Key::K) || trig == Some("couteau") {
+                me.knife = Some(vec![]);
+            }
+            // V : déchirer les sommets choisis (les faces du côté de la souris partent avec la copie) ;
+            // Y : détacher les faces choisies. Puis on les déplace aussitôt (G)
+            let rip = (key(Key::V) || trig == Some("déchirer")) && any;
+            let det = (key(Key::Y) || trig == Some("détacher")) && any;
+            if rip || det {
+                let mut m = me.mesh.clone();
+                let r = if det {
+                    m.detach(&me.sel)
+                } else {
+                    let ch: Vec<usize> = (0..m.pos.len()).filter(|&i| me.sel[i]).collect();
+                    let n = ch.len().max(1) as f32;
+                    let sc = ch.iter().filter_map(|&i| project(to_world(m.pos[i]))).fold(egui::Vec2::ZERO, |a, s| a + s.to_vec2() / n).to_pos2();
+                    let toward = cur.unwrap_or(rc) - sc;
+                    let faces: Vec<usize> = (0..m.polys.len()).filter(|&f| {
+                        let p = &m.polys[f];
+                        if !p.iter().any(|&v| me.sel[v as usize]) {
+                            return false;
+                        }
+                        let c = p.len() as f32;
+                        let fc = p.iter().filter_map(|&v| project(to_world(m.pos[v as usize]))).fold(egui::Vec2::ZERO, |a, s| a + s.to_vec2() / c).to_pos2();
+                        (fc - sc).dot(toward) > 0.0
+                    }).collect();
+                    m.rip_faces(&faces, Some(&me.sel))
+                };
+                match r {
+                    Some(sl) => {
+                        snapshot(me);
+                        me.mesh = m;
+                        me.sel = sl;
+                        if let Some(at) = cur {
+                            me.modal = Some((0, None, me.mesh.pos.clone(), at));
+                        }
+                        dirty = true;
+                    }
+                    None => self.capture_msg = Some(crate::i18n::t(if det { "détacher : choisis au moins une face" } else { "déchirer : rien à séparer ici (choisis des sommets entre des faces)" })),
                 }
             }
             // P : les faces choisies deviennent un autre objet
@@ -3996,7 +4187,7 @@ impl Viewer {
                         ("SOMMETS", &[("fusionner au centre", "M"), ("fusionner par distance", ""), ("biseau des sommets", "Ctrl+Maj+B"), ("lisser les sommets", "")]),
                         ("ARÊTES", &[("biseau", "Ctrl+B"), ("coupe en boucle", "Ctrl+R"), ("pont entre boucles", "")]),
                         ("FACES", &[("extruder", "E"), ("incruster", "I"), ("subdiviser", ""), ("remplir", "F")]),
-                        ("MAILLAGE", &[("séparer la sélection", "P"), ("supprimer ou dissoudre…", "X")]),
+                        ("MAILLAGE", &[("couteau", "K"), ("déchirer", "V"), ("détacher", "Y"), ("séparer la sélection", "P"), ("supprimer ou dissoudre…", "X")]),
                         ("SÉLECTION", &[("tout choisir", "A"), ("inverser la sélection", "Ctrl+I")]),
                     ];
                     let del: &[(&str, &[(&'static str, &str)])] = &[
@@ -5594,6 +5785,13 @@ impl Viewer {
                                     m.prop = !m.prop;
                                 }
                             }
+                            let on = self.mesh.as_ref().is_some_and(|m| m.mirror);
+                            let mb = egui::Button::new(egui::RichText::new("⇋").size(13.0).color(if on { p.on_accent } else { p.text })).fill(if on { p.accent } else { p.panel }).min_size(egui::vec2(24.0, 20.0));
+                            if ui.add_enabled(self.mesh.is_some(), mb).on_hover_text(crate::i18n::t("miroir X : en déplaçant un sommet, son reflet de l'autre côté de l'objet suit")).clicked() {
+                                if let Some(m) = self.mesh.as_mut() {
+                                    m.mirror = !m.mirror;
+                                }
+                            }
                             // Point de pivot (« . » ouvre aussi le menu circulaire)
                             let names = ["point médian", "curseur 3D", "origines individuelles", "objet actif"];
                             let icons = ["⊙", "⊕", "⁘", "◉"];
@@ -6464,6 +6662,8 @@ impl Viewer {
                 let (confirm, cancel, cur) = ui.input(|i| (i.pointer.primary_pressed() || i.key_pressed(Key::Enter), i.pointer.secondary_pressed() || i.key_pressed(Key::Escape), i.pointer.hover_pos().or(i.pointer.latest_pos())));
                 let world = self.scene.as_ref().filter(|s| sel < s.objects.len()).map(|s| s.from_parent(sel, orig.0));
                 let (pivot, cursor) = (self.pivot, self.cursor3d);
+                let snap = ui.input(|i| i.modifiers.command);
+                let step = 10f32.powf((longest * 0.02).log10().floor());
                 let has_parent = self.scene.as_ref().is_some_and(|s| s.parent_of(sel).is_some());
                 if let (Some(scene), Some(cur), Some(world)) = (self.scene.as_mut(), cur, world) {
                     if let Some(o) = scene.objects.get_mut(sel) {
@@ -6481,6 +6681,8 @@ impl Viewer {
                                     let per_px = if cam.ortho { cam.dist / focal } else { (-q[2]).max(0.05) / focal } * longest;
                                     let (right, up) = (cam.unrotate([1.0, 0.0, 0.0]), cam.unrotate([0.0, 1.0, 0.0]));
                                     let mv = [0, 1, 2].map(|k| (right[k] * d.x - up[k] * d.y) * per_px);
+                                    // Ctrl : par crans ronds
+                                    let mv = if snap { mv.map(|x| (x / step).round() * step) } else { mv };
                                     match axis {
                                         Some(k) => o.pos[k] += mv[k],
                                         None => o.pos = [orig.0[0] + mv[0], orig.0[1] + mv[1], orig.0[2] + mv[2]],
@@ -6497,6 +6699,9 @@ impl Viewer {
                                     } else if turn < -180.0 {
                                         turn += 360.0;
                                     }
+                                    if snap {
+                                        turn = (turn / 5.0).round() * 5.0;
+                                    }
                                     o.rot[k] = orig.1[k] - turn * if toward[k] >= 0.0 { 1.0 } else { -1.0 };
                                     // Pivot au curseur 3D : la position tourne aussi autour de lui
                                     if pivot == 1 && !has_parent {
@@ -6512,6 +6717,7 @@ impl Viewer {
                                 }
                                 _ => {
                                     let f = ((cur - center).length() / (from - center).length().max(8.0)).max(0.001);
+                                    let f = if snap { ((f * 10.0).round() / 10.0).max(0.1) } else { f };
                                     match axis {
                                         Some(k) => o.scale[k] = orig.2[k] * f,
                                         None => o.scale = [orig.2[0] * f, orig.2[1] * f, orig.2[2] * f],

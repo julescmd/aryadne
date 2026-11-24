@@ -1699,5 +1699,18 @@
   "pont : choisis deux boucles de bord (deux trous)": "bridge: select two border loops (two holes)",
   "pont : les deux boucles doivent avoir le même nombre de sommets": "bridge: both loops need the same number of vertices",
   "joindre à l'actif": "join into active",
-  "tourner autour de la sélection": "orbit around selection"
+  "tourner autour de la sélection": "orbit around selection",
+  "glisser (G G)": "slide (G G)",
+  "glisser": "slide",
+  "par crans": "snap",
+  "couteau": "knife",
+  "déchirer": "rip",
+  "détacher": "split",
+  "clic : poser un point sur un sommet ou une arête": "click: place a point on a vertex or edge",
+  "Retour arrière : enlever le dernier": "Backspace: remove the last",
+  "Entrée ou clic droit : couper": "Enter or right click: cut",
+  "couteau : chaque segment doit traverser une face (d'un bord à l'autre)": "knife: each segment must cross a face (edge to edge)",
+  "détacher : choisis au moins une face": "split: select at least one face",
+  "déchirer : rien à séparer ici (choisis des sommets entre des faces)": "rip: nothing to tear here (select vertices between faces)",
+  "miroir X : en déplaçant un sommet, son reflet de l'autre côté de l'objet suit": "X mirror: moving a vertex also moves its mirror on the other side"
 }
