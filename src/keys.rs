@@ -131,7 +131,7 @@ pub fn menu(ui: &mut egui::Ui, current: Option<Ease>, bezier: bool) -> Option<Op
     let mut out = None;
     ui.set_max_width(210.0);
     ui.label(egui::RichText::new(crate::i18n::t("Vers la clé suivante")).size(11.0).color(p.muted));
-    let mut row = |ui: &mut egui::Ui, label: String, ease: Option<Ease>, on: bool| -> bool {
+    let row = |ui: &mut egui::Ui, label: String, ease: Option<Ease>, on: bool| -> bool {
         let (r, resp) = ui.allocate_exact_size(vec2(200.0, 26.0), egui::Sense::click());
         if resp.hovered() || on {
             ui.painter().rect_filled(r, 3.0, if on { p.selection } else { p.raised });
