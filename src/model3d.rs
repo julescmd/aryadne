@@ -2179,6 +2179,12 @@ fn split_sharp(pos: &mut Vec<V3>, tris: &mut [[u32; 3]], limit_deg: f32) {
 
 /// Cadre d'une scène : au moins 12 unités de côté autour de l'origine, pour qu'un cube neuf
 /// arrive à une taille raisonnable sur la grille plutôt que de remplir toute la vue.
+/// Cadrage serré d'un modèle ouvert seul : le modèle et une petite marge (pas le minimum d'une scène)
+pub fn tight_bounds(lo: V3, hi: V3) -> (V3, V3) {
+    let m = ((hi[0] - lo[0]).max(hi[1] - lo[1]).max(hi[2] - lo[2]) * 0.15).max(1e-3);
+    ([lo[0] - m, lo[1] - m, lo[2] - m], [hi[0] + m, hi[1] + m, hi[2] + m])
+}
+
 pub fn scene_bounds(lo: V3, hi: V3) -> (V3, V3) {
     ([lo[0].min(-6.0), lo[1].min(-6.0), lo[2].min(-6.0)], [hi[0].max(6.0), hi[1].max(6.0), hi[2].max(6.0)])
 }
@@ -2414,6 +2420,8 @@ pub struct Viewer {
     mesh: Option<MeshEdit>,
     /// Demande d'entrer ou de sortir du mode édition (bouton du panneau)
     mesh_toggle: bool,
+    /// Scène créée pour un modèle ouvert seul : la vue cadre le modèle, pas une scène de 12 m
+    tight_frame: bool,
     /// Mode édition : voir et choisir aussi les sommets cachés derrière le maillage (rayons X, Alt+Z)
     xray: bool,
     want_anim: bool,
@@ -2531,6 +2539,11 @@ impl Viewer {
         let mut v = Self::open_with(out, ctx, move || crate::scene::build(&sc2, &p).0);
         v.scene = Some(sc);
         v.scene_sel = Some(0);
+        // Comme une scène lue du disque : couleurs des objets, et un premier passage qui cadre la vue
+        // sur la scène (sinon le premier cadrage arrivait en mode édition, objet caché : vue trop large)
+        v.look.material = Material::Color;
+        v.scene_dirty = true;
+        v.tight_frame = true;
         v
     }
 
@@ -2594,6 +2607,7 @@ impl Viewer {
             box_sel: None,
             mesh: None,
             mesh_toggle: false,
+            tight_frame: false,
             want_anim: false,
             anim_job: None,
             vp_rect: None,
@@ -4633,7 +4647,7 @@ impl Viewer {
                     Ok(mut m) => {
                         match self.scene_frame {
                             Some((lo, hi)) => (m.min, m.max) = (lo, hi),
-                            None => self.scene_frame = Some(scene_bounds(m.min, m.max)),
+                            None => self.scene_frame = Some(if self.tight_frame { tight_bounds(m.min, m.max) } else { scene_bounds(m.min, m.max) }),
                         }
                         State::Ready(std::sync::Arc::new(m))
                     }
@@ -4649,7 +4663,7 @@ impl Viewer {
             }
         }
         if let (None, State::Ready(m)) = (self.scene_frame, &self.state) {
-            self.scene_frame = Some(scene_bounds(m.min, m.max));
+            self.scene_frame = Some(if self.tight_frame { tight_bounds(m.min, m.max) } else { scene_bounds(m.min, m.max) });
         }
         let path = self.path.clone();
         let scene = self.scene.as_mut().unwrap();

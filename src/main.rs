@@ -1490,7 +1490,18 @@ impl App {
                 ui.painter().set(bg, egui::Shape::Rect(egui::epaint::RectShape::new(whole, 2.0, p.raised, egui::Stroke::new(1.0, if on { p.line } else { egui::Color32::TRANSPARENT }), egui::StrokeKind::Inside)));
             }
             let dot = egui::pos2(rect.left() + 10.0 + 4.0, rect.center().y);
-            ui.painter().circle_filled(dot, 4.0, color);
+            // Le point dit l'état de l'étape : plein si des fichiers y sont ouverts, un anneau si l'un
+            // n'est pas encore enregistré, creux si rien n'est ouvert
+            let open_n = if on { self.docs.len() } else { self.ws.list[i].tabs.len() };
+            let dirty = on && self.docs.iter().any(|d| d.dirty_since.is_some());
+            if open_n > 0 {
+                ui.painter().circle_filled(dot, 4.0, color);
+            } else {
+                ui.painter().circle_stroke(dot, 3.4, egui::Stroke::new(1.3, color));
+            }
+            if dirty {
+                ui.painter().circle_stroke(dot, 6.5, egui::Stroke::new(1.2, color));
+            }
             let text_col = if on || hov { p.text } else { p.muted };
             ui.painter().galley_with_override_text_color(egui::pos2(dot.x + 4.0 + 7.0, rect.center().y - galley.size().y / 2.0), galley, text_col);
             if on {
