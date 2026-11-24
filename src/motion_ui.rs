@@ -517,17 +517,29 @@ impl Editor {
         let mut handles: Vec<(Pos2, u8)> = vec![];
         if let Some(i) = self.sel.filter(|&i| i < self.compo.layers.len()) {
             let lay = &self.compo.layers[i];
+            // Le trajet est dans le repère du parent : on le ramène dans la composition, instant par instant
             if lay.pos.animated() {
                 let (a, b) = (lay.pos.keys[0].t, lay.pos.keys[lay.pos.keys.len() - 1].t);
                 let n = ((b - a) * self.compo.fps).ceil().max(1.0) as usize;
-                let pts: Vec<Pos2> = (0..=n).map(|k| to_screen(lay.pos.at(a + (b - a) * k as f32 / n as f32))).collect();
+                let at = |t: f32, v: [f32; 2]| to_screen(self.compo.parent_world(i, t).apply(v));
+                let pts: Vec<Pos2> = (0..=n).map(|k| {
+                    let t = a + (b - a) * k as f32 / n as f32;
+                    at(t, lay.pos.at(t))
+                }).collect();
                 painter.extend(egui::Shape::dashed_line(&pts, Stroke::new(1.2, p.warning), 2.0, 4.0));
                 for k in &lay.pos.keys {
-                    painter.circle_filled(to_screen(k.v), 3.0, p.warning);
+                    painter.circle_filled(at(k.t, k.v), 3.0, p.warning);
                 }
             }
+            // Le parent, relié d'un trait
+            if let Some(pj) = lay.parent.and_then(|id| self.compo.index_of(id)) {
+                let a = to_screen(self.compo.world(i, self.time).apply([0.0, 0.0]));
+                let b = to_screen(self.compo.world(pj, self.time).apply([0.0, 0.0]));
+                painter.extend(egui::Shape::dashed_line(&[a, b], Stroke::new(1.0, p.info), 4.0, 4.0));
+                painter.circle_stroke(b, 4.0, Stroke::new(1.0, p.info));
+            }
             if lay.live(self.time) || lay.visible {
-                let c = motion::corners(lay, self.time, &mut self.cache).map(to_screen);
+                let c = motion::corners(&self.compo, i, self.time, &mut self.cache).map(to_screen);
                 let mut pts = c.to_vec();
                 pts.push(c[0]);
                 painter.extend(egui::Shape::dashed_line(&pts, Stroke::new(1.0, p.accent), 3.0, 3.0));
@@ -535,7 +547,7 @@ impl Editor {
                     handles.push((q, 0));
                 }
                 let top = pos2((c[0].x + c[1].x) / 2.0, (c[0].y + c[1].y) / 2.0);
-                let center = to_screen(lay.pos.at(self.time));
+                let center = to_screen(self.compo.world(i, self.time).apply([0.0, 0.0]));
                 let dir = (top - center).normalized();
                 let rot = top + dir * 22.0;
                 painter.line_segment([top, rot], Stroke::new(1.0, p.accent));
@@ -570,7 +582,7 @@ impl Editor {
                         let handle = handles.iter().find(|(q, _)| q.distance(m) < 9.0).map(|(_, k)| *k);
                         if let (Some(k), Some(i)) = (handle, self.sel) {
                             let lay = &self.compo.layers[i];
-                            let c = lay.pos.at(self.time);
+                            let c = self.compo.world(i, self.time).apply([0.0, 0.0]);
                             let d = ((cp[0] - c[0]).hypot(cp[1] - c[1])).max(1.0);
                             self.view_drag = Some(if k == 0 {
                                 ViewDrag::Scale { from: lay.scale.at(self.time), d0: d }
@@ -596,21 +608,24 @@ impl Editor {
                     ViewDrag::Draw { b, .. } => *b = cp,
                     ViewDrag::Move { start, from } => {
                         if let Some(i) = self.sel {
-                            let mut v = [from[0] + (m.x - start.x) / s, from[1] + (m.y - start.y) / s];
+                            let mut dv = [(m.x - start.x) / s, (m.y - start.y) / s];
                             if ui.input(|i| i.modifiers.shift) {
-                                if (m.x - start.x).abs() > (m.y - start.y).abs() {
-                                    v[1] = from[1];
+                                if dv[0].abs() > dv[1].abs() {
+                                    dv[1] = 0.0;
                                 } else {
-                                    v[0] = from[0];
+                                    dv[0] = 0.0;
                                 }
                             }
+                            // Le déplacement à l'écran, ramené dans le repère du parent
+                            let dv = self.compo.parent_world(i, t).inverse_vec(dv).unwrap_or(dv);
+                            let v = [from[0] + dv[0], from[1] + dv[1]];
                             self.compo.layers[i].pos.set(t, v);
                             self.rev += 1;
                         }
                     }
                     ViewDrag::Scale { from, d0 } => {
                         if let Some(i) = self.sel {
-                            let c = self.compo.layers[i].pos.at(t);
+                            let c = self.compo.world(i, t).apply([0.0, 0.0]);
                             let f = (cp[0] - c[0]).hypot(cp[1] - c[1]) / *d0;
                             self.compo.layers[i].scale.set(t, [from[0] * f, from[1] * f]);
                             self.rev += 1;
@@ -618,7 +633,7 @@ impl Editor {
                     }
                     ViewDrag::Rotate { from, a0 } => {
                         if let Some(i) = self.sel {
-                            let c = self.compo.layers[i].pos.at(t);
+                            let c = self.compo.world(i, t).apply([0.0, 0.0]);
                             let mut a = *from + ((cp[1] - c[1]).atan2(cp[0] - c[0]) - *a0).to_degrees();
                             if ui.input(|i| i.modifiers.shift) {
                                 a = (a / 15.0).round() * 15.0;
@@ -717,6 +732,7 @@ impl Editor {
                 if let Some(i) = sel {
                     let mut d = self.compo.layers[i].clone();
                     d.name = self.compo.fresh_name(&d.name);
+                    d.id = motion::new_id();
                     self.compo.layers.insert(i, d);
                     self.changed();
                 }
@@ -800,6 +816,7 @@ impl Editor {
             self.insp_tab = k;
         }
         let mut changed = false;
+        let mut new_parent: Option<Option<u64>> = None;
         egui::Frame::new().inner_margin(12).show(ui, |ui| {
             if self.insp_tab == 1 {
                 changed |= self.compo_settings(ui);
@@ -810,6 +827,9 @@ impl Editor {
                 return;
             };
             let t = self.time;
+            // Parents possibles : ni lui-même, ni ses descendants
+            let banned = self.compo.descendants(i);
+            let others: Vec<(u64, String)> = self.compo.layers.iter().enumerate().filter(|(k, _)| *k != i && !banned.contains(k)).map(|(_, l)| (l.id, l.name.clone())).collect();
             let lay = &mut self.compo.layers[i];
             ui.horizontal(|ui| {
                 ui.label(egui::RichText::new(layer_icon(&lay.kind)).size(15.0).color(layer_color(&lay.kind)));
@@ -978,7 +998,71 @@ impl Editor {
                 changed |= ui.add(egui::DragValue::new(&mut lay.end).speed(0.02).range(lay.start..=d.max(lay.start)).max_decimals(2).prefix(crate::i18n::t("fin ")).suffix(" s")).changed();
             });
             changed |= ui.checkbox(&mut lay.visible, crate::i18n::t("Visible")).changed();
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new(crate::i18n::t("Parent")).color(p.muted));
+                let cur = lay.parent.and_then(|id| others.iter().find(|o| o.0 == id)).map(|o| o.1.clone()).unwrap_or_else(|| crate::i18n::t("aucun"));
+                egui::ComboBox::from_id_salt("motion-parent").selected_text(cur).show_ui(ui, |ui| {
+                    if ui.selectable_label(lay.parent.is_none(), crate::i18n::t("aucun")).clicked() {
+                        new_parent = Some(None);
+                    }
+                    for (id, name) in &others {
+                        if ui.selectable_label(lay.parent == Some(*id), name).clicked() {
+                            new_parent = Some(Some(*id));
+                        }
+                    }
+                });
+            }).response.on_hover_text(crate::i18n::t("Le calque suit son parent : déplacer, tourner ou agrandir le parent l'emporte avec lui"));
+            section(ui, "Style");
+            let st = &mut lay.style;
+            let mut on = st.stroke.is_some();
+            if ui.checkbox(&mut on, crate::i18n::t("Contour")).changed() {
+                st.stroke = on.then(|| motion::StrokeStyle { width: 6.0, color: [0x14, 0x10, 0x1a] });
+                changed = true;
+            }
+            if let Some(sk) = &mut st.stroke {
+                ui.horizontal(|ui| {
+                    changed |= ui.add(egui::DragValue::new(&mut sk.width).speed(0.2).range(0.5..=100.0).prefix(crate::i18n::t("épaisseur ")).suffix(" px")).changed();
+                    changed |= ui.color_edit_button_srgb(&mut sk.color).changed();
+                });
+            }
+            let mut on = st.shadow.is_some();
+            if ui.checkbox(&mut on, crate::i18n::t("Ombre portée")).changed() {
+                st.shadow = on.then(|| motion::Shadow { dx: 8.0, dy: 12.0, blur: 18.0, color: [0, 0, 0], opacity: 0.6 });
+                changed = true;
+            }
+            if let Some(sh) = &mut st.shadow {
+                ui.horizontal(|ui| {
+                    changed |= ui.add(egui::DragValue::new(&mut sh.dx).speed(0.5).range(-500.0..=500.0).prefix("x ")).changed();
+                    changed |= ui.add(egui::DragValue::new(&mut sh.dy).speed(0.5).range(-500.0..=500.0).prefix("y ")).changed();
+                    changed |= ui.color_edit_button_srgb(&mut sh.color).changed();
+                });
+                ui.horizontal(|ui| {
+                    changed |= ui.add(egui::DragValue::new(&mut sh.blur).speed(0.5).range(0.0..=200.0).prefix(crate::i18n::t("flou ")).suffix(" px")).changed();
+                    let mut o = sh.opacity * 100.0;
+                    if ui.add(egui::DragValue::new(&mut o).speed(0.5).range(0.0..=100.0).max_decimals(0).suffix(" %")).changed() {
+                        sh.opacity = o / 100.0;
+                        changed = true;
+                    }
+                });
+            }
+            let mut on = st.glow.is_some();
+            if ui.checkbox(&mut on, crate::i18n::t("Lueur")).changed() {
+                st.glow = on.then(|| motion::Glow { radius: 30.0, color: [0xcc, 0xac, 0xb9], strength: 1.2 });
+                changed = true;
+            }
+            if let Some(g) = &mut st.glow {
+                ui.horizontal(|ui| {
+                    changed |= ui.add(egui::DragValue::new(&mut g.radius).speed(0.5).range(1.0..=300.0).prefix(crate::i18n::t("rayon ")).suffix(" px")).changed();
+                    changed |= ui.add(egui::DragValue::new(&mut g.strength).speed(0.02).range(0.1..=4.0).prefix(crate::i18n::t("force "))).changed();
+                    changed |= ui.color_edit_button_srgb(&mut g.color).changed();
+                });
+            }
         });
+        if let (Some(np), Some(i)) = (new_parent, self.sel) {
+            let t = self.time;
+            self.compo.set_parent(i, np, t);
+            changed = true;
+        }
         if changed {
             self.changed();
         }

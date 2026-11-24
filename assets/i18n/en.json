@@ -2167,5 +2167,15 @@
   "MIDI (.mid)": "MIDI (.mid)",
   "piste(s) importée(s)": "track(s) imported",
   "notes choisies": "notes selected",
-  "Espace lire · L reprendre · double-clic : nouvelle région · cadre : choisir des notes · Ctrl+A/C/X/V · ↑↓ transposer (Maj : octave) · ←→ décaler · Ctrl+molette : zoom": "Space play · L repeat · double-click: new region · box: select notes · Ctrl+A/C/X/V · ↑↓ transpose (Shift: octave) · ←→ shift · Ctrl+wheel: zoom"
+  "Espace lire · L reprendre · double-clic : nouvelle région · cadre : choisir des notes · Ctrl+A/C/X/V · ↑↓ transposer (Maj : octave) · ←→ décaler · Ctrl+molette : zoom": "Space play · L repeat · double-click: new region · box: select notes · Ctrl+A/C/X/V · ↑↓ transpose (Shift: octave) · ←→ shift · Ctrl+wheel: zoom",
+  "Parent": "Parent",
+  "Le calque suit son parent : déplacer, tourner ou agrandir le parent l'emporte avec lui": "The layer follows its parent: moving, rotating or scaling the parent carries it along",
+  "Style": "Style",
+  "Contour": "Stroke",
+  "épaisseur ": "width ",
+  "Ombre portée": "Drop shadow",
+  "flou ": "blur ",
+  "Lueur": "Glow",
+  "rayon ": "radius ",
+  "force ": "strength "
 }

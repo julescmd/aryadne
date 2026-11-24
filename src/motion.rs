@@ -243,6 +243,69 @@ pub struct Layer {
     pub opacity: Track,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reveal: Option<Reveal>,
+    /// Identifiant stable (pour la parenté)
+    #[serde(default = "new_id")]
+    pub id: u64,
+    /// Le calque suit ce parent (son identifiant) : sa position, son échelle et sa rotation s'ajoutent
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<u64>,
+    #[serde(default, skip_serializing_if = "Style::is_plain")]
+    pub style: Style,
+}
+
+pub fn new_id() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static N: AtomicU64 = AtomicU64::new(0);
+    let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos() as u64).unwrap_or(1);
+    (t ^ (N.fetch_add(1, Ordering::Relaxed).wrapping_mul(0x9E3779B97F4A7C15))) | 1
+}
+
+/// Contour, ombre portée et lueur d'un calque
+#[derive(Clone, PartialEq, Serialize, Deserialize, Debug, Default)]
+pub struct Style {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stroke: Option<StrokeStyle>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shadow: Option<Shadow>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub glow: Option<Glow>,
+}
+
+impl Style {
+    pub fn is_plain(&self) -> bool {
+        self.stroke.is_none() && self.shadow.is_none() && self.glow.is_none()
+    }
+
+    /// Marge autour du contenu, en px du calque
+    fn pad(&self) -> f32 {
+        let s = self.stroke.as_ref().map(|s| s.width).unwrap_or(0.0);
+        let sh = self.shadow.as_ref().map(|d| d.blur * 1.5 + d.dx.abs().max(d.dy.abs())).unwrap_or(0.0);
+        let g = self.glow.as_ref().map(|g| g.radius * 1.5).unwrap_or(0.0);
+        s + sh.max(g)
+    }
+}
+
+#[derive(Clone, PartialEq, Serialize, Deserialize, Debug)]
+pub struct StrokeStyle {
+    pub width: f32,
+    pub color: [u8; 3],
+}
+
+#[derive(Clone, PartialEq, Serialize, Deserialize, Debug)]
+pub struct Shadow {
+    pub dx: f32,
+    pub dy: f32,
+    pub blur: f32,
+    pub color: [u8; 3],
+    /// De 0 à 1
+    pub opacity: f32,
+}
+
+#[derive(Clone, PartialEq, Serialize, Deserialize, Debug)]
+pub struct Glow {
+    pub radius: f32,
+    pub color: [u8; 3],
+    pub strength: f32,
 }
 
 /// Les propriétés animables, dans l'ordre de l'inspecteur et de la timeline
@@ -269,6 +332,9 @@ impl Layer {
             rot: Track::new(0.0, 0.0),
             opacity: Track::new(100.0, 0.0),
             reveal: None,
+            id: new_id(),
+            parent: None,
+            style: Style::default(),
         }
     }
 
@@ -302,37 +368,78 @@ impl Layer {
         v
     }
 
-    /// Passage du repère du calque (px, origine au centre) à celui de la composition, à l'instant `t`
+    /// Passage du repère du calque (px, origine au centre) à celui de son parent (ou de la composition), à l'instant `t`
     pub fn xform(&self, t: f32) -> Xform {
         let p = self.pos.at(t);
         let s = self.scale.at(t);
         let r = self.rot.at(t)[0].to_radians();
-        Xform { pos: p, sx: s[0] / 100.0, sy: s[1] / 100.0, cos: r.cos(), sin: r.sin() }
+        let (cs, sn) = (r.cos(), r.sin());
+        let (sx, sy) = (s[0] / 100.0, s[1] / 100.0);
+        Xform { a: cs * sx, b: sn * sx, c: -sn * sy, d: cs * sy, e: p[0], f: p[1] }
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+/// Transformation affine : x' = a·x + c·y + e, y' = b·x + d·y + f
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Xform {
-    pub pos: [f32; 2],
-    pub sx: f32,
-    pub sy: f32,
-    pub cos: f32,
-    pub sin: f32,
+    pub a: f32,
+    pub b: f32,
+    pub c: f32,
+    pub d: f32,
+    pub e: f32,
+    pub f: f32,
 }
 
 impl Xform {
+    pub const ID: Xform = Xform { a: 1.0, b: 0.0, c: 0.0, d: 1.0, e: 0.0, f: 0.0 };
+
     pub fn apply(&self, l: [f32; 2]) -> [f32; 2] {
-        let (x, y) = (l[0] * self.sx, l[1] * self.sy);
-        [self.pos[0] + x * self.cos - y * self.sin, self.pos[1] + x * self.sin + y * self.cos]
+        [self.a * l[0] + self.c * l[1] + self.e, self.b * l[0] + self.d * l[1] + self.f]
+    }
+
+    /// Un déplacement (sans la translation)
+    pub fn apply_vec(&self, v: [f32; 2]) -> [f32; 2] {
+        [self.a * v[0] + self.c * v[1], self.b * v[0] + self.d * v[1]]
+    }
+
+    fn det(&self) -> f32 {
+        self.a * self.d - self.b * self.c
     }
 
     pub fn inverse(&self, w: [f32; 2]) -> Option<[f32; 2]> {
-        if self.sx.abs() < 1e-5 || self.sy.abs() < 1e-5 {
+        let det = self.det();
+        if det.abs() < 1e-9 {
             return None;
         }
-        let (dx, dy) = (w[0] - self.pos[0], w[1] - self.pos[1]);
-        let (x, y) = (dx * self.cos + dy * self.sin, -dx * self.sin + dy * self.cos);
-        Some([x / self.sx, y / self.sy])
+        let (x, y) = (w[0] - self.e, w[1] - self.f);
+        Some([(self.d * x - self.c * y) / det, (-self.b * x + self.a * y) / det])
+    }
+
+    pub fn inverse_vec(&self, v: [f32; 2]) -> Option<[f32; 2]> {
+        let det = self.det();
+        (det.abs() >= 1e-9).then(|| [(self.d * v[0] - self.c * v[1]) / det, (-self.b * v[0] + self.a * v[1]) / det])
+    }
+
+    /// self ∘ o : applique `o`, puis `self`
+    pub fn then_parent(&self, o: &Xform) -> Xform {
+        Xform {
+            a: self.a * o.a + self.c * o.b,
+            b: self.b * o.a + self.d * o.b,
+            c: self.a * o.c + self.c * o.d,
+            d: self.b * o.c + self.d * o.d,
+            e: self.a * o.e + self.c * o.f + self.e,
+            f: self.b * o.e + self.d * o.f + self.f,
+        }
+    }
+
+    /// La plus grande échelle (pour choisir la résolution du rendu)
+    pub fn max_scale(&self) -> f32 {
+        self.a.hypot(self.b).max(self.c.hypot(self.d))
+    }
+
+    /// Rotation, en degrés
+    pub fn angle(&self) -> f32 {
+        self.b.atan2(self.a).to_degrees()
     }
 }
 
@@ -372,6 +479,63 @@ impl Compo {
 
     pub fn write(&self, path: &Path) -> Result<(), String> {
         crate::vault::atomic_write(path, serde_json::to_string_pretty(self).map_err(|e| e.to_string())?).map_err(|e| e.to_string())
+    }
+
+    pub fn index_of(&self, id: u64) -> Option<usize> {
+        self.layers.iter().position(|l| l.id == id)
+    }
+
+    /// Le repère du parent d'un calque dans la composition (l'identité s'il n'en a pas)
+    pub fn parent_world(&self, i: usize, t: f32) -> Xform {
+        let mut m = Xform::ID;
+        let mut cur = self.layers.get(i).and_then(|l| l.parent);
+        // Une chaîne de parents bornée : une boucle ne bloque rien
+        for _ in 0..32 {
+            let Some(j) = cur.and_then(|id| self.index_of(id)) else { break };
+            m = self.layers[j].xform(t).then_parent(&m);
+            cur = self.layers[j].parent;
+        }
+        m
+    }
+
+    /// Le repère d'un calque dans la composition, parents compris
+    pub fn world(&self, i: usize, t: f32) -> Xform {
+        self.parent_world(i, t).then_parent(&self.layers[i].xform(t))
+    }
+
+    /// Les calques qui descendent de `i` (enfants, petits-enfants…)
+    pub fn descendants(&self, i: usize) -> Vec<usize> {
+        let mut out = vec![];
+        let mut stack = vec![self.layers[i].id];
+        while let Some(id) = stack.pop() {
+            for (k, l) in self.layers.iter().enumerate() {
+                if l.parent == Some(id) && !out.contains(&k) {
+                    out.push(k);
+                    stack.push(l.id);
+                }
+            }
+        }
+        out
+    }
+
+    /// Donne un parent au calque `i` sans qu'il bouge à l'instant `t` (ses valeurs passent dans le repère du parent)
+    pub fn set_parent(&mut self, i: usize, parent: Option<u64>, t: f32) {
+        if parent.is_some_and(|p| Some(p) == self.layers.get(i).map(|l| l.id) || self.descendants(i).iter().any(|k| self.layers[*k].id == p)) {
+            return;
+        }
+        let old = self.parent_world(i, t);
+        self.layers[i].parent = parent;
+        let new = self.parent_world(i, t);
+        let rot = old.angle() - new.angle();
+        let sc = old.max_scale() / new.max_scale().max(1e-6);
+        let l = &mut self.layers[i];
+        let conv = |v: [f32; 2]| new.inverse(old.apply(v)).unwrap_or(v);
+        l.pos.v = conv(l.pos.v);
+        l.pos.keys.iter_mut().for_each(|k| k.v = conv(k.v));
+        l.rot.v[0] += rot;
+        l.rot.keys.iter_mut().for_each(|k| k.v[0] += rot);
+        l.scale.v = [l.scale.v[0] * sc, l.scale.v[1] * sc];
+        l.scale.keys.iter_mut().for_each(|k| k.v = [k.v[0] * sc, k.v[1] * sc]);
     }
 
     pub fn frames(&self) -> u32 {
@@ -537,9 +701,9 @@ pub fn size(l: &Layer, cache: &mut Cache) -> [f32; 2] {
 }
 
 /// Les quatre coins du calque dans la composition, à l'instant `t`
-pub fn corners(l: &Layer, t: f32, cache: &mut Cache) -> [[f32; 2]; 4] {
-    let [w, h] = size(l, cache);
-    let x = l.xform(t);
+pub fn corners(c: &Compo, i: usize, t: f32, cache: &mut Cache) -> [[f32; 2]; 4] {
+    let [w, h] = size(&c.layers[i], cache);
+    let x = c.world(i, t);
     [x.apply([-w / 2.0, -h / 2.0]), x.apply([w / 2.0, -h / 2.0]), x.apply([w / 2.0, h / 2.0]), x.apply([-w / 2.0, h / 2.0])]
 }
 
@@ -552,7 +716,7 @@ pub fn pick(c: &Compo, t: f32, at: [f32; 2], cache: &mut Cache) -> Option<usize>
         }
         let [w, h] = size(l, cache);
         let pad = 6.0;
-        l.xform(t).inverse(at).is_some_and(|p| p[0].abs() <= w / 2.0 + pad && p[1].abs() <= h / 2.0 + pad)
+        c.world(i, t).inverse(at).is_some_and(|p| p[0].abs() <= w / 2.0 + pad && p[1].abs() <= h / 2.0 + pad)
     })
 }
 
@@ -649,6 +813,146 @@ fn bitmap(l: &Layer, t: f32, k: f32, cache: &mut Cache) -> Option<Bitmap> {
     }
 }
 
+/// Flou d'un masque (trois passes de moyenne glissante : presque une gaussienne)
+fn blur(mask: &mut [f32], w: usize, h: usize, r: f32) {
+    let r = (r / 2.0).round() as usize;
+    if r == 0 {
+        return;
+    }
+    let mut tmp = vec![0.0f32; mask.len()];
+    for _ in 0..3 {
+        for y in 0..h {
+            let row = &mask[y * w..(y + 1) * w];
+            let mut acc: f32 = row[..r.min(w)].iter().sum();
+            for x in 0..w {
+                if x + r < w {
+                    acc += row[x + r];
+                }
+                if x > r {
+                    acc -= row[x - r - 1];
+                }
+                tmp[y * w + x] = acc / (2 * r + 1) as f32;
+            }
+        }
+        for x in 0..w {
+            let mut acc: f32 = (0..r.min(h)).map(|y| tmp[y * w + x]).sum();
+            for y in 0..h {
+                if y + r < h {
+                    acc += tmp[(y + r) * w + x];
+                }
+                if y > r {
+                    acc -= tmp[(y - r - 1) * w + x];
+                }
+                mask[y * w + x] = acc / (2 * r + 1) as f32;
+            }
+        }
+    }
+}
+
+/// Distance (en pixels) de chaque pixel au contenu le plus proche (passes de chanfrein 3-4)
+fn distance(alpha: &[f32], w: usize, h: usize) -> Vec<f32> {
+    let big = 1e9f32;
+    let mut d: Vec<f32> = alpha.iter().map(|a| if *a >= 0.5 { 0.0 } else { big }).collect();
+    let at = |d: &Vec<f32>, x: isize, y: isize| if x < 0 || y < 0 || x >= w as isize || y >= h as isize { big } else { d[y as usize * w + x as usize] };
+    for y in 0..h as isize {
+        for x in 0..w as isize {
+            let i = y as usize * w + x as usize;
+            let v = d[i].min(at(&d, x - 1, y) + 1.0).min(at(&d, x, y - 1) + 1.0).min(at(&d, x - 1, y - 1) + 1.4142).min(at(&d, x + 1, y - 1) + 1.4142);
+            d[i] = v;
+        }
+    }
+    for y in (0..h as isize).rev() {
+        for x in (0..w as isize).rev() {
+            let i = y as usize * w + x as usize;
+            let v = d[i].min(at(&d, x + 1, y) + 1.0).min(at(&d, x, y + 1) + 1.0).min(at(&d, x + 1, y + 1) + 1.4142).min(at(&d, x - 1, y + 1) + 1.4142);
+            d[i] = v;
+        }
+    }
+    d
+}
+
+/// Ajoute au contenu d'un calque sa lueur, son ombre et son contour (dessous), avec la marge qu'il leur faut
+fn styled(bm: Bitmap, st: &Style) -> Bitmap {
+    let k = bm.k;
+    let pad = (st.pad() * k).ceil() as u32 + 2;
+    let (w0, h0) = (bm.img.width(), bm.img.height());
+    let (w, h) = ((w0 + 2 * pad).min(8192) as usize, (h0 + 2 * pad).min(8192) as usize);
+    // Le contenu, en couleurs prémultipliées sur la nouvelle surface
+    let mut rgb = vec![[0.0f32; 3]; w * h];
+    let mut alpha = vec![0.0f32; w * h];
+    for (x, y, p) in bm.img.enumerate_pixels() {
+        let (xx, yy) = ((x + pad) as usize, (y + pad) as usize);
+        if xx >= w || yy >= h {
+            continue;
+        }
+        let a = p[3] as f32 / 255.0;
+        alpha[yy * w + xx] = a;
+        rgb[yy * w + xx] = [p[0] as f32 * a, p[1] as f32 * a, p[2] as f32 * a];
+    }
+    let mut out_rgb = vec![[0.0f32; 3]; w * h];
+    let mut out_a = vec![0.0f32; w * h];
+    // « Par-dessus » : ajoute une couche sous ce qui est déjà là
+    let under = |orgb: &mut Vec<[f32; 3]>, oa: &mut Vec<f32>, i: usize, c: [u8; 3], a: f32| {
+        let a = a.clamp(0.0, 1.0);
+        let keep = 1.0 - oa[i];
+        orgb[i][0] += c[0] as f32 * a * keep;
+        orgb[i][1] += c[1] as f32 * a * keep;
+        orgb[i][2] += c[2] as f32 * a * keep;
+        oa[i] += a * keep;
+    };
+    // Le contenu d'abord (au-dessus de tout)
+    out_rgb.clone_from(&rgb);
+    out_a.clone_from(&alpha);
+    if let Some(s) = &st.stroke {
+        let d = distance(&alpha, w, h);
+        let r = s.width * k;
+        for i in 0..w * h {
+            let cov = (r - d[i] + 0.5).clamp(0.0, 1.0);
+            if cov > 0.0 {
+                under(&mut out_rgb, &mut out_a, i, s.color, cov);
+            }
+        }
+    }
+    // La silhouette (contour compris) sert à l'ombre et à la lueur
+    let shape = out_a.clone();
+    if let Some(sh) = &st.shadow {
+        let mut m = shape.clone();
+        blur(&mut m, w, h, sh.blur * k);
+        let (dx, dy) = ((sh.dx * k).round() as isize, (sh.dy * k).round() as isize);
+        for y in 0..h as isize {
+            for x in 0..w as isize {
+                let (sx, sy) = (x - dx, y - dy);
+                if sx < 0 || sy < 0 || sx >= w as isize || sy >= h as isize {
+                    continue;
+                }
+                let a = m[sy as usize * w + sx as usize] * sh.opacity;
+                if a > 0.002 {
+                    under(&mut out_rgb, &mut out_a, y as usize * w + x as usize, sh.color, a);
+                }
+            }
+        }
+    }
+    if let Some(g) = &st.glow {
+        let mut m = shape;
+        blur(&mut m, w, h, g.radius * k);
+        for i in 0..w * h {
+            let a = (m[i] * g.strength).min(1.0);
+            if a > 0.002 {
+                under(&mut out_rgb, &mut out_a, i, g.color, a);
+            }
+        }
+    }
+    let mut img = image::RgbaImage::new(w as u32, h as u32);
+    for (i, p) in img.pixels_mut().enumerate() {
+        let a = out_a[i].clamp(0.0, 1.0);
+        if a > 0.0 {
+            let c = out_rgb[i];
+            *p = image::Rgba([(c[0] / a).min(255.0) as u8, (c[1] / a).min(255.0) as u8, (c[2] / a).min(255.0) as u8, (a * 255.0) as u8]);
+        }
+    }
+    Bitmap { img, ox: bm.ox - pad as f32 / k, oy: bm.oy - pad as f32 / k, k }
+}
+
 fn sample(img: &image::RgbaImage, x: f32, y: f32) -> [f32; 4] {
     // Bilinéaire, en alpha prémultiplié ; hors de l'image : transparent
     let (w, h) = (img.width() as i32, img.height() as i32);
@@ -676,7 +980,7 @@ pub fn render(c: &Compo, t: f32, scale: f32, cache: &mut Cache) -> image::RgbaIm
     use rayon::prelude::*;
     let (w, h) = (((c.w as f32 * scale).round() as u32).max(1), ((c.h as f32 * scale).round() as u32).max(1));
     let mut out = image::RgbaImage::from_pixel(w, h, image::Rgba([c.bg[0], c.bg[1], c.bg[2], 255]));
-    for l in c.layers.iter().rev() {
+    for (li, l) in c.layers.iter().enumerate().rev() {
         if !l.live(t) {
             continue;
         }
@@ -684,9 +988,9 @@ pub fn render(c: &Compo, t: f32, scale: f32, cache: &mut Cache) -> image::RgbaIm
         if op <= 0.0 {
             continue;
         }
-        let x = l.xform(t);
+        let x = c.world(li, t);
         // Le contenu est calculé à la résolution où il sera vu (net même agrandi)
-        let k = (scale * x.sx.abs().max(x.sy.abs())).clamp(0.02, 8.0);
+        let k = (scale * x.max_scale()).clamp(0.02, 8.0);
         // Un contenu qui ne bouge pas à l'intérieur du calque se dessine une fois (l'export reste rapide)
         let still = match (&l.kind, &l.reveal) {
             (Kind::Text { text, .. }, Some(r)) => t - l.start >= text.chars().count() as f32 * r.delay + r.dur,
@@ -697,6 +1001,7 @@ pub fn render(c: &Compo, t: f32, scale: f32, cache: &mut Cache) -> image::RgbaIm
             let mut h = std::collections::hash_map::DefaultHasher::new();
             serde_json::to_string(&l.kind).unwrap_or_default().hash(&mut h);
             serde_json::to_string(&l.reveal).unwrap_or_default().hash(&mut h);
+            serde_json::to_string(&l.style).unwrap_or_default().hash(&mut h);
             (h.finish(), k.to_bits())
         });
         let cached = key.and_then(|k| cache.bitmaps.get(&k).cloned());
@@ -704,6 +1009,7 @@ pub fn render(c: &Compo, t: f32, scale: f32, cache: &mut Cache) -> image::RgbaIm
             Some(b) => b,
             None => {
                 let Some(b) = bitmap(l, t, k, cache) else { continue };
+                let b = if l.style.is_plain() { b } else { styled(b, &l.style) };
                 let b = Arc::new(b);
                 if let Some(key) = key {
                     if cache.bitmaps.len() > 48 {
@@ -942,6 +1248,37 @@ mod tests {
         assert_eq!(n, 2);
         let ks: Vec<f32> = c.layers[1].scale.keys.iter().map(|k| k.t).collect();
         assert_eq!(ks, vec![0.5, 1.0]);
+    }
+
+    #[test]
+    fn parente_et_style() {
+        let mut c = Compo::default();
+        let mut cache = Cache::new(&std::env::temp_dir());
+        let before = corners(&c, 1, 3.0, &mut cache);
+        // Le trait devient l'enfant du titre sans bouger
+        let pid = c.layers[0].id;
+        c.set_parent(1, Some(pid), 3.0);
+        let after = corners(&c, 1, 3.0, &mut cache);
+        for (a, b) in before.iter().zip(after.iter()) {
+            assert!((a[0] - b[0]).abs() < 0.01 && (a[1] - b[1]).abs() < 0.01, "{a:?} {b:?}");
+        }
+        // Le titre se déplace et tourne : l'enfant suit
+        c.layers[0].pos.v = [1060.0, 500.0];
+        c.layers[0].rot.v = [90.0, 0.0];
+        let moved = c.world(1, 3.0).apply([0.0, 0.0]);
+        assert!((moved[0] - 950.0).abs() < 0.5 && (moved[1] - 500.0).abs() < 0.5, "{moved:?}");
+        // Pas de boucle : le titre ne peut pas devenir l'enfant de son enfant
+        let cid = c.layers[1].id;
+        c.set_parent(0, Some(cid), 3.0);
+        assert_eq!(c.layers[0].parent, None);
+        // Un contour et une ombre élargissent ce qui est dessiné
+        let lit = |img: &image::RgbaImage| img.pixels().filter(|p| p[0] < 60 && p[2] > 200).count();
+        c.layers[0].rot.v = [0.0, 0.0];
+        c.layers[0].style.stroke = Some(StrokeStyle { width: 8.0, color: [10, 10, 250] });
+        let img = render(&c, 3.0, 0.25, &mut cache);
+        assert!(lit(&img) > 100, "contour bleu visible");
+        let s = serde_json::to_string(&c).unwrap();
+        assert_eq!(serde_json::from_str::<Compo>(&s).unwrap(), c);
     }
 
     #[test]
