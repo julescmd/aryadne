@@ -1060,6 +1060,26 @@ impl Editor {
                     changed |= ui.color_edit_button_srgb(&mut g.color).changed();
                 });
             }
+            section(ui, "Tremblement");
+            let mut on = lay.wiggle.is_some();
+            if ui.checkbox(&mut on, crate::i18n::t("Bouger tout seul")).on_hover_text(crate::i18n::t("Petits mouvements au hasard, doux, en plus de l'animation (caméra à l'épaule, objet qui flotte)")).changed() {
+                lay.wiggle = on.then(motion::Wiggle::default);
+                changed = true;
+            }
+            if let Some(w) = &mut lay.wiggle {
+                ui.horizontal(|ui| {
+                    changed |= ui.add(egui::DragValue::new(&mut w.freq).speed(0.05).range(0.1..=30.0).max_decimals(2).suffix(crate::i18n::t_mid(" /s"))).on_hover_text(crate::i18n::t("Mouvements par seconde")).changed();
+                    changed |= ui.add(egui::DragValue::new(&mut w.pos).speed(0.5).range(0.0..=2000.0).max_decimals(0).prefix(crate::i18n::t("position ")).suffix(" px")).changed();
+                });
+                ui.horizontal(|ui| {
+                    changed |= ui.add(egui::DragValue::new(&mut w.rot).speed(0.1).range(0.0..=180.0).max_decimals(1).prefix(crate::i18n::t("rotation ")).suffix("°")).changed();
+                    changed |= ui.add(egui::DragValue::new(&mut w.scale).speed(0.1).range(0.0..=100.0).max_decimals(1).prefix(crate::i18n::t("échelle ")).suffix(" %")).changed();
+                    if ui.small_button(crate::lucide::DICES).on_hover_text(crate::i18n::t("Autre tirage")).clicked() {
+                        w.seed = w.seed.wrapping_add(1);
+                        changed = true;
+                    }
+                });
+            }
         });
         if let (Some(np), Some(i)) = (new_parent, self.sel) {
             let t = self.time;

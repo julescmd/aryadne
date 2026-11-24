@@ -2244,5 +2244,14 @@
   "remontée ": "release ",
   "Ton texte": "Your text",
   "poser le texte": "place text",
-  "Échap": "Esc"
+  "Échap": "Esc",
+  "Tremblement": "Wiggle",
+  "Bouger tout seul": "Wiggle on its own",
+  "Petits mouvements au hasard, doux, en plus de l'animation (caméra à l'épaule, objet qui flotte)": "Small smooth random moves on top of the animation (handheld camera, floating object)",
+  " /s": " /s",
+  "Mouvements par seconde": "Moves per second",
+  "position ": "position ",
+  "rotation ": "rotation ",
+  "échelle ": "scale ",
+  "Autre tirage": "New random seed"
 }

@@ -40,6 +40,7 @@ pub const MUSIC: &str = "\u{f0122}";
 pub const LAYERS: &str = "\u{f0529}";
 pub const LINK: &str = "\u{f0102}";
 pub const TAG: &str = "\u{f017f}";
+pub const DICES: &str = "\u{f02c5}";
 pub const TYPE: &str = "\u{f0198}";
 pub const PEN_TOOL: &str = "\u{f0131}";
 pub const WAND_SPARKLES: &str = "\u{f0357}";

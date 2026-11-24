@@ -209,6 +209,49 @@ pub struct Layer {
     pub parent: Option<u64>,
     #[serde(default, skip_serializing_if = "Style::is_plain")]
     pub style: Style,
+    /// Tremblement : petits mouvements au hasard, doux, qui s'ajoutent à l'animation
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wiggle: Option<Wiggle>,
+}
+
+#[derive(Clone, PartialEq, Serialize, Deserialize, Debug)]
+pub struct Wiggle {
+    /// Mouvements par seconde
+    pub freq: f32,
+    /// Écart maximal de position, en px
+    pub pos: f32,
+    /// Écart de rotation, en degrés
+    pub rot: f32,
+    /// Écart d'échelle, en %
+    pub scale: f32,
+    /// Change le tirage
+    #[serde(default)]
+    pub seed: u32,
+}
+
+impl Default for Wiggle {
+    fn default() -> Wiggle {
+        Wiggle { freq: 2.0, pos: 12.0, rot: 0.0, scale: 0.0, seed: 0 }
+    }
+}
+
+/// Bruit doux de -1 à 1 : valeurs au hasard aux entiers, reliées en douceur (deux octaves)
+pub fn smooth_noise(x: f32, channel: u32, seed: u64) -> f32 {
+    let hash = |i: i64| {
+        let mut h = (i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ seed.wrapping_mul(0xC2B2_AE3D_27D4_EB4F) ^ (channel as u64).wrapping_mul(0x1656_67B1_9E37_79F9);
+        h ^= h >> 31;
+        h = h.wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        h ^= h >> 29;
+        (h >> 11) as f32 / (1u64 << 53) as f32 * 2.0 - 1.0
+    };
+    let octave = |x: f32| {
+        let i = x.floor();
+        let f = x - i;
+        let u = f * f * (3.0 - 2.0 * f);
+        let (a, b) = (hash(i as i64), hash(i as i64 + 1));
+        a + (b - a) * u
+    };
+    (octave(x) * 0.7 + octave(x * 2.03 + 17.0) * 0.3) / 1.0
 }
 
 pub fn new_id() -> u64 {
@@ -293,6 +336,7 @@ impl Layer {
             id: new_id(),
             parent: None,
             style: Style::default(),
+            wiggle: None,
         }
     }
 
@@ -328,9 +372,19 @@ impl Layer {
 
     /// Passage du repère du calque (px, origine au centre) à celui de son parent (ou de la composition), à l'instant `t`
     pub fn xform(&self, t: f32) -> Xform {
-        let p = self.pos.at(t);
-        let s = self.scale.at(t);
-        let r = self.rot.at(t)[0].to_radians();
+        let mut p = self.pos.at(t);
+        let mut s = self.scale.at(t);
+        let mut r = self.rot.at(t)[0];
+        if let Some(w) = &self.wiggle {
+            let x = t * w.freq.max(0.0);
+            let seed = self.id ^ w.seed as u64;
+            p[0] += smooth_noise(x, 0, seed) * w.pos;
+            p[1] += smooth_noise(x, 1, seed) * w.pos;
+            r += smooth_noise(x, 2, seed) * w.rot;
+            let k = smooth_noise(x, 3, seed) * w.scale;
+            s = [s[0] + k, s[1] + k];
+        }
+        let r = r.to_radians();
         let (cs, sn) = (r.cos(), r.sin());
         let (sx, sy) = (s[0] / 100.0, s[1] / 100.0);
         Xform { a: cs * sx, b: sn * sx, c: -sn * sy, d: cs * sy, e: p[0], f: p[1] }
@@ -1251,6 +1305,30 @@ fn fade(l: &mut Layer, t: f32, d: f32, enter: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tremblement() {
+        // Doux (pas de saut d'une image à l'autre), borné, et différent d'un calque à l'autre
+        let mut prev = smooth_noise(0.0, 0, 7);
+        let mut lo = 0.0f32;
+        let mut hi = 0.0f32;
+        for k in 1..2000 {
+            let v = smooth_noise(k as f32 * 0.01, 0, 7);
+            assert!((v - prev).abs() < 0.08, "saut à {k}");
+            assert!(v.abs() <= 1.0);
+            lo = lo.min(v);
+            hi = hi.max(v);
+            prev = v;
+        }
+        assert!(hi - lo > 0.8, "bouge vraiment ({lo}..{hi})");
+        assert_ne!(smooth_noise(3.3, 0, 7), smooth_noise(3.3, 0, 8));
+        let c = Compo::default();
+        let mut l = Layer::new("a", Kind::Rect { w: 10.0, h: 10.0, radius: 0.0, color: [255; 3] }, &c);
+        let still = l.xform(1.0);
+        l.wiggle = Some(Wiggle::default());
+        let moved = l.xform(1.0);
+        assert!((moved.e - still.e).abs() + (moved.f - still.f).abs() > 0.01);
+    }
 
     #[test]
     fn lissages_et_cles() {
