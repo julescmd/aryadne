@@ -587,7 +587,7 @@ impl Editor {
     /// « Voix - mix.wav » à côté de la session ; jamais le nom d'un son qu'elle utilise
     fn export_path(&self, ext: &str) -> PathBuf {
         let stem = self.path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "mix".into());
-        let dir = self.path.parent().map(|d| d.to_path_buf()).unwrap_or_default();
+        let dir = crate::untitled::export_dir(&self.path);
         let used: Vec<PathBuf> = self.session.tracks.iter().flat_map(|t| t.clips.iter()).filter_map(|c| crate::vault::safe(&self.root, &c.src).ok()).collect();
         let mut k = 1;
         loop {

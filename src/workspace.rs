@@ -110,7 +110,7 @@ pub fn tools(kind: &str) -> &'static [Tool] {
     const D3: [Tool; 2] = [Tool { id: "scene", label: "Scène", icon: l::BOX, view: "files" }, Tool { id: "mat", label: "Matériaux", icon: l::BLEND, view: "files" }];
     const MOTION: [Tool; 1] = [Tool { id: "motion", label: "Compos", icon: l::SPLINE, view: "files" }];
     const VIDEO: [Tool; 2] = [Tool { id: "seq", label: "Montage", icon: l::CLAPPERBOARD, view: "files" }, Tool { id: "review", label: "Revue", icon: l::MESSAGE_SQUARE, view: "files" }];
-    const SON: [Tool; 1] = [Tool { id: "audio", label: "Audio", icon: l::AUDIO_LINES, view: "files" }];
+    const SON: [Tool; 2] = [Tool { id: "audio", label: "Audio", icon: l::AUDIO_LINES, view: "files" }, Tool { id: "music", label: "Musique", icon: l::MUSIC, view: "files" }];
     const CODE_T: [Tool; 1] = [Tool { id: "code", label: "Code", icon: l::CODE, view: "files" }];
     match kind {
         "2d" => &D2,
@@ -137,6 +137,7 @@ pub fn tool_of(rel: &str) -> &'static str {
         "motion" => "motion",
         "video" if crate::formats::has(rel, "seq") => "seq",
         "video" => "review",
+        "son" if crate::formats::has(rel, "music") => "music",
         "son" => "audio",
         "code" => "code",
         _ => {
@@ -193,7 +194,7 @@ pub fn owner(rel: &str) -> &'static str {
         "2d"
     } else if crate::formats::has(rel, "motion") {
         "motion"
-    } else if crate::formats::has(rel, "audio") || crate::audio::is_audio(rel) {
+    } else if crate::formats::has(rel, "audio") || crate::formats::has(rel, "music") || crate::audio::is_audio(rel) {
         "son"
     } else if crate::formats::has(rel, "mat") {
         "3d"
@@ -350,6 +351,7 @@ mod tests {
         assert_eq!(tool_of("Teaser.aryseq"), "seq");
         assert_eq!((owner("Intro.arymotion"), tool_of("Intro.arymotion")), ("motion", "motion"));
         assert_eq!((owner("voix.wav"), tool_of("Voix.aryaudio")), ("son", "audio"));
+        assert_eq!((owner("Thème.arymusic"), tool_of("Thème.arymusic")), ("son", "music"));
         assert_eq!(tool_of("robot.glb"), "scene");
         assert_eq!(tool_of("croquis.png"), "image");
         assert!(tools("2d").iter().any(|t| t.view == "boards"));

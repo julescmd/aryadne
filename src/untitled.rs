@@ -10,6 +10,15 @@ pub fn is_untitled(rel: &str) -> bool {
     rel.starts_with(".app/untitled/")
 }
 
+/// Dossier où écrire un export à côté d'un document : le sien, ou la racine du coffre pour un document
+/// sans titre (sinon l'export passerait pour un fichier à récupérer au prochain lancement)
+pub fn export_dir(doc: &Path) -> std::path::PathBuf {
+    match doc.ancestors().find(|a| a.file_name().is_some_and(|n| n == ".app")).and_then(|a| a.parent()) {
+        Some(root) => root.to_path_buf(),
+        None => doc.parent().map(|d| d.to_path_buf()).unwrap_or_default(),
+    }
+}
+
 /// Nom affiché : `untitled.arymat`, sans le dossier caché.
 pub fn name(rel: &str) -> &str {
     rel.rsplit('/').next().unwrap_or(rel)
@@ -135,6 +144,12 @@ fn copy_dir(from: &Path, to: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exports_hors_du_dossier_cache() {
+        assert_eq!(export_dir(Path::new("/c/.app/untitled/2/untitled.arymusic")), Path::new("/c"));
+        assert_eq!(export_dir(Path::new("/c/son/Thème.arymusic")), Path::new("/c/son"));
+    }
 
     #[test]
     fn sans_titre() {

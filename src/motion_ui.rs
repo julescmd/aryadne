@@ -362,7 +362,8 @@ impl Editor {
     }
 
     fn export(&mut self) {
-        let out = self.path.with_extension("mp4");
+        let stem = self.path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "composition".into());
+        let out = crate::untitled::export_dir(&self.path).join(format!("{stem}.mp4"));
         let c = self.compo.clone();
         let root = PathBuf::from(&self.root);
         let prog = self.export_prog.clone();
