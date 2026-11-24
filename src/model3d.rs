@@ -878,6 +878,71 @@ impl Prepared {
 
 pub const MAX_SUBDIV_TRIS: usize = 2_500_000;
 
+/// Maj+touche, lu sur l'événement lui-même (l'état des modificateurs à la fin de l'image peut déjà être relâché)
+fn shift_key(i: &egui::InputState, key: Key) -> bool {
+    i.events.iter().any(|e| matches!(e, egui::Event::Key { key: k, pressed: true, repeat: false, modifiers, .. } if *k == key && modifiers.shift && !modifiers.command && !modifiers.alt))
+}
+
+pub enum PieResult {
+    Open,
+    Cancel,
+    Chose(usize),
+}
+
+/// Menu circulaire, comme ceux de Blender : les choix autour du point d'ouverture ; on vise en
+/// bougeant la souris dans leur direction, puis clic, ou relâcher la touche qui l'a ouvert.
+/// Ordre des places : gauche, droite, bas, haut, puis les diagonales.
+pub fn pie_menu(ui: &egui::Ui, id: egui::Id, center: Pos2, items: &[&str], current: Option<usize>, key: Key) -> PieResult {
+    let p = theme::pal();
+    let dirs = [(-1.0f32, 0.0f32), (1.0, 0.0), (0.0, 1.0), (0.0, -1.0), (-0.72, -0.72), (0.72, -0.72), (-0.72, 0.72), (0.72, 0.72)];
+    let (cur, clicked, cancel, released) = ui.input(|i| (i.pointer.hover_pos(), i.pointer.primary_pressed(), i.key_pressed(Key::Escape) || i.pointer.secondary_pressed(), i.key_released(key)));
+    let off = cur.map(|c| c - center).unwrap_or_default();
+    let hovered = (off.length() > 22.0).then(|| {
+        let a = off.normalized();
+        (0..items.len().min(8)).max_by(|&x, &y| (dirs[x].0 * a.x + dirs[x].1 * a.y).total_cmp(&(dirs[y].0 * a.x + dirs[y].1 * a.y)))
+    }).flatten();
+    egui::Area::new(id).order(egui::Order::Foreground).fixed_pos(center).interactable(false).show(ui.ctx(), |ui| {
+        let painter = ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Foreground, id));
+        painter.circle(center, 18.0, p.raised.gamma_multiply(0.9), Stroke::new(1.0, p.line));
+        if off.length() > 4.0 {
+            painter.line_segment([center, center + off.normalized() * 16.0], Stroke::new(2.0, p.accent));
+        }
+        for (k, label) in items.iter().enumerate().take(8) {
+            let (dx, dy) = dirs[k];
+            let text = crate::i18n::t(label);
+            let galley = ui.painter().layout_no_wrap(text, egui::FontId::proportional(12.5), p.text);
+            let size = galley.size() + egui::vec2(18.0, 10.0);
+            // Bord intérieur sur le cercle : les étiquettes s'écartent du centre au lieu de se chevaucher
+            let at = center + egui::vec2(dx, dy * 1.15) * 70.0;
+            let r = if dx < -0.1 {
+                egui::Rect::from_min_size(pos2(at.x - size.x, at.y - size.y / 2.0), size)
+            } else if dx > 0.1 {
+                egui::Rect::from_min_size(pos2(at.x, at.y - size.y / 2.0), size)
+            } else {
+                egui::Rect::from_center_size(at + egui::vec2(0.0, dy * size.y / 2.0), size)
+            };
+            let on = hovered == Some(k);
+            let fill = if on { p.accent } else if current == Some(k) { p.selection } else { p.raised };
+            painter.rect(r, 4.0, fill, Stroke::new(1.0, p.line), egui::StrokeKind::Inside);
+            let col = if on { p.on_accent } else { p.text };
+            painter.galley_with_override_text_color(r.center() - galley.size() / 2.0, galley, col);
+        }
+    });
+    ui.ctx().request_repaint();
+    if cancel {
+        PieResult::Cancel
+    } else if clicked || (released && off.length() > 40.0) {
+        match hovered {
+            Some(k) => PieResult::Chose(k),
+            None if clicked => PieResult::Cancel,
+            None => PieResult::Open,
+        }
+    } else {
+        PieResult::Open
+    }
+}
+
+
 /// Transformation d'un objet de la scène, parents compris, sous forme affine (colonnes, origine).
 fn object_affine(sc: &crate::scene::Scene, k: usize) -> ([V3; 3], V3) {
     let o = sc.world(k, [0.0; 3]);
@@ -2093,6 +2158,14 @@ pub struct Viewer {
     modal: Option<(u8, Option<usize>, ([f32; 3], [f32; 3], [f32; 3]), Pos2)>,
     /// Menu « ajouter » ouvert sous le curseur (Maj+A)
     add_popup: Option<Pos2>,
+    /// Curseur 3D (dans la scène) : point de départ des nouveaux objets et pivot possible
+    cursor3d: V3,
+    /// Point de pivot des rotations et des tailles : 0 point médian, 1 curseur 3D, 2 origines individuelles, 3 objet actif
+    pivot: u8,
+    /// Menu circulaire ouvert : 0 curseur (Maj+S), 1 point de pivot (.), et son centre
+    pie: Option<(u8, Pos2)>,
+    /// Où dessiner le curseur 3D à cette image (calculé avant la vue, dessiné après)
+    cursor_screen: Option<Pos2>,
     /// Le clic qui vient de valider une transformation : à ignorer pour la sélection, jusqu'au relâchement
     modal_click: bool,
     /// Objets choisis en plus de l'objet actif (`scene_sel`) : Maj + clic, A, sélection au rectangle
@@ -2290,6 +2363,10 @@ impl Viewer {
             gpu_batch: 4,
             capture_msg: None,
             xray: false,
+            cursor3d: [0.0; 3],
+            pivot: 0,
+            pie: None,
+            cursor_screen: None,
             embedded: false,
             sub: None,
             start_edit: false,
@@ -2601,6 +2678,101 @@ impl Viewer {
         }
     }
 
+    /// Actions du menu circulaire du curseur 3D (Maj+S).
+    fn cursor_action(&mut self, i: usize) {
+        let Some(scene) = self.scene.as_mut() else { return };
+        // Mode édition : sur les sommets choisis de l'objet modifié
+        if let Some(me) = self.mesh.as_mut() {
+            let k = me.obj;
+            if k >= scene.objects.len() {
+                return;
+            }
+            let chosen: Vec<usize> = (0..me.mesh.pos.len()).filter(|&v| me.sel.get(v).copied().unwrap_or(false)).collect();
+            let world = |v: V3| scene.world(k, v);
+            let med = (!chosen.is_empty()).then(|| {
+                let n = chosen.len() as f32;
+                chosen.iter().fold([0.0f32; 3], |a, &v| {
+                    let w = world(me.mesh.pos[v]);
+                    [a[0] + w[0] / n, a[1] + w[1] / n, a[2] + w[2] / n]
+                })
+            });
+            match i {
+                0 => {
+                    if let Some(m) = med {
+                        self.cursor3d = m;
+                    }
+                }
+                1 | 5 => {
+                    // Les sommets vont au curseur (1 : tous au même point ; 5 : ensemble, en gardant leur forme)
+                    let origin = scene.world(k, [0.0; 3]);
+                    let cols = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]].map(|e| sub(scene.world(k, e), origin));
+                    if let (Some(inv), Some(m)) = (crate::meshedit::inverse(cols), med) {
+                        me.hist.push((me.mesh.clone(), me.sel.clone()));
+                        me.redo.clear();
+                        let to_local = |w: V3| crate::meshedit::apply(&inv, sub(w, origin));
+                        let target = self.cursor3d;
+                        for &v in &chosen {
+                            let w = world(me.mesh.pos[v]);
+                            let nw = if i == 1 { target } else { [w[0] + target[0] - m[0], w[1] + target[1] - m[1], w[2] + target[2] - m[2]] };
+                            me.mesh.pos[v] = to_local(nw);
+                        }
+                        me.vis = None;
+                        let _ = me.mesh.write_obj(&me.file);
+                        self.scene_dirty = true;
+                    }
+                }
+                2 => self.cursor3d = [0.0; 3],
+                3 => self.cursor3d = scene.world(k, [0.0; 3]),
+                4 => self.cursor3d = self.cursor3d.map(|x| x.round()),
+                _ => {}
+            }
+            return;
+        }
+        let mut sel: Vec<usize> = self.scene_multi.iter().copied().collect();
+        if let Some(a) = self.scene_sel {
+            if !sel.contains(&a) {
+                sel.push(a);
+            }
+        }
+        sel.retain(|&k| k < scene.objects.len());
+        let origins: Vec<V3> = sel.iter().map(|&k| scene.world(k, [0.0; 3])).collect();
+        let med = (!origins.is_empty()).then(|| {
+            let n = origins.len() as f32;
+            origins.iter().fold([0.0f32; 3], |a, w| [a[0] + w[0] / n, a[1] + w[1] / n, a[2] + w[2] / n])
+        });
+        match i {
+            0 => {
+                if let Some(m) = med {
+                    self.cursor3d = m;
+                }
+            }
+            1 | 5 => {
+                let target = self.cursor3d;
+                for (&k, w) in sel.iter().zip(&origins) {
+                    // Seulement les objets sans parent : leur position est celle de la scène
+                    if scene.parent_of(k).is_some() {
+                        continue;
+                    }
+                    let nw = match (i, med) {
+                        (5, Some(m)) => [w[0] + target[0] - m[0], w[1] + target[1] - m[1], w[2] + target[2] - m[2]],
+                        _ => target,
+                    };
+                    scene.objects[k].pos = nw;
+                }
+                let _ = scene.write(&self.path);
+                self.scene_dirty = true;
+            }
+            2 => self.cursor3d = [0.0; 3],
+            3 => {
+                if let Some(a) = self.scene_sel.filter(|&a| a < scene.objects.len()) {
+                    self.cursor3d = scene.world(a, [0.0; 3]);
+                }
+            }
+            4 => self.cursor3d = self.cursor3d.map(|x| x.round()),
+            _ => {}
+        }
+    }
+
     /// Entre en mode édition sur l'objet actif. Son maillage devient un fichier OBJ à côté de la scène
     /// (le modèle d'origine n'est jamais modifié), que le mode édition réécrit à chaque changement.
     fn enter_mesh_edit(&mut self) {
@@ -2661,6 +2833,7 @@ impl Viewer {
         if !crate::scene::is_scene(&self.path) || self.edit.is_some() {
             return;
         }
+        let (pivot_mode, cursor3d) = (self.pivot, self.cursor3d);
         let p = theme::pal();
         let typing = ui.ctx().egui_wants_keyboard_input();
         // Tab : egui s'en sert pour passer d'un champ à l'autre ; sur la vue, sans champ actif, il change de mode
@@ -2797,7 +2970,7 @@ impl Viewer {
             let chosen: Vec<usize> = (0..orig.len()).filter(|&i| me.sel.get(i).copied().unwrap_or(false)).collect();
             let worlds: Vec<V3> = chosen.iter().map(|&i| to_world(orig[i])).collect();
             let n = worlds.len().max(1) as f32;
-            let pivot = worlds.iter().fold([0.0f32; 3], |a, w| [a[0] + w[0] / n, a[1] + w[1] / n, a[2] + w[2] / n]);
+            let pivot = if pivot_mode == 1 { cursor3d } else { worlds.iter().fold([0.0f32; 3], |a, w| [a[0] + w[0] / n, a[1] + w[1] / n, a[2] + w[2] / n]) };
             let q = view(pivot);
             let center = project(pivot).unwrap_or(rc);
             let cancel = secondary || ui.input(|i| i.key_pressed(Key::Escape));
@@ -3535,6 +3708,7 @@ impl Viewer {
         } else {
             tl_panel.frame(tl_frame).show(ui, sub_body);
         }
+        let n_before = scene.objects.len();
         // Menu « ajouter » de l'en-tête
         if let Some(id) = self.hdr_add.take() {
             let k = match id {
@@ -3595,6 +3769,13 @@ impl Viewer {
             });
             if close || ui.input(|i| i.key_pressed(Key::Escape)) || (ui.input(|i| i.pointer.any_pressed()) && !area.response.contains_pointer()) {
                 self.add_popup = None;
+            }
+        }
+        // Les nouveaux objets apparaissent au curseur 3D (une lumière garde sa hauteur au-dessus)
+        for k in n_before..scene.objects.len() {
+            let o = &mut scene.objects[k];
+            for a in 0..3 {
+                o.pos[a] += self.cursor3d[a];
             }
         }
         if !ui.ctx().egui_wants_keyboard_input() && self.edit.is_none() && self.modal.is_none() && self.mesh.is_none() {
@@ -4607,20 +4788,6 @@ impl Viewer {
                     }
                     Hdr::Mode => {
                         let mode = if self.mesh.is_some() { "mode édition" } else if self.edit.is_some() { "UV et matériaux" } else { "mode objet" };
-                        if let Some(me) = self.mesh.as_mut() {
-                        // Sommets, arêtes, faces : les trois modes de sélection, comme dans Blender
-                        for (k, (icon, tip)) in [("•", "sommets (1)"), ("⁄", "arêtes (2)"), ("▱", "faces (3)")].into_iter().enumerate() {
-                            let on = me.mode == k as u8;
-                            let b = egui::Button::new(egui::RichText::new(icon).size(13.0).color(if on { p.on_accent } else { p.text })).fill(if on { p.accent } else { p.panel }).min_size(egui::vec2(24.0, 20.0));
-                            if ui.add(b).on_hover_text(crate::i18n::t(tip)).clicked() {
-                                me.mode = k as u8;
-                            }
-                        }
-                        let xb = egui::Button::new(egui::RichText::new("◫").size(13.0).color(if self.xray { p.on_accent } else { p.text })).fill(if self.xray { p.accent } else { p.panel }).min_size(egui::vec2(24.0, 20.0));
-                        if ui.add(xb).on_hover_text(crate::i18n::t("rayons X (Alt+Z) : voir et choisir aussi les sommets cachés derrière le maillage")).clicked() {
-                            self.xray = !self.xray;
-                        }
-                    }
                     egui::containers::menu::MenuButton::from_button(egui::Button::new(egui::RichText::new(format!("◆ {} ▾", crate::i18n::t(mode))).family(theme::bold()).size(12.0)).fill(p.panel)).ui(ui, |ui| {
                             ui.set_min_width(220.0);
                             if ui.selectable_label(self.mesh.is_none() && self.edit.is_none(), crate::i18n::t("mode objet")).clicked() {
@@ -4646,6 +4813,38 @@ impl Viewer {
                                 ui.close();
                             }
                         });
+                        // Toujours à la même place, grisés hors du mode édition : rien ne bouge en changeant de mode
+                        if is_scene {
+                            let cur = self.mesh.as_ref().map(|m| m.mode);
+                            for (k, (icon, tip)) in [("•", "sommets (1)"), ("⁄", "arêtes (2)"), ("▱", "faces (3)")].into_iter().enumerate() {
+                                let on = cur == Some(k as u8);
+                                let b = egui::Button::new(egui::RichText::new(icon).size(13.0).color(if on { p.on_accent } else { p.text })).fill(if on { p.accent } else { p.panel }).min_size(egui::vec2(24.0, 20.0));
+                                if ui.add_enabled(cur.is_some(), b).on_hover_text(crate::i18n::t(tip)).on_disabled_hover_text(crate::i18n::t("en mode édition (Tab)")).clicked() {
+                                    if let Some(me) = self.mesh.as_mut() {
+                                        me.mode = k as u8;
+                                    }
+                                }
+                            }
+                            let xb = egui::Button::new(egui::RichText::new("◫").size(13.0).color(if self.xray { p.on_accent } else { p.text })).fill(if self.xray { p.accent } else { p.panel }).min_size(egui::vec2(24.0, 20.0));
+                            if ui.add(xb).on_hover_text(crate::i18n::t("rayons X (Alt+Z) : voir et choisir aussi les sommets cachés derrière le maillage")).clicked() {
+                                self.xray = !self.xray;
+                            }
+                            // Point de pivot (« . » ouvre aussi le menu circulaire)
+                            let names = ["point médian", "curseur 3D", "origines individuelles", "objet actif"];
+                            let icons = ["⊙", "⊕", "⁘", "◉"];
+                            egui::containers::menu::MenuButton::from_button(egui::Button::new(egui::RichText::new(format!("{} ▾", icons[self.pivot as usize & 3])).size(13.0)).fill(p.panel).min_size(egui::vec2(30.0, 20.0)))
+                                .ui(ui, |ui| {
+                                    ui.label(crate::theme::section(&crate::i18n::t("point de pivot")));
+                                    for (k, n) in names.iter().enumerate() {
+                                        if ui.selectable_label(self.pivot as usize == k, format!("{}  {}", icons[k], crate::i18n::t(n))).clicked() {
+                                            self.pivot = k as u8;
+                                            ui.close();
+                                        }
+                                    }
+                                })
+                                .0
+                                .on_hover_text(format!("{} (.)", crate::i18n::t("point de pivot")));
+                        }
                     }
                     Hdr::View => {
                         egui::containers::menu::MenuButton::new(crate::i18n::t("vue")).config(stay.clone()).ui(ui, |ui| {
@@ -5253,7 +5452,7 @@ impl Viewer {
             if resp.hovered() {
                 e.keys_3d(ui, ui.input(|i| i.pointer.hover_pos()));
             }
-            if resp.secondary_clicked() {
+            if resp.secondary_clicked() && !ui.input(|i| i.modifiers.shift) {
                 if let Some(at) = resp.interact_pointer_pos() {
                     e.open_menu_3d(at);
                 }
@@ -5262,7 +5461,7 @@ impl Viewer {
         }
         // Scène, mode objet : clic droit sur un objet = il devient l'actif, et son menu s'ouvre (comme Blender)
         if self.edit.is_none() && self.mesh.is_none() && self.scene.is_some() {
-            if resp.secondary_clicked() {
+            if resp.secondary_clicked() && !ui.input(|i| i.modifiers.shift) {
                 if let (Some(at), Some((_, _, prep))) = (resp.interact_pointer_pos(), &self.prepared) {
                     let hit = pick(prep, &self.cam, rect.width(), rect.height(), at.x - rect.left(), at.y - rect.top());
                     if let Some(k) = hit.and_then(|(tri, _)| self.scene_ranges.iter().find(|r| (r.1..r.2).contains(&(tri as usize))).map(|r| r.0)) {
@@ -5377,6 +5576,91 @@ impl Viewer {
                 e.guide_end();
             }
         }
+        // ---- Curseur 3D, comme dans Blender : Maj+clic droit le pose sur la surface visée,
+        // Maj+S et « . » ouvrent les menus circulaires (curseur, point de pivot), Maj+C le remet à
+        // l'origine. Les nouveaux objets apparaissent au curseur.
+        if self.edit.is_none() && crate::scene::is_scene(&self.path) {
+            if let Some((lo, hi)) = self.scene_frame {
+                let longest = (hi[0] - lo[0]).max(hi[1] - lo[1]).max(hi[2] - lo[2]).max(1e-9);
+                let c = [(lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0, (lo[2] + hi[2]) / 2.0];
+                let focal = rect.height().min(rect.width()) * 1.2;
+                let cam = self.cam;
+                let to_screen = |w: V3| -> Option<Pos2> {
+                    let q = cam.view([(w[0] - c[0]) / longest, (w[1] - c[1]) / longest, (w[2] - c[2]) / longest]);
+                    if cam.ortho {
+                        Some(pos2(rect.center().x + q[0] * focal / cam.dist, rect.center().y - q[1] * focal / cam.dist))
+                    } else {
+                        (q[2] < -0.05).then(|| pos2(rect.center().x + q[0] / -q[2] * focal, rect.center().y - q[1] / -q[2] * focal))
+                    }
+                };
+                let typing = ui.ctx().egui_wants_keyboard_input();
+                let (shift_rmb, at, shift_s, shift_c, period) = ui.input(|i| {
+                    (
+                        i.pointer.secondary_pressed() && i.modifiers.shift,
+                        i.pointer.hover_pos(),
+                        shift_key(i, Key::S),
+                        shift_key(i, Key::C),
+                        i.key_pressed(Key::Period) && !i.modifiers.any(),
+                    )
+                });
+                let free = resp.hovered() && !typing && self.modal.is_none() && self.mesh.as_ref().is_none_or(|m| m.modal.is_none());
+                if free && shift_rmb {
+                    if let Some(at) = at.filter(|a| rect.contains(*a)) {
+                        let hit = self.prepared.as_ref().and_then(|(_, _, prep)| {
+                            let (tri, b) = pick(prep, &cam, rect.width(), rect.height(), at.x - rect.left(), at.y - rect.top())?;
+                            let t = prep.tris[tri];
+                            let (pa, pb, pc) = (prep.pos[t[0] as usize], prep.pos[t[1] as usize], prep.pos[t[2] as usize]);
+                            let n = [0, 1, 2].map(|k| pa[k] * b[0] + pb[k] * b[1] + pc[k] * b[2]);
+                            Some([n[0] * longest + c[0], n[1] * longest + c[1], n[2] * longest + c[2]])
+                        });
+                        // Dans le vide : à la profondeur du curseur actuel, sous la souris
+                        self.cursor3d = hit.unwrap_or_else(|| {
+                            let cur = self.cursor3d;
+                            let q = cam.view([(cur[0] - c[0]) / longest, (cur[1] - c[1]) / longest, (cur[2] - c[2]) / longest]);
+                            let depth = if cam.ortho { cam.dist } else { (-q[2]).max(0.05) };
+                            let per_px = if cam.ortho { cam.dist / focal } else { depth / focal } * longest;
+                            let from = to_screen(cur).unwrap_or(rect.center());
+                            let d = at - from;
+                            let (right, up) = (cam.unrotate([1.0, 0.0, 0.0]), cam.unrotate([0.0, 1.0, 0.0]));
+                            [0, 1, 2].map(|k| cur[k] + (right[k] * d.x - up[k] * d.y) * per_px)
+                        });
+                        self.modal_click = true;
+                    }
+                }
+                if free && shift_c {
+                    self.cursor3d = [0.0; 3];
+                    self.cam = Camera { ortho: self.cam.ortho, ..Default::default() };
+                }
+                if free && shift_s {
+                    self.pie = at.map(|a| (0, a));
+                }
+                if free && period {
+                    self.pie = at.map(|a| (1, a));
+                }
+                self.cursor_screen = to_screen(self.cursor3d);
+                // Menus circulaires
+                if let Some((kind, center)) = self.pie {
+                    let items: &[&str] = if kind == 0 {
+                        &["curseur sur la sélection", "sélection sur le curseur", "curseur à l'origine du monde", "curseur sur l'objet actif", "curseur sur la grille", "sélection sur le curseur (garder l'écart)"]
+                    } else {
+                        &["point médian", "curseur 3D", "origines individuelles", "objet actif"]
+                    };
+                    let current = (kind == 1).then_some(self.pivot as usize);
+                    match pie_menu(ui, egui::Id::unique(("pie3d", kind)), center, items, current, if kind == 0 { Key::S } else { Key::Period }) {
+                        PieResult::Open => {}
+                        PieResult::Cancel => self.pie = None,
+                        PieResult::Chose(i) => {
+                            self.pie = None;
+                            if kind == 1 {
+                                self.pivot = i as u8;
+                            } else {
+                                self.cursor_action(i);
+                            }
+                        }
+                    }
+                }
+            }
+        }
         // Scène : poignée de déplacement de l'objet choisi (trois axes à attraper)
         let mut gizmo: Option<([f32; 3], [[f32; 3]; 3])> = None;
         // Le clic qui valide une transformation au clavier ne doit pas aussi choisir un autre objet
@@ -5409,6 +5693,8 @@ impl Viewer {
                 }
                 let (confirm, cancel, cur) = ui.input(|i| (i.pointer.primary_pressed() || i.key_pressed(Key::Enter), i.pointer.secondary_pressed() || i.key_pressed(Key::Escape), i.pointer.hover_pos().or(i.pointer.latest_pos())));
                 let world = self.scene.as_ref().filter(|s| sel < s.objects.len()).map(|s| s.from_parent(sel, orig.0));
+                let (pivot, cursor) = (self.pivot, self.cursor3d);
+                let has_parent = self.scene.as_ref().is_some_and(|s| s.parent_of(sel).is_some());
                 if let (Some(scene), Some(cur), Some(world)) = (self.scene.as_mut(), cur, world) {
                     if let Some(o) = scene.objects.get_mut(sel) {
                         let q = cam.view([(world[0] - c[0]) / longest, (world[1] - c[1]) / longest, (world[2] - c[2]) / longest]);
@@ -5442,12 +5728,30 @@ impl Viewer {
                                         turn += 360.0;
                                     }
                                     o.rot[k] = orig.1[k] - turn * if toward[k] >= 0.0 { 1.0 } else { -1.0 };
+                                    // Pivot au curseur 3D : la position tourne aussi autour de lui
+                                    if pivot == 1 && !has_parent {
+                                        let (sn, cs) = (o.rot[k] - orig.1[k]).to_radians().sin_cos();
+                                        let r = [0, 1, 2].map(|a| orig.0[a] - cursor[a]);
+                                        let r = match k {
+                                            0 => [r[0], r[1] * cs - r[2] * sn, r[1] * sn + r[2] * cs],
+                                            1 => [r[0] * cs + r[2] * sn, r[1], -r[0] * sn + r[2] * cs],
+                                            _ => [r[0] * cs - r[1] * sn, r[0] * sn + r[1] * cs, r[2]],
+                                        };
+                                        o.pos = [0, 1, 2].map(|a| cursor[a] + r[a]);
+                                    }
                                 }
                                 _ => {
                                     let f = ((cur - center).length() / (from - center).length().max(8.0)).max(0.001);
                                     match axis {
                                         Some(k) => o.scale[k] = orig.2[k] * f,
                                         None => o.scale = [orig.2[0] * f, orig.2[1] * f, orig.2[2] * f],
+                                    }
+                                    if pivot == 1 && !has_parent {
+                                        for a in 0..3 {
+                                            if axis.is_none_or(|k| k == a) {
+                                                o.pos[a] = cursor[a] + (orig.0[a] - cursor[a]) * f;
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -5795,7 +6099,7 @@ impl Viewer {
                 self.cam.dist = (self.cam.dist * (-scroll * 0.0015).exp()).clamp(0.2, 50.0);
             }
             let editing_mesh = self.mesh.is_some();
-            let keys = ui.input(|i| [Key::Num1, Key::Num3, Key::Num7, Key::Num5, Key::Home, Key::Period].map(|k| i.key_pressed(k) && !i.modifiers.command && !(editing_mesh && matches!(k, Key::Num1 | Key::Num3))));
+            let keys = ui.input(|i| [Key::Num1, Key::Num3, Key::Num7, Key::Num5, Key::Home, Key::Period].map(|k| i.key_pressed(k) && !i.modifiers.command && !(k == Key::Period && crate::scene::is_scene(&self.path)) && !(editing_mesh && matches!(k, Key::Num1 | Key::Num3))));
             let opposite = mods.shift;
             let half = std::f32::consts::FRAC_PI_2;
             if keys[0] {
@@ -5952,6 +6256,21 @@ impl Viewer {
             painter.image(t.id(), rect, egui::Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
         }
         self.draw_outline(ui, &painter, rect);
+        // Le curseur 3D : un anneau rouge et blanc et sa croix, par-dessus la vue
+        if let Some(s) = self.cursor_screen.take().filter(|s| rect.contains(*s)) {
+            for k in 0..8 {
+                let (a0, a1) = (k as f32 * std::f32::consts::FRAC_PI_4, (k + 1) as f32 * std::f32::consts::FRAC_PI_4);
+                let col = if k % 2 == 0 { Color32::from_rgb(230, 60, 60) } else { Color32::WHITE };
+                let pts: Vec<Pos2> = (0..=6).map(|j| {
+                    let a = a0 + (a1 - a0) * j as f32 / 6.0;
+                    s + egui::vec2(a.cos(), a.sin()) * 10.0
+                }).collect();
+                painter.add(egui::Shape::line(pts, Stroke::new(2.0, col)));
+            }
+            for d in [egui::vec2(1.0, 0.0), egui::vec2(-1.0, 0.0), egui::vec2(0.0, 1.0), egui::vec2(0.0, -1.0)] {
+                painter.line_segment([s + d * 13.0, s + d * 20.0], Stroke::new(1.0, Color32::from_gray(20)));
+            }
+        }
         self.mesh_edit_ui(ui, rect, &resp);
         // Repères des lumières et des caméras de la scène
         if let (Some(scene), Some((lo, hi)), true) = (self.scene.as_ref(), self.scene_frame, self.edit.is_none()) {
