@@ -2362,5 +2362,7 @@
   "pas encore transmis :": "not carried yet:",
   "exporter en PNG, JPG, WebP ou PSD…": "export as PNG, JPG, WebP or PSD…",
   "calque de réglage": "adjustment layer",
-  "styles": "styles"
+  "styles": "styles",
+  "Pelure": "Onion",
+  "Pelure d'oignon : le calque choisi aux images d'avant (rouge) et d'après (vert)": "Onion skin: the selected layer on the frames before (red) and after (green)"
 }

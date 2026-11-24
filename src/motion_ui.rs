@@ -49,6 +49,8 @@ pub struct Editor {
     sel: Option<usize>,
     /// Barre d'outils d'animation (tweener, décaler, poses…)
     anim_tools: bool,
+    /// Pelure d'oignon : le calque choisi aux images d'avant (rouge) et d'après (vert)
+    onion: bool,
     tween_w: f32,
     pose_clip: Option<crate::animtools::motion::Pose>,
     /// Clé choisie : calque, propriété, instant
@@ -145,6 +147,7 @@ impl Editor {
             saved: compo.clone(),
             sel: if compo.layers.is_empty() { None } else { Some(0) },
             anim_tools: false,
+            onion: false,
             tween_w: 0.5,
             pose_clip: None,
             compo,
@@ -547,6 +550,27 @@ impl Editor {
                 let b = to_screen(self.compo.world(pj, self.time).apply([0.0, 0.0]));
                 painter.extend(egui::Shape::dashed_line(&[a, b], Stroke::new(1.0, p.info), 4.0, 4.0));
                 painter.circle_stroke(b, 4.0, Stroke::new(1.0, p.info));
+            }
+            // Pelure d'oignon : trois fantômes de chaque côté, toutes les deux images, de plus en plus pâles
+            if self.onion {
+                let step = 2.0 / self.compo.fps.max(1.0);
+                let now = motion::corners(&self.compo, i, self.time, &mut self.cache);
+                for k in (1..=3).rev() {
+                    for (sign, col) in [(-1.0f32, Color32::from_rgb(230, 90, 90)), (1.0, Color32::from_rgb(110, 200, 130))] {
+                        let t = self.time + sign * k as f32 * step;
+                        if t < 0.0 || t > self.compo.duration || !lay.live(t) {
+                            continue;
+                        }
+                        let fade = 0.55 / k as f32;
+                        let cc = motion::corners(&self.compo, i, t, &mut self.cache);
+                        // Immobile à cet instant : pas de fantôme (il se poserait sur le calque)
+                        if cc.iter().zip(now.iter()).all(|(a, b)| (a[0] - b[0]).abs() + (a[1] - b[1]).abs() < 0.5) {
+                            continue;
+                        }
+                        let c = cc.map(to_screen);
+                        painter.add(egui::Shape::convex_polygon(c.to_vec(), col.gamma_multiply(fade * 0.25), Stroke::new(1.2, col.gamma_multiply(fade))));
+                    }
+                }
             }
             if lay.live(self.time) || lay.visible {
                 let c = motion::corners(&self.compo, i, self.time, &mut self.cache).map(to_screen);
@@ -1203,6 +1227,7 @@ impl Editor {
                 }
             }
         }
+        child.toggle_value(&mut self.onion, format!("{}  {}", l::LAYERS, crate::i18n::t("Pelure"))).on_hover_text(crate::i18n::t("Pelure d'oignon : le calque choisi aux images d'avant (rouge) et d'après (vert)"));
         child.toggle_value(&mut self.anim_tools, format!("{}  {}", l::WAND_SPARKLES, crate::i18n::t("Outils"))).on_hover_text(crate::i18n::t("Outils d'animation : tweener, décaler les clés, poses, miroir…"));
         let wide = bar.width() > 900.0;
         child.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
