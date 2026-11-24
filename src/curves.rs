@@ -30,6 +30,97 @@ pub const Y: Color32 = Color32::from_rgb(120, 196, 52);
 pub const Z: Color32 = Color32::from_rgb(64, 138, 245);
 pub const W: Color32 = Color32::from_rgb(209, 175, 117);
 
+/// Ce que fait une courbe avant sa première clé et après sa dernière (les « infinités » de Maya)
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub enum Inf {
+    /// Garde la valeur de la clé du bout
+    #[default]
+    Constant,
+    /// Rejoue l'animation en boucle
+    Cycle,
+    /// Rejoue en boucle en partant d'où la boucle d'avant s'est arrêtée (une marche, une roue)
+    Offset,
+    /// Va-et-vient : à l'endroit, puis à l'envers
+    Oscillate,
+}
+
+impl Inf {
+    pub const ALL: [Inf; 4] = [Inf::Constant, Inf::Cycle, Inf::Offset, Inf::Oscillate];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Inf::Constant => "Constante",
+            Inf::Cycle => "Cycle",
+            Inf::Offset => "Cycle avec décalage",
+            Inf::Oscillate => "Va-et-vient",
+        }
+    }
+}
+
+/// Avant et après l'animation
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub struct Loop {
+    #[serde(default)]
+    pub pre: Inf,
+    #[serde(default)]
+    pub post: Inf,
+}
+
+impl Loop {
+    pub fn is_none(&self) -> bool {
+        self.pre == Inf::Constant && self.post == Inf::Constant
+    }
+
+    /// Ramène `t` dans l'animation [t0, t1] : l'instant à lire et le nombre de boucles à ajouter (décalage)
+    pub fn remap(&self, t: f32, t0: f32, t1: f32) -> (f32, f32) {
+        let len = t1 - t0;
+        if len <= 1e-6 || (t >= t0 && t <= t1) {
+            return (t, 0.0);
+        }
+        let mode = if t > t1 { self.post } else { self.pre };
+        let u = (t - t0) / len;
+        let n = u.floor();
+        let fr = u - n;
+        match mode {
+            Inf::Constant => (t.clamp(t0, t1), 0.0),
+            Inf::Cycle => (t0 + fr * len, 0.0),
+            Inf::Offset => (t0 + fr * len, n),
+            Inf::Oscillate => {
+                if (n as i64).rem_euclid(2) == 0 {
+                    (t0 + fr * len, 0.0)
+                } else {
+                    (t1 - fr * len, 0.0)
+                }
+            }
+        }
+    }
+}
+
+/// Valeur d'une courbe bouclée
+pub fn eval_loop(keys: &[CK], lp: Loop, t: f32) -> f32 {
+    if keys.len() < 2 || lp.is_none() {
+        return eval(keys, t);
+    }
+    let (a, b) = (keys[0], keys[keys.len() - 1]);
+    let (t2, n) = lp.remap(t, a.t, b.t);
+    eval(keys, t2) + n * (b.v - a.v)
+}
+
+/// Valeur bouclée sur une plage commune à plusieurs courbes (les bornes de l'animation de l'objet)
+pub fn eval_span(keys: &[CK], lp: Loop, t: f32, t0: f32, t1: f32) -> f32 {
+    if keys.len() < 2 || lp.is_none() {
+        return eval(keys, t);
+    }
+    let (t2, n) = lp.remap(t, t0, t1);
+    eval(keys, t2) + n * (eval(keys, t1) - eval(keys, t0))
+}
+
+/// Les bornes communes : de la première clé à la dernière, toutes courbes confondues
+pub fn span(curves: &[Curve]) -> Option<(f32, f32)> {
+    let (lo, hi) = curves.iter().flat_map(|c| c.keys.iter().map(|k| k.t)).fold((f32::MAX, f32::MIN), |(a, b), t| (a.min(t), b.max(t)));
+    (hi > lo).then_some((lo, hi))
+}
+
 /// Tangentes automatiques : à plat sur un sommet ou un creux, sinon la pente des voisines (comme « auto » de Maya)
 pub fn auto_tan(keys: &[CK], i: usize) -> [f32; 4] {
     let k = keys[i];
@@ -98,6 +189,35 @@ pub fn bezier(ta: f32, va: f32, r: [f32; 2], tb: f32, vb: f32, l: [f32; 2], t: f
     bez(va, y1, y2, vb, (lo + hi) / 2.0)
 }
 
+/// Colle des clés copiées à l'instant `now`, chacune sur la courbe du même nom. Les courbes liées reçoivent
+/// une clé aux mêmes instants (elles partagent leurs instants). Faux si rien n'a été collé.
+pub fn paste_keys(curves: &mut [Curve], clip: &[(String, CK)], now: f32) -> bool {
+    let mut times = vec![];
+    for (label, k) in clip {
+        let Some(c) = curves.iter_mut().find(|c| &c.label == label) else { continue };
+        let t = now + k.t;
+        let key = CK { t, ..*k };
+        match c.keys.iter().position(|x| (x.t - t).abs() < 1e-4) {
+            Some(i) => c.keys[i] = key,
+            None => {
+                let at = c.keys.iter().position(|x| x.t > t).unwrap_or(c.keys.len());
+                c.keys.insert(at, key);
+            }
+        }
+        times.push((c.link, t));
+    }
+    for &(link, t) in &times {
+        for c in curves.iter_mut().filter(|c| c.link == link) {
+            if !c.keys.iter().any(|x| (x.t - t).abs() < 1e-4) {
+                let v = eval(&c.keys, t);
+                let at = c.keys.iter().position(|x| x.t > t).unwrap_or(c.keys.len());
+                c.keys.insert(at, CK { t, v, ease: Ease::Smooth, tan: None });
+            }
+        }
+    }
+    !times.is_empty()
+}
+
 #[derive(Clone)]
 enum Drag {
     Keys { from: Pos2, orig: Vec<Curve> },
@@ -120,11 +240,15 @@ pub struct Editor {
     buffer: Option<(String, Vec<Curve>)>,
     /// Tweener sur les clés choisies (0 : clé d'avant, 1 : clé d'après)
     tween: f32,
+    /// Bouclage avant et après l'animation ; None : la partie n'en a pas
+    pub cycle: Option<Loop>,
+    /// Clés copiées : (nom de la courbe, instant relatif, clé)
+    clip: Vec<(String, CK)>,
 }
 
 impl Default for Editor {
     fn default() -> Self {
-        Editor { view: None, sel: vec![], hidden: vec![], drag: None, who: String::new(), normalize: false, buffer: None, tween: 0.5 }
+        Editor { view: None, sel: vec![], hidden: vec![], drag: None, who: String::new(), normalize: false, buffer: None, tween: 0.5, cycle: None, clip: vec![] }
     }
 }
 
@@ -269,6 +393,35 @@ impl Editor {
                 self.normalize = !self.normalize;
                 self.view = None;
             }
+            ui.separator();
+            if icon(ui, !self.sel.is_empty(), crate::lucide::COPY, "Copier les clés choisies (Ctrl+C)") {
+                act = Some("copy");
+            }
+            if icon(ui, !self.clip.is_empty(), crate::lucide::CLIPBOARD_PASTE, "Coller les clés à la tête de lecture (Ctrl+V)") {
+                act = Some("paste");
+            }
+            if let Some(lp) = self.cycle.as_mut() {
+                let on = !lp.is_none();
+                let txt = egui::RichText::new(crate::lucide::INFINITY).size(14.0).color(if on { p.accent } else { p.text });
+                ui.menu_button(txt, |ui| {
+                    for (label, side) in [("Avant l'animation", 0), ("Après l'animation", 1)] {
+                        ui.label(egui::RichText::new(crate::i18n::t(label)).small().color(p.muted));
+                        for m in Inf::ALL {
+                            let cur = if side == 0 { &mut lp.pre } else { &mut lp.post };
+                            if ui.selectable_label(*cur == m, crate::i18n::t(m.name())).clicked() {
+                                *cur = m;
+                            }
+                        }
+                    }
+                    ui.separator();
+                    if ui.button(format!("{}  {}", crate::lucide::INFINITY, crate::i18n::t("Boucler des deux côtés"))).clicked() {
+                        *lp = Loop { pre: Inf::Cycle, post: Inf::Cycle };
+                        ui.close();
+                    }
+                })
+                .response
+                .on_hover_text(crate::i18n::t("Avant et après l'animation : constante, cycle, cycle avec décalage, va-et-vient"));
+            }
             // Valeurs exactes de la clé choisie (comme les champs de Maya)
             if let [(ci, k)] = self.sel[..] {
                 ui.separator();
@@ -310,6 +463,15 @@ impl Editor {
         let mut linked: Vec<(u32, usize)> = self.sel.iter().map(|&(ci, k)| (curves[ci].link, k)).collect();
         linked.sort();
         linked.dedup();
+        if ui.rect_contains_pointer(ui.max_rect()) {
+            let (c, v) = ui.input(|i| (i.modifiers.command && i.key_pressed(egui::Key::C), i.modifiers.command && i.key_pressed(egui::Key::V)));
+            if c && !self.sel.is_empty() {
+                act = Some("copy");
+            }
+            if v && !self.clip.is_empty() {
+                act = Some("paste");
+            }
+        }
         match act {
             Some("unify") => {
                 for &(ci, k) in &self.sel {
@@ -423,6 +585,20 @@ impl Editor {
                     }
                 }
             }
+            Some("copy") => {
+                let t0 = self.sel.iter().filter_map(|&(c, k)| curves.get(c)?.keys.get(k)).map(|k| k.t).fold(f32::MAX, f32::min);
+                self.clip = self.sel.iter().filter_map(|&(c, k)| {
+                    let cv = curves.get(c)?;
+                    let key = *cv.keys.get(k)?;
+                    Some((cv.label.clone(), CK { t: key.t - t0, ..key }))
+                }).collect();
+            }
+            Some("paste") => {
+                if paste_keys(curves, &self.clip, now) {
+                    self.sel.clear();
+                    out.changed = true;
+                }
+            }
             Some("snapshot") => self.buffer = Some((self.who.clone(), curves.to_vec())),
             Some("swap") => {
                 if let Some((who, b)) = self.buffer.take() {
@@ -532,6 +708,7 @@ impl Editor {
             }
         }
         // Courbes, clés, tangentes des clés choisies
+        let sp = span(curves);
         // Courbes tampon : en gris, sous les courbes
         if let Some((who, buf)) = &self.buffer {
             if *who == self.who {
@@ -551,11 +728,28 @@ impl Editor {
             if c.keys.is_empty() {
                 continue;
             }
-            let pts: Vec<Pos2> = (0..=(plot.width() as usize / 2)).map(|i| {
+            let lp = self.cycle.unwrap_or_default();
+            let (t0, t1) = sp.unwrap_or((c.keys[0].t, c.keys[c.keys.len() - 1].t));
+            let (mut before, mut inside, mut after) = (vec![], vec![], vec![]);
+            for i in 0..=(plot.width() as usize / 2) {
                 let x = plot.left() + i as f32 * 2.0;
-                pos2(x, y_of_c(ci, eval(&c.keys, t_of(x))))
-            }).collect();
-            pp.add(Shape::line(pts, Stroke::new(1.8, c.color)));
+                let t = t_of(x);
+                let pt = pos2(x, y_of_c(ci, eval_span(&c.keys, lp, t, t0, t1)));
+                if t < t0 {
+                    before.push(pt);
+                } else if t > t1 {
+                    after.push(pt);
+                } else {
+                    inside.push(pt);
+                }
+            }
+            // Hors de l'animation : en pointillés (comme les infinités de Maya)
+            for ext in [before, after] {
+                if ext.len() > 1 {
+                    pp.extend(Shape::dashed_line(&ext, Stroke::new(1.4, c.color.gamma_multiply(0.75)), 5.0, 4.0));
+                }
+            }
+            pp.add(Shape::line(inside, Stroke::new(1.8, c.color)));
         }
         let key_pos = |ci: usize, c: &Curve, k: usize| pos2(x_of(c.keys[k].t), y_of_c(ci, c.keys[k].v));
         let tan_pts = |ci: usize, c: &Curve, k: usize| {
@@ -887,6 +1081,31 @@ impl Editor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn boucles_et_coller() {
+        let k = |t: f32, v: f32| CK { t, v, ease: Ease::Linear, tan: None };
+        let keys = vec![k(0.0, 0.0), k(1.0, 10.0)];
+        let cyc = Loop { pre: Inf::Cycle, post: Inf::Cycle };
+        assert!((eval_loop(&keys, cyc, 1.5) - 5.0).abs() < 1e-4);
+        assert!((eval_loop(&keys, cyc, -0.25) - 7.5).abs() < 1e-4);
+        let off = Loop { pre: Inf::Constant, post: Inf::Offset };
+        assert!((eval_loop(&keys, off, 2.5) - 25.0).abs() < 1e-4);
+        assert!((eval_loop(&keys, off, -1.0)).abs() < 1e-4);
+        let osc = Loop { pre: Inf::Constant, post: Inf::Oscillate };
+        assert!((eval_loop(&keys, osc, 1.25) - 7.5).abs() < 1e-4);
+        assert!((eval_loop(&keys, osc, 2.25) - 2.5).abs() < 1e-4);
+        // Coller sur une courbe liée : sa voisine reçoit une clé au même instant
+        let mut cv = vec![
+            Curve { label: "X".into(), color: X, keys: keys.clone(), link: 0 },
+            Curve { label: "Y".into(), color: Y, keys: keys.clone(), link: 0 },
+        ];
+        assert!(paste_keys(&mut cv, &[("X".into(), k(0.0, 3.0))], 0.5));
+        assert_eq!(cv[0].keys.len(), 3);
+        assert_eq!(cv[0].keys[1].v, 3.0);
+        assert_eq!(cv[1].keys.len(), 3);
+        assert!((cv[1].keys[1].v - 5.0).abs() < 1e-4);
+    }
 
     #[test]
     fn courbes() {

@@ -88,6 +88,9 @@ pub struct Object {
     /// Clés d'animation, triées par image
     #[serde(default)]
     pub keys: Vec<Key>,
+    /// Avant la première clé et après la dernière : constante, en boucle, en va-et-vient
+    #[serde(default, skip_serializing_if = "crate::curves::Loop::is_none")]
+    pub cycle: crate::curves::Loop,
 }
 
 /// Une clé : la pose complète de l'objet à une image donnée.
@@ -234,6 +237,21 @@ impl Object {
     /// Pose de l'objet à l'image `f` d'après ses clés (None s'il n'en a pas).
     pub fn pose_at(&self, f: f32) -> Option<([f32; 3], [f32; 3], [f32; 3])> {
         let k = &self.keys;
+        // Bouclée : on lit dans l'animation, et le cycle avec décalage ajoute le chemin des boucles d'avant
+        if k.len() >= 2 && !self.cycle.is_none() {
+            let (a, b) = (&k[0], &k[k.len() - 1]);
+            let (f2, n) = self.cycle.remap(f, a.frame as f32, b.frame as f32);
+            if f2 != f || n != 0.0 {
+                let raw = Object { cycle: Default::default(), keys: k.clone(), ..Object::new(String::new(), String::new()) };
+                let (mut p, mut r, mut s) = raw.pose_at(f2)?;
+                for i in 0..3 {
+                    p[i] += n * (b.pos[i] - a.pos[i]);
+                    r[i] += n * (b.rot[i] - a.rot[i]);
+                    s[i] += n * (b.scale[i] - a.scale[i]);
+                }
+                return Some((p, r, s));
+            }
+        }
         let (first, last) = (k.first()?, k.last()?);
         if f <= first.frame as f32 {
             return Some((first.pos, first.rot, first.scale));
@@ -262,7 +280,7 @@ impl Object {
     }
 
     pub fn new(name: String, file: String) -> Object {
-        Object { name, file, pos: [0.0; 3], rot: [0.0; 3], scale: [1.0; 3], visible: true, color: None, mods: vec![], material: String::new(), parent: String::new(), opacity: 0.5, role: String::new(), energy: 1.2, point: false, range: 8.0, shape: 0, spot: spot_deg(), blend: spot_blend(), size: area_size(), keys: vec![] }
+        Object { name, file, pos: [0.0; 3], rot: [0.0; 3], scale: [1.0; 3], visible: true, color: None, mods: vec![], material: String::new(), parent: String::new(), opacity: 0.5, role: String::new(), energy: 1.2, point: false, range: 8.0, shape: 0, spot: spot_deg(), blend: spot_blend(), size: area_size(), keys: vec![], cycle: Default::default() }
     }
 }
 

@@ -68,6 +68,7 @@ pub const ARROW_DOWN: &str = "\u{f0042}";
 pub const PLUG: &str = "\u{f037f}";
 pub const FOLDER_INPUT: &str = "\u{f0334}";
 pub const COPY_PLUS: &str = "\u{f03fd}";
+pub const INFINITY: &str = "\u{f01e7}";
 pub const FLIP_HORIZONTAL_2: &str = "\u{f035e}";
 pub const GLOBE: &str = "\u{f00e8}";
 pub const UNDO_2: &str = "\u{f02a1}";

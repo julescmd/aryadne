@@ -1343,9 +1343,15 @@ impl Editor {
                 let id = self.compo.layers[i].id.to_string();
                 self.curve_ed.show_for(&id);
                 let mut cv = motion::layer_curves(&self.compo.layers[i]);
+                let lp = self.compo.layers[i].cycle;
+                self.curve_ed.cycle = Some(lp);
                 let out = self.curve_ed.ui(ui, &mut cv, self.time, (0.0, dur), fps);
                 if out.changed {
                     motion::apply_curves(&mut self.compo.layers[i], &cv);
+                    self.changed();
+                }
+                if let Some(new) = self.curve_ed.cycle.filter(|n| *n != lp) {
+                    self.compo.layers[i].cycle = new;
                     self.changed();
                 }
                 if let Some(t) = out.seek {

@@ -224,6 +224,9 @@ pub struct Layer {
     /// Tremblement : petits mouvements au hasard, doux, qui s'ajoutent à l'animation
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wiggle: Option<Wiggle>,
+    /// Avant la première clé et après la dernière : constante, en boucle, en va-et-vient
+    #[serde(default, skip_serializing_if = "crate::curves::Loop::is_none")]
+    pub cycle: crate::curves::Loop,
 }
 
 #[derive(Clone, PartialEq, Serialize, Deserialize, Debug)]
@@ -393,7 +396,27 @@ impl Layer {
             parent: None,
             style: Style::default(),
             wiggle: None,
+            cycle: Default::default(),
         }
+    }
+
+    /// Les bornes de l'animation du calque (première et dernière clé, toutes propriétés)
+    pub fn key_span(&self) -> Option<(f32, f32)> {
+        let ts = [&self.pos, &self.scale, &self.rot, &self.opacity].into_iter().flat_map(|t| t.keys.iter().map(|k| k.t));
+        let (lo, hi) = ts.fold((f32::MAX, f32::MIN), |(a, b), t| (a.min(t), b.max(t)));
+        (hi > lo).then_some((lo, hi))
+    }
+
+    /// Valeur d'une propriété du calque à l'instant `t`, bouclage compris
+    pub fn value(&self, tr: &Track, t: f32) -> [f32; 2] {
+        if self.cycle.is_none() || !tr.animated() {
+            return tr.at(t);
+        }
+        let Some((t0, t1)) = self.key_span() else { return tr.at(t) };
+        let (t2, n) = self.cycle.remap(t, t0, t1);
+        let (a, b) = (tr.at(t0), tr.at(t1));
+        let v = tr.at(t2);
+        [v[0] + n * (b[0] - a[0]), v[1] + n * (b[1] - a[1])]
     }
 
     pub fn track(&self, p: Prop) -> &Track {
@@ -428,9 +451,9 @@ impl Layer {
 
     /// Passage du repère du calque (px, origine au centre) à celui de son parent (ou de la composition), à l'instant `t`
     pub fn xform(&self, t: f32) -> Xform {
-        let mut p = self.pos.at(t);
-        let mut s = self.scale.at(t);
-        let mut r = self.rot.at(t)[0];
+        let mut p = self.value(&self.pos, t);
+        let mut s = self.value(&self.scale, t);
+        let mut r = self.value(&self.rot, t)[0];
         if let Some(w) = &self.wiggle {
             let x = t * w.freq.max(0.0);
             let seed = self.id ^ w.seed as u64;
@@ -1047,7 +1070,7 @@ pub fn render(c: &Compo, t: f32, scale: f32, cache: &mut Cache) -> image::RgbaIm
         if !l.live(t) {
             continue;
         }
-        let op = (l.opacity.at(t)[0] / 100.0).clamp(0.0, 1.0);
+        let op = (l.value(&l.opacity, t)[0] / 100.0).clamp(0.0, 1.0);
         if op <= 0.0 {
             continue;
         }

@@ -5846,7 +5846,13 @@ impl Viewer {
                         let fps = scene.fps.max(1.0);
                         self.curve_ed.show_for(&format!("{}-{k}", scene.objects[k].name));
                         let mut cv = crate::scene::object_curves(&scene.objects[k].keys, fps);
-                        let out = self.curve_ed.ui(ui, &mut cv, self.anim_frame / fps, (scene.start as f32 / fps, scene.end as f32 / fps), fps);
+                        let lp = scene.objects[k].cycle;
+                        self.curve_ed.cycle = Some(lp);
+                        let mut out = self.curve_ed.ui(ui, &mut cv, self.anim_frame / fps, (scene.start as f32 / fps, scene.end as f32 / fps), fps);
+                        if let Some(new) = self.curve_ed.cycle.filter(|n| *n != lp) {
+                            scene.objects[k].cycle = new;
+                            out.changed = true;
+                        }
                         if out.changed {
                             crate::scene::apply_object_curves(&mut scene.objects[k].keys, &cv, fps);
                             // La pose suit la courbe à l'image courante
