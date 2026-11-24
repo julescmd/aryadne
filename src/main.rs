@@ -2620,10 +2620,19 @@ impl App {
             let is_md = vault::is_md(&rel);
             let can_summarize = matches!(self.docs[i].content, Content::Text(_));
 
-            // Barre d'outils : chemin + actions
-            egui::Frame::new().inner_margin(egui::Margin::symmetric(16, 6)).stroke(egui::Stroke::new(1.0, p.line)).show(ui, |ui| {
+            // Barre du document, comme la maquette : 34 px, chemin à gauche, actions sans cadre à droite
+            let bar = egui::Frame::new().inner_margin(egui::Margin::symmetric(12, 0)).show(ui, |ui| {
                 ui.set_width(ui.available_width());
-                ui.horizontal(|ui| {
+                ui.set_height(34.0);
+                {
+                    let v = &mut ui.style_mut().visuals.widgets;
+                    v.inactive.weak_bg_fill = egui::Color32::TRANSPARENT;
+                    v.inactive.bg_stroke = egui::Stroke::NONE;
+                    v.hovered.weak_bg_fill = p.raised;
+                    v.hovered.bg_stroke = egui::Stroke::NONE;
+                    v.open.weak_bg_fill = p.raised;
+                }
+                ui.horizontal_centered(|ui| {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         // Fichier sans titre : le bouton pour lui donner un nom et une place
                         if untitled::is_untitled(&rel) && ui.add(egui::Button::new(RichText::new(crate::i18n::t("enregistrer…  Ctrl+S")).color(p.on_accent)).fill(p.accent)).clicked() {
@@ -2632,7 +2641,7 @@ impl App {
                         // « ouvrir ▾ » : application par défaut, au choix, ou dans le dossier
                         let ext_label = if rel.to_lowercase().ends_with(".blend") { "dans Blender" } else { "avec l'app par défaut" };
                         let mut which = 0;
-                        egui::containers::menu::MenuButton::new(crate::i18n::t("ouvrir ▾")).ui(ui, |ui| {
+                        egui::containers::menu::MenuButton::new(format!("{} {}", crate::i18n::t("ouvrir"), lucide::CHEVRON_DOWN)).ui(ui, |ui| {
                             if ui.button(ext_label).clicked() {
                                 which = 1;
                             }
@@ -2718,14 +2727,19 @@ impl App {
                                 Err(e) => self.error = Some(e),
                             }
                         }
-                        if can_summarize && ui.button(crate::i18n::t("résumer")).on_hover_text(crate::i18n::t("Résumé IA de ce fichier")).clicked() {
+                        if can_summarize && ui.button(format!("{} {}", lucide::SPARKLES, crate::i18n::t("résumer"))).on_hover_text(crate::i18n::t("Résumé IA de ce fichier")).clicked() {
                             self.actions.push(Action::Summarize);
                         }
                         if is_md {
+                            // Texte (édition) ou Lecture (rendu), comme des onglets
                             let d = &mut self.docs[i];
-                            let label = if d.preview { "éditer" } else { "lire" };
-                            if ui.button(crate::i18n::t(label)).on_hover_text(crate::i18n::t("Ctrl+E")).clicked() {
-                                d.preview = !d.preview;
+                            ui.add_space(4.0);
+                            for (label, preview) in [("lecture", true), ("texte", false)] {
+                                let on = d.preview == preview;
+                                let b = egui::Button::new(RichText::new(crate::i18n::t(label)).color(if on { p.text } else { p.muted })).fill(if on { p.raised } else { egui::Color32::TRANSPARENT }).stroke(egui::Stroke::new(1.0, if on { p.line } else { egui::Color32::TRANSPARENT }));
+                                if ui.add(b).on_hover_text(crate::i18n::t("Ctrl+E")).clicked() {
+                                    d.preview = preview;
+                                }
                             }
                         }
                         // Le chemin prend la place qui reste, à gauche, et se coupe au besoin : il ne passe plus sous les boutons
@@ -2735,9 +2749,9 @@ impl App {
                             let parts: Vec<&str> = shown.split('/').collect();
                             for (k, part) in parts.iter().enumerate() {
                                 let last = k == parts.len() - 1;
-                                job.append(part, 0.0, egui::TextFormat { font_id: egui::FontId::monospace(12.0), color: if last { p.text } else { p.muted }, ..Default::default() });
+                                job.append(part, 0.0, egui::TextFormat { font_id: egui::FontId::proportional(12.5), color: if last { p.text } else { p.muted }, ..Default::default() });
                                 if !last {
-                                    job.append(" / ", 0.0, egui::TextFormat { font_id: egui::FontId::monospace(12.0), color: p.line, ..Default::default() });
+                                    job.append(" / ", 0.0, egui::TextFormat { font_id: egui::FontId::proportional(12.5), color: p.muted, ..Default::default() });
                                 }
                             }
                             ui.add(egui::Label::new(job).truncate()).on_hover_text(&shown);
@@ -2745,6 +2759,8 @@ impl App {
                     });
                 });
             });
+            let br = bar.response.rect;
+            ui.painter().hline(br.x_range(), br.bottom(), egui::Stroke::new(1.0, p.line));
 
             let doc = &mut self.docs[i];
             match &mut doc.content {
@@ -2901,9 +2917,13 @@ impl App {
                 Content::Text(text) if doc.preview => {
                     let mut goto = None;
                     egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
-                        egui::Frame::new().inner_margin(egui::Margin::symmetric(40, 24)).show(ui, |ui| {
-                            ui.set_max_width(820.0_f32.min(ui.available_width()));
-                            goto = preview::show(ui, text, &existing, &paths);
+                        ui.with_layout(egui::Layout::top_down(egui::Align::Center), |ui| {
+                            ui.set_max_width((680.0 + 64.0_f32).min(ui.available_width()));
+                            egui::Frame::new().inner_margin(egui::Margin { left: 32, right: 32, top: 40, bottom: 80 }).show(ui, |ui| {
+                                ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
+                                    goto = preview::show(ui, text, &existing, &paths);
+                                });
+                            });
                         });
                     });
                     if let Some(n) = goto {
@@ -2912,7 +2932,8 @@ impl App {
                 }
                 Content::Text(text) => {
                     let lang = if is_md { "md".to_string() } else { ext(&rel) };
-                    let fs = self.prefs.editor_size;
+                    // Les notes : deux points de plus que le code (15 px par défaut, comme la maquette)
+                    let fs = if is_md { self.prefs.editor_size + 2.0 } else { self.prefs.editor_size };
                     // Les notes ont leur police (réglages), le code garde la police à chasse fixe
                     let font = if is_md { egui::FontId::new(fs, theme::notes()) } else { egui::FontId::monospace(fs) };
                     let theme = if dark { egui_extras::syntax_highlighting::CodeTheme::dark(fs) } else { egui_extras::syntax_highlighting::CodeTheme::light(fs) }.with_font_id(font);
@@ -2944,7 +2965,7 @@ impl App {
                     }
                     let folds = ed.folds.clone();
                     let mut layouter = |ui: &egui::Ui, buf: &dyn egui::TextBuffer, width: f32| {
-                        let mut job = egui_extras::syntax_highlighting::highlight(ui.ctx(), ui.style(), &theme, buf.as_str(), &lang);
+                        let mut job = if lang == "md" { md_layout(buf.as_str(), fs) } else { egui_extras::syntax_highlighting::highlight(ui.ctx(), ui.style(), &theme, buf.as_str(), &lang) };
                         job.wrap.max_width = if wrap { width } else { f32::INFINITY };
                         code::apply_folds(&mut job, &code::hidden_bytes(buf.as_str(), &folds));
                         ui.painter().layout_job(job)
@@ -2969,7 +2990,13 @@ impl App {
                     let gutter = if numbers { (digits * fs * 0.62 + 26.0) as i8 } else if wrap { 40 } else { 12 };
                     let scroll = if wrap { egui::ScrollArea::vertical() } else { egui::ScrollArea::both() };
                     scroll.id_salt(("scroll", &rel)).auto_shrink(false).show(ui, |ui| {
-                        egui::Frame::new().inner_margin(egui::Margin { left: gutter, right: if !is_md && self.prefs.minimap && text.lines().count() > 40 { 84 } else { 24 }, top: 16, bottom: 120 }).show(ui, |ui| {
+                        // Une note se lit dans une colonne centrée de 680 px (la maquette) ; le code prend toute la largeur
+                        let side = if is_md { 32i8 } else { 0 };
+                        // Une note : colonne de 680 px centrée (la maquette) ; le code prend toute la largeur
+                        let col_w = if is_md { (680.0 + 64.0_f32).min(ui.available_width()) } else { ui.available_width() };
+                        ui.with_layout(egui::Layout::top_down(if is_md { egui::Align::Center } else { egui::Align::Min }), |ui| {
+                        ui.set_max_width(col_w);
+                        egui::Frame::new().inner_margin(egui::Margin { left: if is_md { side } else { gutter }, right: if is_md { side } else if self.prefs.minimap && text.lines().count() > 40 { 84 } else { 24 }, top: if is_md { 40 } else { 16 }, bottom: 120 }).show(ui, |ui| {
                             let bg = ui.painter().add(egui::Shape::Noop);
                             let edit = egui::TextEdit::multiline(text)
                                 .id(id)
@@ -2982,6 +3009,7 @@ impl App {
                             let out = edit.show(ui);
                             changed |= out.response.changed();
                             code::after(ui, ed, text, &lang, &out, &notes, typed_now && out.response.changed(), code::View { minimap: !is_md && self.prefs.minimap, gutter: numbers, font_size: fs, bg });
+                        });
                         });
                     });
                     if changed {
@@ -5745,5 +5773,121 @@ impl egui_tiles::Behavior<String> for Panes<'_> {
 
     fn simplification_options(&self) -> egui_tiles::SimplificationOptions {
         egui_tiles::SimplificationOptions { all_panes_must_have_tabs: true, ..Default::default() }
+    }
+}
+
+/// Mise en forme d'une note pendant qu'on l'écrit (proche du rendu final, comme la maquette) :
+/// titres plus grands en semi-gras, `#`, `**`, `- [ ]` discrets, [[liens]] colorés, `code` à chasse fixe.
+/// Le texte reste le markdown tel quel : chaque caractère garde sa place, seule l'apparence change.
+fn md_layout(text: &str, fs: f32) -> egui::text::LayoutJob {
+    let p = theme::pal();
+    let mut job = egui::text::LayoutJob::default();
+    let fmt = |size: f32, bold: bool, color: egui::Color32| egui::TextFormat {
+        font_id: egui::FontId::new(size, if bold { theme::bold() } else { theme::notes() }),
+        color,
+        line_height: Some(size * 1.6),
+        ..Default::default()
+    };
+    let mut in_code = false;
+    for line in text.split_inclusive('\n') {
+        let body = line.trim_end_matches('\n');
+        let nl = &line[body.len()..];
+        let trimmed = body.trim_start();
+        if trimmed.starts_with("```") {
+            in_code = !in_code;
+            job.append(line, 0.0, egui::TextFormat { font_id: egui::FontId::monospace(fs - 1.0), color: p.muted, ..Default::default() });
+            continue;
+        }
+        if in_code {
+            job.append(line, 0.0, egui::TextFormat { font_id: egui::FontId::monospace(fs - 1.0), color: p.text, background: p.panel, ..Default::default() });
+            continue;
+        }
+        // Titres : les # en gris, le texte en grand
+        let hashes = trimmed.chars().take_while(|c| *c == '#').count();
+        if (1..=6).contains(&hashes) && trimmed[hashes..].starts_with(' ') {
+            let size = match hashes {
+                1 => fs + 7.0,
+                2 => fs + 3.0,
+                _ => fs,
+            };
+            let lead = body.len() - trimmed.len() + hashes + 1;
+            job.append(&body[..lead], 0.0, fmt(size, false, p.muted));
+            inline(&mut job, &body[lead..], size, true, &fmt);
+            job.append(nl, 0.0, fmt(size, false, p.text));
+            continue;
+        }
+        // Listes et cases à cocher : la marque en gris (case cochée : texte estompé)
+        let mut rest = body;
+        for mark in ["- [ ] ", "- [x] ", "- [X] ", "* [ ] ", "- ", "* ", "> "] {
+            if let Some(r) = trimmed.strip_prefix(mark) {
+                let lead = body.len() - r.len();
+                job.append(&body[..lead], 0.0, fmt(fs, false, if mark.contains('x') || mark.contains('X') { p.success } else { p.muted }));
+                rest = &body[lead..];
+                if mark.contains("[x]") || mark.contains("[X]") {
+                    job.append(rest, 0.0, egui::TextFormat { strikethrough: egui::Stroke::new(1.0, p.muted), ..fmt(fs, false, p.muted) });
+                    rest = "";
+                }
+                break;
+            }
+        }
+        inline(&mut job, rest, fs, false, &fmt);
+        job.append(nl, 0.0, fmt(fs, false, p.text));
+    }
+    return job;
+
+    /// Dans une ligne : [[liens]], `code`, **gras** ; le reste en texte normal.
+    fn inline(job: &mut egui::text::LayoutJob, s: &str, size: f32, bold: bool, fmt: &dyn Fn(f32, bool, egui::Color32) -> egui::TextFormat) {
+        let p = theme::pal();
+        let mut i = 0;
+        let b = s.as_bytes();
+        let mut plain = 0;
+        let flush = |job: &mut egui::text::LayoutJob, from: usize, to: usize| {
+            if to > from {
+                job.append(&s[from..to], 0.0, fmt(size, bold, p.text));
+            }
+        };
+        while i < b.len() {
+            let (open, close, kind) = if s[i..].starts_with("[[") {
+                ("[[", "]]", 0)
+            } else if s[i..].starts_with("**") {
+                ("**", "**", 1)
+            } else if b[i] == b'`' {
+                ("`", "`", 2)
+            } else {
+                i += s[i..].chars().next().map_or(1, |c| c.len_utf8());
+                continue;
+            };
+            let Some(end) = s[i + open.len()..].find(close).map(|e| i + open.len() + e) else {
+                i += open.len();
+                continue;
+            };
+            flush(job, plain, i);
+            let inner = &s[i + open.len()..end];
+            job.append(open, 0.0, fmt(size, false, p.muted));
+            match kind {
+                0 => job.append(inner, 0.0, fmt(size, bold, p.link)),
+                1 => job.append(inner, 0.0, fmt(size, true, p.text)),
+                _ => job.append(inner, 0.0, egui::TextFormat { font_id: egui::FontId::monospace(size - 1.5), color: p.text, background: p.panel, ..Default::default() }),
+            }
+            job.append(close, 0.0, fmt(size, false, p.muted));
+            i = end + close.len();
+            plain = i;
+        }
+        flush(job, plain, b.len());
+    }
+}
+
+#[cfg(test)]
+mod tests_md_layout {
+    #[test]
+    fn mise_en_forme_garde_le_texte() {
+        for t in [
+            "# Titre\n\n## À faire\n- [ ] tâche [[Lien]]\n- [x] fait\n\nDu **gras**, du `code` et un [[lien\n",
+            "```rust\nfn main() {}\n```\npas fini **gras\n> citation\n* puce\n### é è ü\n",
+            "",
+            "#pas un titre\n[[",
+        ] {
+            assert_eq!(super::md_layout(t, 15.0).text, t);
+        }
     }
 }

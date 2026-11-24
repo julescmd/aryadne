@@ -81,23 +81,23 @@ pub fn kind(rel: &str) -> (&'static str, Color32, &'static str) {
     let l = rel.to_lowercase();
     let e = l.rsplit_once('.').map(|(_, e)| e).unwrap_or("");
     if vault::is_md(&l) {
-        ("#", ws("notes"), "notes")
+        (crate::lucide::FILE_TEXT, ws("notes"), "notes")
     } else if board::is_board(&l) {
-        ("▦", ws("2d"), "boards")
+        (crate::lucide::LAYOUT_DASHBOARD, ws("2d"), "boards")
     } else if nodes::is_graph(&l) {
-        ("⬡", ws("mat"), "nodes")
+        (crate::lucide::WORKFLOW, ws("mat"), "nodes")
     } else if l.ends_with(".blend") || model3d::is_model(&l) {
-        ("◆", ws("3d"), "3d")
+        (crate::lucide::BOX, ws("3d"), "3d")
     } else if video::is_video(&l) {
-        ("▶", ws("video"), "vidéos")
+        (crate::lucide::FILM, ws("video"), "vidéos")
     } else if images::is_image(&l) || matches!(e, "psd" | "kra" | "exr" | "hdr") {
-        ("▣", ws("2d"), "images")
+        (crate::lucide::IMAGE, ws("2d"), "images")
     } else if office::is_office(&l) || e == "pdf" {
-        ("▤", crate::theme::pal().info, "docs")
+        (crate::lucide::BOOK_OPEN, crate::theme::pal().info, "docs")
     } else if matches!(e, "rs" | "py" | "js" | "ts" | "tsx" | "jsx" | "html" | "htm" | "css" | "scss" | "c" | "cpp" | "h" | "hpp" | "cs" | "java" | "go" | "lua" | "sh" | "glsl" | "hlsl" | "json" | "toml" | "yaml" | "yml" | "gd" | "rb" | "php" | "sql" | "vue" | "svelte" | "xml" | "svg" | "osl" | "ps1" | "bat") {
-        ("‹›", ws("code"), "code")
+        (crate::lucide::CODE, ws("code"), "code")
     } else {
-        ("·", crate::theme::pal().muted, "autres")
+        (crate::lucide::FILE, crate::theme::pal().muted, "autres")
     }
 }
 
@@ -580,19 +580,21 @@ impl App {
             let gx = rect.left() + 17.0 + d as f32 * 14.0;
             painter.line_segment([egui::pos2(gx, rect.top()), egui::pos2(gx, rect.bottom())], egui::Stroke::new(1.0, p.line.linear_multiply(0.7)));
         }
-        let font = egui::FontId::monospace(12.5);
+        // Comme la maquette : Inter 12,5 px, chevron et icône Lucide, nombre discret
+        let font = egui::FontId::proportional(12.5);
         let open = e.is_dir && self.files.expanded.contains(&e.rel);
         if e.is_dir {
-            painter.text(egui::pos2(x, cy), egui::Align2::LEFT_CENTER, if open { "▾" } else { "▸" }, font.clone(), p.muted);
-            let name = painter.layout_no_wrap(e.name.clone(), egui::FontId::new(12.5, theme::bold()), p.text);
+            painter.text(egui::pos2(x + 4.0, cy), egui::Align2::CENTER_CENTER, if open { crate::lucide::CHEVRON_DOWN } else { crate::lucide::CHEVRON_RIGHT }, egui::FontId::proportional(11.0), p.muted);
+            painter.text(egui::pos2(x + 18.0, cy), egui::Align2::CENTER_CENTER, if open { crate::lucide::FOLDER_OPEN } else { crate::lucide::FOLDER }, egui::FontId::proportional(14.0), p.muted);
+            let name = painter.layout_no_wrap(e.name.clone(), font.clone(), p.text);
             let w = name.size().x;
-            painter.galley(egui::pos2(x + 14.0, cy - name.size().y / 2.0), name, p.text);
+            painter.galley(egui::pos2(x + 28.0, cy - name.size().y / 2.0), name, p.text);
             let prefix = format!("{}/", e.rel);
             let n = self.entries.iter().filter(|c| !c.is_dir && c.rel.starts_with(&prefix)).count();
-            painter.text(egui::pos2(x + 22.0 + w, cy), egui::Align2::LEFT_CENTER, n.to_string(), egui::FontId::monospace(10.5), p.muted.linear_multiply(0.8));
+            painter.text(egui::pos2(x + 34.0 + w, cy), egui::Align2::LEFT_CENTER, n.to_string(), egui::FontId::proportional(11.0), p.muted);
         } else {
             let (icon, col, _) = kind(&e.rel);
-            painter.text(egui::pos2(x + 6.0, cy), egui::Align2::CENTER_CENTER, icon, egui::FontId::monospace(if icon.len() > 1 { 10.0 } else { 12.5 }), col);
+            painter.text(egui::pos2(x + 18.0, cy), egui::Align2::CENTER_CENTER, icon, egui::FontId::proportional(14.0), col);
             let (stem, ext) = match e.name.rsplit_once('.') {
                 Some((s, x)) if !s.is_empty() => (s.to_string(), format!(".{x}")),
                 _ => (e.name.clone(), String::new()),
@@ -601,15 +603,15 @@ impl App {
             let color = if active { p.text } else { p.text.linear_multiply(0.85) };
             let g = painter.layout_no_wrap(stem, font.clone(), color);
             let w = g.size().x;
-            painter.galley(egui::pos2(x + 16.0, cy - g.size().y / 2.0), g, color);
+            painter.galley(egui::pos2(x + 28.0, cy - g.size().y / 2.0), g, color);
             let special = vault::is_md(&e.rel) || board::is_board(&e.rel) || nodes::is_graph(&e.rel);
             if (self.files.show_ext || !special) && !ext.is_empty() {
-                painter.text(egui::pos2(x + 16.0 + w, cy), egui::Align2::LEFT_CENTER, ext, font.clone(), p.muted.linear_multiply(0.7));
+                painter.text(egui::pos2(x + 28.0 + w, cy), egui::Align2::LEFT_CENTER, ext, font.clone(), p.muted);
             }
         }
         if with_path {
             let par = vault::display_rel(&vault::parent(&e.rel));
-            painter.text(egui::pos2(x + 16.0, rect.top() + 26.0), egui::Align2::LEFT_CENTER, if par.is_empty() { "/".to_string() } else { par }, egui::FontId::monospace(10.0), p.muted);
+            painter.text(egui::pos2(x + 28.0, rect.top() + 26.0), egui::Align2::LEFT_CENTER, if par.is_empty() { "/".to_string() } else { par }, egui::FontId::proportional(11.0), p.muted);
         }
         // Marqueurs à droite : modifié, épinglé, lié
         let mut rx = rect.right() - 10.0;
@@ -771,8 +773,8 @@ fn fold_section(ui: &mut egui::Ui, title: &str, count: usize, open: &mut bool) -
     ui.add_space(4.0);
     let r = ui.horizontal(|ui| {
         ui.add_space(8.0);
-        let text = format!("{} {}  {}", if *open { "▾" } else { "▸" }, title.to_uppercase(), count);
-        ui.add(egui::Label::new(RichText::new(text).size(10.0).color(p.muted).family(theme::bold())).sense(egui::Sense::click()))
+        let text = format!("{} {}  {}", if *open { crate::lucide::CHEVRON_DOWN } else { crate::lucide::CHEVRON_RIGHT }, crate::i18n::t(title), count);
+        ui.add(egui::Label::new(RichText::new(text).size(11.0).color(p.muted)).sense(egui::Sense::click()))
     });
     ui.add_space(4.0);
     let clicked = r.inner.on_hover_cursor(egui::CursorIcon::PointingHand).clicked();
@@ -786,7 +788,7 @@ fn section(ui: &mut egui::Ui, title: &str) {
     ui.add_space(4.0);
     ui.horizontal(|ui| {
         ui.add_space(12.0);
-        ui.label(RichText::new(title.to_uppercase()).size(10.0).color(theme::pal().muted).family(theme::bold()));
+        ui.label(RichText::new(crate::i18n::sentence(title)).size(11.0).color(theme::pal().muted));
     });
     ui.add_space(4.0);
 }

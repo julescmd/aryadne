@@ -330,7 +330,8 @@ pub fn install_fonts(ctx: &egui::Context, chosen: &Fonts) {
     let pick = |s: &str, d: &str| if s.is_empty() { d.to_string() } else { s.to_string() };
     let ui = add(&mut fonts, &pick(&chosen.ui, "inter")).or_else(|| add(&mut fonts, "inter")).unwrap();
     let mono = add(&mut fonts, &pick(&chosen.mono, "jetbrains")).or_else(|| add(&mut fonts, "jetbrains")).unwrap();
-    let notes = add(&mut fonts, &pick(&chosen.notes, "jetbrains")).or_else(|| add(&mut fonts, "jetbrains")).unwrap();
+    // Notes : Inter par défaut (la charte et la maquette), modifiable dans les réglages
+    let notes = add(&mut fonts, &pick(&chosen.notes, "inter")).or_else(|| add(&mut fonts, "inter")).unwrap();
     for b in BUILTIN {
         add(&mut fonts, b.0);
     }
