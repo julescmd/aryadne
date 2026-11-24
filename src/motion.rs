@@ -510,7 +510,7 @@ impl Compo {
 
 // ---------- Rendu ----------
 
-fn font(name: &str) -> &'static ab_glyph::FontArc {
+pub fn font(name: &str) -> &'static ab_glyph::FontArc {
     use ab_glyph::FontArc;
     static FONTS: OnceLock<Vec<(&'static str, FontArc)>> = OnceLock::new();
     let list = FONTS.get_or_init(|| {

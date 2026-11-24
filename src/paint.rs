@@ -242,10 +242,11 @@ pub enum Tool {
     Eraser,
     Fill,
     Gradient,
+    Text,
     Picker,
 }
 
-const TOOLS: [(Tool, &str, &str, &str); 10] = [
+const TOOLS: [(Tool, &str, &str, &str); 11] = [
     (Tool::Move, crate::lucide::MOVE, "déplacer le calque", "V"),
     (Tool::Select, crate::lucide::SQUARE_DASHED, "sélection rectangulaire", "M"),
     (Tool::Ellipse, crate::lucide::CIRCLE_DASHED, "sélection elliptique", "O"),
@@ -255,6 +256,7 @@ const TOOLS: [(Tool, &str, &str, &str); 10] = [
     (Tool::Eraser, crate::lucide::ERASER, "gomme", "E"),
     (Tool::Fill, crate::lucide::PAINT_BUCKET, "pot de peinture", "G"),
     (Tool::Gradient, crate::lucide::BLEND, "dégradé", "D"),
+    (Tool::Text, crate::lucide::TYPE, "texte", "T"),
     (Tool::Picker, crate::lucide::PIPETTE, "pipette", "I"),
 ];
 
@@ -423,6 +425,74 @@ pub struct Editor {
     pub message: Option<String>,
     adjust: Option<(Adjust, Layer, [f32; 2])>,
     renaming: Option<usize>,
+    /// Texte en cours de saisie, avant d'être posé en calque
+    text: Option<TextDraft>,
+    pub text_font: usize,
+    pub text_size: f32,
+}
+
+/// Texte en cours : point d'ancrage (haut-gauche, px du document) et aperçu rendu
+struct TextDraft {
+    at: [f32; 2],
+    s: String,
+    preview: Option<(String, egui::TextureHandle, [i32; 2], [usize; 2])>,
+    focus: bool,
+}
+
+/// Rend un texte (aligné à gauche, plusieurs lignes) : l'image RGBA et la position de son coin
+/// haut-gauche par rapport à l'ancrage
+pub fn render_text(text: &str, font: &str, size: f32, color: [u8; 4]) -> Option<(Vec<u8>, usize, usize, [i32; 2])> {
+    use ab_glyph::{Font, ScaleFont};
+    let f = crate::motion::font(font);
+    let size = size.clamp(2.0, 2000.0);
+    let sf = f.as_scaled(ab_glyph::PxScale::from(size));
+    let line_h = sf.height() + sf.line_gap();
+    let mut outlined = vec![];
+    for (li, line) in text.lines().enumerate() {
+        let mut x = 0.0f32;
+        let y = li as f32 * line_h + sf.ascent();
+        let mut prev = None;
+        for ch in line.chars() {
+            let id = sf.glyph_id(ch);
+            if let Some(p) = prev {
+                x += sf.kern(p, id);
+            }
+            if let Some(o) = f.outline_glyph(id.with_scale_and_position(ab_glyph::PxScale::from(size), ab_glyph::point(x, y))) {
+                outlined.push(o);
+            }
+            x += sf.h_advance(id);
+            prev = Some(id);
+        }
+    }
+    let (mut x0, mut y0, mut x1, mut y1) = (i32::MAX, i32::MAX, i32::MIN, i32::MIN);
+    for o in &outlined {
+        let b = o.px_bounds();
+        x0 = x0.min(b.min.x.floor() as i32);
+        y0 = y0.min(b.min.y.floor() as i32);
+        x1 = x1.max(b.max.x.ceil() as i32);
+        y1 = y1.max(b.max.y.ceil() as i32);
+    }
+    if x1 <= x0 || y1 <= y0 {
+        return None;
+    }
+    let (w, h) = ((x1 - x0) as usize, (y1 - y0) as usize);
+    let mut px = vec![0u8; w * h * 4];
+    for o in &outlined {
+        let b = o.px_bounds();
+        o.draw(|gx, gy, cov| {
+            let (x, y) = (b.min.x.floor() as i32 + gx as i32 - x0, b.min.y.floor() as i32 + gy as i32 - y0);
+            if x < 0 || y < 0 || x as usize >= w || y as usize >= h {
+                return;
+            }
+            let i = (y as usize * w + x as usize) * 4;
+            let a = (cov.min(1.0) * color[3] as f32).round() as u8;
+            if a > px[i + 3] {
+                px[i..i + 3].copy_from_slice(&color[..3]);
+                px[i + 3] = a;
+            }
+        });
+    }
+    Some((px, w, h, [x0, y0]))
 }
 
 impl Editor {
@@ -435,6 +505,9 @@ impl Editor {
             dirty: Some([0, 0, doc.w, doc.h]),
             doc,
             tool: Tool::Brush,
+            text: None,
+            text_font: 0,
+            text_size: 64.0,
             color: Color32::from_rgb(30, 30, 34),
             size: 18.0,
             hardness: 0.7,
@@ -982,6 +1055,15 @@ impl Editor {
                 Tool::Select | Tool::Ellipse | Tool::Lasso => {
                     ui.label(egui::RichText::new(crate::i18n::t("Maj : ajouter · Alt : retirer")).size(11.0).color(p.muted));
                 }
+                Tool::Text => {
+                    let fonts = crate::motion::FONTS;
+                    egui::ComboBox::from_id_salt("paint-font").selected_text(crate::i18n::t(fonts[self.text_font.min(fonts.len() - 1)].1)).show_ui(ui, |ui| {
+                        for (k, (_, name)) in fonts.iter().enumerate() {
+                            ui.selectable_value(&mut self.text_font, k, crate::i18n::t(name));
+                        }
+                    });
+                    ui.add(egui::DragValue::new(&mut self.text_size).range(4.0..=2000.0).speed(0.5).suffix(" px")).on_hover_text(crate::i18n::t("taille du texte"));
+                }
                 _ => {}
             }
             if self.sel.is_some() && ui.button(crate::i18n::t("désélectionner (Ctrl+D)")).clicked() {
@@ -1245,6 +1327,11 @@ impl Editor {
                             self.sel = self.mix_sel(new);
                             self.sel_base = None;
                         }
+                        Tool::Text => {
+                            // Un nouveau clic pose le texte en cours, puis en commence un autre
+                            self.commit_text(ui.ctx());
+                            self.text = Some(TextDraft { at: [d.x, d.y], s: String::new(), preview: None, focus: true });
+                        }
                         Tool::Gradient | Tool::Move => {}
                     }
                 }
@@ -1292,6 +1379,64 @@ impl Editor {
             painter.line_segment([sa, sb], Stroke::new(1.0, Color32::WHITE));
             painter.circle_filled(sa, 4.0, self.color);
             painter.circle_stroke(sb, 4.0, Stroke::new(1.0, Color32::WHITE));
+        }
+        // Texte en cours : aperçu sur l'image et petite fenêtre de saisie
+        let mut text_done: Option<bool> = None;
+        if self.tool != Tool::Text && self.text.is_some() {
+            text_done = Some(true);
+        }
+        let (font_name, size, color) = (crate::motion::FONTS[self.text_font.min(crate::motion::FONTS.len() - 1)].0, self.text_size, self.color.to_srgba_unmultiplied());
+        if let Some(t) = &mut self.text {
+            let key = format!("{}|{font_name}|{size}|{color:?}", t.s);
+            if t.preview.as_ref().is_none_or(|p| p.0 != key) {
+                t.preview = render_text(&t.s, font_name, size, color).map(|(px, w, h, off)| {
+                    let img = egui::ColorImage::from_rgba_unmultiplied([w, h], &px);
+                    (key.clone(), ctx.load_texture("paint-text", img, egui::TextureOptions::LINEAR), off, [w, h])
+                });
+                if t.preview.is_none() {
+                    t.preview = Some((key, ctx.load_texture("paint-text", egui::ColorImage::new([1, 1], vec![Color32::TRANSPARENT]), egui::TextureOptions::LINEAR), [0, 0], [0, 0]));
+                }
+            }
+            let anchor = to_screen(t.at[0], t.at[1]);
+            let mut box_r = Rect::from_min_size(anchor, vec2(self.text_size * self.zoom * 0.6, self.text_size * self.zoom * 1.2));
+            if let Some((_, tex, off, [w, h])) = &t.preview {
+                if *w > 0 {
+                    let r = Rect::from_min_size(to_screen(t.at[0] + off[0] as f32, t.at[1] + off[1] as f32), vec2(*w as f32 * self.zoom, *h as f32 * self.zoom));
+                    painter.image(tex.id(), r, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+                    box_r = box_r.union(r);
+                }
+            }
+            painter.rect_stroke(box_r.expand(4.0), 0.0, Stroke::new(1.0, Color32::from_black_alpha(140)), egui::StrokeKind::Outside);
+            painter.rect_stroke(box_r.expand(3.0), 0.0, Stroke::new(1.0, Color32::from_white_alpha(200)), egui::StrokeKind::Outside);
+            egui::Area::new(egui::Id::unique("paint-text-box")).order(egui::Order::Foreground).fixed_pos(pos2(box_r.left() - 4.0, box_r.bottom() + 10.0)).show(&ctx, |ui| {
+                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    let r = ui.add(egui::TextEdit::multiline(&mut t.s).desired_rows(2).desired_width(260.0).hint_text(crate::i18n::t("Ton texte")));
+                    if t.focus {
+                        r.request_focus();
+                        t.focus = false;
+                    }
+                    ui.horizontal(|ui| {
+                        if ui.button(crate::i18n::t("poser le texte")).on_hover_text("Ctrl+Entrée").clicked() {
+                            text_done = Some(true);
+                        }
+                        if ui.button(crate::i18n::t("annuler")).on_hover_text(crate::i18n::t("Échap")).clicked() {
+                            text_done = Some(false);
+                        }
+                    });
+                    if ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::Enter)) {
+                        text_done = Some(true);
+                    }
+                    if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                        text_done = Some(false);
+                    }
+                });
+            });
+            ctx.request_repaint();
+        }
+        match text_done {
+            Some(true) => self.commit_text(&ctx),
+            Some(false) => self.text = None,
+            None => {}
         }
         // Rond du pinceau sous le pointeur
         if let (Some(at), true) = (hover.filter(|q| rect.contains(*q)), matches!(self.tool, Tool::Brush | Tool::Eraser)) {
@@ -1367,6 +1512,23 @@ impl Editor {
         if self.save_due.is_some() {
             ctx.request_repaint_after(std::time::Duration::from_millis(500));
         }
+    }
+
+    /// Pose le texte en cours dans un nouveau calque, au-dessus du calque actif
+    fn commit_text(&mut self, _ctx: &egui::Context) {
+        let Some(t) = self.text.take() else { return };
+        if t.s.trim().is_empty() {
+            return;
+        }
+        let font = crate::motion::FONTS[self.text_font.min(crate::motion::FONTS.len() - 1)].0;
+        let Some((px, w, h, off)) = render_text(&t.s, font, self.text_size, self.color.to_srgba_unmultiplied()) else { return };
+        self.checkpoint();
+        let name: String = t.s.lines().next().unwrap_or("").chars().take(24).collect();
+        let layer = Layer { name: format!("T {name}"), visible: true, opacity: 1.0, blend: Blend::Normal, off: [t.at[0].round() as i32 + off[0], t.at[1].round() as i32 + off[1]], w, h, px };
+        self.doc.layers.insert(self.doc.active + 1, layer);
+        self.doc.active += 1;
+        self.all();
+        self.save_due = Some(Instant::now());
     }
 
     fn new_layer(&mut self) {
@@ -1598,5 +1760,17 @@ mod tests {
         ed.filter("pixelate", 8.0);
         assert_eq!(ed.doc.layers[0].px[0..4], ed.doc.layers[0].px[4..8]);
         let _ = std::fs::remove_file(&path);
+    }
+}
+
+#[cfg(test)]
+mod text_tests {
+    #[test]
+    fn texte_rendu() {
+        let (px, w, h, off) = super::render_text("Ab\nc", "inter", 40.0, [200, 10, 10, 255]).unwrap();
+        assert!(w > 20 && h > 60, "{w}x{h}");
+        assert!(off[1] >= 0 && off[1] < 20, "le haut des lettres est près de l'ancrage : {off:?}");
+        assert!(px.chunks_exact(4).any(|p| p == [200, 10, 10, 255]));
+        assert!(super::render_text("   ", "inter", 40.0, [0; 4]).is_none());
     }
 }
