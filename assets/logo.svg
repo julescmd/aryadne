@@ -1,18 +1,1 @@
-<?xml version="1.0" encoding="UTF-8"?>
-<svg id="Layer_2" data-name="Layer 2" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 211.31 183">
-  <defs>
-    <style>
-      .cls-1 {
-        fill: #fff;
-      }
-
-      .cls-2 {
-        fill: #111416;
-      }
-    </style>
-  </defs>
-  <g id="Layer_1-2" data-name="Layer 1">
-    <polygon class="cls-2" points="158.48 0 52.83 0 0 91.5 52.83 183 158.48 183 211.31 91.5 158.48 0"/>
-    <polygon class="cls-1" points="173.08 91.51 134.77 154.4 108.23 154.4 69.92 91.51 55.21 91.51 93.52 154.4 76.54 154.4 38.23 91.51 76.54 28.6 103.08 28.6 141.39 91.51 156.1 91.51 117.79 28.6 134.77 28.6 173.08 91.51"/>
-  </g>
-</svg>
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 100 100"><rect width="100" height="100" rx="22" fill="#1a1417"/><g transform="translate(-0.5 0.5)"><path d="M20 86 L46.74 23.9 A6 6 0 0 1 57.26 18.1 L73.26 47.1 A6 6 0 0 1 62.74 52.9 C58.5 55 53 57.5 49.5 61 C45 66 37.5 66 37.5 59.5 C37.5 53.5 44.5 51.5 48.5 54.8 C51 57 52.7 59 54.04 61.38 L69.04 83.38 A6 6 0 0 0 78.96 76.62 L67 59 M46.74 23.9 L62.74 52.9" fill="none" stroke="#ccacb9" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/></g></svg>

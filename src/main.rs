@@ -2428,7 +2428,7 @@ impl App {
                     // Menu ◆ Aryadne : le coffre (nouveau, importer, sauvegarder…), la fenêtre et les réglages
                     let path = self.root();
                     let short = path.split(['/', '\\']).filter(|s| !s.is_empty()).last().unwrap_or("").to_string();
-                    theme::mark(ui, 16.0);
+                    theme::mark(ui, 18.0);
                     let mut job = egui::text::LayoutJob::default();
                     job.append(&crate::i18n::t("aryadne"), 0.0, egui::TextFormat { font_id: egui::FontId::new(13.0, theme::bold()), color: p.text, ..Default::default() });
                     job.append(&format!("{short}  {}", lucide::CHEVRON_DOWN), 8.0, egui::TextFormat { font_id: egui::FontId::proportional(11.5), color: p.muted, ..Default::default() });

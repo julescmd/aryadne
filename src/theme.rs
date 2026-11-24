@@ -450,21 +450,21 @@ pub fn apply(ctx: &egui::Context, _dark: bool) {
     });
 }
 
-/// Le logo Aryadne, adapté au thème (hexagone sombre en clair, clair en sombre).
+/// Le logo Aryadne (le A d'un seul fil, sur sa tuile), adapté au thème.
 pub fn logo(ui: &mut egui::Ui, height: f32) -> egui::Response {
     let (uri, bytes): (&str, &'static [u8]) = if is_dark() {
         ("bytes://logo-dark.png", include_bytes!("../assets/logo-dark.png"))
     } else {
         ("bytes://logo-light.png", include_bytes!("../assets/logo-light.png"))
     };
-    ui.add(egui::Image::from_bytes(uri, bytes).fit_to_exact_size(egui::vec2(height * 211.31 / 183.0, height)))
+    ui.add(egui::Image::from_bytes(uri, bytes).fit_to_exact_size(egui::vec2(height, height)))
 }
 
-/// Le motif seul (sans hexagone), de la couleur d'accent choisie.
+/// Le motif seul (le A d'un seul fil, sans tuile), de la couleur d'accent choisie.
 pub fn mark(ui: &mut egui::Ui, height: f32) -> egui::Response {
     let img = egui::Image::from_bytes("bytes://mark.png", include_bytes!("../assets/mark.png"))
         .tint(pal().accent)
-        .fit_to_exact_size(egui::vec2(height * 134.85 / 125.79, height));
+        .fit_to_exact_size(egui::vec2(height, height));
     ui.add(img)
 }
 
