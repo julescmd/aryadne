@@ -789,6 +789,29 @@ impl Project {
         }
     }
 
+    /// Arrêt sur image : à `t`, le plan `i` est coupé et une image fixe (`still`, déjà extraite) tient pendant
+    /// `dur` secondes ; tout ce qui suit, sur toutes les pistes, recule d'autant (le son reste synchro).
+    /// Rend l'indice du plan fixe.
+    pub fn freeze_frame(&mut self, i: usize, t: f32, dur: f32, still: String) -> Option<usize> {
+        let c = self.clips.get(i)?.clone();
+        if t < c.start - 1e-3 || t > c.end() + 1e-3 || dur <= 0.0 {
+            return None;
+        }
+        let ids: Vec<u64> = self.clips.iter().filter(|x| x.start < t - 1e-3 && x.end() > t + 1e-3).map(|x| x.id).collect();
+        self.split_linked(&ids, t);
+        for x in self.clips.iter_mut().filter(|x| x.start >= t - 1e-3) {
+            x.start += dur;
+        }
+        let pose = c.pose_at(t);
+        let mut f = Clip { kind: "image".into(), file: still, name: format!("{} (arrêt)", c.name), start: t, src_in: 0.0, src_out: dur, media: 0.0, has_audio: false, speed: 1.0, fade_in: 0.0, fade_out: 0.0, xfade: 0.0, keys: vec![], link: 0, id: 0, ..c };
+        if let Some(k) = pose {
+            (f.x, f.y, f.scale, f.opacity) = (k.x, k.y, k.scale, k.opacity);
+        }
+        self.clips.push(f);
+        self.ensure_ids();
+        Some(self.clips.len() - 1)
+    }
+
     /// Retire [a, b) de la timeline sur les pistes `lanes` (piste son ?, numéro) : ce qui est dedans part,
     /// ce qui suit sur ces pistes recule d'autant. Les autres pistes ne bougent pas.
     pub fn cut_range(&mut self, lanes: &[(bool, usize)], a: f32, b: f32) {
@@ -1252,6 +1275,29 @@ pub(crate) fn timecode(t: f32, fps: f32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn arret_sur_image() {
+        let mut p = Project::default();
+        let mut v = Clip::test();
+        (v.src_in, v.src_out, v.has_audio) = (0.0, 4.0, true);
+        p.clips.push(v);
+        let mut a = Clip::test();
+        (a.kind, a.audio, a.src_out) = ("audio".into(), true, 4.0);
+        p.clips.push(a);
+        let mut after = Clip::test();
+        (after.start, after.src_out) = (4.0, 2.0);
+        p.clips.push(after);
+        p.ensure_ids();
+        let k = p.freeze_frame(0, 1.5, 2.0, "arrets/c 1.5.png".into()).unwrap();
+        let f = &p.clips[k];
+        assert_eq!((f.kind.as_str(), f.start, f.len()), ("image", 1.5, 2.0));
+        // Le plan est coupé, sa suite et le son reculent de 2 s, le plan d'après aussi
+        assert!(p.clips.iter().any(|c| c.kind == "video" && c.start == 3.5 && (c.src_in - 1.5).abs() < 1e-4));
+        assert!(p.clips.iter().any(|c| c.audio && c.start == 3.5));
+        assert!(p.clips.iter().any(|c| c.kind == "video" && c.start == 6.0));
+        assert_eq!(p.duration(), 8.0);
+    }
 
     #[test]
     fn version_verticale() {

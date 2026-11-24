@@ -1091,6 +1091,7 @@ impl Editor {
             return;
         };
         let mut ch = false;
+        let mut freeze = false;
         // ---- En-tête : vignette, nom, chapitre et durée
         {
             let c = self.project.clips[i].clone();
@@ -1174,6 +1175,12 @@ impl Editor {
                 c.speed = pct / 100.0;
                 ch = true;
             }
+            if c.kind == "video" {
+                let b = egui::Button::new(RichText::new(format!("{}  {}", crate::lucide::PAUSE, crate::i18n::t("Arrêt sur image"))).size(12.0));
+                if ui.add(b).on_hover_text(crate::i18n::t("Fige l'image de la tête de lecture pendant 2 secondes ; la suite du montage recule d'autant")).clicked() {
+                    freeze = true;
+                }
+            }
         });
         if is_visual {
             card(ui, "Look", &mut |ui| {
@@ -1255,6 +1262,34 @@ impl Editor {
             }
         });
         if ch {
+            self.changed();
+        }
+        if freeze {
+            self.freeze_frame(i);
+        }
+    }
+
+    /// Arrêt sur image du plan `i` à la tête de lecture : l'image est extraite par ffmpeg dans « arrêts/ »
+    /// à côté du montage, puis posée comme plan fixe de 2 secondes
+    fn freeze_frame(&mut self, i: usize) {
+        let c = self.project.clips[i].clone();
+        let t = self.playhead.clamp(c.start, (c.end() - 1.0 / self.project.fps.max(1.0)).max(c.start));
+        let src_t = c.src_in + (t - c.start) * c.speed;
+        let Some(ff) = crate::ffmpeg::find("ffmpeg") else {
+            self.message = Some(crate::i18n::t("ffmpeg n'est pas installé."));
+            return;
+        };
+        let dir = self.path.parent().map(|d| d.join("arrêts")).unwrap_or_default();
+        let _ = std::fs::create_dir_all(&dir);
+        let name = format!("{} {:.2}.png", c.name, src_t);
+        let out = dir.join(&name);
+        let o = crate::ffmpeg::command(ff).args(["-v", "error", "-y", "-ss", &format!("{src_t:.3}"), "-i"]).arg(self.media_path(&c.file)).args(["-frames:v", "1"]).arg(&out).output();
+        if !o.as_ref().is_ok_and(|o| o.status.success()) || !out.exists() {
+            self.message = Some(crate::i18n::t("L'image n'a pas pu être extraite du plan."));
+            return;
+        }
+        if let Some(k) = self.project.freeze_frame(i, t, 2.0, format!("arrêts/{name}")) {
+            self.sel = vec![self.project.clips[k].id];
             self.changed();
         }
     }
