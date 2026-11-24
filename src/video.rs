@@ -170,6 +170,38 @@ pub struct Viewer {
     /// Signets : image → nom (peut être vide), gardés à côté des dessins
     pub marks: BTreeMap<usize, String>,
     pub zoom: crate::zoomview::Zoom,
+    /// Retours écrits, image par image (comme SyncSketch)
+    pub comments: Vec<Comment>,
+    comment_input: String,
+    comments_todo_only: bool,
+    pub show_comments: bool,
+}
+
+/// Un retour sur une image : le texte, s'il est réglé, et quand il a été écrit
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+pub struct Comment {
+    pub frame: usize,
+    pub text: String,
+    #[serde(default)]
+    pub done: bool,
+    #[serde(default)]
+    pub at: String,
+}
+
+fn comments_path(notes: &Path) -> PathBuf {
+    notes.with_extension("comments.json")
+}
+
+/// Les retours en note Markdown : une case par retour, rangés par image
+pub fn comments_markdown(title: &str, comments: &[Comment], fps: f32) -> String {
+    let mut c: Vec<&Comment> = comments.iter().collect();
+    c.sort_by_key(|c| c.frame);
+    let mut out = format!("# {} · {title}\n\n", crate::i18n::t("Retours"));
+    for k in c {
+        let secs = k.frame as f32 / fps.max(1.0);
+        out.push_str(&format!("- [{}] **{} {}** ({}:{:05.2}) {}\n", if k.done { "x" } else { " " }, crate::i18n::t("image"), k.frame + 1, (secs / 60.0) as u32, secs % 60.0, k.text.replace('\n', " ")));
+    }
+    out
 }
 
 impl Viewer {
@@ -181,6 +213,7 @@ impl Viewer {
         let preview_fps = if duration * fps > MAX_PREVIEW_FRAMES { (MAX_PREVIEW_FRAMES / duration.max(1.0)).max(1.0) } else { fps };
         let lines = std::fs::read_to_string(&notes_path).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
         let marks = std::fs::read_to_string(marks_path(&notes_path)).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
+        let comments = std::fs::read_to_string(comments_path(&notes_path)).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
         let mut v = Self {
             dir: cache_dir(&path),
             path,
@@ -229,6 +262,10 @@ impl Viewer {
             show_skipped: false,
             marks,
             zoom: Default::default(),
+            comments,
+            comment_input: String::new(),
+            comments_todo_only: false,
+            show_comments: true,
         };
         if v.info.is_ok() {
             v.start_extract(ctx.clone());
@@ -469,6 +506,98 @@ impl Viewer {
         }
     }
 
+    fn save_comments(&self) {
+        if let Some(d) = self.notes_path.parent() {
+            let _ = std::fs::create_dir_all(d);
+        }
+        let _ = crate::vault::atomic_write(comments_path(&self.notes_path), serde_json::to_string_pretty(&self.comments).unwrap_or_default());
+    }
+
+    /// Le panneau des retours : écrire sur l'image courante, la liste, cocher, exporter en note
+    fn comments_panel(&mut self, ui: &mut egui::Ui, fps: f32) {
+        let p = theme::pal();
+        let open = self.comments.iter().filter(|c| !c.done).count();
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(crate::i18n::t("Retours")).strong().size(13.5));
+            ui.label(RichText::new(format!("{open} {}", crate::i18n::t_mid("à faire"))).size(11.5).color(p.muted));
+        });
+        ui.add_space(6.0);
+        let hint = format!("{} {}…", crate::i18n::t("Commenter l'image"), self.cur + 1);
+        let r = ui.add(egui::TextEdit::multiline(&mut self.comment_input).hint_text(hint).desired_rows(2).desired_width(f32::INFINITY));
+        let send = r.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter) && i.modifiers.command);
+        ui.horizontal(|ui| {
+            let ok = !self.comment_input.trim().is_empty();
+            if (ui.add_enabled(ok, egui::Button::new(crate::i18n::t("Ajouter"))).on_hover_text("Ctrl+Entrée").clicked() || send) && ok {
+                let at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs().to_string()).unwrap_or_default();
+                self.comments.push(Comment { frame: self.cur, text: self.comment_input.trim().to_string(), done: false, at });
+                self.comment_input.clear();
+                self.playing = false;
+                self.save_comments();
+            }
+            ui.checkbox(&mut self.comments_todo_only, crate::i18n::t("à faire seulement"));
+        });
+        ui.separator();
+        let mut order: Vec<usize> = (0..self.comments.len()).collect();
+        order.sort_by_key(|i| (self.comments[*i].frame, self.comments[*i].at.clone()));
+        let mut goto = None;
+        let mut remove = None;
+        let mut changed = false;
+        egui::ScrollArea::vertical().auto_shrink([false, false]).max_height(ui.available_height() - 34.0).show(ui, |ui| {
+            if self.comments.is_empty() {
+                ui.label(RichText::new(crate::i18n::t("Pas encore de retour. Va sur une image, écris, puis Ctrl+Entrée.")).size(11.5).color(p.muted));
+            }
+            for i in order {
+                let c = &mut self.comments[i];
+                if self.comments_todo_only && c.done {
+                    continue;
+                }
+                let here = c.frame == self.cur;
+                let drawn = self.lines.get(&c.frame).is_some_and(|l| !l.is_empty());
+                egui::Frame::new().fill(if here { p.raised } else { Color32::TRANSPARENT }).corner_radius(4).inner_margin(egui::Margin::symmetric(6, 4)).show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.horizontal(|ui| {
+                        changed |= ui.checkbox(&mut c.done, "").on_hover_text(crate::i18n::t("réglé")).changed();
+                        let secs = c.frame as f32 / fps.max(1.0);
+                        let label = format!("{} {} · {}:{:04.1}{}", crate::i18n::t("image"), c.frame + 1, (secs / 60.0) as u32, secs % 60.0, if drawn { "  ✎" } else { "" });
+                        if ui.add(egui::Label::new(RichText::new(label).size(11.5).color(p.accent)).sense(Sense::click())).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                            goto = Some(c.frame);
+                        }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.small_button(crate::lucide::X).on_hover_text(crate::i18n::t("retirer")).clicked() {
+                                remove = Some(i);
+                            }
+                        });
+                    });
+                    let mut t = RichText::new(&c.text);
+                    if c.done {
+                        t = t.strikethrough().color(p.muted);
+                    }
+                    ui.add(egui::Label::new(t).wrap());
+                });
+            }
+        });
+        if let Some(f) = goto {
+            self.cur = f;
+            self.playing = false;
+        }
+        if let Some(i) = remove {
+            self.comments.remove(i);
+            changed = true;
+        }
+        if changed {
+            self.save_comments();
+        }
+        ui.separator();
+        if ui.add_enabled(!self.comments.is_empty(), egui::Button::new(format!("{}  {}", crate::lucide::FILE_TEXT, crate::i18n::t("Exporter en note")))).on_hover_text(crate::i18n::t("Une note Markdown à côté de la vidéo, une case par retour")).clicked() {
+            let stem = self.path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "video".into());
+            let out = self.path.with_file_name(format!("{stem} - retours.md"));
+            let name = self.path.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+            if crate::vault::atomic_write(&out, comments_markdown(&name, &self.comments, fps)).is_ok() {
+                self.comment_input.clear();
+            }
+        }
+    }
+
     fn save_marks(&self) {
         if let Some(d) = self.notes_path.parent() {
             let _ = std::fs::create_dir_all(d);
@@ -547,8 +676,16 @@ impl Viewer {
             ctx.request_repaint();
         }
 
+        // Retours, à droite
+        if self.show_comments {
+            let fps_c = self.preview_fps;
+            egui::Panel::right(egui::Id::new(("review-comments", self.path.to_string_lossy().to_string()))).resizable(true).default_size(280.0).min_size(220.0).max_size(460.0).frame(egui::Frame::new().fill(p.panel).stroke(Stroke::new(1.0, p.line)).inner_margin(10)).show(ui, |ui| self.comments_panel(ui, fps_c));
+        }
         // Barre d'outils
         ui.horizontal_wrapped(|ui| {
+            if ui.add(egui::Button::new(format!("{}  {}", crate::lucide::MESSAGE_SQUARE, crate::i18n::t("Retours"))).selected(self.show_comments)).clicked() {
+                self.show_comments ^= true;
+            }
             if ui.button(if self.playing { "⏸ pause" } else { "▶ lecture" }).clicked() {
                 self.playing = !self.playing;
                 self.clock = None;
@@ -971,6 +1108,11 @@ impl Viewer {
         for &k in self.marks.keys() {
             bookmark_glyph(&pt, pos2(x_of(k as f32), tl.bottom() - 12.0), MARK);
         }
+        // Retours : un point par image commentée (vert quand tout est réglé)
+        for c in &self.comments {
+            let col = if self.comments.iter().filter(|o| o.frame == c.frame).all(|o| o.done) { p.success } else { p.info };
+            pt.circle_filled(pos2(x_of(c.frame as f32), tl.center().y + 2.0), 3.5, col);
+        }
         let last = frames.saturating_sub(1);
         let (a, b) = (self.loop_in.unwrap_or(0), self.loop_out.unwrap_or(last));
         let has_loop = self.loop_in.is_some() || self.loop_out.is_some();
@@ -1299,6 +1441,21 @@ pub fn burn(img: &mut image::RgbaImage, lines: &[Line]) {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests_comments {
+    use super::*;
+
+    #[test]
+    fn retours_en_note() {
+        let c = vec![Comment { frame: 47, text: "la main\npasse au travers".into(), done: false, at: "2".into() }, Comment { frame: 11, text: "ok".into(), done: true, at: "1".into() }];
+        let md = comments_markdown("plan_04.mp4", &c, 24.0);
+        let lines: Vec<&str> = md.lines().collect();
+        assert!(lines[0].ends_with("plan_04.mp4"));
+        assert_eq!(lines[2], "- [x] **Image 12** (0:00.46) ok");
+        assert_eq!(lines[3], "- [ ] **Image 48** (0:01.96) la main passe au travers");
     }
 }
 

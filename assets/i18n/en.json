@@ -2203,5 +2203,12 @@
   "sélection elliptique": "elliptical selection",
   "lasso": "lasso",
   "baguette magique": "magic wand",
-  "cocher dans la note": "check in the note"
+  "cocher dans la note": "check in the note",
+  "Retours": "Feedback",
+  "Commenter l'image": "Comment on frame",
+  "à faire seulement": "to do only",
+  "Pas encore de retour. Va sur une image, écris, puis Ctrl+Entrée.": "No feedback yet. Go to a frame, write, then Ctrl+Enter.",
+  "réglé": "resolved",
+  "Exporter en note": "Export as a note",
+  "Une note Markdown à côté de la vidéo, une case par retour": "A Markdown note next to the video, one checkbox per comment"
 }
