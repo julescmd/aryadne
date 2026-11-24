@@ -137,7 +137,7 @@ pub fn tool_of(rel: &str) -> &'static str {
         "motion" => "motion",
         "video" if crate::formats::has(rel, "seq") => "seq",
         "video" => "review",
-        "son" if crate::formats::has(rel, "music") => "music",
+        "son" if crate::formats::has(rel, "music") || crate::midi::is_midi(rel) => "music",
         "son" => "audio",
         "code" => "code",
         _ => {
@@ -194,7 +194,7 @@ pub fn owner(rel: &str) -> &'static str {
         "2d"
     } else if crate::formats::has(rel, "motion") {
         "motion"
-    } else if crate::formats::has(rel, "audio") || crate::formats::has(rel, "music") || crate::audio::is_audio(rel) {
+    } else if crate::formats::has(rel, "audio") || crate::formats::has(rel, "music") || crate::audio::is_audio(rel) || crate::midi::is_midi(rel) {
         "son"
     } else if crate::formats::has(rel, "mat") {
         "3d"

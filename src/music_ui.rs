@@ -22,7 +22,10 @@ enum Focus {
 enum Drag {
     Scrub,
     Region { track: usize, region: usize, grab: f64, mode: u8, start: f64, len: f64 },
-    Note { idx: usize, grab: f64, resize: bool, t0: f64, p0: u8, len0: f64 },
+    /// Les notes choisies glissent ensemble : (indice, début, hauteur, longueur) au départ
+    Notes { grab: f64, row0: i64, resize: bool, orig: Vec<(usize, f64, u8, f64)> },
+    /// Cadre de sélection dans le rouleau : coin de départ (temps, rangée)
+    Box { a: (f64, i64), additive: bool },
 }
 
 pub struct Editor {
@@ -38,7 +41,9 @@ pub struct Editor {
     looping: bool,
     sel_track: usize,
     sel_region: Option<(usize, usize)>,
-    sel_note: Option<usize>,
+    /// Notes choisies dans la région du rouleau
+    sel_notes: Vec<usize>,
+    clipboard: Vec<Note>,
     /// Pas de la grille du rouleau, en temps (0,25 = double croche)
     grid: f64,
     last_len: f64,
@@ -118,7 +123,8 @@ impl Editor {
             looping: true,
             sel_track: sel_region.map(|r| r.0).unwrap_or(0),
             sel_region,
-            sel_note: None,
+            sel_notes: vec![],
+            clipboard: vec![],
             grid: 0.25,
             last_len: 0.5,
             zoom: 0.0,
@@ -164,7 +170,7 @@ impl Editor {
         if let Some(s) = from.pop() {
             to.push(std::mem::replace(&mut self.song, s));
             self.saved = self.song.clone();
-            self.sel_note = None;
+            self.sel_notes.clear();
             self.sel_region = self.sel_region.filter(|(t, r)| self.song.tracks.get(*t).is_some_and(|tr| *r < tr.regions.len()));
             let _ = self.song.write(&self.path);
         }
@@ -251,12 +257,124 @@ impl Editor {
         (track, r)
     }
 
+    fn import_midi(&mut self) {
+        let Some(f) = rfd::FileDialog::new().add_filter("MIDI", &["mid", "midi"]).pick_file() else { return };
+        let r = std::fs::read(&f).map_err(|e| e.to_string()).and_then(|b| crate::midi::read(&b));
+        match r {
+            Ok(m) => {
+                let fresh = self.song.tracks.iter().all(|t| t.regions.is_empty());
+                if fresh {
+                    self.song.bpm = m.bpm;
+                }
+                self.song.bars = self.song.bars.max(m.bars);
+                let n = m.tracks.len();
+                for mut t in m.tracks {
+                    t.color = crate::audio::COLORS[self.song.tracks.len() % crate::audio::COLORS.len()];
+                    self.song.tracks.push(t);
+                }
+                self.zoom = 0.0;
+                self.say(format!("{n} {}", crate::i18n::t_mid("piste(s) importée(s)")));
+                self.changed();
+            }
+            Err(e) => self.say(e),
+        }
+    }
+
+    /// Un fichier MIDI du coffre ouvert seul : un morceau à côté de lui (ou celui qui existe déjà)
+    pub fn song_for(root: &str, rel: &str) -> Result<String, String> {
+        let stem = std::path::Path::new(rel).file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "morceau".into());
+        let out = crate::vault::join(&crate::vault::parent(rel), &format!("{stem}.{}", crate::formats::ext("music")));
+        let path = crate::vault::safe(root, &out)?;
+        if !path.exists() {
+            let bytes = std::fs::read(crate::vault::safe(root, rel)?).map_err(|e| e.to_string())?;
+            crate::midi::read(&bytes)?.write(&path)?;
+        }
+        Ok(out)
+    }
+
+    fn delete_notes(&mut self) {
+        let mut ks = std::mem::take(&mut self.sel_notes);
+        ks.sort_unstable();
+        ks.dedup();
+        if ks.is_empty() {
+            return;
+        }
+        if let Some(g) = self.region_mut() {
+            for k in ks.into_iter().rev() {
+                if k < g.notes.len() {
+                    g.notes.remove(k);
+                }
+            }
+        }
+        self.changed();
+    }
+
+    /// Raccourcis du rouleau : tout choisir, copier, coller à la tête de lecture, transposer, décaler
+    fn roll_keys(&mut self, i: &egui::InputState) {
+        let cmd = i.modifiers.command;
+        let Some(g) = self.region().cloned() else { return };
+        if cmd && i.key_pressed(egui::Key::A) {
+            self.sel_notes = (0..g.notes.len()).collect();
+        }
+        let copy = i.events.iter().any(|e| matches!(e, egui::Event::Copy)) || (cmd && i.key_pressed(egui::Key::C));
+        let cut = i.events.iter().any(|e| matches!(e, egui::Event::Cut)) || (cmd && i.key_pressed(egui::Key::X));
+        if (copy || cut) && !self.sel_notes.is_empty() {
+            let mut c: Vec<Note> = self.sel_notes.iter().filter_map(|k| g.notes.get(*k).cloned()).collect();
+            let t0 = c.iter().map(|n| n.t).fold(f64::MAX, f64::min);
+            c.iter_mut().for_each(|n| n.t -= t0);
+            self.clipboard = c;
+            if cut {
+                self.delete_notes();
+            }
+        }
+        let paste = i.events.iter().any(|e| matches!(e, egui::Event::Paste(_))) || (cmd && i.key_pressed(egui::Key::V));
+        if paste && !self.clipboard.is_empty() {
+            let at = (self.beat - g.start).clamp(0.0, g.len);
+            let at = (at / self.grid).floor() * self.grid;
+            let clip = self.clipboard.clone();
+            if let Some(rg) = self.region_mut() {
+                let n0 = rg.notes.len();
+                rg.notes.extend(clip.into_iter().map(|mut n| {
+                    n.t += at;
+                    n
+                }).filter(|n| n.t < g.len));
+                let n1 = rg.notes.len();
+                self.sel_notes = (n0..n1).collect();
+            }
+            // La tête de lecture avance d'autant : coller plusieurs fois enchaîne
+            let span = self.clipboard.iter().map(|n| n.t + n.len).fold(0.0, f64::max);
+            self.beat = g.start + at + (span / self.song.beats_per_bar as f64).ceil().max(1.0) * self.song.beats_per_bar as f64;
+            self.changed();
+        }
+        if self.sel_notes.is_empty() {
+            return;
+        }
+        let dp: i32 = if i.key_pressed(egui::Key::ArrowUp) { if i.modifiers.shift { 12 } else { 1 } } else if i.key_pressed(egui::Key::ArrowDown) { if i.modifiers.shift { -12 } else { -1 } } else { 0 };
+        let dt = if i.key_pressed(egui::Key::ArrowRight) { self.grid } else if i.key_pressed(egui::Key::ArrowLeft) { -self.grid } else { 0.0 };
+        if dp != 0 || dt != 0.0 {
+            let sel = self.sel_notes.clone();
+            let glen = g.len;
+            if let Some(rg) = self.region_mut() {
+                for k in sel {
+                    if let Some(n) = rg.notes.get_mut(k) {
+                        n.p = (n.p as i32 + dp).clamp(0, 127) as u8;
+                        n.t = (n.t + dt).clamp(0.0, (glen - n.len).max(0.0));
+                    }
+                }
+            }
+            self.changed();
+        }
+    }
+
     fn keyboard(&mut self, ui: &egui::Ui) {
         if ui.ctx().memory(|m| m.focused().is_some()) {
             return;
         }
         let i = ui.input(|i| i.clone());
         let cmd = i.modifiers.command;
+        if self.focus == Focus::Roll {
+            self.roll_keys(&i);
+        }
         if i.key_pressed(egui::Key::Space) {
             self.toggle_play();
         }
@@ -284,20 +402,11 @@ impl Editor {
         }
         if i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace) {
             match self.focus {
-                Focus::Roll => {
-                    if let Some(k) = self.sel_note.take() {
-                        if let Some(g) = self.region_mut() {
-                            if k < g.notes.len() {
-                                g.notes.remove(k);
-                            }
-                        }
-                        self.changed();
-                    }
-                }
+                Focus::Roll => self.delete_notes(),
                 Focus::Arrange => {
                     if let Some((t, r)) = self.sel_region.take() {
                         self.song.tracks[t].regions.remove(r);
-                        self.sel_note = None;
+                        self.sel_notes.clear();
                         self.changed();
                     }
                 }
@@ -407,6 +516,16 @@ impl Editor {
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let busy = self.export_rx.is_some();
             ui.menu_button(format!("{}  {}", l::DOWNLOAD, crate::i18n::t(if busy { "Export…" } else { "Exporter" })), |ui| {
+                if ui.add_enabled(!busy, egui::Button::new(crate::i18n::t("MIDI (.mid)"))).clicked() {
+                    let stem = self.path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "morceau".into());
+                    let out = crate::untitled::export_dir(&self.path).join(format!("{stem}.mid"));
+                    match std::fs::write(&out, crate::midi::write(&self.song)) {
+                        Ok(()) => self.say(format!("{} : {stem}.mid", crate::i18n::t("exporté"))),
+                        Err(e) => self.say(e.to_string()),
+                    }
+                    ui.close();
+                }
+                ui.separator();
                 for (ext, label) in [("wav", "WAV 24 bits"), ("mp3", "MP3 256 kb/s")] {
                     if ui.add_enabled(!busy, egui::Button::new(label)).clicked() {
                         let stem = self.path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "morceau".into());
@@ -422,6 +541,9 @@ impl Editor {
                     }
                 }
             });
+            if ui.button(format!("{}  {}", l::UPLOAD, crate::i18n::t("Importer un MIDI…"))).on_hover_text(crate::i18n::t("Ses pistes s'ajoutent au morceau")).clicked() {
+                self.import_midi();
+            }
             if self.pending.is_some() {
                 ui.label(egui::RichText::new(crate::i18n::t("préparation…")).size(11.5).color(p.muted));
             }
@@ -555,7 +677,7 @@ impl Editor {
                     match hit(h) {
                         Some((ri, _)) => {
                             if self.sel_region != Some((ti, ri)) {
-                                self.sel_note = None;
+                                self.sel_notes.clear();
                                 self.roll_scroll = 0.0;
                             }
                             self.sel_region = Some((ti, ri));
@@ -578,7 +700,7 @@ impl Editor {
                             tr.regions.push(Region { start, len: bpb.min(next - start).max(0.25), name: String::new(), notes: vec![] });
                             e.changed();
                             e.sel_region = e.song.tracks[ti].regions.iter().position(|g| g.start == start).map(|k| (ti, k));
-                            e.sel_note = None;
+                            e.sel_notes.clear();
                         }));
                     }
                 }
@@ -643,7 +765,7 @@ impl Editor {
                     }
                     true
                 }
-                Drag::Note { .. } => true,
+                Drag::Notes { .. } | Drag::Box { .. } => true,
             };
             if keep && ui.input(|i| i.pointer.any_down()) {
                 self.drag = Some(d);
@@ -769,7 +891,7 @@ impl Editor {
             let Some(i) = row_of(n.p) else { continue };
             let y = y_of(i);
             let r = Rect::from_min_max(pos2(x_of(n.t), y + 1.0), pos2(x_of(n.t + n.len).max(x_of(n.t) + 4.0), y + row_h - 1.0));
-            let chosen = self.sel_note == Some(k);
+            let chosen = self.sel_notes.contains(&k);
             gp.rect(r, 3.0, base.gamma_multiply(0.45 + 0.55 * n.v), Stroke::new(1.0, if chosen { p.text } else { base.gamma_multiply(0.4) }), egui::StrokeKind::Inside);
         }
         // Tête de lecture
@@ -779,7 +901,8 @@ impl Editor {
         }
         // Souris
         let resp = ui.interact(grid_r, ui.scope_id().with("music-grid"), Sense::click_and_drag());
-        let pitch_at = |y: f32| -> Option<u8> { rows.get((((y - grid_r.top()) / row_h).floor() as i64 + first as i64).max(0) as usize).copied() };
+        let row_at = move |y: f32| ((y - grid_r.top()) / row_h).floor() as i64 + first as i64;
+        let pitch_at = |y: f32| -> Option<u8> { rows.get(row_at(y).max(0) as usize).copied() };
         let note_at = |pos: egui::Pos2| -> Option<(usize, bool)> {
             let pt = pitch_at(pos.y)?;
             g.notes.iter().enumerate().rev().find_map(|(k, n)| {
@@ -797,14 +920,14 @@ impl Editor {
         }
         let gstep = self.grid;
         let snap = move |b: f64| (b / gstep).floor() * gstep;
+        let shift = ui.input(|i| i.modifiers.shift);
         if resp.secondary_clicked() {
             if let Some(h) = resp.interact_pointer_pos() {
                 if let Some((k, _)) = note_at(h) {
-                    if let Some(rg) = self.region_mut() {
-                        rg.notes.remove(k);
+                    if !self.sel_notes.contains(&k) {
+                        self.sel_notes = vec![k];
                     }
-                    self.sel_note = None;
-                    self.changed();
+                    self.delete_notes();
                 }
             }
         }
@@ -813,9 +936,19 @@ impl Editor {
             if let Some(h) = resp.interact_pointer_pos() {
                 match note_at(h) {
                     Some((k, _)) => {
-                        self.sel_note = Some(k);
+                        if shift {
+                            if let Some(i) = self.sel_notes.iter().position(|x| *x == k) {
+                                self.sel_notes.remove(i);
+                            } else {
+                                self.sel_notes.push(k);
+                            }
+                        } else {
+                            self.sel_notes = vec![k];
+                        }
                         self.last_len = g.notes[k].len;
+                        self.preview_note(ti, g.notes[k].p);
                     }
+                    None if shift => self.sel_notes.clear(),
                     None => {
                         if let Some(pt) = pitch_at(h.y) {
                             let t = snap(b_of(h.x));
@@ -824,7 +957,7 @@ impl Editor {
                                 if let Some(rg) = self.region_mut() {
                                     rg.notes.push(Note { t, len, p: pt, v: 0.8 });
                                     let k = rg.notes.len() - 1;
-                                    self.sel_note = Some(k);
+                                    self.sel_notes = vec![k];
                                 }
                                 self.preview_note(ti, pt);
                                 self.changed();
@@ -837,45 +970,95 @@ impl Editor {
         if resp.drag_started() {
             self.focus = Focus::Roll;
             if let Some(h) = resp.interact_pointer_pos() {
-                if let Some((k, edge)) = note_at(h) {
-                    let n = &g.notes[k];
-                    self.sel_note = Some(k);
-                    self.drag = Some(Drag::Note { idx: k, grab: b_of(h.x) - n.t, resize: edge, t0: n.t, p0: n.p, len0: n.len });
+                match note_at(h) {
+                    Some((k, edge)) => {
+                        if !self.sel_notes.contains(&k) {
+                            self.sel_notes = vec![k];
+                        }
+                        let orig = self.sel_notes.iter().filter_map(|i| g.notes.get(*i).map(|n| (*i, n.t, n.p, n.len))).collect();
+                        self.drag = Some(Drag::Notes { grab: b_of(h.x), row0: row_at(h.y), resize: edge, orig });
+                    }
+                    None => self.drag = Some(Drag::Box { a: (b_of(h.x), row_at(h.y)), additive: shift }),
                 }
             }
         }
-        if let Some(Drag::Note { idx, grab, resize, t0, p0, len0, .. }) = &self.drag {
-            let (idx, grab, resize, t0, p0, len0) = (*idx, *grab, *resize, *t0, *p0, *len0);
-            if let Some(m) = ui.input(|i| i.pointer.interact_pos()) {
-                let b = b_of(m.x);
-                let pt = pitch_at(m.y).unwrap_or(p0);
-                let grid = self.grid;
-                let glen = g.len;
-                let mut moved_pitch = None;
-                if let Some(rg) = self.region_mut() {
-                    if let Some(n) = rg.notes.get_mut(idx) {
-                        if resize {
-                            n.len = ((b - t0) / grid).round().max(1.0) * grid;
-                        } else {
-                            n.t = (((b - grab) / grid).round() * grid).clamp(0.0, (glen - len0).max(0.0));
-                            if n.p != pt {
-                                moved_pitch = Some(pt);
+        let pointer = ui.input(|i| i.pointer.interact_pos());
+        let released = !ui.input(|i| i.pointer.any_down());
+        match self.drag.take() {
+            Some(Drag::Notes { grab, row0, resize, orig }) => {
+                if let Some(m) = pointer {
+                    let db = ((b_of(m.x) - grab) / gstep).round() * gstep;
+                    let dr = row_at(m.y) - row0;
+                    let glen = g.len;
+                    let mut heard = None;
+                    if let Some(rg) = self.region_mut() {
+                        // Le groupe reste entier dans la région
+                        let lo = orig.iter().map(|o| o.1).fold(f64::MAX, f64::min);
+                        let hi = orig.iter().map(|o| o.1 + o.3).fold(f64::MIN, f64::max);
+                        let db = db.clamp(-lo, (glen - hi).max(-lo));
+                        for (i, t0, p0, len0) in &orig {
+                            let Some(n) = rg.notes.get_mut(*i) else { continue };
+                            if resize {
+                                n.len = (len0 + db).max(gstep);
+                            } else {
+                                n.t = t0 + db;
+                                let r0 = rows.iter().position(|r| r == p0).unwrap_or(0) as i64;
+                                let np = rows[(r0 + dr).clamp(0, rows.len() as i64 - 1) as usize];
+                                if np != n.p && orig.len() == 1 {
+                                    heard = Some(np);
+                                }
+                                n.p = np;
                             }
-                            n.p = pt;
+                        }
+                    }
+                    if let Some(p) = heard {
+                        self.preview_note(ti, p);
+                    }
+                }
+                if released {
+                    if let Some(n) = orig.first().and_then(|o| self.region().and_then(|g| g.notes.get(o.0))) {
+                        self.last_len = n.len;
+                    }
+                    self.changed();
+                } else {
+                    self.drag = Some(Drag::Notes { grab, row0, resize, orig });
+                }
+            }
+            Some(Drag::Box { a, additive }) => {
+                if let Some(m) = pointer {
+                    let (b0, b1) = (a.0.min(b_of(m.x)), a.0.max(b_of(m.x)));
+                    let (r0, r1) = (a.1.min(row_at(m.y)), a.1.max(row_at(m.y)));
+                    let y0 = grid_r.top() + (r0 - first as i64) as f32 * row_h;
+                    let y1 = grid_r.top() + (r1 + 1 - first as i64) as f32 * row_h;
+                    let br = Rect::from_min_max(pos2(x_of(b0), y0), pos2(x_of(b1), y1));
+                    gp.rect(br, 2.0, p.accent.gamma_multiply(0.12), Stroke::new(1.0, p.accent), egui::StrokeKind::Inside);
+                    if released {
+                        let hit: Vec<usize> = g
+                            .notes
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, n)| {
+                                let r = rows.iter().position(|x| *x == n.p).map(|i| i as i64).unwrap_or(-1);
+                                r >= r0 && r <= r1 && n.t < b1 && n.t + n.len > b0
+                            })
+                            .map(|(k, _)| k)
+                            .collect();
+                        if additive {
+                            for k in hit {
+                                if !self.sel_notes.contains(&k) {
+                                    self.sel_notes.push(k);
+                                }
+                            }
+                        } else {
+                            self.sel_notes = hit;
                         }
                     }
                 }
-                if let Some(pt) = moved_pitch {
-                    self.preview_note(ti, pt);
+                if !released {
+                    self.drag = Some(Drag::Box { a, additive });
                 }
             }
-            if !ui.input(|i| i.pointer.any_down()) {
-                self.drag = None;
-                if let Some(n) = self.region().and_then(|g| g.notes.get(idx)) {
-                    self.last_len = n.len;
-                }
-                self.changed();
-            }
+            other => self.drag = other,
         }
         // Molette : hauteurs ; Maj : temps ; Ctrl : zoom
         if ui.rect_contains_pointer(full) {
@@ -953,14 +1136,20 @@ impl Editor {
                 });
                 if ui.button(crate::i18n::t("Vider la région")).clicked() {
                     g.notes.clear();
-                    self.sel_note = None;
+                    self.sel_notes.clear();
                     changed = true;
                 }
-                if let Some(k) = self.sel_note {
-                    if let Some(n) = self.song.tracks[rt].regions[rr].notes.get_mut(k) {
-                        section(ui, "Note");
-                        ui.label(music::note_name(n.p));
-                        changed |= ui.add(egui::Slider::new(&mut n.v, 0.05..=1.0).text(crate::i18n::t("force"))).changed();
+                let sel: Vec<usize> = self.sel_notes.iter().copied().filter(|k| *k < self.song.tracks[rt].regions[rr].notes.len()).collect();
+                if let Some(&k0) = sel.first() {
+                    let notes = &mut self.song.tracks[rt].regions[rr].notes;
+                    section(ui, if sel.len() == 1 { "Note" } else { "Notes" });
+                    ui.label(if sel.len() == 1 { music::note_name(notes[k0].p) } else { format!("{} {}", sel.len(), crate::i18n::t_mid("notes choisies")) });
+                    let mut v = notes[k0].v;
+                    if ui.add(egui::Slider::new(&mut v, 0.05..=1.0).text(crate::i18n::t("force"))).changed() {
+                        for k in &sel {
+                            notes[*k].v = v;
+                        }
+                        changed = true;
                     }
                 }
             }

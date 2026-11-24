@@ -25,6 +25,7 @@ mod audio;
 mod audio_ui;
 mod music;
 mod music_ui;
+mod midi;
 mod motion_ui;
 mod scene;
 mod workspace;
@@ -1977,6 +1978,12 @@ impl App {
                 Some(s) => s,
                 None => return,
             }
+        } else if midi::is_midi(&rel) {
+            // Un MIDI ouvert seul devient un morceau du séquenceur
+            match self.report(music_ui::Editor::song_for(&self.root(), &rel)) {
+                Some(s) => s,
+                None => return,
+            }
         } else {
             rel
         };
@@ -2401,7 +2408,7 @@ impl App {
             Some(Content::Model(v)) if v.is_mesh_edit() => t("MODE ÉDITION · 1 2 3 : sommets, arêtes, faces · glisser : rectangle (Maj ajoute, Ctrl retire) · Ctrl+clic : chemin · Alt+clic : boucle · Ctrl+plus / moins · Ctrl+I inverser · G R S · E extruder · I incruster · M fusionner · L pièce liée · X supprimer · Ctrl+Z"),
             Some(Content::Model(v)) if v.is_scene() => t("molette enfoncée : tourner (Maj : déplacer) · glisser : rectangle · G R S : déplacer, tourner, taille (X Y Z : axe) · Maj+clic, A, B : sélection · Maj+A ajouter · X supprimer · Maj+D dupliquer · P parent · H cacher · I clé · Tab édition · Espace lecture · Ctrl+Z annuler"),
             Some(Content::Model(_)) => t("glisser : tourner · Maj+glisser : déplacer · molette : zoom · 1 3 7 : vues · 5 : perspective · L + glisser : lumière · H + glisser : HDRI · F2 renommer le fichier"),
-            Some(Content::Music(_)) => t("Espace lire · L reprendre · double-clic : nouvelle région · Ctrl+D dupliquer · Maj : glisser au temps · molette : hauteurs, Maj+molette : temps, Ctrl+molette : zoom"),
+            Some(Content::Music(_)) => t("Espace lire · L reprendre · double-clic : nouvelle région · cadre : choisir des notes · Ctrl+A/C/X/V · ↑↓ transposer (Maj : octave) · ←→ décaler · Ctrl+molette : zoom"),
             Some(Content::Audio(_)) => t("Espace lire · S couper à la tête · B rasoir · V sélection · L boucle · M repère · Suppr retirer et resserrer · Ctrl+D dupliquer · Ctrl+molette : zoom"),
             Some(Content::Motion(_)) => t("Espace lecture · ← → image par image · K clé de position · V Q E T outils · Maj : contraindre · Ctrl+molette : zoom · Suppr calque ou clé"),
             Some(Content::Montage(_)) => t("Espace / J K L lecture · V C B N R Y H Z T outils · I O entrée sortie · , insérer · . recouvrir · Ctrl+K couper · Maj+Suppr supprimer et refermer · Q W propager · M repère · S magnétisme · Alt+molette : zoom"),

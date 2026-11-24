@@ -2118,7 +2118,7 @@
   "Corde pincée": "Pluck",
   "Cymbale": "Crash",
   "Des points de départ calculés sur la tonalité du morceau. Ils remplissent la région choisie, ou une nouvelle de 4 mesures à la tête de lecture.": "Starting points computed from the song's key. They fill the chosen region, or a new 4-bar one at the playhead.",
-  "Espace lire · L reprendre · double-clic : nouvelle région · Ctrl+D dupliquer · Maj : glisser au temps · molette : hauteurs, Maj+molette : temps, Ctrl+molette : zoom": "Space play · L repeat · double-click: new region · Ctrl+D duplicate · Shift: drag by beat · wheel: pitch, Shift+wheel: time, Ctrl+wheel: zoom",
+  "Espace lire · L reprendre · double-clic : nouvelle région · Ctrl+D dupliquer · Maj : glisser au temps · molette : hauteurs, Maj+molette : temps, Ctrl+molette : zoom": "Space play · L repeat · double-click: new region · glide a box to select notes · Ctrl+A/C/X/V · ↑↓ transpose (Shift: octave) · ←→ shift · Ctrl+wheel: zoom",
   "Four on the floor": "Four on the floor",
   "Idées": "Ideas",
   "Instrument": "Instrument",
@@ -2161,5 +2161,11 @@
   "ronde, filtrée": "round, filtered",
   "−1 octave": "−1 octave",
   "majeur": "major",
-  "mineur": "minor"
+  "mineur": "minor",
+  "Importer un MIDI…": "Import MIDI…",
+  "Ses pistes s'ajoutent au morceau": "Its tracks are added to the song",
+  "MIDI (.mid)": "MIDI (.mid)",
+  "piste(s) importée(s)": "track(s) imported",
+  "notes choisies": "notes selected",
+  "Espace lire · L reprendre · double-clic : nouvelle région · cadre : choisir des notes · Ctrl+A/C/X/V · ↑↓ transposer (Maj : octave) · ←→ décaler · Ctrl+molette : zoom": "Space play · L repeat · double-click: new region · box: select notes · Ctrl+A/C/X/V · ↑↓ transpose (Shift: octave) · ←→ shift · Ctrl+wheel: zoom"
 }
