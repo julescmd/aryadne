@@ -1123,28 +1123,44 @@ impl App {
         let kind = self.ws.cur().kind.clone();
         let pages = workspace::pages(&kind);
         let accent = workspace::accent_of(self.ws.cur()).map(|c| egui::Color32::from_rgb(c[0], c[1], c[2])).unwrap_or(p.accent);
-        egui::Panel::top("workspaces").exact_size(28.0).frame(egui::Frame::new().fill(p.panel).stroke(egui::Stroke::new(1.0, p.line)).inner_margin(egui::Margin::symmetric(12, 0))).show(ui, |ui| {
-            ui.horizontal_centered(|ui| {
-                ui.spacing_mut().item_spacing.x = 4.0;
-                // Ouvrir / fermer l'explorateur, d'où qu'on soit
-                let on = self.explorer_open;
-                if ui.add(egui::Button::new(RichText::new("☰").size(13.0).color(if on { accent } else { p.muted })).frame(false)).on_hover_text(crate::i18n::t("fichiers (Ctrl+B)")).clicked() {
-                    self.explorer_open = !on;
-                }
-                ui.add_space(8.0);
+        // Rail d'icônes à gauche : les pages de l'espace (fichiers, cerveau, références…), toujours à la même place
+        egui::Panel::left("rail").exact_size(44.0).resizable(false).frame(egui::Frame::new().fill(p.panel).stroke(egui::Stroke::new(1.0, p.line)).inner_margin(egui::Margin { left: 6, right: 6, top: 8, bottom: 8 })).show(ui, |ui| {
+            ui.vertical_centered(|ui| {
+                ui.spacing_mut().item_spacing.y = 4.0;
                 for (label, v) in pages {
                     let view = view_of(v);
                     let on = view == self.view();
-                    let text = RichText::new(crate::i18n::t(label)).size(12.0).color(if on { p.text } else { p.muted });
-                    let r = ui.add(egui::Label::new(if on { text.family(theme::bold()) } else { text }).sense(egui::Sense::click()));
+                    let v: &str = v;
+                    let icon = match v {
+                        "files" => "▤",
+                        "brain" => "◎",
+                        "refs" => "▦",
+                        "boards" => "◫",
+                        "tasks" => "✓",
+                        "chat" => "✦",
+                        _ => "⌕",
+                    };
+                    let (r, resp) = ui.allocate_exact_size(egui::vec2(32.0, 32.0), egui::Sense::click());
+                    if on || resp.hovered() {
+                        ui.painter().rect_filled(r, 2.0, p.raised);
+                    }
                     if on {
-                        let y = ui.max_rect().bottom();
-                        ui.painter().rect_filled(egui::Rect::from_min_max(egui::pos2(r.rect.left(), y - 2.0), egui::pos2(r.rect.right(), y)), 0.0, accent);
+                        ui.painter().rect_filled(egui::Rect::from_min_size(egui::pos2(r.left() - 6.0, r.top() + 6.0), egui::vec2(2.0, r.height() - 12.0)), 0.0, accent);
                     }
-                    if r.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
-                        self.view = Some(view);
+                    let col = if on { p.text } else if resp.hovered() { p.text } else { p.muted };
+                    ui.painter().text(r.center(), egui::Align2::CENTER_CENTER, icon, egui::FontId::proportional(16.0), col);
+                    let tip = if v == "files" { format!("{}  ({})", crate::i18n::t(label), keymap::text("explorer")) } else { crate::i18n::t(label) };
+                    if resp.on_hover_text(tip).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                        if on && v == "files" {
+                            // Fichiers déjà là : le même bouton ouvre et ferme l'explorateur
+                            self.explorer_open = !self.explorer_open;
+                        } else {
+                            self.view = Some(view);
+                            if v == "files" {
+                                self.explorer_open = true;
+                            }
+                        }
                     }
-                    ui.add_space(12.0);
                 }
             });
         });
@@ -1290,7 +1306,8 @@ impl App {
         let area = egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(theme::gutter()).inner_margin(3))
             .show(ui, |ui| {
-                let mut b = Panes { app: self };
+                let main_tile = layout::find(&tree, layout::MAIN);
+                let mut b = Panes { app: self, main_tile };
                 tree.ui(&mut b, ui);
             })
             .response
@@ -5131,13 +5148,13 @@ impl eframe::App for App {
                 let a = ui.available_rect_before_wrap();
                 self.topbar(ui);
                 let b = ui.available_rect_before_wrap();
-                self.ws_bar(ui);
-                let c = ui.available_rect_before_wrap();
                 self.statusbar(ui);
+                let c = ui.available_rect_before_wrap();
+                self.ws_bar(ui);
                 let d = ui.available_rect_before_wrap();
                 self.zones_next.push(("top", egui::Rect::from_min_max(a.min, egui::pos2(a.max.x, b.min.y))));
-                self.zones_next.push(("pages", egui::Rect::from_min_max(b.min, egui::pos2(b.max.x, c.min.y))));
-                self.zones_next.push(("status", egui::Rect::from_min_max(egui::pos2(c.min.x, d.max.y), c.max)));
+                self.zones_next.push(("status", egui::Rect::from_min_max(egui::pos2(b.min.x, c.max.y), b.max)));
+                self.zones_next.push(("pages", egui::Rect::from_min_max(c.min, egui::pos2(d.min.x, c.max.y))));
                 self.explorer_rect = None;
                 if std::mem::take(&mut self.reset_layout) {
                     self.tree = None;
@@ -5451,6 +5468,8 @@ fn parse_moves(t: &str) -> Result<Vec<OrganizeMove>, String> {
 /// Ce que la disposition en cases demande à l'application : le contenu et le titre de chaque case.
 struct Panes<'a> {
     app: &'a mut App,
+    /// La case de l'éditeur principal : seule dans ses onglets, elle n'a pas de barre « Document »
+    main_tile: Option<egui_tiles::TileId>,
 }
 
 impl egui_tiles::Behavior<String> for Panes<'_> {
@@ -5522,6 +5541,11 @@ impl egui_tiles::Behavior<String> for Panes<'_> {
 
     fn tab_bar_height(&self, _style: &egui::Style) -> f32 {
         26.0
+    }
+
+    /// L'éditeur principal seul dans sa case : pas de barre d'onglets au-dessus (les documents ont déjà la leur)
+    fn is_tab_bar_visible(&self, _tile_id: egui_tiles::TileId, tabs: &egui_tiles::Tabs) -> bool {
+        !(tabs.children.len() == 1 && Some(tabs.children[0]) == self.main_tile)
     }
 
     fn gap_width(&self, _style: &egui::Style) -> f32 {
