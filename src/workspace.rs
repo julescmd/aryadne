@@ -36,6 +36,11 @@ pub struct Workspace {
     /// Ce à quoi sert l'espace : notes, 3d, 2d, video, code, ai, refs, mat. Décide de l'écran d'accueil.
     #[serde(default)]
     pub kind: String,
+    /// Dispositions enregistrées de l'étape (« Modelage », « Animation »…) et celle en cours
+    #[serde(default)]
+    pub dispositions: Vec<Disposition>,
+    #[serde(default)]
+    pub disposition: String,
     /// Outil ouvert dans l'espace (voir `tools`) ; vide : le premier
     #[serde(default)]
     pub tool: String,
@@ -63,6 +68,20 @@ fn path() -> Option<std::path::PathBuf> {
 
 /// Les espaces fournis d'origine : (nom, couleur, vue, assistant ouvert, genre).
 /// Les références ne sont plus un espace à part : chaque espace qui en a besoin a sa page « références ».
+/// Une disposition : l'arrangement des panneaux d'une étape, sous un nom
+#[derive(Serialize, Deserialize, Clone, Default)]
+pub struct Disposition {
+    pub name: String,
+    #[serde(default)]
+    pub places: HashMap<String, crate::dock::Place>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layout: Option<crate::layout::Layout>,
+    #[serde(default = "yes")]
+    pub explorer: bool,
+    #[serde(default)]
+    pub views: Vec<String>,
+}
+
 /// Dans l'ordre du pipeline : un espace par étape, ses outils en onglets (voir `tools`).
 /// Les matériaux sont un outil de la 3D, le compositing un outil de la 2D ; l'IA est l'Assistant, partout.
 pub const PRESETS: [(&str, Option<[u8; 3]>, &str, bool, &str); 5] = [

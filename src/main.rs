@@ -332,6 +332,8 @@ struct App {
     home_open: bool,
     home_filter: u8,
     home_ask: String,
+    /// Nom tapé dans le menu Disposition
+    disp_new: String,
     /// Le prochain affichage de l'Assistant envoie le message déjà écrit (venu de l'accueil)
     chat_autosend: bool,
     /// Inspecteur du board : réglages du générateur de palettes, onglet (0 couleurs, 1 propriétés)
@@ -381,7 +383,6 @@ struct App {
     /// Zones de l'interface (image précédente) : la barre du bas montre les raccourcis de celle sous la souris
     zones_last: Vec<(&'static str, egui::Rect)>,
     zones_next: Vec<(&'static str, egui::Rect)>,
-    ws_name: String,
     /// Fenêtre « nouveau fichier » : genre choisi et nom tapé
     new_file: Option<(usize, String)>,
     /// Explorateur : éléments choisis en plus de `selected` (Ctrl + clic, Maj + clic)
@@ -543,6 +544,154 @@ impl App {
                 Some(rel) => self.open_here(rel),
                 None => self.run_cmd(extras::Cmd::NewScene, ctx),
             }
+        }
+    }
+
+    // ---------- dispositions de l'étape ----------
+
+    /// Nom de la disposition en cours (« Principale » tant qu'on n'en a pas nommé)
+    fn disp_name(&self) -> String {
+        let w = self.ws.cur();
+        if w.disposition.is_empty() { crate::i18n::t("Principale") } else { w.disposition.clone() }
+    }
+
+    /// Range l'arrangement actuel des panneaux dans la disposition en cours
+    fn disp_store(&mut self) {
+        self.ws_capture();
+        let name = self.disp_name();
+        let w = &mut self.ws.list[self.ws.current];
+        let d = workspace::Disposition { name: name.clone(), places: w.places.clone(), layout: w.layout.clone(), explorer: w.explorer, views: w.views.clone() };
+        match w.dispositions.iter_mut().find(|x| x.name == name) {
+            Some(x) => *x = d,
+            None => w.dispositions.push(d),
+        }
+        w.disposition = name;
+    }
+
+    /// Passer à une autre disposition de l'étape (les fichiers ouverts restent)
+    fn disp_switch(&mut self, name: &str, ctx: &egui::Context) {
+        self.disp_store();
+        let w = &mut self.ws.list[self.ws.current];
+        let Some(d) = w.dispositions.iter().find(|x| x.name == name).cloned() else { return };
+        w.places = d.places;
+        w.layout = d.layout;
+        w.explorer = d.explorer;
+        w.views = d.views;
+        w.disposition = d.name;
+        dock::reset();
+        self.ws_apply(ctx, false);
+        self.ws.save();
+    }
+
+    /// Menu « Disposition » à droite des onglets : changer, enregistrer sous un nom, renommer, réinitialiser
+    fn disp_menu(&mut self, ui: &mut egui::Ui) {
+        let p = theme::pal();
+        let ctx = ui.ctx().clone();
+        let cur = self.disp_name();
+        let names: Vec<String> = {
+            let w = self.ws.cur();
+            let mut v: Vec<String> = w.dispositions.iter().map(|d| d.name.clone()).collect();
+            if !v.contains(&cur) {
+                v.insert(0, cur.clone());
+            }
+            v
+        };
+        let mut go: Option<String> = None;
+        let mut act: u8 = 0;
+        egui::containers::menu::MenuButton::new(RichText::new(format!("{cur} {}", lucide::CHEVRON_DOWN)).size(12.5).color(p.text)).ui(ui, |ui| {
+            ui.set_min_width(240.0);
+            ui.label(RichText::new(crate::i18n::t("Dispositions de l'étape")).size(11.0).color(p.muted));
+            for n in &names {
+                if ui.selectable_label(*n == cur, n).clicked() && *n != cur {
+                    go = Some(n.clone());
+                    ui.close();
+                }
+            }
+            ui.separator();
+            ui.horizontal(|ui| {
+                ui.add(egui::TextEdit::singleline(&mut self.disp_new).hint_text(crate::i18n::t("Modelage, Animation…")).desired_width(150.0));
+                if ui.add_enabled(!self.disp_new.trim().is_empty(), egui::Button::new(crate::i18n::t("Enregistrer"))).on_hover_text(crate::i18n::t("Garde l'arrangement actuel des panneaux sous ce nom")).clicked() {
+                    act = 1;
+                    ui.close();
+                }
+            });
+            if ui.button(crate::i18n::t("Renommer en ce nom")).on_hover_text(crate::i18n::t("Donne le nom tapé ci-dessus à la disposition en cours")).clicked() && !self.disp_new.trim().is_empty() {
+                act = 2;
+                ui.close();
+            }
+            if ui.button(crate::i18n::t("Réinitialiser cette disposition")).clicked() {
+                act = 3;
+                ui.close();
+            }
+            if names.len() > 1 && ui.button(RichText::new(crate::i18n::t("Supprimer cette disposition")).color(p.missing)).clicked() {
+                act = 4;
+                ui.close();
+            }
+            ui.separator();
+            if ui.button(crate::i18n::t("Ouvrir l'étape dans une nouvelle fenêtre")).on_hover_text(crate::i18n::t("Par exemple les matériaux sur un écran et la scène sur l'autre")).clicked() {
+                if let Err(e) = workspace::open_in_window(&self.root(), self.ws.current) {
+                    self.error = Some(e);
+                }
+                ui.close();
+            }
+        });
+        if let Some(n) = go {
+            self.disp_switch(&n, &ctx);
+        }
+        match act {
+            1 => {
+                // La disposition en cours est gardée telle quelle, la nouvelle part de l'arrangement actuel
+                self.disp_store();
+                let name = std::mem::take(&mut self.disp_new).trim().to_string();
+                let w = &mut self.ws.list[self.ws.current];
+                let mut d = w.dispositions.iter().find(|x| x.name == w.disposition).cloned().unwrap_or_default();
+                d.name = name.clone();
+                w.dispositions.retain(|x| x.name != name);
+                w.dispositions.push(d);
+                w.disposition = name;
+                self.ws.save();
+            }
+            2 => {
+                let name = std::mem::take(&mut self.disp_new).trim().to_string();
+                self.disp_store();
+                let w = &mut self.ws.list[self.ws.current];
+                if !w.dispositions.iter().any(|x| x.name == name) {
+                    if let Some(d) = w.dispositions.iter_mut().find(|x| x.name == cur) {
+                        d.name = name.clone();
+                    }
+                    w.disposition = name;
+                }
+                self.ws.save();
+            }
+            3 => {
+                let i = self.ws.current;
+                self.ws.list[i].places.clear();
+                self.ws.list[i].layout = None;
+                dock::reset();
+                self.tree = None;
+                self.disp_store();
+                self.ws.save();
+            }
+            4 => {
+                let i = self.ws.current;
+                self.ws.list[i].dispositions.retain(|x| x.name != cur);
+                if let Some(n) = self.ws.list[i].dispositions.first().map(|d| d.name.clone()) {
+                    self.ws.list[i].disposition = String::new();
+                    // La première qui reste prend la place
+                    let w = &mut self.ws.list[i];
+                    if let Some(d) = w.dispositions.iter().find(|x| x.name == n).cloned() {
+                        w.places = d.places;
+                        w.layout = d.layout;
+                        w.explorer = d.explorer;
+                        w.views = d.views;
+                        w.disposition = d.name;
+                    }
+                    dock::reset();
+                    self.ws_apply(&ctx, false);
+                }
+                self.ws.save();
+            }
+            _ => {}
         }
     }
 
@@ -1291,10 +1440,7 @@ impl App {
         let ctx = ui.ctx().clone();
         let mut go: Option<usize> = None;
         let mut changed = false;
-        let mut add = false;
-        let mut dup: Option<usize> = None;
         let mut del: Option<usize> = None;
-        let mut reset: Option<usize> = None;
         ui.spacing_mut().item_spacing.x = 2.0;
         let n = self.ws.list.len();
         for i in 0..n {
@@ -1352,73 +1498,22 @@ impl App {
                 let bottom = ui.max_rect().bottom() + 6.0;
                 ui.painter().rect_filled(egui::Rect::from_min_max(egui::pos2(whole.left() + 8.0, bottom - 2.0), egui::pos2(whole.right() - 8.0, bottom)), 0.0, color);
             }
-            let r = r.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(crate::i18n::t("clic droit : renommer, couleur, dupliquer"));
+            let r = r.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(format!("{}  Ctrl+{}", crate::i18n::t("Étape du pipeline"), i + 1));
             if r.clicked() {
                 go = Some(i);
             }
-            r.context_menu(|ui| {
-                ui.set_min_width(210.0);
-                if self.ws_name.is_empty() || ui.memory(|m| m.data.get_temp::<usize>(egui::Id::unique("ws-edit"))) != Some(i) {
-                    self.ws_name = self.ws.list[i].name.clone();
-                    ui.memory_mut(|m| m.data.insert_temp(egui::Id::unique("ws-edit"), i));
-                }
-                if ui.add(egui::TextEdit::singleline(&mut self.ws_name).hint_text(crate::i18n::t("nom de l'espace"))).changed() && !self.ws_name.trim().is_empty() {
-                    self.ws.list[i].name = self.ws_name.trim().to_string();
-                    changed = true;
-                }
-                ui.horizontal(|ui| {
-                    ui.label(crate::i18n::t("couleur"));
-                    let mut c = self.ws.list[i].accent.unwrap_or([p.accent.r(), p.accent.g(), p.accent.b()]);
-                    if ui.color_edit_button_srgb(&mut c).changed() {
-                        self.ws.list[i].accent = Some(c);
-                        changed = true;
-                    }
-                    if self.ws.list[i].accent.is_some() && ui.small_button(crate::i18n::t("celle des réglages")).clicked() {
-                        self.ws.list[i].accent = None;
-                        changed = true;
+            // Les étapes sont fixes ; un ancien espace fait à la main peut seulement être retiré
+            let custom = !workspace::PRESETS.iter().any(|p| p.4 == self.ws.list[i].kind && p.0 == self.ws.list[i].name);
+            if custom {
+                r.context_menu(|ui| {
+                    if n > 1 && ui.button(RichText::new(crate::i18n::t("retirer cet espace")).color(p.missing)).clicked() {
+                        del = Some(i);
+                        ui.close();
                     }
                 });
-                ui.separator();
-                if ui.button(crate::i18n::t("dupliquer")).clicked() {
-                    dup = Some(i);
-                    ui.close();
-                }
-                if ui.button(crate::i18n::t("ouvrir dans une nouvelle fenêtre")).on_hover_text(crate::i18n::t("Cet espace dans sa propre fenêtre, sur le même coffre : par exemple les matériaux sur un écran et la scène sur l'autre")).clicked() {
-                    if let Err(e) = workspace::open_in_window(&self.root(), i) {
-                        self.error = Some(e);
-                    }
-                    ui.close();
-                }
-                if ui.button(crate::i18n::t("réinitialiser la disposition")).clicked() {
-                    reset = Some(i);
-                    ui.close();
-                }
-                if n > 1 && ui.button(RichText::new(crate::i18n::t("supprimer")).color(p.missing)).clicked() {
-                    del = Some(i);
-                    ui.close();
-                }
-            });
-        }
-        ui.add_space(2.0);
-        if ui.add(egui::Button::new(RichText::new(lucide::PLUS).size(14.0).color(p.muted)).frame(false).min_size(egui::vec2(26.0, 26.0))).on_hover_text(crate::i18n::t("Enregistrer la disposition actuelle comme nouvel espace de travail")).clicked() {
-            add = true;
-        }
-        if add || dup.is_some() {
-            self.ws_capture();
-            let mut w = self.ws.list[dup.unwrap_or(self.ws.current)].clone();
-            w.name = if add { format!("{} {}", crate::i18n::t("espace"), self.ws.list.len() + 1) } else { format!("{} 2", w.name) };
-            self.ws.list.push(w);
-            go = Some(self.ws.list.len() - 1);
-        }
-        if let Some(i) = reset {
-            self.ws.list[i].places.clear();
-            self.ws.list[i].layout = None;
-            if i == self.ws.current {
-                dock::reset();
-                self.tree = None;
             }
-            changed = true;
         }
+
         if let Some(i) = del {
             if i == self.ws.current {
                 // On quitte l'espace avant de le retirer
@@ -2346,12 +2441,15 @@ impl App {
         } else if pressed(Modifiers::COMMAND, Key::G) {
             self.view = Some(if self.view() == View::Brain { View::Files } else { View::Brain });
         }
-        // Ctrl+1, 2, 3… : les pages de l'espace en cours, dans l'ordre de la deuxième rangée
-        let pages = workspace::pages(&self.ws.cur().kind);
-        for (n, k) in [Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5, Key::Num6].into_iter().enumerate() {
-            if pressed(Modifiers::COMMAND, k) {
-                if let Some((_, v)) = pages.get(n) {
-                    self.view = Some(view_of(v));
+        // Ctrl+1, 2, 3… : les étapes du pipeline ; Alt+1, 2, 3… : les outils de l'étape en cours
+        let tools = workspace::tools(&self.ws.cur().kind);
+        for (n, k) in [Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5, Key::Num6, Key::Num7].into_iter().enumerate() {
+            if pressed(Modifiers::COMMAND, k) && n < self.ws.list.len() {
+                self.ws_switch(n, ctx);
+            }
+            if pressed(Modifiers::ALT, k) {
+                if let Some(t) = tools.get(n) {
+                    self.set_tool(t.id);
                 }
             }
         }
@@ -2806,10 +2904,22 @@ impl App {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.add_space(6.0);
                         let on = self.split.is_some();
+                        let split_on = on;
+                        let _ = split_on;
                         let b = egui::Button::new(RichText::new(lucide::COLUMNS_2).size(14.0).color(if on { p.text } else { p.muted })).fill(if on { p.raised } else { egui::Color32::TRANSPARENT }).frame(on).min_size(egui::vec2(26.0, 26.0));
                         if ui.add(b).on_hover_text(format!("{} ({})", crate::i18n::t("côte à côte"), keymap::text("split"))).clicked() {
                             self.toggle_split();
                         }
+                        // Comme la maquette : « Disposition  Principale ▾ »
+                        {
+                            let v = &mut ui.style_mut().visuals.widgets;
+                            v.inactive.weak_bg_fill = egui::Color32::TRANSPARENT;
+                            v.inactive.bg_stroke = egui::Stroke::NONE;
+                            v.hovered.weak_bg_fill = p.raised;
+                            v.open.weak_bg_fill = p.raised;
+                        }
+                        self.disp_menu(ui);
+                        ui.label(RichText::new(crate::i18n::t("Disposition")).size(11.0).color(p.muted));
                     });
                 });
             });

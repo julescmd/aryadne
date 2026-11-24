@@ -1944,5 +1944,17 @@
   "Scripts, shaders et pages, avec l'exécution et l'aide d'un serveur de langage.": "Scripts, shaders and pages, with running and language server help.",
   "Nouveau fichier": "New file",
   "Écris une note, ou rouvre une note récente.": "Write a note, or reopen a recent note.",
-  "Nouvelle note": "New note"
+  "Nouvelle note": "New note",
+  "Principale": "Main",
+  "Dispositions de l'étape": "Layouts of this step",
+  "Modelage, Animation…": "Modeling, Animation…",
+  "Enregistrer": "Save",
+  "Garde l'arrangement actuel des panneaux sous ce nom": "Keep the current panel arrangement under this name",
+  "Renommer en ce nom": "Rename to this name",
+  "Donne le nom tapé ci-dessus à la disposition en cours": "Gives the name typed above to the current layout",
+  "Réinitialiser cette disposition": "Reset this layout",
+  "Supprimer cette disposition": "Delete this layout",
+  "Ouvrir l'étape dans une nouvelle fenêtre": "Open this step in a new window",
+  "Par exemple les matériaux sur un écran et la scène sur l'autre": "For example materials on one screen and the scene on the other",
+  "Disposition": "Layout"
 }

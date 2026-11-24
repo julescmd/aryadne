@@ -100,12 +100,12 @@ impl App {
     fn commands(&self) -> Vec<(&'static str, &'static str, Cmd)> {
         use settings::Tab;
         let mut v = vec![
-            ("aller : fichiers", "Ctrl+1", Cmd::View(View::Files)),
-            ("aller : cerveau", "Ctrl+2", Cmd::View(View::Brain)),
-            ("aller : refs", "Ctrl+3", Cmd::View(View::Refs)),
-            ("aller : boards", "Ctrl+4", Cmd::View(View::Boards)),
-            ("aller : tâches", "Ctrl+5", Cmd::View(View::Tasks)),
-            ("aller : chat", "Ctrl+6", Cmd::View(View::Chat)),
+            ("aller : fichiers", "", Cmd::View(View::Files)),
+            ("aller : cerveau", "Ctrl+G", Cmd::View(View::Brain)),
+            ("aller : refs", "", Cmd::View(View::Refs)),
+            ("aller : moodboard", "", Cmd::View(View::Boards)),
+            ("aller : tâches", "", Cmd::View(View::Tasks)),
+            ("aller : chat", "", Cmd::View(View::Chat)),
             ("aller : recherche", "Ctrl+Maj+F", Cmd::View(View::Search)),
             ("nouvelle note", "Ctrl+N", Cmd::NewNote),
             ("note du jour", "Ctrl+J", Cmd::Daily),
