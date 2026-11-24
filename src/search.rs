@@ -33,6 +33,10 @@ pub struct Search {
     pub input: String,
     pub results: Option<Arc<Mutex<Results>>>,
     pub last_query: String,
+    /// Remplacer : le texte de remplacement (None : le mode est fermé)
+    pub replace: Option<String>,
+    /// Fichiers décochés : laissés tels quels au remplacement
+    pub skip: std::collections::HashSet<String>,
 }
 
 fn searchable(rel: &str) -> bool {
@@ -127,9 +131,40 @@ pub fn highlight(line: &str, query: &str) -> Vec<(String, bool)> {
     out
 }
 
+/// Remplace chaque passage trouvé (même règle que la recherche : majuscules et accents ignorés).
+/// Retourne le texte et le nombre de remplacements.
+pub fn replace_in(text: &str, query: &str, with: &str) -> (String, usize) {
+    let mut out = String::with_capacity(text.len());
+    let mut n = 0;
+    // Ligne par ligne : la recherche aussi trouve ligne par ligne
+    for (i, line) in text.split('\n').enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+        let parts = highlight(line, query);
+        for (part, hit) in parts {
+            if hit {
+                out.push_str(with);
+                n += 1;
+            } else {
+                out.push_str(&part);
+            }
+        }
+    }
+    (out, n)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn remplacer_sans_accents() {
+        let (t, n) = replace_in("La Forêt\nune foret\r\nrien", "foret", "jungle");
+        assert_eq!(t, "La jungle\nune jungle\r\nrien");
+        assert_eq!(n, 2);
+        assert_eq!(replace_in("abc", "zz", "y"), ("abc".to_string(), 0));
+    }
 
     #[test]
     fn surlignage_sans_accents() {

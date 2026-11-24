@@ -2537,6 +2537,11 @@ impl App {
             self.view = Some(View::Search);
             self.search.last_query.clear();
         }
+        if keymap::pressed(ctx, "replace_all") {
+            self.view = Some(View::Search);
+            self.search.last_query.clear();
+            self.search.replace.get_or_insert_with(String::new);
+        }
         if keymap::pressed(ctx, "assistant") {
             self.toggle_assistant();
         }
@@ -5603,6 +5608,43 @@ impl App {
         });
     }
 
+    /// Remplace partout où la recherche a trouvé, sauf dans les fichiers décochés ; un fichier ouvert est
+    /// changé dans son onglet (et s'enregistre comme une saisie)
+    fn replace_everywhere(&mut self) {
+        let (Some(res), Some(with)) = (self.search.results.clone(), self.search.replace.clone()) else { return };
+        let (files, query) = {
+            let r = res.lock().unwrap();
+            (r.files.iter().filter(|f| !f.lines.is_empty()).map(|f| f.rel.clone()).collect::<Vec<_>>(), r.query.clone())
+        };
+        let root = self.root();
+        let (mut n_files, mut n) = (0, 0);
+        for rel in files.into_iter().filter(|r| !self.search.skip.contains(r)) {
+            if let Some(d) = self.docs.iter_mut().find(|d| d.rel == rel) {
+                if let Content::Text(t) = &mut d.content {
+                    let (new, k) = search::replace_in(t, &query, &with);
+                    if k > 0 {
+                        *t = new;
+                        d.dirty_since = Some(Instant::now());
+                        n += k;
+                        n_files += 1;
+                    }
+                    continue;
+                }
+            }
+            if let Ok(text) = vault::read(&root, &rel) {
+                let (new, k) = search::replace_in(&text, &query, &with);
+                if k > 0 && vault::write(&root, &rel, &new).is_ok() {
+                    n += k;
+                    n_files += 1;
+                }
+            }
+        }
+        self.toast(format!("{n} {} · {n_files} {}", crate::i18n::t("remplacements"), crate::i18n::t("fichiers")));
+        // La recherche se relance sur le nouveau texte
+        self.search.last_query.clear();
+        self.search.skip.clear();
+    }
+
     fn search_view(&mut self, ui: &mut egui::Ui) {
         let p = theme::pal();
         let ctx = ui.ctx().clone();
@@ -5611,11 +5653,28 @@ impl App {
                 ui.set_width(ui.available_width());
                 ui.horizontal(|ui| {
                     ui.label(RichText::new("/").color(p.accent).size(18.0).family(theme::bold()));
-                    let r = ui.add(egui::TextEdit::singleline(&mut self.search.input).hint_text(crate::i18n::t("chercher dans tout le coffre (notes, code, texte, noms de fichiers)…")).font(egui::FontId::monospace(15.0)).frame(egui::Frame::NONE).desired_width(f32::INFINITY));
+                    let open = self.search.replace.is_some();
+                    let w = ui.available_width() - 34.0;
+                    let r = ui.add(egui::TextEdit::singleline(&mut self.search.input).hint_text(crate::i18n::t("chercher dans tout le coffre (notes, code, texte, noms de fichiers)…")).font(egui::FontId::monospace(15.0)).frame(egui::Frame::NONE).desired_width(w));
                     if self.search.results.is_none() && self.search.input.is_empty() {
                         r.request_focus();
                     }
+                    if ui.add(egui::Button::new(RichText::new(lucide::REPLACE).size(15.0)).selected(open)).on_hover_text(crate::i18n::t("Remplacer dans tous les fichiers (Ctrl+Maj+H)")).clicked() {
+                        self.search.replace = if open { None } else { Some(String::new()) };
+                    }
                 });
+                if self.search.replace.is_some() {
+                    let mut go = false;
+                    ui.horizontal(|ui| {
+                        let Some(with) = self.search.replace.as_mut() else { return };
+                        ui.label(RichText::new(lucide::CORNER_DOWN_RIGHT).color(p.accent).size(15.0));
+                        ui.add(egui::TextEdit::singleline(with).hint_text(crate::i18n::t("remplacer par…")).font(egui::FontId::monospace(15.0)).frame(egui::Frame::NONE).desired_width(ui.available_width() - 34.0));
+                        go = ui.add(egui::Button::new(RichText::new(lucide::REPLACE_ALL).size(15.0))).on_hover_text(crate::i18n::t("Tout remplacer dans les fichiers cochés")).clicked();
+                    });
+                    if go {
+                        self.replace_everywhere();
+                    }
+                }
             });
             self.search.run(self.root(), self.entries.clone(), ctx.clone());
             let Some(res) = self.search.results.clone() else {
@@ -5664,17 +5723,43 @@ impl App {
                 egui::Frame::new().inner_margin(egui::Margin::symmetric(16, 6)).show(ui, |ui| {
                     for f in &files {
                         ui.add_space(8.0);
-                        let head = ui.add(egui::Button::new(RichText::new(&f.rel).family(theme::bold()).color(if f.name_match { p.accent } else { p.text })).frame(false));
-                        if head.clicked() {
-                            open = Some(f.rel.clone());
-                        }
+                        let replacing = self.search.replace.clone();
+                        ui.horizontal(|ui| {
+                            if replacing.is_some() && !f.lines.is_empty() {
+                                let mut on = !self.search.skip.contains(&f.rel);
+                                if ui.checkbox(&mut on, "").on_hover_text(crate::i18n::t("inclure ce fichier au remplacement")).changed() {
+                                    if on {
+                                        self.search.skip.remove(&f.rel);
+                                    } else {
+                                        self.search.skip.insert(f.rel.clone());
+                                    }
+                                }
+                            }
+                            let head = ui.add(egui::Button::new(RichText::new(&f.rel).family(theme::bold()).color(if f.name_match { p.accent } else { p.text })).frame(false));
+                            if head.clicked() {
+                                open = Some(f.rel.clone());
+                            }
+                        });
                         for l in &f.lines {
                             let r = ui.horizontal(|ui| {
                                 ui.spacing_mut().item_spacing.x = 0.0;
                                 ui.label(RichText::new(format!("{:>5}  ", l.number)).color(p.muted).size(11.5));
+                                let with = self.search.replace.as_ref().filter(|_| !self.search.skip.contains(&f.rel));
                                 for (part, hit) in search::highlight(&l.text, &query) {
                                     let t = RichText::new(part).size(12.5);
-                                    ui.label(if hit { t.background_color(p.accent.linear_multiply(0.3)).color(p.text) } else { t.color(p.muted) });
+                                    match (hit, with) {
+                                        // Aperçu du remplacement : l'ancien barré, le nouveau à côté
+                                        (true, Some(w)) => {
+                                            ui.label(t.strikethrough().background_color(p.missing.linear_multiply(0.25)).color(p.muted));
+                                            ui.label(RichText::new(w).size(12.5).background_color(p.accent.linear_multiply(0.3)).color(p.text));
+                                        }
+                                        (true, None) => {
+                                            ui.label(t.background_color(p.accent.linear_multiply(0.3)).color(p.text));
+                                        }
+                                        _ => {
+                                            ui.label(t.color(p.muted));
+                                        }
+                                    }
                                 }
                             });
                             if r.response.interact(egui::Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {

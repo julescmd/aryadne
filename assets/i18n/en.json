@@ -2430,5 +2430,11 @@
   "Normaliser la sonie : chaque clip choisi atteint la cible, crête sous -1 dB": "Normalize loudness: each selected clip reaches the target, peak under -1 dB",
   "limité par la crête": "limited by the peak",
   "Télé (EBU R128)": "TV (EBU R128)",
-  "Podcast en mono": "Mono podcast"
+  "Podcast en mono": "Mono podcast",
+  "Remplacer dans tous les fichiers (Ctrl+Maj+H)": "Replace in all files (Ctrl+Shift+H)",
+  "remplacer par…": "replace with…",
+  "Tout remplacer dans les fichiers cochés": "Replace all in checked files",
+  "inclure ce fichier au remplacement": "include this file in the replace",
+  "remplacements": "replacements",
+  "remplacer dans tous les fichiers": "replace in all files"
 }

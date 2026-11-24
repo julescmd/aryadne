@@ -20,6 +20,7 @@ pub const ACTIONS: &[Action] = &[
     Action { id: "new_note", label: "nouvelle note", default: &[(C, Key::N)] },
     Action { id: "daily", label: "note du jour", default: &[(C, Key::J)] },
     Action { id: "search", label: "recherche dans tout le coffre", default: &[(CS, Key::F)] },
+    Action { id: "replace_all", label: "remplacer dans tous les fichiers", default: &[(CS, Key::H)] },
     Action { id: "assistant", label: "assistant IA", default: &[(C, Key::L)] },
     Action { id: "explorer", label: "afficher / masquer l'explorateur", default: &[(C, Key::B)] },
     Action { id: "split", label: "vue côte à côte", default: &[(C, Key::Backslash)] },
