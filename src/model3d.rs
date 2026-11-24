@@ -1437,6 +1437,12 @@ impl Prepared {
     }
 }
 
+/// Poids à l'écran → poids dans l'espace (perspective juste) : rend 1/profondeur interpolé et les deux premiers poids
+fn persp_bary(w: [f32; 3], inv_depth: [f32; 3]) -> (f32, [f32; 2]) {
+    let z = w[0] * inv_depth[0] + w[1] * inv_depth[1] + w[2] * inv_depth[2];
+    (z, [w[0] * inv_depth[0] / z, w[1] * inv_depth[1] / z])
+}
+
 pub fn render(m: &Prepared, cam: &Camera, look: &Look, w: usize, h: usize) -> Frame {
     use rayon::prelude::*;
     let focal = w.min(h) as f32 * 1.2;
@@ -1521,6 +1527,10 @@ pub fn render(m: &Prepared, cam: &Camera, look: &Look, w: usize, h: usize) -> Fr
                 continue;
             }
             let inv = 1.0 / area;
+            // En perspective, ce qui varie linéairement à l'écran est 1/profondeur : on interpole ça, et les poids
+            // (UV, normales, position) sont corrigés d'autant. Sinon les textures glissent quand la caméra bouge.
+            let persp = !cam.ortho;
+            let (ia, ib, ic) = if persp { (1.0 / -a[2], 1.0 / -b[2], 1.0 / -c[2]) } else { (1.0, 1.0, 1.0) };
             for y in miny..=maxy {
                 let py = y as f32 + 0.5;
                 for x in minx..=maxx {
@@ -1531,12 +1541,13 @@ pub fn render(m: &Prepared, cam: &Camera, look: &Look, w: usize, h: usize) -> Fr
                     if w0 < 0.0 || w1 < 0.0 || w2 < 0.0 {
                         continue;
                     }
-                    let z = w0 * a[2] + w1 * b[2] + w2 * c[2];
+                    // Plus grand = plus proche, dans les deux cas
+                    let (z, bw) = if persp { persp_bary([w0, w1, w2], [ia, ib, ic]) } else { (w0 * a[2] + w1 * b[2] + w2 * c[2], [w0, w1]) };
                     let k = (y as usize - y0) * w + x as usize;
                     if z > depth[k] {
                         depth[k] = z;
                         tri[k] = ti as u32;
-                        bary[k] = [w0, w1];
+                        bary[k] = bw;
                     }
                 }
             }
@@ -1790,6 +1801,12 @@ pub fn render(m: &Prepared, cam: &Camera, look: &Look, w: usize, h: usize) -> Fr
             }
             let _ = col;
             chunk[o..o + 3].copy_from_slice(&rgb);
+        }
+        // Le reste du programme attend la profondeur de vue (négative devant la caméra) : on la redonne
+        if !cam.ortho {
+            for d in depth.iter_mut().filter(|d| **d > 0.0) {
+                *d = -1.0 / *d;
+            }
         }
         (tri, depth)
     }).collect();
@@ -8431,6 +8448,19 @@ mod tests_weld {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn perspective_juste() {
+        // Un segment qui fuit : de (0, 0, -1) à (1, 0, -4), vu par un sténopé (x écran = x / profondeur)
+        let (a, b) = ([0.0f32, 0.0, -1.0], [1.0f32, 0.0, -4.0]);
+        let sx = |p: [f32; 3]| p[0] / -p[2];
+        // Le milieu à l'écran n'est pas le milieu dans l'espace : les poids corrigés retrouvent le bon point
+        let mid = (sx(a) + sx(b)) / 2.0;
+        let (_, w) = persp_bary([0.5, 0.5, 0.0], [1.0 / -a[2], 1.0 / -b[2], 1.0]);
+        let p = [a[0] * w[0] + b[0] * w[1], 0.0, a[2] * w[0] + b[2] * w[1]];
+        assert!((sx(p) - mid).abs() < 1e-5, "le point retrouvé retombe sous le pixel");
+        assert!((w[0] - 0.8).abs() < 1e-5, "et non 0,5 (affine) : {w:?}");
+    }
 
     #[test]
     fn formes_de_lumiere() {
