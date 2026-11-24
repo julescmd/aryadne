@@ -1167,6 +1167,23 @@ impl Editor {
             if fx_btn(ui, "Compresseur", "voix parlée, niveau plus égal") {
                 self.add_fx(Fx::Compress);
             }
+            if fx_btn(ui, "De-esser", "adoucit les « s » qui sifflent") {
+                self.add_fx(Fx::Deess);
+            }
+            section(ui, &crate::i18n::t("Espace et voix"));
+            if fx_btn(ui, "Réverbération", "une pièce : réglable dans l'onglet Clip") {
+                self.add_fx(Fx::Reverb { amount: 0.35 });
+            }
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                let w = (ui.available_width() - 4.0) / 2.0;
+                for (label, st) in [("Voix plus grave", -3.0f32), ("Voix plus aiguë", 3.0)] {
+                    let b = egui::Button::new(egui::RichText::new(format!("{}\n{st:+.0} {}", crate::i18n::t(label), crate::i18n::t_mid("demi-tons"))).size(12.0)).min_size(vec2(w, 38.0));
+                    if ui.add_enabled(has, b).on_hover_text(crate::i18n::t("Change la hauteur sans changer la durée")).clicked() {
+                        self.add_fx(Fx::Pitch { semitones: st });
+                    }
+                }
+            });
             section(ui, &crate::i18n::t("Montage"));
             if fx_btn(ui, "Supprimer", "et resserrer la piste (Suppr)") {
                 self.delete_selection();
@@ -1266,6 +1283,7 @@ impl Editor {
             return;
         };
         let mut changed = false;
+        let mut fx_edit = false;
         let mut drop_fx = None;
         {
             let c = &mut self.session.tracks[ti].clips[ci];
@@ -1291,9 +1309,34 @@ impl Editor {
             if c.fx.is_empty() {
                 ui.label(egui::RichText::new(crate::i18n::t("Aucun effet.")).size(11.5).color(p.muted));
             }
-            for (k, f) in c.fx.iter().enumerate() {
+            for (k, f) in self.session.tracks[ti].clips[ci].fx.iter_mut().enumerate() {
                 ui.horizontal(|ui| {
-                    ui.label(f.label());
+                    // Les effets à un réglage se règlent ici
+                    match f {
+                        Fx::Pitch { semitones } => {
+                            ui.label(crate::i18n::t("Hauteur"));
+                            fx_edit |= ui.add(egui::DragValue::new(semitones).range(-12.0..=12.0).speed(0.05).max_decimals(1).suffix(" st")).changed();
+                        }
+                        Fx::Reverb { amount } => {
+                            ui.label(crate::i18n::t("Réverbération"));
+                            let mut pc = *amount * 100.0;
+                            if ui.add(egui::DragValue::new(&mut pc).range(0.0..=100.0).speed(0.5).max_decimals(0).suffix(" %")).changed() {
+                                *amount = pc / 100.0;
+                                fx_edit = true;
+                            }
+                        }
+                        Fx::Denoise { amount } => {
+                            ui.label(crate::i18n::t("Réduction de bruit"));
+                            let mut pc = *amount * 100.0;
+                            if ui.add(egui::DragValue::new(&mut pc).range(0.0..=100.0).speed(0.5).max_decimals(0).suffix(" %")).changed() {
+                                *amount = pc / 100.0;
+                                fx_edit = true;
+                            }
+                        }
+                        _ => {
+                            ui.label(f.label());
+                        }
+                    }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui.small_button(l::X).on_hover_text(crate::i18n::t("retirer")).clicked() {
                             drop_fx = Some(k);
@@ -1306,6 +1349,7 @@ impl Editor {
             self.session.tracks[ti].clips[ci].fx.remove(k);
             changed = true;
         }
+        changed |= fx_edit;
         changed |= self.track_props(ui, ti);
         if changed {
             self.changed();

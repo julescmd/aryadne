@@ -44,6 +44,12 @@ pub enum Fx {
     Highpass { hz: f32 },
     /// Voix claire : coupe-bas, réduction de bruit douce, présence, compression
     Voice,
+    /// Hauteur en demi-tons, sans changer la durée
+    Pitch { semitones: f32 },
+    /// Réverbération : de 0 (sèche) à 1 (grande salle)
+    Reverb { amount: f32 },
+    /// Adoucit les « s » qui sifflent
+    Deess,
 }
 
 impl Fx {
@@ -54,6 +60,9 @@ impl Fx {
             Fx::Compress => crate::i18n::t("Compresseur"),
             Fx::Highpass { hz } => format!("{} {hz:.0} Hz", crate::i18n::t("Coupe-bas")),
             Fx::Voice => crate::i18n::t("Voix claire"),
+            Fx::Pitch { semitones } => format!("{} {semitones:+.1} {}", crate::i18n::t("Hauteur"), crate::i18n::t_mid("demi-tons")),
+            Fx::Reverb { amount } => format!("{} {:.0} %", crate::i18n::t("Réverbération"), amount * 100.0),
+            Fx::Deess => crate::i18n::t("De-esser"),
         }
     }
 
@@ -64,6 +73,17 @@ impl Fx {
             Fx::Compress => "acompressor=threshold=-20dB:ratio=3:attack=8:release=160:makeup=3".into(),
             Fx::Highpass { hz } => format!("highpass=f={hz:.0}"),
             Fx::Voice => "highpass=f=80,afftdn=nr=10:nf=-40,equalizer=f=3500:t=q:w=1:g=3,acompressor=threshold=-20dB:ratio=3:attack=8:release=160:makeup=2".into(),
+            // Plus vite (ou plus lent) pour la hauteur, puis le tempo remis : la durée ne change pas
+            Fx::Pitch { semitones } => {
+                let k = 2f32.powf(semitones.clamp(-12.0, 12.0) / 12.0);
+                format!("aresample={RATE},asetrate={:.0},aresample={RATE},atempo={:.6}", RATE as f32 * k, 1.0 / k)
+            }
+            // Trois échos qui s'éteignent : une pièce, une salle
+            Fx::Reverb { amount } => {
+                let a = amount.clamp(0.0, 1.0);
+                format!("aecho=0.85:0.9:{:.0}|{:.0}|{:.0}:{:.3}|{:.3}|{:.3}", 30.0 + 40.0 * a, 55.0 + 80.0 * a, 85.0 + 130.0 * a, 0.12 + 0.3 * a, 0.08 + 0.22 * a, 0.05 + 0.16 * a)
+            }
+            Fx::Deess => "deesser=i=0.6:m=0.5:f=0.5".into(),
         }
     }
 }
@@ -752,6 +772,10 @@ mod tests {
         let m = mix(&s, &sounds, 0.0, 2.0, false);
         assert!(m[..RATE as usize * 2 - 200].iter().all(|v| *v == 0.0));
         assert!(m[RATE as usize * 2 + 200..].iter().any(|v| v.abs() > 0.4));
+        // La hauteur garde la durée : asetrate × k puis atempo ÷ k
+        let f = Fx::Pitch { semitones: 12.0 }.filter();
+        assert!(f.contains("asetrate=96000") && f.contains("atempo=0.5"), "{f}");
+        assert!(Fx::Reverb { amount: 0.5 }.filter().starts_with("aecho="));
         // Sonie : un sinus de 997 Hz à pleine échelle sur les deux canaux vaut 0 LUFS, à -20 dB il vaut -20
         let sine = |amp: f32| -> Vec<f32> { (0..RATE as usize * 3).flat_map(|i| { let v = amp * (i as f32 * 997.0 * std::f32::consts::TAU / RATE as f32).sin(); [v, v] }).collect() };
         assert!(lufs(&sine(1.0)).unwrap().abs() < 0.1, "{:?}", lufs(&sine(1.0)));
