@@ -74,6 +74,8 @@ pub enum Kind {
     Lattice { amount: f32, axis: u8, curve: u8 },
     Melt { amount: f32, axis: u8 },
     Crumple { amount: f32, scale: f32, seed: f32 },
+    /// Remaillage par voxels : taille d'un voxel (fraction de la diagonale) et lissage
+    Remesh { voxel: f32, smooth: u32 },
 }
 
 fn one() -> f32 {
@@ -183,6 +185,7 @@ pub const ALL: &[(&str, &str, &str)] = &[
     ("déformer", "Gonflement axial (lattice)", "renfle ou pince le milieu"),
     ("organique", "Fondre (melt)", "affaisse vers le sol"),
     ("organique", "Froisser (crumple)", "plis aléatoires"),
+    ("topologie", "Remailler (voxels)", "refait la surface en quads réguliers, pour sculpter"),
 ];
 
 impl Kind {
@@ -220,7 +223,8 @@ impl Kind {
             29 => Kind::FlipNormals,
             30 => Kind::Lattice { amount: 0.3, axis: 1, curve: 0 },
             31 => Kind::Melt { amount: 0.3, axis: 1 },
-            _ => Kind::Crumple { amount: 0.03, scale: 6.0, seed: 0.0 },
+            32 => Kind::Crumple { amount: 0.03, scale: 6.0, seed: 0.0 },
+            _ => Kind::Remesh { voxel: 0.015, smooth: 1 },
         }
     }
     pub fn index(&self) -> usize {
@@ -258,6 +262,7 @@ impl Kind {
             Kind::Lattice { .. } => 30,
             Kind::Melt { .. } => 31,
             Kind::Crumple { .. } => 32,
+            Kind::Remesh { .. } => 33,
         }
     }
     pub fn name(&self) -> &'static str {
@@ -480,6 +485,16 @@ fn apply_one(k: Kind, mut m: Mesh, origin: V3) -> Mesh {
         }
         Kind::Triangulate => {
             m.edges = vec![7; m.tris.len()];
+        }
+        Kind::Remesh { voxel, smooth } => {
+            let diag = len(size).max(1e-6);
+            if let Some(o) = crate::remesh::remesh(&m.pos, &m.tris, voxel.clamp(0.002, 0.2) * diag, smooth.min(10)) {
+                let c = m.colors.first().copied().unwrap_or(Color32::from_gray(200));
+                m.colors = vec![c; o.tris.len()];
+                m.pos = o.pos;
+                m.tris = o.tris;
+                m.edges = o.edges;
+            }
         }
         _ => m = apply_more(k, m, origin, lo, hi),
     }
@@ -1652,6 +1667,11 @@ fn params(ui: &mut egui::Ui, k: &mut Kind) -> bool {
             s!(ui, amount, 0.0..=0.2, "force");
             s!(ui, scale, 0.5..=30.0, "échelle");
             s!(ui, seed, 0.0..=100.0, "graine");
+        }
+        Kind::Remesh { voxel, smooth } => {
+            c |= ui.add(egui::Slider::new(voxel, 0.004..=0.1).logarithmic(true).text(crate::i18n::t("taille des voxels"))).changed();
+            c |= ui.add(egui::Slider::new(smooth, 0..=6).text(crate::i18n::t("lissage"))).changed();
+            ui.label(egui::RichText::new(crate::i18n::t("Plus petit : plus de détails et plus de faces.")).size(11.0).color(crate::theme::pal().muted));
         }
     }
     c

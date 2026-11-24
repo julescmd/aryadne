@@ -2210,5 +2210,10 @@
   "Pas encore de retour. Va sur une image, écris, puis Ctrl+Entrée.": "No feedback yet. Go to a frame, write, then Ctrl+Enter.",
   "réglé": "resolved",
   "Exporter en note": "Export as a note",
-  "Une note Markdown à côté de la vidéo, une case par retour": "A Markdown note next to the video, one checkbox per comment"
+  "Une note Markdown à côté de la vidéo, une case par retour": "A Markdown note next to the video, one checkbox per comment",
+  "Remailler (voxels)": "Remesh (voxels)",
+  "refait la surface en quads réguliers, pour sculpter": "rebuilds the surface as even quads, for sculpting",
+  "taille des voxels": "voxel size",
+  "lissage": "smoothing",
+  "Plus petit : plus de détails et plus de faces.": "Smaller: more detail and more faces."
 }
