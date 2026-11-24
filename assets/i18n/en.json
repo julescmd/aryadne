@@ -2189,5 +2189,18 @@
   "métal rouillé": "rusty metal",
   "toon": "toon",
   "céramique": "ceramic",
-  "or": "gold"
+  "or": "gold",
+  "sélection ▾": "Select ▾",
+  "filtres ▾": "Filters ▾",
+  "tout sélectionner   Ctrl+A": "select all   Ctrl+A",
+  "inverser la sélection   Ctrl+Maj+I": "invert selection   Ctrl+Shift+I",
+  "désélectionner   Ctrl+D": "deselect   Ctrl+D",
+  "Maj : ajouter · Alt : retirer": "Shift: add · Alt: subtract",
+  "flou léger": "light blur",
+  "flou fort": "strong blur",
+  "pixeliser": "pixelate",
+  "glisser : de la couleur vers le transparent": "drag: from the color to transparent",
+  "sélection elliptique": "elliptical selection",
+  "lasso": "lasso",
+  "baguette magique": "magic wand"
 }

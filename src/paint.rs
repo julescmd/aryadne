@@ -235,20 +235,153 @@ impl Doc {
 pub enum Tool {
     Move,
     Select,
+    Ellipse,
+    Lasso,
+    Wand,
     Brush,
     Eraser,
     Fill,
+    Gradient,
     Picker,
 }
 
-const TOOLS: [(Tool, &str, &str, &str); 6] = [
-    (Tool::Move, "✥", "déplacer le calque", "V"),
-    (Tool::Select, "⬚", "sélection rectangulaire", "M"),
-    (Tool::Brush, "✎", "pinceau", "B"),
-    (Tool::Eraser, "⌫", "gomme", "E"),
-    (Tool::Fill, "◧", "pot de peinture", "G"),
-    (Tool::Picker, "⊙", "pipette", "I"),
+const TOOLS: [(Tool, &str, &str, &str); 10] = [
+    (Tool::Move, crate::lucide::MOVE, "déplacer le calque", "V"),
+    (Tool::Select, crate::lucide::SQUARE_DASHED, "sélection rectangulaire", "M"),
+    (Tool::Ellipse, crate::lucide::CIRCLE_DASHED, "sélection elliptique", "O"),
+    (Tool::Lasso, crate::lucide::LASSO, "lasso", "L"),
+    (Tool::Wand, crate::lucide::WAND_SPARKLES, "baguette magique", "W"),
+    (Tool::Brush, crate::lucide::PAINTBRUSH, "pinceau", "B"),
+    (Tool::Eraser, crate::lucide::ERASER, "gomme", "E"),
+    (Tool::Fill, crate::lucide::PAINT_BUCKET, "pot de peinture", "G"),
+    (Tool::Gradient, crate::lucide::BLEND, "dégradé", "D"),
+    (Tool::Picker, crate::lucide::PIPETTE, "pipette", "I"),
 ];
+
+/// Une sélection : un masque (0 à 255 par pixel du document), son cadre, et son contour à dessiner
+#[derive(Clone)]
+pub struct Sel {
+    pub mask: Vec<u8>,
+    pub bbox: [i32; 4],
+    /// Contour en coordonnées du document (vide pour la baguette : on montre le cadre)
+    pub outline: Vec<[f32; 2]>,
+}
+
+impl Sel {
+    /// Sélection d'après une fonction de couverture (0 à 1) évaluée en 4 points par pixel, dans un cadre
+    fn from_fn(w: usize, h: usize, bbox: [i32; 4], cover: impl Fn(f32, f32) -> bool, outline: Vec<[f32; 2]>) -> Option<Sel> {
+        let b = [bbox[0].max(0), bbox[1].max(0), bbox[2].min(w as i32), bbox[3].min(h as i32)];
+        if b[2] <= b[0] || b[3] <= b[1] {
+            return None;
+        }
+        let mut mask = vec![0u8; w * h];
+        for y in b[1]..b[3] {
+            for x in b[0]..b[2] {
+                let n = [(0.25, 0.25), (0.75, 0.25), (0.25, 0.75), (0.75, 0.75)].iter().filter(|(dx, dy)| cover(x as f32 + dx, y as f32 + dy)).count();
+                mask[y as usize * w + x as usize] = (n * 255 / 4) as u8;
+            }
+        }
+        Some(Sel { mask, bbox: b, outline })
+    }
+
+    pub fn rect(w: usize, h: usize, a: [f32; 2], b: [f32; 2]) -> Option<Sel> {
+        let (x0, y0, x1, y1) = (a[0].min(b[0]).round(), a[1].min(b[1]).round(), a[0].max(b[0]).round(), a[1].max(b[1]).round());
+        Sel::from_fn(w, h, [x0 as i32, y0 as i32, x1 as i32, y1 as i32], |x, y| x >= x0 && x < x1 && y >= y0 && y < y1, vec![[x0, y0], [x1, y0], [x1, y1], [x0, y1]])
+    }
+
+    pub fn ellipse(w: usize, h: usize, a: [f32; 2], b: [f32; 2]) -> Option<Sel> {
+        let (cx, cy) = ((a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0);
+        let (rx, ry) = (((a[0] - b[0]) / 2.0).abs().max(0.5), ((a[1] - b[1]) / 2.0).abs().max(0.5));
+        let outline = (0..64).map(|k| {
+            let t = k as f32 / 64.0 * std::f32::consts::TAU;
+            [cx + rx * t.cos(), cy + ry * t.sin()]
+        }).collect();
+        Sel::from_fn(w, h, [(cx - rx).floor() as i32, (cy - ry).floor() as i32, (cx + rx).ceil() as i32, (cy + ry).ceil() as i32], |x, y| ((x - cx) / rx).powi(2) + ((y - cy) / ry).powi(2) <= 1.0, outline)
+    }
+
+    /// Polygone fermé (lasso), règle pair-impair
+    pub fn poly(w: usize, h: usize, pts: &[[f32; 2]]) -> Option<Sel> {
+        if pts.len() < 3 {
+            return None;
+        }
+        let bb = pts.iter().fold([f32::MAX, f32::MAX, f32::MIN, f32::MIN], |m, p| [m[0].min(p[0]), m[1].min(p[1]), m[2].max(p[0]), m[3].max(p[1])]);
+        let inside = |x: f32, y: f32| {
+            let mut c = false;
+            let mut j = pts.len() - 1;
+            for i in 0..pts.len() {
+                let (a, b) = (pts[i], pts[j]);
+                if (a[1] > y) != (b[1] > y) && x < (b[0] - a[0]) * (y - a[1]) / (b[1] - a[1]) + a[0] {
+                    c = !c;
+                }
+                j = i;
+            }
+            c
+        };
+        Sel::from_fn(w, h, [bb[0].floor() as i32, bb[1].floor() as i32, bb[2].ceil() as i32, bb[3].ceil() as i32], inside, pts.to_vec())
+    }
+
+    /// Baguette magique : les pixels voisins de couleur proche (sur l'image composée)
+    pub fn wand(w: usize, h: usize, comp: &[u8], at: [i32; 2], tol: f32) -> Option<Sel> {
+        if at[0] < 0 || at[1] < 0 || at[0] as usize >= w || at[1] as usize >= h {
+            return None;
+        }
+        let i0 = (at[1] as usize * w + at[0] as usize) * 4;
+        let target = [comp[i0], comp[i0 + 1], comp[i0 + 2], comp[i0 + 3]];
+        let near = |i: usize| (0..4).map(|k| (comp[i * 4 + k] as f32 - target[k] as f32).abs() / 255.0).fold(0.0f32, f32::max) <= tol;
+        let mut mask = vec![0u8; w * h];
+        let mut stack = vec![(at[0] as usize, at[1] as usize)];
+        let mut bb = [i32::MAX, i32::MAX, i32::MIN, i32::MIN];
+        while let Some((x, y)) = stack.pop() {
+            let i = y * w + x;
+            if mask[i] != 0 || !near(i) {
+                continue;
+            }
+            mask[i] = 255;
+            bb = [bb[0].min(x as i32), bb[1].min(y as i32), bb[2].max(x as i32 + 1), bb[3].max(y as i32 + 1)];
+            if x > 0 {
+                stack.push((x - 1, y));
+            }
+            if y > 0 {
+                stack.push((x, y - 1));
+            }
+            if x + 1 < w {
+                stack.push((x + 1, y));
+            }
+            if y + 1 < h {
+                stack.push((x, y + 1));
+            }
+        }
+        Some(Sel { mask, bbox: bb, outline: vec![] })
+    }
+
+    pub fn all(w: usize, h: usize) -> Sel {
+        Sel { mask: vec![255; w * h], bbox: [0, 0, w as i32, h as i32], outline: vec![[0.0, 0.0], [w as f32, 0.0], [w as f32, h as f32], [0.0, h as f32]] }
+    }
+
+    /// Ajoute (Maj) ou retire (Alt) une autre sélection
+    pub fn combine(mut self, o: &Sel, subtract: bool) -> Sel {
+        for (a, b) in self.mask.iter_mut().zip(o.mask.iter()) {
+            *a = if subtract { (*a).min(255 - *b) } else { (*a).max(*b) };
+        }
+        if !subtract {
+            self.bbox = [self.bbox[0].min(o.bbox[0]), self.bbox[1].min(o.bbox[1]), self.bbox[2].max(o.bbox[2]), self.bbox[3].max(o.bbox[3])];
+        }
+        // Le contour d'une combinaison n'est plus une forme simple : on montre le cadre
+        self.outline.clear();
+        self
+    }
+
+    pub fn invert(&self, w: usize, h: usize) -> Sel {
+        Sel { mask: self.mask.iter().map(|v| 255 - v).collect(), bbox: [0, 0, w as i32, h as i32], outline: vec![] }
+    }
+
+    pub fn at(&self, w: usize, x: i32, y: i32) -> f32 {
+        if x < self.bbox[0] || y < self.bbox[1] || x >= self.bbox[2] || y >= self.bbox[3] {
+            return 0.0;
+        }
+        self.mask.get(y as usize * w + x as usize).map(|v| *v as f32 / 255.0).unwrap_or(0.0)
+    }
+}
 
 /// Réglage en cours de prévisualisation : on part toujours du calque d'avant.
 #[derive(Clone, Copy, PartialEq)]
@@ -266,7 +399,13 @@ pub struct Editor {
     pub hardness: f32,
     pub flow: f32,
     pub tolerance: f32,
-    sel: Option<[i32; 4]>,
+    sel: Option<Sel>,
+    /// Points du lasso en cours
+    lasso: Vec<[f32; 2]>,
+    /// Dégradé en cours : départ et arrivée
+    grad: Option<(Pos2, Pos2)>,
+    /// Sélection d'avant le geste, et le mode : 0 remplacer, 1 ajouter (Maj), 2 retirer (Alt)
+    sel_base: Option<(Option<Sel>, u8)>,
     /// Vue : zoom (pixels écran par pixel image) et décalage
     zoom: f32,
     pan: egui::Vec2,
@@ -302,6 +441,9 @@ impl Editor {
             flow: 1.0,
             tolerance: 0.12,
             sel: None,
+            lasso: vec![],
+            grad: None,
+            sel_base: None,
             zoom: 1.0,
             pan: egui::Vec2::ZERO,
             fit: true,
@@ -366,7 +508,15 @@ impl Editor {
     }
 
     fn in_sel(&self, x: i32, y: i32) -> bool {
-        self.sel.is_none_or(|s| x >= s[0] && y >= s[1] && x < s[2] && y < s[3])
+        self.sel_k(x, y) >= 0.5
+    }
+
+    /// Part de la sélection en ce pixel du document (1 sans sélection)
+    fn sel_k(&self, x: i32, y: i32) -> f32 {
+        match &self.sel {
+            None => 1.0,
+            Some(s) => s.at(self.doc.w, x, y),
+        }
     }
 
     /// Un tampon du pinceau (ou de la gomme) centré en `c` (coordonnées du document).
@@ -379,10 +529,12 @@ impl Editor {
         let hard = self.hardness.clamp(0.0, 0.99);
         let col = self.color;
         let erase = self.tool == Tool::Eraser;
-        let sel = self.sel;
+        let sel = self.sel.as_ref();
+        let dw = self.doc.w;
         for y in y0..=y1 {
             for x in x0..=x1 {
-                if sel.is_some_and(|s| x < s[0] || y < s[1] || x >= s[2] || y >= s[3]) {
+                let sk = sel.map(|s| s.at(dw, x, y)).unwrap_or(1.0);
+                if sk <= 0.0 {
                     continue;
                 }
                 let (lx, ly) = (x - l.off[0], y - l.off[1]);
@@ -395,7 +547,7 @@ impl Editor {
                 }
                 // Bord doux : plein jusqu'à la dureté, puis décroissance
                 let k = if d <= hard { 1.0 } else { 1.0 - (d - hard) / (1.0 - hard) };
-                let k = k * k * (3.0 - 2.0 * k) * self.flow;
+                let k = k * k * (3.0 - 2.0 * k) * self.flow * sk;
                 let idx = ly as usize * l.w + lx as usize;
                 if k <= cover[idx] {
                     continue;
@@ -433,7 +585,8 @@ impl Editor {
         }
         self.checkpoint();
         let col = [self.color.r(), self.color.g(), self.color.b(), self.color.a()];
-        let sel = self.sel;
+        let sel = self.sel.clone();
+        let dw = self.doc.w;
         let l = &mut self.doc.layers[self.doc.active];
         let (w, h) = (l.w, l.h);
         let off = l.off;
@@ -449,7 +602,7 @@ impl Editor {
             }
             seen[idx] = true;
             let (dx, dy) = (x as i32 + off[0], y as i32 + off[1]);
-            if sel.is_some_and(|s| dx < s[0] || dy < s[1] || dx >= s[2] || dy >= s[3]) || !near(&l.px[idx * 4..idx * 4 + 4]) {
+            if sel.as_ref().is_some_and(|s| s.at(dw, dx, dy) < 0.5) || !near(&l.px[idx * 4..idx * 4 + 4]) {
                 continue;
             }
             l.px[idx * 4..idx * 4 + 4].copy_from_slice(&col);
@@ -471,18 +624,176 @@ impl Editor {
 
     /// Applique une transformation de couleur au calque actif (dans la sélection s'il y en a une).
     fn map_active(&mut self, base: &Layer, f: impl Fn([f32; 3]) -> [f32; 3]) {
-        let sel = self.sel;
+        let sel = self.sel.clone();
+        let dw = self.doc.w;
         let l = &mut self.doc.layers[self.doc.active];
         for y in 0..l.h {
             for x in 0..l.w {
                 let (dx, dy) = (x as i32 + l.off[0], y as i32 + l.off[1]);
-                if sel.is_some_and(|s| dx < s[0] || dy < s[1] || dx >= s[2] || dy >= s[3]) {
+                // Un bord de sélection adouci mélange l'ancien et le nouveau
+                let sk = sel.as_ref().map(|s| s.at(dw, dx, dy)).unwrap_or(1.0);
+                if sk <= 0.0 {
                     continue;
                 }
                 let i = (y * l.w + x) * 4;
-                let c = f([base.px[i] as f32 / 255.0, base.px[i + 1] as f32 / 255.0, base.px[i + 2] as f32 / 255.0]);
+                let old = [base.px[i] as f32 / 255.0, base.px[i + 1] as f32 / 255.0, base.px[i + 2] as f32 / 255.0];
+                let c = f(old);
                 for k in 0..3 {
-                    l.px[i + k] = (c[k].clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
+                    l.px[i + k] = ((old[k] + (c[k].clamp(0.0, 1.0) - old[k]) * sk) * 255.0 + 0.5) as u8;
+                }
+            }
+        }
+        self.all();
+    }
+
+    /// La sélection après un geste : remplace, ajoute ou retire, d'après la sélection d'avant le geste
+    fn mix_sel(&self, new: Option<Sel>) -> Option<Sel> {
+        match (self.sel_base.clone(), new) {
+            (Some((Some(base), 1)), Some(n)) => Some(base.combine(&n, false)),
+            (Some((Some(base), 2)), Some(n)) => Some(base.combine(&n, true)),
+            (Some((Some(base), _)), None) if self.sel_base.as_ref().is_some_and(|b| b.1 != 0) => Some(base),
+            (_, n) => n,
+        }
+    }
+
+    /// Dégradé linéaire de la couleur vers le transparent, de `a` à `b`, dans la sélection
+    fn gradient(&mut self, a: Pos2, b: Pos2) {
+        let d = b - a;
+        let len2 = d.length_sq();
+        if len2 < 1.0 {
+            return;
+        }
+        self.checkpoint();
+        let col = self.color;
+        let dw = self.doc.w;
+        let sel = self.sel.clone();
+        let l = &mut self.doc.layers[self.doc.active];
+        for y in 0..l.h {
+            for x in 0..l.w {
+                let (dx, dy) = (x as i32 + l.off[0], y as i32 + l.off[1]);
+                let sk = sel.as_ref().map(|s| s.at(dw, dx, dy)).unwrap_or(1.0);
+                if sk <= 0.0 {
+                    continue;
+                }
+                let t = (((dx as f32 + 0.5 - a.x) * d.x + (dy as f32 + 0.5 - a.y) * d.y) / len2).clamp(0.0, 1.0);
+                let al = (1.0 - t) * col.a() as f32 / 255.0 * sk;
+                let i = (y * l.w + x) * 4;
+                let sa = l.px[i + 3] as f32 / 255.0;
+                let oa = al + sa * (1.0 - al);
+                let src = [col.r(), col.g(), col.b()];
+                for ch in 0..3 {
+                    l.px[i + ch] = if oa > 0.0 { ((src[ch] as f32 * al + l.px[i + ch] as f32 * sa * (1.0 - al)) / oa) as u8 } else { 0 };
+                }
+                l.px[i + 3] = (oa * 255.0) as u8;
+            }
+        }
+        self.all();
+    }
+
+    /// Filtres du calque actif (dans la sélection) : flou, netteté, bruit, pixelisation
+    fn filter(&mut self, kind: &str, amount: f32) {
+        self.checkpoint();
+        let base = self.doc.layers[self.doc.active].clone();
+        let (w, h) = (base.w, base.h);
+        let src: Vec<f32> = base.px.iter().map(|v| *v as f32).collect();
+        // Flou : trois passes de moyenne glissante horizontale puis verticale, en couleurs prémultipliées
+        let blurred = |r: usize| -> Vec<f32> {
+            let mut a: Vec<f32> = src.chunks_exact(4).flat_map(|p| [p[0] * p[3] / 255.0, p[1] * p[3] / 255.0, p[2] * p[3] / 255.0, p[3]]).collect();
+            let mut tmp = a.clone();
+            for _ in 0..3 {
+                for y in 0..h {
+                    for c in 0..4 {
+                        let mut acc = 0.0;
+                        let n = (2 * r + 1) as f32;
+                        for k in 0..=r.min(w - 1) {
+                            acc += a[(y * w + k) * 4 + c];
+                        }
+                        acc += a[(y * w) * 4 + c] * r as f32;
+                        for x in 0..w {
+                            tmp[(y * w + x) * 4 + c] = acc / n;
+                            let add = (x + r + 1).min(w - 1);
+                            let sub = x.saturating_sub(r);
+                            acc += a[(y * w + add) * 4 + c] - a[(y * w + sub) * 4 + c];
+                        }
+                    }
+                }
+                for x in 0..w {
+                    for c in 0..4 {
+                        let mut acc = 0.0;
+                        let n = (2 * r + 1) as f32;
+                        for k in 0..=r.min(h - 1) {
+                            acc += tmp[(k * w + x) * 4 + c];
+                        }
+                        acc += tmp[x * 4 + c] * r as f32;
+                        for y in 0..h {
+                            a[(y * w + x) * 4 + c] = acc / n;
+                            let add = (y + r + 1).min(h - 1);
+                            let sub = y.saturating_sub(r);
+                            acc += tmp[(add * w + x) * 4 + c] - tmp[(sub * w + x) * 4 + c];
+                        }
+                    }
+                }
+            }
+            // Retour en couleurs non prémultipliées
+            a.chunks_exact(4).flat_map(|p| if p[3] > 0.01 { [p[0] * 255.0 / p[3], p[1] * 255.0 / p[3], p[2] * 255.0 / p[3], p[3]] } else { [0.0; 4] }).collect()
+        };
+        let out: Vec<f32> = match kind {
+            "blur" => blurred(((amount / 2.0).round() as usize).max(1)),
+            "sharpen" => {
+                let b = blurred(1);
+                src.iter().zip(b.iter()).enumerate().map(|(i, (s, b))| if i % 4 == 3 { *s } else { s + (s - b) * amount }).collect()
+            }
+            "noise" => {
+                let mut seed = 0x2545F4914F6CDD1Du64;
+                src.chunks_exact(4)
+                    .flat_map(|p| {
+                        seed ^= seed << 13;
+                        seed ^= seed >> 7;
+                        seed ^= seed << 17;
+                        let n = ((seed >> 40) as f32 / (1u64 << 24) as f32 - 0.5) * amount * 255.0;
+                        [p[0] + n, p[1] + n, p[2] + n, p[3]]
+                    })
+                    .collect()
+            }
+            "pixelate" => {
+                let k = (amount as usize).max(2);
+                let mut o = src.clone();
+                for by in (0..h).step_by(k) {
+                    for bx in (0..w).step_by(k) {
+                        let (mut acc, mut n) = ([0.0f32; 4], 0.0);
+                        for y in by..(by + k).min(h) {
+                            for x in bx..(bx + k).min(w) {
+                                for c in 0..4 {
+                                    acc[c] += src[(y * w + x) * 4 + c];
+                                }
+                                n += 1.0;
+                            }
+                        }
+                        for y in by..(by + k).min(h) {
+                            for x in bx..(bx + k).min(w) {
+                                for c in 0..4 {
+                                    o[(y * w + x) * 4 + c] = acc[c] / n;
+                                }
+                            }
+                        }
+                    }
+                }
+                o
+            }
+            _ => src.clone(),
+        };
+        let sel = self.sel.clone();
+        let dw = self.doc.w;
+        let l = &mut self.doc.layers[self.doc.active];
+        for y in 0..h {
+            for x in 0..w {
+                let sk = sel.as_ref().map(|s| s.at(dw, x as i32 + l.off[0], y as i32 + l.off[1])).unwrap_or(1.0);
+                if sk <= 0.0 {
+                    continue;
+                }
+                let i = (y * w + x) * 4;
+                for c in 0..4 {
+                    l.px[i + c] = (src[i + c] + (out[i + c] - src[i + c]) * sk).round().clamp(0.0, 255.0) as u8;
                 }
             }
         }
@@ -594,6 +905,32 @@ impl Editor {
                     ui.close();
                 }
             });
+            egui::containers::menu::MenuButton::new(crate::i18n::t("sélection ▾")).ui(ui, |ui| {
+                ui.set_min_width(230.0);
+                if ui.button(crate::i18n::t("tout sélectionner   Ctrl+A")).clicked() {
+                    self.sel = Some(Sel::all(self.doc.w, self.doc.h));
+                    ui.close();
+                }
+                if ui.add_enabled(self.sel.is_some(), egui::Button::new(crate::i18n::t("inverser la sélection   Ctrl+Maj+I"))).clicked() {
+                    self.sel = self.sel.as_ref().map(|s| s.invert(self.doc.w, self.doc.h));
+                    ui.close();
+                }
+                if ui.add_enabled(self.sel.is_some(), egui::Button::new(crate::i18n::t("désélectionner   Ctrl+D"))).clicked() {
+                    self.sel = None;
+                    ui.close();
+                }
+                ui.separator();
+                ui.label(egui::RichText::new(crate::i18n::t("Maj : ajouter · Alt : retirer")).size(11.0).color(p.muted));
+            });
+            egui::containers::menu::MenuButton::new(crate::i18n::t("filtres ▾")).ui(ui, |ui| {
+                ui.set_min_width(230.0);
+                for (label, kind, amount) in [("flou léger", "blur", 4.0), ("flou fort", "blur", 16.0), ("netteté", "sharpen", 0.8), ("bruit", "noise", 0.12), ("pixeliser", "pixelate", 12.0)] {
+                    if ui.button(crate::i18n::t(label)).clicked() {
+                        self.filter(kind, amount);
+                        ui.close();
+                    }
+                }
+            });
             egui::containers::menu::MenuButton::new(crate::i18n::t("calque ▾")).ui(ui, |ui| {
                 ui.set_min_width(230.0);
                 if ui.button(crate::i18n::t("nouveau calque   Ctrl+Maj+N")).clicked() {
@@ -620,7 +957,7 @@ impl Editor {
             ui.separator();
             for (t, icon, label, key) in TOOLS {
                 let on = self.tool == t;
-                let b = egui::Button::new(egui::RichText::new(icon).size(14.0).color(if on { p.on_accent } else { p.text })).fill(if on { p.accent } else { p.panel }).min_size(vec2(26.0, 22.0));
+                let b = egui::Button::new(egui::RichText::new(icon).size(15.0).color(if on { p.on_accent } else { p.text })).fill(if on { p.accent } else { Color32::TRANSPARENT }).min_size(vec2(28.0, 26.0));
                 if ui.add(b).on_hover_text(format!("{} ({key})", crate::i18n::t(label))).clicked() {
                     self.tool = t;
                 }
@@ -636,8 +973,14 @@ impl Editor {
                     ui.add(egui::Slider::new(&mut self.hardness, 0.0..=1.0).text(crate::i18n::t("dureté")).show_value(false));
                     ui.add(egui::Slider::new(&mut self.flow, 0.05..=1.0).text(crate::i18n::t("opacité")).show_value(false));
                 }
-                Tool::Fill => {
+                Tool::Fill | Tool::Wand => {
                     ui.add(egui::Slider::new(&mut self.tolerance, 0.0..=1.0).text(crate::i18n::t("tolérance")));
+                }
+                Tool::Gradient => {
+                    ui.label(egui::RichText::new(crate::i18n::t("glisser : de la couleur vers le transparent")).size(11.0).color(p.muted));
+                }
+                Tool::Select | Tool::Ellipse | Tool::Lasso => {
+                    ui.label(egui::RichText::new(crate::i18n::t("Maj : ajouter · Alt : retirer")).size(11.0).color(p.muted));
                 }
                 _ => {}
             }
@@ -782,7 +1125,13 @@ impl Editor {
                             self.checkpoint();
                             self.drag_from = Some((d, self.doc.layers[self.doc.active].off));
                         }
-                        Tool::Select => self.drag_from = Some((d, [0, 0])),
+                        Tool::Select | Tool::Ellipse | Tool::Lasso => {
+                            let m = ui.input(|i| if i.modifiers.shift { 1 } else if i.modifiers.alt { 2 } else { 0 });
+                            self.sel_base = Some((self.sel.clone(), m));
+                            self.drag_from = Some((d, [0, 0]));
+                            self.lasso = vec![[d.x, d.y]];
+                        }
+                        Tool::Gradient => self.grad = Some((d, d)),
                         _ => {}
                     }
                 }
@@ -815,12 +1164,40 @@ impl Editor {
                                 self.all();
                             }
                         }
-                        Tool::Select => {
+                        Tool::Select | Tool::Ellipse | Tool::Lasso => {
                             if let Some((from, _)) = self.drag_from {
-                                let (a, b) = (from, d);
-                                let s = [a.x.min(b.x).floor() as i32, a.y.min(b.y).floor() as i32, a.x.max(b.x).ceil() as i32, a.y.max(b.y).ceil() as i32];
-                                let s = [s[0].max(0), s[1].max(0), s[2].min(self.doc.w as i32), s[3].min(self.doc.h as i32)];
-                                self.sel = (s[2] > s[0] && s[3] > s[1]).then_some(s);
+                                let (w, h) = (self.doc.w, self.doc.h);
+                                let (mut a, b) = ([from.x, from.y], [d.x, d.y]);
+                                // Maj sans sélection d'avant : un carré ou un cercle
+                                let square = ui.input(|i| i.modifiers.shift) && self.sel_base.as_ref().is_some_and(|b| b.0.is_none());
+                                let b = if square && self.tool != Tool::Lasso {
+                                    let k = (b[0] - a[0]).abs().max((b[1] - a[1]).abs());
+                                    [a[0] + k * (b[0] - a[0]).signum(), a[1] + k * (b[1] - a[1]).signum()]
+                                } else {
+                                    b
+                                };
+                                if ui.input(|i| i.modifiers.command) && self.tool == Tool::Ellipse {
+                                    // Ctrl : depuis le centre
+                                    a = [2.0 * a[0] - b[0], 2.0 * a[1] - b[1]];
+                                }
+                                let new = match self.tool {
+                                    Tool::Select => Sel::rect(w, h, a, b),
+                                    Tool::Ellipse => Sel::ellipse(w, h, a, b),
+                                    _ => {
+                                        if self.lasso.last().is_none_or(|l| (l[0] - d.x).hypot(l[1] - d.y) > 1.5 / self.zoom) {
+                                            self.lasso.push([d.x, d.y]);
+                                        }
+                                        None
+                                    }
+                                };
+                                if self.tool != Tool::Lasso {
+                                    self.sel = self.mix_sel(new);
+                                }
+                            }
+                        }
+                        Tool::Gradient => {
+                            if let Some(g) = &mut self.grad {
+                                g.1 = d;
                             }
                         }
                         _ => {}
@@ -828,6 +1205,15 @@ impl Editor {
                 }
             }
             if resp.drag_stopped() {
+                if self.tool == Tool::Lasso && self.drag_from.is_some() {
+                    let pts = std::mem::take(&mut self.lasso);
+                    let new = Sel::poly(self.doc.w, self.doc.h, &pts);
+                    self.sel = self.mix_sel(new);
+                }
+                if let Some((a, b)) = self.grad.take() {
+                    self.gradient(a, b);
+                }
+                self.sel_base = None;
                 self.stroke = None;
                 self.drag_from = None;
             }
@@ -851,8 +1237,15 @@ impl Editor {
                             self.dab(d);
                             self.stroke = None;
                         }
-                        Tool::Select => self.sel = None,
-                        Tool::Move => {}
+                        Tool::Select | Tool::Ellipse | Tool::Lasso => self.sel = None,
+                        Tool::Wand => {
+                            let m = ui.input(|i| if i.modifiers.shift { 1 } else if i.modifiers.alt { 2 } else { 0 });
+                            self.sel_base = Some((self.sel.clone(), m));
+                            let new = Sel::wand(self.doc.w, self.doc.h, &self.comp, px, self.tolerance);
+                            self.sel = self.mix_sel(new);
+                            self.sel_base = None;
+                        }
+                        Tool::Gradient | Tool::Move => {}
                     }
                 }
             }
@@ -873,11 +1266,32 @@ impl Editor {
             }
         }
         // Sélection : cadre en pointillés
-        if let Some(s) = self.sel {
-            let r = Rect::from_min_max(to_screen(s[0] as f32, s[1] as f32), to_screen(s[2] as f32, s[3] as f32));
-            let pts = [r.left_top(), r.right_top(), r.right_bottom(), r.left_bottom(), r.left_top()];
+        // Fourmis : le contour de la forme, ou le cadre d'une sélection composée
+        let ants = |pts: Vec<Pos2>| {
             painter.extend(egui::Shape::dashed_line(&pts, Stroke::new(1.0, Color32::BLACK), 5.0, 5.0));
-            painter.extend(egui::Shape::dashed_line(&[pts[1], pts[2], pts[3], pts[4], pts[0]], Stroke::new(1.0, Color32::WHITE), 5.0, 5.0));
+            painter.extend(egui::Shape::dashed_line(&pts.iter().skip(1).copied().chain(pts.first().copied()).collect::<Vec<_>>(), Stroke::new(1.0, Color32::WHITE), 5.0, 5.0));
+        };
+        if let Some(s) = &self.sel {
+            let mut pts: Vec<Pos2> = if s.outline.is_empty() {
+                let b = s.bbox;
+                vec![to_screen(b[0] as f32, b[1] as f32), to_screen(b[2] as f32, b[1] as f32), to_screen(b[2] as f32, b[3] as f32), to_screen(b[0] as f32, b[3] as f32)]
+            } else {
+                s.outline.iter().map(|p| to_screen(p[0], p[1])).collect()
+            };
+            if let Some(f) = pts.first().copied() {
+                pts.push(f);
+            }
+            ants(pts);
+        }
+        if self.tool == Tool::Lasso && self.lasso.len() > 1 {
+            ants(self.lasso.iter().map(|p| to_screen(p[0], p[1])).collect());
+        }
+        if let Some((a, b)) = self.grad {
+            let (sa, sb) = (to_screen(a.x, a.y), to_screen(b.x, b.y));
+            painter.line_segment([sa, sb], Stroke::new(2.0, Color32::from_black_alpha(150)));
+            painter.line_segment([sa, sb], Stroke::new(1.0, Color32::WHITE));
+            painter.circle_filled(sa, 4.0, self.color);
+            painter.circle_stroke(sb, 4.0, Stroke::new(1.0, Color32::WHITE));
         }
         // Rond du pinceau sous le pointeur
         if let (Some(at), true) = (hover.filter(|q| rect.contains(*q)), matches!(self.tool, Tool::Brush | Tool::Eraser)) {
@@ -900,7 +1314,9 @@ impl Editor {
             } else if cmd && k(egui::Key::D) {
                 self.sel = None;
             } else if cmd && k(egui::Key::A) {
-                self.sel = Some([0, 0, self.doc.w as i32, self.doc.h as i32]);
+                self.sel = Some(Sel::all(self.doc.w, self.doc.h));
+            } else if cmd && shift && k(egui::Key::I) {
+                self.sel = self.sel.as_ref().map(|s| s.invert(self.doc.w, self.doc.h));
             } else if cmd && k(egui::Key::J) {
                 self.duplicate_layer();
             } else if cmd && k(egui::Key::E) {
@@ -926,15 +1342,17 @@ impl Editor {
                     self.size = (self.size * 1.2).min(500.0);
                 }
                 if (k(egui::Key::Delete) || k(egui::Key::Backspace)) && self.sel.is_some() {
-                    // Efface la sélection dans le calque actif
+                    // Efface la sélection dans le calque actif (en douceur sur les bords)
                     self.checkpoint();
-                    let s = self.sel.unwrap_or_default();
+                    let s = self.sel.clone().unwrap();
+                    let dw = self.doc.w;
                     let l = &mut self.doc.layers[self.doc.active];
-                    for y in s[1]..s[3] {
-                        for x in s[0]..s[2] {
+                    for y in s.bbox[1]..s.bbox[3] {
+                        for x in s.bbox[0]..s.bbox[2] {
                             let (lx, ly) = (x - l.off[0], y - l.off[1]);
                             if lx >= 0 && ly >= 0 && (lx as usize) < l.w && (ly as usize) < l.h {
-                                l.px[(ly as usize * l.w + lx as usize) * 4 + 3] = 0;
+                                let i = (ly as usize * l.w + lx as usize) * 4 + 3;
+                                l.px[i] = (l.px[i] as f32 * (1.0 - s.at(dw, x, y))) as u8;
                             }
                         }
                     }
@@ -1139,6 +1557,46 @@ mod tests {
         e.fill([0, 0]);
         assert_eq!(&e.doc.layers[0].px[0..4], &[255, 255, 0, 255]);
         assert_eq!(e.doc.layers[0].px[(10 * 20 + 10) * 4 + 2], 255);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn selections_degrade_et_filtres() {
+        let (w, h) = (40, 40);
+        // Ellipse : le centre est pris, les coins non
+        let e = Sel::ellipse(w, h, [0.0, 0.0], [40.0, 40.0]).unwrap();
+        assert_eq!(e.at(w, 20, 20), 1.0);
+        assert_eq!(e.at(w, 0, 0), 0.0);
+        // Lasso en triangle
+        let t = Sel::poly(w, h, &[[0.0, 0.0], [40.0, 0.0], [0.0, 40.0]]).unwrap();
+        assert_eq!(t.at(w, 5, 5), 1.0);
+        assert_eq!(t.at(w, 35, 35), 0.0);
+        // Retirer l'ellipse du tout, puis inverser : on retombe sur l'ellipse
+        let ring = Sel::all(w, h).combine(&e, true);
+        assert_eq!(ring.at(w, 20, 20), 0.0);
+        assert_eq!(ring.invert(w, h).at(w, 20, 20), 1.0);
+        // Baguette : sur une image moitié noire moitié blanche, elle prend la moitié cliquée
+        let comp: Vec<u8> = (0..w * h).flat_map(|i| if i % w < 20 { [0, 0, 0, 255] } else { [255, 255, 255, 255] }).collect();
+        let m = Sel::wand(w, h, &comp, [5, 5], 0.1).unwrap();
+        assert_eq!((m.at(w, 19, 30), m.at(w, 20, 30)), (1.0, 0.0));
+        assert_eq!(m.bbox, [0, 0, 20, 40]);
+
+        let path = std::env::temp_dir().join(format!("aryadne-paint3-{}.aryimg", std::process::id()));
+        Doc::new(w, h, false).save(&path).unwrap();
+        let mut ed = Editor::open(path.clone()).unwrap();
+        ed.color = Color32::from_rgb(255, 0, 0);
+        // Dégradé limité à la moitié gauche
+        ed.sel = Some(m);
+        ed.gradient(pos2(0.0, 0.0), pos2(40.0, 0.0));
+        let a = |e: &Editor, x: usize, y: usize| e.doc.layers[0].px[(y * w + x) * 4 + 3];
+        assert!(a(&ed, 0, 10) > 240 && a(&ed, 15, 10) > 0 && a(&ed, 15, 10) < a(&ed, 0, 10));
+        assert_eq!(a(&ed, 30, 10), 0, "hors de la sélection");
+        // Le flou adoucit le bord du dégradé dans la sélection, pas ailleurs
+        ed.sel = None;
+        ed.filter("blur", 6.0);
+        assert!(a(&ed, 21, 10) > 0, "le flou déborde de l'ancien bord");
+        ed.filter("pixelate", 8.0);
+        assert_eq!(ed.doc.layers[0].px[0..4], ed.doc.layers[0].px[4..8]);
         let _ = std::fs::remove_file(&path);
     }
 }
