@@ -2441,11 +2441,46 @@ pub struct Viewer {
 
 impl Viewer {
     pub fn open(path: std::path::PathBuf, ctx: &egui::Context) -> Self {
+        let p = path.clone();
+        Self::open_with(path, ctx, move || load(&p))
+    }
+
+    /// Un modèle ouvert seul arrive dans une scène toute prête (le modèle, un soleil, une caméra) :
+    /// édition, modificateurs, UV et matériaux marchent tout de suite. La scène n'est écrite à côté du
+    /// modèle (« robot.aryscene ») qu'au premier changement ; une scène qui le contient déjà est reprise.
+    pub fn open_in_new_scene(model: std::path::PathBuf, ctx: &egui::Context) -> Self {
+        let dir = model.parent().unwrap_or(std::path::Path::new("")).to_path_buf();
+        let stem = model.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "modèle".into());
+        let name = model.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+        let ext = crate::formats::ext("scene");
+        let mut out = dir.join(format!("{stem}.{ext}"));
+        let mut n = 2;
+        while out.exists() {
+            // Une scène de ce nom qui contient déjà ce modèle : on la rouvre
+            if crate::scene::Scene::read(&out).is_ok_and(|sc| sc.objects.iter().any(|o| o.file.rsplit(['/', '\\']).next() == Some(name.as_str()))) {
+                return Self::open(out, ctx);
+            }
+            out = dir.join(format!("{stem} {n}.{ext}"));
+            n += 1;
+        }
+        let mut sc = crate::scene::Scene::default();
+        sc.add(&out, &model);
+        let l = sc.add_role("soleil", "light");
+        (sc.objects[l].pos, sc.objects[l].rot) = ([4.0, 6.0, 3.0], [35.0, 0.0, -35.0]);
+        let c = sc.add_role("caméra", "camera");
+        (sc.objects[c].pos, sc.objects[c].rot) = ([7.0, 5.0, 7.0], [-28.0, 45.0, 0.0]);
+        let (sc2, p) = (sc.clone(), out.clone());
+        let mut v = Self::open_with(out, ctx, move || crate::scene::build(&sc2, &p).0);
+        v.scene = Some(sc);
+        v.scene_sel = Some(0);
+        v
+    }
+
+    fn open_with(path: std::path::PathBuf, ctx: &egui::Context, loader: impl FnOnce() -> Result<Model, String> + Send + 'static) -> Self {
         let (tx, rx) = channel();
         let ctx = ctx.clone();
-        let p = path.clone();
         std::thread::spawn(move || {
-            let _ = tx.send(load(&p));
+            let _ = tx.send(loader());
             ctx.request_repaint();
         });
         Self {

@@ -1880,7 +1880,8 @@ impl App {
             let content = if model3d::is_model(&rel) {
                 match (vault::safe(&self.root(), &rel), self.ctx.clone()) {
                     (Ok(path), Some(ctx)) => {
-                        let mut v = model3d::Viewer::open(path, &ctx);
+                        // Un modèle seul s'ouvre dans une scène toute prête ; une scène s'ouvre telle quelle
+                        let mut v = if formats::has(&rel, "scene") { model3d::Viewer::open(path, &ctx) } else { model3d::Viewer::open_in_new_scene(path, &ctx) };
                         let root = self.root();
                         v.hdr_files = self
                             .entries
