@@ -2417,5 +2417,13 @@
   "Cycle avec décalage": "Cycle with offset",
   "Va-et-vient": "Oscillate",
   "Boucler des deux côtés": "Loop both sides",
-  "Avant et après l'animation : constante, cycle, cycle avec décalage, va-et-vient": "Before and after the animation: constant, cycle, cycle with offset, oscillate"
+  "Avant et après l'animation : constante, cycle, cycle avec décalage, va-et-vient": "Before and after the animation: constant, cycle, cycle with offset, oscillate",
+  "transformation": "transform",
+  "transformation libre (Ctrl+T)": "free transform (Ctrl+T)",
+  "angle (Maj : par 15°)": "angle (Shift: 15° steps)",
+  "retourner verticalement": "flip vertical",
+  "valider (Entrée)": "commit (Enter)",
+  "annuler (Échap)": "cancel (Esc)",
+  "Ce calque ne se transforme pas (réglage, verrouillé ou masque)": "This layer can't be transformed (adjustment, locked or mask)",
+  "Le calque est vide": "The layer is empty"
 }

@@ -923,6 +923,99 @@ enum Adjust {
     HueSat,
 }
 
+/// Transformation libre en cours (Ctrl+T, comme Photoshop) : le calque d'avant, et la taille, la rotation et
+/// le déplacement autour du centre de son contenu
+#[derive(Clone)]
+struct Xf {
+    orig: Layer,
+    /// Centre et demi-taille du contenu d'origine (px du document)
+    c0: [f32; 2],
+    half: [f32; 2],
+    t: [f32; 2],
+    s: [f32; 2],
+    r: f32,
+    /// Geste en cours : poignée (-1, 0, 1 en x et y ; (0, 0) : déplacer ; None : tourner), départ, état de départ
+    drag: Option<(Option<[i8; 2]>, Pos2, [f32; 5])>,
+}
+
+impl Xf {
+    /// Point local (unités du contenu d'origine, centré) → document
+    fn map(&self, q: [f32; 2]) -> [f32; 2] {
+        xf_map(self.c0, self.t, self.s, self.r, q)
+    }
+}
+
+fn xf_map(c0: [f32; 2], t: [f32; 2], s: [f32; 2], r: f32, q: [f32; 2]) -> [f32; 2] {
+    let (c, sn) = (r.cos(), r.sin());
+    let (x, y) = (q[0] * s[0], q[1] * s[1]);
+    [c0[0] + t[0] + c * x - sn * y, c0[1] + t[1] + sn * x + c * y]
+}
+
+/// Cadre du contenu visible d'un calque (px du document) : x0, y0, x1, y1
+pub fn content_box(l: &Layer) -> Option<[i32; 4]> {
+    let (mut x0, mut y0, mut x1, mut y1) = (i32::MAX, i32::MAX, i32::MIN, i32::MIN);
+    for y in 0..l.h {
+        for x in 0..l.w {
+            if l.px[(y * l.w + x) * 4 + 3] > 0 {
+                x0 = x0.min(x as i32);
+                x1 = x1.max(x as i32 + 1);
+                y0 = y0.min(y as i32);
+                y1 = y1.max(y as i32 + 1);
+            }
+        }
+    }
+    (x1 > x0).then(|| [x0 + l.off[0], y0 + l.off[1], x1 + l.off[0], y1 + l.off[1]])
+}
+
+/// Le calque `orig` agrandi, tourné et déplacé (rééchantillonnage bilinéaire, couleurs prémultipliées
+/// pour ne pas noircir les bords). Le masque, lui, reste où il est.
+pub fn transform_layer(orig: &Layer, c0: [f32; 2], t: [f32; 2], s: [f32; 2], r: f32) -> Layer {
+    use rayon::prelude::*;
+    let (sx, sy) = (if s[0].abs() < 1e-4 { 1e-4 } else { s[0] }, if s[1].abs() < 1e-4 { 1e-4 } else { s[1] });
+    // Cadre de sortie : les coins du calque d'origine transformés
+    let corners = [[0.0, 0.0], [orig.w as f32, 0.0], [0.0, orig.h as f32], [orig.w as f32, orig.h as f32]]
+        .map(|[x, y]| xf_map(c0, t, [sx, sy], r, [(x + orig.off[0] as f32 - c0[0]) / 1.0, (y + orig.off[1] as f32 - c0[1]) / 1.0]));
+    let x0 = corners.iter().map(|c| c[0]).fold(f32::MAX, f32::min).floor() as i32;
+    let y0 = corners.iter().map(|c| c[1]).fold(f32::MAX, f32::min).floor() as i32;
+    let x1 = corners.iter().map(|c| c[0]).fold(f32::MIN, f32::max).ceil() as i32;
+    let y1 = corners.iter().map(|c| c[1]).fold(f32::MIN, f32::max).ceil() as i32;
+    let (w, h) = ((x1 - x0).clamp(1, 16384) as usize, (y1 - y0).clamp(1, 16384) as usize);
+    let (c, sn) = (r.cos(), r.sin());
+    let src = |x: i32, y: i32| -> [f32; 4] {
+        if x < 0 || y < 0 || x as usize >= orig.w || y as usize >= orig.h {
+            return [0.0; 4];
+        }
+        let i = (y as usize * orig.w + x as usize) * 4;
+        let a = orig.px[i + 3] as f32 / 255.0;
+        [orig.px[i] as f32 * a, orig.px[i + 1] as f32 * a, orig.px[i + 2] as f32 * a, a]
+    };
+    let mut px = vec![0u8; w * h * 4];
+    px.par_chunks_mut(w * 4).enumerate().for_each(|(yy, row)| {
+        for xx in 0..w {
+            // Centre du pixel de sortie → point du contenu d'origine
+            let (dx, dy) = (x0 as f32 + xx as f32 + 0.5 - c0[0] - t[0], y0 as f32 + yy as f32 + 0.5 - c0[1] - t[1]);
+            let (lx, ly) = ((c * dx + sn * dy) / sx, (-sn * dx + c * dy) / sy);
+            let (fx, fy) = (lx + c0[0] - orig.off[0] as f32 - 0.5, ly + c0[1] - orig.off[1] as f32 - 0.5);
+            let (ix, iy) = (fx.floor(), fy.floor());
+            let (ax, ay) = (fx - ix, fy - iy);
+            let (ix, iy) = (ix as i32, iy as i32);
+            let (p00, p10, p01, p11) = (src(ix, iy), src(ix + 1, iy), src(ix, iy + 1), src(ix + 1, iy + 1));
+            let mut v = [0.0f32; 4];
+            for k in 0..4 {
+                v[k] = (p00[k] * (1.0 - ax) + p10[k] * ax) * (1.0 - ay) + (p01[k] * (1.0 - ax) + p11[k] * ax) * ay;
+            }
+            if v[3] > 1e-4 {
+                let o = xx * 4;
+                row[o] = (v[0] / v[3]).round().clamp(0.0, 255.0) as u8;
+                row[o + 1] = (v[1] / v[3]).round().clamp(0.0, 255.0) as u8;
+                row[o + 2] = (v[2] / v[3]).round().clamp(0.0, 255.0) as u8;
+                row[o + 3] = (v[3] * 255.0).round().clamp(0.0, 255.0) as u8;
+            }
+        }
+    });
+    Layer { off: [x0, y0], w, h, px, fx_maps: None, ..orig.clone() }
+}
+
 pub struct Editor {
     pub path: PathBuf,
     pub doc: Doc,
@@ -984,6 +1077,8 @@ pub struct Editor {
     sel_group: Option<u32>,
     pub text_font: usize,
     pub text_size: f32,
+    /// Transformation libre en cours
+    xf: Option<Xf>,
 }
 
 /// Texte en cours : point d'ancrage (haut-gauche, px du document) et aperçu rendu
@@ -1099,6 +1194,7 @@ impl Editor {
             message: None,
             adjust: None,
             renaming: None,
+            xf: None,
         })
     }
 
@@ -1134,6 +1230,167 @@ impl Editor {
     fn all(&mut self) {
         let (w, h) = (self.doc.w, self.doc.h);
         self.touched([0, 0, w, h]);
+    }
+
+    /// Ctrl+T : transformation libre du calque actif
+    fn start_xf(&mut self) {
+        if self.xf.is_some() {
+            return;
+        }
+        let l = &self.doc.layers[self.doc.active];
+        if l.adj.is_some() || l.lock_all || self.edit_mask {
+            self.message = Some(crate::i18n::t("Ce calque ne se transforme pas (réglage, verrouillé ou masque)"));
+            return;
+        }
+        let Some(b) = content_box(l) else {
+            self.message = Some(crate::i18n::t("Le calque est vide"));
+            return;
+        };
+        let orig = l.clone();
+        self.checkpoint();
+        let c0 = [(b[0] + b[2]) as f32 / 2.0, (b[1] + b[3]) as f32 / 2.0];
+        let half = [(b[2] - b[0]) as f32 / 2.0, (b[3] - b[1]) as f32 / 2.0];
+        self.xf = Some(Xf { orig, c0, half, t: [0.0; 2], s: [1.0; 2], r: 0.0, drag: None });
+    }
+
+    fn apply_xf(&mut self) {
+        if let Some(x) = &self.xf {
+            let nl = transform_layer(&x.orig, x.c0, x.t, x.s, x.r);
+            self.doc.layers[self.doc.active] = nl;
+            self.all();
+        }
+    }
+
+    /// Entrée : on garde ; Échap : on revient au calque d'avant
+    fn end_xf(&mut self, keep: bool) {
+        if let Some(x) = self.xf.take() {
+            if !keep {
+                self.doc.layers[self.doc.active] = x.orig;
+                self.undo.pop();
+                self.all();
+            }
+        }
+    }
+
+    /// Les gestes de la transformation : poignées (taille), dedans (déplacer), dehors (tourner)
+    fn xf_ui(&mut self, ui: &egui::Ui, resp: &egui::Response, painter: &egui::Painter, to_doc: impl Fn(Pos2) -> Pos2, to_screen: impl Fn(f32, f32) -> Pos2) {
+        let p = theme::pal();
+        let Some(x) = self.xf.clone() else { return };
+        let corner = |hx: f32, hy: f32| {
+            let d = x.map([hx * x.half[0], hy * x.half[1]]);
+            to_screen(d[0], d[1])
+        };
+        let poly: Vec<Pos2> = [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)].iter().map(|&(a, b)| corner(a, b)).collect();
+        painter.add(egui::Shape::closed_line(poly.clone(), Stroke::new(1.0, p.accent)));
+        let handles: Vec<([i8; 2], Pos2)> = [(-1, -1), (0, -1), (1, -1), (1, 0), (1, 1), (0, 1), (-1, 1), (-1, 0)].iter().map(|&(a, b)| ([a, b], corner(a as f32, b as f32))).collect();
+        for (_, h) in &handles {
+            let r = Rect::from_center_size(*h, vec2(8.0, 8.0));
+            painter.rect_filled(r, 0.0, Color32::WHITE);
+            painter.rect_stroke(r, 0.0, Stroke::new(1.0, p.accent), egui::StrokeKind::Inside);
+        }
+        let c = corner(0.0, 0.0);
+        painter.circle_stroke(c, 4.0, Stroke::new(1.0, p.accent));
+        let inside = |q: Pos2| {
+            // Point dans le quadrilatère (convexe) : même côté de chaque arête
+            let mut sign = 0.0f32;
+            for i in 0..4 {
+                let (a, b) = (poly[i], poly[(i + 1) % 4]);
+                let cr = (b - a).x * (q - a).y - (b - a).y * (q - a).x;
+                if sign == 0.0 {
+                    sign = cr.signum();
+                } else if cr.signum() != sign && cr != 0.0 {
+                    return false;
+                }
+            }
+            true
+        };
+        // Curseur selon ce qu'il y a sous la souris
+        let hover = ui.input(|i| i.pointer.hover_pos());
+        let hit = |q: Pos2| -> Option<[i8; 2]> {
+            if let Some((h, _)) = handles.iter().find(|(_, h)| h.distance(q) < 7.0) {
+                Some(*h)
+            } else if inside(q) {
+                Some([0, 0])
+            } else {
+                None
+            }
+        };
+        if let Some(q) = hover.filter(|q| resp.rect.contains(*q)) {
+            ui.ctx().set_cursor_icon(match hit(q) {
+                Some([0, 0]) => egui::CursorIcon::Move,
+                Some([a, b]) if a != 0 && b != 0 => egui::CursorIcon::ResizeNeSw,
+                Some([0, _]) => egui::CursorIcon::ResizeVertical,
+                Some(_) => egui::CursorIcon::ResizeHorizontal,
+                None => egui::CursorIcon::Alias,
+            });
+        }
+        if resp.drag_started_by(egui::PointerButton::Primary) {
+            if let Some(at) = ui.input(|i| i.pointer.press_origin()) {
+                if let Some(xx) = &mut self.xf {
+                    xx.drag = Some((hit(at), to_doc(at), [x.t[0], x.t[1], x.s[0], x.s[1], x.r]));
+                }
+            }
+        }
+        if resp.dragged_by(egui::PointerButton::Primary) {
+            let (shift, alt) = ui.input(|i| (i.modifiers.shift, i.modifiers.alt));
+            if let (Some(at), Some(xx)) = (resp.interact_pointer_pos(), self.xf.as_mut()) {
+                let m = to_doc(at);
+                if let Some((h, from, st)) = xx.drag {
+                    let (t0, s0, r0) = ([st[0], st[1]], [st[2], st[3]], st[4]);
+                    let center = [xx.c0[0] + t0[0], xx.c0[1] + t0[1]];
+                    match h {
+                        Some([0, 0]) => xx.t = [t0[0] + m.x - from.x, t0[1] + m.y - from.y],
+                        None => {
+                            let a0 = (from.y - center[1]).atan2(from.x - center[0]);
+                            let a1 = (m.y - center[1]).atan2(m.x - center[0]);
+                            let mut r = r0 + a1 - a0;
+                            // Maj : par pas de 15°
+                            if shift {
+                                let step = 15f32.to_radians();
+                                r = (r / step).round() * step;
+                            }
+                            xx.r = r;
+                        }
+                        Some([hx, hy]) => {
+                            let (hx, hy) = (hx as f32, hy as f32);
+                            // Souris dans le repère tourné, depuis le centre de départ
+                            let (c, sn) = (r0.cos(), r0.sin());
+                            let (dx, dy) = (m.x - center[0], m.y - center[1]);
+                            let (mx, my) = (c * dx + sn * dy, -sn * dx + c * dy);
+                            // Point fixe : le côté opposé (ou le centre avec Alt)
+                            let anchor = if alt { [0.0, 0.0] } else { [-hx * xx.half[0], -hy * xx.half[1]] };
+                            let (ax, ay) = (anchor[0] * s0[0], anchor[1] * s0[1]);
+                            let mut s = s0;
+                            if hx != 0.0 {
+                                s[0] = (mx - ax) / (hx * xx.half[0] - anchor[0]);
+                            }
+                            if hy != 0.0 {
+                                s[1] = (my - ay) / (hy * xx.half[1] - anchor[1]);
+                            }
+                            // Coin : proportions gardées (comme Photoshop), Maj pour les libérer
+                            if hx != 0.0 && hy != 0.0 && !shift {
+                                let k = if (s[0] / s0[0]).abs() > (s[1] / s0[1]).abs() { s[0] / s0[0] } else { s[1] / s0[1] };
+                                s = [s0[0] * k, s0[1] * k];
+                            }
+                            // Le point fixe ne bouge pas
+                            let fix = |sc: [f32; 2]| {
+                                let (x, y) = (anchor[0] * sc[0], anchor[1] * sc[1]);
+                                [c * x - sn * y, sn * x + c * y]
+                            };
+                            let (a_old, a_new) = (fix(s0), fix(s));
+                            xx.s = s;
+                            xx.t = [t0[0] + a_old[0] - a_new[0], t0[1] + a_old[1] - a_new[1]];
+                        }
+                    }
+                }
+            }
+            self.apply_xf();
+        }
+        if resp.drag_stopped() {
+            if let Some(xx) = &mut self.xf {
+                xx.drag = None;
+            }
+        }
     }
 
     fn checkpoint(&mut self) {
@@ -1573,6 +1830,10 @@ impl Editor {
             ui.spacing_mut().item_spacing.x = 4.0;
             egui::containers::menu::MenuButton::new(crate::i18n::t("image ▾")).ui(ui, |ui| {
                 ui.set_min_width(230.0);
+                if ui.button(format!("{}  {}", crate::lucide::SCALE_3D_ICON, crate::i18n::t("transformation libre (Ctrl+T)"))).clicked() {
+                    self.start_xf();
+                    ui.close();
+                }
                 if ui.button(crate::i18n::t("luminosité et contraste…")).clicked() {
                     self.checkpoint();
                     self.adjust = Some((Adjust::BrightContrast, self.doc.layers[self.doc.active].clone(), [0.0, 0.0]));
@@ -1651,6 +1912,38 @@ impl Editor {
                 }
             });
             ui.separator();
+            // Transformation libre : ses valeurs à la place des réglages de l'outil
+            if let Some(mut x) = self.xf.clone() {
+                ui.label(egui::RichText::new(format!("{}  {}", crate::lucide::SCALE_3D_ICON, crate::i18n::t("transformation"))).size(12.5));
+                let mut w = x.s[0] * 100.0;
+                let mut h = x.s[1] * 100.0;
+                let mut a = x.r.to_degrees();
+                let mut ch = false;
+                ch |= ui.add(egui::DragValue::new(&mut w).speed(0.5).max_decimals(1).suffix(" %").prefix("L ")).on_hover_text(crate::i18n::t("largeur")).changed();
+                ch |= ui.add(egui::DragValue::new(&mut h).speed(0.5).max_decimals(1).suffix(" %").prefix("H ")).on_hover_text(crate::i18n::t("hauteur")).changed();
+                ch |= ui.add(egui::DragValue::new(&mut a).speed(0.5).max_decimals(1).suffix("°").prefix(format!("{} ", crate::lucide::ROTATE_CW))).on_hover_text(crate::i18n::t("angle (Maj : par 15°)")).changed();
+                if ui.button(egui::RichText::new(crate::lucide::FLIP_HORIZONTAL_2).size(14.0)).on_hover_text(crate::i18n::t("retourner horizontalement")).clicked() {
+                    w = -w;
+                    ch = true;
+                }
+                if ui.button(egui::RichText::new(crate::lucide::FLIP_VERTICAL_2).size(14.0)).on_hover_text(crate::i18n::t("retourner verticalement")).clicked() {
+                    h = -h;
+                    ch = true;
+                }
+                if ch {
+                    x.s = [w / 100.0, h / 100.0];
+                    x.r = a.to_radians();
+                    self.xf = Some(x);
+                    self.apply_xf();
+                }
+                if ui.button(egui::RichText::new(crate::lucide::CHECK).size(14.0).color(p.accent)).on_hover_text(crate::i18n::t("valider (Entrée)")).clicked() {
+                    self.end_xf(true);
+                }
+                if ui.button(egui::RichText::new(crate::lucide::X).size(14.0)).on_hover_text(crate::i18n::t("annuler (Échap)")).clicked() {
+                    self.end_xf(false);
+                }
+                return;
+            }
             // Le nom de l'outil en cours, puis ses réglages (les outils sont dans la colonne de gauche)
             if let Some((_, icon, label, _)) = TOOLS.iter().find(|t| t.0 == self.tool) {
                 ui.label(egui::RichText::new(format!("{icon}  {}", crate::i18n::t(label))).size(12.5));
@@ -1911,9 +2204,13 @@ impl Editor {
         // ---- Souris
         let hover = ui.input(|i| i.pointer.hover_pos());
         let space = ui.input(|i| i.key_down(egui::Key::Space));
+        let xf_on = self.xf.is_some();
+        if xf_on {
+            self.xf_ui(ui, &resp, &painter, to_doc, to_screen);
+        }
         if resp.dragged_by(egui::PointerButton::Middle) || (space && resp.dragged_by(egui::PointerButton::Primary)) {
             self.pan += resp.drag_delta();
-        } else {
+        } else if !xf_on {
             if self.swallow_click || self.swatch_pick.is_some() {
                 // Fermer le sélecteur de couleur : rien d'autre
             } else if resp.drag_started_by(egui::PointerButton::Primary) {
@@ -2184,7 +2481,15 @@ impl Editor {
         if !ctx.egui_wants_keyboard_input() && (resp.hovered() || resp.has_focus()) {
             let (cmd, shift) = ui.input(|i| (i.modifiers.command, i.modifiers.shift));
             let k = |key: egui::Key| ui.input(|i| i.key_pressed(key));
-            if cmd && k(egui::Key::Z) {
+            if self.xf.is_some() {
+                if k(egui::Key::Enter) {
+                    self.end_xf(true);
+                } else if k(egui::Key::Escape) {
+                    self.end_xf(false);
+                }
+            } else if cmd && k(egui::Key::T) {
+                self.start_xf();
+            } else if cmd && k(egui::Key::Z) {
                 if shift {
                     self.redo();
                 } else {
@@ -3252,6 +3557,30 @@ mod tests {
 
 #[cfg(test)]
 mod text_tests {
+    #[test]
+    fn transformation_libre() {
+        use super::*;
+        let mut l = Layer::blank("x", 4, 2);
+        for p in l.px.chunks_mut(4) {
+            p.copy_from_slice(&[200, 10, 10, 255]);
+        }
+        l.off = [10, 10];
+        let b = content_box(&l).unwrap();
+        assert_eq!(b, [10, 10, 14, 12]);
+        let c0 = [12.0, 11.0];
+        // Doubler la taille autour du centre : 8 × 4, même centre
+        let big = transform_layer(&l, c0, [0.0; 2], [2.0, 2.0], 0.0);
+        assert_eq!(content_box(&big).unwrap(), [8, 9, 16, 13]);
+        assert_eq!(big.at(12, 11), [200, 10, 10, 255]);
+        // Un quart de tour : 2 × 4
+        let rot = transform_layer(&l, c0, [5.0, 0.0], [1.0, 1.0], std::f32::consts::FRAC_PI_2);
+        assert_eq!(content_box(&rot).unwrap(), [16, 9, 18, 13]);
+        // Sans changement : identique
+        let same = transform_layer(&l, c0, [0.0; 2], [1.0; 2], 0.0);
+        assert_eq!(content_box(&same).unwrap(), b);
+        assert_eq!(same.px.chunks(4).filter(|p| p[3] == 255).count(), 8);
+    }
+
     #[test]
     fn texte_rendu() {
         let (px, w, h, off) = super::render_text("Ab\nc", "inter", 40.0, [200, 10, 10, 255]).unwrap();
