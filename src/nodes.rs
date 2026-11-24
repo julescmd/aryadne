@@ -2376,6 +2376,10 @@ pub struct Editor {
     solo: Option<u32>,
     /// Fichier à ouvrir dans un autre onglet (le maître d'un calque de l'atelier)
     pub open_request: Option<PathBuf>,
+    /// Miniatures des préréglages de matériaux (bande du bas)
+    preset_tex: HashMap<&'static str, egui::TextureHandle>,
+    preset_rx: Option<std::sync::mpsc::Receiver<(&'static str, Img)>>,
+    strip_open: bool,
     /// Atelier : calque choisi, et les matériaux du coffre (relus de temps en temps)
     layer_sel: Option<usize>,
     mat_list: Option<(std::time::Instant, Vec<String>)>,
@@ -2451,6 +2455,9 @@ impl Editor {
             thumb_version: 0,
             rename: None,
             open_request: None,
+            preset_tex: HashMap::new(),
+            preset_rx: None,
+            strip_open: true,
             layer_sel: None,
             mat_list: None,
             masters_seen: 0,
@@ -2627,6 +2634,84 @@ impl Editor {
         bb
     }
 
+    /// La bande des préréglages : une sphère par matériau, calculée une fois en arrière-plan ; un clic remplace le graphe
+    fn preset_strip(&mut self, ui: &mut egui::Ui, r: Rect, ctx: &egui::Context) -> Option<&'static str> {
+        let p = theme::pal();
+        if let Some(rx) = &self.preset_rx {
+            while let Ok((name, img)) = rx.try_recv() {
+                let ci = to_texture(ctx, "preset", &img);
+                self.preset_tex.insert(name, ctx.load_texture(format!("preset-{name}"), ci, egui::TextureOptions::LINEAR));
+            }
+            if self.preset_tex.len() < MATERIAL_PRESETS.len() {
+                ctx.request_repaint_after(std::time::Duration::from_millis(120));
+            } else {
+                self.preset_rx = None;
+            }
+        } else if self.strip_open && self.preset_tex.is_empty() {
+            let root = self.root.clone();
+            let sphere = self.sphere.get_or_insert_with(|| std::sync::Arc::new(crate::model3d::preview_sphere())).clone();
+            let (tx, rx) = std::sync::mpsc::channel();
+            let c2 = ctx.clone();
+            std::thread::spawn(move || {
+                for name in MATERIAL_PRESETS {
+                    let Some(g) = material_preset(name) else { continue };
+                    let Ok(prog) = Program::compile(&g, &root, 256) else { continue };
+                    let img = crate::model3d::render_material_preview(&sphere, std::sync::Arc::new(prog), 80);
+                    if tx.send((name, img)).is_err() {
+                        return;
+                    }
+                    c2.request_repaint();
+                }
+            });
+            self.preset_rx = Some(rx);
+        }
+        let painter = ui.painter_at(r);
+        painter.rect_filled(r, 0.0, p.panel);
+        painter.hline(r.x_range(), r.top() + 0.5, Stroke::new(1.0, p.line));
+        let head = Rect::from_min_size(r.min, vec2(r.width(), 26.0));
+        let hr = ui.interact(head, ui.scope_id().with("preset-strip-head"), Sense::click()).on_hover_text(crate::i18n::t("Afficher ou masquer"));
+        painter.text(pos2(head.left() + 12.0, head.center().y), egui::Align2::LEFT_CENTER, format!("{}  {}", if self.strip_open { crate::lucide::CHEVRON_DOWN } else { crate::lucide::CHEVRON_RIGHT }, crate::i18n::t("Préréglages")), egui::FontId::proportional(12.0), p.text);
+        painter.text(pos2(head.right() - 12.0, head.center().y), egui::Align2::RIGHT_CENTER, crate::i18n::t("un clic remplace le graphe actuel"), egui::FontId::proportional(11.0), p.muted);
+        if hr.clicked() {
+            self.strip_open ^= true;
+        }
+        if !self.strip_open {
+            return None;
+        }
+        let body = Rect::from_min_max(pos2(r.left(), head.bottom()), r.max);
+        let mut chosen = None;
+        let mut child = ui.new_child(egui::UiBuilder::new().max_rect(body.shrink2(vec2(8.0, 2.0))).layout(egui::Layout::left_to_right(egui::Align::Min)));
+        egui::ScrollArea::horizontal().id_salt("preset-strip").auto_shrink([false, false]).show(&mut child, |ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            for name in MATERIAL_PRESETS {
+                let (cell, resp) = ui.allocate_exact_size(vec2(80.0, 92.0), Sense::click());
+                if resp.hovered() {
+                    ui.painter().rect_filled(cell, 4.0, p.raised);
+                }
+                let img_r = Rect::from_center_size(pos2(cell.center().x, cell.top() + 32.0), vec2(60.0, 60.0));
+                match self.preset_tex.get(name) {
+                    Some(t) => {
+                        ui.painter().image(t.id(), img_r, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+                    }
+                    None => {
+                        ui.painter().circle_filled(img_r.center(), 24.0, p.raised);
+                    }
+                }
+                // Nom sur deux lignes au plus, coupé proprement
+                let mut job = egui::text::LayoutJob::simple(crate::i18n::t(name), egui::FontId::proportional(10.5), p.text, cell.width() - 4.0);
+                job.halign = egui::Align::Center;
+                job.wrap.max_rows = 2;
+                job.wrap.break_anywhere = false;
+                let gal = ui.painter().layout_job(job);
+                ui.painter().galley(pos2(cell.center().x, cell.top() + 64.0), gal, p.text);
+                if resp.on_hover_text(crate::i18n::t(name)).clicked() {
+                    chosen = Some(name);
+                }
+            }
+        });
+        chosen
+    }
+
     /// Calcule les miniatures en arrière-plan quand le graphe change.
     fn thumbs_tick(&mut self, ctx: &egui::Context) {
         if let Some(rx) = &self.thumb_rx {
@@ -2737,6 +2822,15 @@ impl Editor {
         let lib_rect = Rect::from_min_size(avail.min, vec2(lib_w, avail.height()));
         let insp_rect = Rect::from_min_max(pos2(avail.right() - insp_w, avail.top()), avail.max);
         let graph_rect = Rect::from_min_max(pos2(lib_rect.right(), avail.top()), pos2(insp_rect.left(), avail.bottom()));
+        // Bande des préréglages sous le graphe (matériaux seulement)
+        let strip_h = if kind == GraphKind::Material { if self.strip_open { 126.0 } else { 28.0 } } else { 0.0 };
+        let strip_rect = Rect::from_min_max(pos2(graph_rect.left(), graph_rect.bottom() - strip_h), graph_rect.max);
+        let graph_rect = Rect::from_min_max(graph_rect.min, pos2(graph_rect.right(), graph_rect.bottom() - strip_h));
+        if strip_h > 0.0 {
+            if let Some(name) = self.preset_strip(ui, strip_rect, &ctx) {
+                preset = Some(name);
+            }
+        }
         for r in [lib_rect, insp_rect] {
             ui.painter().rect_filled(r, 0.0, p.panel);
         }

@@ -2181,5 +2181,13 @@
   "Spectre": "Spectrum",
   "En direct": "Live",
   "Lance la lecture, ou choisis un clip ou une plage.": "Start playback, or pick a clip or a range.",
-  "Pic": "Peak"
+  "Pic": "Peak",
+  "un clic remplace le graphe actuel": "a click replaces the current graph",
+  "Afficher ou masquer": "Show or hide",
+  "bois": "wood",
+  "pierre": "stone",
+  "métal rouillé": "rusty metal",
+  "toon": "toon",
+  "céramique": "ceramic",
+  "or": "gold"
 }
