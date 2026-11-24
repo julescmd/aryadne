@@ -878,6 +878,88 @@ impl Prepared {
 
 pub const MAX_SUBDIV_TRIS: usize = 2_500_000;
 
+/// Transformation d'un objet de la scène, parents compris, sous forme affine (colonnes, origine).
+fn object_affine(sc: &crate::scene::Scene, k: usize) -> ([V3; 3], V3) {
+    let o = sc.world(k, [0.0; 3]);
+    let col = |e: V3| {
+        let w = sc.world(k, e);
+        [w[0] - o[0], w[1] - o[1], w[2] - o[2]]
+    };
+    ([col([1.0, 0.0, 0.0]), col([0.0, 1.0, 0.0]), col([0.0, 0.0, 1.0])], o)
+}
+
+fn inv3(m: [V3; 3]) -> Option<[V3; 3]> {
+    // m est donné par colonnes ; on inverse la matrice dont ce sont les colonnes
+    let [a, b, c] = m;
+    let det = a[0] * (b[1] * c[2] - c[1] * b[2]) - b[0] * (a[1] * c[2] - c[1] * a[2]) + c[0] * (a[1] * b[2] - b[1] * a[2]);
+    if det.abs() < 1e-12 {
+        return None;
+    }
+    let r0 = cross(b, c);
+    let r1 = cross(c, a);
+    let r2 = cross(a, b);
+    // Lignes de l'inverse = r_i / det ; renvoyées en colonnes
+    Some([[r0[0] / det, r1[0] / det, r2[0] / det], [r0[1] / det, r1[1] / det, r2[1] / det], [r0[2] / det, r1[2] / det, r2[2] / det]])
+}
+
+fn mulm(m: &[V3; 3], v: V3) -> V3 {
+    [m[0][0] * v[0] + m[1][0] * v[1] + m[2][0] * v[2], m[0][1] * v[0] + m[1][1] * v[1] + m[2][1] * v[2], m[0][2] * v[0] + m[1][2] * v[1] + m[2][2] * v[2]]
+}
+
+/// Déplacement rapide : si seules les poses des objets ont changé depuis `built`, renvoie le
+/// maillage affiché avec les sommets des objets déplacés transformés sur place.
+fn fast_move(built: &crate::scene::Scene, scene: &crate::scene::Scene, ranges: &[(usize, usize, usize)], prep: &Prepared, m: &Model) -> Option<Prepared> {
+    if built.objects.len() != scene.objects.len() || prep.tris.len() != m.tris.len() {
+        return None;
+    }
+    // Rien d'autre que la pose ne doit avoir changé (fichier, modificateurs, couleur, visibilité…)
+    for (a, b) in built.objects.iter().zip(&scene.objects) {
+        let mut b2 = b.clone();
+        (b2.pos, b2.rot, b2.scale) = (a.pos, a.rot, a.scale);
+        b2.keys = a.keys.clone();
+        if &b2 != a {
+            return None;
+        }
+    }
+    let s = m.size();
+    let scale = 1.0 / s[0].max(s[1]).max(s[2]).max(1e-9);
+    let c = [(m.min[0] + m.max[0]) / 2.0, (m.min[1] + m.max[1]) / 2.0, (m.min[2] + m.max[2]) / 2.0];
+    let mut pos = prep.pos.clone();
+    let mut nrm = prep.nrm.clone();
+    let mut any = false;
+    for &(k, t0, t1) in ranges {
+        let (la, oa) = object_affine(built, k);
+        let (lb, ob) = object_affine(scene, k);
+        if la == lb && oa == ob {
+            continue;
+        }
+        let ia = inv3(la)?;
+        // D = B ∘ A⁻¹ en coordonnées du monde ; L = partie linéaire
+        let l = [mulm(&lb, ia[0]), mulm(&lb, ia[1]), mulm(&lb, ia[2])];
+        let lt_inv = inv3([[l[0][0], l[1][0], l[2][0]], [l[0][1], l[1][1], l[2][1]], [l[0][2], l[1][2], l[2][2]]])?;
+        let mut seen = std::collections::HashSet::new();
+        for t in prep.tris.get(t0..t1)? {
+            for &v in t {
+                if !seen.insert(v) {
+                    continue;
+                }
+                let n = pos[v as usize];
+                let w = [n[0] / scale + c[0], n[1] / scale + c[1], n[2] / scale + c[2]];
+                let local = mulm(&ia, [w[0] - oa[0], w[1] - oa[1], w[2] - oa[2]]);
+                let w2 = mulm(&lb, local);
+                let w2 = [w2[0] + ob[0], w2[1] + ob[1], w2[2] + ob[2]];
+                pos[v as usize] = [(w2[0] - c[0]) * scale, (w2[1] - c[1]) * scale, (w2[2] - c[2]) * scale];
+                nrm[v as usize] = norm(mulm(&lt_inv, nrm[v as usize]));
+            }
+        }
+        any = true;
+    }
+    if !any {
+        return None;
+    }
+    Some(Prepared { pos, nrm, tris: prep.tris.clone(), colors: prep.colors.clone(), edges: prep.edges.clone(), floor: prep.floor, uv: prep.uv.clone(), mat: prep.mat.clone(), curv: std::sync::OnceLock::new(), bvh: std::sync::OnceLock::new() })
+}
+
 /// Réglages d'affichage (comme le panneau d'affichage de Substance).
 #[derive(Clone)]
 pub struct Look {
@@ -2040,6 +2122,10 @@ pub struct Viewer {
     kb_busy: bool,
     /// Annuler dans la scène : dernier état enregistré, états précédents, états annulés
     scene_saved: Option<crate::scene::Scene>,
+    /// Scène telle qu'à la dernière reconstruction complète (déplacement rapide)
+    scene_built: Option<crate::scene::Scene>,
+    /// Déplacement rapide en cours : reconstruction complète et écriture du fichier au relâché
+    scene_moving: bool,
     scene_hist: Vec<crate::scene::Scene>,
     scene_redo: Vec<crate::scene::Scene>,
     scene_ver: u64,
@@ -2167,6 +2253,8 @@ impl Viewer {
             stats_text: String::new(),
             kb_busy: false,
             scene_saved: None,
+            scene_built: None,
+            scene_moving: false,
             scene_hist: vec![],
             scene_redo: vec![],
             scene_ver: 0,
@@ -4085,7 +4173,10 @@ impl Viewer {
         }
         if changed {
             self.scene_dirty = true;
-            let _ = scene.write(&path);
+            // Pendant un glisser, le fichier s'écrit au relâché (pas à chaque image)
+            if !ui.input(|i| i.pointer.any_down()) {
+                let _ = scene.write(&path);
+            }
         }
         // Annuler (Ctrl+Z) et rétablir (Ctrl+Maj+Z) : un pas par action terminée, une fois la souris relâchée
         let (undo, redo, down) = ui.input(|i| (i.modifiers.command && !i.modifiers.shift && i.key_pressed(Key::Z), i.modifiers.command && (i.modifiers.shift && i.key_pressed(Key::Z) || i.key_pressed(Key::Y)), i.pointer.any_down()));
@@ -4113,9 +4204,31 @@ impl Viewer {
                 let _ = scene.write(&path);
             }
         }
+        // Déplacement d'objets seulement (glisser, poignées) : on déplace leurs sommets tout de suite,
+        // sans reconstruire la scène ; plus de retard ni d'image qui se recharge pendant le geste.
+        // La reconstruction complète (et l'écriture du fichier) se fait au relâché.
+        let down = ui.input(|i| i.pointer.any_down());
+        if self.scene_dirty && down && self.scene_rx.is_none() && std::env::var("NOFASTMOVE").is_err() {
+            if let (Some(built), Some(prep), State::Ready(m)) = (&self.scene_built, &self.prepared, &self.state) {
+                if let Some(np) = (!prep.0).then(|| fast_move(built, scene, &self.scene_ranges, &prep.2, m)).flatten() {
+                    self.prepared = Some((prep.0, prep.1, std::sync::Arc::new(np)));
+                    self.scene_built = Some(scene.clone());
+                    self.last = None;
+                    self.trace = None;
+                    self.scene_dirty = false;
+                    self.scene_moving = true;
+                }
+            }
+        }
+        if self.scene_moving && !down {
+            self.scene_moving = false;
+            self.scene_dirty = true;
+            let _ = scene.write(&path);
+        }
         // Reconstruction en arrière-plan, une à la fois : l'ancienne image reste affichée entre-temps
-        if self.scene_dirty && self.scene_rx.is_none() && !matches!(self.state, State::Loading(_)) {
+        if self.scene_dirty && !self.scene_moving && self.scene_rx.is_none() && !matches!(self.state, State::Loading(_)) {
             self.scene_dirty = false;
+            self.scene_built = Some(scene.clone());
             let (tx, rx) = channel();
             let (sc, ctx) = (scene.clone(), ui.ctx().clone());
             std::thread::spawn(move || {
@@ -5623,8 +5736,11 @@ impl Viewer {
         let interacting = dragging || self.turntable || ui.input(|i| i.smooth_scroll_delta.y != 0.0);
         let ppp = ui.ctx().pixels_per_point();
         // Pendant le mouvement : demi-résolution pour rester fluide, pleine résolution à l'arrêt.
+        // Un modèle léger reste net pendant le mouvement : passer en basse définition puis revenir
+        // se voyait comme un petit chargement à chaque geste
         let heavy = shown_tris > 600_000;
-        let scale = if interacting { if heavy { 0.4 } else { 0.6 } } else { ppp.min(2.0) };
+        let light = shown_tris < 150_000;
+        let scale = if interacting && !light { if heavy { 0.4 } else { 0.6 } } else { ppp.min(2.0) };
         let size = [(rect.width() * scale).max(16.0) as usize, (rect.height() * scale).max(16.0) as usize];
         let (mut look, refs, refs_key) = self.render_setup();
         // Pendant qu'on tourne autour du modèle : moins de rayons d'ombre, pour rester fluide
@@ -6522,5 +6638,63 @@ mod ombres {
         look.lamps[0].at = [5.0, 5.0, 5.0];
         let far = render(&prep, &cam, &look, 160, 160);
         assert!(lum(&near) > lum(&far));
+    }
+}
+
+#[cfg(test)]
+mod fast_move_tests {
+    use super::*;
+
+    fn prep_of(sc: &crate::scene::Scene, lo: V3, hi: V3) -> (Prepared, Model, Vec<(usize, usize, usize)>) {
+        let (m, _, ranges) = crate::scene::build_ranges(sc, std::path::Path::new("/tmp/x.aryscene"));
+        let mut m = m.unwrap();
+        (m.min, m.max) = (lo, hi);
+        let s = m.size();
+        let l = s[0].max(s[1]).max(s[2]).max(1e-9);
+        let c = [(m.min[0] + m.max[0]) / 2.0, (m.min[1] + m.max[1]) / 2.0, (m.min[2] + m.max[2]) / 2.0];
+        let mesh = crate::modifiers::apply(&[], crate::modifiers::Mesh::from_model(&m, false), [-c[0] / l, -c[1] / l, -c[2] / l]);
+        (Prepared::from_mesh_fixed(mesh, 0.0), m, ranges)
+    }
+
+    /// Déplacer, tourner et agrandir un objet sur place donne les mêmes sommets qu'une reconstruction
+    #[test]
+    fn deplacement_rapide_identique() {
+        let mut sc = crate::scene::Scene::default();
+        sc.objects.push(crate::scene::Object::new("a".into(), "@cube".into()));
+        sc.objects.push(crate::scene::Object::new("b".into(), "@sphere".into()));
+        sc.objects[1].pos = [2.0, 0.0, 0.0];
+        let (lo, hi) = ([-5.0; 3], [5.0; 3]);
+        let (p0, m0, r0) = prep_of(&sc, lo, hi);
+        let mut sc2 = sc.clone();
+        sc2.objects[1].pos = [1.0, 2.0, -1.0];
+        sc2.objects[1].rot = [30.0, 45.0, 10.0];
+        sc2.objects[1].scale = [1.5, 0.5, 2.0];
+        let fast = fast_move(&sc, &sc2, &r0, &p0, &m0).expect("déplacement rapide");
+        let (full, _, _) = prep_of(&sc2, lo, hi);
+        // Les coins de chaque triangle (les sommets peuvent être dédoublés autrement aux arêtes vives)
+        assert_eq!(fast.tris.len(), full.tris.len());
+        for (ta, tb) in fast.tris.iter().zip(&full.tris) {
+            for c in 0..3 {
+                let (a, b) = (fast.pos[ta[c] as usize], full.pos[tb[c] as usize]);
+                for k in 0..3 {
+                    assert!((a[k] - b[k]).abs() < 1e-4, "{a:?} {b:?}");
+                }
+            }
+        }
+        // Un autre changement que la pose : pas de raccourci
+        let mut sc3 = sc.clone();
+        sc3.objects[0].visible = false;
+        assert!(fast_move(&sc, &sc3, &r0, &p0, &m0).is_none());
+    }
+    #[test]
+    fn inverse_3x3() {
+        let m = [[2.0, 0.0, 1.0], [0.5, 3.0, 0.0], [0.0, 1.0, 1.5]];
+        let i = inv3(m).unwrap();
+        for v in [[1.0, 2.0, 3.0], [-0.5, 0.25, 4.0]] {
+            let back = mulm(&i, mulm(&m, v));
+            for k in 0..3 {
+                assert!((back[k] - v[k]).abs() < 1e-4, "{back:?} {v:?}");
+            }
+        }
     }
 }
