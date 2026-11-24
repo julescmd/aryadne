@@ -1254,6 +1254,7 @@ impl Editor {
         if self.locked() {
             return;
         }
+        self.grow_to_doc();
         let l = self.target_ref();
         let (lx, ly) = (at[0] - l.off[0], at[1] - l.off[1]);
         if lx < 0 || ly < 0 || lx as usize >= l.w || ly as usize >= l.h || !self.in_sel(at[0], at[1]) {
@@ -1344,6 +1345,7 @@ impl Editor {
         if self.locked() {
             return;
         }
+        self.grow_to_doc();
         let col = self.paint_color();
         let dw = self.doc.w;
         let sel = self.sel.clone();
@@ -1923,6 +1925,7 @@ impl Editor {
                     match self.tool {
                         Tool::Brush | Tool::Eraser if self.doc.layers[self.doc.active].visible && !self.doc.layers[self.doc.active].lock_all => {
                             self.checkpoint();
+                            self.grow_to_doc();
                             let l = self.target_ref().clone();
                             let n = l.w * l.h;
                             self.stroke = Some((l, vec![0.0; n], d));
@@ -2045,6 +2048,7 @@ impl Editor {
                         }
                         Tool::Brush | Tool::Eraser if !self.doc.layers[self.doc.active].lock_all => {
                             self.checkpoint();
+                            self.grow_to_doc();
                             let l = self.target_ref().clone();
                             let n = l.w * l.h;
                             self.stroke = Some((l, vec![0.0; n], d));
@@ -2367,6 +2371,24 @@ impl Editor {
             return true;
         }
         false
+    }
+
+    /// Comme Photoshop : peindre à côté d'un petit calque l'agrandit (ici, jusqu'à couvrir le document)
+    fn grow_to_doc(&mut self) {
+        let (dw, dh) = (self.doc.w as i32, self.doc.h as i32);
+        let l = self.target();
+        let (x0, y0) = (l.off[0].min(0), l.off[1].min(0));
+        let (x1, y1) = ((l.off[0] + l.w as i32).max(dw), (l.off[1] + l.h as i32).max(dh));
+        let (nw, nh) = ((x1 - x0) as usize, (y1 - y0) as usize);
+        if nw == l.w && nh == l.h {
+            return;
+        }
+        let mut px = vec![0u8; nw * nh * 4];
+        for y in 0..l.h {
+            let dst = ((y as i32 + l.off[1] - y0) as usize * nw + (l.off[0] - x0) as usize) * 4;
+            px[dst..dst + l.w * 4].copy_from_slice(&l.px[y * l.w * 4..(y + 1) * l.w * 4]);
+        }
+        (l.px, l.w, l.h, l.off) = (px, nw, nh, [x0, y0]);
     }
 
     fn painting_mask(&self) -> bool {
