@@ -1023,6 +1023,45 @@ pub fn pie_menu(ui: &egui::Ui, id: egui::Id, center: Pos2, items: &[&str], curre
 
 
 /// Transformation d'un objet de la scène, parents compris, sous forme affine (colonnes, origine).
+/// Arêtes de l'objet `k` (sommets déjà posés dans `prep`, scène `built`) replacées aux images données ;
+/// le côté vaut -1, -2 pour les clés d'avant (la plus proche d'abord), 1, 2 pour celles d'après
+fn ghost_edges(built: &crate::scene::Scene, scene: &crate::scene::Scene, k: usize, prep: &Prepared, m: &Model, (t0, t1): (usize, usize), before: &[i32], after: &[i32]) -> Vec<(i32, Vec<[V3; 2]>)> {
+    let s = m.size();
+    let scale = 1.0 / s[0].max(s[1]).max(s[2]).max(1e-9);
+    let c = [(m.min[0] + m.max[0]) / 2.0, (m.min[1] + m.max[1]) / 2.0, (m.min[2] + m.max[2]) / 2.0];
+    let (la, oa) = object_affine(built, k);
+    let Some(ia) = inv3(la) else { return vec![] };
+    // Arêtes uniques, en espace local de l'objet ; au plus ~2500 pour rester fluide
+    let mut seen = std::collections::HashSet::new();
+    let mut edges: Vec<[V3; 2]> = vec![];
+    let local = |v: u32| {
+        let n = prep.pos[v as usize];
+        let w = [n[0] / scale + c[0], n[1] / scale + c[1], n[2] / scale + c[2]];
+        mulm(&ia, [w[0] - oa[0], w[1] - oa[1], w[2] - oa[2]])
+    };
+    let tris = prep.tris.get(t0..t1).unwrap_or(&[]);
+    let stride = (tris.len() / 1200).max(1);
+    for t in tris.iter().step_by(stride) {
+        for (a, b) in [(t[0], t[1]), (t[1], t[2]), (t[2], t[0])] {
+            if seen.insert((a.min(b), a.max(b))) {
+                edges.push([local(a), local(b)]);
+            }
+        }
+    }
+    let mut sc = scene.clone();
+    let mut out = vec![];
+    for (side, f) in before.iter().enumerate().map(|(i, f)| (-(i as i32) - 1, *f)).chain(after.iter().enumerate().map(|(i, f)| (i as i32 + 1, *f))) {
+        sc.apply_frame(f as f32);
+        let (lb, ob) = object_affine(&sc, k);
+        let put = |q: V3| {
+            let w = mulm(&lb, q);
+            [w[0] + ob[0], w[1] + ob[1], w[2] + ob[2]]
+        };
+        out.push((side, edges.iter().map(|[a, b]| [put(*a), put(*b)]).collect()));
+    }
+    out
+}
+
 fn object_affine(sc: &crate::scene::Scene, k: usize) -> ([V3; 3], V3) {
     let o = sc.world(k, [0.0; 3]);
     let col = |e: V3| {
@@ -2538,6 +2577,10 @@ pub struct Viewer {
     anim_graph: bool,
     /// Barre d'outils d'animation (tweener, décaler, poses…)
     anim_tools: bool,
+    /// Pelure d'oignon : l'objet choisi aux clés d'avant et d'après, en fil de fer
+    onion: bool,
+    /// Fantômes calculés : signature, puis segments (monde) par clé avec leur côté (-1 avant, 1 après)
+    ghosts: Option<(String, Vec<(i32, Vec<[V3; 2]>)>)>,
     tween_w: f32,
     /// Pose copiée, par nom d'objet
     pose_clip: Vec<(String, crate::animtools::Pose)>,
@@ -2731,6 +2774,8 @@ impl Viewer {
             prop_tab: PropTab::Object,
             anim_graph: false,
             anim_tools: false,
+            onion: false,
+            ghosts: None,
             tween_w: 0.5,
             pose_clip: vec![],
             key_sel: None,
@@ -5691,6 +5736,7 @@ impl Viewer {
                 let auto_col = if self.anim_auto { p.text } else { p.muted };
                 let rec_col = if self.anim_auto { Color32::from_rgb(230, 80, 80) } else { auto_col };
                 ui.toggle_value(&mut self.anim_auto, egui::RichText::new(crate::lucide::CIRCLE_DOT).size(14.0).color(rec_col)).on_hover_text(crate::i18n::t("Chaque déplacement pose une clé à l'image courante"));
+                ui.toggle_value(&mut self.onion, egui::RichText::new(crate::lucide::LAYERS).size(14.0)).on_hover_text(crate::i18n::t("Pelure d'oignon : l'objet choisi aux clés d'avant (rouge) et d'après (vert)"));
                 ui.toggle_value(&mut self.anim_tools, egui::RichText::new(crate::lucide::WAND_SPARKLES).size(14.0)).on_hover_text(crate::i18n::t("Outils d'animation : tweener, décaler les clés, poses, miroir…"));
                 if ui.toggle_value(&mut self.anim_graph, egui::RichText::new(crate::lucide::SPLINE).size(14.0)).on_hover_text(crate::i18n::t("Éditeur de courbes : clés et poignées de Bézier par canal (Maj+F6)")).changed() {
                 }
@@ -8116,7 +8162,7 @@ impl Viewer {
                                 (kf, sc.world(k, [0.0; 3]))
                             })
                             .collect();
-                        self.motion_path = Some((sig, pts, keys));
+                        self.motion_path = Some((sig.clone(), pts, keys));
                     }
                     if let Some((_, pts, keys)) = &self.motion_path {
                         let line: Vec<Pos2> = pts.iter().filter_map(|v| project(*v)).collect();
@@ -8137,6 +8183,31 @@ impl Viewer {
                                 let col = if (*kf as f32 - self.anim_frame).abs() < 0.5 { p.accent } else { p.warning };
                                 crate::keys::draw(&over, q, 4.5, None, col, true, false);
                                 over.text(q + egui::vec2(7.0, -7.0), egui::Align2::LEFT_BOTTOM, kf.to_string(), egui::FontId::proportional(10.0), p.muted);
+                            }
+                        }
+                    }
+                    // Pelure d'oignon : deux clés de chaque côté, en fil de fer qui s'efface avec la distance
+                    if self.onion {
+                        if let (Some(built), Some(prep), State::Ready(m), Some(&(_, t0, t1))) = (&self.scene_built, &self.prepared, &self.state, self.scene_ranges.iter().find(|r| r.0 == k)) {
+                            let now = self.anim_frame;
+                            let frames: Vec<i32> = self.motion_path.as_ref().map(|mp| mp.2.iter().map(|x| x.0).collect()).unwrap_or_default();
+                            let before: Vec<i32> = frames.iter().copied().filter(|&f| (f as f32) < now - 0.5).rev().take(2).collect();
+                            let after: Vec<i32> = frames.iter().copied().filter(|&f| (f as f32) > now + 0.5).take(2).collect();
+                            let gsig = format!("{sig}|{before:?}|{after:?}|{:p}", std::sync::Arc::as_ptr(&prep.2));
+                            if self.ghosts.as_ref().is_none_or(|g| g.0 != gsig) {
+                                self.ghosts = Some((gsig, ghost_edges(built, scene, k, &prep.2, m, (t0, t1), &before, &after)));
+                            }
+                            if let Some((_, gs)) = &self.ghosts {
+                                for (side, segs) in gs {
+                                    let far = side.unsigned_abs() as f32;
+                                    let base = if *side < 0 { Color32::from_rgb(235, 90, 90) } else { Color32::from_rgb(110, 210, 120) };
+                                    let st = Stroke::new(1.0, base.gamma_multiply(0.55 / far));
+                                    for [a, b] in segs {
+                                        if let (Some(qa), Some(qb)) = (project(*a), project(*b)) {
+                                            over.line_segment([qa, qb], st);
+                                        }
+                                    }
+                                }
                             }
                         }
                     }

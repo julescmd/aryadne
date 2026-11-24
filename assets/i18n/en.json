@@ -2425,5 +2425,6 @@
   "valider (Entrée)": "commit (Enter)",
   "annuler (Échap)": "cancel (Esc)",
   "Ce calque ne se transforme pas (réglage, verrouillé ou masque)": "This layer can't be transformed (adjustment, locked or mask)",
-  "Le calque est vide": "The layer is empty"
+  "Le calque est vide": "The layer is empty",
+  "Pelure d'oignon : l'objet choisi aux clés d'avant (rouge) et d'après (vert)": "Onion skin: the selected object at the previous (red) and next (green) keys"
 }
