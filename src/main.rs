@@ -1919,7 +1919,7 @@ impl App {
         if keymap::pressed(ctx, "assistant") {
             self.assistant_open = !self.assistant_open;
         }
-        if keymap::pressed(ctx, "explorer") {
+        if !crate::model3d::mesh_keys() && keymap::pressed(ctx, "explorer") {
             self.explorer_open = !self.explorer_open;
         }
         if keymap::pressed(ctx, "compact") {

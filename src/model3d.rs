@@ -883,6 +883,27 @@ fn shift_key(i: &egui::InputState, key: Key) -> bool {
     i.events.iter().any(|e| matches!(e, egui::Event::Key { key: k, pressed: true, repeat: false, modifiers, .. } if *k == key && modifiers.shift && !modifiers.command && !modifiers.alt))
 }
 
+/// Le mode édition 3D est sous la souris : ses raccourcis (Ctrl+B, Ctrl+R…) passent avant ceux de l'app.
+static MESH_KEYS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// Crans de molette de cette image (positif vers le haut).
+fn wheel_of(i: &egui::InputState) -> f32 {
+    i.events.iter().map(|e| if let egui::Event::MouseWheel { delta, .. } = e { delta.y } else { 0.0 }).sum()
+}
+
+/// Aide de l'outil en cours, en bas de la vue, sur un fond lisible (au-dessus des statistiques).
+fn tool_hint(ui: &egui::Ui, rect: egui::Rect, text: String) {
+    let p = theme::pal();
+    let painter = ui.painter_at(rect);
+    let galley = painter.layout(text, egui::FontId::monospace(11.5), p.text, rect.width() - 40.0);
+    let at = pos2(rect.center().x - galley.size().x / 2.0, rect.bottom() - 30.0 - galley.size().y);
+    painter.rect_filled(egui::Rect::from_min_size(at, galley.size()).expand2(egui::vec2(8.0, 5.0)), 4.0, p.raised.gamma_multiply(0.94));
+    painter.galley(at, galley, p.text);
+}
+
+pub fn mesh_keys() -> bool {
+    MESH_KEYS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 pub enum PieResult {
     Open,
     Cancel,
@@ -1913,7 +1934,69 @@ struct MeshEdit {
     active: Option<usize>,
     /// Sommets visibles depuis la caméra, avec la clé (caméra, vue, positions) du calcul
     vis: Option<(u64, Vec<bool>)>,
+    /// Outil réglé à la souris en cours
+    op: Option<ParamOp>,
+    /// Dernier outil validé, encore réglable dans son panneau
+    last: Option<ParamOp>,
+    /// Coupe en boucle qui attend qu'on choisisse l'anneau : nombre de coupes
+    loopcut: Option<u32>,
 }
+
+/// Outil réglé à la souris (biseau, incrustation, coupe en boucle), rejoué depuis le maillage de
+/// départ à chaque changement : pendant l'outil, puis dans le panneau « dernière opération ».
+struct ParamOp {
+    /// 0 incruster, 1 biseau, 2 coupe en boucle
+    kind: u8,
+    base: crate::meshedit::EMesh,
+    base_sel: Vec<bool>,
+    from: Pos2,
+    center: Pos2,
+    /// Incrustation : part du chemin vers le centre ; biseau : part de la largeur permise ; coupe : glissement (-1 à 1)
+    amount: f32,
+    segments: u32,
+    typed: String,
+    ring: Vec<(u32, u32)>,
+    /// Biseau : la plus grande largeur permise
+    limit: f32,
+    /// Sélection laissée par l'outil : si elle change, le panneau de la dernière opération se ferme
+    result_sel: Vec<bool>,
+}
+
+impl ParamOp {
+    fn run(&self) -> Option<(crate::meshedit::EMesh, Vec<bool>)> {
+        let mut m = self.base.clone();
+        let s = match self.kind {
+            0 => m.inset(&self.base_sel, self.amount)?,
+            1 => m.bevel(&self.base_sel, self.amount * self.limit, self.segments)?,
+            _ => m.loop_cut(&self.ring, self.segments, self.amount)?,
+        };
+        Some((m, s))
+    }
+    fn default_amount(&self) -> f32 {
+        match self.kind {
+            0 | 1 => 0.25,
+            _ => 0.0,
+        }
+    }
+    fn name(&self) -> &'static str {
+        ["incruster", "biseau", "coupe en boucle"][self.kind.min(2) as usize]
+    }
+    fn amount_label(&self) -> &'static str {
+        ["épaisseur :", "largeur :", "glissement :"][self.kind.min(2) as usize]
+    }
+    /// Valeur montrée (et tapée) : la largeur réelle pour le biseau
+    fn shown(&self) -> f32 {
+        if self.kind == 1 { self.amount * self.limit } else { self.amount }
+    }
+    fn from_shown(&self, v: f32) -> f32 {
+        match self.kind {
+            0 => v.clamp(0.01, 0.95),
+            1 => (v / self.limit.max(1e-9)).clamp(0.0, 1.0),
+            _ => v.clamp(-1.0, 1.0),
+        }
+    }
+}
+
 
 /// Sépare les sommets partagés par des faces qui font entre elles un angle marqué : les arêtes vives
 /// restent nettes à l'éclairage, les surfaces courbes restent lisses. L'ordre des triangles ne change pas.
@@ -2678,6 +2761,55 @@ impl Viewer {
         }
     }
 
+    /// Cadre la vue sur la sélection (objets choisis, ou sommets choisis en mode édition) ; sans
+    /// sélection, toute la scène.
+    fn frame_selection(&mut self) {
+        let Some((lo, hi)) = self.scene_frame else {
+            self.cam = Camera { ortho: self.cam.ortho, ..Default::default() };
+            return;
+        };
+        let longest = (hi[0] - lo[0]).max(hi[1] - lo[1]).max(hi[2] - lo[2]).max(1e-9);
+        let c = [(lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0, (lo[2] + hi[2]) / 2.0];
+        // Points en espace normalisé (celui de la caméra)
+        let mut pts: Vec<V3> = vec![];
+        if let (Some(me), Some(scene)) = (self.mesh.as_ref(), self.scene.as_ref()) {
+            for (i, v) in me.mesh.pos.iter().enumerate() {
+                if me.sel.get(i).copied().unwrap_or(false) {
+                    let w = scene.world(me.obj, *v);
+                    pts.push([0, 1, 2].map(|k| (w[k] - c[k]) / longest));
+                }
+            }
+        } else if let Some((_, _, prep)) = self.prepared.as_ref() {
+            let mut chosen: Vec<usize> = self.scene_multi.iter().copied().collect();
+            chosen.extend(self.scene_sel);
+            for &(o, t0, t1) in &self.scene_ranges {
+                if chosen.contains(&o) {
+                    for t in prep.tris.get(t0..t1).unwrap_or(&[]) {
+                        for &v in t {
+                            pts.push(prep.pos[v as usize]);
+                        }
+                    }
+                }
+            }
+        }
+        if pts.is_empty() {
+            self.cam = Camera { ortho: self.cam.ortho, ..Default::default() };
+            return;
+        }
+        let (mut a, mut b) = ([f32::MAX; 3], [f32::MIN; 3]);
+        for p in &pts {
+            for k in 0..3 {
+                a[k] = a[k].min(p[k]);
+                b[k] = b[k].max(p[k]);
+            }
+        }
+        let mid = [0, 1, 2].map(|k| (a[k] + b[k]) / 2.0);
+        let size = ((b[0] - a[0]).powi(2) + (b[1] - a[1]).powi(2) + (b[2] - a[2]).powi(2)).sqrt().max(0.02);
+        let r = self.cam.rotate(mid);
+        self.cam.pan = [-r[0], -r[1]];
+        self.cam.dist = (r[2] + size * 1.9).clamp(0.05, 50.0);
+    }
+
     /// Actions du menu circulaire du curseur 3D (Maj+S).
     fn cursor_action(&mut self, i: usize) {
         let Some(scene) = self.scene.as_mut() else { return };
@@ -2823,7 +2955,7 @@ impl Viewer {
             (f, mesh)
         };
         let n = mesh.pos.len();
-        self.mesh = Some(MeshEdit { obj: k, file, mesh, sel: vec![false; n], hist: vec![], redo: vec![], modal: None, boxing: None, skip_click: false, mode: 0, active: None, vis: None });
+        self.mesh = Some(MeshEdit { obj: k, file, mesh, sel: vec![false; n], hist: vec![], redo: vec![], modal: None, boxing: None, skip_click: false, mode: 0, active: None, vis: None, op: None, last: None, loopcut: None });
         self.scene_multi.clear();
         self.capture_msg = None;
     }
@@ -2946,8 +3078,18 @@ impl Viewer {
         };
         // Position à l'écran d'un sommet visible (None : caché ou derrière la caméra)
         let project_v = |me: &MeshEdit, i: usize| -> Option<Pos2> { if vis.get(i).copied().unwrap_or(true) { project(to_world(me.mesh.pos[i])) } else { None } };
+        // Centre de la sélection à l'écran : le repère des outils réglés à la souris
+        let sel_center = |me: &MeshEdit| -> Option<Pos2> {
+            let ch: Vec<usize> = (0..me.mesh.pos.len()).filter(|&i| me.sel.get(i).copied().unwrap_or(false)).collect();
+            let n = ch.len().max(1) as f32;
+            project(ch.iter().fold([0.0f32; 3], |a, &i| {
+                let w = to_world(me.mesh.pos[i]);
+                [a[0] + w[0] / n, a[1] + w[1] / n, a[2] + w[2] / n]
+            }))
+        };
         let mut dirty = false;
         let hovered = resp.hovered();
+        MESH_KEYS.store(hovered, std::sync::atomic::Ordering::Relaxed);
         let (pressed, secondary, cur) = ui.input(|i| (i.pointer.primary_pressed(), i.pointer.secondary_pressed(), i.pointer.hover_pos().or(i.pointer.latest_pos())));
         let key = |k: Key| !typing && ui.input(|i| i.key_pressed(k) && !i.modifiers.any());
         let snapshot = |me: &mut MeshEdit| {
@@ -2957,6 +3099,176 @@ impl Viewer {
                 me.hist.remove(0);
             }
         };
+        // ---- Outil interactif en cours (biseau, incrustation, coupe en boucle) : la souris règle la
+        // valeur, la molette les segments, on peut taper un nombre ; clic ou Entrée valide, clic droit
+        // prend la valeur par défaut, Échap annule.
+        if let Some(cuts) = me.loopcut {
+            // Coupe en boucle, premier temps : l'anneau sous la souris se montre, la molette règle le nombre
+            let wheel = ui.input(wheel_of);
+            let mut cuts = cuts;
+            if wheel > 0.0 {
+                cuts = (cuts + 1).min(64);
+            } else if wheel < 0.0 {
+                cuts = cuts.saturating_sub(1).max(1);
+            }
+            for (k, n) in [(Key::Num1, 1), (Key::Num2, 2), (Key::Num3, 3), (Key::Num4, 4), (Key::Num5, 5), (Key::Num6, 6), (Key::Num7, 7), (Key::Num8, 8), (Key::Num9, 9)] {
+                if ui.input(|i| i.key_pressed(k)) {
+                    cuts = n;
+                }
+            }
+            me.loopcut = Some(cuts);
+            let scr: Vec<Option<Pos2>> = (0..me.mesh.pos.len()).map(|i| project(to_world(me.mesh.pos[i]))).collect();
+            let near = cur.and_then(|at| me.mesh.edges().into_iter().filter_map(|(a, b)| {
+                let (sa, sb) = (scr[a as usize]?, scr[b as usize]?);
+                let ab = sb - sa;
+                let t = ((at - sa).dot(ab) / ab.length_sq().max(1e-6)).clamp(0.0, 1.0);
+                let d = (sa + ab * t - at).length();
+                (d < 40.0).then_some(((a, b), d))
+            }).min_by(|x, y| x.1.total_cmp(&y.1)).map(|x| x.0));
+            let ring = near.map(|(a, b)| me.mesh.edge_ring(a, b).0);
+            if let Some(ring) = &ring {
+                // Aperçu : les futures coupes en jaune
+                let painter = ui.painter_at(rect);
+                let col = Color32::from_rgb(255, 214, 80);
+                for j in 0..cuts {
+                    let t = (j as f32 + 1.0) / (cuts as f32 + 1.0);
+                    let pts: Vec<Option<Pos2>> = ring.iter().map(|&(a, b)| {
+                        let (pa, pb) = (me.mesh.pos[a as usize], me.mesh.pos[b as usize]);
+                        project(to_world([0, 1, 2].map(|k| pa[k] + (pb[k] - pa[k]) * t)))
+                    }).collect();
+                    for w in pts.windows(2) {
+                        if let (Some(x), Some(y)) = (w[0], w[1]) {
+                            painter.line_segment([x, y], Stroke::new(1.6, col));
+                        }
+                    }
+                    if ring.len() > 2 {
+                        if let (Some(Some(x)), Some(Some(y))) = (pts.first(), pts.last()) {
+                            let (r0, rl) = (ring[0], ring[ring.len() - 1]);
+                            // Anneau fermé : la dernière arête rejoint la première par un quadrilatère
+                            if me.mesh.polys.iter().any(|p| p.len() == 4 && p.contains(&r0.0) && p.contains(&r0.1) && p.contains(&rl.0) && p.contains(&rl.1)) {
+                                painter.line_segment([*x, *y], Stroke::new(1.6, col));
+                            }
+                        }
+                    }
+                }
+            }
+            let cancel = ui.input(|i| i.key_pressed(Key::Escape));
+            if cancel {
+                me.loopcut = None;
+            } else if let (true, Some(ring), Some(at)) = (pressed || secondary, ring, cur) {
+                me.loopcut = None;
+                me.skip_click = true;
+                snapshot(me);
+                let mut op = ParamOp { kind: 2, base: me.mesh.clone(), base_sel: me.sel.clone(), from: at, center: at, amount: 0.0, segments: cuts, typed: String::new(), ring, limit: 1.0, result_sel: vec![] };
+                if let Some((m, s)) = op.run() {
+                    me.mesh = m;
+                    me.sel = s.clone();
+                    op.result_sel = s;
+                    dirty = true;
+                    // Clic droit : la coupe reste au milieu ; clic gauche : on la fait glisser
+                    if secondary {
+                        me.last = Some(op);
+                    } else {
+                        me.op = Some(op);
+                    }
+                } else {
+                    me.hist.pop();
+                }
+            }
+            let msg = format!("{}   ·   {} {cuts}   ·   {}   ·   {}   ·   {}", crate::i18n::t("coupe en boucle"), crate::i18n::t("coupes :"), crate::i18n::t("molette ou 1 à 9 : nombre de coupes"), crate::i18n::t("clic : couper puis glisser"), crate::i18n::t("clic droit : couper au milieu"));
+            tool_hint(ui, rect, msg);
+            ui.ctx().request_repaint();
+        } else if let Some(mut op) = me.op.take() {
+            let (wheel, ctrl, back, enter, esc) = ui.input(|i| (wheel_of(i), i.modifiers.command, i.key_pressed(Key::Backspace), i.key_pressed(Key::Enter), i.key_pressed(Key::Escape)));
+            if op.kind != 0 {
+                if wheel > 0.0 {
+                    op.segments = (op.segments + 1).min(64);
+                } else if wheel < 0.0 {
+                    op.segments = op.segments.saturating_sub(1).max(1);
+                }
+            }
+            // Saisie au clavier : la valeur exacte
+            ui.input(|i| {
+                for e in &i.events {
+                    if let egui::Event::Text(t) = e {
+                        for ch in t.chars() {
+                            if ch.is_ascii_digit() || ch == '.' || ch == ',' || (ch == '-' && op.typed.is_empty()) {
+                                op.typed.push(if ch == ',' { '.' } else { ch });
+                            }
+                        }
+                    }
+                }
+            });
+            if back {
+                op.typed.pop();
+            }
+            if let Ok(v) = op.typed.parse::<f32>() {
+                op.amount = op.from_shown(v);
+            } else if let Some(at) = cur {
+                let (dist, d0) = ((at - op.center).length(), (op.from - op.center).length().max(24.0));
+                op.amount = match op.kind {
+                    0 => (1.0 - 0.75 * dist / d0).clamp(0.01, 0.95),
+                    1 => (0.25 * dist / d0).clamp(0.0, 1.0),
+                    _ => {
+                        let (a, b) = op.ring[0];
+                        let (sa, sb) = (project(to_world(op.base.pos[a as usize])), project(to_world(op.base.pos[b as usize])));
+                        match (sa, sb) {
+                            (Some(sa), Some(sb)) if (sb - sa).length_sq() > 1.0 => (2.0 * (at - op.from).dot(sb - sa) / (sb - sa).length_sq()).clamp(-1.0, 1.0),
+                            _ => 0.0,
+                        }
+                    }
+                };
+                if ctrl {
+                    let step = if op.kind == 2 { 0.1 } else { 0.05 };
+                    op.amount = (op.amount / step).round() * step;
+                }
+            }
+            if esc {
+                me.mesh = op.base;
+                me.sel = op.base_sel;
+                me.hist.pop();
+                me.skip_click = true;
+                dirty = true;
+            } else {
+                if secondary {
+                    // Clic droit : la valeur par défaut, et c'est fait
+                    op.amount = op.default_amount();
+                    op.typed.clear();
+                }
+                if let Some((m, s)) = op.run() {
+                    me.mesh = m;
+                    me.sel = s.clone();
+                    op.result_sel = s;
+                    dirty = true;
+                }
+                let shown = op.shown();
+                let msg = format!(
+                    "{}   {} {}{}   ·   {}   ·   {}   ·   {}   ·   {}",
+                    crate::i18n::t(op.name()),
+                    crate::i18n::t(op.amount_label()),
+                    if op.typed.is_empty() { format!("{shown:.3}") } else { format!("[{}]", op.typed) },
+                    if op.kind != 0 { format!("   {} {}", crate::i18n::t(if op.kind == 1 { "segments :" } else { "coupes :" }), op.segments) } else { String::new() },
+                    crate::i18n::t(if op.kind == 1 { "molette : segments" } else { "Ctrl : arrondir" }),
+                    crate::i18n::t("clic : valider"),
+                    crate::i18n::t("clic droit : valeur par défaut"),
+                    crate::i18n::t("Échap : annuler"),
+                );
+                tool_hint(ui, rect, msg);
+                if pressed || enter || secondary {
+                    me.skip_click = true;
+                    me.last = Some(op);
+                } else {
+                    // Repère : du centre au pointeur, comme dans Blender
+                    if let (Some(at), true) = (cur, op.kind != 2) {
+                        let painter = ui.painter_at(rect);
+                        let dash = egui::Shape::dashed_line(&[op.center, at], Stroke::new(1.0, p.text), 4.0, 4.0);
+                        painter.extend(dash);
+                    }
+                    me.op = Some(op);
+                }
+            }
+            ui.ctx().request_repaint();
+        } else
         // ---- Transformation en cours
         if let Some((kind, axis, orig, from)) = me.modal.take() {
             let mut axis = axis;
@@ -3060,7 +3372,7 @@ impl Viewer {
                     last = q;
                 }
             }
-            ui.painter_at(rect).text(rect.left_bottom() + egui::vec2(12.0, -10.0), egui::Align2::LEFT_BOTTOM, format!("{what}   ·   X Y Z : {}   ·   {}   ·   {}", crate::i18n::t("imposer un axe"), crate::i18n::t("clic : valider"), crate::i18n::t("Échap : annuler")), egui::FontId::monospace(11.5), p.accent);
+            tool_hint(ui, rect, format!("{what}   ·   X Y Z : {}   ·   {}   ·   {}", crate::i18n::t("imposer un axe"), crate::i18n::t("clic : valider"), crate::i18n::t("Échap : annuler")));
             ui.ctx().request_repaint();
         } else if hovered || me.boxing.is_some() {
             let any = me.sel.iter().any(|s| *s);
@@ -3123,19 +3435,28 @@ impl Viewer {
                     me.mode = k as u8;
                 }
             }
-            // I : face incrustée dans chaque face choisie
+            // I : face incrustée dans chaque face choisie, réglée à la souris
             if key(Key::I) && any {
-                snapshot(me);
-                match me.mesh.inset(&me.sel, 0.25) {
-                    Some(sel) => {
-                        me.sel = sel;
-                        dirty = true;
-                    }
-                    None => {
-                        me.hist.pop();
-                        self.capture_msg = Some(crate::i18n::t("incruster demande au moins une face dont tous les sommets sont choisis"));
-                    }
+                if me.mesh.faces_in(&me.sel).is_empty() {
+                    self.capture_msg = Some(crate::i18n::t("incruster demande au moins une face dont tous les sommets sont choisis"));
+                } else if let Some(at) = cur {
+                    snapshot(me);
+                    me.op = Some(ParamOp { kind: 0, base: me.mesh.clone(), base_sel: me.sel.clone(), from: at, center: sel_center(me).unwrap_or(rc), amount: 0.25, segments: 1, typed: String::new(), ring: vec![], limit: 1.0, result_sel: vec![] });
                 }
+            }
+            // Ctrl+B : biseau des arêtes choisies
+            if !typing && any && ui.input(|i| i.modifiers.command && !i.modifiers.shift && i.key_pressed(Key::B)) {
+                let limit = me.mesh.bevel_limit(&me.sel);
+                if limit <= 0.0 || me.mesh.clone().bevel(&me.sel, limit * 0.1, 1).is_none() {
+                    self.capture_msg = Some(crate::i18n::t("biseau : choisis au moins une arête entre deux faces"));
+                } else if let Some(at) = cur {
+                    snapshot(me);
+                    me.op = Some(ParamOp { kind: 1, base: me.mesh.clone(), base_sel: me.sel.clone(), from: at, center: sel_center(me).unwrap_or(rc), amount: 0.25, segments: 1, typed: String::new(), ring: vec![], limit, result_sel: vec![] });
+                }
+            }
+            // Ctrl+R : coupe en boucle
+            if !typing && ui.input(|i| i.modifiers.command && !i.modifiers.shift && i.key_pressed(Key::R)) {
+                me.loopcut = Some(1);
             }
             // M : fusionner au centre
             if key(Key::M) && any {
@@ -3335,6 +3656,60 @@ impl Viewer {
                     over.circle_filled(*s, 3.5, p.accent);
                 } else if light {
                     over.circle_filled(*s, 2.2, Color32::from_black_alpha(200));
+                }
+            }
+        }
+        // Panneau de la dernière opération (comme F9 dans Blender) : on la rajuste après coup
+        if me.op.is_none() && me.loopcut.is_none() {
+            if me.last.as_ref().is_some_and(|l| l.result_sel != me.sel) {
+                me.last = None;
+            }
+            if let Some(mut l) = me.last.take() {
+                let mut changed = false;
+                let mut close = false;
+                let at = rect.left_bottom() + egui::vec2(12.0, -34.0);
+                egui::Area::new(ui.id().with("derniere-op")).order(egui::Order::Foreground).pivot(egui::Align2::LEFT_BOTTOM).fixed_pos(at).show(ui.ctx(), |ui| {
+                    egui::Frame::popup(ui.style()).show(ui, |ui| {
+                        ui.set_max_width(220.0);
+                        ui.horizontal(|ui| {
+                            if ui.small_button("×").on_hover_text(crate::i18n::t("fermer")).clicked() {
+                                close = true;
+                            }
+                            ui.label(egui::RichText::new(crate::i18n::t(l.name())).family(theme::bold()));
+                        });
+                        egui::Grid::new("derniere-op-grille").num_columns(2).spacing([10.0, 6.0]).show(ui, |ui| {
+                            ui.label(crate::i18n::t(l.amount_label().trim_end_matches(" :")));
+                            let mut v = l.shown();
+                            let (lo, hi, speed) = match l.kind {
+                                0 => (0.01, 0.95, 0.005),
+                                1 => (0.0, l.limit, l.limit * 0.005),
+                                _ => (-1.0, 1.0, 0.01),
+                            };
+                            if ui.add(egui::DragValue::new(&mut v).range(lo..=hi).speed(speed).max_decimals(3)).changed() {
+                                l.amount = l.from_shown(v);
+                                changed = true;
+                            }
+                            ui.end_row();
+                            if l.kind != 0 {
+                                ui.label(crate::i18n::t(if l.kind == 1 { "segments" } else { "coupes" }));
+                                if ui.add(egui::DragValue::new(&mut l.segments).range(1..=64).speed(0.1)).changed() {
+                                    changed = true;
+                                }
+                                ui.end_row();
+                            }
+                        });
+                    });
+                });
+                if changed {
+                    if let Some((m, s)) = l.run() {
+                        me.mesh = m;
+                        me.sel = s.clone();
+                        l.result_sel = s;
+                        dirty = true;
+                    }
+                }
+                if !close {
+                    me.last = Some(l);
                 }
             }
         }
@@ -3901,7 +4276,8 @@ impl Viewer {
             }
         }
         if !ui.ctx().egui_wants_keyboard_input() {
-            if ui.input(|i| i.key_pressed(Key::I) && !i.modifiers.any()) {
+            // (en mode édition, I incruste : pas de clé d'animation)
+            if self.mesh.is_none() && ui.input(|i| i.key_pressed(Key::I) && !i.modifiers.any()) {
                 if let Some(k) = self.scene_sel.filter(|&k| k < scene.objects.len()) {
                     scene.objects[k].set_key(self.anim_frame.round() as i32);
                     changed = true;
@@ -4857,8 +5233,11 @@ impl Viewer {
                                 }
                             }
                             ui.separator();
-                            if ui.button(crate::i18n::t("cadrer (Origine ou .)")).clicked() {
+                            if ui.button(crate::i18n::t("tout cadrer (Origine)")).clicked() {
                                 self.cam = Camera { ortho: self.cam.ortho, ..Default::default() };
+                            }
+                            if ui.button(crate::i18n::t("cadrer la sélection (Maj+F)")).clicked() {
+                                self.frame_selection();
                             }
 
                         let mut z = z_up;
@@ -5800,7 +6179,7 @@ impl Viewer {
                 // Rappel des touches, en bas de la vue
                 let what = [crate::i18n::t("déplacer"), crate::i18n::t("tourner"), crate::i18n::t("taille")][kind.min(2) as usize].clone();
                 let ax = axis.map(|k| format!(" · {} {}", crate::i18n::t("axe"), crate::gizmo::LETTER[k])).unwrap_or_default();
-                ui.painter_at(rect).text(rect.left_bottom() + egui::vec2(12.0, -10.0), egui::Align2::LEFT_BOTTOM, format!("{what}{ax}   ·   X Y Z : {}   ·   {}   ·   {}", crate::i18n::t("imposer un axe"), crate::i18n::t("clic : valider"), crate::i18n::t("Échap : annuler")), egui::FontId::monospace(11.5), p.accent);
+                tool_hint(ui, rect, format!("{what}{ax}   ·   X Y Z : {}   ·   {}   ·   {}", crate::i18n::t("imposer un axe"), crate::i18n::t("clic : valider"), crate::i18n::t("Échap : annuler")));
             }
             if let (Some(sel), Some((lo, hi)), Some(scene)) = (self.scene_sel, self.scene_frame, self.scene.as_mut()) {
                 // Place de l'objet dans la scène et direction de ses axes, parents compris
@@ -6094,7 +6473,8 @@ impl Viewer {
             }
         }
         if resp.hovered() {
-            let scroll = ui.input(|i| i.smooth_scroll_delta.y + i.zoom_delta().ln() * 300.0);
+            let busy = self.mesh.as_ref().is_some_and(|m| m.op.is_some() || m.loopcut.is_some());
+            let scroll = if busy { 0.0 } else { ui.input(|i| i.smooth_scroll_delta.y + i.zoom_delta().ln() * 300.0) };
             if scroll != 0.0 {
                 self.cam.dist = (self.cam.dist * (-scroll * 0.0015).exp()).clamp(0.2, 50.0);
             }
@@ -6119,6 +6499,9 @@ impl Viewer {
             }
             if keys[4] || keys[5] {
                 self.cam = Camera { ortho: self.cam.ortho, ..Default::default() };
+            }
+            if crate::scene::is_scene(&self.path) && ui.input(|i| shift_key(i, Key::F)) {
+                self.frame_selection();
             }
         }
         if self.turntable && !dragging {
