@@ -1255,7 +1255,18 @@ impl Editor {
 
     fn apply_xf(&mut self) {
         if let Some(x) = &self.xf {
-            let nl = transform_layer(&x.orig, x.c0, x.t, x.s, x.r);
+            let mut nl = transform_layer(&x.orig, x.c0, x.t, x.s, x.r);
+            // Le masque est lié au calque : il suit. Hors de sa zone, un masque montre tout (blanc)
+            if let Some(m) = &x.orig.mask {
+                let mut tm = transform_layer(m, x.c0, x.t, x.s, x.r);
+                for px in tm.px.chunks_mut(4) {
+                    let a = px[3] as f32 / 255.0;
+                    let v = (px[0] as f32 * a + 255.0 * (1.0 - a)).round() as u8;
+                    px.copy_from_slice(&[v, v, v, 255]);
+                }
+                tm.mask = None;
+                nl.mask = Some(Box::new(tm));
+            }
             self.doc.layers[self.doc.active] = nl;
             self.all();
         }
@@ -3575,6 +3586,15 @@ mod text_tests {
         // Un quart de tour : 2 × 4
         let rot = transform_layer(&l, c0, [5.0, 0.0], [1.0, 1.0], std::f32::consts::FRAC_PI_2);
         assert_eq!(content_box(&rot).unwrap(), [16, 9, 18, 13]);
+        // Le masque suit : un masque noir à gauche, blanc à droite, retourné, passe noir à droite
+        let mut m = Layer::blank("m", 4, 2);
+        m.off = [10, 10];
+        for (i, p) in m.px.chunks_mut(4).enumerate() {
+            let v = if i % 4 < 2 { 0 } else { 255 };
+            p.copy_from_slice(&[v, v, v, 255]);
+        }
+        let flipped = transform_layer(&m, c0, [0.0; 2], [-1.0, 1.0], 0.0);
+        assert!(flipped.at(10, 10)[0] > 200 && flipped.at(13, 10)[0] < 50);
         // Sans changement : identique
         let same = transform_layer(&l, c0, [0.0; 2], [1.0; 2], 0.0);
         assert_eq!(content_box(&same).unwrap(), b);
