@@ -2439,5 +2439,6 @@
   "remplacer dans tous les fichiers": "replace in all files",
   "Flou de mouvement (comme After Effects) · clic droit : angle d'obturateur et qualité": "Motion blur (like After Effects) · right-click: shutter angle and quality",
   "angle d'obturateur": "shutter angle",
-  "180° : le flou du cinéma ; plus d'échantillons : plus lisse, plus lent": "180°: film-like blur; more samples: smoother, slower"
+  "180° : le flou du cinéma ; plus d'échantillons : plus lisse, plus lent": "180°: film-like blur; more samples: smoother, slower",
+  "Crée une copie verticale du montage pour Reels, TikTok et Shorts : chaque plan remplit le cadre 9:16": "Creates a vertical copy of the edit for Reels, TikTok and Shorts: each shot fills the 9:16 frame"
 }

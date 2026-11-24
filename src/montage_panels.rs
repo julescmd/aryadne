@@ -1357,6 +1357,8 @@ impl Editor {
         let tips = [
             "Retire les passages sans voix du clip choisi (et de son son lié) ; la suite de ces pistes se resserre",
             "Choisis la musique : les plans de V1 sont mis bout à bout et chaque coupe tombe sur un temps fort",
+            "",
+            "Crée une copie verticale du montage pour Reels, TikTok et Shorts : chaque plan remplit le cadre 9:16",
         ];
         let soon = crate::i18n::t("Pas encore branché : viendra avec l'Assistant qui agit dans l'application");
         let mut run: Option<usize> = None;
@@ -1364,8 +1366,8 @@ impl Editor {
             for (k, label) in ["Couper les silences", "Couper sur le rythme", "Sous-titres", "Version 9:16"].into_iter().enumerate() {
                 let txt = if busy && k < 2 { format!("{} {}", crate::lucide::LOADER, crate::i18n::t(label)) } else { format!("{} {}", crate::lucide::SPARKLES, crate::i18n::t(label)) };
                 let b = egui::Button::new(RichText::new(txt).size(12.0)).stroke(Stroke::new(1.0, p.line)).corner_radius(13).min_size(vec2(0.0, 26.0));
-                if k < 2 {
-                    if hui.add_enabled(!busy, b).on_hover_text(crate::i18n::t(tips[k])).clicked() {
+                if k < 2 || k == 3 {
+                    if hui.add_enabled(!busy || k == 3, b).on_hover_text(crate::i18n::t(tips[k])).clicked() {
                         run = Some(k);
                     }
                 } else {
@@ -1381,13 +1383,17 @@ impl Editor {
                         ui.close();
                     }
                 }
-                for label in ["Sous-titres", "Version 9:16"] {
-                    ui.add_enabled(false, egui::Button::new(crate::i18n::t(label))).on_disabled_hover_text(&soon);
+                if ui.button(crate::i18n::t("Version 9:16")).on_hover_text(crate::i18n::t(tips[3])).clicked() {
+                    run = Some(3);
+                    ui.close();
                 }
+                ui.add_enabled(false, egui::Button::new(crate::i18n::t("Sous-titres"))).on_disabled_hover_text(&soon);
             });
         }
-        if let Some(k) = run {
-            self.start_smart(k == 1, &hui.ctx().clone());
+        match run {
+            Some(3) => self.make_vertical(),
+            Some(k) => self.start_smart(k == 1, &hui.ctx().clone()),
+            None => {}
         }
         if hui.available_width() > 150.0 {
         hui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -2346,6 +2352,30 @@ fn short_time(t: f32) -> String {
 
 impl Editor {
     /// Lance l'analyse du son : du clip choisi (silences) ou de la musique (temps forts)
+    /// « Version 9:16 » : une copie verticale du montage, enregistrée à côté et ouverte
+    fn make_vertical(&mut self) {
+        let mut sizes: std::collections::HashMap<String, Option<(f32, f32)>> = Default::default();
+        for c in &self.project.clips {
+            if c.kind != "audio" && c.kind != "text" && !sizes.contains_key(&c.file) {
+                sizes.insert(c.file.clone(), crate::montage::media_dims(&self.path, c));
+            }
+        }
+        let v = crate::montage::vertical_version(&self.project, |c| sizes.get(&c.file).copied().flatten());
+        let stem = self.path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "montage".into());
+        let ext = self.path.extension().map(|e| e.to_string_lossy().to_string()).unwrap_or_else(|| "aryav".into());
+        let dir = self.path.parent().map(|d| d.to_path_buf()).unwrap_or_default();
+        let mut out = dir.join(format!("{stem} 9x16.{ext}"));
+        let mut n = 2;
+        while out.exists() {
+            out = dir.join(format!("{stem} 9x16 ({n}).{ext}"));
+            n += 1;
+        }
+        match v.write(&out) {
+            Ok(()) => self.open_tab = Some(out),
+            Err(e) => self.message = Some(e),
+        }
+    }
+
     fn start_smart(&mut self, beats: bool, ctx: &egui::Context) {
         let pick = self.sel.iter().filter_map(|id| self.project.index(*id)).find(|&i| self.project.clips[i].sounds());
         let i = match (pick, beats) {

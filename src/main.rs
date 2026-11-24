@@ -3195,6 +3195,7 @@ impl App {
         let p = theme::pal();
         let mut lsp_goto: Option<(PathBuf, usize)> = None;
         let mut open_material: Option<PathBuf> = None;
+        let mut open_tab: Option<PathBuf> = None;
         self.feed_project_words();
         egui::CentralPanel::default().frame(egui::Frame::new().fill(p.bg)).show(ui, |ui| {
             if self.home_open || (self.docs.is_empty() && self.ws.cur().tool.is_empty()) {
@@ -3412,6 +3413,9 @@ impl App {
                     m.show(ui);
                     if let Some(path) = m.open_request.take() {
                         open_material = Some(path);
+                    }
+                    if let Some(path) = m.open_tab.take() {
+                        open_tab = Some(path);
                     }
                 }
                 Content::Music(m) => m.show(ui),
@@ -3683,6 +3687,10 @@ impl App {
             }
         });
         // Matériau édité à côté du modèle (vue côte à côte)
+        if let Some(rel) = open_tab.and_then(|p| vault::inside(&self.root(), &p)) {
+            self.refresh();
+            self.open(rel);
+        }
         if let Some(path) = open_material {
             if let Some(rel) = vault::inside(&self.root(), &path) {
                 let model = self.active;

@@ -143,6 +143,8 @@ pub struct Editor {
     pub(crate) key_menu: Option<(usize, usize)>,
     /// Graphe d'étalonnage à ouvrir dans l'éditeur de nodes
     pub open_request: Option<PathBuf>,
+    /// Fichier à ouvrir dans un onglet à lui (la version 9:16)
+    pub open_tab: Option<PathBuf>,
     saved: Project,
     history: Vec<Project>,
     redo: Vec<Project>,
@@ -233,6 +235,7 @@ impl Editor {
             motion_gen: crate::motion::generation(),
             key_menu: None,
             open_request: None,
+            open_tab: None,
             saved: project.clone(),
             history: vec![],
             redo: vec![],

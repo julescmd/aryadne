@@ -866,6 +866,56 @@ impl Project {
     }
 }
 
+/// Taille d'un média (largeur, hauteur en pixels), pour le recadrage
+pub fn media_dims(project: &Path, c: &Clip) -> Option<(f32, f32)> {
+    let path = source_file(project, &c.file);
+    if crate::motion::is_compo(&c.file) {
+        let comp = crate::motion::Compo::read(&path).ok()?;
+        return Some((comp.w as f32, comp.h as f32));
+    }
+    if c.kind == "image" {
+        if let Ok((w, h)) = image::image_dimensions(&path) {
+            return Some((w as f32, h as f32));
+        }
+    }
+    let ffprobe = ffmpeg::find("ffprobe")?;
+    let o = ffmpeg::command(ffprobe).args(["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height", "-of", "csv=p=0:s=x"]).arg(&path).output().ok()?;
+    let t = String::from_utf8_lossy(&o.stdout);
+    let (w, h) = t.trim().split_once('x')?;
+    Some((w.trim().parse().ok()?, h.trim().parse().ok()?))
+}
+
+/// La version verticale (9:16) d'un montage : même histoire, chaque plan agrandi pour remplir le cadre
+/// (au lieu des bandes noires), centré ; les titres gardent leur taille. `dims` donne la taille d'un média.
+pub fn vertical_version(p: &Project, dims: impl Fn(&Clip) -> Option<(f32, f32)>) -> Project {
+    let (ow, oh) = (p.width.max(2) as f32, p.height.max(2) as f32);
+    let short = p.width.min(p.height).max(2);
+    let mut v = p.clone();
+    (v.width, v.height) = (short, short * 16 / 9 / 2 * 2);
+    let (nw, nh) = (v.width as f32, v.height as f32);
+    for c in v.clips.iter_mut() {
+        if c.kind == "audio" || c.kind == "text" {
+            continue;
+        }
+        // « Contenir » → « couvrir » dans le nouveau cadre ; les décalages suivent la taille du cadre
+        let k = match dims(c) {
+            Some((mw, mh)) if mw > 0.0 && mh > 0.0 => {
+                let (a, b) = (nw / mw, nh / mh);
+                a.max(b) / a.min(b)
+            }
+            _ => 1.0,
+        };
+        let (fx, fy) = (nw / ow, nh / oh);
+        c.scale *= k;
+        (c.x, c.y) = (c.x * fx, c.y * fy);
+        for key in c.keys.iter_mut() {
+            key.scale *= k;
+            (key.x, key.y) = (key.x * fx, key.y * fy);
+        }
+    }
+    v
+}
+
 pub fn resolve(project: &Path, file: &str) -> PathBuf {
     let p = Path::new(file);
     let p = if p.is_absolute() { p.to_path_buf() } else { project.parent().unwrap_or(Path::new("")).join(p) };
@@ -1202,6 +1252,23 @@ pub(crate) fn timecode(t: f32, fps: f32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn version_verticale() {
+        let mut p = Project { width: 1920, height: 1080, ..Default::default() };
+        let mut c = Clip::test();
+        c.x = 192.0;
+        p.clips.push(c);
+        let mut t = Clip::test();
+        t.kind = "text".into();
+        p.clips.push(t);
+        let v = vertical_version(&p, |_| Some((1920.0, 1080.0)));
+        assert_eq!((v.width, v.height), (1080, 1920));
+        // Un plan 16:9 qui remplit un cadre 9:16 : (16/9)² ≈ 3,16 fois plus grand
+        assert!((v.clips[0].scale - (16.0f32 / 9.0).powi(2)).abs() < 0.01, "{}", v.clips[0].scale);
+        assert!((v.clips[0].x - 108.0).abs() < 0.01);
+        assert_eq!(v.clips[1].scale, 1.0);
+    }
 
     #[test]
     fn timeline_magnetique() {
