@@ -2621,6 +2621,9 @@ impl App {
             let can_summarize = matches!(self.docs[i].content, Content::Text(_));
 
             // Barre du document, comme la maquette : 34 px, chemin à gauche, actions sans cadre à droite
+            // La 3D n'a pas de barre de document dans la maquette : la vue prend tout
+            let show_bar = !matches!(self.docs[i].content, Content::Model(_));
+            if show_bar {
             let bar = egui::Frame::new().inner_margin(egui::Margin::symmetric(12, 0)).show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 ui.set_height(34.0);
@@ -2761,6 +2764,7 @@ impl App {
             });
             let br = bar.response.rect;
             ui.painter().hline(br.x_range(), br.bottom(), egui::Stroke::new(1.0, p.line));
+            }
 
             let doc = &mut self.docs[i];
             match &mut doc.content {
@@ -2855,7 +2859,7 @@ impl App {
                     }
                 }
                 Content::Model(viewer) => {
-                    egui::Frame::new().inner_margin(egui::Margin::symmetric(16, 10)).show(ui, |ui| viewer.show(ui));
+                    viewer.show(ui);
                     if let Some(path) = viewer.open_request.take() {
                         open_material = Some(path);
                     }
@@ -5628,7 +5632,7 @@ impl egui_tiles::Behavior<String> for Panes<'_> {
                 let h = egui::Rect::from_min_size(rect.min, egui::vec2(rect.width(), 34.0));
                 ui.painter().hline(h.x_range(), h.bottom() - 0.5, egui::Stroke::new(1.0, p.line));
                 // Le fond de l'en-tête d'abord : les onglets et la croix, enregistrés après, passent au-dessus
-                let hr = ui.interact(h, ui.id().with(("pane-head", &id)), egui::Sense::click());
+                let hr = ui.interact(h, ui.scope_id().with(("pane-head", &id)), egui::Sense::click());
                 hr.context_menu(|ui| {
                     if ui.button(crate::i18n::t("sortir dans sa propre fenêtre")).clicked() {
                         dock::set_side(&id, dock::Side::Window);
@@ -5646,7 +5650,7 @@ impl egui_tiles::Behavior<String> for Panes<'_> {
                         let on = self.app.insp_tab == k;
                         let g = ui.painter().layout_no_wrap(label, egui::FontId::proportional(12.5), if on { p.text } else { p.muted });
                         let r = egui::Rect::from_min_size(egui::pos2(x, h.center().y - 12.0), egui::vec2(g.size().x + 16.0, 24.0));
-                        let resp = ui.interact(r, ui.id().with(("insp-tab", k)), egui::Sense::click());
+                        let resp = ui.interact(r, ui.scope_id().with(("insp-tab", k)), egui::Sense::click());
                         if on || resp.hovered() {
                             ui.painter().rect(r, 2.0, p.raised, egui::Stroke::new(1.0, if on { p.line } else { egui::Color32::TRANSPARENT }), egui::StrokeKind::Inside);
                         }
@@ -5662,7 +5666,7 @@ impl egui_tiles::Behavior<String> for Panes<'_> {
                 }
                 if !id.starts_with("ed:") {
                     let xr = egui::Rect::from_center_size(egui::pos2(h.right() - 18.0, h.center().y), egui::vec2(24.0, 24.0));
-                    let xresp = ui.interact(xr, ui.id().with(("pane-close", &id)), egui::Sense::click());
+                    let xresp = ui.interact(xr, ui.scope_id().with(("pane-close", &id)), egui::Sense::click());
                     if xresp.hovered() {
                         ui.painter().rect_filled(xr, 2.0, p.raised);
                     }

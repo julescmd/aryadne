@@ -1734,5 +1734,20 @@
   "liens": "links",
   "inspecteur": "inspector",
   "Pas de titres ni de symboles dans ce fichier.": "No headings or symbols in this file.",
-  "Les liens entrants concernent les notes.": "Backlinks apply to notes."
+  "Les liens entrants concernent les notes.": "Backlinks apply to notes.",
+  "objets": "objects",
+  "Scène": "Scene",
+  "Propriétés": "Properties",
+  "Objet": "Object",
+  "Modificateurs": "Modifiers",
+  "Matériau": "Material",
+  "Monde": "World",
+  "Lumière": "Light",
+  "Caméra": "Camera",
+  "Position": "Location",
+  "Rotation": "Rotation",
+  "Taille": "Scale",
+  "maillage": "mesh",
+  "Auto-clé": "Auto key",
+  "Courbes": "Curves"
 }

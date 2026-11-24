@@ -4575,121 +4575,6 @@ impl Viewer {
         } else {
             self.anim_last = None;
         }
-        // Timeline (une bande) ou éditeur de courbes (un panneau qu'on agrandit)
-        let tl_frame = egui::Frame::new().fill(p.panel).stroke(Stroke::new(1.0, p.line)).inner_margin(egui::Margin::symmetric(10, 4));
-        let tl_panel = if self.anim_graph { egui::Panel::bottom("scene-graph").resizable(true).default_size(300.0).min_size(160.0).max_size((ui.available_height() * 0.7).max(180.0)) } else { egui::Panel::bottom("scene-timeline").exact_size(58.0) };
-        let sub_body = |ui: &mut egui::Ui| {
-            ui.horizontal(|ui| {
-                if ui.button(if self.anim_playing { "⏸" } else { "▶" }).on_hover_text(crate::i18n::t("lire / arrêter (Espace)")).clicked() {
-                    self.anim_playing = !self.anim_playing;
-                }
-                if ui.button("⏮").on_hover_text(crate::i18n::t("revenir au début")).clicked() {
-                    seek = Some(scene.start as f32);
-                }
-                let mut fr = self.anim_frame.round() as i32;
-                if ui.add(egui::DragValue::new(&mut fr).prefix(format!("{} ", crate::i18n::t("image")))).changed() {
-                    seek = Some(fr as f32);
-                }
-                ui.separator();
-                let sel = self.scene_sel.filter(|&k| k < scene.objects.len());
-                let here = self.anim_frame.round() as i32;
-                let on_key = sel.is_some_and(|k| scene.objects[k].keys.iter().any(|x| x.frame == here));
-                if ui.add_enabled(sel.is_some(), egui::Button::new(egui::RichText::new(if on_key { "◆" } else { "◇" }).color(if on_key { p.accent } else { p.text }))).on_hover_text(crate::i18n::t("Poser une clé pour l'objet choisi à cette image (K)")).clicked() {
-                    if let Some(k) = sel {
-                        scene.objects[k].set_key(here);
-                        changed = true;
-                    }
-                }
-                if ui.add_enabled(on_key, egui::Button::new("✕")).on_hover_text(crate::i18n::t("Retirer la clé de cette image")).clicked() {
-                    if let Some(k) = sel {
-                        scene.objects[k].keys.retain(|x| x.frame != here);
-                        changed = true;
-                    }
-                }
-                if let Some(key) = sel.and_then(|k| scene.objects[k].keys.iter_mut().find(|x| x.frame == here)) {
-                    // Passage vers la clé suivante
-                    let cur = key.mode().to_string();
-                    egui::ComboBox::from_id_salt("key-interp").width(90.0).selected_text(crate::i18n::t(match cur.as_str() { "linear" => "linéaire", "constant" => "constant", _ => "Bézier" })).show_ui(ui, |ui| {
-                        for (m, l) in [("bezier", "Bézier"), ("linear", "linéaire"), ("constant", "constant")] {
-                            if ui.selectable_label(cur == m, crate::i18n::t(l)).clicked() {
-                                key.interp = m.to_string();
-                                changed = true;
-                            }
-                        }
-                    });
-                }
-                ui.toggle_value(&mut self.anim_auto, egui::RichText::new(crate::i18n::t("clé auto")).size(11.0)).on_hover_text(crate::i18n::t("Chaque déplacement pose une clé à l'image courante"));
-                ui.separator();
-                if ui.toggle_value(&mut self.anim_graph, egui::RichText::new(crate::i18n::t("courbes")).size(11.0)).on_hover_text(crate::i18n::t("Éditeur de courbes : clés et poignées de Bézier par canal (Maj+F6)")).changed() {
-                    self.graph.reset_view();
-                }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    changed |= ui.add(egui::DragValue::new(&mut scene.fps).range(1.0..=1000.0).suffix(" i/s")).changed();
-                    changed |= ui.add(egui::DragValue::new(&mut scene.end).prefix(format!("{} ", crate::i18n::t("fin")))).changed();
-                    changed |= ui.add(egui::DragValue::new(&mut scene.start).prefix(format!("{} ", crate::i18n::t("début")))).changed();
-                });
-            });
-            if self.anim_graph {
-                let sel = self.scene_sel.filter(|&k| k < scene.objects.len());
-                if self.graph.who != sel {
-                    self.graph.who = sel;
-                    self.graph.reset_view();
-                }
-                match sel {
-                    Some(k) => {
-                        let mut keys = std::mem::take(&mut scene.objects[k].keys);
-                        let out = self.graph.ui(ui, &mut keys, self.anim_frame, (scene.start, scene.end));
-                        scene.objects[k].keys = keys;
-                        if out.changed {
-                            // La pose suit la courbe à l'image courante
-                            if let Some((pos, rot, scale)) = scene.objects[k].pose_at(self.anim_frame) {
-                                (scene.objects[k].pos, scene.objects[k].rot, scene.objects[k].scale) = (pos, rot, scale);
-                            }
-                            changed = true;
-                        }
-                        if out.seek.is_some() {
-                            seek = out.seek;
-                        }
-                    }
-                    None => {
-                        ui.centered_and_justified(|ui| ui.label(egui::RichText::new(crate::i18n::t("choisis un objet pour voir ses courbes")).color(p.muted)));
-                    }
-                }
-                return;
-            }
-            // La règle : un clic ou un glissement déplace la tête de lecture ; les losanges sont les clés de l'objet choisi
-            let (r, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 20.0), egui::Sense::click_and_drag());
-            let (a, b) = (scene.start as f32, scene.end.max(scene.start + 1) as f32);
-            let x_of = |f: f32| r.left() + 6.0 + (r.width() - 12.0) * ((f - a) / (b - a)).clamp(0.0, 1.0);
-            let painter = ui.painter();
-            painter.rect_filled(r, 3.0, p.bg);
-            let step = [1, 2, 5, 10, 20, 50, 100, 200, 500].into_iter().find(|s| (r.width() - 12.0) / (b - a) * *s as f32 > 46.0).unwrap_or(1000);
-            let mut f = (scene.start as f32 / step as f32).ceil() as i32 * step;
-            while f <= scene.end {
-                let x = x_of(f as f32);
-                painter.line_segment([egui::pos2(x, r.bottom() - 5.0), egui::pos2(x, r.bottom())], Stroke::new(1.0, p.muted));
-                painter.text(egui::pos2(x + 3.0, r.top() + 1.0), egui::Align2::LEFT_TOP, f.to_string(), egui::FontId::monospace(9.0), p.muted);
-                f += step;
-            }
-            for (k, o) in scene.objects.iter().enumerate() {
-                let on = self.scene_sel == Some(k);
-                for key in &o.keys {
-                    let c = egui::pos2(x_of(key.frame as f32), r.center().y + 3.0);
-                    let d = if on { 4.5 } else { 2.5 };
-                    painter.add(egui::Shape::convex_polygon(vec![c + egui::vec2(0.0, -d), c + egui::vec2(d, 0.0), c + egui::vec2(0.0, d), c + egui::vec2(-d, 0.0)], if on { p.accent } else { p.muted }, Stroke::NONE));
-                }
-            }
-            let x = x_of(self.anim_frame);
-            painter.line_segment([egui::pos2(x, r.top()), egui::pos2(x, r.bottom())], Stroke::new(2.0, p.accent));
-            if let Some(at) = resp.interact_pointer_pos().filter(|_| resp.dragged() || resp.clicked()) {
-                seek = Some((a + (b - a) * ((at.x - r.left() - 6.0) / (r.width() - 12.0)).clamp(0.0, 1.0)).round());
-            }
-        };
-        if let Some(sub_r) = crate::layout::offer("3d-timeline", "timeline 3D") {
-            crate::layout::draw_in(ui, sub_r, p.panel, 6.0, sub_body);
-        } else {
-            tl_panel.frame(tl_frame).show(ui, sub_body);
-        }
         let n_before = scene.objects.len();
         // Menu « ajouter » de l'en-tête
         if let Some(id) = self.hdr_add.take() {
@@ -4952,12 +4837,21 @@ impl Viewer {
                 changed = true;
             }
         }
-        let sub_body = |ui: &mut egui::Ui| {
+        // part 0 : la liste de la scène (panneau de gauche) ; part 1 : les propriétés (panneau de droite)
+        let mut sub_body = |ui: &mut egui::Ui, part: u8| {
             ui.spacing_mut().slider_width = 80.0;
-            ui.horizontal(|ui| {
-                ui.label(crate::theme::section(&crate::i18n::t("SCÈNE")));
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    egui::containers::menu::MenuButton::new(crate::i18n::t("＋ ajouter ▾")).ui(ui, |ui| {
+            if part == 0 {
+            // En-tête de 34 px comme la maquette : « Scène », le nombre d'objets, puis recadrer et ajouter
+            let (hr, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 34.0), egui::Sense::hover());
+            ui.painter().hline(hr.x_range(), hr.bottom() - 0.5, Stroke::new(1.0, p.line));
+            let mut hui = ui.new_child(egui::UiBuilder::new().max_rect(hr.shrink2(egui::vec2(8.0, 0.0))).layout(egui::Layout::left_to_right(egui::Align::Center)));
+            hui.add_space(4.0);
+            hui.label(egui::RichText::new(crate::i18n::t("Scène")).size(13.0).family(theme::bold()).color(p.text));
+            hui.add_space(4.0);
+            let n = scene.objects.len();
+            hui.label(egui::RichText::new(format!("{n} {}", crate::i18n::t_mid(if n == 1 { "objet" } else { "objets" }))).size(11.0).color(p.muted));
+            hui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    egui::containers::menu::MenuButton::new(egui::RichText::new(crate::lucide::PLUS).size(14.0)).ui(ui, |ui| {
                         ui.set_min_width(240.0);
                         ui.menu_button(crate::i18n::t("forme de base"), |ui| {
                             for (id, label) in crate::scene::PRIMITIVES {
@@ -5013,41 +4907,51 @@ impl Viewer {
                             });
                         }
                     });
-                });
+                    if ui.add(egui::Button::new(egui::RichText::new(crate::lucide::SCAN).size(14.0).color(p.muted)).frame(false)).on_hover_text(crate::i18n::t("recadrer la vue sur la scène")).clicked() {
+                        reframe = true;
+                    }
             });
-            if ui.add(egui::Button::new(egui::RichText::new(crate::i18n::t("recadrer la vue sur la scène")).size(10.5).color(p.muted)).frame(false)).clicked() {
-                reframe = true;
-            }
+            ui.add_space(6.0);
             if scene.objects.is_empty() {
                 ui.add_space(6.0);
                 ui.label(egui::RichText::new(crate::i18n::t("Scène vide. Glisse des modèles sur la fenêtre, ou ajoute-en avec le bouton.")).color(p.muted).size(11.0));
             }
             // (index, action) : 0 supprimer, 1 dupliquer
             let mut action: Option<(usize, u8)> = None;
-            egui::ScrollArea::vertical().id_salt("scene-objects").max_height((ui.available_height() * 0.36).max(110.0)).show(ui, |ui| {
+            egui::ScrollArea::vertical().id_salt("scene-objects").auto_shrink([false, false]).show(ui, |ui| {
+                ui.spacing_mut().item_spacing.y = 0.0;
                 for (i, depth) in scene.tree() {
                     let o = &mut scene.objects[i];
                     ui.horizontal(|ui| {
-                        ui.add_space(depth as f32 * 14.0);
+                        // Rangée de 24 px : icône Lucide, nom en Inter 12,5, œil à droite
                         let icon = match crate::scene::kind(o) {
-                            crate::scene::Kind::Model => "▣",
-                            crate::scene::Kind::Image => "▨",
-                            crate::scene::Kind::Empty => "◇",
-                            crate::scene::Kind::Light => "☀",
-                            crate::scene::Kind::Camera => "◎",
+                            crate::scene::Kind::Model => crate::lucide::BOX,
+                            crate::scene::Kind::Image => crate::lucide::IMAGE,
+                            crate::scene::Kind::Empty => crate::lucide::SQUARE,
+                            crate::scene::Kind::Light => crate::lucide::SUN,
+                            crate::scene::Kind::Camera => crate::lucide::CAMERA,
                         };
-                        let (ir, _) = ui.allocate_exact_size(egui::vec2(16.0, 16.0), egui::Sense::hover());
-                        crate::icons::glyph(ui.painter(), ir, icon, p.muted);
-                        if crate::icons::button(ui, if o.visible { crate::icons::I::Eye } else { crate::icons::I::EyeOff }, false, 18.0, &crate::i18n::t("afficher / cacher")).clicked() {
-                            o.visible = !o.visible;
-                            changed = true;
-                        }
                         let on = self.scene_sel == Some(i);
                         let also = self.scene_multi.contains(&i);
                         let bad = self.scene_errors.get(i).and_then(|e| e.as_ref());
-                        let text = egui::RichText::new(&o.name).size(12.0).color(if bad.is_some() { p.missing } else if on { p.accent } else if o.visible { p.text } else { p.muted });
-                        let text = if also && !on { text.color(p.accent.gamma_multiply(0.75)) } else { text };
-                        let r = ui.add(egui::Button::new(if on { text.family(theme::bold()) } else { text }).frame(false));
+                        let (rect, r) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 24.0), egui::Sense::click());
+                        let eye_r = egui::Rect::from_center_size(egui::pos2(rect.right() - 17.0, rect.center().y), egui::vec2(22.0, 22.0));
+                        let eye = ui.interact(eye_r, r.id.with("eye"), egui::Sense::click());
+                        let fill = if on || also { p.selection } else if r.hovered() { p.line.linear_multiply(0.45) } else { Color32::TRANSPARENT };
+                        ui.painter().rect_filled(rect, 0.0, fill);
+                        let x = rect.left() + 8.0 + depth as f32 * 14.0;
+                        ui.painter().text(egui::pos2(x + 7.0, rect.center().y), egui::Align2::CENTER_CENTER, icon, egui::FontId::proportional(14.0), p.muted);
+                        let col = if bad.is_some() { p.missing } else if o.visible { p.text } else { p.muted };
+                        ui.painter().text(egui::pos2(x + 20.0, rect.center().y), egui::Align2::LEFT_CENTER, &o.name, egui::FontId::proportional(12.5), col);
+                        if on && self.mesh.is_some() {
+                            ui.painter().text(egui::pos2(eye_r.left() - 4.0, rect.center().y), egui::Align2::RIGHT_CENTER, crate::i18n::t("édition"), egui::FontId::proportional(11.0), p.muted);
+                        }
+                        let eye_col = if eye.hovered() { p.text } else { p.muted };
+                        ui.painter().text(eye_r.center(), egui::Align2::CENTER_CENTER, if o.visible { crate::lucide::EYE } else { crate::lucide::EYE_OFF }, egui::FontId::proportional(13.0), eye_col);
+                        if eye.on_hover_text(crate::i18n::t("afficher / cacher")).clicked() {
+                            o.visible = !o.visible;
+                            changed = true;
+                        }
                         let r = match bad {
                             Some(e) => r.on_hover_text(format!("{} : {e}", o.file)),
                             None => r.on_hover_text(&o.file),
@@ -5100,34 +5004,49 @@ impl Viewer {
                 }
                 changed = true;
             }
+            }
+            if part == 1 {
             // Parents possibles pour l'objet choisi : tout sauf lui-même et ses propres enfants
             let parents: Vec<String> = match self.scene_sel {
                 Some(s) if s < scene.objects.len() => (0..scene.objects.len()).filter(|&k| k != s && !scene.descends(k, s)).map(|k| scene.objects[k].name.clone()).collect(),
                 _ => vec![],
             };
-            // ---- Propriétés, comme l'éditeur de Blender : une colonne d'onglets, et le contenu à côté
-            ui.separator();
-            let tab = self.prop_tab;
+            // ---- Propriétés, comme la maquette : un en-tête de 34 px, une rangée d'onglets, puis le contenu
+            let sel_kind = self.scene_sel.and_then(|i| scene.objects.get(i)).map(crate::scene::kind);
+            let has_data = matches!(sel_kind, Some(crate::scene::Kind::Light | crate::scene::Kind::Camera));
+            let mut tab = self.prop_tab;
+            if tab == PropTab::Data && !has_data {
+                tab = PropTab::Object;
+            }
             let mut new_tab = tab;
-            ui.horizontal_top(|ui| {
-                ui.vertical(|ui| {
-                    ui.spacing_mut().item_spacing.y = 3.0;
-                    for (t, icon, tip) in PROP_TABS {
-                        let on = tab == t;
-                        // Tous les onglets à la même taille, alignés, quel que soit le glyphe
-                        let (r, resp) = ui.allocate_exact_size(egui::vec2(28.0, 28.0), egui::Sense::click());
-                        let fill = if on { p.accent } else if resp.hovered() { p.line } else { p.panel };
-                        ui.painter().rect_filled(r, 3.0, fill);
-                        crate::icons::glyph(ui.painter(), r.shrink(6.0), icon, if on { p.on_accent } else { p.text });
-                        if resp.on_hover_text(crate::i18n::t(tip)).clicked() {
-                            new_tab = t;
-                        }
+            {
+                let (hr, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 34.0), egui::Sense::hover());
+                ui.painter().hline(hr.x_range(), hr.bottom() - 0.5, Stroke::new(1.0, p.line));
+                let chip = egui::Rect::from_min_size(hr.left_center() + egui::vec2(6.0, -12.0), egui::vec2(84.0, 24.0));
+                ui.painter().rect(chip, 2.0, p.raised, Stroke::new(1.0, p.line), egui::StrokeKind::Inside);
+                ui.painter().text(chip.center(), egui::Align2::CENTER_CENTER, crate::i18n::t("Propriétés"), egui::FontId::proportional(12.5), p.text);
+                // Onglets : Objet, Modificateurs, Matériau, (Lumière ou Caméra), Monde, Scène
+                let (tr, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 37.0), egui::Sense::hover());
+                ui.painter().hline(tr.x_range(), tr.bottom() - 0.5, Stroke::new(1.0, p.line));
+                let mut tui = ui.new_child(egui::UiBuilder::new().max_rect(tr.shrink(6.0)).layout(egui::Layout::left_to_right(egui::Align::Center)));
+                tui.spacing_mut().item_spacing.x = 1.0;
+                tui.spacing_mut().button_padding = egui::vec2(6.0, 0.0);
+                let data_name = if sel_kind == Some(crate::scene::Kind::Camera) { "Caméra" } else { "Lumière" };
+                for (t, name) in [(PropTab::Object, "Objet"), (PropTab::Modifiers, "Modificateurs"), (PropTab::Material, "Matériau"), (PropTab::Data, data_name), (PropTab::World, "Monde"), (PropTab::Scene, "Scène")] {
+                    if t == PropTab::Data && !has_data {
+                        continue;
                     }
-                });
-                ui.separator();
+                    let on = tab == t;
+                    let text = egui::RichText::new(crate::i18n::t(name)).size(12.0).color(if on { p.text } else { p.muted });
+                    let b = egui::Button::new(text).fill(if on { p.selection } else { Color32::TRANSPARENT }).stroke(Stroke::NONE).corner_radius(2.0).min_size(egui::vec2(0.0, 24.0));
+                    if tui.add(b).clicked() {
+                        new_tab = t;
+                    }
+                }
+            }
+            let _ = PROP_TABS;
+            egui::Frame::new().inner_margin(12).show(ui, |ui| {
                 ui.vertical(|ui| {
-                    let title = PROP_TABS.iter().find(|x| x.0 == tab).map(|x| x.2).unwrap_or("");
-                    ui.label(crate::theme::section(&crate::i18n::t(title)));
                     egui::ScrollArea::vertical().id_salt("scene-props").show(ui, |ui| {
                         match tab {
                             PropTab::Scene => {
@@ -5155,11 +5074,59 @@ impl Viewer {
                                 }
                                 Some(o) => match tab {
                                     PropTab::Object => {
+                                        // Titre comme la maquette : icône, nom en 15 px (modifiable), genre à droite
+                                        ui.spacing_mut().item_spacing.y = 6.0;
                                         let before = o.name.clone();
-                                        if ui.add(egui::TextEdit::singleline(&mut o.name).desired_width(f32::INFINITY)).changed() {
-                                            renamed = Some((before, o.name.clone()));
-                                            changed = true;
-                                        }
+                                        let kind = crate::scene::kind(o);
+                                        ui.horizontal(|ui| {
+                                            let (icon, what) = match kind {
+                                                crate::scene::Kind::Model => (crate::lucide::BOX, "maillage"),
+                                                crate::scene::Kind::Image => (crate::lucide::IMAGE, "image"),
+                                                crate::scene::Kind::Empty => (crate::lucide::SQUARE, "groupe vide"),
+                                                crate::scene::Kind::Light => (crate::lucide::SUN, "lumière"),
+                                                crate::scene::Kind::Camera => (crate::lucide::CAMERA, "caméra"),
+                                            };
+                                            ui.label(egui::RichText::new(icon).size(16.0).color(crate::theme::ws_color("3d").unwrap_or(p.accent)));
+                                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                                ui.label(egui::RichText::new(crate::i18n::t(what)).size(11.0).color(p.muted));
+                                                let te = egui::TextEdit::singleline(&mut o.name).frame(egui::Frame::NONE).font(egui::FontId::new(15.0, theme::bold())).desired_width(ui.available_width());
+                                                if ui.add(te).changed() {
+                                                    renamed = Some((before.clone(), o.name.clone()));
+                                                    changed = true;
+                                                }
+                                            });
+                                        });
+                                        ui.add_space(8.0);
+                                        ui.label(egui::RichText::new(crate::i18n::t("Transformer")).size(11.0).color(p.muted));
+                                        let mut row = |ui: &mut egui::Ui, label: &str, v: &mut [f32; 3], speed: f64, reset: [f32; 3]| {
+                                            ui.horizontal(|ui| {
+                                                ui.spacing_mut().item_spacing.x = 4.0;
+                                                let (lr, lresp) = ui.allocate_exact_size(egui::vec2(62.0, 22.0), egui::Sense::click());
+                                                ui.painter().text(lr.left_center(), egui::Align2::LEFT_CENTER, crate::i18n::t(label), egui::FontId::proportional(12.0), if lresp.hovered() { p.text } else { p.muted });
+                                                if lresp.on_hover_text(crate::i18n::t("cliquer pour remettre à zéro")).clicked() {
+                                                    *v = reset;
+                                                    changed = true;
+                                                }
+                                                let signed = reset != [1.0; 3];
+                                                let w = ((ui.available_width() - 8.0) / 3.0).max(30.0);
+                                                for (shown, axis) in ["X", "Y", "Z"].iter().enumerate() {
+                                                    let (k, sign) = crate::gizmo::SHOWN[shown];
+                                                    let sign = if signed { sign } else { 1.0 };
+                                                    let (_, uf) = if label == "Position" { crate::settings::unit() } else { ("", 1.0) };
+                                                    let mut val = v[k] * sign * uf + 0.0;
+                                                    let dv = egui::DragValue::new(&mut val).speed(speed * uf as f64).max_decimals(if label == "Rotation" { 1 } else { 2 }).suffix(if label == "Rotation" { "°" } else { "" });
+                                                    if ui.add_sized([w, 22.0], dv).on_hover_text(*axis).changed() {
+                                                        v[k] = val * sign / uf;
+                                                        changed = true;
+                                                    }
+                                                }
+                                            });
+                                        };
+                                        row(ui, "Position", &mut o.pos, 0.01, [0.0; 3]);
+                                        row(ui, "Rotation", &mut o.rot, 0.5, [0.0; 3]);
+                                        row(ui, "Taille", &mut o.scale, 0.005, [1.0; 3]);
+                                        ui.add_space(8.0);
+                                        ui.label(egui::RichText::new(crate::i18n::t("Objet")).size(11.0).color(p.muted));
                                         ui.horizontal(|ui| {
                                             ui.label(egui::RichText::new(crate::i18n::t("parent")).size(11.0).color(p.muted));
                                             let cur = if o.parent.is_empty() { crate::i18n::t("aucun") } else { o.parent.clone() };
@@ -5191,35 +5158,6 @@ impl Viewer {
                                             }
                                         }
 
-                                        let mut row = |ui: &mut egui::Ui, label: &str, v: &mut [f32; 3], speed: f64, reset: [f32; 3]| {
-                                            ui.horizontal(|ui| {
-                                                if ui.add(egui::Button::new(egui::RichText::new(crate::i18n::t(label)).size(11.0).color(p.muted)).frame(false)).on_hover_text(crate::i18n::t("cliquer pour remettre à zéro")).clicked() {
-                                                    *v = reset;
-                                                    changed = true;
-                                                }
-                                            });
-                                            // Montrés avec Z vers le haut ; l'échelle n'a pas de sens
-                                            let signed = reset != [1.0; 3];
-                                            ui.horizontal(|ui| {
-                                                for (shown, axis) in ["x", "y", "z"].iter().enumerate() {
-                                                    let (k, sign) = crate::gizmo::SHOWN[shown];
-                                                    let sign = if signed { sign } else { 1.0 };
-                                                    // Position : dans l'unité choisie (la scène est en mètres)
-                                                    let (uname, uf) = if label == "position" { crate::settings::unit() } else { ("", 1.0) };
-                                                    let mut val = v[k] * sign * uf + 0.0;
-                                                    if val == 0.0 {
-                                                        val = 0.0;
-                                                    }
-                                                    if ui.add(egui::DragValue::new(&mut val).speed(speed * uf as f64).prefix(format!("{axis} ")).suffix(if uname.is_empty() { String::new() } else { format!(" {uname}") }).max_decimals(3)).changed() {
-                                                        v[k] = val * sign / uf;
-                                                        changed = true;
-                                                    }
-                                                }
-                                            });
-                                        };
-                                        row(ui, "position", &mut o.pos, 0.01, [0.0; 3]);
-                                        row(ui, "rotation °", &mut o.rot, 0.5, [0.0; 3]);
-                                        row(ui, "échelle", &mut o.scale, 0.005, [1.0; 3]);
                                         ui.horizontal(|ui| {
                                             let mut uniform = o.scale[0];
                                             if ui.add(egui::DragValue::new(&mut uniform).speed(0.005).prefix(format!("{} ", crate::i18n::t("uniforme")))).changed() {
@@ -5360,11 +5298,174 @@ impl Viewer {
                 });
             });
             self.prop_tab = new_tab;
+            }
         };
         if let Some(sub_r) = crate::layout::offer("3d-outliner", "outliner et propriétés") {
-            crate::layout::draw_in(ui, sub_r, p.panel, 8.0, sub_body);
+            crate::layout::draw_in(ui, sub_r, p.panel, 8.0, |ui| {
+                sub_body(ui, 0);
+                sub_body(ui, 1);
+            });
         } else {
-            egui::Panel::right("scene-outliner").resizable(true).default_size(270.0).min_size(220.0).max_size((ui.available_width() * 0.45).max(240.0)).frame(egui::Frame::new().fill(p.panel).stroke(Stroke::new(1.0, p.line)).inner_margin(8)).show(ui, sub_body);
+            // Comme la maquette : la scène à gauche (240 px), les propriétés à droite (290 px)
+            let frame = egui::Frame::new().fill(p.panel).stroke(Stroke::new(1.0, p.line));
+            egui::Panel::left("scene-outliner").resizable(true).default_size(240.0).min_size(180.0).max_size((ui.available_width() * 0.35).max(200.0)).frame(frame).show(ui, |ui| sub_body(ui, 0));
+            egui::Panel::right("scene-inspector").resizable(true).default_size(290.0).min_size(240.0).max_size((ui.available_width() * 0.45).max(260.0)).frame(frame).show(ui, |ui| sub_body(ui, 1));
+        }
+        let seek_before = seek;
+        // Timeline (une bande) ou éditeur de courbes (un panneau qu'on agrandit)
+        let tl_frame = egui::Frame::new().fill(p.panel).stroke(Stroke::new(1.0, p.line));
+        let tl_panel = if self.anim_graph { egui::Panel::bottom("scene-graph").resizable(true).default_size(300.0).min_size(160.0).max_size((ui.available_height() * 0.7).max(180.0)) } else { egui::Panel::bottom("scene-timeline").resizable(true).default_size(120.0).min_size(70.0).max_size(320.0) };
+        let sub_body = |ui: &mut egui::Ui| {
+            // Comme la maquette : une barre de 30 px (lecture, temps, image), puis la règle et les pistes
+            let (hr, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 30.0), egui::Sense::hover());
+            ui.painter().hline(hr.x_range(), hr.bottom() - 0.5, Stroke::new(1.0, p.line));
+            let mut hui = ui.new_child(egui::UiBuilder::new().max_rect(hr.shrink2(egui::vec2(8.0, 0.0))).layout(egui::Layout::left_to_right(egui::Align::Center)));
+            {
+                let v = &mut hui.style_mut().visuals.widgets;
+                v.inactive.weak_bg_fill = Color32::TRANSPARENT;
+                v.inactive.bg_stroke = Stroke::NONE;
+                v.hovered.weak_bg_fill = p.raised;
+                v.hovered.bg_stroke = Stroke::NONE;
+            }
+            hui.spacing_mut().button_padding = egui::vec2(6.0, 2.0);
+            hui.horizontal_centered(|ui| {
+                if ui.button(egui::RichText::new(if self.anim_playing { crate::lucide::PAUSE } else { crate::lucide::PLAY }).size(14.0)).on_hover_text(crate::i18n::t("lire / arrêter (Espace)")).clicked() {
+                    self.anim_playing = !self.anim_playing;
+                }
+                if ui.button(egui::RichText::new(crate::lucide::UNDO_2).size(13.0).color(p.muted)).on_hover_text(crate::i18n::t("revenir au début")).clicked() {
+                    seek = Some(scene.start as f32);
+                }
+                let secs = self.anim_frame / scene.fps.max(1.0);
+                let tc = format!("{}:{:02}:{:02}", (secs / 60.0) as i32, secs as i32 % 60, (self.anim_frame.round() as i32).rem_euclid(scene.fps.max(1.0).round() as i32));
+                ui.label(egui::RichText::new(tc).monospace().size(12.0).color(p.text));
+                let mut fr = self.anim_frame.round() as i32;
+                {
+                    let v = &mut ui.style_mut().visuals.widgets;
+                    v.inactive.bg_fill = Color32::TRANSPARENT;
+                }
+                if ui.add(egui::DragValue::new(&mut fr).prefix(format!("{} ", crate::i18n::t("image"))).suffix(format!(" / {}", scene.end))).changed() {
+                    seek = Some(fr as f32);
+                }
+                ui.add_space(8.0);
+                let sel = self.scene_sel.filter(|&k| k < scene.objects.len());
+                let here = self.anim_frame.round() as i32;
+                let on_key = sel.is_some_and(|k| scene.objects[k].keys.iter().any(|x| x.frame == here));
+                if ui.add_enabled(sel.is_some(), egui::Button::new(egui::RichText::new(if on_key { "◆" } else { "◇" }).color(if on_key { p.accent } else { p.text }))).on_hover_text(crate::i18n::t("Poser une clé pour l'objet choisi à cette image (K)")).clicked() {
+                    if let Some(k) = sel {
+                        scene.objects[k].set_key(here);
+                        changed = true;
+                    }
+                }
+                if ui.add_enabled(on_key, egui::Button::new("✕")).on_hover_text(crate::i18n::t("Retirer la clé de cette image")).clicked() {
+                    if let Some(k) = sel {
+                        scene.objects[k].keys.retain(|x| x.frame != here);
+                        changed = true;
+                    }
+                }
+                if let Some(key) = sel.and_then(|k| scene.objects[k].keys.iter_mut().find(|x| x.frame == here)) {
+                    // Passage vers la clé suivante
+                    let cur = key.mode().to_string();
+                    egui::ComboBox::from_id_salt("key-interp").width(90.0).selected_text(crate::i18n::t(match cur.as_str() { "linear" => "linéaire", "constant" => "constant", _ => "Bézier" })).show_ui(ui, |ui| {
+                        for (m, l) in [("bezier", "Bézier"), ("linear", "linéaire"), ("constant", "constant")] {
+                            if ui.selectable_label(cur == m, crate::i18n::t(l)).clicked() {
+                                key.interp = m.to_string();
+                                changed = true;
+                            }
+                        }
+                    });
+                }
+                let auto_col = if self.anim_auto { p.text } else { p.muted };
+                ui.toggle_value(&mut self.anim_auto, egui::RichText::new(crate::i18n::t("Auto-clé")).size(11.0).color(auto_col)).on_hover_text(crate::i18n::t("Chaque déplacement pose une clé à l'image courante"));
+                if ui.toggle_value(&mut self.anim_graph, egui::RichText::new(crate::i18n::t("Courbes")).size(12.5)).on_hover_text(crate::i18n::t("Éditeur de courbes : clés et poignées de Bézier par canal (Maj+F6)")).changed() {
+                    self.graph.reset_view();
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    changed |= ui.add(egui::DragValue::new(&mut scene.fps).range(1.0..=1000.0).suffix(" i/s")).changed();
+                    changed |= ui.add(egui::DragValue::new(&mut scene.end).prefix(format!("{} ", crate::i18n::t("fin")))).changed();
+                    changed |= ui.add(egui::DragValue::new(&mut scene.start).prefix(format!("{} ", crate::i18n::t("début")))).changed();
+                });
+            });
+            if self.anim_graph {
+                let sel = self.scene_sel.filter(|&k| k < scene.objects.len());
+                if self.graph.who != sel {
+                    self.graph.who = sel;
+                    self.graph.reset_view();
+                }
+                match sel {
+                    Some(k) => {
+                        let mut keys = std::mem::take(&mut scene.objects[k].keys);
+                        let out = self.graph.ui(ui, &mut keys, self.anim_frame, (scene.start, scene.end));
+                        scene.objects[k].keys = keys;
+                        if out.changed {
+                            // La pose suit la courbe à l'image courante
+                            if let Some((pos, rot, scale)) = scene.objects[k].pose_at(self.anim_frame) {
+                                (scene.objects[k].pos, scene.objects[k].rot, scene.objects[k].scale) = (pos, rot, scale);
+                            }
+                            changed = true;
+                        }
+                        if out.seek.is_some() {
+                            seek = out.seek;
+                        }
+                    }
+                    None => {
+                        ui.centered_and_justified(|ui| ui.label(egui::RichText::new(crate::i18n::t("choisis un objet pour voir ses courbes")).color(p.muted)));
+                    }
+                }
+                return;
+            }
+            // La règle et les pistes : un clic ou un glissement déplace la tête de lecture ; une piste par objet animé
+            let full = ui.available_rect_before_wrap();
+            let gutter = 96.0;
+            let r = egui::Rect::from_min_max(egui::pos2(full.left() + gutter, full.top()), egui::pos2(full.right() - 12.0, full.bottom()));
+            let resp = ui.interact(r, ui.scope_id().with("tl-track"), egui::Sense::click_and_drag());
+            ui.allocate_rect(full, egui::Sense::hover());
+            let (a, b) = (scene.start as f32, scene.end.max(scene.start + 1) as f32);
+            let x_of = |f: f32| r.left() + 6.0 + (r.width() - 12.0) * ((f - a) / (b - a)).clamp(0.0, 1.0);
+            let painter = ui.painter_at(full);
+            let step = [1, 2, 5, 10, 20, 50, 100, 200, 500].into_iter().find(|s| (r.width() - 12.0) / (b - a) * *s as f32 > 56.0).unwrap_or(1000);
+            let mut f = (scene.start as f32 / step as f32).ceil() as i32 * step;
+            while f <= scene.end {
+                let x = x_of(f as f32);
+                painter.text(egui::pos2(x, r.top() + 4.0), egui::Align2::LEFT_TOP, f.to_string(), egui::FontId::monospace(11.0), p.muted);
+                f += step;
+            }
+            let mut y = r.top() + 26.0;
+            for (k, o) in scene.objects.iter().enumerate() {
+                if o.keys.is_empty() || y + 10.0 > full.bottom() {
+                    continue;
+                }
+                let on = self.scene_sel == Some(k);
+                painter.text(egui::pos2(r.left() - 8.0, y), egui::Align2::RIGHT_CENTER, &o.name, egui::FontId::proportional(11.0), if on { p.text } else { p.muted });
+                for key in &o.keys {
+                    let c = egui::pos2(x_of(key.frame as f32), y);
+                    let d = 5.0;
+                    painter.add(egui::Shape::convex_polygon(vec![c + egui::vec2(0.0, -d), c + egui::vec2(d, 0.0), c + egui::vec2(0.0, d), c + egui::vec2(-d, 0.0)], if on { p.accent } else { p.muted }, Stroke::NONE));
+                }
+                y += 22.0;
+            }
+            let x = x_of(self.anim_frame);
+            painter.line_segment([egui::pos2(x, full.top()), egui::pos2(x, full.bottom())], Stroke::new(1.0, p.accent));
+            if let Some(at) = resp.interact_pointer_pos().filter(|_| resp.dragged() || resp.clicked()) {
+                seek = Some((a + (b - a) * ((at.x - r.left() - 6.0) / (r.width() - 12.0)).clamp(0.0, 1.0)).round());
+            }
+        };
+        if let Some(sub_r) = crate::layout::offer("3d-timeline", "timeline 3D") {
+            crate::layout::draw_in(ui, sub_r, p.panel, 6.0, sub_body);
+        } else {
+            tl_panel.frame(tl_frame).show(ui, sub_body);
+        }
+        // La timeline se dessine après les panneaux de côté (elle reste sous la vue, comme la maquette) :
+        // une image choisie là s'applique tout de suite
+        if seek != seek_before {
+            if let Some(f) = seek {
+                if f != self.anim_frame {
+                    self.anim_frame = f;
+                    if scene.apply_frame(f) {
+                        self.scene_dirty = true;
+                        self.scene_saved = Some(scene.clone());
+                    }
+                }
+            }
         }
         if let Some((lo, hi)) = self.scene_frame {
             let longest = (hi[0] - lo[0]).max(hi[1] - lo[1]).max(hi[2] - lo[2]).max(1e-9);
@@ -5760,13 +5861,22 @@ impl Viewer {
         let mut want_edit: Option<bool> = if std::mem::take(&mut self.start_edit) { Some(true) } else { None };
         // L'en-tête flotte par-dessus le haut de la vue, comme dans Blender : la vue garde toute la hauteur
         let vp = self.vp_rect.unwrap_or(ui.available_rect_before_wrap());
-        let hdr_area = egui::Area::new(egui::Id::unique(("hdr3d", self.path.to_string_lossy().to_string()))).order(egui::Order::Middle).fixed_pos(vp.min + egui::vec2(6.0, 6.0)).show(ui.ctx(), |ui| {
-        ui.set_max_width((vp.width() - 12.0).max(200.0));
-        // Compact, comme l'en-tête de Blender
-        ui.spacing_mut().button_padding = egui::vec2(5.0, 1.0);
-        ui.spacing_mut().interact_size.y = 20.0;
-        egui::Frame::new().fill(p.panel.gamma_multiply(0.94)).corner_radius(6).stroke(Stroke::new(1.0, p.line)).inner_margin(egui::Margin::symmetric(5, 3)).show(ui, |ui| {
-        egui::ScrollArea::horizontal().id_salt("hdr3d-scroll").scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden).max_width((vp.width() - 12.0).max(120.0)).show(ui, |ui| ui.horizontal(|ui| {
+        let hdr_area = egui::Area::new(egui::Id::unique(("hdr3d", self.path.to_string_lossy().to_string()))).order(egui::Order::Middle).fixed_pos(vp.min + egui::vec2(12.0, 10.0)).show(ui.ctx(), |ui| {
+        ui.set_max_width((vp.width() - 24.0).max(200.0));
+        // Comme la maquette : une barre de 34 px sur toute la largeur, boutons sans cadre
+        ui.spacing_mut().button_padding = egui::vec2(6.0, 2.0);
+        ui.spacing_mut().interact_size.y = 22.0;
+        {
+            let v = &mut ui.style_mut().visuals.widgets;
+            v.inactive.weak_bg_fill = Color32::TRANSPARENT;
+            v.inactive.bg_stroke = Stroke::NONE;
+            v.hovered.weak_bg_fill = p.raised;
+            v.hovered.bg_stroke = Stroke::NONE;
+            v.open.weak_bg_fill = p.raised;
+        }
+        egui::Frame::new().fill(p.panel).corner_radius(6).stroke(Stroke::new(1.0, p.line)).inner_margin(egui::Margin::symmetric(6, 5)).show(ui, |ui| {
+        ui.set_min_width((vp.width() - 24.0 - 14.0).max(120.0));
+        egui::ScrollArea::horizontal().id_salt("hdr3d-scroll").scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden).max_width((vp.width() - 24.0 - 14.0).max(120.0)).show(ui, |ui| ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 3.0;
             for item in HEADER {
                 match item {
