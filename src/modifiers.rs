@@ -1276,21 +1276,21 @@ pub fn panel_with(ui: &mut egui::Ui, stack: &mut Vec<Modifier>, applied: bool, r
         ui.label(crate::theme::section(&crate::i18n::t("MODIFICATEURS")));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             egui::containers::menu::MenuButton::new("⋯").ui(ui, |ui| {
-                if ui.button(crate::i18n::t("tout déplier")).clicked() {
+                if ui.add(egui::Button::new(format!("{}  {}", crate::lucide::CHEVRONS_UP_DOWN, crate::i18n::t("tout déplier")))).clicked() {
                     stack.iter_mut().for_each(|m| m.open = true);
                 }
-                if ui.button(crate::i18n::t("tout replier")).clicked() {
+                if ui.add(egui::Button::new(format!("{}  {}", crate::lucide::CHEVRONS_DOWN_UP, crate::i18n::t("tout replier")))).clicked() {
                     stack.iter_mut().for_each(|m| m.open = false);
                 }
-                if ui.button(crate::i18n::t("tout activer")).clicked() {
+                if ui.add(egui::Button::new(format!("{}  {}", crate::lucide::EYE, crate::i18n::t("tout activer")))).clicked() {
                     stack.iter_mut().for_each(|m| m.on = true);
                     changed = true;
                 }
-                if ui.button(crate::i18n::t("tout désactiver")).clicked() {
+                if ui.add(egui::Button::new(format!("{}  {}", crate::lucide::EYE_OFF, crate::i18n::t("tout désactiver")))).clicked() {
                     stack.iter_mut().for_each(|m| m.on = false);
                     changed = true;
                 }
-                if ui.button(crate::i18n::t("vider la pile")).clicked() {
+                if ui.add(egui::Button::new(format!("{}  {}", crate::lucide::ERASER, crate::i18n::t("vider la pile")))).clicked() {
                     stack.clear();
                     changed = true;
                 }

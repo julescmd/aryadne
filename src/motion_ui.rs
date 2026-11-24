@@ -466,16 +466,16 @@ impl Editor {
             ui.horizontal_wrapped(|ui| {
                 ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
                 let c = (self.compo.w as f32 / 2.0, self.compo.h as f32 / 2.0);
-                if ui.button(format!("{}  {}", l::TYPE, crate::i18n::t("Texte"))).clicked() {
+                if ui.add(egui::Button::new(egui::RichText::new(l::TYPE).size(14.0)).min_size(egui::vec2(24.0, 20.0))).on_hover_text(crate::i18n::t("Texte")).clicked() {
                     self.add_layer(Kind::Text { text: crate::i18n::t("Texte"), size: 120.0, color: [0xf4, 0xee, 0xf1], font: "inter-bold".into(), tracking: 0.0, align: 1 }, Some([c.0, c.1]));
                 }
-                if ui.button(format!("{}  {}", l::SQUARE, crate::i18n::t("Forme"))).clicked() {
+                if ui.add(egui::Button::new(egui::RichText::new(l::SQUARE).size(14.0)).min_size(egui::vec2(24.0, 20.0))).on_hover_text(crate::i18n::t("Forme")).clicked() {
                     self.add_layer(Kind::Rect { w: 400.0, h: 240.0, radius: 12.0, color: [0xcc, 0xac, 0xb9] }, Some([c.0, c.1]));
                 }
-                if ui.button(format!("{}  {}", l::CIRCLE, crate::i18n::t("Ellipse"))).clicked() {
+                if ui.add(egui::Button::new(egui::RichText::new(l::CIRCLE).size(14.0)).min_size(egui::vec2(24.0, 20.0))).on_hover_text(crate::i18n::t("Ellipse")).clicked() {
                     self.add_layer(Kind::Ellipse { w: 260.0, h: 260.0, color: [0x8b, 0xa8, 0xc6] }, Some([c.0, c.1]));
                 }
-                if ui.button(format!("{}  {}", l::IMAGE_PLUS, crate::i18n::t("Image…"))).clicked() {
+                if ui.add(egui::Button::new(egui::RichText::new(l::IMAGE_PLUS).size(14.0)).min_size(egui::vec2(24.0, 20.0))).on_hover_text(crate::i18n::t("Image…")).clicked() {
                     self.add_image();
                 }
             });
@@ -821,7 +821,7 @@ impl Editor {
                 Some(z) => format!("{} %", (z * 100.0).round()),
             };
             ui.menu_button(zl, |ui| {
-                if ui.button(crate::i18n::t("ajuster")).clicked() {
+                if ui.add(egui::Button::new(format!("{}  {}", crate::lucide::SCAN, crate::i18n::t("ajuster")))).clicked() {
                     self.zoom = None;
                 }
                 for z in [0.25, 0.5, 1.0] {
@@ -1180,7 +1180,7 @@ impl Editor {
             Some(m) => {
                 ui.horizontal(|ui| {
                     ui.label(egui::RichText::new(format!("{}  {}", l::MUSIC, m.rsplit('/').next().unwrap_or(&m))).size(12.0));
-                    if ui.small_button(crate::i18n::t("retirer")).clicked() {
+                    if ui.add(egui::Button::new(egui::RichText::new(crate::lucide::X).size(13.0)).min_size(egui::vec2(24.0, 20.0))).on_hover_text(crate::i18n::t("retirer")).clicked() {
                         c.music = None;
                         changed = true;
                     }

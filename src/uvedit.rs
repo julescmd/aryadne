@@ -2061,7 +2061,7 @@ impl Edit {
                 }
                 self.changed();
             }
-            if ui.button(crate::i18n::t("tout effacer")).clicked() {
+            if ui.add(egui::Button::new(egui::RichText::new(crate::lucide::ERASER).size(14.0)).min_size(egui::vec2(24.0, 20.0))).on_hover_text(crate::i18n::t("tout effacer")).clicked() {
                 self.data.seams.clear();
                 self.changed();
             }

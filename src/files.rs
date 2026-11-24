@@ -191,11 +191,11 @@ impl App {
                                 self.files.save();
                             }
                             ui.separator();
-                            if ui.button(crate::i18n::t("tout replier")).clicked() {
+                            if ui.add(egui::Button::new(format!("{}  {}", crate::lucide::CHEVRONS_DOWN_UP, crate::i18n::t("tout replier")))).clicked() {
                                 self.files.expanded.clear();
                                 self.files.save();
                             }
-                            if ui.button(crate::i18n::t("tout déplier")).clicked() {
+                            if ui.add(egui::Button::new(format!("{}  {}", crate::lucide::CHEVRONS_UP_DOWN, crate::i18n::t("tout déplier")))).clicked() {
                                 self.files.expanded = self.entries.iter().filter(|e| e.is_dir).map(|e| e.rel.clone()).collect();
                                 self.files.save();
                             }
@@ -216,7 +216,7 @@ impl App {
                             if ui.button(crate::i18n::t("note")).clicked() {
                                 self.new_note();
                             }
-                            if ui.button(crate::i18n::t("fichier…")).clicked() {
+                            if ui.add(egui::Button::new(format!("{}  {}", crate::lucide::FILE, crate::i18n::t("fichier…")))).clicked() {
                                 self.actions.push(Action::NewFile(dir.clone()));
                             }
                             if ui.button(crate::i18n::t("dossier…")).clicked() {
@@ -230,10 +230,10 @@ impl App {
                                 }
                             }
                             ui.separator();
-                            if ui.button(crate::i18n::t("importer des fichiers…")).clicked() {
+                            if ui.add(egui::Button::new(format!("{}  {}", crate::lucide::UPLOAD, crate::i18n::t("importer des fichiers…")))).clicked() {
                                 self.pick_import(false);
                             }
-                            if ui.button(crate::i18n::t("lier un dossier…")).clicked() {
+                            if ui.add(egui::Button::new(format!("{}  {}", crate::lucide::FOLDER_PLUS, crate::i18n::t("lier un dossier…")))).clicked() {
                                 self.pick_import(true);
                             }
                         }).0.on_hover_text(crate::i18n::t("nouveau…"));
@@ -684,7 +684,7 @@ impl App {
 
             ui.label(RichText::new(&e.rel).color(p.muted).size(11.0));
             ui.separator();
-            if !e.is_dir && ui.button(crate::i18n::t("ouvrir")).clicked() {
+            if !e.is_dir && ui.add(egui::Button::new(egui::RichText::new(crate::lucide::FOLDER_OPEN).size(14.0)).min_size(egui::vec2(24.0, 20.0))).on_hover_text(crate::i18n::t("ouvrir")).clicked() {
                 self.actions.push(Action::Open(e.rel.clone()));
             }
             if ui.button(crate::i18n::t("nouveau fichier ici")).clicked() {
@@ -708,10 +708,10 @@ impl App {
                 self.actions.push(Action::Rename(e.rel.clone()));
             }
             if vault::is_external(&e.rel) && !e.is_dir {
-                if ui.button(crate::i18n::t("déplacer dans le coffre")).on_hover_text(crate::i18n::t("Le fichier quitte son dossier d'origine")).clicked() {
+                if ui.add(egui::Button::new(egui::RichText::new(crate::lucide::FOLDER_INPUT).size(14.0)).min_size(egui::vec2(24.0, 20.0))).on_hover_text(crate::i18n::t("Le fichier quitte son dossier d'origine")).clicked() {
                     self.dialog = Some(Dialog::MoveIn { rel: e.rel.clone(), copy: false });
                 }
-                if ui.button(crate::i18n::t("copier dans le coffre")).clicked() {
+                if ui.add(egui::Button::new(egui::RichText::new(crate::lucide::COPY_PLUS).size(14.0)).min_size(egui::vec2(24.0, 20.0))).on_hover_text(crate::i18n::t("copier dans le coffre")).clicked() {
                     self.dialog = Some(Dialog::MoveIn { rel: e.rel.clone(), copy: true });
                 }
             }
@@ -740,7 +740,7 @@ impl App {
                 self.dialog = Some(Dialog::Transfer { send: true });
             }
             ui.separator();
-            if ui.button(crate::i18n::t("afficher dans le dossier")).clicked() {
+            if ui.add(egui::Button::new(egui::RichText::new(crate::lucide::FOLDER_OPEN).size(14.0)).min_size(egui::vec2(24.0, 20.0))).on_hover_text(crate::i18n::t("afficher dans le dossier")).clicked() {
                 if let Ok(path) = vault::safe(&self.root(), &e.rel) {
                     settings::reveal(&path, !e.is_dir);
                 }

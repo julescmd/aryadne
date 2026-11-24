@@ -2811,7 +2811,7 @@ impl App {
                 ui.close();
             }
         }
-        if ui.button(crate::i18n::t("réinitialiser la disposition")).clicked() {
+        if ui.add(egui::Button::new(egui::RichText::new(crate::lucide::ROTATE_CCW).size(14.0)).min_size(egui::vec2(24.0, 20.0))).on_hover_text(crate::i18n::t("réinitialiser la disposition")).clicked() {
             dock::reset();
             self.reset_layout = true;
             self.view_panels.clear();
@@ -3256,7 +3256,7 @@ impl App {
                             if ui.button(crate::i18n::t("avec…")).on_hover_text(crate::i18n::t("Choisir l'application")).clicked() {
                                 which = 2;
                             }
-                            if ui.button(crate::i18n::t("afficher dans le dossier")).clicked() {
+                            if ui.add(egui::Button::new(format!("{}  {}", crate::lucide::FOLDER_OPEN, crate::i18n::t("afficher dans le dossier")))).clicked() {
                                 which = 3;
                             }
                         });
@@ -3318,34 +3318,34 @@ impl App {
                                 _ => {}
                             }
                         }
-                        if rel.to_lowercase().ends_with(".py") && ui.button(crate::i18n::t("▶ Blender")).on_hover_text(crate::i18n::t("Lance le script dans Blender en arrière-plan (blender --background --python)")).clicked() {
+                        if rel.to_lowercase().ends_with(".py") && ui.add(egui::Button::new(egui::RichText::new(lucide::CUBOID).size(14.0)).min_size(egui::vec2(24.0, 20.0))).on_hover_text(crate::i18n::t("Lance le script dans Blender en arrière-plan (blender --background --python)")).clicked() {
                             self.want_blender = true;
                         }
-                        if extras::runner_for(&rel).is_some() && ui.button(crate::i18n::t("▶ exécuter")).on_hover_text(crate::i18n::t("Lance le script et affiche sa sortie (F5)")).clicked() {
+                        if extras::runner_for(&rel).is_some() && ui.add(egui::Button::new(egui::RichText::new(crate::lucide::PLAY).size(14.0)).min_size(egui::vec2(24.0, 20.0))).on_hover_text(crate::i18n::t("Lance le script et affiche sa sortie (F5)")).clicked() {
                             *run_now = true;
                         }
-                        if matches!(self.docs[i].content, Content::Text(_)) && ui.button(crate::i18n::t("historique")).on_hover_text(crate::i18n::t("Versions précédentes de ce fichier")).clicked() {
+                        if matches!(self.docs[i].content, Content::Text(_)) && ui.add(egui::Button::new(egui::RichText::new(lucide::HISTORY).size(14.0)).min_size(egui::vec2(24.0, 20.0))).on_hover_text(crate::i18n::t("Versions précédentes de ce fichier")).clicked() {
                             self.flush_all();
                             self.history_dlg = Some(extras::HistoryDlg { versions: extras::history_list(&root, &rel), rel: rel.clone(), sel: 0, diff: true });
                         }
-                        if live::is_previewable(&rel) && ui.button(crate::i18n::t("aperçu live")).on_hover_text(crate::i18n::t("Ouvre la page dans ton navigateur ; elle se recharge à chaque enregistrement")).clicked() {
+                        if live::is_previewable(&rel) && ui.add(egui::Button::new(egui::RichText::new(lucide::GLOBE).size(14.0)).min_size(egui::vec2(24.0, 20.0))).on_hover_text(crate::i18n::t("Ouvre la page dans ton navigateur ; elle se recharge à chaque enregistrement")).clicked() {
                             self.flush_all();
                             match live::open(&root, &rel) {
                                 Ok(url) => self.toast = Some((format!("aperçu : {url}"), Instant::now())),
                                 Err(e) => self.error = Some(e),
                             }
                         }
-                        if can_summarize && ui.button(format!("{} {}", lucide::SPARKLES, crate::i18n::t("résumer"))).on_hover_text(crate::i18n::t("Résumé IA de ce fichier")).clicked() {
+                        if can_summarize && ui.add(egui::Button::new(egui::RichText::new(lucide::SPARKLES).size(14.0)).min_size(egui::vec2(24.0, 20.0))).on_hover_text(crate::i18n::t("Résumé IA de ce fichier")).clicked() {
                             self.actions.push(Action::Summarize);
                         }
                         if is_md {
                             // Texte (édition) ou Lecture (rendu), comme des onglets
                             let d = &mut self.docs[i];
                             ui.add_space(4.0);
-                            for (label, preview) in [("lecture", true), ("texte", false)] {
+                            for (label, icon, preview) in [("lecture", lucide::BOOK_OPEN, true), ("texte", lucide::PENCIL, false)] {
                                 let on = d.preview == preview;
-                                let b = egui::Button::new(RichText::new(crate::i18n::t(label)).color(if on { p.text } else { p.muted })).fill(if on { p.raised } else { egui::Color32::TRANSPARENT }).stroke(egui::Stroke::new(1.0, if on { p.line } else { egui::Color32::TRANSPARENT }));
-                                if ui.add(b).on_hover_text(crate::i18n::t("Ctrl+E")).clicked() {
+                                let b = egui::Button::new(RichText::new(icon).size(14.0).color(if on { p.text } else { p.muted })).fill(if on { p.raised } else { egui::Color32::TRANSPARENT }).stroke(egui::Stroke::new(1.0, if on { p.line } else { egui::Color32::TRANSPARENT }));
+                                if ui.add(b).on_hover_text(format!("{} (Ctrl+E)", crate::i18n::t(label))).clicked() {
                                     d.preview = preview;
                                 }
                             }
@@ -3834,10 +3834,10 @@ impl App {
                                 }
                             });
                             ui.horizontal(|ui| {
-                                if ui.button(crate::i18n::t("copier")).clicked() {
+                                if ui.add(egui::Button::new(egui::RichText::new(crate::lucide::COPY).size(14.0)).min_size(egui::vec2(24.0, 20.0))).on_hover_text(crate::i18n::t("copier")).clicked() {
                                     ui.ctx().copy_text(text.clone());
                                 }
-                                if ui.button(crate::i18n::t("enregistrer en note")).clicked() {
+                                if ui.add(egui::Button::new(egui::RichText::new(crate::lucide::FILE_TEXT).size(14.0)).min_size(egui::vec2(24.0, 20.0))).on_hover_text(crate::i18n::t("enregistrer en note")).clicked() {
                                     save = Some((rel.clone(), text.clone()));
                                 }
                             });
@@ -4323,7 +4323,7 @@ impl App {
         };
         sep(&mut hui);
         egui::containers::menu::MenuButton::new(crate::i18n::t("Vue")).ui(&mut hui, |ui| {
-            if ui.button(crate::i18n::t("Tout cadrer")).clicked() {
+            if ui.add(egui::Button::new(format!("{}  {}", crate::lucide::SCAN, crate::i18n::t("Tout cadrer")))).clicked() {
                 self.board.fit();
             }
             if ui.button(crate::i18n::t("Taille réelle (100 %)")).clicked() {
@@ -4400,7 +4400,7 @@ impl App {
                         self.board.data.zoom = v;
                     }
                 }
-                if ui.button(crate::i18n::t("Tout cadrer")).clicked() {
+                if ui.add(egui::Button::new(format!("{}  {}", crate::lucide::SCAN, crate::i18n::t("Tout cadrer")))).clicked() {
                     self.board.fit();
                 }
             });
@@ -4822,7 +4822,7 @@ impl App {
                     }
                     ui.add_space(10.0);
                     ui.horizontal_wrapped(|ui| {
-                        if ui.button(crate::i18n::t("ouvrir")).clicked() {
+                        if ui.add(egui::Button::new(egui::RichText::new(crate::lucide::FOLDER_OPEN).size(14.0)).min_size(egui::vec2(24.0, 20.0))).on_hover_text(crate::i18n::t("ouvrir")).clicked() {
                             self.actions.push(Action::Open(sel.clone()));
                         }
                         if ui.button(crate::i18n::t("ajouter au board")).clicked() {
@@ -4870,10 +4870,10 @@ impl App {
             if imgs.is_empty() {
                 ui.centered_and_justified(|ui| {
                     ui.label(RichText::new(crate::i18n::t("aucune image\n\nglisse des images dans la fenêtre, ou :")).color(p.muted));
-                    if ui.button(crate::i18n::t("importer des fichiers…")).clicked() {
+                    if ui.add(egui::Button::new(egui::RichText::new(crate::lucide::UPLOAD).size(14.0)).min_size(egui::vec2(24.0, 20.0))).on_hover_text(crate::i18n::t("importer des fichiers…")).clicked() {
                         self.pick_import(false);
                     }
-                    if ui.button(crate::i18n::t("lier un dossier…")).clicked() {
+                    if ui.add(egui::Button::new(egui::RichText::new(crate::lucide::FOLDER_PLUS).size(14.0)).min_size(egui::vec2(24.0, 20.0))).on_hover_text(crate::i18n::t("lier un dossier…")).clicked() {
                         self.pick_import(true);
                     }
                 });
@@ -4999,7 +4999,7 @@ impl App {
                         if !embedded && ui.small_button("×").on_hover_text(crate::i18n::t("Ctrl+L")).clicked() {
                             self.assistant_open = false;
                         }
-                        if ui.small_button(crate::i18n::t("vider")).clicked() {
+                        if ui.add(egui::Button::new(egui::RichText::new(crate::lucide::ERASER).size(13.0)).min_size(egui::vec2(24.0, 20.0))).on_hover_text(crate::i18n::t("vider")).clicked() {
                             self.assistant.msgs.clear();
                         }
                     });
@@ -5063,7 +5063,7 @@ impl App {
                                     if ui.small_button(crate::i18n::t("insérer au curseur")).clicked() {
                                         insert = Some(block.clone());
                                     }
-                                    if ui.small_button(crate::i18n::t("copier")).clicked() {
+                                    if ui.add(egui::Button::new(egui::RichText::new(crate::lucide::COPY).size(13.0)).min_size(egui::vec2(24.0, 20.0))).on_hover_text(crate::i18n::t("copier")).clicked() {
                                         ui.ctx().copy_text(block.clone());
                                     }
                                 });
@@ -5471,7 +5471,7 @@ impl App {
                             ui.label(RichText::new(format!("derniers fichiers reçus : {}", pr.received.len())).size(11.5));
                         }
                         ui.horizontal(|ui| {
-                            if ui.button(crate::i18n::t("arrêter")).clicked() {
+                            if ui.add(egui::Button::new(egui::RichText::new(crate::lucide::SQUARE).size(14.0)).min_size(egui::vec2(24.0, 20.0))).on_hover_text(crate::i18n::t("arrêter")).clicked() {
                                 self.receiver = None;
                             }
                             if ui.button(crate::i18n::t("ouvrir reçus/")).clicked() {
@@ -5899,12 +5899,12 @@ impl App {
                     }
                     ui.label(RichText::new(crate::i18n::t("Recommandé. Le fichier reste dans son dossier ; Aryadne l'affiche sans le copier.")).color(p.muted).size(11.0));
                     ui.add_space(6.0);
-                    if ui.button(crate::i18n::t("déplacer dans le coffre")).clicked() {
+                    if ui.add(egui::Button::new(egui::RichText::new(crate::lucide::FOLDER_INPUT).size(14.0)).min_size(egui::vec2(24.0, 20.0))).on_hover_text(crate::i18n::t("déplacer dans le coffre")).clicked() {
                         choice = Some("move");
                     }
                     ui.label(RichText::new(crate::i18n::t("Le fichier quitte son dossier d'origine. Aucun doublon.")).color(p.muted).size(11.0));
                     ui.add_space(6.0);
-                    if ui.button(crate::i18n::t("copier dans le coffre")).clicked() {
+                    if ui.add(egui::Button::new(egui::RichText::new(crate::lucide::COPY_PLUS).size(14.0)).min_size(egui::vec2(24.0, 20.0))).on_hover_text(crate::i18n::t("copier dans le coffre")).clicked() {
                         choice = Some("copy");
                     }
                     ui.label(RichText::new(crate::i18n::t("L'original reste en place : le fichier prend deux fois la place.")).color(p.muted).size(11.0));
@@ -5981,7 +5981,7 @@ impl App {
                                 up.install(self.github_token.clone(), ctx);
                             }
                         }
-                        if !st.checking && st.progress.is_none() && ui.button(crate::i18n::t("vérifier")).clicked() {
+                        if !st.checking && st.progress.is_none() && ui.add(egui::Button::new(egui::RichText::new(crate::lucide::CHECK).size(14.0)).min_size(egui::vec2(24.0, 20.0))).on_hover_text(crate::i18n::t("vérifier")).clicked() {
                             up.check(self.github_token.clone(), ctx);
                         }
                         if ui.button(crate::i18n::t("fermer")).clicked() {
@@ -6464,7 +6464,7 @@ fn ollama_panel(ui: &mut egui::Ui, local: &ollama::Local, s: &mut ai::Settings, 
                     s.model = m.trim_end_matches(":latest").to_string();
                     changed = true;
                 }
-                if ui.small_button(crate::i18n::t("supprimer")).on_hover_text(crate::i18n::t("Libère l'espace disque")).clicked() {
+                if ui.add(egui::Button::new(egui::RichText::new(crate::lucide::TRASH_2).size(13.0)).min_size(egui::vec2(24.0, 20.0))).on_hover_text(crate::i18n::t("Libère l'espace disque")).clicked() {
                     delete = Some(m.clone());
                 }
             });

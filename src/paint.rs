@@ -1696,7 +1696,7 @@ impl Editor {
             }
             ui.separator();
             ui.label(egui::RichText::new(format!("{} × {} px · {} %", self.doc.w, self.doc.h, (self.zoom * 100.0).round())).size(11.0).color(p.muted));
-            if ui.button(crate::i18n::t("ajuster")).clicked() {
+            if ui.add(egui::Button::new(egui::RichText::new(crate::lucide::SCAN).size(14.0)).min_size(egui::vec2(24.0, 20.0))).on_hover_text(crate::i18n::t("ajuster")).clicked() {
                 self.fit = true;
             }
         });

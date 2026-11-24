@@ -253,7 +253,7 @@ impl App {
         if !cfg.ready() {
             ui.horizontal(|ui| {
                 ui.label(RichText::new(crate::i18n::t("Pour recevoir d'un ordinateur ailleurs, branche un stockage (R2…).")).color(p.muted).size(11.5));
-                if ui.small_button(crate::i18n::t("réglages")).clicked() {
+                if ui.add(egui::Button::new(egui::RichText::new(crate::lucide::SETTINGS).size(13.0)).min_size(egui::vec2(24.0, 20.0))).on_hover_text(crate::i18n::t("réglages")).clicked() {
                     self.open_settings_tab(ctx, settings::Tab::Cloud);
                 }
             });
@@ -321,7 +321,7 @@ impl App {
         if !cfg.ready() {
             ui.horizontal(|ui| {
                 ui.label(RichText::new(crate::i18n::t("Pour envoyer vers un ordinateur ailleurs, branche un stockage (R2…).")).color(p.muted).size(11.5));
-                if ui.small_button(crate::i18n::t("réglages")).clicked() {
+                if ui.add(egui::Button::new(egui::RichText::new(crate::lucide::SETTINGS).size(13.0)).min_size(egui::vec2(24.0, 20.0))).on_hover_text(crate::i18n::t("réglages")).clicked() {
                     self.open_settings_tab(ctx, settings::Tab::Cloud);
                 }
             });

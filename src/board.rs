@@ -1377,7 +1377,7 @@ impl Board {
                                 }
                             }
                             ui.separator();
-                            if ui.button(crate::i18n::t("fichier…")).clicked() {
+                            if ui.add(egui::Button::new(egui::RichText::new(crate::lucide::FILE).size(14.0)).min_size(egui::vec2(24.0, 20.0))).on_hover_text(crate::i18n::t("fichier…")).clicked() {
                                 if let Some(f) = rfd::FileDialog::new().add_filter("police", &["ttf", "otf"]).pick_file() {
                                     look.font = f.to_string_lossy().to_string();
                                 }

@@ -331,7 +331,7 @@ impl Editor {
         });
         ui.add_space(6.0);
         ui.horizontal(|ui| {
-            if ui.button(format!("{} {}", crate::lucide::PLUS, crate::i18n::t("Importer"))).on_hover_text(crate::i18n::t("Vidéos, images, sons, images à calques (.aryimg)")).clicked() {
+            if ui.add(egui::Button::new(egui::RichText::new(crate::lucide::PLUS).size(14.0)).min_size(egui::vec2(24.0, 20.0))).on_hover_text(crate::i18n::t("Vidéos, images, sons, images à calques (.aryimg)")).clicked() {
                 if let Some(files) = rfd::FileDialog::new().pick_files() {
                     for f in files {
                         if let Ok(c) = import(&self.path, &f, 0, 0.0) {
@@ -343,7 +343,7 @@ impl Editor {
                     self.changed();
                 }
             }
-            if ui.button(format!("{} {}", crate::lucide::TYPE, crate::i18n::t("Titre"))).on_hover_text(crate::i18n::t("Ajoute un titre à la tête de lecture (outil Texte : T)")).clicked() {
+            if ui.add(egui::Button::new(egui::RichText::new(crate::lucide::TYPE).size(14.0)).min_size(egui::vec2(24.0, 20.0))).on_hover_text(crate::i18n::t("Ajoute un titre à la tête de lecture (outil Texte : T)")).clicked() {
                 self.add_title(self.playhead, None);
             }
         });
@@ -611,7 +611,7 @@ impl Editor {
                             if ui.button(if c.grade.is_empty() { crate::i18n::t("＋ étalonnage en nodes") } else { crate::i18n::t("nodes ✎") }).on_hover_text(crate::i18n::t("Un graphe de nodes (courbes, rampes, balance…) appliqué aux couleurs de ce clip")).clicked() {
                                 new_grade = true;
                             }
-                            if !c.grade.is_empty() && ui.small_button(crate::i18n::t("retirer")).clicked() {
+                            if !c.grade.is_empty() && ui.add(egui::Button::new(egui::RichText::new(crate::lucide::X).size(13.0)).min_size(egui::vec2(24.0, 20.0))).on_hover_text(crate::i18n::t("retirer")).clicked() {
                                 c.grade.clear();
                                 ch = true;
                             }
@@ -1250,7 +1250,7 @@ impl Editor {
         }
         // ---- Ailleurs : le plan dans d'autres outils
         ui.horizontal_wrapped(|ui| {
-            if is_visual && ui.button(format!("{}  {}", crate::lucide::WORKFLOW, crate::i18n::t("Étalonner en nodes"))).clicked() {
+            if is_visual && ui.add(egui::Button::new(egui::RichText::new(crate::lucide::WORKFLOW).size(14.0)).min_size(egui::vec2(24.0, 20.0))).on_hover_text(crate::i18n::t("Étalonner en nodes")).clicked() {
                 self.new_grade(i);
             }
         });

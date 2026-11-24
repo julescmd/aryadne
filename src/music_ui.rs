@@ -541,7 +541,7 @@ impl Editor {
                     }
                 }
             });
-            if ui.button(format!("{}  {}", l::UPLOAD, crate::i18n::t("Importer un MIDI…"))).on_hover_text(crate::i18n::t("Ses pistes s'ajoutent au morceau")).clicked() {
+            if ui.add(egui::Button::new(egui::RichText::new(l::UPLOAD).size(14.0)).min_size(egui::vec2(24.0, 20.0))).on_hover_text(crate::i18n::t("Ses pistes s'ajoutent au morceau")).clicked() {
                 self.import_midi();
             }
             if self.pending.is_some() {
@@ -628,7 +628,7 @@ impl Editor {
                 self.sel_track = ti;
             }
             hr.context_menu(|ui| {
-                if ui.button(crate::i18n::t("supprimer la piste")).clicked() {
+                if ui.add(egui::Button::new(format!("{}  {}", crate::lucide::TRASH_2, crate::i18n::t("supprimer la piste")))).clicked() {
                     todo.push(Box::new(move |e: &mut Editor| {
                         e.song.tracks.remove(ti);
                         e.sel_region = None;

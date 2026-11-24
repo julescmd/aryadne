@@ -110,7 +110,7 @@ impl Graph {
                 }
             }
             ui.separator();
-            if ui.button(crate::i18n::t("cadrer")).on_hover_text("Origine").clicked() {
+            if ui.add(egui::Button::new(egui::RichText::new(crate::lucide::SCAN).size(14.0)).min_size(egui::vec2(24.0, 20.0))).on_hover_text("Origine").clicked() {
                 self.view = None;
             }
         });

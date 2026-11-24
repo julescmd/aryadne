@@ -416,10 +416,10 @@ impl App {
             ui.horizontal(|ui| {
                 ui.label(RichText::new(format!("@{}", f.name)).color(p.accent).family(theme::bold()));
                 ui.label(RichText::new(&f.path).color(p.muted).size(11.0));
-                if ui.small_button(crate::i18n::t("ouvrir")).clicked() {
+                if ui.add(egui::Button::new(egui::RichText::new(crate::lucide::FOLDER_OPEN).size(13.0)).min_size(egui::vec2(24.0, 20.0))).on_hover_text(crate::i18n::t("ouvrir")).clicked() {
                     reveal(std::path::Path::new(&f.path), false);
                 }
-                if ui.small_button(crate::i18n::t("retirer")).on_hover_text(crate::i18n::t("Le dossier n'est pas supprimé")).clicked() {
+                if ui.add(egui::Button::new(egui::RichText::new(crate::lucide::X).size(13.0)).min_size(egui::vec2(24.0, 20.0))).on_hover_text(crate::i18n::t("Le dossier n'est pas supprimé")).clicked() {
                     let r = vault::unlink(&root, &format!("@{}", f.name));
                     self.report(r);
                     changed = true;
@@ -436,7 +436,7 @@ impl App {
         ui.add_space(8.0);
         ui.horizontal(|ui| {
             ui.label(format!("fichiers liés : {}", links.files.len()));
-            if !links.files.is_empty() && ui.small_button(crate::i18n::t("tout retirer")).on_hover_text(crate::i18n::t("Les fichiers ne sont pas supprimés")).clicked() {
+            if !links.files.is_empty() && ui.add(egui::Button::new(egui::RichText::new(crate::lucide::X).size(13.0)).min_size(egui::vec2(24.0, 20.0))).on_hover_text(crate::i18n::t("Les fichiers ne sont pas supprimés")).clicked() {
                 let r = vault::unlink(&root, vault::LINKED_FILES);
                 self.report(r);
                 changed = true;
@@ -446,7 +446,7 @@ impl App {
         ui.label(caps(&crate::i18n::t("coffre")));
         ui.label(RichText::new(&root).color(p.muted).size(11.0));
         ui.horizontal(|ui| {
-            if ui.button(crate::i18n::t("ouvrir le dossier")).clicked() {
+            if ui.add(egui::Button::new(egui::RichText::new(crate::lucide::FOLDER_OPEN).size(14.0)).min_size(egui::vec2(24.0, 20.0))).on_hover_text(crate::i18n::t("ouvrir le dossier")).clicked() {
                 reveal(std::path::Path::new(&root), false);
             }
             if ui.button(crate::i18n::t("changer de coffre…")).clicked() {
@@ -550,7 +550,7 @@ impl App {
         ui.checkbox(&mut self.prefs.auto_update, crate::i18n::t("vérifier au démarrage (toutes les 6 h)"));
         ui.label(RichText::new(format!("Source : releases de github.com/{}", updater::REPO)).color(p.muted).size(11.0));
         ui.add_space(8.0);
-        let check = ui.button(crate::i18n::t("vérifier maintenant")).clicked();
+        let check = ui.add(egui::Button::new(egui::RichText::new(crate::lucide::REFRESH_CW).size(14.0)).min_size(egui::vec2(24.0, 20.0))).on_hover_text(crate::i18n::t("vérifier maintenant")).clicked();
         ui.add_space(16.0);
         ui.label(caps(&crate::i18n::t("système")));
         let label = if cfg!(windows) { "Aryadne dans le menu Démarrer" } else { "Aryadne dans le menu des applications (avec son icône)" };
@@ -670,7 +670,7 @@ fn font_picker(ui: &mut egui::Ui, label: &str, value: &mut String, default: &str
         }
     });
     ui.horizontal(|ui| {
-        if ui.small_button(crate::i18n::t("fichier…")).on_hover_text(crate::i18n::t("Choisir un fichier .ttf ou .otf")).clicked() {
+        if ui.add(egui::Button::new(egui::RichText::new(crate::lucide::FILE).size(13.0)).min_size(egui::vec2(24.0, 20.0))).on_hover_text(crate::i18n::t("Choisir un fichier .ttf ou .otf")).clicked() {
             if let Some(f) = rfd::FileDialog::new().add_filter("police", &["ttf", "otf"]).pick_file() {
                 *value = f.to_string_lossy().to_string();
             }

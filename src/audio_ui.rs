@@ -723,7 +723,7 @@ impl Editor {
                 self.sel_track = ti;
             }
             hr.context_menu(|ui| {
-                if ui.button(crate::i18n::t("supprimer la piste")).clicked() {
+                if ui.add(egui::Button::new(format!("{}  {}", crate::lucide::TRASH_2, crate::i18n::t("supprimer la piste")))).clicked() {
                     actions.push(Box::new(move |e: &mut Editor| {
                         e.session.remove_track(ti);
                         e.sel_clip = None;

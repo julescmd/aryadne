@@ -813,7 +813,7 @@ impl Viewer {
                 }
             }
             ui.separator();
-            if ui.button(crate::i18n::t("exporter…")).clicked() && self.export.is_none() {
+            if ui.add(egui::Button::new(egui::RichText::new(crate::lucide::DOWNLOAD).size(14.0)).min_size(egui::vec2(24.0, 20.0))).on_hover_text(crate::i18n::t("exporter…")).clicked() && self.export.is_none() {
                 self.export = Some(Export { fps: info.fps, every: self.on, format: "png", height: 0, with_drawings: true, job: None });
             }
         });
@@ -1239,7 +1239,7 @@ impl Viewer {
                     } else if j.finished {
                         ui.label(RichText::new(format!("terminé : {}", j.out.as_ref().map(|o| o.display().to_string()).unwrap_or_default())).color(p.accent).size(11.5));
                         if let Some(o) = &j.out {
-                            if ui.small_button(crate::i18n::t("ouvrir le dossier")).clicked() {
+                            if ui.add(egui::Button::new(egui::RichText::new(crate::lucide::FOLDER_OPEN).size(13.0)).min_size(egui::vec2(24.0, 20.0))).on_hover_text(crate::i18n::t("ouvrir le dossier")).clicked() {
                                 crate::settings::reveal(o, o.is_file());
                             }
                         }

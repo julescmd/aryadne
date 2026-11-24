@@ -710,7 +710,7 @@ impl App {
                 if r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
                     add = true;
                 }
-                add |= ui.button(crate::i18n::t("ajouter")).clicked();
+                add |= ui.add(egui::Button::new(egui::RichText::new(crate::lucide::PLUS).size(14.0)).min_size(egui::vec2(24.0, 20.0))).on_hover_text(crate::i18n::t("ajouter")).clicked();
             });
             ui.add_space(4.0);
             ui.label(RichText::new(crate::i18n::t("Toutes les cases « - [ ] » de tes notes, regroupées par note. Cocher ici coche dans la note. Ajoute « @2026-12-01 » pour une échéance.")).color(p.muted).size(11.0));
@@ -1631,7 +1631,7 @@ impl App {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     close = ui.small_button("×").on_hover_text(crate::i18n::t("fermer")).clicked();
                     if running {
-                        stop = ui.small_button(crate::i18n::t("arrêter")).clicked();
+                        stop = ui.add(egui::Button::new(egui::RichText::new(crate::lucide::SQUARE).size(13.0)).min_size(egui::vec2(24.0, 20.0))).on_hover_text(crate::i18n::t("arrêter")).clicked();
                     } else {
                         again = ui.small_button(crate::i18n::t("relancer")).clicked();
                     }
