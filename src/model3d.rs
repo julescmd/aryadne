@@ -6163,7 +6163,7 @@ impl Viewer {
                     }
                     Hdr::Fill => {
                         // Comme la maquette : l'ombrage et le rendu sont poussés à droite (largeur mesurée à l'image d'avant)
-                        let id = egui::Id::new("hdr3d-right");
+                        let id = egui::Id::unique("hdr3d-right");
                         let right_w: f32 = ui.ctx().data(|d| d.get_temp(id)).unwrap_or(0.0);
                         let fill = (hdr_w - (ui.cursor().min.x - hdr_x0) - right_w).max(4.0);
                         ui.add_space(fill);
@@ -6354,7 +6354,7 @@ impl Viewer {
             }
             if let Some(x0) = right_x0 {
                 let w = ui.min_rect().right() - x0;
-                ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("hdr3d-right"), w + 2.0));
+                ui.ctx().data_mut(|d| d.insert_temp(egui::Id::unique("hdr3d-right"), w + 2.0));
             }
         }));
         });

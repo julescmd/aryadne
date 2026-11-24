@@ -3774,7 +3774,7 @@ impl App {
         ui.painter().rect(col, 6.0, p.panel, egui::Stroke::new(1.0, p.line), egui::StrokeKind::Inside);
         for (k, (tool, icon, label, key)) in tools.iter().enumerate() {
             let r = egui::Rect::from_min_size(col.min + egui::vec2(5.0, 4.0 + k as f32 * 32.0), egui::vec2(30.0, 30.0));
-            let resp = ui.interact(r, egui::Id::new(("board-tool", k)), egui::Sense::click());
+            let resp = ui.interact(r, egui::Id::unique(("board-tool", k)), egui::Sense::click());
             let on = self.board.tool == *tool;
             if on {
                 ui.painter().rect_filled(r, 4.0, p.accent);
@@ -3897,7 +3897,7 @@ impl App {
             let text = crate::i18n::t(label);
             let g = ui.painter().layout_no_wrap(text, egui::FontId::proportional(12.5), p.text);
             let r = egui::Rect::from_min_size(egui::pos2(x, hr.center().y - 12.0), egui::vec2(g.size().x + 16.0, 24.0));
-            let resp = ui.interact(r, egui::Id::new(("board-insp", k)), egui::Sense::click());
+            let resp = ui.interact(r, egui::Id::unique(("board-insp", k)), egui::Sense::click());
             let on = self.board_tab == k;
             if on {
                 ui.painter().rect(r, 2.0, p.raised, egui::Stroke::new(1.0, p.line), egui::StrokeKind::Inside);

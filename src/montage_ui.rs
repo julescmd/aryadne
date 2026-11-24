@@ -156,6 +156,10 @@ pub struct Editor {
     fx_search: String,
     /// Déplacement d'un clip dans le moniteur Programme : clip, souris et position de départ
     monitor_drag: Option<(u64, Pos2, f32, f32)>,
+    /// Poignée de coin tirée dans le moniteur : (clip, distance au centre au départ, taille au départ)
+    monitor_scale: Option<(u64, f32, f32)>,
+    /// Panneau de gauche : 0 médias, 1 source
+    left_tab: u8,
     folded: HashSet<&'static str>,
     shuttle: f32,
     /// Ajuster le zoom pour voir tout le montage (\\)
@@ -220,6 +224,8 @@ impl Editor {
             bin_grid: true,
             fx_search: String::new(),
             monitor_drag: None,
+            monitor_scale: None,
+            left_tab: 0,
             folded: HashSet::new(),
             shuttle: 0.0,
             fit_zoom: true,
@@ -229,6 +235,11 @@ impl Editor {
 
     fn changed(&mut self) {
         self.project.ensure_ids();
+        // Timeline magnétique : l'histoire se resserre, ce qui y est accroché suit
+        if self.project.magnetic {
+            let before = self.saved.clone();
+            self.project.magnetize(&before);
+        }
         if self.saved != self.project {
             self.history.push(std::mem::replace(&mut self.saved, self.project.clone()));
             if self.history.len() > 200 {
@@ -754,8 +765,8 @@ impl Editor {
         let fx_r = crate::layout::offer("montage-fx", "options d'effet, source, effets");
         let prog_r = crate::layout::offer("montage-program", "moniteur programme");
         let timeline_block = |this: &mut Editor, ui: &mut egui::Ui| {
-            egui::Panel::left("montage-tools").exact_size(36.0).resizable(false).frame(egui::Frame::new().fill(p.panel).stroke(Stroke::new(1.0, p.line)).inner_margin(egui::Margin::symmetric(3, 8))).show(ui, |ui| this.tools_panel(ui));
-            egui::CentralPanel::default().frame(egui::Frame::new().fill(p.bg)).show(ui, |ui| this.timeline_panel(ui));
+            // Les outils sont dans la barre de la timeline
+            egui::CentralPanel::default().frame(egui::Frame::new().fill(p.panel)).show(ui, |ui| this.timeline_panel(ui));
         };
         let top_left = |this: &mut Editor, ui: &mut egui::Ui| {
             let tabs = ["options d'effet", "source", "effets"];
@@ -770,32 +781,34 @@ impl Editor {
         // Disposition de la maquette (quand aucun panneau n'a sa propre case) : médias à gauche,
         // inspecteur à droite, moniteurs source et programme côte à côte, timeline dessous
         if bin_r.is_none() && tl_r.is_none() && fx_r.is_none() && prog_r.is_none() {
-            egui::Panel::left("montage-media").resizable(true).default_size(250.0).min_size(190.0).max_size(460.0).frame(panel_frame).show(ui, |ui| {
-                pane_head(ui, &crate::i18n::t("Médias"), None);
-                egui::Frame::new().inner_margin(6).show(ui, |ui| self.bin_panel(ui));
+            // Médias à gauche, avec la source en second onglet (on y choisit l'entrée et la sortie d'un média)
+            egui::Panel::left("montage-media").resizable(true).default_size(280.0).min_size(200.0).max_size(480.0).frame(panel_frame).show(ui, |ui| {
+                let left = if self.source.is_some() && self.left_tab == 1 { 1 } else { 0 };
+                let k = tab_chips(ui, left, &[&crate::i18n::t("Médias"), &crate::i18n::t("Source")]);
+                if let Some(k) = k {
+                    self.left_tab = k;
+                }
+                egui::Frame::new().inner_margin(8).show(ui, |ui| if left == 1 { self.source_panel(ui) } else { self.bin_panel(ui) });
             });
             egui::Panel::right("montage-inspector").resizable(true).default_size(290.0).min_size(240.0).max_size(460.0).frame(panel_frame).show(ui, |ui| {
-                let (hr, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 34.0), Sense::hover());
-                ui.painter().hline(hr.x_range(), hr.bottom() - 0.5, Stroke::new(1.0, p.line));
-                let mut x = hr.left() + 6.0;
-                let cur = if self.top_tab == 1 { 0 } else { self.top_tab };
-                for (k, label) in [(0u8, "Clip"), (2, "Effets")] {
-                    let g = ui.painter().layout_no_wrap(crate::i18n::t(label), egui::FontId::proportional(12.5), p.text);
-                    let r = Rect::from_min_size(pos2(x, hr.center().y - 12.0), egui::vec2(g.size().x + 16.0, 24.0));
-                    let resp = ui.interact(r, egui::Id::new(("montage-insp", k)), Sense::click());
-                    let on = cur == k;
-                    if on {
-                        ui.painter().rect(r, 2.0, p.raised, Stroke::new(1.0, p.line), egui::StrokeKind::Inside);
-                    }
-                    ui.painter().galley(pos2(r.left() + 8.0, r.center().y - g.size().y / 2.0), g, if on { p.text } else { p.muted });
-                    if resp.clicked() {
-                        self.top_tab = k;
-                    }
-                    x = r.right() + 2.0;
+                // Clip (cartes), Effets (bibliothèque), Avancé (toutes les options d'effet)
+                let cur = match self.top_tab { 2 => 1, 3 => 2, _ => 0 };
+                if let Some(k) = tab_chips(ui, cur, &[&crate::i18n::t("Clip"), &crate::i18n::t("Effets"), &crate::i18n::t("Avancé")]) {
+                    self.top_tab = [0, 2, 3][k as usize];
                 }
-                egui::Frame::new().inner_margin(12).show(ui, |ui| if cur == 2 { self.effects_panel(ui) } else { self.effect_controls(ui) });
+                egui::ScrollArea::vertical().id_salt("montage-insp").auto_shrink([false, false]).show(ui, |ui| {
+                    egui::Frame::new().inner_margin(12).show(ui, |ui| match cur {
+                        1 => self.effects_panel(ui),
+                        2 => self.effect_controls(ui),
+                        _ => self.clip_cards(ui),
+                    });
+                });
             });
             egui::Panel::bottom("montage-lower").resizable(true).default_size((full_h * 0.4).max(240.0)).min_size(180.0).max_size((full_h * 0.75).max(200.0)).frame(egui::Frame::new()).show(ui, |ui| timeline_block(self, ui));
+            // Un seul moniteur : le montage
+            egui::CentralPanel::default().frame(egui::Frame::new().fill(p.code_bg).inner_margin(egui::Margin::symmetric(16, 10))).show(ui, |ui| self.program_monitor(ui));
+            return;
+            #[allow(unreachable_code)]
             egui::CentralPanel::default().frame(egui::Frame::new().fill(p.code_bg).inner_margin(egui::Margin::symmetric(16, 12))).show(ui, |ui| {
                 // Deux moniteurs de même largeur, chacun dans sa case (rien ne déborde sur le voisin)
                 let full = ui.available_rect_before_wrap();
@@ -1373,6 +1386,8 @@ mod tests {
         let f = dir.join("m.aryav");
         let mut p = Project::default();
         p.clips = vec![clip(0.0, 4.0, 0, false), clip(4.0, 4.0, 0, false), clip(0.0, 8.0, 0, true)];
+        // Mode libre (comme Premiere) : la timeline magnétique est testée dans montage.rs
+        p.magnetic = false;
         p.ensure_ids();
         p.write(&f).unwrap();
         let mut e = Editor::open(f.clone(), dir.to_str().unwrap());
@@ -1425,4 +1440,30 @@ pub(crate) fn pane_head(ui: &mut egui::Ui, title: &str, count: Option<&str>) {
     if let Some(c) = count {
         ui.painter().text(pos2(hr.left() + 20.0 + w, hr.center().y), egui::Align2::LEFT_CENTER, c, egui::FontId::proportional(11.0), p.muted);
     }
+}
+
+/// Rangée d'onglets de 34 px (pastille en relief pour l'onglet ouvert) ; rend l'onglet cliqué
+pub(crate) fn tab_chips(ui: &mut egui::Ui, cur: u8, tabs: &[&str]) -> Option<u8> {
+    let p = crate::theme::pal();
+    let (hr, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 34.0), Sense::hover());
+    ui.painter().hline(hr.x_range(), hr.bottom() - 0.5, Stroke::new(1.0, p.line));
+    let mut x = hr.left() + 6.0;
+    let mut out = None;
+    for (k, label) in tabs.iter().enumerate() {
+        let g = ui.painter().layout_no_wrap(label.to_string(), egui::FontId::proportional(12.5), p.text);
+        let r = Rect::from_min_size(pos2(x, hr.center().y - 12.0), egui::vec2(g.size().x + 16.0, 24.0));
+        let resp = ui.interact(r, ui.scope_id().with(("tab-chip", k)), Sense::click());
+        let on = cur == k as u8;
+        if on {
+            ui.painter().rect(r, 2.0, p.raised, Stroke::new(1.0, p.line), egui::StrokeKind::Inside);
+        } else if resp.hovered() {
+            ui.painter().rect_filled(r, 2.0, p.raised);
+        }
+        ui.painter().galley(pos2(r.left() + 8.0, r.center().y - g.size().y / 2.0), g, if on { p.text } else { p.muted });
+        if resp.clicked() {
+            out = Some(k as u8);
+        }
+        x = r.right() + 2.0;
+    }
+    out
 }

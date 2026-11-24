@@ -266,6 +266,12 @@ pub fn bake_luts(p: &Project, project: &Path, root: &str) -> bool {
 }
 
 impl Clip {
+    /// Clip vide pour les tests
+    #[cfg(test)]
+    pub fn test() -> Clip {
+        Clip { name: "c".into(), file: "c.mp4".into(), kind: "video".into(), track: 0, start: 0.0, src_in: 0.0, src_out: 1.0, media: 10.0, has_audio: false, speed: 1.0, opacity: 1.0, volume: 1.0, fade_in: 0.0, fade_out: 0.0, brightness: 0.0, contrast: 1.0, saturation: 1.0, x: 0.0, y: 0.0, scale: 1.0, grade: String::new(), keys: vec![], text: String::new(), text_size: 72.0, text_color: [255; 3], font: String::new(), outline: false, xfade: 0.0, audio: false, link: 0, fx: vec![], id: 0 }
+    }
+
     /// Placement, taille et opacité à l'instant `t` de la timeline, d'après les clés (None sans clé).
     pub fn pose_at(&self, t: f32) -> Option<PoseKey> {
         let (k, r) = (&self.keys, t - self.start);
@@ -338,11 +344,26 @@ pub struct Project {
     /// Médias du panneau Projet (chemins comme ceux des clips)
     #[serde(default)]
     pub bin: Vec<String>,
+    /// Timeline magnétique : la piste V1 est l'histoire, sans trous ; le reste suit le plan auquel il est accroché
+    /// (absent des anciens montages : ils restent libres, on l'allume dans la barre de la timeline)
+    #[serde(default)]
+    pub magnetic: bool,
+    /// Chapitres (bandes nommées au-dessus de la règle), triés par début
+    #[serde(default)]
+    pub chapters: Vec<Chapter>,
 }
+
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+pub struct Chapter {
+    pub start: f32,
+    pub name: String,
+}
+
+
 
 impl Default for Project {
     fn default() -> Self {
-        Project { version: 2, width: 1920, height: 1080, fps: 24.0, tracks: 3, clips: vec![], atracks: 3, vstate: vec![], astate: vec![], markers: vec![], mark_in: None, mark_out: None, bin: vec![] }
+        Project { version: 2, width: 1920, height: 1080, fps: 24.0, tracks: 3, clips: vec![], atracks: 3, vstate: vec![], astate: vec![], markers: vec![], mark_in: None, mark_out: None, bin: vec![], magnetic: true, chapters: vec![] }
     }
 }
 
@@ -458,6 +479,48 @@ impl Project {
         self.clips.push(c);
         self.ensure_ids();
         vec![self.clips.len() - 1]
+    }
+
+    /// Timeline magnétique : resserre l'histoire (V1) sans trous, depuis 0, puis déplace chaque clip
+    /// accroché (titres, calques, sons) du même décalage que le plan de V1 sous lequel il commençait
+    /// dans `before`. Les sons liés à un plan de V1 le suivent par leur lien. Vrai si quelque chose a bougé.
+    pub fn magnetize(&mut self, before: &Project) -> bool {
+        let main = |c: &Clip| !c.audio && c.track == 0;
+        let mut order: Vec<usize> = (0..self.clips.len()).filter(|&i| main(&self.clips[i])).collect();
+        order.sort_by(|&a, &b| self.clips[a].start.total_cmp(&self.clips[b].start));
+        // Décalage de chaque plan de V1 (par identifiant)
+        let mut delta: Vec<(u64, f32)> = vec![];
+        let mut t = 0.0f32;
+        for (n, &i) in order.iter().enumerate() {
+            let c = &mut self.clips[i];
+            // Un fondu enchaîné fait se chevaucher le plan et le précédent
+            let want = if n == 0 { 0.0 } else { (t - c.xfade).max(0.0) };
+            let d = want - c.start;
+            if d.abs() > 1e-4 {
+                c.start = want;
+            }
+            delta.push((c.id, d));
+            t = c.end();
+        }
+        let mut moved = delta.iter().any(|(_, d)| d.abs() > 1e-4);
+        let of_id = |id: u64| delta.iter().find(|x| x.0 == id).map(|x| x.1);
+        // Plan de V1 sous un instant, dans l'état d'avant
+        let host = |at: f32| before.clips.iter().filter(|c| main(c) && c.start - 1e-3 <= at && at < c.end() - 1e-3).map(|c| c.id).next();
+        let link_of: Vec<(u32, u64)> = self.clips.iter().filter(|c| main(c) && c.link != 0).map(|c| (c.link, c.id)).collect();
+        for c in self.clips.iter_mut().filter(|c| !main(c)) {
+            // Le son lié à un plan de V1 suit ce plan ; le reste suit le plan sous son début (avant le changement)
+            let by_link = (c.link != 0).then(|| link_of.iter().find(|(l, _)| *l == c.link).map(|x| x.1)).flatten();
+            let old_start = before.clips.iter().find(|b| b.id == c.id).map(|b| b.start).unwrap_or(c.start);
+            let anchor = by_link.or_else(|| host(old_start));
+            if let Some(d) = anchor.and_then(of_id) {
+                let want = (old_start + d).max(0.0);
+                if (c.start - want).abs() > 1e-4 && (c.start - old_start).abs() < 1e-4 {
+                    c.start = want;
+                    moved = true;
+                }
+            }
+        }
+        moved
     }
 
     pub fn write(&self, path: &Path) -> Result<(), String> {
@@ -903,6 +966,27 @@ pub(crate) fn timecode(t: f32, fps: f32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn timeline_magnetique() {
+        let clip = |id: u64, track: usize, audio: bool, start: f32, len: f32, link: u32| Clip { id, track, audio, start, src_in: 0.0, src_out: len, link, ..Clip::test() };
+        let mut p = Project { clips: vec![clip(1, 0, false, 0.0, 4.0, 1), clip(2, 0, false, 4.0, 3.0, 0), clip(3, 0, false, 7.0, 5.0, 0), clip(4, 1, false, 8.0, 2.0, 0), clip(5, 0, true, 0.0, 4.0, 1)], ..Default::default() };
+        let before = p.clone();
+        // On retire le plan 2 : le plan 3 recule de 3 s, et le titre accroché au plan 3 aussi
+        p.clips.retain(|c| c.id != 2);
+        assert!(p.magnetize(&before));
+        let at = |p: &Project, id: u64| p.clips.iter().find(|c| c.id == id).unwrap().start;
+        assert_eq!(at(&p, 3), 4.0);
+        assert_eq!(at(&p, 4), 5.0);
+        assert_eq!(at(&p, 5), 0.0);
+        // Un plan rallongé pousse la suite, et le son lié reste avec son plan
+        let before = p.clone();
+        let i = p.clips.iter().position(|c| c.id == 1).unwrap();
+        p.clips[i].start = 2.0;
+        p.magnetize(&before);
+        assert_eq!(at(&p, 1), 0.0);
+        assert!(!p.clone().magnetize(&p));
+    }
 
     #[test]
     fn coupe_et_durees() {
