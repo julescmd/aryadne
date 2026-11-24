@@ -912,6 +912,317 @@ impl EMesh {
         Some(out)
     }
 
+    /// Incrustation de toute la région choisie (le I par défaut de Blender) : le contour de la
+    /// région rentre de `thick` dans le plan des faces, relié à l'ancien contour par des quadrilatères.
+    pub fn inset_region(&mut self, sel: &[bool], thick: f32) -> Option<Vec<bool>> {
+        let faces = self.faces_in(sel);
+        if faces.is_empty() {
+            return None;
+        }
+        let region: HashSet<usize> = faces.iter().copied().collect();
+        let mut inner: HashMap<(u32, u32), usize> = HashMap::new();
+        for &f in &faces {
+            let p = &self.polys[f];
+            for k in 0..p.len() {
+                inner.insert((p[k], p[(k + 1) % p.len()]), f);
+            }
+        }
+        let border: Vec<((u32, u32), usize)> = inner.iter().filter(|(e, _)| !inner.contains_key(&(e.1, e.0))).map(|(e, f)| (*e, *f)).collect();
+        if border.is_empty() {
+            return None;
+        }
+        // Normale vers l'intérieur de chaque arête du contour, dans le plan de sa face
+        let mut push: HashMap<u32, Vec<V3>> = HashMap::new();
+        for &((a, b), f) in &border {
+            let n = self.normal(&self.polys[f]);
+            let d = unit(sub(self.pos[b as usize], self.pos[a as usize]));
+            let inward = unit(cross(n, d));
+            push.entry(a).or_default().push(inward);
+            push.entry(b).or_default().push(inward);
+        }
+        let mut copy: HashMap<u32, u32> = HashMap::new();
+        for (&v, ns) in &push {
+            let m = ns.iter().fold([0.0f32; 3], |a, n| [a[0] + n[0], a[1] + n[1], a[2] + n[2]]);
+            let m = unit(m);
+            let c = ns.iter().map(|n| n[0] * m[0] + n[1] * m[1] + n[2] * m[2]).fold(1.0f32, f32::min).max(0.25);
+            let p = self.pos[v as usize];
+            self.pos.push([p[0] + m[0] * thick / c, p[1] + m[1] * thick / c, p[2] + m[2] * thick / c]);
+            copy.insert(v, self.pos.len() as u32 - 1);
+        }
+        for &f in &region {
+            for v in self.polys[f].iter_mut() {
+                if let Some(&n) = copy.get(v) {
+                    *v = n;
+                }
+            }
+        }
+        for &((a, b), _) in &border {
+            self.polys.push(vec![a, b, copy[&b], copy[&a]]);
+        }
+        let mut out = vec![false; self.pos.len()];
+        for &f in &region {
+            for &v in &self.polys[f] {
+                out[v as usize] = true;
+            }
+        }
+        Some(out)
+    }
+
+    /// Longueur moyenne du contour de la région choisie : l'échelle de l'incrustation.
+    pub fn region_scale(&self, sel: &[bool]) -> f32 {
+        let faces = self.faces_in(sel);
+        let mut tot = 0.0;
+        let mut n = 0;
+        for &f in &faces {
+            let p = &self.polys[f];
+            for k in 0..p.len() {
+                let d = sub(self.pos[p[(k + 1) % p.len()] as usize], self.pos[p[k] as usize]);
+                tot += (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+                n += 1;
+            }
+        }
+        if n == 0 { 0.0 } else { tot / n as f32 }
+    }
+
+    /// Biseau des sommets choisis (Ctrl+Maj+B) : chaque sommet devient une petite face, ses arêtes
+    /// coupées à `width` de lui.
+    pub fn bevel_verts(&mut self, sel: &[bool], width: f32) -> Option<Vec<bool>> {
+        let mut faces_of: Vec<Vec<usize>> = vec![vec![]; self.pos.len()];
+        for (f, p) in self.polys.iter().enumerate() {
+            for &v in p {
+                faces_of[v as usize].push(f);
+            }
+        }
+        let mut in_face: HashMap<(usize, u32), [u32; 2]> = HashMap::new();
+        let mut caps: Vec<(u32, Vec<u32>)> = vec![];
+        let n0 = self.pos.len();
+        for v in 0..n0 as u32 {
+            if !sel.get(v as usize).copied().unwrap_or(false) {
+                continue;
+            }
+            let Some((fan, false)) = self.fan(v, &faces_of) else { continue };
+            let pv = self.pos[v as usize];
+            let mut pts: HashMap<u32, u32> = HashMap::new();
+            for &(_, x, _) in &fan {
+                let d = sub(self.pos[x as usize], pv);
+                let l = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt().max(1e-9);
+                let both = sel.get(x as usize).copied().unwrap_or(false);
+                let w = width.min(l * if both { 0.45 } else { 0.9 });
+                self.pos.push([pv[0] + d[0] / l * w, pv[1] + d[1] / l * w, pv[2] + d[2] / l * w]);
+                pts.insert(x, self.pos.len() as u32 - 1);
+            }
+            for &(f, prev, next) in &fan {
+                in_face.insert((f, v), [pts[&prev], pts[&next]]);
+            }
+            // La face du coin : les points dans l'ordre inverse de l'éventail (tournée vers l'extérieur)
+            let mut cap: Vec<u32> = fan.iter().map(|&(_, x, _)| pts[&x]).collect();
+            cap.reverse();
+            caps.push((v, cap));
+        }
+        if caps.is_empty() {
+            return None;
+        }
+        for (f, p) in self.polys.iter_mut().enumerate() {
+            let mut out = vec![];
+            for &v in p.iter() {
+                match in_face.get(&(f, v)) {
+                    Some(r) => out.extend(r),
+                    None => out.push(v),
+                }
+            }
+            *p = out;
+        }
+        let mut sel_out = vec![false; self.pos.len()];
+        for (_, cap) in caps {
+            for &v in &cap {
+                sel_out[v as usize] = true;
+            }
+            self.polys.push(cap);
+        }
+        Some(self.compact(sel_out))
+    }
+
+    /// Subdivise les faces choisies : `cuts` coupes par côté. Les quadrilatères deviennent une grille,
+    /// les autres faces un éventail de quadrilatères autour de leur centre ; les faces voisines
+    /// reçoivent les nouveaux points sur leurs côtés partagés.
+    pub fn subdivide(&mut self, sel: &[bool], cuts: u32) -> Option<Vec<bool>> {
+        let faces = self.faces_in(sel);
+        if faces.is_empty() || cuts == 0 {
+            return None;
+        }
+        let n = cuts as usize;
+        let mut pts: HashMap<(u32, u32), Vec<u32>> = HashMap::new();
+        for &f in &faces {
+            let p = self.polys[f].clone();
+            for k in 0..p.len() {
+                let (a, b) = (p[k], p[(k + 1) % p.len()]);
+                if pts.contains_key(&(a, b)) {
+                    continue;
+                }
+                let (pa, pb) = (self.pos[a as usize], self.pos[b as usize]);
+                let mut vs = vec![];
+                for j in 1..=n {
+                    let t = j as f32 / (n + 1) as f32;
+                    self.pos.push([0, 1, 2].map(|q| pa[q] + (pb[q] - pa[q]) * t));
+                    vs.push(self.pos.len() as u32 - 1);
+                }
+                let mut r = vs.clone();
+                r.reverse();
+                pts.insert((a, b), vs);
+                pts.insert((b, a), r);
+            }
+        }
+        let chosen: HashSet<usize> = faces.iter().copied().collect();
+        let side = |a: u32, b: u32, pts: &HashMap<(u32, u32), Vec<u32>>| -> Vec<u32> {
+            let mut l = vec![a];
+            l.extend(&pts[&(a, b)]);
+            l.push(b);
+            l
+        };
+        let mut polys = vec![];
+        let old = std::mem::take(&mut self.polys);
+        for (f, p) in old.into_iter().enumerate() {
+            if !chosen.contains(&f) {
+                // Voisine : les points s'insèrent sur ses côtés subdivisés
+                let mut out = vec![];
+                for k in 0..p.len() {
+                    out.push(p[k]);
+                    if let Some(m) = pts.get(&(p[k], p[(k + 1) % p.len()])) {
+                        out.extend(m);
+                    }
+                }
+                polys.push(out);
+                continue;
+            }
+            if p.len() == 4 {
+                let s0 = side(p[0], p[1], &pts);
+                let s2 = side(p[3], p[2], &pts);
+                let s1 = side(p[1], p[2], &pts);
+                let s3 = side(p[0], p[3], &pts);
+                // Grille (n+2) x (n+2) : rangées de s3 (gauche) à s1 (droite)
+                let m = n + 2;
+                let mut grid = vec![vec![0u32; m]; m];
+                for i in 0..m {
+                    grid[0][i] = s0[i];
+                    grid[m - 1][i] = s2[i];
+                    grid[i][0] = s3[i];
+                    grid[i][m - 1] = s1[i];
+                }
+                for r in 1..m - 1 {
+                    for c in 1..m - 1 {
+                        let (u, v) = (c as f32 / (m - 1) as f32, r as f32 / (m - 1) as f32);
+                        let (a, b, cc, d) = (self.pos[p[0] as usize], self.pos[p[1] as usize], self.pos[p[2] as usize], self.pos[p[3] as usize]);
+                        let q = [0, 1, 2].map(|k| (1.0 - v) * ((1.0 - u) * a[k] + u * b[k]) + v * ((1.0 - u) * d[k] + u * cc[k]));
+                        self.pos.push(q);
+                        grid[r][c] = self.pos.len() as u32 - 1;
+                    }
+                }
+                for r in 0..m - 1 {
+                    for c in 0..m - 1 {
+                        polys.push(vec![grid[r][c], grid[r][c + 1], grid[r + 1][c + 1], grid[r + 1][c]]);
+                    }
+                }
+            } else {
+                let k = p.len();
+                let cnt = k as f32;
+                let cpos = p.iter().fold([0.0f32; 3], |a, &v| {
+                    let q = self.pos[v as usize];
+                    [a[0] + q[0] / cnt, a[1] + q[1] / cnt, a[2] + q[2] / cnt]
+                });
+                self.pos.push(cpos);
+                let c = self.pos.len() as u32 - 1;
+                for i in 0..k {
+                    let (a, b) = (p[i], p[(i + 1) % k]);
+                    let prev = pts[&(p[(i + k - 1) % k], a)].last().copied().unwrap();
+                    let s = &pts[&(a, b)];
+                    polys.push(vec![prev, a, s[0], c]);
+                    for j in 0..s.len() - 1 {
+                        polys.push(vec![s[j], s[j + 1], c]);
+                    }
+                }
+            }
+        }
+        self.polys = polys;
+        let mut out = vec![false; self.pos.len()];
+        for (i, s) in sel.iter().enumerate() {
+            if *s && i < out.len() {
+                out[i] = true;
+            }
+        }
+        for i in sel.len()..self.pos.len() {
+            out[i] = true;
+        }
+        Some(out)
+    }
+
+    /// Lisse les sommets choisis : chacun va vers la moyenne de ses voisins, `repeat` fois.
+    pub fn smooth(&mut self, sel: &[bool], factor: f32, repeat: u32) -> Option<Vec<bool>> {
+        if !sel.iter().any(|s| *s) {
+            return None;
+        }
+        let nb = self.neighbors();
+        for _ in 0..repeat.max(1) {
+            let old = self.pos.clone();
+            for (i, s) in sel.iter().enumerate() {
+                if !*s || i >= old.len() || nb[i].is_empty() {
+                    continue;
+                }
+                let c = nb[i].len() as f32;
+                let avg = nb[i].iter().fold([0.0f32; 3], |a, &j| {
+                    let q = old[j as usize];
+                    [a[0] + q[0] / c, a[1] + q[1] / c, a[2] + q[2] / c]
+                });
+                self.pos[i] = [0, 1, 2].map(|k| old[i][k] + (avg[k] - old[i][k]) * factor);
+            }
+        }
+        Some(sel.to_vec())
+    }
+
+    /// Fusionne les sommets choisis plus proches que `dist` (« fusionner par distance »).
+    pub fn merge_by_distance(&mut self, sel: &[bool], dist: f32) -> Option<Vec<bool>> {
+        let chosen: Vec<usize> = (0..self.pos.len()).filter(|&i| sel.get(i).copied().unwrap_or(false)).collect();
+        if chosen.len() < 2 {
+            return None;
+        }
+        let d = dist.max(1e-7);
+        let cell = |p: V3| p.map(|x| (x / d).floor() as i64);
+        let mut grid: HashMap<[i64; 3], Vec<usize>> = HashMap::new();
+        let mut map: Vec<u32> = (0..self.pos.len() as u32).collect();
+        for &i in &chosen {
+            let c = cell(self.pos[i]);
+            let mut target = None;
+            'look: for dx in -1..=1 {
+                for dy in -1..=1 {
+                    for dz in -1..=1 {
+                        for &j in grid.get(&[c[0] + dx, c[1] + dy, c[2] + dz]).map(|v| v.as_slice()).unwrap_or(&[]) {
+                            let e = sub(self.pos[i], self.pos[j]);
+                            if e[0] * e[0] + e[1] * e[1] + e[2] * e[2] <= d * d {
+                                target = Some(j);
+                                break 'look;
+                            }
+                        }
+                    }
+                }
+            }
+            match target {
+                Some(j) => map[i] = j as u32,
+                None => grid.entry(c).or_default().push(i),
+            }
+        }
+        for p in &mut self.polys {
+            for v in p.iter_mut() {
+                *v = map[*v as usize];
+            }
+            p.dedup();
+            while p.len() > 1 && p.first() == p.last() {
+                p.pop();
+            }
+        }
+        self.polys.retain(|p| p.len() >= 3);
+        let out: Vec<bool> = (0..self.pos.len()).map(|i| sel.get(i).copied().unwrap_or(false) && map[i] == i as u32).collect();
+        Some(self.compact(out))
+    }
+
     /// Tout ce qui touche la sélection par des faces (L / Ctrl+L) : la pièce entière.
     pub fn linked(&self, sel: &[bool]) -> Vec<bool> {
         let mut out: Vec<bool> = (0..self.pos.len()).map(|i| sel.get(i).copied().unwrap_or(false)).collect();
@@ -1081,6 +1392,54 @@ mod tests {
         assert_eq!(m.polys.len(), 2 + 4 * 3);
         assert!(ferme(&m));
         assert!((m.volume() - 1.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn outils_de_modelage() {
+        // Incrustation de région : deux faces voisines, une seule bordure
+        let mut m = cube();
+        let mut sel = vec![false; 8];
+        for v in [0, 1, 2, 3, 6, 7] {
+            sel[v] = true;
+        }
+        let f0 = m.faces_in(&sel).len();
+        assert_eq!(f0, 2);
+        assert!(m.inset_region(&sel, 0.1).is_some());
+        assert_eq!(m.polys.len(), 6 + 6);
+        assert!(ferme(&m));
+        // Biseau d'un sommet : un triangle au coin
+        let mut m = cube();
+        let mut sel = vec![false; 8];
+        sel[7] = true;
+        assert!(m.bevel_verts(&sel, 0.2).is_some());
+        assert_eq!(m.polys.len(), 7);
+        assert!(ferme(&m));
+        assert!(m.volume() < 1.0 && m.volume() > 0.99);
+        // Subdiviser tout le cube en 2 coupes : 6 x 9 faces
+        let mut m = cube();
+        assert!(m.subdivide(&[true; 8], 2).is_some());
+        assert_eq!(m.polys.len(), 54);
+        assert!(ferme(&m));
+        // Une seule face subdivisée : ses voisines gagnent des points, tout reste fermé
+        let mut m = cube();
+        let mut sel = vec![false; 8];
+        for v in [0, 2, 3, 1] {
+            sel[v] = true;
+        }
+        assert!(m.subdivide(&sel, 1).is_some());
+        assert!(ferme(&m));
+        // Fusionner par distance : deux sommets presque confondus
+        let mut m = cube();
+        m.pos.push([1.0, 1.0, 1.00001]);
+        m.polys[1] = m.polys[1].iter().map(|&v| if v == 7 { 8 } else { v }).collect();
+        let n = m.pos.len();
+        assert!(m.merge_by_distance(&vec![true; n], 0.001).is_some());
+        assert_eq!(m.pos.len(), 8);
+        assert!(ferme(&m));
+        // Lisser
+        let mut m = cube();
+        assert!(m.smooth(&[true; 8], 0.5, 2).is_some());
+        assert!(m.volume() < 1.0);
     }
 
     #[test]

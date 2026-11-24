@@ -1940,12 +1940,19 @@ struct MeshEdit {
     last: Option<ParamOp>,
     /// Coupe en boucle qui attend qu'on choisisse l'anneau : nombre de coupes
     loopcut: Option<u32>,
+    /// Menu du clic droit ouvert, et l'outil qu'on y a choisi (appliqué à l'image suivante)
+    menu: Option<Pos2>,
+    trigger: Option<&'static str>,
+    /// Édition proportionnelle (O), son rayon (dans la scène), et la distance de chaque sommet à la sélection
+    prop: bool,
+    prop_r: f32,
+    prop_d: (Option<Pos2>, Vec<f32>),
 }
 
 /// Outil réglé à la souris (biseau, incrustation, coupe en boucle), rejoué depuis le maillage de
 /// départ à chaque changement : pendant l'outil, puis dans le panneau « dernière opération ».
 struct ParamOp {
-    /// 0 incruster, 1 biseau, 2 coupe en boucle
+    /// 0 incruster, 1 biseau, 2 coupe en boucle, 3 biseau des sommets, 4 subdiviser, 5 lisser, 6 fusionner par distance
     kind: u8,
     base: crate::meshedit::EMesh,
     base_sel: Vec<bool>,
@@ -1960,39 +1967,106 @@ struct ParamOp {
     limit: f32,
     /// Sélection laissée par l'outil : si elle change, le panneau de la dernière opération se ferme
     result_sel: Vec<bool>,
+    /// Incrustation : face par face (I une seconde fois) plutôt que toute la région
+    alt: bool,
 }
 
 impl ParamOp {
+    fn new(kind: u8, me: &MeshEdit, from: Pos2, center: Pos2) -> ParamOp {
+        let limit = match kind {
+            0 => me.mesh.region_scale(&me.sel) * 0.5,
+            1 => me.mesh.bevel_limit(&me.sel),
+            3 => me.mesh.bevel_limit(&me.sel) * 0.9,
+            6 => {
+                let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
+                for p in &me.mesh.pos {
+                    for k in 0..3 {
+                        lo[k] = lo[k].min(p[k]);
+                        hi[k] = hi[k].max(p[k]);
+                    }
+                }
+                ((hi[0] - lo[0]).max(hi[1] - lo[1]).max(hi[2] - lo[2]) * 0.1).max(1e-6)
+            }
+            _ => 1.0,
+        };
+        let mut op = ParamOp { kind, base: me.mesh.clone(), base_sel: me.sel.clone(), from, center, amount: 0.0, segments: 1, typed: String::new(), ring: vec![], limit, result_sel: vec![], alt: false };
+        op.amount = op.default_amount();
+        op.segments = match kind {
+            5 => 1,
+            _ => 1,
+        };
+        op
+    }
     fn run(&self) -> Option<(crate::meshedit::EMesh, Vec<bool>)> {
         let mut m = self.base.clone();
         let s = match self.kind {
-            0 => m.inset(&self.base_sel, self.amount)?,
+            0 if self.alt => m.inset(&self.base_sel, self.amount)?,
+            0 => m.inset_region(&self.base_sel, self.amount * self.limit)?,
             1 => m.bevel(&self.base_sel, self.amount * self.limit, self.segments)?,
-            _ => m.loop_cut(&self.ring, self.segments, self.amount)?,
+            2 => m.loop_cut(&self.ring, self.segments, self.amount)?,
+            3 => m.bevel_verts(&self.base_sel, self.amount * self.limit)?,
+            4 => m.subdivide(&self.base_sel, self.segments)?,
+            5 => m.smooth(&self.base_sel, self.amount, self.segments)?,
+            _ => m.merge_by_distance(&self.base_sel, self.amount * self.limit)?,
         };
         Some((m, s))
     }
     fn default_amount(&self) -> f32 {
         match self.kind {
-            0 | 1 => 0.25,
+            0 | 1 | 3 => 0.25,
+            5 => 0.5,
+            6 => 0.001,
             _ => 0.0,
         }
     }
+    /// L'outil se règle à la souris (les autres s'appliquent tout de suite, réglables dans le panneau)
+    fn interactive(&self) -> bool {
+        matches!(self.kind, 0 | 1 | 2 | 3)
+    }
     fn name(&self) -> &'static str {
-        ["incruster", "biseau", "coupe en boucle"][self.kind.min(2) as usize]
+        ["incruster", "biseau", "coupe en boucle", "biseau des sommets", "subdiviser", "lisser les sommets", "fusionner par distance"][self.kind.min(6) as usize]
     }
     fn amount_label(&self) -> &'static str {
-        ["épaisseur :", "largeur :", "glissement :"][self.kind.min(2) as usize]
+        match self.kind {
+            0 => "épaisseur :",
+            1 | 3 => "largeur :",
+            2 => "glissement :",
+            5 => "force :",
+            6 => "distance :",
+            _ => "",
+        }
     }
-    /// Valeur montrée (et tapée) : la largeur réelle pour le biseau
+    fn segments_label(&self) -> Option<&'static str> {
+        match self.kind {
+            1 => Some("segments"),
+            2 | 4 => Some("coupes"),
+            5 => Some("répétitions"),
+            _ => None,
+        }
+    }
+    /// Valeur montrée (et tapée) : la vraie distance quand il y en a une
     fn shown(&self) -> f32 {
-        if self.kind == 1 { self.amount * self.limit } else { self.amount }
+        if self.scaled() { self.amount * self.limit } else { self.amount }
+    }
+    fn scaled(&self) -> bool {
+        matches!(self.kind, 1 | 3 | 6) || (self.kind == 0 && !self.alt)
     }
     fn from_shown(&self, v: f32) -> f32 {
         match self.kind {
-            0 => v.clamp(0.01, 0.95),
-            1 => (v / self.limit.max(1e-9)).clamp(0.0, 1.0),
-            _ => v.clamp(-1.0, 1.0),
+            2 => v.clamp(-1.0, 1.0),
+            5 => v.clamp(0.0, 1.0),
+            0 if self.alt => v.clamp(0.01, 0.95),
+            _ => (v / self.limit.max(1e-9)).clamp(0.0, if self.kind == 0 { 4.0 } else { 1.0 }),
+        }
+    }
+    /// Bornes du réglage dans le panneau (valeur montrée) et pas du glissement
+    fn range(&self) -> (f32, f32, f32) {
+        match self.kind {
+            0 if self.alt => (0.01, 0.95, 0.005),
+            0 => (0.0, self.limit * 4.0, self.limit * 0.005),
+            2 => (-1.0, 1.0, 0.01),
+            5 => (0.0, 1.0, 0.01),
+            _ => (0.0, self.limit, self.limit * 0.005),
         }
     }
 }
@@ -2955,7 +3029,7 @@ impl Viewer {
             (f, mesh)
         };
         let n = mesh.pos.len();
-        self.mesh = Some(MeshEdit { obj: k, file, mesh, sel: vec![false; n], hist: vec![], redo: vec![], modal: None, boxing: None, skip_click: false, mode: 0, active: None, vis: None, op: None, last: None, loopcut: None });
+        self.mesh = Some(MeshEdit { obj: k, file, mesh, sel: vec![false; n], hist: vec![], redo: vec![], modal: None, boxing: None, skip_click: false, mode: 0, active: None, vis: None, op: None, last: None, loopcut: None, menu: None, trigger: None, prop: false, prop_r: 0.0, prop_d: (None, vec![]) });
         self.scene_multi.clear();
         self.capture_msg = None;
     }
@@ -3099,6 +3173,10 @@ impl Viewer {
                 me.hist.remove(0);
             }
         };
+        let idle = me.op.is_none() && me.modal.is_none() && me.loopcut.is_none() && me.boxing.is_none();
+        if idle && hovered && secondary && !ui.input(|i| i.modifiers.shift) {
+            me.menu = cur;
+        }
         // ---- Outil interactif en cours (biseau, incrustation, coupe en boucle) : la souris règle la
         // valeur, la molette les segments, on peut taper un nombre ; clic ou Entrée valide, clic droit
         // prend la valeur par défaut, Échap annule.
@@ -3159,7 +3237,9 @@ impl Viewer {
                 me.loopcut = None;
                 me.skip_click = true;
                 snapshot(me);
-                let mut op = ParamOp { kind: 2, base: me.mesh.clone(), base_sel: me.sel.clone(), from: at, center: at, amount: 0.0, segments: cuts, typed: String::new(), ring, limit: 1.0, result_sel: vec![] };
+                let mut op = ParamOp::new(2, me, at, at);
+                op.segments = cuts;
+                op.ring = ring;
                 if let Some((m, s)) = op.run() {
                     me.mesh = m;
                     me.sel = s.clone();
@@ -3180,7 +3260,12 @@ impl Viewer {
             ui.ctx().request_repaint();
         } else if let Some(mut op) = me.op.take() {
             let (wheel, ctrl, back, enter, esc) = ui.input(|i| (wheel_of(i), i.modifiers.command, i.key_pressed(Key::Backspace), i.key_pressed(Key::Enter), i.key_pressed(Key::Escape)));
-            if op.kind != 0 {
+            // I une seconde fois : face par face, ou toute la région
+            if op.kind == 0 && ui.input(|i| i.key_pressed(Key::I) && !i.modifiers.any()) {
+                op.alt = !op.alt;
+                op.amount = op.default_amount();
+            }
+            if op.segments_label().is_some() {
                 if wheel > 0.0 {
                     op.segments = (op.segments + 1).min(64);
                 } else if wheel < 0.0 {
@@ -3207,8 +3292,9 @@ impl Viewer {
             } else if let Some(at) = cur {
                 let (dist, d0) = ((at - op.center).length(), (op.from - op.center).length().max(24.0));
                 op.amount = match op.kind {
-                    0 => (1.0 - 0.75 * dist / d0).clamp(0.01, 0.95),
-                    1 => (0.25 * dist / d0).clamp(0.0, 1.0),
+                    0 if op.alt => (1.0 - 0.75 * dist / d0).clamp(0.01, 0.95),
+                    0 => (0.25 + 1.0 - dist / d0).clamp(0.0, 4.0),
+                    1 | 3 => (0.25 * dist / d0).clamp(0.0, 1.0),
                     _ => {
                         let (a, b) = op.ring[0];
                         let (sa, sb) = (project(to_world(op.base.pos[a as usize])), project(to_world(op.base.pos[b as usize])));
@@ -3247,8 +3333,8 @@ impl Viewer {
                     crate::i18n::t(op.name()),
                     crate::i18n::t(op.amount_label()),
                     if op.typed.is_empty() { format!("{shown:.3}") } else { format!("[{}]", op.typed) },
-                    if op.kind != 0 { format!("   {} {}", crate::i18n::t(if op.kind == 1 { "segments :" } else { "coupes :" }), op.segments) } else { String::new() },
-                    crate::i18n::t(if op.kind == 1 { "molette : segments" } else { "Ctrl : arrondir" }),
+                    match op.segments_label() { Some(l) => format!("   {} : {}", crate::i18n::t(l), op.segments), None => String::new() },
+                    crate::i18n::t(match op.kind { 0 if op.alt => "I : toute la région", 0 => "I : face par face", 1 => "molette : segments", _ => "Ctrl : arrondir" }),
                     crate::i18n::t("clic : valider"),
                     crate::i18n::t("clic droit : valeur par défaut"),
                     crate::i18n::t("Échap : annuler"),
@@ -3272,6 +3358,26 @@ impl Viewer {
         // ---- Transformation en cours
         if let Some((kind, axis, orig, from)) = me.modal.take() {
             let mut axis = axis;
+            let wheel = ui.input(wheel_of);
+            if me.prop_r <= 0.0 {
+                // Un quart de la taille de l'objet modifié
+                let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
+                for v in &orig {
+                    let w = to_world(*v);
+                    for k in 0..3 {
+                        lo[k] = lo[k].min(w[k]);
+                        hi[k] = hi[k].max(w[k]);
+                    }
+                }
+                let size = ((hi[0] - lo[0]).powi(2) + (hi[1] - lo[1]).powi(2) + (hi[2] - lo[2]).powi(2)).sqrt();
+                me.prop_r = if size.is_finite() && size > 0.0 { size * 0.25 } else { longest * 0.1 };
+            }
+            if me.prop && wheel != 0.0 {
+                me.prop_r *= if wheel > 0.0 { 1.12 } else { 1.0 / 1.12 };
+            }
+            if ui.input(|i| i.key_pressed(Key::O) && !i.modifiers.any()) {
+                me.prop = !me.prop;
+            }
             for (kk, k) in [(Key::X, 0usize), (Key::Y, 2), (Key::Z, 1)] {
                 if ui.input(|i| i.key_pressed(kk)) {
                     let mut e = [0.0f32; 3];
@@ -3295,8 +3401,8 @@ impl Viewer {
             } else if let Some(cur) = cur {
                 let d = cur - from;
                 let toward = cam.unrotate([0.0, 0.0, 1.0]);
-                for (&i, w) in chosen.iter().zip(&worlds) {
-                    let nw = match kind {
+                let xf = |w: &V3| -> V3 {
+                    match kind {
                         0 => {
                             let per_px = if cam.ortho { cam.dist / focal } else { (-q[2]).max(0.05) / focal } * longest;
                             let (right, up) = (cam.unrotate([1.0, 0.0, 0.0]), cam.unrotate([0.0, 1.0, 0.0]));
@@ -3344,8 +3450,44 @@ impl Viewer {
                                 None => [pivot[0] + v[0] * f, pivot[1] + v[1] * f, pivot[2] + v[2] * f],
                             }
                         }
-                    };
-                    me.mesh.pos[i] = to_local(nw);
+                    }
+                };
+                for (&i, w) in chosen.iter().zip(&worlds) {
+                    me.mesh.pos[i] = to_local(xf(w));
+                }
+                // Édition proportionnelle : les sommets voisins suivent, de moins en moins avec la distance
+                if me.prop {
+                    let r = me.prop_r.max(1e-6);
+                    if me.prop_d.0 != Some(from) || me.prop_d.1.len() != orig.len() {
+                        let mut dmin = vec![f32::MAX; orig.len()];
+                        for (i, o) in orig.iter().enumerate() {
+                            if me.sel.get(i).copied().unwrap_or(false) {
+                                continue;
+                            }
+                            let wi = to_world(*o);
+                            for w in &worlds {
+                                let e = sub(wi, *w);
+                                dmin[i] = dmin[i].min(dot(e, e));
+                            }
+                            dmin[i] = dmin[i].sqrt();
+                        }
+                        me.prop_d = (Some(from), dmin);
+                    }
+                    for i in 0..orig.len() {
+                        let dd = me.prop_d.1[i];
+                        if dd < r {
+                            let t = dd / r;
+                            let wgt = 1.0 - t * t * (3.0 - 2.0 * t);
+                            let w = to_world(orig[i]);
+                            let nw = xf(&w);
+                            me.mesh.pos[i] = to_local([0, 1, 2].map(|k| w[k] + (nw[k] - w[k]) * wgt));
+                        }
+                    }
+                    // Le cercle d'influence, autour du pivot
+                    let right = cam.unrotate([1.0, 0.0, 0.0]);
+                    if let Some(edge) = project([pivot[0] + right[0] * r, pivot[1] + right[1] * r, pivot[2] + right[2] * r]) {
+                        ui.painter_at(rect).circle_stroke(center, (edge - center).length(), Stroke::new(1.0, p.text.gamma_multiply(0.7)));
+                    }
                 }
                 dirty = true;
                 if confirm {
@@ -3372,9 +3514,11 @@ impl Viewer {
                     last = q;
                 }
             }
-            tool_hint(ui, rect, format!("{what}   ·   X Y Z : {}   ·   {}   ·   {}", crate::i18n::t("imposer un axe"), crate::i18n::t("clic : valider"), crate::i18n::t("Échap : annuler")));
+            let prop_txt = if me.prop { format!("   ·   {} {:.3} ({})", crate::i18n::t("proportionnel, rayon"), me.prop_r, crate::i18n::t("molette")) } else { format!("   ·   O : {}", crate::i18n::t("proportionnel")) };
+            tool_hint(ui, rect, format!("{what}   ·   X Y Z : {}{prop_txt}   ·   {}   ·   {}", crate::i18n::t("imposer un axe"), crate::i18n::t("clic : valider"), crate::i18n::t("Échap : annuler")));
             ui.ctx().request_repaint();
-        } else if hovered || me.boxing.is_some() {
+        } else if hovered || me.boxing.is_some() || me.trigger.is_some() {
+            let trig = me.trigger.take();
             let any = me.sel.iter().any(|s| *s);
             // ---- Outils
             let start = if key(Key::G) { Some(0u8) } else if key(Key::R) { Some(1) } else if key(Key::S) { Some(2) } else { None };
@@ -3382,7 +3526,7 @@ impl Viewer {
                 snapshot(me);
                 me.modal = Some((kind, None, me.mesh.pos.clone(), at));
             }
-            if key(Key::E) && any {
+            if (key(Key::E) || trig == Some("extruder")) && any {
                 snapshot(me);
                 match me.mesh.extrude(&me.sel) {
                     Some((sel, dir)) => {
@@ -3400,14 +3544,14 @@ impl Viewer {
                     }
                 }
             }
-            if (key(Key::X) || key(Key::Delete)) && any {
+            if (key(Key::X) || key(Key::Delete) || trig == Some("supprimer")) && any {
                 snapshot(me);
                 let sel = std::mem::take(&mut me.sel);
                 me.mesh.delete(&sel);
                 me.sel = vec![false; me.mesh.pos.len()];
                 dirty = true;
             }
-            if key(Key::F) {
+            if key(Key::F) || trig == Some("remplir") {
                 // Les sommets choisis, rangés en tournant autour de leur centre vu d'ici : la face regarde vers nous
                 let pts: Vec<(u32, Pos2)> = (0..me.mesh.pos.len()).filter(|&i| me.sel[i]).filter_map(|i| project(to_world(me.mesh.pos[i])).map(|s| (i as u32, s))).collect();
                 if pts.len() >= 3 {
@@ -3423,8 +3567,11 @@ impl Viewer {
                     }
                 }
             }
-            if key(Key::A) {
+            if key(Key::A) || trig == Some("tout choisir") {
                 me.sel.iter_mut().for_each(|s| *s = true);
+            }
+            if trig == Some("inverser la sélection") {
+                me.sel.iter_mut().for_each(|s| *s = !*s);
             }
             if !typing && ui.input(|i| i.modifiers.alt && i.key_pressed(Key::A)) {
                 me.sel.iter_mut().for_each(|s| *s = false);
@@ -3435,31 +3582,58 @@ impl Viewer {
                     me.mode = k as u8;
                 }
             }
-            // I : face incrustée dans chaque face choisie, réglée à la souris
-            if key(Key::I) && any {
-                if me.mesh.faces_in(&me.sel).is_empty() {
-                    self.capture_msg = Some(crate::i18n::t("incruster demande au moins une face dont tous les sommets sont choisis"));
-                } else if let Some(at) = cur {
-                    snapshot(me);
-                    me.op = Some(ParamOp { kind: 0, base: me.mesh.clone(), base_sel: me.sel.clone(), from: at, center: sel_center(me).unwrap_or(rc), amount: 0.25, segments: 1, typed: String::new(), ring: vec![], limit: 1.0, result_sel: vec![] });
-                }
-            }
-            // Ctrl+B : biseau des arêtes choisies
-            if !typing && any && ui.input(|i| i.modifiers.command && !i.modifiers.shift && i.key_pressed(Key::B)) {
-                let limit = me.mesh.bevel_limit(&me.sel);
-                if limit <= 0.0 || me.mesh.clone().bevel(&me.sel, limit * 0.1, 1).is_none() {
-                    self.capture_msg = Some(crate::i18n::t("biseau : choisis au moins une arête entre deux faces"));
-                } else if let Some(at) = cur {
-                    snapshot(me);
-                    me.op = Some(ParamOp { kind: 1, base: me.mesh.clone(), base_sel: me.sel.clone(), from: at, center: sel_center(me).unwrap_or(rc), amount: 0.25, segments: 1, typed: String::new(), ring: vec![], limit, result_sel: vec![] });
+            // Outils réglés à la souris (I, Ctrl+B, Ctrl+Maj+B) ou appliqués tout de suite
+            // (subdiviser, lisser, fusionner par distance), aussi depuis le menu du clic droit
+            let (cmd, shf) = ui.input(|i| (i.modifiers.command, i.modifiers.shift));
+            let b_key = !typing && ui.input(|i| i.key_pressed(Key::B));
+            let wanted: Option<u8> = if key(Key::I) || trig == Some("incruster") {
+                Some(0)
+            } else if (b_key && cmd && !shf) || trig == Some("biseau") {
+                Some(1)
+            } else if (b_key && cmd && shf) || trig == Some("biseau des sommets") {
+                Some(3)
+            } else if trig == Some("subdiviser") {
+                Some(4)
+            } else if trig == Some("lisser les sommets") {
+                Some(5)
+            } else if trig == Some("fusionner par distance") {
+                Some(6)
+            } else {
+                None
+            };
+            if let (Some(kind), true) = (wanted, any) {
+                let at = cur.unwrap_or(rc);
+                let center = sel_center(me).unwrap_or(rc);
+                let mut op = ParamOp::new(kind, me, at, center);
+                match op.run() {
+                    None => {
+                        self.capture_msg = Some(crate::i18n::t(match kind {
+                            0 | 4 => "il faut au moins une face dont tous les sommets sont choisis",
+                            1 => "biseau : choisis au moins une arête entre deux faces",
+                            6 => "fusionner par distance : rien d'assez proche",
+                            _ => "rien à faire avec cette sélection",
+                        }));
+                    }
+                    Some((m, sl)) => {
+                        snapshot(me);
+                        if op.interactive() {
+                            me.op = Some(op);
+                        } else {
+                            me.mesh = m;
+                            me.sel = sl.clone();
+                            op.result_sel = sl;
+                            me.last = Some(op);
+                            dirty = true;
+                        }
+                    }
                 }
             }
             // Ctrl+R : coupe en boucle
-            if !typing && ui.input(|i| i.modifiers.command && !i.modifiers.shift && i.key_pressed(Key::R)) {
+            if (!typing && ui.input(|i| i.modifiers.command && !i.modifiers.shift && i.key_pressed(Key::R))) || trig == Some("coupe en boucle") {
                 me.loopcut = Some(1);
             }
             // M : fusionner au centre
-            if key(Key::M) && any {
+            if (key(Key::M) || trig == Some("fusionner au centre")) && any {
                 snapshot(me);
                 match me.mesh.merge(&me.sel) {
                     Some(sel) => {
@@ -3489,6 +3663,9 @@ impl Viewer {
             }
             if key(Key::B) {
                 me.boxing = Some(None);
+            }
+            if key(Key::O) {
+                me.prop = !me.prop;
             }
             // Ctrl+Z annuler, Ctrl+Maj+Z ou Ctrl+Y rétablir
             let (z, y) = ui.input(|i| (i.modifiers.command && !i.modifiers.shift && i.key_pressed(Key::Z), i.modifiers.command && (i.modifiers.shift && i.key_pressed(Key::Z) || i.key_pressed(Key::Y))));
@@ -3659,6 +3836,39 @@ impl Viewer {
                 }
             }
         }
+        // Menu du clic droit : tous les outils du mode édition, avec leur raccourci
+        if let Some(at) = me.menu {
+            let mut close = false;
+            let area = egui::Area::new(ui.id().with("menu-edition")).order(egui::Order::Foreground).fixed_pos(at).constrain(true).show(ui.ctx(), |ui| {
+                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    ui.set_min_width(230.0);
+                    let groups: [(&str, &[(&'static str, &str)]); 4] = [
+                        ("SOMMETS", &[("fusionner au centre", "M"), ("fusionner par distance", ""), ("biseau des sommets", "Ctrl+Maj+B"), ("lisser les sommets", "")]),
+                        ("ARÊTES", &[("biseau", "Ctrl+B"), ("coupe en boucle", "Ctrl+R")]),
+                        ("FACES", &[("extruder", "E"), ("incruster", "I"), ("subdiviser", ""), ("remplir", "F")]),
+                        ("SÉLECTION", &[("tout choisir", "A"), ("inverser la sélection", "Ctrl+I"), ("supprimer", "X")]),
+                    ];
+                    for (gi, (title, items)) in groups.iter().enumerate() {
+                        if gi > 0 {
+                            ui.separator();
+                        }
+                        ui.label(crate::theme::section(&crate::i18n::t(title)));
+                        for (name, sc) in items.iter() {
+                            let r = ui.add(egui::Button::new(crate::i18n::t(name)).shortcut_text(crate::i18n::t_mid(sc)).frame(false).min_size(egui::vec2(220.0, 0.0)));
+                            if r.clicked() {
+                                me.trigger = Some(name);
+                                close = true;
+                            }
+                        }
+                    }
+                });
+            });
+            if close || ui.input(|i| i.key_pressed(Key::Escape)) || (ui.input(|i| i.pointer.any_pressed()) && !area.response.contains_pointer() && me.menu != cur) {
+                me.menu = None;
+                me.skip_click = true;
+            }
+            ui.ctx().request_repaint();
+        }
         // Panneau de la dernière opération (comme F9 dans Blender) : on la rajuste après coup
         if me.op.is_none() && me.loopcut.is_none() {
             if me.last.as_ref().is_some_and(|l| l.result_sel != me.sel) {
@@ -3678,20 +3888,26 @@ impl Viewer {
                             ui.label(egui::RichText::new(crate::i18n::t(l.name())).family(theme::bold()));
                         });
                         egui::Grid::new("derniere-op-grille").num_columns(2).spacing([10.0, 6.0]).show(ui, |ui| {
-                            ui.label(crate::i18n::t(l.amount_label().trim_end_matches(" :")));
-                            let mut v = l.shown();
-                            let (lo, hi, speed) = match l.kind {
-                                0 => (0.01, 0.95, 0.005),
-                                1 => (0.0, l.limit, l.limit * 0.005),
-                                _ => (-1.0, 1.0, 0.01),
-                            };
-                            if ui.add(egui::DragValue::new(&mut v).range(lo..=hi).speed(speed).max_decimals(3)).changed() {
-                                l.amount = l.from_shown(v);
-                                changed = true;
+                            if !l.amount_label().is_empty() {
+                                ui.label(crate::i18n::t(l.amount_label().trim_end_matches(" :")));
+                                let mut v = l.shown();
+                                let (lo, hi, speed) = l.range();
+                                if ui.add(egui::DragValue::new(&mut v).range(lo..=hi).speed(speed).max_decimals(4)).changed() {
+                                    l.amount = l.from_shown(v);
+                                    changed = true;
+                                }
+                                ui.end_row();
                             }
-                            ui.end_row();
-                            if l.kind != 0 {
-                                ui.label(crate::i18n::t(if l.kind == 1 { "segments" } else { "coupes" }));
+                            if l.kind == 0 {
+                                ui.label("");
+                                if ui.checkbox(&mut l.alt, crate::i18n::t("face par face")).changed() {
+                                    l.amount = l.default_amount();
+                                    changed = true;
+                                }
+                                ui.end_row();
+                            }
+                            if let Some(lab) = l.segments_label() {
+                                ui.label(crate::i18n::t(lab));
                                 if ui.add(egui::DragValue::new(&mut l.segments).range(1..=64).speed(0.1)).changed() {
                                     changed = true;
                                 }
@@ -5205,6 +5421,13 @@ impl Viewer {
                             if ui.add(xb).on_hover_text(crate::i18n::t("rayons X (Alt+Z) : voir et choisir aussi les sommets cachés derrière le maillage")).clicked() {
                                 self.xray = !self.xray;
                             }
+                            let on = self.mesh.as_ref().is_some_and(|m| m.prop);
+                            let pb = egui::Button::new(egui::RichText::new("◎").size(13.0).color(if on { p.on_accent } else { p.text })).fill(if on { p.accent } else { p.panel }).min_size(egui::vec2(24.0, 20.0));
+                            if ui.add_enabled(self.mesh.is_some(), pb).on_hover_text(crate::i18n::t("édition proportionnelle (O) : les sommets voisins suivent ; molette pendant G R S pour le rayon")).clicked() {
+                                if let Some(m) = self.mesh.as_mut() {
+                                    m.prop = !m.prop;
+                                }
+                            }
                             // Point de pivot (« . » ouvre aussi le menu circulaire)
                             let names = ["point médian", "curseur 3D", "origines individuelles", "objet actif"];
                             let icons = ["⊙", "⊕", "⁘", "◉"];
@@ -6473,7 +6696,7 @@ impl Viewer {
             }
         }
         if resp.hovered() {
-            let busy = self.mesh.as_ref().is_some_and(|m| m.op.is_some() || m.loopcut.is_some());
+            let busy = self.mesh.as_ref().is_some_and(|m| m.op.is_some() || m.loopcut.is_some() || (m.prop && m.modal.is_some()));
             let scroll = if busy { 0.0 } else { ui.input(|i| i.smooth_scroll_delta.y + i.zoom_delta().ln() * 300.0) };
             if scroll != 0.0 {
                 self.cam.dist = (self.cam.dist * (-scroll * 0.0015).exp()).clamp(0.2, 50.0);
