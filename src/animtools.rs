@@ -254,7 +254,7 @@ pub mod motion {
     pub fn put(tr: &mut Track, t: f32, v: [f32; 2]) {
         match tr.key_at(t) {
             Some(i) => tr.keys[i].v = v,
-            None => tr.insert(Key { t, v, ease: Default::default() }),
+            None => tr.insert(Key { t, v, ..Default::default() }),
         }
     }
 

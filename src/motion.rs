@@ -20,12 +20,15 @@ pub fn is_compo(rel: &str) -> bool {
 /// Les lissages sont ceux de toute l'app (voir keys.rs)
 pub use crate::keys::{Ease, EASES};
 
-#[derive(Clone, PartialEq, Serialize, Deserialize, Debug)]
+#[derive(Clone, PartialEq, Serialize, Deserialize, Debug, Default)]
 pub struct Key {
     pub t: f32,
     pub v: [f32; 2],
     #[serde(default)]
     pub ease: Ease,
+    /// Tangentes posées dans l'éditeur de courbes, par axe (gauche Δt Δv, droite Δt Δv) ; vide : le lissage
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tan: Vec<Option<[f32; 4]>>,
 }
 
 /// Une propriété animable : une valeur fixe, ou des clés
@@ -50,6 +53,10 @@ impl Track {
 
     pub fn at(&self, t: f32) -> [f32; 2] {
         let k = &self.keys;
+        // Des tangentes posées dans l'éditeur de courbes : chaque axe suit sa courbe
+        if k.iter().any(|x| !x.tan.is_empty()) {
+            return [0, 1].map(|c| crate::curves::eval(&self.curve(c), t));
+        }
         match k.len() {
             0 => self.v,
             _ if t <= k[0].t => k[0].v,
@@ -61,6 +68,11 @@ impl Track {
                 [a.v[0] + (b.v[0] - a.v[0]) * e, a.v[1] + (b.v[1] - a.v[1]) * e]
             }
         }
+    }
+
+    /// Un axe de la propriété, en courbe (pour l'éditeur de courbes)
+    pub fn curve(&self, c: usize) -> Vec<crate::curves::CK> {
+        self.keys.iter().map(|k| crate::curves::CK { t: k.t, v: k.v[c], ease: k.ease, tan: k.tan.get(c).copied().flatten() }).collect()
     }
 
     pub fn key_at(&self, t: f32) -> Option<usize> {
@@ -76,7 +88,7 @@ impl Track {
         }
         match self.key_at(t) {
             Some(i) => self.keys[i].v = v,
-            None => self.insert(Key { t, v, ease: Ease::Smooth }),
+            None => self.insert(Key { t, v, ease: Ease::Smooth, tan: vec![] }),
         }
     }
 
@@ -97,7 +109,7 @@ impl Track {
             }
             None => {
                 let v = self.at(t);
-                self.insert(Key { t, v, ease: Ease::Smooth });
+                self.insert(Key { t, v, ease: Ease::Smooth, tan: vec![] });
             }
         }
     }
@@ -318,6 +330,50 @@ pub enum Prop {
     Opacity,
 }
 
+/// Les courbes d'un calque pour l'éditeur de courbes : un axe par courbe, liées par propriété
+pub fn layer_curves(l: &Layer) -> Vec<crate::curves::Curve> {
+    use crate::curves::{Curve, W, X, Y, Z};
+    let mut out = vec![];
+    for (n, (pr, name)) in PROPS.iter().enumerate() {
+        let tr = l.track(*pr);
+        let axes: &[(&str, eframe::egui::Color32)] = match pr {
+            Prop::Pos | Prop::Scale => &[("X", X), ("Y", Y)],
+            Prop::Rot => &[("", Z)],
+            Prop::Opacity => &[("", W)],
+        };
+        for (c, (ax, col)) in axes.iter().enumerate() {
+            let label = if ax.is_empty() { crate::i18n::t(name) } else { format!("{} {ax}", crate::i18n::t(name)) };
+            out.push(Curve { label, color: *col, keys: tr.curve(c), link: n as u32 });
+        }
+    }
+    out
+}
+
+/// Remet les courbes éditées dans le calque (les instants et lissages viennent du premier axe de chaque lien)
+pub fn apply_curves(l: &mut Layer, curves: &[crate::curves::Curve]) {
+    for (n, (pr, _)) in PROPS.iter().enumerate() {
+        let axes: Vec<&crate::curves::Curve> = curves.iter().filter(|c| c.link == n as u32).collect();
+        let Some(first) = axes.first() else { continue };
+        let tr = l.track_mut(*pr);
+        let last = tr.keys.last().map(|k| k.v);
+        tr.keys = first
+            .keys
+            .iter()
+            .enumerate()
+            .map(|(i, k)| {
+                let mut v = last.unwrap_or([0.0; 2]);
+                for (c, a) in axes.iter().enumerate().take(2) {
+                    if let Some(x) = a.keys.get(i) {
+                        v[c] = x.v;
+                    }
+                }
+                let tan: Vec<Option<[f32; 4]>> = axes.iter().map(|a| a.keys.get(i).and_then(|x| x.tan)).collect();
+                Key { t: k.t, v, ease: k.ease, tan: if tan.iter().any(|x| x.is_some()) { tan } else { vec![] } }
+            })
+            .collect();
+    }
+}
+
 pub const PROPS: [(Prop, &str); 4] = [(Prop::Pos, "Position"), (Prop::Scale, "Échelle"), (Prop::Rot, "Rotation"), (Prop::Opacity, "Opacité")];
 
 impl Layer {
@@ -472,7 +528,7 @@ impl Default for Compo {
         title.pos.v = [960.0, 500.0];
         let mut line = Layer::new("Soulignement", Kind::Rect { w: 420.0, h: 10.0, radius: 5.0, color: [0xcc, 0xac, 0xb9] }, &c);
         line.pos.v = [960.0, 610.0];
-        line.scale.keys = vec![Key { t: 0.4, v: [0.0, 100.0], ease: Ease::Out }, Key { t: 1.2, v: [100.0, 100.0], ease: Ease::Smooth }];
+        line.scale.keys = vec![Key { t: 0.4, v: [0.0, 100.0], ease: Ease::Out, tan: vec![] }, Key { t: 1.2, v: [100.0, 100.0], ease: Ease::Smooth, tan: vec![] }];
         c.layers = vec![title, line];
         c
     }
@@ -1269,14 +1325,14 @@ pub fn apply_preset(l: &mut Layer, name: &str, t: f32) {
         "Rebond" => {
             let s = l.scale.at(t);
             l.scale.keys.retain(|k| k.t < t - KEY_EPS || k.t > t + 0.6 + KEY_EPS);
-            l.scale.insert(Key { t, v: [0.0, 0.0], ease: Ease::Bounce });
-            l.scale.insert(Key { t: t + 0.6, v: s, ease: Ease::Smooth });
+            l.scale.insert(Key { t, v: [0.0, 0.0], ease: Ease::Bounce, tan: vec![] });
+            l.scale.insert(Key { t: t + 0.6, v: s, ease: Ease::Smooth, tan: vec![] });
         }
         "Glissement doux" => {
             let p = l.pos.at(t);
             l.pos.keys.retain(|k| k.t < t - KEY_EPS || k.t > t + 0.8 + KEY_EPS);
-            l.pos.insert(Key { t, v: [p[0] - 240.0, p[1]], ease: Ease::Out });
-            l.pos.insert(Key { t: t + 0.8, v: p, ease: Ease::Smooth });
+            l.pos.insert(Key { t, v: [p[0] - 240.0, p[1]], ease: Ease::Out, tan: vec![] });
+            l.pos.insert(Key { t: t + 0.8, v: p, ease: Ease::Smooth, tan: vec![] });
             fade(l, t, 0.5, true);
         }
         "Fondu d'entrée" => fade(l, t, 0.6, true),
@@ -1286,8 +1342,8 @@ pub fn apply_preset(l: &mut Layer, name: &str, t: f32) {
         }
         "Tour complet" => {
             let r = l.rot.at(t)[0];
-            l.rot.insert(Key { t, v: [r, 0.0], ease: Ease::Smooth });
-            l.rot.insert(Key { t: t + 1.0, v: [r + 360.0, 0.0], ease: Ease::Smooth });
+            l.rot.insert(Key { t, v: [r, 0.0], ease: Ease::Smooth, tan: vec![] });
+            l.rot.insert(Key { t: t + 1.0, v: [r + 360.0, 0.0], ease: Ease::Smooth, tan: vec![] });
             l.rot.sort();
         }
         _ => {}
@@ -1298,8 +1354,8 @@ fn fade(l: &mut Layer, t: f32, d: f32, enter: bool) {
     let full = if l.opacity.animated() { l.opacity.keys.iter().map(|k| k.v[0]).fold(0.0, f32::max).max(1.0) } else { l.opacity.v[0].max(1.0) };
     let (a, b) = if enter { (0.0, full) } else { (full, 0.0) };
     l.opacity.keys.retain(|k| k.t < t - KEY_EPS || k.t > t + d + KEY_EPS);
-    l.opacity.insert(Key { t, v: [a, 0.0], ease: Ease::Smooth });
-    l.opacity.insert(Key { t: t + d, v: [b, 0.0], ease: Ease::Smooth });
+    l.opacity.insert(Key { t, v: [a, 0.0], ease: Ease::Smooth, tan: vec![] });
+    l.opacity.insert(Key { t: t + d, v: [b, 0.0], ease: Ease::Smooth, tan: vec![] });
 }
 
 #[cfg(test)]

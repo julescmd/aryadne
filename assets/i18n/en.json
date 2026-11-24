@@ -2364,5 +2364,19 @@
   "calque de réglage": "adjustment layer",
   "styles": "styles",
   "Pelure": "Onion",
-  "Pelure d'oignon : le calque choisi aux images d'avant (rouge) et d'après (vert)": "Onion skin: the selected layer on the frames before (red) and after (green)"
+  "Pelure d'oignon : le calque choisi aux images d'avant (rouge) et d'après (vert)": "Onion skin: the selected layer on the frames before (red) and after (green)",
+  "Éditeur de courbes : toutes les clés du calque, tangentes comprises (comme le Graph Editor de Maya)": "Graph editor: every key of the layer, tangents included (like Maya's Graph Editor)",
+  "Éditeur de courbes": "Graph Editor",
+  "Choisis un calque pour voir ses courbes.": "Select a layer to see its curves.",
+  "tangentes": "tangents",
+  "Spline": "Spline",
+  "Plate": "Flat",
+  "Escalier": "Stepped",
+  "Plates aux sommets, sinon suivent les voisines": "Flat at peaks, otherwise follow the neighbours",
+  "Lisses : suivent la pente des voisines": "Smooth: follow the neighbours' slope",
+  "Droites vers les clés voisines": "Straight toward the neighbouring keys",
+  "Horizontales : départ et arrivée en douceur": "Horizontal: ease in and out",
+  "La valeur tient jusqu'à la clé suivante": "The value holds until the next key",
+  "Lissage": "Easing",
+  "pas encore de clé": "no key yet"
 }

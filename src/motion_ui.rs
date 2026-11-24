@@ -51,6 +51,9 @@ pub struct Editor {
     anim_tools: bool,
     /// Pelure d'oignon : le calque choisi aux images d'avant (rouge) et d'après (vert)
     onion: bool,
+    /// Éditeur de courbes (fenêtre, comme le Graph Editor de Maya)
+    curves_open: bool,
+    curve_ed: crate::curves::Editor,
     tween_w: f32,
     pose_clip: Option<crate::animtools::motion::Pose>,
     /// Clé choisie : calque, propriété, instant
@@ -148,6 +151,8 @@ impl Editor {
             sel: if compo.layers.is_empty() { None } else { Some(0) },
             anim_tools: false,
             onion: false,
+            curves_open: false,
+            curve_ed: Default::default(),
             tween_w: 0.5,
             pose_clip: None,
             compo,
@@ -1228,6 +1233,7 @@ impl Editor {
             }
         }
         child.toggle_value(&mut self.onion, format!("{}  {}", l::LAYERS, crate::i18n::t("Pelure"))).on_hover_text(crate::i18n::t("Pelure d'oignon : le calque choisi aux images d'avant (rouge) et d'après (vert)"));
+        child.toggle_value(&mut self.curves_open, format!("{}  {}", l::SPLINE, crate::i18n::t("Courbes"))).on_hover_text(crate::i18n::t("Éditeur de courbes : toutes les clés du calque, tangentes comprises (comme le Graph Editor de Maya)"));
         child.toggle_value(&mut self.anim_tools, format!("{}  {}", l::WAND_SPARKLES, crate::i18n::t("Outils"))).on_hover_text(crate::i18n::t("Outils d'animation : tweener, décaler les clés, poses, miroir…"));
         let wide = bar.width() > 900.0;
         child.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1324,6 +1330,31 @@ impl Editor {
             }
             if changed {
                 self.changed();
+            }
+        }
+        // Éditeur de courbes, dans sa fenêtre
+        if self.curves_open {
+            let mut open = true;
+            let name = self.sel.and_then(|i| self.compo.layers.get(i)).map(|l| l.name.clone()).unwrap_or_default();
+            egui::Window::new(format!("{} · {name}", crate::i18n::t("Éditeur de courbes"))).id(egui::Id::unique("motion-curves")).open(&mut open).resizable(true).default_size(vec2(780.0, 380.0)).show(ui.ctx(), |ui| {
+                let Some(i) = self.sel.filter(|&i| i < self.compo.layers.len()) else {
+                    ui.label(crate::i18n::t("Choisis un calque pour voir ses courbes."));
+                    return;
+                };
+                let id = self.compo.layers[i].id.to_string();
+                self.curve_ed.show_for(&id);
+                let mut cv = motion::layer_curves(&self.compo.layers[i]);
+                let out = self.curve_ed.ui(ui, &mut cv, self.time, (0.0, dur), fps);
+                if out.changed {
+                    motion::apply_curves(&mut self.compo.layers[i], &cv);
+                    self.changed();
+                }
+                if let Some(t) = out.seek {
+                    self.time = t.clamp(0.0, dur);
+                }
+            });
+            if !open {
+                self.curves_open = false;
             }
         }
         let body = ui.available_rect_before_wrap();
