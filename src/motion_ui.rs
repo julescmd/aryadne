@@ -47,6 +47,10 @@ pub struct Editor {
     time: f32,
     playing: Option<(Instant, f32)>,
     sel: Option<usize>,
+    /// Barre d'outils d'animation (tweener, décaler, poses…)
+    anim_tools: bool,
+    tween_w: f32,
+    pose_clip: Option<crate::animtools::motion::Pose>,
     /// Clé choisie : calque, propriété, instant
     sel_key: Option<(usize, Prop, f32)>,
     tool: Tool,
@@ -140,6 +144,9 @@ impl Editor {
             path,
             saved: compo.clone(),
             sel: if compo.layers.is_empty() { None } else { Some(0) },
+            anim_tools: false,
+            tween_w: 0.5,
+            pose_clip: None,
             compo,
             comps: vec![],
             open_request: None,
@@ -1196,6 +1203,7 @@ impl Editor {
                 }
             }
         }
+        child.toggle_value(&mut self.anim_tools, format!("{}  {}", l::WAND_SPARKLES, crate::i18n::t("Outils"))).on_hover_text(crate::i18n::t("Outils d'animation : tweener, décaler les clés, poses, miroir…"));
         let wide = bar.width() > 900.0;
         child.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if !wide {
@@ -1210,6 +1218,89 @@ impl Editor {
             ui.label(egui::RichText::new(crate::i18n::t("Courbe")).size(11.5).color(p.muted));
         });
 
+        // Outils d'animation, comme dans la 3D (même logique, en secondes)
+        if self.anim_tools {
+            let (r2, _) = ui.allocate_exact_size(vec2(ui.available_width(), 30.0), Sense::hover());
+            ui.painter().rect_filled(r2, 0.0, p.bg.gamma_multiply(0.6));
+            ui.painter().hline(r2.x_range(), r2.bottom() - 0.5, Stroke::new(1.0, p.line));
+            let mut tu = ui.new_child(egui::UiBuilder::new().max_rect(r2.shrink2(vec2(8.0, 0.0))).layout(egui::Layout::left_to_right(egui::Align::Center)));
+            flat(&mut tu);
+            tu.spacing_mut().item_spacing.x = 4.0;
+            use crate::animtools::motion as at;
+            let t = self.time;
+            let step = 1.0 / fps.max(1.0);
+            let mut changed = false;
+            let mut seek: Option<f32> = None;
+            let sel = self.sel.filter(|&i| i < self.compo.layers.len());
+            tu.add_enabled_ui(sel.is_some(), |ui| {
+              egui::ScrollArea::horizontal().id_salt("motion-anim-tools").scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden).show(ui, |ui| {
+              ui.horizontal_centered(|ui| {
+                let Some(i) = sel else { return };
+                ui.label(egui::RichText::new(crate::i18n::t("Tweener")).size(11.5).color(p.muted));
+                ui.spacing_mut().slider_width = 90.0;
+                let mut apply = ui.add(egui::Slider::new(&mut self.tween_w, -0.5..=1.5).show_value(false)).on_hover_text(format!("{} · {:.0} %", crate::i18n::t("Entre la clé d'avant (0 %) et celle d'après (100 %) ; au-delà : dépassement"), self.tween_w * 100.0)).changed();
+                for (lab, w) in [("0", 0.0), ("¼", 0.25), ("½", 0.5), ("¾", 0.75), ("1", 1.0)] {
+                    if ui.small_button(lab).clicked() {
+                        self.tween_w = w;
+                        apply = true;
+                    }
+                }
+                if apply {
+                    if at::tween(&mut self.compo.layers[i], t, self.tween_w) {
+                        changed = true;
+                    } else {
+                        self.message = Some(crate::i18n::t("Le tweener a besoin d'une clé avant et d'une clé après l'image courante"));
+                    }
+                }
+                ui.separator();
+                let typing = ui.ctx().egui_wants_keyboard_input();
+                for (icon, d, tip) in [(l::CHEVRON_LEFT, -1.0, "Avancer d'une image les clés de l'image courante (Alt+←)"), (l::CHEVRON_RIGHT, 1.0, "Reculer d'une image les clés de l'image courante (Alt+→)")] {
+                    let key = !typing && ui.input(|x| x.modifiers.alt && !x.modifiers.shift && x.key_pressed(if d < 0.0 { egui::Key::ArrowLeft } else { egui::Key::ArrowRight }));
+                    if (ui.small_button(icon).on_hover_text(crate::i18n::t(tip)).clicked() || key) && at::nudge(&mut self.compo.layers[i], t, d * step) {
+                        seek = Some(t + d * step);
+                        changed = true;
+                    }
+                }
+                ui.separator();
+                for (lab, d, tip) in [("−1", -1.0, "Retirer une image après l'image courante : la suite se rapproche (Alt+Maj+←)"), ("+1", 1.0, "Ajouter une image après l'image courante : la suite s'éloigne (Alt+Maj+→)")] {
+                    let key = !typing && ui.input(|x| x.modifiers.alt && x.modifiers.shift && x.key_pressed(if d < 0.0 { egui::Key::ArrowLeft } else { egui::Key::ArrowRight }));
+                    if ui.small_button(lab).on_hover_text(crate::i18n::t(tip)).clicked() || key {
+                        at::shift_after(&mut self.compo.layers[i], t, d * step);
+                        changed = true;
+                    }
+                }
+                ui.separator();
+                if ui.small_button(l::COPY).on_hover_text(crate::i18n::t("Copier la pose")).clicked() {
+                    self.pose_clip = Some(at::pose(&self.compo.layers[i], t));
+                    self.message = Some(crate::i18n::t("Pose copiée"));
+                }
+                if ui.add_enabled(self.pose_clip.is_some(), egui::Button::new(l::CLIPBOARD_PASTE).small()).on_hover_text(crate::i18n::t("Coller la pose (et poser une clé)")).clicked() {
+                    if let Some(pz) = self.pose_clip.clone() {
+                        at::paste(&mut self.compo.layers[i], t, &pz);
+                        changed = true;
+                    }
+                }
+                ui.separator();
+                if ui.small_button(crate::i18n::t("Alléger")).on_hover_text(crate::i18n::t("Retire les clés que les voisines redonnent déjà (l'animation ne change pas)")).clicked() {
+                    let n = at::reduce(&mut self.compo.layers[i]);
+                    self.message = Some(format!("{} · {n}", crate::i18n::t("Clés retirées")));
+                    changed |= n > 0;
+                }
+                let mut off = 0i32;
+                if ui.add(egui::DragValue::new(&mut off).speed(0.15).prefix(format!("{} ", crate::i18n::t("décaler"))).suffix(crate::i18n::t_mid(" im."))).on_hover_text(crate::i18n::t("Glisser : décale toute l'animation des objets choisis")).changed() && off != 0 {
+                    at::offset_all(&mut self.compo.layers[i], off as f32 * step);
+                    changed = true;
+                }
+              });
+              });
+            });
+            if let Some(s2) = seek {
+                self.time = s2.clamp(0.0, dur);
+            }
+            if changed {
+                self.changed();
+            }
+        }
         let body = ui.available_rect_before_wrap();
         // Le panneau garde toute sa hauteur (sinon il se resserre sur son contenu)
         ui.allocate_rect(body, Sense::hover());

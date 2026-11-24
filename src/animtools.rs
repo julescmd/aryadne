@@ -238,3 +238,130 @@ mod tests {
         assert_eq!(c.keys.len(), 2);
     }
 }
+
+/// Les mêmes outils pour les calques du Motion (clés en secondes, par propriété)
+pub mod motion {
+    use crate::motion::{Key, Layer, Prop, Track, KEY_EPS, PROPS};
+
+    /// Une pose : la valeur de chaque propriété
+    pub type Pose = Vec<(Prop, [f32; 2])>;
+
+    pub fn pose(l: &Layer, t: f32) -> Pose {
+        PROPS.iter().map(|(p, _)| (*p, l.track(*p).at(t))).collect()
+    }
+
+    /// Pose une clé (la crée au besoin, même sur une propriété pas encore animée)
+    pub fn put(tr: &mut Track, t: f32, v: [f32; 2]) {
+        match tr.key_at(t) {
+            Some(i) => tr.keys[i].v = v,
+            None => tr.insert(Key { t, v, ease: Default::default() }),
+        }
+    }
+
+    pub fn paste(l: &mut Layer, t: f32, p: &Pose) {
+        for (pr, v) in p {
+            put(l.track_mut(*pr), t, *v);
+        }
+    }
+
+    /// Tweener sur chaque propriété animée qui a une clé avant et une après
+    pub fn tween(l: &mut Layer, t: f32, w: f32) -> bool {
+        let mut any = false;
+        for (pr, _) in PROPS {
+            let tr = l.track_mut(pr);
+            let a = tr.keys.iter().rev().find(|k| k.t < t - KEY_EPS).map(|k| k.v);
+            let b = tr.keys.iter().find(|k| k.t > t + KEY_EPS).map(|k| k.v);
+            if let (Some(a), Some(b)) = (a, b) {
+                put(tr, t, [a[0] + (b[0] - a[0]) * w, a[1] + (b[1] - a[1]) * w]);
+                any = true;
+            }
+        }
+        any
+    }
+
+    /// Décale de `dt` les clés posées à `t` (toutes propriétés), sans écraser d'autres clés
+    pub fn nudge(l: &mut Layer, t: f32, dt: f32) -> bool {
+        let hit = |tr: &Track| tr.key_at(t).is_some_and(|_| tr.keys.iter().all(|k| (k.t - t).abs() < KEY_EPS || (k.t - (t + dt)).abs() >= KEY_EPS));
+        if !PROPS.iter().any(|(p, _)| l.track(*p).key_at(t).is_some()) || !PROPS.iter().all(|(p, _)| l.track(*p).key_at(t).is_none() || hit(l.track(*p))) {
+            return false;
+        }
+        for (pr, _) in PROPS {
+            let tr = l.track_mut(pr);
+            if let Some(i) = tr.key_at(t) {
+                let mut k = tr.keys.remove(i);
+                k.t = (k.t + dt).max(0.0);
+                tr.insert(k);
+            }
+        }
+        true
+    }
+
+    /// Ajoute ou retire du temps après `t` : les clés plus loin glissent (sans passer avant `t`)
+    pub fn shift_after(l: &mut Layer, t: f32, dt: f32) {
+        let mut dt = dt;
+        if dt < 0.0 {
+            let next = PROPS.iter().flat_map(|(p, _)| l.track(*p).keys.iter().map(|k| k.t)).filter(|x| *x > t + KEY_EPS).fold(f32::INFINITY, f32::min);
+            if !next.is_finite() {
+                return;
+            }
+            dt = dt.max(-(next - t - KEY_EPS * 2.0));
+        }
+        for (pr, _) in PROPS {
+            for k in l.track_mut(pr).keys.iter_mut().filter(|k| k.t > t + KEY_EPS) {
+                k.t += dt;
+            }
+        }
+    }
+
+    pub fn offset_all(l: &mut Layer, dt: f32) {
+        for (pr, _) in PROPS {
+            for k in &mut l.track_mut(pr).keys {
+                k.t = (k.t + dt).max(0.0);
+            }
+        }
+    }
+
+    /// Retire les clés que leurs voisines redonnent déjà
+    pub fn reduce(l: &mut Layer) -> usize {
+        let mut n = 0;
+        for (pr, _) in PROPS {
+            let tr = l.track_mut(pr);
+            let mut i = 1;
+            while i + 1 < tr.keys.len() {
+                let mut without = tr.clone();
+                let k = without.keys.remove(i);
+                let v = without.at(k.t);
+                if (v[0] - k.v[0]).abs() < 1e-3 && (v[1] - k.v[1]).abs() < 1e-3 {
+                    *tr = without;
+                    n += 1;
+                } else {
+                    i += 1;
+                }
+            }
+        }
+        n
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use crate::motion::{Compo, Kind};
+
+        #[test]
+        fn outils_motion() {
+            let c = Compo::default();
+            let mut l = Layer::new("a", Kind::Rect { w: 10.0, h: 10.0, radius: 0.0, color: [255; 3] }, &c);
+            put(&mut l.pos, 0.0, [0.0, 0.0]);
+            put(&mut l.pos, 2.0, [100.0, 0.0]);
+            assert!(tween(&mut l, 1.0, 0.25));
+            assert_eq!(l.pos.keys[1].v, [25.0, 0.0]);
+            assert!(nudge(&mut l, 1.0, 0.5));
+            assert!((l.pos.keys[1].t - 1.5).abs() < 1e-6);
+            shift_after(&mut l, 0.0, 1.0);
+            assert!((l.pos.keys[2].t - 3.0).abs() < 1e-6);
+            let p = pose(&l, 0.0);
+            paste(&mut l, 4.0, &p);
+            assert_eq!(l.pos.keys.last().unwrap().v, [0.0, 0.0]);
+        }
+    }
+}
