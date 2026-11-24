@@ -67,6 +67,19 @@ pub struct Editor {
     export_prog: Arc<AtomicU32>,
     /// Propriété montrée dans la courbe, à droite de la timeline
     curve: Prop,
+    tl_scroll: f32,
+    /// Message affiché et depuis quand (il s'efface après quelques secondes)
+    msg_seen: Option<(String, Instant)>,
+    /// Son de la composition analysé (chemin, résultat attendu d'un fil)
+    wave_job: Option<(String, Arc<std::sync::Mutex<Option<Result<Arc<motion::Wave>, String>>>>)>,
+    /// ffplay qui joue la musique pendant la lecture
+    sound: Option<std::process::Child>,
+}
+
+impl Drop for Editor {
+    fn drop(&mut self) {
+        self.stop_sound();
+    }
 }
 
 fn tc(t: f32, fps: f32) -> String {
@@ -149,6 +162,10 @@ impl Editor {
             export_rx: None,
             export_prog: Arc::new(AtomicU32::new(0)),
             curve: Prop::Pos,
+            tl_scroll: 0.0,
+            msg_seen: None,
+            wave_job: None,
+            sound: None,
         }
     }
 
@@ -298,12 +315,50 @@ impl Editor {
     fn toggle_play(&mut self) {
         if self.playing.is_some() {
             self.playing = None;
+            self.stop_sound();
         } else {
             if self.time >= self.compo.duration - 1e-3 {
                 self.time = 0.0;
             }
             self.playing = Some((Instant::now(), self.time));
+            self.start_sound();
         }
+    }
+
+    fn stop_sound(&mut self) {
+        if let Some(mut c) = self.sound.take() {
+            let _ = c.kill();
+            let _ = c.wait();
+        }
+    }
+
+    /// La musique à partir de la tête de lecture (ffplay, sans fenêtre)
+    fn start_sound(&mut self) {
+        self.stop_sound();
+        let Some(m) = self.compo.music.as_ref().and_then(|m| crate::vault::safe(&self.root, m).ok()) else { return };
+        let Some(fp) = crate::ffmpeg::find("ffplay") else { return };
+        let mut cmd = crate::ffmpeg::command(fp);
+        cmd.args(["-nodisp", "-autoexit", "-loglevel", "quiet", "-ss", &format!("{:.3}", self.time), "-t", &format!("{:.3}", (self.compo.duration - self.time).max(0.0))]).arg(m);
+        cmd.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+        self.sound = cmd.spawn().ok();
+    }
+
+    /// L'enveloppe et les temps forts de la musique, analysés en arrière-plan la première fois
+    fn wave(&mut self) -> Option<Arc<motion::Wave>> {
+        let m = self.compo.music.clone()?;
+        if self.wave_job.as_ref().is_none_or(|(p, _)| *p != m) {
+            let slot = Arc::new(std::sync::Mutex::new(None));
+            let s2 = slot.clone();
+            let path = crate::vault::safe(&self.root, &m).ok();
+            std::thread::spawn(move || {
+                let r = path.ok_or_else(|| "?".to_string()).and_then(|p| motion::analyse(&p)).map(Arc::new);
+                *s2.lock().unwrap() = Some(r);
+            });
+            self.wave_job = Some((m, slot));
+        }
+        let (_, slot) = self.wave_job.as_ref()?;
+        let g = slot.lock().ok()?;
+        g.as_ref().and_then(|r| r.as_ref().ok()).cloned()
     }
 
     fn export(&mut self) {
@@ -327,6 +382,7 @@ impl Editor {
             self.time = if t >= self.compo.duration { 0.0 } else { t };
             if t >= self.compo.duration {
                 self.playing = Some((Instant::now(), 0.0));
+                self.start_sound();
             }
             ui.ctx().request_repaint();
         }
@@ -343,6 +399,9 @@ impl Editor {
             }
         }
         self.keyboard(ui);
+        if self.playing.is_none() && self.sound.is_some() {
+            self.stop_sound();
+        }
         let frame = egui::Frame::new().fill(p.panel).stroke(Stroke::new(1.0, p.line));
         let full_h = ui.available_height();
         egui::Panel::left("motion-project").resizable(true).default_size(240.0).min_size(190.0).max_size(420.0).frame(frame).show(ui, |ui| self.project_panel(ui));
@@ -717,6 +776,14 @@ impl Editor {
             });
             ui.label(egui::RichText::new(format!("{} × {}", self.compo.w, self.compo.h)).size(11.5).color(p.muted));
         });
+        if let Some(m) = self.message.clone() {
+            if self.msg_seen.as_ref().is_none_or(|(s, _)| *s != m) {
+                self.msg_seen = Some((m, Instant::now()));
+            } else if self.msg_seen.as_ref().is_some_and(|(_, t)| t.elapsed().as_secs_f32() > 5.0) {
+                self.message = None;
+            }
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(500));
+        }
         if let Some(m) = self.message.clone().or(self.error.clone()) {
             let r = Rect::from_min_size(pos2(full.left() + 64.0, full.bottom() - 40.0), vec2(full.width() - 128.0, 26.0));
             painter.rect_filled(r, 4.0, p.raised);
@@ -1010,6 +1077,17 @@ impl Editor {
         }
         child.label(egui::RichText::new(tc(self.time, fps)).monospace().size(12.5));
         child.label(egui::RichText::new(format!("{} {} / {} · {} i/s", crate::i18n::t("image"), (self.time * fps).round() as u32, self.compo.frames(), fps)).size(11.5).color(p.muted));
+        if self.compo.music.is_some() {
+            let beats = self.wave().map(|w| w.beats.clone()).unwrap_or_default();
+            let ok = self.sel.is_some() && !beats.is_empty();
+            if child.add_enabled(ok, egui::Button::new(format!("{}  {}", l::MUSIC, crate::i18n::t("Caler sur le rythme")))).on_hover_text(crate::i18n::t("Les clés du calque choisi vont sur les temps forts les plus proches")).clicked() {
+                if let Some(i) = self.sel {
+                    let n = motion::snap_to_beats(&mut self.compo.layers[i], &beats);
+                    self.message = Some(format!("{n} {}", crate::i18n::t_mid("clé(s) calée(s) sur le rythme")));
+                    self.changed();
+                }
+            }
+        }
         let wide = bar.width() > 900.0;
         child.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if !wide {
@@ -1058,7 +1136,12 @@ impl Editor {
         // Rangées : un calque, puis ses propriétés quand il est choisi
         let row_h = 28.0;
         let sub_h = 22.0;
-        let mut y = ruler.bottom();
+        // Les rangées défilent sous la règle (molette)
+        let rows_clip = Rect::from_min_max(pos2(body.left(), ruler.bottom() + 0.5), pos2(tracks.right(), body.bottom()));
+        let head_painter = painter.clone();
+        let painter = ui.painter_at(rows_clip);
+        let top0 = ruler.bottom() - self.tl_scroll;
+        let mut y = top0;
         let t_now = self.time;
         let mut clicked_layer = None;
         let mut toggles: Vec<(usize, Prop)> = vec![];
@@ -1069,7 +1152,8 @@ impl Editor {
             let sel = self.sel == Some(i);
             let r = Rect::from_min_max(pos2(body.left(), y), pos2(tracks.right(), y + row_h));
             if r.top() > body.bottom() {
-                break;
+                y += row_h + if sel { sub_h * PROPS.len() as f32 } else { 0.0 };
+                continue;
             }
             if sel {
                 painter.rect_filled(Rect::from_min_max(r.min, pos2(tracks.left(), r.bottom())), 0.0, p.selection);
@@ -1082,12 +1166,12 @@ impl Editor {
             let name_r = Rect::from_min_max(pos2(r.left() + 40.0, r.top()), pos2(tracks.left() - 30.0, r.bottom()));
             painter.with_clip_rect(name_r).text(name_r.left_center(), egui::Align2::LEFT_CENTER, &lay.name, egui::FontId::proportional(12.5), if lay.visible { p.text } else { p.muted });
             let eye_r = Rect::from_center_size(pos2(tracks.left() - 16.0, r.center().y), vec2(20.0, 20.0));
-            let er = ui.interact(eye_r, ui.scope_id().with(("motion-eye", i)), Sense::click());
+            let er = ui.interact(eye_r.intersect(rows_clip), ui.scope_id().with(("motion-eye", i)), Sense::click());
             painter.text(eye_r.center(), egui::Align2::CENTER_CENTER, if lay.visible { l::EYE } else { l::EYE_OFF }, egui::FontId::proportional(13.0), if er.hovered() { p.text } else { p.muted });
             if er.clicked() {
                 eye = Some(i);
             }
-            let nr = ui.interact(Rect::from_min_max(r.min, pos2(tracks.left() - 30.0, r.bottom())), ui.scope_id().with(("motion-name", i)), Sense::click());
+            let nr = ui.interact(Rect::from_min_max(r.min, pos2(tracks.left() - 30.0, r.bottom())).intersect(rows_clip), ui.scope_id().with(("motion-name", i)), Sense::click());
             if nr.clicked() {
                 clicked_layer = Some(i);
             }
@@ -1097,7 +1181,7 @@ impl Editor {
             for kt in lay.key_times() {
                 diamond(&painter, pos2(x_of(kt), r.center().y), 4.5, Some(if sel { p.text } else { c }), p.code_bg);
             }
-            let br = ui.interact(bar_r.expand2(vec2(3.0, 0.0)), ui.scope_id().with(("motion-bar", i)), Sense::click_and_drag());
+            let br = ui.interact(bar_r.expand2(vec2(3.0, 0.0)).intersect(rows_clip), ui.scope_id().with(("motion-bar", i)), Sense::click_and_drag());
             if let Some(h) = br.hover_pos() {
                 let edge = (h.x - bar_r.left()).abs() < 6.0 || (h.x - bar_r.right()).abs() < 6.0;
                 if edge {
@@ -1136,13 +1220,14 @@ impl Editor {
                 for (pr, label) in PROPS {
                     let r = Rect::from_min_max(pos2(body.left(), y), pos2(tracks.right(), y + sub_h));
                     if r.top() > body.bottom() {
-                        break;
+                        y += sub_h;
+                        continue;
                     }
                     let lay = &self.compo.layers[i];
                     let tr = lay.track(pr);
                     let at = tr.key_at(t_now).is_some();
                     let dr = Rect::from_center_size(pos2(r.left() + 30.0, r.center().y), vec2(16.0, 16.0));
-                    let dresp = ui.interact(dr, ui.scope_id().with(("motion-dia", i, label)), Sense::click()).on_hover_text(crate::i18n::t("Poser ou retirer une clé à cet instant"));
+                    let dresp = ui.interact(dr.intersect(rows_clip), ui.scope_id().with(("motion-dia", i, label)), Sense::click()).on_hover_text(crate::i18n::t("Poser ou retirer une clé à cet instant"));
                     diamond(&painter, dr.center(), 4.0, if at { Some(p.accent) } else { None }, if tr.animated() { p.accent } else { p.muted });
                     if dresp.clicked() {
                         toggles.push((i, pr));
@@ -1163,7 +1248,7 @@ impl Editor {
                         let chosen = self.sel_key.is_some_and(|s| s.0 == i && s.1 == pr && (s.2 - k.t).abs() < motion::KEY_EPS);
                         diamond(&painter, pos2(x_of(k.t), r.center().y), 4.0, Some(if chosen { p.text } else { p.accent }), p.code_bg);
                     }
-                    let kr = ui.interact(Rect::from_min_max(pos2(tracks.left(), r.top()), r.max), ui.scope_id().with(("motion-keys", i, label)), Sense::click_and_drag());
+                    let kr = ui.interact(Rect::from_min_max(pos2(tracks.left(), r.top()), r.max).intersect(rows_clip), ui.scope_id().with(("motion-keys", i, label)), Sense::click_and_drag());
                     let hit = |h: Pos2| tr.keys.iter().map(|k| k.t).find(|kt| (x_of(*kt) - h.x).abs() < 6.0);
                     if kr.clicked() {
                         if let Some(h) = kr.interact_pointer_pos() {
@@ -1190,11 +1275,52 @@ impl Editor {
                 }
             }
         }
+        // La musique, sous les calques : forme d'onde et temps forts
+        if let Some(m) = self.compo.music.clone() {
+            let r = Rect::from_min_max(pos2(body.left(), y), pos2(tracks.right(), y + 34.0));
+            let c = crate::theme::ws_color("video").unwrap_or(p.success);
+            painter.rect_filled(Rect::from_min_size(pos2(r.left() + 8.0, r.center().y - 8.0), vec2(3.0, 16.0)), 0.0, c);
+            painter.text(pos2(r.left() + 20.0, r.center().y), egui::Align2::LEFT_CENTER, l::MUSIC, egui::FontId::proportional(13.0), p.muted);
+            let name_r = Rect::from_min_max(pos2(r.left() + 40.0, r.top()), pos2(tracks.left() - 8.0, r.bottom()));
+            painter.with_clip_rect(name_r.intersect(rows_clip)).text(name_r.left_center(), egui::Align2::LEFT_CENTER, m.rsplit('/').next().unwrap_or(&m), egui::FontId::proportional(12.5), p.text);
+            if let Some(w) = self.wave() {
+                let mid = r.center().y;
+                let x0 = x_of(0.0).max(tracks.left());
+                let mut x = x0;
+                while x < x_of(dur) {
+                    let k = (t_of(x) * motion::WAVE_RATE) as usize;
+                    let v = w.env.get(k..(k + 3).min(w.env.len())).map(|s| s.iter().cloned().fold(0.0, f32::max)).unwrap_or(0.0);
+                    painter.vline(x, (mid - v * 12.0)..=(mid + v * 12.0).max(mid + 0.5), Stroke::new(1.0, c.gamma_multiply(0.7)));
+                    x += 2.0;
+                }
+                for b in w.beats.iter().filter(|b| **b <= dur) {
+                    let bx = x_of(*b);
+                    painter.add(egui::Shape::convex_polygon(vec![pos2(bx - 3.5, r.top() + 2.0), pos2(bx + 3.5, r.top() + 2.0), pos2(bx, r.top() + 7.0)], p.warning, Stroke::NONE));
+                }
+            } else {
+                painter.text(pos2(tracks.left() + 12.0, r.center().y), egui::Align2::LEFT_CENTER, crate::i18n::t("lecture du son…"), egui::FontId::proportional(11.5), p.muted);
+            }
+            painter.hline(body.x_range(), r.bottom() - 0.5, Stroke::new(1.0, p.line.gamma_multiply(0.6)));
+            y += 34.0;
+        }
+        // Défilement : la molette sur les rangées
+        let content = y - top0;
+        let room = rows_clip.height();
+        if ui.rect_contains_pointer(rows_clip) {
+            let d = ui.input(|i| if i.modifiers.command { 0.0 } else { i.smooth_scroll_delta.y });
+            self.tl_scroll -= d;
+        }
+        self.tl_scroll = self.tl_scroll.clamp(0.0, (content - room + 12.0).max(0.0));
+        if content > room {
+            let bar_h = (room * room / content).max(24.0);
+            let by = rows_clip.top() + (room - bar_h) * self.tl_scroll / (content - room + 12.0).max(1.0);
+            painter.rect_filled(Rect::from_min_size(pos2(tracks.right() - 5.0, by), vec2(3.0, bar_h)), 2.0, p.line);
+        }
         if n == 0 {
             painter.text(pos2(tracks.center().x, ruler.bottom() + 30.0), egui::Align2::CENTER_CENTER, crate::i18n::t("Pas encore de calque : ajoute un texte ou une forme."), egui::FontId::proportional(12.0), p.muted);
         }
         // Clic dans le vide des pistes : la tête de lecture y va
-        let empty = Rect::from_min_max(pos2(tracks.left(), y), tracks.max);
+        let empty = Rect::from_min_max(pos2(tracks.left(), y.max(rows_clip.top())), tracks.max);
         if empty.height() > 4.0 {
             let er = ui.interact(empty, ui.scope_id().with("motion-empty"), Sense::click_and_drag());
             if er.drag_started() || er.clicked() {
@@ -1207,8 +1333,13 @@ impl Editor {
         }
         // Glisser
         let mut commit = false;
+        let beats: Vec<f32> = self.wave().map(|w| w.beats.clone()).unwrap_or_default();
         if let (Some(d), Some(m)) = (self.tl_drag.take(), ui.input(|i| i.pointer.interact_pos())) {
-            let t = snap(t_of(m.x));
+            // Les clés et la tête de lecture s'aimantent aux temps forts de la musique
+            let t = match beats.iter().find(|b| (x_of(**b) - m.x).abs() < 6.0) {
+                Some(b) if !ui.input(|i| i.modifiers.alt) => *b,
+                _ => snap(t_of(m.x)),
+            };
             let mut next = None;
             match &d {
                 TlDrag::Scrub => {
@@ -1292,6 +1423,7 @@ impl Editor {
             self.changed();
         }
         // Tête de lecture
+        let painter = head_painter;
         let x = x_of(self.time);
         painter.vline(x, ruler.top()..=body.bottom(), Stroke::new(1.0, p.accent));
         painter.add(egui::Shape::convex_polygon(vec![pos2(x - 5.0, ruler.top() + 14.0), pos2(x + 5.0, ruler.top() + 14.0), pos2(x, ruler.top() + 20.0)], p.accent, Stroke::NONE));

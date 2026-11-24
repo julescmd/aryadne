@@ -782,6 +782,77 @@ pub fn export(c: &Compo, out: &Path, root: &Path, progress: impl Fn(f32)) -> Res
     Ok(out.to_path_buf())
 }
 
+// ---------- Musique ----------
+
+/// Enveloppe d'un son (100 valeurs par seconde, de 0 à 1) et ses temps forts, en secondes
+#[derive(Clone, Debug, Default)]
+pub struct Wave {
+    pub env: Vec<f32>,
+    pub beats: Vec<f32>,
+}
+
+pub const WAVE_RATE: f32 = 100.0;
+
+/// Lit un son avec ffmpeg et en tire l'enveloppe et les temps forts
+pub fn analyse(path: &Path) -> Result<Wave, String> {
+    let ff = crate::ffmpeg::find("ffmpeg").ok_or(crate::i18n::t("ffmpeg n'est pas installé."))?;
+    let o = crate::ffmpeg::command(ff).args(["-v", "error", "-i"]).arg(path).args(["-ac", "1", "-ar", "8000", "-f", "s16le", "-"]).stdin(std::process::Stdio::null()).output().map_err(|e| e.to_string())?;
+    if !o.status.success() {
+        return Err(String::from_utf8_lossy(&o.stderr).lines().last().unwrap_or("ffmpeg").to_string());
+    }
+    let samples: Vec<f32> = o.stdout.chunks_exact(2).map(|b| i16::from_le_bytes([b[0], b[1]]) as f32 / 32768.0).collect();
+    let win = (8000.0 / WAVE_RATE) as usize;
+    let env: Vec<f32> = samples.chunks(win).map(|c| (c.iter().map(|x| x * x).sum::<f32>() / c.len().max(1) as f32).sqrt()).collect();
+    let peak = env.iter().cloned().fold(1e-6, f32::max);
+    let env: Vec<f32> = env.iter().map(|v| v / peak).collect();
+    let beats = beats(&env);
+    Ok(Wave { env, beats })
+}
+
+/// Temps forts : là où le son monte d'un coup, nettement plus que d'habitude autour (une seconde de chaque côté)
+pub fn beats(env: &[f32]) -> Vec<f32> {
+    let n = env.len();
+    let flux: Vec<f32> = (0..n).map(|i| if i == 0 { 0.0 } else { (env[i] - env[i - 1]).max(0.0) }).collect();
+    let r = WAVE_RATE as usize;
+    let mut out: Vec<f32> = vec![];
+    for i in 1..n.saturating_sub(1) {
+        let (a, b) = (i.saturating_sub(r), (i + r).min(n));
+        let w = &flux[a..b];
+        let mean = w.iter().sum::<f32>() / w.len() as f32;
+        let sd = (w.iter().map(|x| (x - mean).powi(2)).sum::<f32>() / w.len() as f32).sqrt();
+        let f = flux[i];
+        if f > mean + 1.5 * sd && f > 0.05 && f >= flux[i - 1] && f >= flux[i + 1] {
+            let t = i as f32 / WAVE_RATE;
+            // Un temps fort tous les quarts de seconde au plus
+            if out.last().is_none_or(|l| t - l >= 0.25) {
+                out.push(t);
+            }
+        }
+    }
+    out
+}
+
+/// Cale les clés d'un calque sur les temps forts les plus proches (à moins d'une demi-seconde) ; rend le nombre de clés déplacées
+pub fn snap_to_beats(l: &mut Layer, beats: &[f32]) -> usize {
+    let mut n = 0;
+    for (p, _) in PROPS {
+        let tr = l.track_mut(p);
+        let mut used: Vec<f32> = vec![];
+        for k in &mut tr.keys {
+            let near = beats.iter().cloned().filter(|b| !used.iter().any(|u| (u - b).abs() < KEY_EPS)).min_by(|a, b| (a - k.t).abs().total_cmp(&(b - k.t).abs()));
+            if let Some(b) = near.filter(|b| (b - k.t).abs() < 0.5) {
+                if (b - k.t).abs() > KEY_EPS {
+                    n += 1;
+                }
+                k.t = b;
+                used.push(b);
+            }
+        }
+        tr.sort();
+    }
+    n
+}
+
 /// Préréglages d'animation : ils posent des clés sur le calque, à partir de l'instant `t`
 pub const PRESETS: [&str; 6] = ["Entrée lettre par lettre", "Rebond", "Glissement doux", "Fondu d'entrée", "Sortie en fondu", "Tour complet"];
 
@@ -853,6 +924,24 @@ mod tests {
         t.toggle_key(0.0);
         assert!(!t.animated());
         assert_eq!(t.v[0], 5.0);
+    }
+
+    #[test]
+    fn temps_forts() {
+        // Un coup toutes les 0,5 s sur un fond calme
+        let mut env = vec![0.05f32; 400];
+        for b in [50usize, 100, 150, 200, 250, 300, 350] {
+            env[b] = 1.0;
+            env[b + 1] = 0.6;
+        }
+        let found = beats(&env);
+        assert_eq!(found.len(), 7, "{found:?}");
+        assert!((found[0] - 0.5).abs() < 0.02);
+        let mut c = Compo::default();
+        let n = snap_to_beats(&mut c.layers[1], &found);
+        assert_eq!(n, 2);
+        let ks: Vec<f32> = c.layers[1].scale.keys.iter().map(|k| k.t).collect();
+        assert_eq!(ks, vec![0.5, 1.0]);
     }
 
     #[test]

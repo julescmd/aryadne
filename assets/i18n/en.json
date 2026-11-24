@@ -2029,5 +2029,9 @@
   "Préréglages d'animation": "Animation presets",
   "Ajouter un calque": "Add a layer",
   "Compositions": "Compositions",
-  "Lisser les clés": "Smooth keys"
+  "Lisser les clés": "Smooth keys",
+  "Caler sur le rythme": "Snap to the beat",
+  "Les clés du calque choisi vont sur les temps forts les plus proches": "The chosen layer's keys move to the nearest beats",
+  "clé(s) calée(s) sur le rythme": "key(s) snapped to the beat",
+  "lecture du son…": "reading the sound…"
 }
