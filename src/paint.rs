@@ -559,7 +559,7 @@ const TOOLS: [(Tool, &str, &str, &str); 11] = [
     (Tool::Brush, crate::lucide::PAINTBRUSH, "pinceau", "B"),
     (Tool::Eraser, crate::lucide::ERASER, "gomme", "E"),
     (Tool::Fill, crate::lucide::PAINT_BUCKET, "pot de peinture", "G"),
-    (Tool::Gradient, crate::lucide::BLEND, "dégradé", "D"),
+    (Tool::Gradient, crate::lucide::BLEND, "dégradé", "G"),
     (Tool::Text, crate::lucide::TYPE, "texte", "T"),
     (Tool::Picker, crate::lucide::PIPETTE, "pipette", "I"),
 ];
@@ -701,6 +701,12 @@ pub struct Editor {
     pub doc: Doc,
     pub tool: Tool,
     pub color: Color32,
+    /// Couleur d'arrière-plan (X échange, D remet noir et blanc)
+    pub bg_color: Color32,
+    /// Sélecteur de couleur ouvert (arrière-plan ?) et sa place
+    swatch_pick: Option<bool>,
+    swallow_click: bool,
+    swatch_at: Pos2,
     pub size: f32,
     pub hardness: f32,
     pub flow: f32,
@@ -823,6 +829,10 @@ impl Editor {
             dirty: Some([0, 0, doc.w, doc.h]),
             doc,
             tool: Tool::Brush,
+            bg_color: Color32::WHITE,
+            swatch_pick: None,
+            swallow_click: false,
+            swatch_at: Pos2::ZERO,
             text: None,
             panel_w: 230.0,
             edit_mask: false,
@@ -1386,17 +1396,9 @@ impl Editor {
                 }
             });
             ui.separator();
-            for (t, icon, label, key) in TOOLS {
-                let on = self.tool == t;
-                let b = egui::Button::new(egui::RichText::new(icon).size(15.0).color(if on { p.on_accent } else { p.text })).fill(if on { p.accent } else { Color32::TRANSPARENT }).min_size(vec2(28.0, 26.0));
-                if ui.add(b).on_hover_text(format!("{} ({key})", crate::i18n::t(label))).clicked() {
-                    self.tool = t;
-                }
-            }
-            ui.separator();
-            let mut c = self.color;
-            if ui.color_edit_button_srgba(&mut c).changed() {
-                self.color = c;
+            // Le nom de l'outil en cours, puis ses réglages (les outils sont dans la colonne de gauche)
+            if let Some((_, icon, label, _)) = TOOLS.iter().find(|t| t.0 == self.tool) {
+                ui.label(egui::RichText::new(format!("{icon}  {}", crate::i18n::t(label))).size(12.5));
             }
             match self.tool {
                 Tool::Brush | Tool::Eraser => {
@@ -1446,6 +1448,67 @@ impl Editor {
         if let Some(m) = &self.message {
             ui.label(egui::RichText::new(m).size(11.0).color(p.muted));
         }
+        // ---- Colonne des outils à gauche, comme Photoshop, avec les couleurs en bas
+        egui::Panel::left(egui::Id::unique(("paint-tools", self.path.to_string_lossy().to_string()))).resizable(false).exact_size(44.0).frame(egui::Frame::new().fill(p.panel).stroke(Stroke::new(1.0, p.line)).inner_margin(egui::Margin::symmetric(4, 8))).show(ui, |ui| {
+            ui.vertical_centered(|ui| {
+                ui.spacing_mut().item_spacing.y = 2.0;
+                for (k, (t, icon, label, key)) in TOOLS.into_iter().enumerate() {
+                    // Petits séparateurs entre les familles : déplacer, sélections, peinture, texte et pipette
+                    if [1, 5, 10].contains(&k) {
+                        ui.add_space(4.0);
+                        let (r, _) = ui.allocate_exact_size(vec2(26.0, 1.0), egui::Sense::hover());
+                        ui.painter().rect_filled(r, 0.0, p.line);
+                        ui.add_space(4.0);
+                    }
+                    let on = self.tool == t;
+                    let b = egui::Button::new(egui::RichText::new(icon).size(15.0).color(if on { p.on_accent } else { p.text })).fill(if on { p.accent } else { Color32::TRANSPARENT }).min_size(vec2(32.0, 28.0));
+                    if ui.add(b).on_hover_text(format!("{} ({key})", crate::i18n::t(label))).clicked() {
+                        self.tool = t;
+                    }
+                }
+                ui.add_space(12.0);
+                // Premier plan et arrière-plan, l'un sur l'autre
+                let (r, _) = ui.allocate_exact_size(vec2(36.0, 36.0), egui::Sense::hover());
+                let back = egui::Rect::from_min_size(r.min + vec2(12.0, 12.0), vec2(22.0, 22.0));
+                let front = egui::Rect::from_min_size(r.min + vec2(2.0, 2.0), vec2(22.0, 22.0));
+                for (rect, which) in [(back, true), (front, false)] {
+                    let col = if which { self.bg_color } else { self.color };
+                    ui.painter().rect_filled(rect, 0.0, col);
+                    ui.painter().rect_stroke(rect, 0.0, Stroke::new(1.0, Color32::from_black_alpha(160)), egui::StrokeKind::Inside);
+                    ui.painter().rect_stroke(rect.expand(1.0), 0.0, Stroke::new(1.0, Color32::from_white_alpha(120)), egui::StrokeKind::Inside);
+                    let resp = ui.interact(rect, ui.scope_id().with(("swatch", which)), egui::Sense::click());
+                    if resp.clicked() {
+                        self.swatch_pick = if self.swatch_pick == Some(which) { None } else { Some((which, rect.right_top())) }.map(|x| x.0);
+                        self.swatch_at = rect.right_top();
+                    }
+                    resp.on_hover_text(crate::i18n::t(if which { "Couleur d'arrière-plan" } else { "Couleur de premier plan" }));
+                }
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 0.0;
+                    if ui.add(egui::Button::new(egui::RichText::new("⇄").size(11.0)).frame(false)).on_hover_text(crate::i18n::t("Échanger les couleurs (X)")).clicked() {
+                        std::mem::swap(&mut self.color, &mut self.bg_color);
+                    }
+                    if ui.add(egui::Button::new(egui::RichText::new("◩").size(11.0)).frame(false)).on_hover_text(crate::i18n::t("Noir et blanc par défaut (D)")).clicked() {
+                        (self.color, self.bg_color) = (Color32::BLACK, Color32::WHITE);
+                    }
+                });
+            });
+        });
+        // Le sélecteur de la couleur cliquée, à droite de la colonne ; un clic ailleurs le ferme
+        if let Some(which) = self.swatch_pick {
+            let r = egui::Area::new(egui::Id::unique("paint-swatch-pop")).order(egui::Order::Foreground).fixed_pos(self.swatch_at + vec2(8.0, -10.0)).show(&ctx, |ui| {
+                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    let c = if which { &mut self.bg_color } else { &mut self.color };
+                    egui::color_picker::color_picker_color32(ui, c, egui::color_picker::Alpha::OnlyBlend);
+                });
+            });
+            if r.response.clicked_elsewhere() && !ctx.input(|i| i.pointer.interact_pos().is_some_and(|p| (p - self.swatch_at).length() < 30.0)) {
+                self.swatch_pick = None;
+                // Ce clic ne fait que fermer : il ne peint pas sur l'image
+                self.swallow_click = true;
+            }
+        }
+
         // ---- Calques, à droite
         match crate::layout::offer("paint-layers", "calques (retouche)") {
             Some(r) => crate::layout::draw_in(ui, r, p.panel, 8.0, |ui| self.layers_panel(ui)),
@@ -1579,7 +1642,9 @@ impl Editor {
         if resp.dragged_by(egui::PointerButton::Middle) || (space && resp.dragged_by(egui::PointerButton::Primary)) {
             self.pan += resp.drag_delta();
         } else {
-            if resp.drag_started_by(egui::PointerButton::Primary) {
+            if self.swallow_click || self.swatch_pick.is_some() {
+                // Fermer le sélecteur de couleur : rien d'autre
+            } else if resp.drag_started_by(egui::PointerButton::Primary) {
                 if matches!(self.tool, Tool::Brush | Tool::Eraser | Tool::Move) {
                     self.locked();
                 }
@@ -1694,7 +1759,9 @@ impl Editor {
                 self.stroke = None;
                 self.drag_from = None;
             }
-            if resp.clicked() {
+            if ui.input(|i| i.pointer.any_released()) && std::mem::take(&mut self.swallow_click) {
+                // Le clic qui a fermé le sélecteur de couleur s'arrête là
+            } else if resp.clicked() && self.swatch_pick.is_none() {
                 if let Some(at) = resp.interact_pointer_pos() {
                     let d = to_doc(at);
                     let px = [d.x.floor() as i32, d.y.floor() as i32];
@@ -1873,11 +1940,21 @@ impl Editor {
                 self.map_active(&base, |c| c.map(|x| 1.0 - x));
             } else if !cmd {
                 for (t, _, _, key) in TOOLS {
-                    if let Some(kk) = egui::Key::from_name(key) {
+                    if let Some(kk) = egui::Key::from_name(key).filter(|_| key != "G") {
                         if k(kk) {
                             self.tool = t;
                         }
                     }
+                }
+                // G : pot de peinture, puis dégradé (comme dans Photoshop)
+                if k(egui::Key::G) {
+                    self.tool = if self.tool == Tool::Fill { Tool::Gradient } else { Tool::Fill };
+                }
+                if k(egui::Key::X) {
+                    std::mem::swap(&mut self.color, &mut self.bg_color);
+                }
+                if k(egui::Key::D) && !ui.input(|i| i.modifiers.any()) {
+                    (self.color, self.bg_color) = (Color32::BLACK, Color32::WHITE);
                 }
                 if k(egui::Key::OpenBracket) {
                     self.size = (self.size / 1.2).max(1.0);

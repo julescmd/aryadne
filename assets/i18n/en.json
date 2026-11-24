@@ -2347,5 +2347,9 @@
   "Dissocier le groupe": "Ungroup",
   "Supprimer le groupe et ses calques": "Delete Group and Contents",
   "Grouper le calque (Ctrl+G)": "Group Layer (Ctrl+G)",
-  "Sortir du groupe": "Move Out of Group"
+  "Sortir du groupe": "Move Out of Group",
+  "Couleur d'arrière-plan": "Background color",
+  "Couleur de premier plan": "Foreground color",
+  "Échanger les couleurs (X)": "Swap colors (X)",
+  "Noir et blanc par défaut (D)": "Default black and white (D)"
 }
