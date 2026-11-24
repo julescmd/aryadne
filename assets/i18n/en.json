@@ -2341,5 +2341,11 @@
   "Nouveau calque de réglage (non destructif)": "New adjustment layer (non-destructive)",
   "noirs": "blacks",
   "blancs": "whites",
-  "exposition (IL)": "exposure (EV)"
+  "exposition (IL)": "exposure (EV)",
+  "Traverser": "Pass Through",
+  "Nom :": "Name:",
+  "Dissocier le groupe": "Ungroup",
+  "Supprimer le groupe et ses calques": "Delete Group and Contents",
+  "Grouper le calque (Ctrl+G)": "Group Layer (Ctrl+G)",
+  "Sortir du groupe": "Move Out of Group"
 }
