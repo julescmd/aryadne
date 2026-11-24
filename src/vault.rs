@@ -799,3 +799,65 @@ mod scan_bench {
         eprintln!("{n} éléments en {:.0} ms", t.elapsed().as_secs_f64() * 1000.0);
     }
 }
+
+/// Propriétés de l'en-tête YAML d'une note (comme Obsidian) : (clé, valeurs) dans l'ordre, et le nombre de
+/// lignes de l'en-tête (traits compris). Lit les formes simples : « clé: valeur », « clé: [a, b] » et les listes
+/// « - a » sous la clé.
+pub fn frontmatter(text: &str) -> Option<(Vec<(String, Vec<String>)>, usize)> {
+    let mut lines = text.lines();
+    if lines.next()?.trim_end() != "---" {
+        return None;
+    }
+    let mut props: Vec<(String, Vec<String>)> = vec![];
+    let unquote = |v: &str| v.trim().trim_matches('"').trim_matches('\'').to_string();
+    for (n, l) in lines.enumerate() {
+        if l.trim_end() == "---" || l.trim_end() == "..." {
+            return Some((props, n + 2));
+        }
+        if let Some(item) = l.trim_start().strip_prefix("- ").filter(|_| l.starts_with(' ') || l.starts_with('-')) {
+            if let Some(last) = props.last_mut() {
+                last.1.push(unquote(item));
+            }
+            continue;
+        }
+        if let Some((k, v)) = l.split_once(':').filter(|(k, _)| !k.trim().is_empty() && !k.starts_with(' ')) {
+            let v = v.trim();
+            let vals = if let Some(inner) = v.strip_prefix('[').and_then(|x| x.strip_suffix(']')) {
+                inner.split(',').map(unquote).filter(|x| !x.is_empty()).collect()
+            } else if v.is_empty() {
+                vec![]
+            } else {
+                vec![unquote(v)]
+            };
+            props.push((k.trim().to_string(), vals));
+        }
+    }
+    None
+}
+
+/// Les tags de l'en-tête (« tags: » ou « tag: »), sans le « # »
+pub fn front_tags(text: &str) -> Vec<String> {
+    frontmatter(text)
+        .map(|(p, _)| p.into_iter().filter(|(k, _)| k.eq_ignore_ascii_case("tags") || k.eq_ignore_ascii_case("tag")).flat_map(|(_, v)| v).flat_map(|v| v.split_whitespace().map(|t| t.trim_start_matches('#').to_string()).collect::<Vec<_>>()).filter(|t| !t.is_empty()).collect())
+        .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod front_tests {
+    use super::*;
+
+    #[test]
+    fn proprietes_yaml() {
+        let t = "---\ntitre: Le court\ntags: [court, \"pelico\"]\nauteurs:\n  - Jules\n  - Annabelle\nvide:\n---\n# Corps";
+        let (p, n) = frontmatter(t).unwrap();
+        assert_eq!(n, 8);
+        assert_eq!(p[0], ("titre".into(), vec!["Le court".into()]));
+        assert_eq!(p[1].1, vec!["court".to_string(), "pelico".into()]);
+        assert_eq!(p[2].1, vec!["Jules".to_string(), "Annabelle".into()]);
+        assert!(p[3].1.is_empty());
+        assert_eq!(front_tags(t), vec!["court".to_string(), "pelico".into()]);
+        assert_eq!(front_tags("---\ntags: a b\n---"), vec!["a".to_string(), "b".into()]);
+        assert!(frontmatter("# pas d'en-tête").is_none());
+        assert!(frontmatter("---\njamais fermé").is_none());
+    }
+}

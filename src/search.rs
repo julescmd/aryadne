@@ -72,6 +72,14 @@ impl Search {
                     let big = vault::safe(&root, &e.rel).ok().and_then(|p| std::fs::metadata(p).ok()).is_none_or(|m| m.len() > MAX_FILE);
                     if !big {
                         if let Ok(text) = vault::read(&root, &e.rel) {
+                            // « #tag » trouve aussi les tags de l'en-tête (« tags: [tag] »)
+                            if let Some(tag) = q.strip_prefix('#') {
+                                let t = fold(tag);
+                                if vault::front_tags(&text).iter().any(|x| fold(x) == t) && !fold(&text).contains(&needle) {
+                                    lines.push(Line { number: 1, text: format!("tags: {tag}") });
+                                    total += 1;
+                                }
+                            }
                             for (i, line) in text.lines().enumerate() {
                                 if fold(line).contains(&needle) {
                                     lines.push(Line { number: i + 1, text: line.trim().chars().take(220).collect() });

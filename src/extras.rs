@@ -1127,8 +1127,12 @@ pub fn collect_tags(root: &str, entries: &[Entry]) -> Vec<(String, usize)> {
     let mut count: HashMap<String, usize> = HashMap::new();
     for e in entries.iter().filter(|e| !e.is_dir && vault::is_md(&e.rel)).take(3000) {
         let Ok(t) = vault::read(root, &e.rel) else { continue };
+        for tag in vault::front_tags(&t) {
+            *count.entry(tag.to_lowercase()).or_default() += 1;
+        }
+        let skip = vault::frontmatter(&t).map(|f| f.1).unwrap_or(0);
         let mut in_code = false;
-        for l in t.lines() {
+        for l in t.lines().skip(skip) {
             if l.trim_start().starts_with("```") {
                 in_code = !in_code;
             }

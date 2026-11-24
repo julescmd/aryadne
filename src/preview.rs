@@ -40,6 +40,11 @@ pub fn show_doc(ui: &mut egui::Ui, text: &str, existing: &HashSet<String>, paths
     let lines: Vec<&str> = text.lines().collect();
     let mut i = 0;
     let ctx = Ctx { existing, paths };
+    // En-tête YAML : un tableau de propriétés (comme Obsidian), pas du texte brut
+    if let Some((props, n)) = crate::vault::frontmatter(text) {
+        properties(ui, &props, &ctx, &mut out);
+        i = n;
+    }
     while i < lines.len() {
         let line = lines[i];
         let trimmed = line.trim_start();
@@ -293,6 +298,51 @@ pub fn section(text: &str, title: &str) -> Option<String> {
     let level = heading(lines[start].trim_start())?.0;
     let end = (start + 1..lines.len()).find(|&i| heading(lines[i].trim_start()).is_some_and(|(l, _)| l <= level)).unwrap_or(lines.len());
     Some(lines[start..end].join("\n"))
+}
+
+/// Les propriétés de l'en-tête : une ligne par clé, les listes et les tags en pastilles
+fn properties(ui: &mut egui::Ui, props: &[(String, Vec<String>)], ctx: &Ctx, out: &mut Option<Out>) {
+    if props.is_empty() {
+        return;
+    }
+    let p = theme::pal();
+    egui::Frame::new().stroke(egui::Stroke::new(1.0, p.line)).corner_radius(6).inner_margin(egui::Margin::symmetric(12, 8)).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        egui::Grid::new(ui.next_auto_id()).num_columns(2).spacing(egui::vec2(18.0, 6.0)).show(ui, |ui| {
+            for (k, vals) in props {
+                let low = k.to_lowercase();
+                let icon = match low.as_str() {
+                    "tags" | "tag" => crate::lucide::TAGS,
+                    "date" | "created" | "updated" | "créé" | "modifié" | "échéance" | "due" => crate::lucide::CALENDAR,
+                    "aliases" | "alias" => crate::lucide::FORWARD,
+                    _ if vals.len() > 1 => crate::lucide::LIST,
+                    _ if vals.first().is_some_and(|v| v.starts_with("http")) => crate::lucide::LINK,
+                    _ => crate::lucide::TEXT_ICON,
+                };
+                ui.label(RichText::new(format!("{icon}  {k}")).color(p.muted).size(12.5));
+                ui.horizontal_wrapped(|ui| {
+                    if vals.is_empty() {
+                        ui.label(RichText::new("—").color(p.muted));
+                    }
+                    let tags = low == "tags" || low == "tag";
+                    for v in vals {
+                        if tags {
+                            for t in v.split_whitespace() {
+                                let t = t.trim_start_matches('#');
+                                ui.label(RichText::new(format!("#{t}")).size(12.0).color(p.link).background_color(p.link.gamma_multiply(0.15)));
+                            }
+                        } else if vals.len() > 1 {
+                            egui::Frame::new().fill(p.code_bg).corner_radius(10).inner_margin(egui::Margin::symmetric(8, 1)).show(ui, |ui| inline(ui, v, ctx, out, None));
+                        } else {
+                            inline(ui, v, ctx, out, None);
+                        }
+                    }
+                });
+                ui.end_row();
+            }
+        });
+    });
+    ui.add_space(6.0);
 }
 
 /// Sans l'en-tête YAML du début
