@@ -679,7 +679,7 @@ impl Viewer {
         // Retours, à droite
         if self.show_comments {
             let fps_c = self.preview_fps;
-            egui::Panel::right(egui::Id::new(("review-comments", self.path.to_string_lossy().to_string()))).resizable(true).default_size(280.0).min_size(220.0).max_size(460.0).frame(egui::Frame::new().fill(p.panel).stroke(Stroke::new(1.0, p.line)).inner_margin(10)).show(ui, |ui| self.comments_panel(ui, fps_c));
+            egui::Panel::right(egui::Id::unique(("review-comments", self.path.to_string_lossy().to_string()))).resizable(true).default_size(280.0).min_size(220.0).max_size(460.0).frame(egui::Frame::new().fill(p.panel).stroke(Stroke::new(1.0, p.line)).inner_margin(10)).show(ui, |ui| self.comments_panel(ui, fps_c));
         }
         // Barre d'outils
         ui.horizontal_wrapped(|ui| {
