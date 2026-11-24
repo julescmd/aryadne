@@ -178,7 +178,7 @@ impl App {
             Cmd::Theme => self.set_dark(ctx, !theme::is_dark()),
             Cmd::Pin => self.set_pinned(ctx, !self.pinned),
             Cmd::Compact => self.compact = !self.compact,
-            Cmd::Assistant => self.assistant_open = !self.assistant_open,
+            Cmd::Assistant => self.toggle_assistant(),
             Cmd::CloseTab => {
                 if let Some(i) = self.active {
                     self.actions.push(Action::Close(i));

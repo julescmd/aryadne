@@ -352,6 +352,8 @@ struct App {
     /// Explorateur ouvert (Ctrl+B) ; panneau « structure » masqué ; fenêtres de pages ajoutées
     explorer_open: bool,
     side_hidden: bool,
+    /// Onglet de l'inspecteur : 0 plan, 1 liens, 2 Assistant
+    insp_tab: u8,
     view_panels: Vec<String>,
     /// Zones de l'interface (image précédente) : la barre du bas montre les raccourcis de celle sous la souris
     zones_last: Vec<(&'static str, egui::Rect)>,
@@ -997,11 +999,24 @@ impl App {
             let on = i == self.ws.current;
             let color = workspace::accent_of(&self.ws.list[i]).map(|c| egui::Color32::from_rgb(c[0], c[1], c[2])).unwrap_or(if on { theme::theme().p.accent } else { p.muted });
             let label = crate::i18n::t(&self.ws.list[i].name);
-            let mut text = egui::text::LayoutJob::default();
-            let font = egui::FontId::new(13.0, if on { theme::bold() } else { egui::FontFamily::Proportional });
-            text.append("● ", 0.0, egui::TextFormat { font_id: font.clone(), color, ..Default::default() });
-            text.append(&label, 0.0, egui::TextFormat { font_id: font, color: if on { color } else { p.muted }, ..Default::default() });
-            let r = ui.add(egui::Button::new(text).frame(false)).on_hover_text(crate::i18n::t("clic droit : renommer, couleur, dupliquer"));
+            // Comme la maquette : pastille + nom ; l'onglet actif a un fond relevé, un contour et sa couleur en bas
+            let galley = ui.painter().layout_no_wrap(label, egui::FontId::proportional(12.5), if on { p.text } else { p.muted });
+            let size = egui::vec2(galley.size().x + 10.0 + 8.0 + 7.0 + 10.0, 28.0);
+            let (rect, r) = ui.allocate_exact_size(size, egui::Sense::click());
+            let hov = r.hovered();
+            if on || hov {
+                ui.painter().rect(rect, 2.0, p.raised, egui::Stroke::new(1.0, if on { p.line } else { egui::Color32::TRANSPARENT }), egui::StrokeKind::Inside);
+            }
+            let dot = egui::pos2(rect.left() + 10.0 + 4.0, rect.center().y);
+            ui.painter().circle_filled(dot, 4.0, color);
+            let text_col = if on || hov { p.text } else { p.muted };
+            ui.painter().galley_with_override_text_color(egui::pos2(dot.x + 4.0 + 7.0, rect.center().y - galley.size().y / 2.0), galley, text_col);
+            if on {
+                // La barre de couleur touche le bas de la barre du haut
+                let bottom = ui.max_rect().bottom() + 6.0;
+                ui.painter().rect_filled(egui::Rect::from_min_max(egui::pos2(rect.left() + 8.0, bottom - 2.0), egui::pos2(rect.right() - 8.0, bottom)), 0.0, color);
+            }
+            let r = r.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(crate::i18n::t("clic droit : renommer, couleur, dupliquer"));
             if r.clicked() {
                 go = Some(i);
             }
@@ -1047,9 +1062,9 @@ impl App {
                     ui.close();
                 }
             });
-            ui.add_space(10.0);
         }
-        if ui.add(egui::Button::new(RichText::new("＋").color(p.muted)).frame(false)).on_hover_text(crate::i18n::t("Enregistrer la disposition actuelle comme nouvel espace de travail")).clicked() {
+        ui.add_space(2.0);
+        if ui.add(egui::Button::new(RichText::new(lucide::PLUS).size(14.0).color(p.muted)).frame(false).min_size(egui::vec2(26.0, 26.0))).on_hover_text(crate::i18n::t("Enregistrer la disposition actuelle comme nouvel espace de travail")).clicked() {
             add = true;
         }
         if add || dup.is_some() {
@@ -1193,6 +1208,15 @@ impl App {
         }
     }
 
+    /// L'Assistant : dans l'onglet de l'inspecteur quand il est affiché, sinon dans son propre panneau.
+    pub(crate) fn toggle_assistant(&mut self) {
+        if self.side_wanted() && !self.assistant_open {
+            self.insp_tab = if self.insp_tab == 2 { 0 } else { 2 };
+        } else {
+            self.assistant_open = !self.assistant_open;
+        }
+    }
+
     /// Le panneau structure n'a de sens que pour un texte.
     fn side_wanted(&self) -> bool {
         self.view() == View::Files && self.current().is_none_or(|d| matches!(d.content, Content::Text(_))) && self.split.is_none() && !self.side_hidden
@@ -1217,7 +1241,7 @@ impl App {
             "explorer" => crate::i18n::t("fichiers"),
             "terminal" => "terminal".into(),
             "assistant" => crate::i18n::t("assistant"),
-            "side" => crate::i18n::t("structure"),
+            "side" => crate::i18n::t("inspecteur"),
             v if v.starts_with("ed:") => layout::title(v).map(|t| crate::i18n::t(&t)).unwrap_or_else(|| v.trim_start_matches("ed:").to_string()),
             v => {
                 let id = v.strip_prefix("view:").unwrap_or(v);
@@ -1308,7 +1332,19 @@ impl App {
             .frame(egui::Frame::new().fill(theme::pal().line).inner_margin(0))
             .show(ui, |ui| {
                 let main_tile = layout::find(&tree, layout::MAIN);
-                let mut b = Panes { app: self, main_tile };
+                // Les panneaux seuls dans leur case : pas de barre d'onglets, ils dessinent leur propre en-tête
+                let alone: HashSet<egui_tiles::TileId> = tree
+                    .tiles
+                    .iter()
+                    .filter_map(|(_, t)| match t {
+                        egui_tiles::Tile::Container(egui_tiles::Container::Tabs(tb)) => {
+                            let shown: Vec<_> = tb.children.iter().copied().filter(|c| tree.tiles.is_visible(*c)).collect();
+                            (shown.len() == 1).then(|| shown[0])
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                let mut b = Panes { app: self, main_tile, alone };
                 tree.ui(&mut b, ui);
             })
             .response
@@ -1721,6 +1757,7 @@ impl App {
                     let settings = self.ai.clone().unwrap_or_default();
                     self.summary_rx = Some(ai::summarize(settings, rel.clone(), text, self.local.clone(), ctx.clone()));
                     self.summary = Some((rel, Summary::Loading));
+                    self.insp_tab = 2;
                 }
             }
         }
@@ -1938,7 +1975,7 @@ impl App {
             self.search.last_query.clear();
         }
         if keymap::pressed(ctx, "assistant") {
-            self.assistant_open = !self.assistant_open;
+            self.toggle_assistant();
         }
         if !crate::model3d::mesh_keys() && keymap::pressed(ctx, "explorer") {
             self.explorer_open = !self.explorer_open;
@@ -2337,21 +2374,28 @@ impl App {
                         let active = Some(i) == self.active;
                         let name = d.rel.rsplit('/').next().unwrap_or(&d.rel);
                         let mark = if d.dirty_since.is_some() { " ●" } else { "" };
+                        // Comme la maquette : 32 px, pastille de la couleur du genre de fichier, barre de cette
+                        // couleur en haut de l'onglet actif, séparateur à droite
+                        let col = files::kind(&d.rel).1;
                         let fill = if active { p.bg } else { p.panel };
-                        let r = egui::Frame::new().fill(fill).stroke(egui::Stroke::new(1.0, p.line)).inner_margin(egui::Margin { left: 12, right: 6, top: 6, bottom: 6 }).show(ui, |ui| {
-                            ui.horizontal(|ui| {
+                        let r = egui::Frame::new().fill(fill).inner_margin(egui::Margin { left: 12, right: 4, top: 0, bottom: 0 }).show(ui, |ui| {
+                            ui.set_height(32.0);
+                            ui.horizontal_centered(|ui| {
                                 ui.spacing_mut().item_spacing.x = 8.0;
-                                let out = if self.panes.contains(&d.rel) { "◧ " } else { "" };
-                                ui.label(RichText::new(format!("{out}{name}{mark}")).color(if active { p.text } else { p.muted }).size(12.0));
-                                let x = ui.add(egui::Label::new(RichText::new("×").color(p.muted)).sense(egui::Sense::click()));
-                                if x.on_hover_text(crate::i18n::t("Fermer (Ctrl+W)")).clicked() {
+                                let (dr, _) = ui.allocate_exact_size(egui::vec2(6.0, 6.0), egui::Sense::hover());
+                                ui.painter().circle_filled(dr.center(), 3.0, col);
+                                let out = if self.panes.contains(&d.rel) { format!("{} ", lucide::PANEL_RIGHT) } else { String::new() };
+                                ui.label(RichText::new(format!("{out}{name}{mark}")).color(if active { p.text } else { p.muted }).size(12.5));
+                                let x = ui.add(egui::Button::new(RichText::new(lucide::X).size(11.0).color(p.muted)).frame(false).min_size(egui::vec2(20.0, 20.0)));
+                                if x.on_hover_text(format!("{} ({})", crate::i18n::t("fermer"), keymap::text("close_tab"))).clicked() {
                                     self.actions.push(Action::Close(i));
                                 }
                             });
                         });
+                        let top = r.response.rect;
+                        ui.painter().vline(top.right(), top.y_range(), egui::Stroke::new(1.0, p.line));
                         if active {
-                            let top = r.response.rect;
-                            ui.painter().rect_filled(egui::Rect::from_min_size(top.min, egui::vec2(top.width(), 2.0)), 0.0, p.accent);
+                            ui.painter().rect_filled(egui::Rect::from_min_size(top.min, egui::vec2(top.width(), 2.0)), 0.0, col);
                         }
                         let resp = r.response.interact(egui::Sense::click_and_drag());
                         if resp.clicked() {
@@ -2403,8 +2447,23 @@ impl App {
                             self.actions.push(Action::Close(i));
                         }
                     }
+                    ui.add_space(4.0);
+                    let ctx = ui.ctx().clone();
+                    if ui.add(egui::Button::new(RichText::new(lucide::PLUS).size(14.0).color(p.muted)).frame(false).min_size(egui::vec2(26.0, 26.0))).on_hover_text(crate::i18n::t("nouveau fichier")).clicked() {
+                        self.run_cmd(extras::Cmd::NewFile, &ctx);
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.add_space(6.0);
+                        let on = self.split.is_some();
+                        let b = egui::Button::new(RichText::new(lucide::COLUMNS_2).size(14.0).color(if on { p.text } else { p.muted })).fill(if on { p.raised } else { egui::Color32::TRANSPARENT }).frame(on).min_size(egui::vec2(26.0, 26.0));
+                        if ui.add(b).on_hover_text(format!("{} ({})", crate::i18n::t("côte à côte"), keymap::text("split"))).clicked() {
+                            self.toggle_split();
+                        }
+                    });
                 });
             });
+            let r = ui.min_rect();
+            ui.painter().hline(r.x_range(), r.bottom(), egui::Stroke::new(1.0, p.line));
         });
         if let Some(rel) = untear {
             self.panes.retain(|r| *r != rel);
@@ -2964,13 +3023,19 @@ impl App {
             return;
         }
         crate::dock::show_ex(ui, "side", &crate::i18n::t("structure"), crate::dock::Side::Right, 290.0, 200.0, egui::Frame::new().fill(p.panel).stroke(egui::Stroke::new(1.0, p.line)).inner_margin(12), true, |ui| {
-                egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
+                // Onglet Assistant : le résumé (s'il y en a un) en haut, la discussion en dessous
+                let assistant_tab = self.insp_tab == 2;
+                let max_h = if assistant_tab { if self.summary.is_some() { ui.available_height() * 0.4 } else { 0.0 } } else { f32::INFINITY };
+                if max_h > 0.0 {
+                egui::ScrollArea::vertical().auto_shrink(!assistant_tab).max_height(max_h).show(ui, |ui| {
                     let is_md = self.current().is_some_and(|d| vault::is_md(&d.rel));
+                    let tab = self.insp_tab;
                     // Structure : fonctions, classes, titres… (clic = aller à la ligne)
-                    let syms = self.current().and_then(|d| if let Content::Text(t) = &d.content { Some(code::symbols(t, &if vault::is_md(&d.rel) { "md".to_string() } else { ext(&d.rel) })) } else { None }).unwrap_or_default();
+                    let syms = if tab != 0 { vec![] } else { self.current().and_then(|d| if let Content::Text(t) = &d.content { Some(code::symbols(t, &if vault::is_md(&d.rel) { "md".to_string() } else { ext(&d.rel) })) } else { None }).unwrap_or_default() };
+                    if tab == 0 && syms.is_empty() {
+                        ui.label(RichText::new(crate::i18n::t("Pas de titres ni de symboles dans ce fichier.")).color(p.muted).size(12.5));
+                    }
                     if !syms.is_empty() {
-                        ui.label(caps(&format!("{} · {}", crate::i18n::t("structure"), syms.len())));
-                        ui.add_space(4.0);
                         let mut jump = None;
                         for sy in syms.iter().take(300) {
                             ui.horizontal(|ui| {
@@ -2992,7 +3057,10 @@ impl App {
                         }
                         ui.add_space(16.0);
                     }
-                    if is_md {
+                    if tab == 1 && !is_md {
+                        ui.label(RichText::new(crate::i18n::t("Les liens entrants concernent les notes.")).color(p.muted).size(12.5));
+                    }
+                    if tab == 1 && is_md {
                         ui.label(caps(&format!("{} · {}", crate::i18n::t("liens entrants"), self.backlinks.len())));
                         ui.add_space(4.0);
                         if self.backlinks.is_empty() {
@@ -3016,13 +3084,16 @@ impl App {
                         ui.add_space(16.0);
                     }
 
-                    ui.label(caps(&crate::i18n::t("résumé ia")));
-                    ui.add_space(4.0);
+                    if tab != 2 {
+                        return;
+                    }
                     let mut save = None;
+                    if self.summary.is_some() {
+                        ui.label(caps(&crate::i18n::t("résumé ia")));
+                        ui.add_space(4.0);
+                    }
                     match &self.summary {
-                        None => {
-                            ui.label(RichText::new(crate::i18n::t("ouvre un fichier et clique sur « résumer »")).color(p.muted).size(11.5));
-                        }
+                        None => {}
                         Some((rel, Summary::Loading)) => {
                             ui.horizontal(|ui| {
                                 ui.spinner();
@@ -3069,6 +3140,10 @@ impl App {
                         }
                     }
                 });
+                }
+                if assistant_tab {
+                    self.assistant_ui(ui, true);
+                }
             });
     }
 
@@ -3800,6 +3875,11 @@ impl App {
     }
 
     fn assistant_panel(&mut self, ui: &mut egui::Ui) {
+        self.assistant_ui(ui, false);
+    }
+
+    /// L'Assistant : dans son panneau, ou dans l'onglet Assistant de l'inspecteur (`embedded`).
+    fn assistant_ui(&mut self, ui: &mut egui::Ui, embedded: bool) {
         let p = theme::pal();
         self.assistant.poll();
         let existing: HashSet<String> = self.md.keys().cloned().collect();
@@ -3815,11 +3895,13 @@ impl App {
             self.assistant_open = false;
             return;
         }
-        crate::dock::show_ex(ui, "assistant", &crate::i18n::t("assistant"), crate::dock::Side::Right, 340.0, 240.0, egui::Frame::new().fill(p.panel).stroke(egui::Stroke::new(1.0, p.line)).inner_margin(12), true, |ui| {
+        let mut body = |ui: &mut egui::Ui| {
                 ui.horizontal(|ui| {
-                    ui.label(caps(&crate::i18n::t("assistant")));
+                    if !embedded {
+                        ui.label(caps(&crate::i18n::t("assistant")));
+                    }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.small_button("×").on_hover_text(crate::i18n::t("Ctrl+L")).clicked() {
+                        if !embedded && ui.small_button("×").on_hover_text(crate::i18n::t("Ctrl+L")).clicked() {
                             self.assistant_open = false;
                         }
                         if ui.small_button(crate::i18n::t("vider")).clicked() {
@@ -3905,7 +3987,12 @@ impl App {
                         send = true;
                     }
                 });
-            });
+            };
+        if embedded {
+            body(ui);
+        } else {
+            crate::dock::show_ex(ui, "assistant", &crate::i18n::t("assistant"), crate::dock::Side::Right, 340.0, 240.0, egui::Frame::new().fill(p.panel).stroke(egui::Stroke::new(1.0, p.line)).inner_margin(12), true, body);
+        };
         if let Some(b) = bar_out {
             self.apply_chat_bar(b, &ctxt);
         }
@@ -5478,6 +5565,7 @@ struct Panes<'a> {
     app: &'a mut App,
     /// La case de l'éditeur principal : seule dans ses onglets, elle n'a pas de barre « Document »
     main_tile: Option<egui_tiles::TileId>,
+    alone: HashSet<egui_tiles::TileId>,
 }
 
 impl egui_tiles::Behavior<String> for Panes<'_> {
@@ -5491,12 +5579,81 @@ impl egui_tiles::Behavior<String> for Panes<'_> {
             }
             return egui_tiles::UiResponse::None;
         }
+        let header = id != layout::MAIN && self.alone.contains(&_tile);
         ui.push_id(("pane", &id), |ui| {
-            let rect = ui.max_rect();
-            ui.painter().rect_filled(rect, 0.0, theme::pal().panel);
-            ui.set_clip_rect(ui.clip_rect().intersect(rect));
-            let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect).layout(egui::Layout::top_down(egui::Align::Min)));
-            dock::inline(&id, || self.app.pane_body(&mut child, &id));
+            let mut rect = ui.max_rect();
+            let p = theme::pal();
+            ui.painter().rect_filled(rect, 0.0, p.panel);
+            let full = rect;
+            if header {
+                rect.min.y += 34.0;
+            }
+            {
+                let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect).layout(egui::Layout::top_down(egui::Align::Min)));
+                child.set_clip_rect(ui.clip_rect().intersect(rect));
+                dock::inline(&id, || self.app.pane_body(&mut child, &id));
+            }
+            // L'en-tête après le contenu : ses boutons passent au-dessus
+            let rect = full;
+            if header {
+                // En-tête du panneau, comme la maquette : titre, fermer ; clic droit : le sortir
+                let h = egui::Rect::from_min_size(rect.min, egui::vec2(rect.width(), 34.0));
+                ui.painter().hline(h.x_range(), h.bottom() - 0.5, egui::Stroke::new(1.0, p.line));
+                // Le fond de l'en-tête d'abord : les onglets et la croix, enregistrés après, passent au-dessus
+                let hr = ui.interact(h, ui.id().with(("pane-head", &id)), egui::Sense::click());
+                hr.context_menu(|ui| {
+                    if ui.button(crate::i18n::t("sortir dans sa propre fenêtre")).clicked() {
+                        dock::set_side(&id, dock::Side::Window);
+                        ui.close();
+                    }
+                    if ui.button(crate::i18n::t("réinitialiser la disposition")).clicked() {
+                        self.app.reset_layout = true;
+                        ui.close();
+                    }
+                });
+                if id == "side" {
+                    // L'inspecteur : des onglets fixes à la place du titre (Plan, Liens, Assistant)
+                    let mut x = h.left() + 6.0;
+                    for (k, label) in [(0u8, crate::i18n::t("structure")), (1, crate::i18n::t("liens")), (2, format!("{} {}", lucide::SPARKLES, crate::i18n::t("assistant")))] {
+                        let on = self.app.insp_tab == k;
+                        let g = ui.painter().layout_no_wrap(label, egui::FontId::proportional(12.5), if on { p.text } else { p.muted });
+                        let r = egui::Rect::from_min_size(egui::pos2(x, h.center().y - 12.0), egui::vec2(g.size().x + 16.0, 24.0));
+                        let resp = ui.interact(r, ui.id().with(("insp-tab", k)), egui::Sense::click());
+                        if on || resp.hovered() {
+                            ui.painter().rect(r, 2.0, p.raised, egui::Stroke::new(1.0, if on { p.line } else { egui::Color32::TRANSPARENT }), egui::StrokeKind::Inside);
+                        }
+                        let col = if on || resp.hovered() { p.text } else { p.muted };
+                        ui.painter().galley_with_override_text_color(egui::pos2(r.left() + 8.0, r.center().y - g.size().y / 2.0), g, col);
+                        if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                            self.app.insp_tab = k;
+                        }
+                        x = r.right() + 2.0;
+                    }
+                } else {
+                    ui.painter().text(egui::pos2(h.left() + 12.0, h.center().y), egui::Align2::LEFT_CENTER, App::pane_title(&id), egui::FontId::new(13.0, theme::bold()), p.text);
+                }
+                if !id.starts_with("ed:") {
+                    let xr = egui::Rect::from_center_size(egui::pos2(h.right() - 18.0, h.center().y), egui::vec2(24.0, 24.0));
+                    let xresp = ui.interact(xr, ui.id().with(("pane-close", &id)), egui::Sense::click());
+                    if xresp.hovered() {
+                        ui.painter().rect_filled(xr, 2.0, p.raised);
+                    }
+                    ui.painter().text(xr.center(), egui::Align2::CENTER_CENTER, lucide::X, egui::FontId::proportional(13.0), if xresp.hovered() { p.text } else { p.muted });
+                    if xresp.on_hover_text(crate::i18n::t("fermer")).clicked() {
+                        match id.as_str() {
+                            "explorer" => self.app.explorer_open = false,
+                            "terminal" => self.app.terminal = None,
+                            "assistant" => self.app.assistant_open = false,
+                            "side" => self.app.side_hidden = true,
+                            v => {
+                                if let Some(k) = v.strip_prefix("view:") {
+                                    self.app.view_panels.retain(|x| x != k);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         });
         egui_tiles::UiResponse::None
     }
@@ -5553,7 +5710,7 @@ impl egui_tiles::Behavior<String> for Panes<'_> {
 
     /// L'éditeur principal seul dans sa case : pas de barre d'onglets au-dessus (les documents ont déjà la leur)
     fn is_tab_bar_visible(&self, _tile_id: egui_tiles::TileId, tabs: &egui_tiles::Tabs) -> bool {
-        !(tabs.children.len() == 1 && Some(tabs.children[0]) == self.main_tile)
+        !tabs.children.iter().any(|c| self.alone.contains(c))
     }
 
     /// Panneaux nets, séparés par une ligne de 1 px (la charte : pas de coins arrondis entre les cases)

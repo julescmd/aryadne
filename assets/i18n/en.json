@@ -1729,5 +1729,10 @@
   "vidéos": "videos",
   "autres": "other",
   "enregistré": "saved",
-  "lecture": "reading"
+  "lecture": "reading",
+  "côte à côte": "side by side",
+  "liens": "links",
+  "inspecteur": "inspector",
+  "Pas de titres ni de symboles dans ce fichier.": "No headings or symbols in this file.",
+  "Les liens entrants concernent les notes.": "Backlinks apply to notes."
 }
