@@ -1051,6 +1051,25 @@ impl Editor {
                     }
                 });
             }).response.on_hover_text(crate::i18n::t("Le calque suit son parent : déplacer, tourner ou agrandir le parent l'emporte avec lui"));
+            // Cache de piste : le calque du dessus découpe celui-ci (et ne se dessine plus lui-même)
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new(crate::i18n::t("Cache")).color(p.muted));
+                let cur = lay.matte.map(|m| crate::i18n::t(m.name())).unwrap_or_else(|| crate::i18n::t("aucun"));
+                ui.add_enabled_ui(i > 0, |ui| {
+                    egui::ComboBox::from_id_salt("motion-matte").selected_text(cur).show_ui(ui, |ui| {
+                        if ui.selectable_label(lay.matte.is_none(), crate::i18n::t("aucun")).clicked() {
+                            lay.matte = None;
+                            changed = true;
+                        }
+                        for m in motion::Matte::ALL {
+                            if ui.selectable_label(lay.matte == Some(m), crate::i18n::t(m.name())).clicked() {
+                                lay.matte = Some(m);
+                                changed = true;
+                            }
+                        }
+                    });
+                });
+            }).response.on_hover_text(crate::i18n::t("Cache de piste (comme After Effects) : ce calque n'apparaît qu'à travers le calque juste au-dessus, qui ne se dessine plus"));
             section(ui, "Style");
             let st = &mut lay.style;
             let mut on = st.stroke.is_some();
@@ -1441,7 +1460,10 @@ impl Editor {
             painter.hline(body.x_range(), r.bottom() - 0.5, Stroke::new(1.0, p.line.gamma_multiply(0.6)));
             let c = layer_color(&lay.kind);
             painter.rect_filled(Rect::from_min_size(pos2(r.left() + 8.0, r.center().y - 8.0), vec2(3.0, 16.0)), 0.0, c);
-            painter.text(pos2(r.left() + 20.0, r.center().y), egui::Align2::LEFT_CENTER, layer_icon(&lay.kind), egui::FontId::proportional(13.0), p.muted);
+            // Calque qui sert de cache au calque d'en dessous : son icône devient celle du cache ; le calque caché a une flèche
+            let is_matte = self.compo.layers.get(i + 1).is_some_and(|n| n.matte.is_some());
+            let icon = if is_matte { l::SQUARE_DASHED } else if lay.matte.is_some() { l::CORNER_LEFT_UP } else { layer_icon(&lay.kind) };
+            painter.text(pos2(r.left() + 20.0, r.center().y), egui::Align2::LEFT_CENTER, icon, egui::FontId::proportional(13.0), if is_matte || lay.matte.is_some() { p.accent } else { p.muted });
             let name_r = Rect::from_min_max(pos2(r.left() + 40.0, r.top()), pos2(tracks.left() - 30.0, r.bottom()));
             painter.with_clip_rect(name_r).text(name_r.left_center(), egui::Align2::LEFT_CENTER, &lay.name, egui::FontId::proportional(12.5), if lay.visible { p.text } else { p.muted });
             let eye_r = Rect::from_center_size(pos2(tracks.left() - 16.0, r.center().y), vec2(20.0, 20.0));

@@ -227,6 +227,31 @@ pub struct Layer {
     /// Avant la première clé et après la dernière : constante, en boucle, en va-et-vient
     #[serde(default, skip_serializing_if = "crate::curves::Loop::is_none")]
     pub cycle: crate::curves::Loop,
+    /// Cache de piste (comme After Effects) : le calque n'apparaît qu'à travers celui du dessus
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub matte: Option<Matte>,
+}
+
+/// Comment le calque du dessus sert de cache
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Debug)]
+pub enum Matte {
+    Alpha,
+    AlphaInverted,
+    Luma,
+    LumaInverted,
+}
+
+impl Matte {
+    pub const ALL: [Matte; 4] = [Matte::Alpha, Matte::AlphaInverted, Matte::Luma, Matte::LumaInverted];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Matte::Alpha => "Alpha",
+            Matte::AlphaInverted => "Alpha inversé",
+            Matte::Luma => "Luminance",
+            Matte::LumaInverted => "Luminance inversée",
+        }
+    }
 }
 
 #[derive(Clone, PartialEq, Serialize, Deserialize, Debug)]
@@ -397,6 +422,7 @@ impl Layer {
             style: Style::default(),
             wiggle: None,
             cycle: Default::default(),
+            matte: None,
         }
     }
 
@@ -1108,59 +1134,102 @@ pub fn render(c: &Compo, t: f32, scale: f32, cache: &mut Cache) -> image::RgbaIm
     render_one(c, t, scale, cache)
 }
 
+/// Un calque prêt à poser : son image, sa transformation, son opacité et le cadre (px de sortie) qu'il touche
+type Prepped = (Arc<Bitmap>, Xform, f32, [u32; 4]);
+
+fn prep_layer(c: &Compo, li: usize, t: f32, scale: f32, cache: &mut Cache, (w, h): (u32, u32), as_matte: bool) -> Option<Prepped> {
+    let l = &c.layers[li];
+    // Un cache sert même masqué (comme dans After Effects) ; il doit seulement exister à cet instant
+    let alive = if as_matte { t >= l.start && t < l.end } else { l.live(t) };
+    if !alive {
+        return None;
+    }
+    let op = (l.value(&l.opacity, t)[0] / 100.0).clamp(0.0, 1.0);
+    if op <= 0.0 {
+        return None;
+    }
+    let x = c.world(li, t);
+    // Le contenu est calculé à la résolution où il sera vu (net même agrandi)
+    let k = (scale * x.max_scale()).clamp(0.02, 8.0);
+    // Un contenu qui ne bouge pas à l'intérieur du calque se dessine une fois (l'export reste rapide)
+    let still = match (&l.kind, &l.reveal) {
+        (Kind::Text { text, .. }, Some(r)) => t - l.start >= text.chars().count() as f32 * r.delay + r.dur,
+        _ => true,
+    };
+    let key = still.then(|| {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        serde_json::to_string(&l.kind).unwrap_or_default().hash(&mut h);
+        serde_json::to_string(&l.reveal).unwrap_or_default().hash(&mut h);
+        serde_json::to_string(&l.style).unwrap_or_default().hash(&mut h);
+        (h.finish(), k.to_bits())
+    });
+    let cached = key.and_then(|k| cache.bitmaps.get(&k).cloned());
+    let bm = match cached {
+        Some(b) => b,
+        None => {
+            let b = bitmap(l, t, k, cache)?;
+            let b = if l.style.is_plain() { b } else { styled(b, &l.style) };
+            let b = Arc::new(b);
+            if let Some(key) = key {
+                if cache.bitmaps.len() > 48 {
+                    cache.bitmaps.clear();
+                }
+                cache.bitmaps.insert(key, b.clone());
+            }
+            b
+        }
+    };
+    let (bw, bh) = (bm.img.width() as f32 / bm.k, bm.img.height() as f32 / bm.k);
+    let pts = [[bm.ox, bm.oy], [bm.ox + bw, bm.oy], [bm.ox + bw, bm.oy + bh], [bm.ox, bm.oy + bh]].map(|p| x.apply(p));
+    let x0 = (pts.iter().map(|p| p[0]).fold(f32::MAX, f32::min) * scale).floor().max(0.0) as u32;
+    let x1 = (pts.iter().map(|p| p[0]).fold(f32::MIN, f32::max) * scale).ceil().min(w as f32) as u32;
+    let y0 = (pts.iter().map(|p| p[1]).fold(f32::MAX, f32::min) * scale).floor().max(0.0) as u32;
+    let y1 = (pts.iter().map(|p| p[1]).fold(f32::MIN, f32::max) * scale).ceil().min(h as f32) as u32;
+    (x0 < x1 && y0 < y1).then_some((bm, x, op, [x0, y0, x1, y1]))
+}
+
+/// La carte d'un cache de piste (0 : caché, 1 : visible), par pixel de sortie
+fn matte_map(c: &Compo, li: usize, t: f32, scale: f32, cache: &mut Cache, (w, h): (u32, u32), m: Matte) -> Vec<f32> {
+    use rayon::prelude::*;
+    let inverted = matches!(m, Matte::AlphaInverted | Matte::LumaInverted);
+    let mut map = vec![if inverted { 1.0 } else { 0.0 }; (w * h) as usize];
+    let Some((bm, x, op, [x0, y0, x1, y1])) = prep_layer(c, li, t, scale, cache, (w, h), true) else { return map };
+    map.par_chunks_mut(w as usize).enumerate().filter(|(y, _)| (*y as u32) >= y0 && (*y as u32) < y1).for_each(|(py, row)| {
+        for px in x0..x1 {
+            let world = [(px as f32 + 0.5) / scale, (py as f32 + 0.5) / scale];
+            let Some(lp) = x.inverse(world) else { return };
+            let s = sample(&bm.img, (lp[0] - bm.ox) * bm.k, (lp[1] - bm.oy) * bm.k);
+            let a = s[3] * op;
+            // Luminance du calque posé sur du noir (couleurs prémultipliées)
+            let luma = (0.2126 * s[0] + 0.7152 * s[1] + 0.0722 * s[2]) / 255.0 * op;
+            row[px as usize] = match m {
+                Matte::Alpha => a,
+                Matte::AlphaInverted => 1.0 - a,
+                Matte::Luma => luma,
+                Matte::LumaInverted => 1.0 - luma,
+            }
+            .clamp(0.0, 1.0);
+        }
+    });
+    map
+}
+
 fn render_one(c: &Compo, t: f32, scale: f32, cache: &mut Cache) -> image::RgbaImage {
     use rayon::prelude::*;
     let (w, h) = (((c.w as f32 * scale).round() as u32).max(1), ((c.h as f32 * scale).round() as u32).max(1));
     let mut out = image::RgbaImage::from_pixel(w, h, image::Rgba([c.bg[0], c.bg[1], c.bg[2], 255]));
-    for (li, l) in c.layers.iter().enumerate().rev() {
-        if !l.live(t) {
+    // Les calques qui servent de cache au calque d'en dessous ne se dessinent pas eux-mêmes
+    let mattes: Vec<usize> = (1..c.layers.len()).filter(|&i| c.layers[i].matte.is_some()).map(|i| i - 1).collect();
+    for li in (0..c.layers.len()).rev() {
+        if mattes.contains(&li) {
             continue;
         }
-        let op = (l.value(&l.opacity, t)[0] / 100.0).clamp(0.0, 1.0);
-        if op <= 0.0 {
-            continue;
-        }
-        let x = c.world(li, t);
-        // Le contenu est calculé à la résolution où il sera vu (net même agrandi)
-        let k = (scale * x.max_scale()).clamp(0.02, 8.0);
-        // Un contenu qui ne bouge pas à l'intérieur du calque se dessine une fois (l'export reste rapide)
-        let still = match (&l.kind, &l.reveal) {
-            (Kind::Text { text, .. }, Some(r)) => t - l.start >= text.chars().count() as f32 * r.delay + r.dur,
-            _ => true,
+        let Some((bm, x, op, [x0, y0, x1, y1])) = prep_layer(c, li, t, scale, cache, (w, h), false) else { continue };
+        let mask = match c.layers[li].matte {
+            Some(m) if li > 0 => Some(matte_map(c, li - 1, t, scale, cache, (w, h), m)),
+            _ => None,
         };
-        let key = still.then(|| {
-            use std::hash::{Hash, Hasher};
-            let mut h = std::collections::hash_map::DefaultHasher::new();
-            serde_json::to_string(&l.kind).unwrap_or_default().hash(&mut h);
-            serde_json::to_string(&l.reveal).unwrap_or_default().hash(&mut h);
-            serde_json::to_string(&l.style).unwrap_or_default().hash(&mut h);
-            (h.finish(), k.to_bits())
-        });
-        let cached = key.and_then(|k| cache.bitmaps.get(&k).cloned());
-        let bm = match cached {
-            Some(b) => b,
-            None => {
-                let Some(b) = bitmap(l, t, k, cache) else { continue };
-                let b = if l.style.is_plain() { b } else { styled(b, &l.style) };
-                let b = Arc::new(b);
-                if let Some(key) = key {
-                    if cache.bitmaps.len() > 48 {
-                        cache.bitmaps.clear();
-                    }
-                    cache.bitmaps.insert(key, b.clone());
-                }
-                b
-            }
-        };
-        let (bw, bh) = (bm.img.width() as f32 / bm.k, bm.img.height() as f32 / bm.k);
-        let pts = [[bm.ox, bm.oy], [bm.ox + bw, bm.oy], [bm.ox + bw, bm.oy + bh], [bm.ox, bm.oy + bh]].map(|p| x.apply(p));
-        let x0 = (pts.iter().map(|p| p[0]).fold(f32::MAX, f32::min) * scale).floor().max(0.0) as u32;
-        let x1 = (pts.iter().map(|p| p[0]).fold(f32::MIN, f32::max) * scale).ceil().min(w as f32) as u32;
-        let y0 = (pts.iter().map(|p| p[1]).fold(f32::MAX, f32::min) * scale).floor().max(0.0) as u32;
-        let y1 = (pts.iter().map(|p| p[1]).fold(f32::MIN, f32::max) * scale).ceil().min(h as f32) as u32;
-        if x0 >= x1 || y0 >= y1 {
-            continue;
-        }
         let row_len = w as usize * 4;
         let raw: &mut [u8] = &mut out;
         raw.par_chunks_mut(row_len).enumerate().filter(|(y, _)| (*y as u32) >= y0 && (*y as u32) < y1).for_each(|(py, row)| {
@@ -1168,7 +1237,7 @@ fn render_one(c: &Compo, t: f32, scale: f32, cache: &mut Cache) -> image::RgbaIm
                 let world = [(px as f32 + 0.5) / scale, (py as f32 + 0.5) / scale];
                 let Some(lp) = x.inverse(world) else { return };
                 let s = sample(&bm.img, (lp[0] - bm.ox) * bm.k, (lp[1] - bm.oy) * bm.k);
-                let a = s[3] * op;
+                let a = s[3] * op * mask.as_ref().map_or(1.0, |m| m[py * w as usize + px as usize]);
                 if a <= 0.001 {
                     continue;
                 }
@@ -1447,6 +1516,28 @@ mod tests {
         assert!(lit(&sharp) <= 12, "{}", lit(&sharp));
         assert!(lit(&soft) > 12, "{}", lit(&soft));
         assert!(soft.get_pixel(100, 20)[0] < 255);
+    }
+
+    #[test]
+    fn cache_de_piste() {
+        let mut c = Compo { layers: vec![], ..Compo::default() };
+        (c.w, c.h, c.bg) = (100, 20, [0, 0, 0]);
+        // En haut : un carré blanc à gauche (le cache) ; dessous : un rectangle rouge sur toute la largeur
+        let mut m = Layer::new("cache", Kind::Rect { w: 20.0, h: 20.0, radius: 0.0, color: [255, 255, 255] }, &c);
+        m.pos.v = [10.0, 10.0];
+        let mut r = Layer::new("rouge", Kind::Rect { w: 100.0, h: 20.0, radius: 0.0, color: [255, 0, 0] }, &c);
+        r.pos.v = [50.0, 10.0];
+        r.matte = Some(Matte::Alpha);
+        c.layers = vec![m, r];
+        let mut cache = Cache::new(Path::new("."));
+        let img = render(&c, 0.0, 1.0, &mut cache);
+        // Rouge seulement sous le carré ; le cache lui-même n'est pas dessiné (pas de blanc)
+        assert_eq!(img.get_pixel(10, 10).0, [255, 0, 0, 255]);
+        assert_eq!(img.get_pixel(60, 10).0, [0, 0, 0, 255]);
+        c.layers[1].matte = Some(Matte::AlphaInverted);
+        let inv = render(&c, 0.0, 1.0, &mut cache);
+        assert_eq!(inv.get_pixel(10, 10).0, [0, 0, 0, 255]);
+        assert_eq!(inv.get_pixel(60, 10).0, [255, 0, 0, 255]);
     }
 
     #[test]

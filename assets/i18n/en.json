@@ -2452,5 +2452,10 @@
   "une pièce : réglable dans l'onglet Clip": "a room: adjust it in the Clip tab",
   "Voix plus grave": "Deeper voice",
   "Voix plus aiguë": "Higher voice",
-  "Change la hauteur sans changer la durée": "Changes the pitch without changing the length"
+  "Change la hauteur sans changer la durée": "Changes the pitch without changing the length",
+  "Cache": "Matte",
+  "Alpha inversé": "Alpha inverted",
+  "Luminance": "Luma",
+  "Luminance inversée": "Luma inverted",
+  "Cache de piste (comme After Effects) : ce calque n'apparaît qu'à travers le calque juste au-dessus, qui ne se dessine plus": "Track matte (like After Effects): this layer only shows through the layer just above, which is no longer drawn"
 }
