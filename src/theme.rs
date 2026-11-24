@@ -466,15 +466,72 @@ pub fn logo(ui: &mut egui::Ui, height: f32) -> egui::Response {
     } else {
         ("bytes://logo-light.png", include_bytes!("../assets/logo-light.png"))
     };
-    ui.add(egui::Image::from_bytes(uri, bytes).fit_to_exact_size(egui::vec2(height, height)))
+    match crisp(ui, uri, bytes, height) {
+        Some(t) => ui.add(egui::Image::new(&t).fit_to_exact_size(egui::vec2(height, height))),
+        None => ui.allocate_response(egui::vec2(height, height), egui::Sense::hover()),
+    }
+}
+
+
+/// Une image intégrée réduite une fois à la taille exacte en pixels de l'écran (filtre Lanczos), gardée en
+/// cache : à 18 px, un fil fin reste net au lieu de devenir un escalier
+fn crisp(ui: &egui::Ui, key: &str, bytes: &'static [u8], height: f32) -> Option<egui::TextureHandle> {
+    crisp_ex(ui, key, bytes, height, 0.0)
+}
+
+/// Comme `crisp`, et si le trait de l'image (`stroke` px dans l'image d'origine) deviendrait plus fin
+/// que 1,15 px à l'écran, il est d'abord épaissi (comme on dessine une icône exprès pour les petites tailles)
+fn crisp_ex(ui: &egui::Ui, key: &str, bytes: &'static [u8], height: f32, stroke: f32) -> Option<egui::TextureHandle> {
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+    static CACHE: Mutex<Option<HashMap<(String, u32), egui::TextureHandle>>> = Mutex::new(None);
+    let px = (height * ui.ctx().pixels_per_point()).round().max(1.0) as u32;
+    let key = &format!("{key}-{stroke}");
+    let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    let map = cache.get_or_insert_with(HashMap::new);
+    if let Some(t) = map.get(&(key.to_string(), px)) {
+        return Some(t.clone());
+    }
+    let mut img = image::load_from_memory(bytes).ok()?.to_rgba8();
+    if stroke > 0.0 {
+        let k = img.width() as f32 / px as f32;
+        let r = ((1.15 * k - stroke) / 2.0).round();
+        if r >= 1.0 {
+            let (w, h, r) = (img.width() as i32, img.height() as i32, r as i32);
+            let src = img.clone();
+            for y in 0..h {
+                for x in 0..w {
+                    let mut a = 0u8;
+                    for dy in -r..=r {
+                        for dx in -r..=r {
+                            if dx * dx + dy * dy <= r * r {
+                                let (sx, sy) = (x + dx, y + dy);
+                                if sx >= 0 && sy >= 0 && sx < w && sy < h {
+                                    a = a.max(src.get_pixel(sx as u32, sy as u32)[3]);
+                                }
+                            }
+                        }
+                    }
+                    let p = img.get_pixel_mut(x as u32, y as u32);
+                    *p = image::Rgba([255, 255, 255, a]);
+                }
+            }
+        }
+    }
+    let small = image::imageops::resize(&img, px, px, image::imageops::FilterType::Lanczos3);
+    let ci = egui::ColorImage::from_rgba_unmultiplied([px as usize, px as usize], small.as_raw());
+    let t = ui.ctx().load_texture(format!("crisp-{key}-{px}"), ci, egui::TextureOptions::LINEAR);
+    map.insert((key.to_string(), px), t.clone());
+    Some(t)
 }
 
 /// Le motif seul (le A d'un seul fil, sans tuile), de la couleur d'accent choisie.
 pub fn mark(ui: &mut egui::Ui, height: f32) -> egui::Response {
-    let img = egui::Image::from_bytes("bytes://mark.png", include_bytes!("../assets/mark.png"))
-        .tint(pal().accent)
-        .fit_to_exact_size(egui::vec2(height, height));
-    ui.add(img)
+    // Le fil du A fait environ 9 px sur 256 dans l'image d'origine
+    match crisp_ex(ui, "mark", include_bytes!("../assets/mark.png"), height, 9.0) {
+        Some(t) => ui.add(egui::Image::new(&t).tint(pal().accent).fit_to_exact_size(egui::vec2(height, height))),
+        None => ui.allocate_response(egui::vec2(height, height), egui::Sense::hover()),
+    }
 }
 
 /// Icône de la fenêtre.
