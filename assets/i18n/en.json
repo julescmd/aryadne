@@ -2403,5 +2403,19 @@
   "Cadrer (F)": "Frame (F)",
   "Normaliser : chaque courbe entre -1 et 1": "Normalize: each curve between -1 and 1",
   "Image de la clé": "Key frame",
-  "Valeur de la clé": "Key value"
+  "Valeur de la clé": "Key value",
+  "ouvrir la note intégrée": "open the embedded note",
+  "note intégrée trop profondément": "embedded too deeply",
+  "section introuvable": "section not found",
+  "Verrouiller le poids des tangentes : les poignées gardent leur longueur, seule la pente change": "Lock tangent weights: handles keep their length, only the slope changes",
+  "Copier les clés choisies (Ctrl+C)": "Copy selected keys (Ctrl+C)",
+  "Coller les clés à la tête de lecture (Ctrl+V)": "Paste keys at the playhead (Ctrl+V)",
+  "Avant l'animation": "Before the animation",
+  "Après l'animation": "After the animation",
+  "Constante": "Constant",
+  "Cycle": "Cycle",
+  "Cycle avec décalage": "Cycle with offset",
+  "Va-et-vient": "Oscillate",
+  "Boucler des deux côtés": "Loop both sides",
+  "Avant et après l'animation : constante, cycle, cycle avec décalage, va-et-vient": "Before and after the animation: constant, cycle, cycle with offset, oscillate"
 }

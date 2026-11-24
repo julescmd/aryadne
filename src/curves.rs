@@ -244,11 +244,13 @@ pub struct Editor {
     pub cycle: Option<Loop>,
     /// Clés copiées : (nom de la courbe, instant relatif, clé)
     clip: Vec<(String, CK)>,
+    /// Poids verrouillé (Maya) : tirer une poignée change sa pente, pas sa longueur
+    pub lock_weight: bool,
 }
 
 impl Default for Editor {
     fn default() -> Self {
-        Editor { view: None, sel: vec![], hidden: vec![], drag: None, who: String::new(), normalize: false, buffer: None, tween: 0.5, cycle: None, clip: vec![] }
+        Editor { view: None, sel: vec![], hidden: vec![], drag: None, who: String::new(), normalize: false, buffer: None, tween: 0.5, cycle: None, clip: vec![], lock_weight: false }
     }
 }
 
@@ -399,6 +401,10 @@ impl Editor {
             }
             if icon(ui, !self.clip.is_empty(), crate::lucide::CLIPBOARD_PASTE, "Coller les clés à la tête de lecture (Ctrl+V)") {
                 act = Some("paste");
+            }
+            let r = ui.add(egui::Button::new(egui::RichText::new(crate::lucide::WEIGHT).size(14.0)).frame(false).selected(self.lock_weight).min_size(vec2(24.0, 22.0))).on_hover_text(crate::i18n::t("Verrouiller le poids des tangentes : les poignées gardent leur longueur, seule la pente change"));
+            if r.clicked() {
+                self.lock_weight = !self.lock_weight;
             }
             if let Some(lp) = self.cycle.as_mut() {
                 let on = !lp.is_none();
@@ -952,7 +958,13 @@ impl Editor {
             (Some(Drag::Tan { c, k, right }), Some(at)) if resp.dragged() => {
                 let key = curves[c].keys[k];
                 let mut tg = tangents(&curves[c].keys, k);
-                let h = [t_of(at.x) - key.t, v_of(at.y) * norm[c].1 + norm[c].0 - key.v];
+                let mut h = [t_of(at.x) - key.t, v_of(at.y) * norm[c].1 + norm[c].0 - key.v];
+                // Poids verrouillé : la poignée garde sa longueur dans le temps, seule la pente suit la souris
+                if self.lock_weight {
+                    let len = if right { tg[2] } else { tg[0] };
+                    let slope = h[1] / if right { h[0].max(0.005) } else { h[0].min(-0.005) };
+                    h = [len, slope * len];
+                }
                 // Les deux côtés restent alignés (une tangente lisse), sauf avec Maj (cassée)
                 let broken = ui.input(|i| i.modifiers.shift);
                 if right {

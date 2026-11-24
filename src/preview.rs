@@ -101,7 +101,10 @@ pub fn show_doc(ui: &mut egui::Ui, text: &str, existing: &HashSet<String>, paths
         } else if let Some(c) = IMAGE.captures(trimmed) {
             let target = c.get(1).or(c.get(3)).map(|m| m.as_str().trim()).unwrap_or("");
             let width = c.get(2).and_then(|w| w.as_str().parse::<f32>().ok());
-            image(ui, target, width, &ctx);
+            match note_target(target, ctx.paths) {
+                Some((rel, sec)) => embed(ui, &rel, sec.as_deref(), &ctx, &mut out),
+                None => image(ui, target, width, &ctx),
+            }
         } else if let Some(c) = TASK.captures(line) {
             let indent = c[1].len() as f32 * 6.0;
             let mut done = &c[2] != " ";
@@ -256,6 +259,96 @@ fn quote(ui: &mut egui::Ui, body: &[&str], ctx: &Ctx, out: &mut Option<Out>) {
     ui.add_space(4.0);
 }
 
+thread_local! {
+    /// Profondeur des notes intégrées : une note qui s'intègre elle-même ne boucle pas
+    static DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// « ![[Note]] » ou « ![[Note#Titre]] » : la note du coffre visée et la section, si ce n'est pas une image
+fn note_target(target: &str, paths: &HashSet<String>) -> Option<(String, Option<String>)> {
+    let (name, sec) = match target.split_once('#') {
+        Some((n, s)) => (n.trim(), Some(s.trim().to_string()).filter(|s| !s.is_empty())),
+        None => (target.trim(), None),
+    };
+    let ext = name.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase());
+    if ext.as_deref().is_some_and(|e| e != "md") {
+        return None;
+    }
+    let file = if name.ends_with(".md") { name.to_string() } else { format!("{name}.md") };
+    let file = file.trim_start_matches('/');
+    let rel = if paths.contains(file) {
+        file.to_string()
+    } else {
+        let low = file.to_lowercase();
+        paths.iter().find(|q| q.rsplit('/').next().is_some_and(|n| n.to_lowercase() == low))?.clone()
+    };
+    Some((rel, sec))
+}
+
+/// La partie d'une note sous un titre, jusqu'au titre suivant de même niveau ou plus haut
+pub fn section(text: &str, title: &str) -> Option<String> {
+    let want = title.trim().to_lowercase();
+    let lines: Vec<&str> = text.lines().collect();
+    let start = lines.iter().position(|l| heading(l.trim_start()).is_some_and(|(_, t)| t.trim().to_lowercase() == want))?;
+    let level = heading(lines[start].trim_start())?.0;
+    let end = (start + 1..lines.len()).find(|&i| heading(lines[i].trim_start()).is_some_and(|(l, _)| l <= level)).unwrap_or(lines.len());
+    Some(lines[start..end].join("\n"))
+}
+
+/// Sans l'en-tête YAML du début
+fn body(text: &str) -> &str {
+    if let Some(rest) = text.strip_prefix("---\n") {
+        if let Some(end) = rest.find("\n---") {
+            return rest[end + 4..].trim_start_matches('\n');
+        }
+    }
+    text
+}
+
+/// Une note intégrée : son contenu dans un cadre, son nom cliquable pour l'ouvrir
+fn embed(ui: &mut egui::Ui, rel: &str, sec: Option<&str>, ctx: &Ctx, out: &mut Option<Out>) {
+    let p = theme::pal();
+    let depth = DEPTH.with(|d| d.get());
+    let name = rel.rsplit('/').next().unwrap_or(rel).trim_end_matches(".md");
+    let title = match sec {
+        Some(s) => format!("{name} › {s}"),
+        None => name.to_string(),
+    };
+    let text = std::fs::read_to_string(std::path::Path::new(&crate::nodes::vault_root()).join(rel)).unwrap_or_default();
+    let content = match sec {
+        Some(s) => section(body(&text), s),
+        None => Some(body(&text).to_string()),
+    };
+    let frame = egui::Frame::new().fill(p.code_bg.gamma_multiply(0.6)).stroke(egui::Stroke::new(1.0, p.line)).corner_radius(6).inner_margin(egui::Margin { left: 14, right: 10, top: 8, bottom: 10 });
+    let resp = frame.show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        let r = ui.add(egui::Label::new(RichText::new(format!("{}  {title}", crate::lucide::FILE_TEXT)).small().color(p.link)).sense(egui::Sense::click()));
+        if r.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(crate::i18n::t("ouvrir la note intégrée")).clicked() {
+            *out = Some(Out::Open(name.to_string()));
+        }
+        ui.add_space(2.0);
+        match content {
+            _ if depth >= 3 => {
+                ui.label(RichText::new(crate::i18n::t("note intégrée trop profondément")).color(p.muted));
+            }
+            Some(c) => {
+                DEPTH.with(|d| d.set(depth + 1));
+                // Une case cochée ici viserait une ligne de l'autre note : seuls les liens remontent
+                if let Some(Out::Open(n)) = show_doc(ui, &c, ctx.existing, ctx.paths) {
+                    *out = Some(Out::Open(n));
+                }
+                DEPTH.with(|d| d.set(depth));
+            }
+            None => {
+                ui.label(RichText::new(crate::i18n::t("section introuvable")).color(p.missing));
+            }
+        }
+    });
+    let r = resp.response.rect;
+    ui.painter().rect_filled(egui::Rect::from_min_size(r.min, egui::vec2(3.0, r.height())), egui::CornerRadius { nw: 6, sw: 6, ne: 0, se: 0 }, p.accent);
+    ui.add_space(4.0);
+}
+
 fn image(ui: &mut egui::Ui, target: &str, width: Option<f32>, ctx: &Ctx) {
     let p = theme::pal();
     let src = if target.starts_with("http://") || target.starts_with("https://") {
@@ -392,5 +485,17 @@ mod tests {
         assert_eq!(cells("| a | **b** |"), vec!["a", "**b**"]);
         assert!(CALLOUT.captures("[!astuce] Garder le nombre de polygones bas").is_some());
         assert!(IMAGE.captures("![[croquis.png|300]]").is_some());
+    }
+
+    #[test]
+    fn notes_integrees() {
+        let paths: HashSet<String> = ["notes/Idées.md".to_string(), "refs/croquis.png".to_string()].into_iter().collect();
+        assert_eq!(note_target("Idées", &paths), Some(("notes/Idées.md".into(), None)));
+        assert_eq!(note_target("idées#Couleurs", &paths), Some(("notes/Idées.md".into(), Some("Couleurs".into()))));
+        assert_eq!(note_target("croquis.png", &paths), None);
+        let t = "# Idées\nintro\n## Couleurs\nrouge\n### Nuances\nvermillon\n## Formes\nrond";
+        assert_eq!(section(t, "couleurs").unwrap(), "## Couleurs\nrouge\n### Nuances\nvermillon");
+        assert!(section(t, "absent").is_none());
+        assert_eq!(body("---\ntags: x\n---\nTexte"), "Texte");
     }
 }
