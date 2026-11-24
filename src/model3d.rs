@@ -1846,6 +1846,8 @@ struct MeshEdit {
     mode: u8,
     /// Dernier sommet cliqué : départ du plus court chemin (Ctrl+clic)
     active: Option<usize>,
+    /// Sommets visibles depuis la caméra, avec la clé (caméra, vue, positions) du calcul
+    vis: Option<(u64, Vec<bool>)>,
 }
 
 /// Sépare les sommets partagés par des faces qui font entre elles un angle marqué : les arêtes vives
@@ -2103,6 +2105,8 @@ pub struct Viewer {
     mesh: Option<MeshEdit>,
     /// Demande d'entrer ou de sortir du mode édition (bouton du panneau)
     mesh_toggle: bool,
+    /// Mode édition : voir et choisir aussi les sommets cachés derrière le maillage (rayons X, Alt+Z)
+    xray: bool,
     want_anim: bool,
     anim_job: Option<AnimJob>,
     /// La vue de la frame précédente (l'en-tête et les outils flottent par-dessus)
@@ -2285,6 +2289,7 @@ impl Viewer {
             gpu_scene: None,
             gpu_batch: 4,
             capture_msg: None,
+            xray: false,
             embedded: false,
             sub: None,
             start_edit: false,
@@ -2646,7 +2651,7 @@ impl Viewer {
             (f, mesh)
         };
         let n = mesh.pos.len();
-        self.mesh = Some(MeshEdit { obj: k, file, mesh, sel: vec![false; n], hist: vec![], redo: vec![], modal: None, boxing: None, skip_click: false, mode: 0, active: None });
+        self.mesh = Some(MeshEdit { obj: k, file, mesh, sel: vec![false; n], hist: vec![], redo: vec![], modal: None, boxing: None, skip_click: false, mode: 0, active: None, vis: None });
         self.scene_multi.clear();
         self.capture_msg = None;
     }
@@ -2702,8 +2707,72 @@ impl Viewer {
                 (q[2] < -0.05).then(|| pos2(rc.x + q[0] / -q[2] * focal, rc.y - q[1] / -q[2] * focal))
             }
         };
+        if !typing && resp.hovered() && ui.input(|i| i.modifiers.alt && i.key_pressed(Key::Z)) {
+            self.xray = !self.xray;
+        }
+        let xray = self.xray;
         let me = self.mesh.as_mut().unwrap();
         me.sel.resize(me.mesh.pos.len(), false);
+        // Comme Blender : sans rayons X, les sommets cachés derrière le maillage ne se voient
+        // pas et ne se choisissent pas. Recalculé seulement quand la vue ou le maillage change.
+        let vis: Vec<bool> = if xray {
+            vec![true; me.mesh.pos.len()]
+        } else {
+            let key = {
+                use std::hash::{Hash, Hasher};
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                for x in [cam.yaw, cam.pitch, cam.dist, cam.pan[0], cam.pan[1], rect.width(), rect.height()] {
+                    x.to_bits().hash(&mut h);
+                }
+                cam.ortho.hash(&mut h);
+                me.mesh.pos.len().hash(&mut h);
+                me.mesh.polys.len().hash(&mut h);
+                let mut acc = [0.0f64; 3];
+                for (i, v) in me.mesh.pos.iter().enumerate() {
+                    let w = (i % 7 + 1) as f64;
+                    for k in 0..3 {
+                        acc[k] += v[k] as f64 * w;
+                    }
+                }
+                acc.map(|a| a.to_bits()).hash(&mut h);
+                h.finish()
+            };
+            match &me.vis {
+                Some((k, v)) if *k == key && v.len() == me.mesh.pos.len() => v.clone(),
+                _ => {
+                    let vp: Vec<V3> = me.mesh.pos.iter().map(|&v| view(to_world(v))).collect();
+                    let mut tris: Vec<[u32; 3]> = vec![];
+                    for poly in &me.mesh.polys {
+                        for k in 1..poly.len().saturating_sub(1) {
+                            tris.push([poly[0], poly[k], poly[k + 1]]);
+                        }
+                    }
+                    let v = if tris.is_empty() {
+                        vec![true; vp.len()]
+                    } else {
+                        let bvh = crate::bvh::Bvh::new(&vp, &tris);
+                        let ext = vp.iter().fold(0.0f32, |m, q| m.max(q[0].abs()).max(q[1].abs()));
+                        let eps = 2e-3 * ext.max(1e-3);
+                        vp.iter()
+                            .map(|&q| {
+                                // Vers la caméra : l'origine en perspective, tout droit vers +z en orthographique
+                                let (d, reach) = if cam.ortho {
+                                    ([0.0, 0.0, 1.0], 1e6)
+                                } else {
+                                    let l = (q[0] * q[0] + q[1] * q[1] + q[2] * q[2]).sqrt().max(1e-9);
+                                    ([-q[0] / l, -q[1] / l, -q[2] / l], l)
+                                };
+                                !bvh.occluded(q, d, eps, reach - eps)
+                            })
+                            .collect()
+                    };
+                    me.vis = Some((key, v.clone()));
+                    v
+                }
+            }
+        };
+        // Position à l'écran d'un sommet visible (None : caché ou derrière la caméra)
+        let project_v = |me: &MeshEdit, i: usize| -> Option<Pos2> { if vis.get(i).copied().unwrap_or(true) { project(to_world(me.mesh.pos[i])) } else { None } };
         let mut dirty = false;
         let hovered = resp.hovered();
         let (pressed, secondary, cur) = ui.input(|i| (i.pointer.primary_pressed(), i.pointer.secondary_pressed(), i.pointer.hover_pos().or(i.pointer.latest_pos())));
@@ -2913,7 +2982,7 @@ impl Viewer {
                 me.sel = me.mesh.linked(&me.sel);
             } else if key(Key::L) {
                 if let Some(at) = cur {
-                    let near = (0..me.mesh.pos.len()).filter_map(|i| project(to_world(me.mesh.pos[i])).map(|s| (i, (s - at).length()))).min_by(|a, b| a.1.total_cmp(&b.1));
+                    let near = (0..me.mesh.pos.len()).filter_map(|i| project_v(me, i).map(|s| (i, (s - at).length()))).min_by(|a, b| a.1.total_cmp(&b.1));
                     if let Some((i, _)) = near {
                         let mut one = vec![false; me.mesh.pos.len()];
                         one[i] = true;
@@ -2960,7 +3029,7 @@ impl Viewer {
                         ui.painter_at(rect).rect_stroke(area, 0.0, Stroke::new(1.0, p.accent), egui::StrokeKind::Inside);
                         if !down {
                             for i in 0..me.mesh.pos.len() {
-                                let inside = project(to_world(me.mesh.pos[i])).is_some_and(|s| area.contains(s));
+                                let inside = project_v(me, i).is_some_and(|s| area.contains(s));
                                 // Maj : ajoute ; Ctrl : retire ; sinon : remplace
                                 me.sel[i] = if ctrl_down { me.sel[i] && !inside } else if shift { me.sel[i] || inside } else { inside };
                             }
@@ -2976,7 +3045,7 @@ impl Viewer {
                 ui.ctx().request_repaint();
             } else if resp.clicked() && !me.skip_click {
                 if let Some(at) = resp.interact_pointer_pos() {
-                    let scr: Vec<Option<Pos2>> = me.mesh.pos.iter().map(|v| project(to_world(*v))).collect();
+                    let scr: Vec<Option<Pos2>> = (0..me.mesh.pos.len()).map(|i| project_v(me, i)).collect();
                     let nearest_edge = |scr: &[Option<Pos2>]| me.mesh.edges().into_iter().filter_map(|(a, b)| {
                         let (sa, sb) = (scr[a as usize]?, scr[b as usize]?);
                         let ab = sb - sa;
@@ -3062,7 +3131,7 @@ impl Viewer {
         }
         // ---- Affichage : arêtes puis sommets (au-delà d'un certain nombre, seulement les sommets choisis)
         let over = ui.painter_at(rect);
-        let screen: Vec<Option<Pos2>> = me.mesh.pos.iter().map(|v| project(to_world(*v))).collect();
+        let screen: Vec<Option<Pos2>> = (0..me.mesh.pos.len()).map(|i| project_v(me, i)).collect();
         let light = me.mesh.pos.len() <= 20_000;
         if light && me.mode == 2 {
             for f in me.mesh.faces_in(&me.sel) {
@@ -4546,6 +4615,10 @@ impl Viewer {
                             if ui.add(b).on_hover_text(crate::i18n::t(tip)).clicked() {
                                 me.mode = k as u8;
                             }
+                        }
+                        let xb = egui::Button::new(egui::RichText::new("◫").size(13.0).color(if self.xray { p.on_accent } else { p.text })).fill(if self.xray { p.accent } else { p.panel }).min_size(egui::vec2(24.0, 20.0));
+                        if ui.add(xb).on_hover_text(crate::i18n::t("rayons X (Alt+Z) : voir et choisir aussi les sommets cachés derrière le maillage")).clicked() {
+                            self.xray = !self.xray;
                         }
                     }
                     egui::containers::menu::MenuButton::from_button(egui::Button::new(egui::RichText::new(format!("◆ {} ▾", crate::i18n::t(mode))).family(theme::bold()).size(12.0)).fill(p.panel)).ui(ui, |ui| {

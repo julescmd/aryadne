@@ -1603,5 +1603,6 @@
  "Argile": "Clay",
  "Graphite": "Graphite",
  "Clair": "Light",
- "vous": "you"
+ "vous": "you",
+ "rayons X (Alt+Z) : voir et choisir aussi les sommets cachés derrière le maillage": "X-ray (Alt+Z): see and select vertices hidden behind the mesh too"
 }
