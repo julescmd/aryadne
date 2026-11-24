@@ -1062,6 +1062,22 @@ fn ghost_edges(built: &crate::scene::Scene, scene: &crate::scene::Scene, k: usiz
     out
 }
 
+/// Le point de vue de la caméra `k` de la scène, dans le repère de la vue (bornes de la scène `lo`, `hi`)
+fn camera_view(sc: &crate::scene::Scene, k: usize, (lo, hi): (V3, V3), base: Camera) -> Camera {
+    let longest = (hi[0] - lo[0]).max(hi[1] - lo[1]).max(hi[2] - lo[2]).max(1e-9);
+    let c = [(lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0, (lo[2] + hi[2]) / 2.0];
+    let wpos = sc.world(k, [0.0; 3]);
+    let o = &sc.objects[k];
+    let mut cam = base;
+    cam.yaw = -o.rot[1].to_radians();
+    cam.pitch = -o.rot[0].to_radians();
+    cam.ortho = false;
+    let r = cam.rotate([(wpos[0] - c[0]) / longest, (wpos[1] - c[1]) / longest, (wpos[2] - c[2]) / longest]);
+    cam.pan = [-r[0], -r[1]];
+    cam.dist = r[2].max(0.05);
+    cam
+}
+
 fn object_affine(sc: &crate::scene::Scene, k: usize) -> ([V3; 3], V3) {
     let o = sc.world(k, [0.0; 3]);
     let col = |e: V3| {
@@ -2032,17 +2048,10 @@ fn encode_animation(ff: std::path::PathBuf, scene: crate::scene::Scene, path: &s
         let mut lk = look.clone();
         lk.lamps = sc.lights().into_iter().map(|l| lamp_of(&l, c, longest)).collect();
         // Le point de vue : la caméra de la scène si elle existe
-        let mut cam = view_cam;
-        if let Some(k) = cam_obj {
-            let wpos = sc.world(k, [0.0; 3]);
-            let o = &sc.objects[k];
-            cam.yaw = -o.rot[1].to_radians();
-            cam.pitch = -o.rot[0].to_radians();
-            cam.ortho = false;
-            let r = cam.rotate([(wpos[0] - c[0]) / longest, (wpos[1] - c[1]) / longest, (wpos[2] - c[2]) / longest]);
-            cam.pan = [-r[0], -r[1]];
-            cam.dist = r[2].max(0.05);
-        }
+        let cam = match cam_obj {
+            Some(k) => camera_view(&sc, k, (lo, hi), view_cam),
+            None => view_cam,
+        };
         let frame = render(&prep, &cam, &lk, w, h);
         if stdin.write_all(&frame.rgba).is_err() {
             let mut msg = String::new();
@@ -2579,6 +2588,8 @@ pub struct Viewer {
     anim_tools: bool,
     /// Pelure d'oignon : l'objet choisi aux clés d'avant et d'après, en fil de fer
     onion: bool,
+    /// Vue par la caméra de la scène (0) : la vue suit la caméra, même animée
+    look_through: bool,
     /// Fantômes calculés : signature, puis segments (monde) par clé avec leur côté (-1 avant, 1 après)
     ghosts: Option<(String, Vec<(i32, Vec<[V3; 2]>)>)>,
     tween_w: f32,
@@ -2775,6 +2786,7 @@ impl Viewer {
             anim_graph: false,
             anim_tools: false,
             onion: false,
+            look_through: false,
             ghosts: None,
             tween_w: 0.5,
             pose_clip: vec![],
@@ -7936,8 +7948,31 @@ impl Viewer {
             if keys[4] || keys[5] {
                 self.cam = Camera { ortho: self.cam.ortho, ..Default::default() };
             }
+            if keys.iter().any(|k| *k) {
+                self.look_through = false;
+            }
+            // 0 : regarder par la caméra de la scène (comme Blender), 0 encore pour revenir
+            if crate::scene::is_scene(&self.path) && ui.input(|i| i.key_pressed(Key::Num0) && !i.modifiers.any()) {
+                self.look_through = !self.look_through;
+                if !self.look_through {
+                    self.cam = Camera { ortho: self.cam.ortho, ..Default::default() };
+                }
+            }
             if crate::scene::is_scene(&self.path) && ui.input(|i| shift_key(i, Key::F)) {
                 self.frame_selection();
+            }
+        }
+        if self.look_through {
+            if dragging {
+                self.look_through = false;
+            } else if let (Some(scene), Some(fr)) = (self.scene.as_ref(), self.scene_frame) {
+                match scene.objects.iter().position(|o| crate::scene::kind(o) == crate::scene::Kind::Camera) {
+                    Some(k) => self.cam = camera_view(scene, k, fr, self.cam),
+                    None => {
+                        self.look_through = false;
+                        self.capture_msg = Some(crate::i18n::t("La scène n'a pas de caméra (Ajouter › Caméra)"));
+                    }
+                }
             }
         }
         if self.turntable && !dragging {
@@ -8108,6 +8143,17 @@ impl Viewer {
                 }
             };
             let over = ui.painter_at(rect);
+            // Vue par la caméra : le cadre 16:9 de l'export d'animation, le reste assombri
+            if self.look_through {
+                let h = rect.height().min(rect.width() * 9.0 / 16.0);
+                let f = egui::Rect::from_center_size(rect.center(), egui::vec2(h * 16.0 / 9.0, h));
+                let shade = Color32::from_black_alpha(150);
+                for r in [egui::Rect::from_min_max(rect.min, egui::pos2(rect.max.x, f.min.y)), egui::Rect::from_min_max(egui::pos2(rect.min.x, f.max.y), rect.max), egui::Rect::from_min_max(egui::pos2(rect.min.x, f.min.y), egui::pos2(f.min.x, f.max.y)), egui::Rect::from_min_max(egui::pos2(f.max.x, f.min.y), egui::pos2(rect.max.x, f.max.y))] {
+                    over.rect_filled(r, 0.0, shade);
+                }
+                over.rect_stroke(f, 0.0, Stroke::new(1.0, p.text.gamma_multiply(0.6)), egui::StrokeKind::Outside);
+                over.text(f.right_top() + egui::vec2(-8.0, 6.0), egui::Align2::RIGHT_TOP, format!("{}  {}", crate::lucide::CAMERA, crate::i18n::t("Caméra · 0 ou tourner pour sortir")), egui::FontId::proportional(11.5), p.text.gamma_multiply(0.8));
+            }
             // Sélection au rectangle (B, puis glisser) : prend les objets dont l'origine tombe dedans
             let mut boxed: Option<egui::Rect> = None;
             if let Some(start) = self.box_sel {
