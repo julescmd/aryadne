@@ -27,6 +27,10 @@ pub enum Kind {
     Note {
         rel: String,
     },
+    /// Palette de couleurs posée sur le board (générée depuis la sélection, ou par l'Assistant)
+    Palette {
+        colors: Vec<[u8; 3]>,
+    },
     /// Trait à main levée. Points normalisés (0..1) dans le rectangle de l'élément.
     Stroke {
         points: Vec<[f32; 2]>,
@@ -403,6 +407,47 @@ impl Board {
         self.touch();
     }
 
+    /// Disposer : la sélection (ou tout le board) en rangées serrées, comme « pack » de PureRef
+    pub fn arrange_grid(&mut self) {
+        let idx: Vec<usize> = if self.selection.len() > 1 { self.selection.clone() } else { (0..self.data.items.len()).filter(|&i| !matches!(self.data.items[i].kind, Kind::Stroke { .. })).collect() };
+        if idx.len() < 2 {
+            return;
+        }
+        self.checkpoint();
+        let start = idx.iter().map(|&i| self.data.items[i].rect().min).fold(pos2(f32::MAX, f32::MAX), |a, b| pos2(a.x.min(b.x), a.y.min(b.y)));
+        let area: f32 = idx.iter().map(|&i| self.data.items[i].w * self.data.items[i].h).sum();
+        let row_w = area.sqrt() * 1.6;
+        let gap = 16.0;
+        let (mut x, mut y, mut row_h) = (start.x, start.y, 0.0f32);
+        for &i in &idx {
+            let it = &mut self.data.items[i];
+            if x > start.x && x + it.w > start.x + row_w {
+                x = start.x;
+                y += row_h + gap;
+                row_h = 0.0;
+            }
+            it.x = x;
+            it.y = y;
+            x += it.w + gap;
+            row_h = row_h.max(it.h);
+        }
+        self.touch();
+    }
+
+    /// Disposer : la sélection à la même hauteur que le premier élément choisi
+    pub fn same_height(&mut self) {
+        let Some(&first) = self.selection.first() else { return };
+        let h = self.data.items[first].h;
+        self.checkpoint();
+        for &i in &self.selection.clone() {
+            let it = &mut self.data.items[i];
+            let k = h / it.h.max(1.0);
+            it.w *= k;
+            it.h = h;
+        }
+        self.touch();
+    }
+
     pub fn fit(&mut self) {
         self.fit_next = true;
     }
@@ -522,7 +567,7 @@ impl Board {
         let mut event = None;
         let (rect, resp) = ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
         let painter = ui.painter_at(rect);
-        painter.rect_filled(rect, 0.0, p.panel);
+        painter.rect_filled(rect, 0.0, p.bg);
 
         // Les images gardent leurs vraies proportions dès qu'on les connaît.
         for it in &mut self.data.items {
@@ -555,14 +600,15 @@ impl Board {
         self.view_center = to_world(rect.center()).to_vec2();
         let screen_rect = |r: Rect| Rect::from_min_max(to_screen(r.min), to_screen(r.max));
 
-        // Grille de points
+        // Grille de points, discrète comme la maquette
         let step = 32.0 * zoom;
         if step > 9.0 {
+            let dot = p.line.gamma_multiply(0.7);
             let mut gy = rect.top() + (origin.y - rect.top()).rem_euclid(step);
             while gy < rect.bottom() {
                 let mut gx = rect.left() + (origin.x - rect.left()).rem_euclid(step);
                 while gx < rect.right() {
-                    painter.rect_filled(Rect::from_center_size(pos2(gx, gy), vec2(1.5, 1.5)), 0.0, p.line);
+                    painter.circle_filled(pos2(gx, gy), 1.0, dot);
                     gx += step;
                 }
                 gy += step;
@@ -631,10 +677,11 @@ impl Board {
                     let uv = if *flip { Rect::from_min_max(pos2(1.0, 0.0), pos2(0.0, 1.0)) } else { Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)) };
                     match slot {
                         Slot::Ready(l) => {
-                            painter.image(l.tex.id(), r, uv, Color32::WHITE);
+                            // Coins arrondis à 10 px comme la maquette
+                            painter.add(egui::epaint::RectShape::filled(r, (10.0 * zoom).clamp(1.0, 10.0), Color32::WHITE).with_texture(l.tex.id(), uv));
                         }
                         Slot::Loading => {
-                            painter.rect_filled(r, 0.0, p.line);
+                            painter.rect_filled(r, (10.0 * zoom).clamp(1.0, 10.0), p.line);
                         }
                         Slot::Failed(e) => {
                             // Pas d'aperçu : carte avec le nom et le type du fichier.
@@ -669,6 +716,18 @@ impl Board {
                     let body = painter.layout(note_preview(rel), egui::FontId::monospace((12.0 * zoom).max(3.0)), p.muted, (r.width() - 24.0 * zoom).max(10.0));
                     clip.galley(r.min + vec2(12.0, 38.0) * zoom, body, p.muted);
                 }
+                Kind::Palette { colors } => {
+                    let rad = (10.0 * zoom).clamp(1.0, 10.0);
+                    let n = colors.len().max(1) as f32;
+                    let w = r.width() / n;
+                    let clip = painter.with_clip_rect(r.intersect(rect));
+                    for (k, c) in colors.iter().enumerate() {
+                        let seg = Rect::from_min_size(pos2(r.left() + w * k as f32, r.top()), vec2(w + 0.5, r.height()));
+                        let cr = egui::CornerRadius { nw: if k == 0 { rad as u8 } else { 0 }, sw: if k == 0 { rad as u8 } else { 0 }, ne: if k + 1 == colors.len() { rad as u8 } else { 0 }, se: if k + 1 == colors.len() { rad as u8 } else { 0 } };
+                        clip.rect_filled(seg, cr, Color32::from_rgb(c[0], c[1], c[2]));
+                    }
+                    painter.rect_stroke(r, rad, Stroke::new(1.0, p.line), egui::StrokeKind::Outside);
+                }
                 Kind::Stroke { points, color, width, widths } => {
                     let col = Color32::from_rgba_unmultiplied(color[0], color[1], color[2], color[3]);
                     let pts: Vec<Pos2> = points.iter().map(|q| pos2(r.min.x + q[0] * r.width(), r.min.y + q[1] * r.height())).collect();
@@ -676,7 +735,8 @@ impl Board {
                 }
             }
             if self.selection.contains(&i) {
-                painter.rect_stroke(r, 0.0, Stroke::new(1.5, p.accent), egui::StrokeKind::Outside);
+                let rad = if matches!(it.kind, Kind::Image { .. } | Kind::Palette { .. }) { (10.0 * zoom).clamp(1.0, 10.0) + 2.0 } else { 2.0 };
+                painter.rect_stroke(r.expand(2.0), rad, Stroke::new(2.0, p.accent), egui::StrokeKind::Outside);
             } else if hit == Some(i) && self.tool == Tool::Select && self.drag.is_none() {
                 painter.rect_stroke(r, 0.0, Stroke::new(1.0, p.muted), egui::StrokeKind::Outside);
             } else if hit == Some(i) && self.tool == Tool::Eraser && matches!(it.kind, Kind::Stroke { .. }) {
@@ -1071,7 +1131,7 @@ impl Board {
                     self.editing = Some(i);
                 }
                 Some((_, Kind::Note { rel })) | Some((_, Kind::Image { rel, .. })) => event = Some(Event::Open(rel)),
-                Some((_, Kind::Stroke { .. })) => {}
+                Some((_, Kind::Stroke { .. } | Kind::Palette { .. })) => {}
                 None => {
                     if let Some(w) = world_ptr {
                         self.add(Kind::Text { text: String::new(), size: text_size(), look: TextLook::default() }, w.to_vec2() + vec2(140.0, 20.0), vec2(280.0, 40.0));
@@ -1394,13 +1454,6 @@ impl Board {
                 p.muted,
             );
         }
-        let info = format!(
-            "{} éléments{} · zoom {:.0} %",
-            self.data.items.len(),
-            if self.selection.is_empty() { String::new() } else { format!(" · {} sélectionné(s)", self.selection.len()) },
-            zoom * 100.0
-        );
-        painter.text(rect.left_bottom() + vec2(12.0, -10.0), egui::Align2::LEFT_BOTTOM, info, egui::FontId::monospace(11.0), p.muted);
         if self.drag.is_some() || self.editing.is_some() {
             ui.ctx().request_repaint();
         }

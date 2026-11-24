@@ -3,6 +3,7 @@
 mod cloud;
 mod keymap;
 mod lucide;
+mod palette;
 mod bridge;
 mod layout;
 mod icons;
@@ -314,6 +315,9 @@ struct App {
     proj_words: HashMap<String, (Instant, std::sync::Arc<Vec<String>>)>,
     run: Option<extras::Run>,
     auto_query: String,
+    /// Inspecteur du board : réglages du générateur de palettes, onglet (0 couleurs, 1 propriétés)
+    pal_gen: palette::Settings,
+    board_tab: u8,
     toast: Option<(String, Instant)>,
     updater: updater::Updater,
     prefs: settings::Prefs,
@@ -3566,102 +3570,12 @@ impl App {
     fn boards_view(&mut self, ui: &mut egui::Ui) {
         let p = theme::pal();
         self.ensure_board();
-        let boards = self.boards_list();
+        let frame = egui::Frame::new().fill(p.panel).stroke(egui::Stroke::new(1.0, p.line));
+        // Comme la maquette : les calques à gauche, les couleurs à droite, le board au centre
+        egui::Panel::left("board-layers").resizable(true).default_size(240.0).min_size(180.0).max_size(360.0).frame(frame).show(ui, |ui| self.board_layers(ui));
+        egui::Panel::right("board-inspector").resizable(true).default_size(300.0).min_size(260.0).max_size(420.0).frame(frame).show(ui, |ui| self.board_inspector(ui));
         egui::CentralPanel::default().frame(egui::Frame::new().fill(p.bg)).show(ui, |ui| {
-            egui::Frame::new().fill(p.panel).stroke(egui::Stroke::new(1.0, p.line)).inner_margin(egui::Margin::symmetric(12, 5)).show(ui, |ui| {
-                ui.set_width(ui.available_width());
-                ui.horizontal_wrapped(|ui| {
-                    ui.label(caps(&crate::i18n::t("board")));
-                    let current = self.board.rel.clone().unwrap_or_default();
-                    let mut pick = None;
-                    egui::ComboBox::from_id_salt("board-pick").selected_text(board::board_name(&current)).width(180.0).show_ui(ui, |ui| {
-                        for b in &boards {
-                            if ui.selectable_label(*b == current, board::board_name(b)).clicked() {
-                                pick = Some(b.clone());
-                            }
-                        }
-                    });
-                    if let Some(b) = pick {
-                        self.open_board(b);
-                    }
-                    if ui.button(crate::i18n::t("+ board")).clicked() {
-                        self.new_board("Moodboard");
-                    }
-                    ui.separator();
-                    // Outils
-                    // Outils : sélection et texte, puis les outils de dessin de l'annotation vidéo
-                    for (tool, label, key) in [(board::Tool::Select, "sélection", "V"), (board::Tool::Text, "texte", "T")] {
-                        if ui.selectable_label(self.board.tool == tool, crate::i18n::t(label)).on_hover_text(key).clicked() {
-                            self.board.tool = tool;
-                        }
-                    }
-                    ui.separator();
-                    for (tool, icon, label, key) in board::DRAW_TOOLS {
-                        let on = self.board.tool == tool;
-                        let b = egui::Button::new(RichText::new(icon).size(14.0).color(if on { p.on_accent } else { p.text })).fill(if on { p.accent } else { p.panel }).min_size(egui::vec2(26.0, 22.0));
-                        let key = if tool == board::Tool::Arrow { "Maj+A".to_string() } else { key.to_string() };
-                        if ui.add(b).on_hover_text(format!("{} ({key})", crate::i18n::t(label))).clicked() {
-                            self.board.tool = tool;
-                        }
-                    }
-                    let drawing = !matches!(self.board.tool, board::Tool::Select | board::Tool::Text | board::Tool::Eraser);
-                    if drawing {
-                        ui.separator();
-                        for c in [p.accent, egui::Color32::from_rgb(0x18, 0x18, 0x1b), egui::Color32::WHITE, egui::Color32::from_rgb(0x25, 0x63, 0xeb), egui::Color32::from_rgb(0x16, 0xa3, 0x4a), egui::Color32::from_rgb(0xea, 0xb3, 0x08)] {
-                            let (r, resp) = ui.allocate_exact_size(egui::vec2(18.0, 18.0), egui::Sense::click());
-                            ui.painter().rect_filled(r, 0.0, c);
-                            ui.painter().rect_stroke(r, 0.0, egui::Stroke::new(if self.board.pen_color == c { 2.0 } else { 1.0 }, if self.board.pen_color == c { p.text } else { p.line }), egui::StrokeKind::Inside);
-                            if resp.clicked() {
-                                self.board.pen_color = c;
-                            }
-                        }
-                        ui.color_edit_button_srgba(&mut self.board.pen_color);
-                        egui::containers::menu::MenuButton::new(crate::i18n::t("trait ▾")).ui(ui, |ui| {
-                            ui.set_min_width(240.0);
-                            ui.add(egui::Slider::new(&mut self.board.pen_width, 0.5..=60.0).clamping(egui::SliderClamping::Never).logarithmic(true).text(crate::i18n::t("épaisseur")));
-                            ui.add(egui::Slider::new(&mut self.board.opacity, 0.05..=1.0).text(crate::i18n::t("opacité")));
-                            ui.add(egui::Slider::new(&mut self.board.stabilizer, 0.0..=0.95).text(crate::i18n::t("stabilisateur")));
-                            ui.add(egui::Slider::new(&mut self.board.taper, 0.0..=1.0).text(crate::i18n::t("effilé")));
-                            ui.label(RichText::new(crate::i18n::t("Maj : ligne droite, carré, cercle, angles de 15°")).size(10.5).color(p.muted));
-                        });
-                    }
-                    ui.separator();
-                    if ui.add_enabled(self.board.can_undo(), egui::Button::new("↶")).on_hover_text(crate::i18n::t("annuler (Ctrl+Z)")).clicked() {
-                        self.board.undo();
-                    }
-                    if ui.add_enabled(self.board.can_redo(), egui::Button::new("↷")).on_hover_text(crate::i18n::t("rétablir (Ctrl+Y)")).clicked() {
-                        self.board.redo();
-                    }
-                    ui.scope(|ui| {
-                        if ui.button(crate::i18n::t("cadrer")).clicked() {
-                            self.board.fit();
-                        }
-                    });
-                });
-                ui.add_space(4.0);
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new(crate::i18n::t("auto")).color(p.accent).family(theme::bold()));
-                    ui.add(egui::TextEdit::singleline(&mut self.auto_query).hint_text(crate::i18n::t("mots-clés : forêt brume…")).desired_width(200.0));
-                    if ui.button(crate::i18n::t("par mots-clés")).on_hover_text(crate::i18n::t("Ajoute les images dont le nom, le dossier ou les notes qui les citent correspondent")).clicked() {
-                        let q = self.auto_query.clone();
-                        let n = self.auto_board_keywords(&q);
-                        self.toast(if n == 0 { "aucune image ne correspond".to_string() } else { format!("{n} images ajoutées") });
-                    }
-                    let seed = (self.board.selection.len() == 1)
-                        .then(|| self.board.selection[0])
-                        .and_then(|i| self.board.data.items.get(i))
-                        .and_then(|it| if let board::Kind::Image { rel, .. } = &it.kind { Some(rel.clone()) } else { None });
-                    let btn = ui.add_enabled(seed.is_some(), egui::Button::new(crate::i18n::t("par couleurs"))).on_hover_text(crate::i18n::t("Ajoute les refs aux couleurs proches de l'image sélectionnée")).on_disabled_hover_text("sélectionne d'abord une seule image du board");
-                    if btn.clicked() {
-                        if let Some(seed) = seed {
-                            match self.auto_board_colors(&seed) {
-                                Ok(n) => self.toast(format!("{} images aux couleurs proches", n.saturating_sub(1))),
-                                Err(e) => self.toast(e),
-                            }
-                        }
-                    }
-                });
-            });
+            let canvas = ui.available_rect_before_wrap();
             let entries = self.entries.clone();
             let root = self.root();
             let summary = move |rel: &str| -> String {
@@ -3673,7 +3587,476 @@ impl App {
                 Some(board::Event::PasteImage(at)) => self.paste_image(at.to_vec2()),
                 None => {}
             }
+            self.board_header(ui, canvas);
+            self.board_tools(ui, canvas);
+            // Invitation à déposer : board vide, ou des fichiers survolent la fenêtre
+            let hovering = ui.ctx().input(|i| !i.raw.hovered_files.is_empty());
+            if hovering || self.board.data.items.is_empty() {
+                let text = format!("{}  {}", lucide::IMAGES, crate::i18n::t("Dépose ici des images, des fichiers ou un lien de page web"));
+                let g = ui.painter().layout_no_wrap(text, egui::FontId::proportional(12.0), p.text);
+                let sub = ui.painter().layout_no_wrap(crate::i18n::t("depuis le bureau ou le navigateur"), egui::FontId::proportional(11.0), p.muted);
+                let w = g.size().x + sub.size().x + 34.0;
+                let r = egui::Rect::from_center_size(egui::pos2(canvas.center().x, canvas.bottom() - 32.0), egui::vec2(w, 30.0));
+                ui.painter().rect_filled(r, 6.0, p.raised);
+                dashed_rect(ui.painter(), r, p.accent);
+                let gy = r.center().y - g.size().y / 2.0;
+                let gw = g.size().x;
+                ui.painter().galley(egui::pos2(r.left() + 12.0, gy), g, p.text);
+                ui.painter().galley(egui::pos2(r.left() + 22.0 + gw, r.center().y - sub.size().y / 2.0), sub, p.muted);
+            }
         });
+    }
+
+    /// En-tête flottant du board : choix du board, menus Vue, Sélection, Ajouter, Disposer ; à droite, le compte et le zoom
+    fn board_header(&mut self, ui: &mut egui::Ui, canvas: egui::Rect) {
+        let p = theme::pal();
+        let hr = egui::Rect::from_min_max(canvas.min + egui::vec2(12.0, 10.0), egui::pos2(canvas.right() - 12.0, canvas.top() + 44.0));
+        ui.painter().rect(hr, 6.0, p.panel, egui::Stroke::new(1.0, p.line), egui::StrokeKind::Inside);
+        let mut hui = ui.new_child(egui::UiBuilder::new().max_rect(hr.shrink2(egui::vec2(6.0, 0.0))).layout(egui::Layout::left_to_right(egui::Align::Center)));
+        flat_buttons(&mut hui);
+        hui.set_clip_rect(hr.shrink(1.0));
+        hui.spacing_mut().item_spacing.x = 4.0;
+        let boards = self.boards_list();
+        let current = self.board.rel.clone().unwrap_or_default();
+        let mut pick = None;
+        let mut new_board = false;
+        egui::containers::menu::MenuButton::new(RichText::new(format!("{}  {} {}", lucide::LAYOUT_DASHBOARD, board::board_name(&current), lucide::CHEVRON_DOWN)).strong()).ui(&mut hui, |ui| {
+            for b in &boards {
+                if ui.selectable_label(*b == current, board::board_name(b)).clicked() {
+                    pick = Some(b.clone());
+                }
+            }
+            ui.separator();
+            if ui.button(format!("{} {}", lucide::PLUS, crate::i18n::t("Nouveau board"))).clicked() {
+                new_board = true;
+            }
+        });
+        if let Some(b) = pick {
+            self.open_board(b);
+        }
+        if new_board {
+            self.new_board("Moodboard");
+        }
+        let sep = |ui: &mut egui::Ui| {
+            let (r, _) = ui.allocate_exact_size(egui::vec2(9.0, 16.0), egui::Sense::hover());
+            ui.painter().vline(r.center().x, r.y_range(), egui::Stroke::new(1.0, p.line));
+        };
+        sep(&mut hui);
+        egui::containers::menu::MenuButton::new(crate::i18n::t("Vue")).ui(&mut hui, |ui| {
+            if ui.button(crate::i18n::t("Tout cadrer")).clicked() {
+                self.board.fit();
+            }
+            if ui.button(crate::i18n::t("Taille réelle (100 %)")).clicked() {
+                self.board.data.zoom = 1.0;
+            }
+            ui.separator();
+            if ui.add_enabled(self.board.can_undo(), egui::Button::new(crate::i18n::t("Annuler   Ctrl+Z"))).clicked() {
+                self.board.undo();
+            }
+            if ui.add_enabled(self.board.can_redo(), egui::Button::new(crate::i18n::t("Rétablir   Ctrl+Y"))).clicked() {
+                self.board.redo();
+            }
+        });
+        egui::containers::menu::MenuButton::new(crate::i18n::t("Sélection")).ui(&mut hui, |ui| {
+            if ui.button(crate::i18n::t("Tout choisir")).clicked() {
+                self.board.selection = (0..self.board.data.items.len()).collect();
+            }
+            if ui.button(crate::i18n::t("Toutes les images")).clicked() {
+                self.board.selection = (0..self.board.data.items.len()).filter(|&i| matches!(self.board.data.items[i].kind, board::Kind::Image { .. })).collect();
+            }
+            if ui.button(crate::i18n::t("Rien")).clicked() {
+                self.board.selection.clear();
+            }
+            ui.separator();
+            if ui.add_enabled(!self.board.selection.is_empty(), egui::Button::new(crate::i18n::t("Supprimer   Suppr"))).clicked() {
+                self.board.delete_selection();
+            }
+        });
+        egui::containers::menu::MenuButton::new(crate::i18n::t("Ajouter")).ui(&mut hui, |ui| {
+            ui.set_min_width(260.0);
+            if ui.button(crate::i18n::t("Texte   T")).clicked() {
+                self.board.tool = board::Tool::Text;
+            }
+            if ui.button(crate::i18n::t("Palette depuis la sélection")).clicked() {
+                self.board_tab = 0;
+                self.palette_to_board();
+            }
+            ui.separator();
+            ui.label(RichText::new(crate::i18n::t("Moodboard automatique")).size(11.0).color(p.muted));
+            ui.add(egui::TextEdit::singleline(&mut self.auto_query).hint_text(crate::i18n::t("mots-clés : forêt brume…")).desired_width(240.0));
+            if ui.button(crate::i18n::t("Images par mots-clés")).on_hover_text(crate::i18n::t("Ajoute les images dont le nom, le dossier ou les notes qui les citent correspondent")).clicked() {
+                let q = self.auto_query.clone();
+                let n = self.auto_board_keywords(&q);
+                self.toast(if n == 0 { "aucune image ne correspond".to_string() } else { format!("{n} images ajoutées") });
+            }
+            let seed = (self.board.selection.len() == 1)
+                .then(|| self.board.selection[0])
+                .and_then(|i| self.board.data.items.get(i))
+                .and_then(|it| if let board::Kind::Image { rel, .. } = &it.kind { Some(rel.clone()) } else { None });
+            if ui.add_enabled(seed.is_some(), egui::Button::new(crate::i18n::t("Images aux couleurs proches"))).on_disabled_hover_text(crate::i18n::t("sélectionne d'abord une seule image du board")).clicked() {
+                if let Some(seed) = seed {
+                    match self.auto_board_colors(&seed) {
+                        Ok(n) => self.toast(format!("{} images aux couleurs proches", n.saturating_sub(1))),
+                        Err(e) => self.toast(e),
+                    }
+                }
+            }
+        });
+        egui::containers::menu::MenuButton::new(crate::i18n::t("Disposer")).ui(&mut hui, |ui| {
+            if ui.button(crate::i18n::t("En rangées serrées")).on_hover_text(crate::i18n::t("La sélection, ou tout le board")).clicked() {
+                self.board.arrange_grid();
+            }
+            if ui.add_enabled(self.board.selection.len() > 1, egui::Button::new(crate::i18n::t("Même hauteur"))).clicked() {
+                self.board.same_height();
+            }
+        });
+        // Le compte et le zoom à droite, seulement s'il reste la place
+        if hui.available_width() > 150.0 {
+        hui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let z = (self.board.data.zoom * 100.0).round();
+            egui::containers::menu::MenuButton::new(RichText::new(format!("{z} %")).monospace()).ui(ui, |ui| {
+                for (label, v) in [("50 %", 0.5), ("100 %", 1.0), ("200 %", 2.0)] {
+                    if ui.button(label).clicked() {
+                        self.board.data.zoom = v;
+                    }
+                }
+                if ui.button(crate::i18n::t("Tout cadrer")).clicked() {
+                    self.board.fit();
+                }
+            });
+            let n = self.board.data.items.len();
+            let s = self.board.selection.len();
+            let info = if s > 0 { format!("{n} {} · {s} {}", crate::i18n::t_mid("éléments"), crate::i18n::t_mid("choisis")) } else { format!("{n} {}", crate::i18n::t_mid("éléments")) };
+            if ui.available_width() > 90.0 {
+                ui.label(RichText::new(info).size(11.0).color(p.muted));
+            }
+        });
+        }
+    }
+
+    /// Colonne d'outils flottante, à gauche du board ; les réglages du trait à côté quand on dessine
+    fn board_tools(&mut self, ui: &mut egui::Ui, canvas: egui::Rect) {
+        let p = theme::pal();
+        let tools: [(board::Tool, &str, &str, &str); 8] = [
+            (board::Tool::Select, lucide::MOUSE_POINTER_2, "Sélectionner", "V"),
+            (board::Tool::Text, lucide::TYPE, "Texte", "T"),
+            (board::Tool::Pen, lucide::PENCIL, "Pinceau", "B"),
+            (board::Tool::Eraser, lucide::ERASER, "Gomme", "E"),
+            (board::Tool::Rect, lucide::SQUARE, "Cadre", "R"),
+            (board::Tool::Ellipse, lucide::CIRCLE, "Ellipse", "O"),
+            (board::Tool::Line, lucide::SPLINE, "Ligne", "L"),
+            (board::Tool::Arrow, lucide::ARROW_RIGHT, "Flèche", "Maj+A"),
+        ];
+        let col = egui::Rect::from_min_size(canvas.min + egui::vec2(12.0, 56.0), egui::vec2(40.0, 8.0 + tools.len() as f32 * 32.0));
+        ui.painter().rect(col, 6.0, p.panel, egui::Stroke::new(1.0, p.line), egui::StrokeKind::Inside);
+        for (k, (tool, icon, label, key)) in tools.iter().enumerate() {
+            let r = egui::Rect::from_min_size(col.min + egui::vec2(5.0, 4.0 + k as f32 * 32.0), egui::vec2(30.0, 30.0));
+            let resp = ui.interact(r, egui::Id::new(("board-tool", k)), egui::Sense::click());
+            let on = self.board.tool == *tool;
+            if on {
+                ui.painter().rect_filled(r, 4.0, p.accent);
+            } else if resp.hovered() {
+                ui.painter().rect_filled(r, 4.0, p.raised);
+            }
+            ui.painter().text(r.center(), egui::Align2::CENTER_CENTER, *icon, egui::FontId::proportional(16.0), if on { p.on_accent } else { p.text });
+            if resp.on_hover_text(format!("{} ({key})", crate::i18n::t(label))).clicked() {
+                self.board.tool = *tool;
+            }
+        }
+        let drawing = !matches!(self.board.tool, board::Tool::Select | board::Tool::Text | board::Tool::Eraser);
+        if drawing {
+            let pr = egui::Rect::from_min_size(egui::pos2(col.right() + 8.0, col.top()), egui::vec2(176.0, 92.0));
+            ui.painter().rect(pr, 6.0, p.panel, egui::Stroke::new(1.0, p.line), egui::StrokeKind::Inside);
+            let mut pui = ui.new_child(egui::UiBuilder::new().max_rect(pr.shrink(8.0)).layout(egui::Layout::top_down(egui::Align::Min)));
+            pui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                for c in [p.accent, egui::Color32::from_rgb(0x18, 0x18, 0x1b), egui::Color32::WHITE, egui::Color32::from_rgb(0x25, 0x63, 0xeb), egui::Color32::from_rgb(0x16, 0xa3, 0x4a), egui::Color32::from_rgb(0xea, 0xb3, 0x08)] {
+                    let (r, resp) = ui.allocate_exact_size(egui::vec2(18.0, 18.0), egui::Sense::click());
+                    ui.painter().circle_filled(r.center(), 8.0, c);
+                    if self.board.pen_color == c {
+                        ui.painter().circle_stroke(r.center(), 9.5, egui::Stroke::new(1.5, p.text));
+                    }
+                    if resp.clicked() {
+                        self.board.pen_color = c;
+                    }
+                }
+                ui.color_edit_button_srgba(&mut self.board.pen_color);
+            });
+            pui.spacing_mut().slider_width = 100.0;
+            pui.add(egui::Slider::new(&mut self.board.pen_width, 0.5..=60.0).logarithmic(true).text(crate::i18n::t("épaisseur")));
+            pui.add(egui::Slider::new(&mut self.board.opacity, 0.05..=1.0).text(crate::i18n::t("opacité")));
+        }
+    }
+
+    /// Panneau des calques : un élément par rangée, le plus haut en premier
+    fn board_layers(&mut self, ui: &mut egui::Ui) {
+        let p = theme::pal();
+        let (hr, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 34.0), egui::Sense::hover());
+        ui.painter().hline(hr.x_range(), hr.bottom() - 0.5, egui::Stroke::new(1.0, p.line));
+        ui.painter().text(hr.left_center() + egui::vec2(12.0, 0.0), egui::Align2::LEFT_CENTER, crate::i18n::t("Calques"), egui::FontId::new(13.0, theme::bold()), p.text);
+        ui.add_space(6.0);
+        let shift = ui.input(|i| i.modifiers.shift || i.modifiers.command);
+        let mut click: Option<usize> = None;
+        egui::ScrollArea::vertical().id_salt("board-layers").auto_shrink([false, false]).show(ui, |ui| {
+            ui.spacing_mut().item_spacing.y = 0.0;
+            for i in (0..self.board.data.items.len()).rev() {
+                let (icon, name) = match &self.board.data.items[i].kind {
+                    board::Kind::Image { rel, .. } => (if video::is_video(rel) { lucide::FILM } else if crate::boardlive::is_model(rel) { lucide::BOX } else { lucide::IMAGE }, rel.rsplit('/').next().unwrap_or(rel).to_string()),
+                    board::Kind::Text { text, .. } => (lucide::TYPE, text.lines().next().unwrap_or("").replace(['*', '~', '_'], "").chars().take(40).collect::<String>()),
+                    board::Kind::Note { rel } => (lucide::FILE_TEXT, vault::stem(rel).to_string()),
+                    board::Kind::Palette { .. } => (lucide::PALETTE, crate::i18n::t("Palette")),
+                    board::Kind::Stroke { .. } => (lucide::PENCIL, crate::i18n::t("Trait")),
+                };
+                let name = if name.trim().is_empty() { crate::i18n::t("Texte") } else { name };
+                let sel = self.board.selection.contains(&i);
+                let (r, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 24.0), egui::Sense::click());
+                if sel {
+                    ui.painter().rect_filled(r, 0.0, p.selection);
+                } else if resp.hovered() {
+                    ui.painter().rect_filled(r, 0.0, p.line.linear_multiply(0.45));
+                }
+                ui.painter().text(r.left_center() + egui::vec2(19.0, 0.0), egui::Align2::CENTER_CENTER, icon, egui::FontId::proportional(14.0), p.muted);
+                let clip = ui.painter().with_clip_rect(r.shrink2(egui::vec2(8.0, 0.0)));
+                clip.text(r.left_center() + egui::vec2(32.0, 0.0), egui::Align2::LEFT_CENTER, name, egui::FontId::proportional(12.5), p.text);
+                if resp.clicked() {
+                    click = Some(i);
+                }
+            }
+        });
+        if let Some(i) = click {
+            if shift {
+                if let Some(at) = self.board.selection.iter().position(|&k| k == i) {
+                    self.board.selection.remove(at);
+                } else {
+                    self.board.selection.push(i);
+                }
+            } else {
+                self.board.selection = vec![i];
+            }
+        }
+    }
+
+    /// Couleurs des images choisies (ou de tout le board), d'après leurs vignettes
+    fn board_source_colors(&mut self) -> (Vec<egui::Color32>, usize) {
+        let sel: Vec<usize> = if self.board.selection.is_empty() { (0..self.board.data.items.len()).collect() } else { self.board.selection.clone() };
+        let mut cols = vec![];
+        let mut n = 0;
+        for i in sel {
+            if let Some(board::Kind::Image { rel, .. }) = self.board.data.items.get(i).map(|x| x.kind.clone()) {
+                if let images::Slot::Ready(l) = self.images.get(&rel, images::Size::Thumb) {
+                    cols.extend(l.palette.iter().copied());
+                    n += 1;
+                }
+            }
+        }
+        (cols, n)
+    }
+
+    fn palette_to_board(&mut self) {
+        let (src, _) = self.board_source_colors();
+        let cols = palette::generate(&src, &self.pal_gen);
+        if cols.is_empty() {
+            self.toast(crate::i18n::t("Choisis des images pour en tirer une palette"));
+            return;
+        }
+        let n = cols.len() as f32;
+        let at = self.board.view_center;
+        self.board.add(board::Kind::Palette { colors: cols.iter().map(|c| [c.r(), c.g(), c.b()]).collect() }, at, egui::vec2(60.0 * n, 100.0));
+    }
+
+    /// Inspecteur du board : onglets Couleurs (générateur de palettes) et Propriétés
+    fn board_inspector(&mut self, ui: &mut egui::Ui) {
+        let p = theme::pal();
+        let (hr, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 34.0), egui::Sense::hover());
+        ui.painter().hline(hr.x_range(), hr.bottom() - 0.5, egui::Stroke::new(1.0, p.line));
+        let mut x = hr.left() + 6.0;
+        for (k, label) in [(1u8, "Propriétés"), (0, "Couleurs")] {
+            let text = crate::i18n::t(label);
+            let g = ui.painter().layout_no_wrap(text, egui::FontId::proportional(12.5), p.text);
+            let r = egui::Rect::from_min_size(egui::pos2(x, hr.center().y - 12.0), egui::vec2(g.size().x + 16.0, 24.0));
+            let resp = ui.interact(r, egui::Id::new(("board-insp", k)), egui::Sense::click());
+            let on = self.board_tab == k;
+            if on {
+                ui.painter().rect(r, 2.0, p.raised, egui::Stroke::new(1.0, p.line), egui::StrokeKind::Inside);
+            }
+            ui.painter().galley(egui::pos2(r.left() + 8.0, r.center().y - g.size().y / 2.0), g, if on { p.text } else { p.muted });
+            if resp.clicked() {
+                self.board_tab = k;
+            }
+            x = r.right() + 2.0;
+        }
+        egui::ScrollArea::vertical().id_salt("board-insp").auto_shrink([false, false]).show(ui, |ui| {
+            egui::Frame::new().inner_margin(12).show(ui, |ui| {
+                ui.spacing_mut().item_spacing.y = 8.0;
+                if self.board_tab == 1 {
+                    self.board_props(ui);
+                } else {
+                    self.board_colors(ui);
+                }
+            });
+        });
+    }
+
+    fn board_props(&mut self, ui: &mut egui::Ui) {
+        let p = theme::pal();
+        match self.board.selection.as_slice() {
+            [] => {
+                ui.label(RichText::new(crate::i18n::t("Rien de choisi. Clique un élément du board ou d'un calque.")).size(12.0).color(p.muted));
+            }
+            [i] => {
+                let Some(it) = self.board.data.items.get(*i).cloned() else { return };
+                let (what, path) = match &it.kind {
+                    board::Kind::Image { rel, .. } => ("Image", Some(rel.clone())),
+                    board::Kind::Text { .. } => ("Texte", None),
+                    board::Kind::Note { rel } => ("Note", Some(rel.clone())),
+                    board::Kind::Palette { .. } => ("Palette", None),
+                    board::Kind::Stroke { .. } => ("Trait", None),
+                };
+                ui.label(RichText::new(crate::i18n::t(what)).size(15.0).family(theme::bold()));
+                if let Some(rel) = &path {
+                    ui.label(RichText::new(rel).size(11.0).color(p.muted));
+                }
+                ui.label(RichText::new(crate::i18n::t("Taille")).size(11.0).color(p.muted));
+                ui.label(RichText::new(format!("{:.0} × {:.0}", it.w, it.h)).monospace().size(12.0));
+                if let board::Kind::Palette { colors } = &it.kind {
+                    ui.horizontal_wrapped(|ui| {
+                        for c in colors {
+                            let col = egui::Color32::from_rgb(c[0], c[1], c[2]);
+                            if ui.add(egui::Button::new(RichText::new(palette::hex(col)).monospace().size(11.0))).on_hover_text(crate::i18n::t("copier")).clicked() {
+                                ui.ctx().copy_text(format!("#{}", palette::hex(col)));
+                            }
+                        }
+                    });
+                }
+                if let Some(rel) = path {
+                    if ui.button(crate::i18n::t("Ouvrir")).clicked() {
+                        self.actions.push(Action::Open(rel));
+                    }
+                }
+            }
+            many => {
+                ui.label(RichText::new(format!("{} {}", many.len(), crate::i18n::t_mid("éléments choisis"))).size(13.0));
+            }
+        }
+    }
+
+    fn board_colors(&mut self, ui: &mut egui::Ui) {
+        let p = theme::pal();
+        let (src, n_img) = self.board_source_colors();
+        let cols = palette::generate(&src, &self.pal_gen);
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(crate::i18n::t(if self.board.selection.is_empty() { "Palette du board" } else { "Palette de la sélection" })).size(11.0).color(p.muted));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.label(RichText::new(format!("{n_img} {}", crate::i18n::t_mid(if n_img == 1 { "image" } else { "images" }))).size(11.0).color(p.muted));
+            });
+        });
+        if cols.is_empty() {
+            ui.label(RichText::new(crate::i18n::t("Choisis des images sur le board : leurs couleurs donnent la palette.")).size(12.0).color(p.muted));
+        } else {
+            let gap = 6.0;
+            let w = ((ui.available_width() - gap * (cols.len() as f32 - 1.0)) / cols.len() as f32).max(16.0);
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = gap;
+                for c in &cols {
+                    ui.vertical(|ui| {
+                        ui.spacing_mut().item_spacing.y = 4.0;
+                        let (r, resp) = ui.allocate_exact_size(egui::vec2(w, 56.0), egui::Sense::click());
+                        ui.painter().rect_filled(r, 2.0, *c);
+                        if self.pal_gen.readable {
+                            let (tc, ratio) = palette::text_on(*c);
+                            ui.painter().text(r.center(), egui::Align2::CENTER_CENTER, "Aa", egui::FontId::new(13.0, theme::bold()), tc);
+                            let _ = ratio;
+                        }
+                        if resp.on_hover_text(format!("#{} · {}", palette::hex(*c), crate::i18n::t("cliquer pour copier"))).clicked() {
+                            ui.ctx().copy_text(format!("#{}", palette::hex(*c)));
+                            self.toast = Some((format!("#{} copié", palette::hex(*c)), Instant::now()));
+                        }
+                        ui.label(RichText::new(palette::hex(*c)).monospace().size(10.5).color(p.muted));
+                    });
+                }
+            });
+            ui.horizontal(|ui| {
+                let w = (ui.available_width() - 8.0) / 3.0;
+                if ui.add_sized([w, 24.0], egui::Button::new(crate::i18n::t("Copier"))).on_hover_text(crate::i18n::t("Les codes hexadécimaux, une ligne chacun")).clicked() {
+                    ui.ctx().copy_text(cols.iter().map(|c| format!("#{}", palette::hex(*c))).collect::<Vec<_>>().join("\n"));
+                    self.toast("palette copiée");
+                }
+                if ui.add_sized([w, 24.0], egui::Button::new(crate::i18n::t("Exporter"))).on_hover_text(crate::i18n::t("Fichier .gpl (GIMP, Krita, Inkscape, Blender) dans le dossier palettes du coffre")).clicked() {
+                    let name = self.board.rel.as_deref().map(board::board_name).unwrap_or_else(|| "palette".into());
+                    let mut text = format!("GIMP Palette\nName: {name}\nColumns: {}\n#\n", cols.len());
+                    for c in &cols {
+                        text.push_str(&format!("{:3} {:3} {:3}\t#{}\n", c.r(), c.g(), c.b(), palette::hex(*c)));
+                    }
+                    let rel = format!("palettes/{name}.gpl");
+                    match vault::write(&self.root(), &rel, &text) {
+                        Ok(()) => {
+                            self.toast(format!("exportée : {rel}"));
+                            self.refresh();
+                        }
+                        Err(e) => self.error = Some(e),
+                    }
+                }
+                if ui.add_sized([w, 24.0], egui::Button::new(RichText::new(crate::i18n::t("Sur le board")).color(p.on_accent)).fill(p.accent)).clicked() {
+                    self.palette_to_board();
+                }
+            });
+        }
+        ui.add_space(6.0);
+        ui.label(RichText::new(crate::i18n::t("Harmonie")).size(11.0).color(p.muted));
+        let w = (ui.available_width() - 8.0) / 3.0;
+        egui::Grid::new("pal-harmony").num_columns(3).spacing(egui::vec2(4.0, 4.0)).show(ui, |ui| {
+            for (k, (h, label)) in palette::HARMONIES.iter().enumerate() {
+                let on = self.pal_gen.harmony == *h;
+                let b = egui::Button::new(RichText::new(crate::i18n::t(label)).size(12.0)).fill(if on { p.selection } else { p.field });
+                if ui.add_sized([w.max(60.0), 24.0], b).clicked() {
+                    if *h == palette::Harmony::Random && on {
+                        self.pal_gen.seed = self.pal_gen.seed.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+                    }
+                    self.pal_gen.harmony = *h;
+                }
+                if k % 3 == 2 {
+                    ui.end_row();
+                }
+            }
+        });
+        ui.add_space(6.0);
+        ui.label(RichText::new(crate::i18n::t("Réglages")).size(11.0).color(p.muted));
+        let slider_row = |ui: &mut egui::Ui, label: &str, w: egui::Slider<'_>| {
+            ui.horizontal(|ui| {
+                let (r, _) = ui.allocate_exact_size(egui::vec2(80.0, 20.0), egui::Sense::hover());
+                ui.painter().text(r.left_center(), egui::Align2::LEFT_CENTER, crate::i18n::t(label), egui::FontId::proportional(12.5), p.text);
+                ui.spacing_mut().slider_width = (ui.available_width() - 50.0).max(60.0);
+                ui.add(w);
+            });
+        };
+        slider_row(ui, "Couleurs", egui::Slider::new(&mut self.pal_gen.count, 3..=9));
+        let mut sat = (self.pal_gen.saturation * 100.0).round() as i32;
+        slider_row(ui, "Saturation", egui::Slider::new(&mut sat, -100..=100));
+        self.pal_gen.saturation = sat as f32 / 100.0;
+        let mut con = (self.pal_gen.contrast * 100.0).round() as i32;
+        slider_row(ui, "Contraste", egui::Slider::new(&mut con, -100..=100));
+        self.pal_gen.contrast = con as f32 / 100.0;
+        ui.checkbox(&mut self.pal_gen.readable, crate::i18n::t("Texte lisible sur chaque couleur (4,5:1)"));
+        if !src.is_empty() {
+            ui.add_space(6.0);
+            ui.label(RichText::new(crate::i18n::t("Variantes")).size(11.0).color(p.muted));
+            for h in [palette::Harmony::Analogous, palette::Harmony::Complement, palette::Harmony::Mono] {
+                let st = palette::Settings { harmony: h, ..self.pal_gen.clone() };
+                let alt = palette::generate(&src, &st);
+                let (r, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 22.0), egui::Sense::click());
+                let w = r.width() / alt.len().max(1) as f32;
+                for (k, c) in alt.iter().enumerate() {
+                    ui.painter().rect_filled(egui::Rect::from_min_size(egui::pos2(r.left() + w * k as f32, r.top()), egui::vec2(w + 0.5, r.height())), 0.0, *c);
+                }
+                if resp.hovered() {
+                    ui.painter().rect_stroke(r, 2.0, egui::Stroke::new(1.0, p.text), egui::StrokeKind::Outside);
+                }
+                let label = palette::HARMONIES.iter().find(|x| x.0 == h).map(|x| x.1).unwrap_or("");
+                if resp.on_hover_text(crate::i18n::t(label)).clicked() {
+                    self.pal_gen.harmony = h;
+                }
+            }
+        }
     }
 
     // ---------- refs ----------
@@ -5894,4 +6277,21 @@ mod tests_md_layout {
             assert_eq!(super::md_layout(t, 15.0).text, t);
         }
     }
+}
+
+/// Boutons sans cadre (barres flottantes, en-têtes) : fond seulement au survol
+fn flat_buttons(ui: &mut egui::Ui) {
+    let p = theme::pal();
+    let v = &mut ui.style_mut().visuals.widgets;
+    v.inactive.weak_bg_fill = egui::Color32::TRANSPARENT;
+    v.inactive.bg_stroke = egui::Stroke::NONE;
+    v.hovered.weak_bg_fill = p.raised;
+    v.hovered.bg_stroke = egui::Stroke::NONE;
+    v.open.weak_bg_fill = p.raised;
+}
+
+/// Contour en pointillés (zone où déposer)
+fn dashed_rect(painter: &egui::Painter, r: egui::Rect, color: egui::Color32) {
+    let pts = vec![r.left_top(), r.right_top(), r.right_bottom(), r.left_bottom(), r.left_top()];
+    painter.extend(egui::Shape::dashed_line(&pts, egui::Stroke::new(1.0, color), 4.0, 3.0));
 }
