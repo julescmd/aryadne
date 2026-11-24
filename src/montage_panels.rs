@@ -1328,6 +1328,12 @@ impl Editor {
         let p = crate::theme::pal();
         let ctx = ui.ctx().clone();
         self.strips.poll(&ctx);
+        if crate::motion::generation() != self.motion_gen {
+            self.motion_gen = crate::motion::generation();
+            self.strips.refresh_motion();
+            // L'image affichée est redemandée : elle peut venir d'une composition qui vient de changer
+            self.shown = None;
+        }
         let fps = self.project.fps.max(1.0);
         let (full, _) = ui.allocate_exact_size(ui.available_size(), Sense::hover());
         let area = Rect::from_min_max(pos2(full.left() + HEAD_W, full.top()), pos2(full.right(), full.bottom() - SCROLL_H));

@@ -5972,7 +5972,7 @@ impl App {
         let abs = std::path::Path::new(&self.root()).join(&rel);
         if self.view() == View::Files {
             match self.active.and_then(|i| self.docs.get_mut(i)).map(|d| &mut d.content) {
-                Some(Content::Montage(m)) if video::is_video(&rel) || images::has_preview(&rel) || [".mp3", ".wav", ".flac", ".ogg", ".m4a", ".aac", ".opus"].iter().any(|e| rel.to_lowercase().ends_with(e)) => {
+                Some(Content::Montage(m)) if video::is_video(&rel) || motion::is_compo(&rel) || images::has_preview(&rel) || [".mp3", ".wav", ".flac", ".ogg", ".m4a", ".aac", ".opus"].iter().any(|e| rel.to_lowercase().ends_with(e)) => {
                     m.add.push(abs);
                     return;
                 }

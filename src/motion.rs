@@ -1154,6 +1154,93 @@ pub fn snap_to_beats(l: &mut Layer, beats: &[f32]) -> usize {
     n
 }
 
+// ---------- Rendu pour le montage ----------
+
+/// La racine du coffre qui contient ce fichier (le dossier qui a un `.app`)
+pub fn vault_root_of(p: &Path) -> Option<PathBuf> {
+    p.ancestors().skip(1).find(|a| a.join(".app").is_dir()).map(|a| a.to_path_buf())
+}
+
+/// Où se range la vidéo rendue d'une composition posée dans un montage
+pub fn cache_path(comp: &Path) -> PathBuf {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    comp.to_string_lossy().hash(&mut h);
+    let stem = comp.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "compo".into());
+    let base = vault_root_of(comp).map(|r| r.join(".app")).unwrap_or_else(|| comp.parent().map(|d| d.join(".aryadne")).unwrap_or_default());
+    base.join("cache").join("motion").join(format!("{stem}-{:08x}.mp4", h.finish() as u32))
+}
+
+/// Compte les rendus terminés : un montage qui le voit changer relit les vidéos des compositions
+static GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+pub fn generation() -> u64 {
+    GENERATION.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Une vidéo du cache des compositions (ses vignettes deviennent périmées quand elle est rendue à nouveau)
+pub fn is_cache_file(p: &Path) -> bool {
+    let s = p.to_string_lossy().replace('\\', "/");
+    s.contains("/cache/motion/")
+}
+
+fn running() -> &'static std::sync::Mutex<std::collections::HashSet<PathBuf>> {
+    static R: OnceLock<std::sync::Mutex<std::collections::HashSet<PathBuf>>> = OnceLock::new();
+    R.get_or_init(Default::default)
+}
+
+fn stale(comp: &Path, out: &Path) -> bool {
+    let m = |p: &Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
+    match (m(comp), m(out)) {
+        (Some(a), Some(b)) => a > b,
+        _ => true,
+    }
+}
+
+fn render_now(comp: &Path, out: &Path) -> Result<(), String> {
+    let c = Compo::read(comp)?;
+    if let Some(d) = out.parent() {
+        std::fs::create_dir_all(d).map_err(|e| e.to_string())?;
+    }
+    let root = vault_root_of(comp).unwrap_or_else(|| comp.parent().map(|d| d.to_path_buf()).unwrap_or_default());
+    // Rendu à côté, puis remplacement d'un coup : l'ancienne version reste lisible pendant ce temps
+    let part = out.with_extension("part.mp4");
+    export(&c, &part, &root, |_| {})?;
+    std::fs::rename(&part, out).map_err(|e| e.to_string())
+}
+
+/// La vidéo d'une composition, à jour : rendue tout de suite (`wait`) ou en arrière-plan si elle a changé.
+/// Le chemin rendu est toujours celui du cache, même pendant qu'une nouvelle version se prépare.
+pub fn render_cached(comp: &Path, wait: bool) -> PathBuf {
+    let out = cache_path(comp);
+    if !stale(comp, &out) {
+        return out;
+    }
+    let busy = !running().lock().unwrap().insert(out.clone());
+    if busy {
+        if wait {
+            while running().lock().unwrap().contains(&out) {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        }
+        return out;
+    }
+    let (c2, o2) = (comp.to_path_buf(), out.clone());
+    let job = move || {
+        if let Err(e) = render_now(&c2, &o2) {
+            eprintln!("rendu de {} : {e}", c2.display());
+        }
+        running().lock().unwrap().remove(&o2);
+        GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    };
+    if wait {
+        job();
+    } else {
+        std::thread::spawn(job);
+    }
+    out
+}
+
 /// Préréglages d'animation : ils posent des clés sur le calque, à partir de l'instant `t`
 pub const PRESETS: [&str; 6] = ["Entrée lettre par lettre", "Rebond", "Glissement doux", "Fondu d'entrée", "Sortie en fondu", "Tour complet"];
 
@@ -1274,6 +1361,35 @@ mod tests {
         assert!(lit(&img) > 100, "contour bleu visible");
         let s = serde_json::to_string(&c).unwrap();
         assert_eq!(serde_json::from_str::<Compo>(&s).unwrap(), c);
+    }
+
+    #[test]
+    fn video_pour_le_montage() {
+        if crate::ffmpeg::find("ffmpeg").is_none() {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("aryadne-motion-{}", new_id()));
+        std::fs::create_dir_all(dir.join(".app")).unwrap();
+        let comp = dir.join("Intro.arymotion");
+        let mut c = Compo::default();
+        (c.w, c.h, c.duration) = (320, 180, 0.5);
+        c.write(&comp).unwrap();
+        let out = render_cached(&comp, true);
+        assert!(out.starts_with(dir.join(".app").join("cache")), "{out:?}");
+        assert!(out.exists() && !stale(&comp, &out));
+        // Le montage lit la composition par sa vidéo, et sait sa durée
+        let proj = dir.join("Film.aryseq");
+        assert_eq!(crate::montage::resolve(&proj, "Intro.arymotion"), out);
+        let clip = crate::montage::import(&proj, &comp, 0, 0.0).unwrap();
+        assert_eq!((clip.file.as_str(), clip.kind.as_str(), clip.media), ("Intro.arymotion", "video", 0.5));
+        // Une composition changée est rendue à nouveau (attendre la fin avant de ranger)
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        c.duration = 0.4;
+        c.write(&comp).unwrap();
+        let g = generation();
+        render_cached(&comp, true);
+        assert!(generation() > g && !stale(&comp, &out));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

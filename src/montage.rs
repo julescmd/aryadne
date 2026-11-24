@@ -668,6 +668,17 @@ impl Project {
 
 pub fn resolve(project: &Path, file: &str) -> PathBuf {
     let p = Path::new(file);
+    let p = if p.is_absolute() { p.to_path_buf() } else { project.parent().unwrap_or(Path::new("")).join(p) };
+    // Une composition Motion se lit par sa vidéo rendue (remise à jour en arrière-plan quand elle change)
+    if crate::motion::is_compo(file) {
+        return crate::motion::render_cached(&p, false);
+    }
+    p
+}
+
+/// Le fichier d'un clip tel qu'il est sur le disque (la composition elle-même, pas sa vidéo)
+fn source_file(project: &Path, file: &str) -> PathBuf {
+    let p = Path::new(file);
     if p.is_absolute() { p.to_path_buf() } else { project.parent().unwrap_or(Path::new("")).join(p) }
 }
 
@@ -675,6 +686,7 @@ pub(crate) fn kind_of(path: &Path) -> &'static str {
     match path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default().as_str() {
         "aryimg" | "png" | "jpg" | "jpeg" | "webp" | "bmp" | "tga" | "tif" | "tiff" => "image",
         "mp3" | "wav" | "flac" | "ogg" | "m4a" | "aac" | "opus" => "audio",
+        // Une composition Motion se monte comme une vidéo
         _ => "video",
     }
 }
@@ -683,7 +695,14 @@ pub(crate) fn kind_of(path: &Path) -> &'static str {
 pub fn import(project: &Path, media: &Path, track: usize, start: f32) -> Result<Clip, String> {
     let kind = kind_of(media);
     let (mut dur, mut has_audio) = (5.0f32, false);
-    if kind != "image" {
+    if crate::motion::is_compo(&media.to_string_lossy()) {
+        // Sa vidéo est rendue maintenant, pour que l'aperçu la trouve
+        let c = crate::motion::Compo::read(media)?;
+        dur = c.duration;
+        has_audio = c.music.is_some();
+        // Sa vidéo se prépare en arrière-plan ; le montage la montre dès qu'elle est prête
+        crate::motion::render_cached(media, false);
+    } else if kind != "image" {
         let ffprobe = ffmpeg::find("ffprobe").ok_or("ffprobe introuvable")?;
         let out = ffmpeg::command(ffprobe).args(["-v", "error", "-show_entries", "format=duration:stream=codec_type", "-of", "json"]).arg(media).output().map_err(|e| e.to_string())?;
         let v: serde_json::Value = serde_json::from_slice(&out.stdout).map_err(|_| "Média illisible.".to_string())?;
@@ -839,6 +858,10 @@ pub fn export(p: &Project, project: &Path, out: &Path) -> Result<(), String> {
         return Err("Le montage est vide.".into());
     }
     let (w, h) = (p.width.max(2) / 2 * 2, p.height.max(2) / 2 * 2);
+    // Les compositions Motion du montage sont rendues à jour avant l'export
+    for c in p.clips.iter().filter(|c| crate::motion::is_compo(&c.file)) {
+        crate::motion::render_cached(&source_file(project, &c.file), true);
+    }
     bake_texts(p);
     let (inputs, filter, has_audio, total) = graph(p, project, 0.0, w, h, false, true);
     let mut cmd = ffmpeg::command(ff);
@@ -891,6 +914,12 @@ impl Strips {
             self.rx = Some(rx);
         }
         self.tx.clone().unwrap()
+    }
+
+    /// Une composition vient d'être rendue : ses vignettes et sa forme d'onde sont à refaire, et les échecs à réessayer
+    pub(crate) fn refresh_motion(&mut self) {
+        self.thumbs.retain(|k, v| v.is_some() && !crate::motion::is_cache_file(&k.0));
+        self.waves.retain(|k, v| v.is_some() && !crate::motion::is_cache_file(k));
     }
 
     pub(crate) fn poll(&mut self, ctx: &egui::Context) {

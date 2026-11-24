@@ -132,6 +132,8 @@ pub struct Editor {
     pub add: Vec<PathBuf>,
     root: String,
     strips: Strips,
+    /// Dernier rendu de composition vu (voir motion::generation)
+    motion_gen: u64,
     /// Graphe d'étalonnage à ouvrir dans l'éditeur de nodes
     pub open_request: Option<PathBuf>,
     saved: Project,
@@ -210,6 +212,7 @@ impl Editor {
             add: vec![],
             root: root.to_string(),
             strips: Strips::default(),
+            motion_gen: crate::motion::generation(),
             open_request: None,
             saved: project.clone(),
             history: vec![],
