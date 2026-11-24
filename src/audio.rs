@@ -128,6 +128,29 @@ pub struct Track {
     #[serde(default)]
     pub solo: bool,
     pub clips: Vec<Clip>,
+    /// Baisse automatique sous une autre piste (la musique sous la voix)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duck: Option<Duck>,
+}
+
+/// La piste baisse de `amount` dB quand la piste `under` joue
+#[derive(Clone, PartialEq, Serialize, Deserialize, Debug)]
+pub struct Duck {
+    pub under: usize,
+    pub amount: f32,
+    /// Remontée, en secondes
+    #[serde(default = "release")]
+    pub release: f32,
+}
+
+fn release() -> f32 {
+    0.4
+}
+
+impl Duck {
+    pub fn new(under: usize) -> Duck {
+        Duck { under, amount: 12.0, release: release() }
+    }
 }
 
 #[derive(Clone, PartialEq, Serialize, Deserialize, Debug)]
@@ -151,7 +174,7 @@ impl Session {
     }
 
     pub fn new_track(i: usize) -> Track {
-        Track { name: format!("{} {}", crate::i18n::t("Piste"), i + 1), color: COLORS[i % COLORS.len()], volume: 0.0, mute: false, solo: false, clips: vec![] }
+        Track { name: format!("{} {}", crate::i18n::t("Piste"), i + 1), color: COLORS[i % COLORS.len()], volume: 0.0, mute: false, solo: false, clips: vec![], duck: None }
     }
 
     pub fn read(path: &Path) -> Result<Session, String> {
@@ -216,6 +239,21 @@ impl Session {
     }
 
     /// Les pistes qu'on entend (solo, muet)
+    /// Retire une piste ; les baisses qui la suivaient sont recalées
+    pub fn remove_track(&mut self, ti: usize) {
+        if ti >= self.tracks.len() {
+            return;
+        }
+        self.tracks.remove(ti);
+        for t in &mut self.tracks {
+            match &mut t.duck {
+                Some(d) if d.under == ti => t.duck = None,
+                Some(d) if d.under > ti => d.under -= 1,
+                _ => {}
+            }
+        }
+    }
+
     pub fn audible(&self) -> Vec<usize> {
         let solo = self.tracks.iter().any(|t| t.solo);
         (0..self.tracks.len()).filter(|&i| if solo { self.tracks[i].solo } else { !self.tracks[i].mute }).collect()
@@ -349,28 +387,77 @@ pub fn mix(s: &Session, sounds: &Sounds, a: f64, b: f64, wait: bool) -> Vec<f32>
     let n = (((b - a) * RATE as f64).max(0.0)) as usize;
     let mut out = vec![0.0f32; n * 2];
     for ti in s.audible() {
-        let tr = &s.tracks[ti];
-        let tv = db(tr.volume);
-        for c in &tr.clips {
-            if c.end() <= a || c.start >= b {
-                continue;
-            }
-            let Some(buf) = (if wait { sounds.wait(c) } else { sounds.ready(c) }) else { continue };
-            let from = ((c.start.max(a) - a) * RATE as f64) as usize;
-            let to = (((c.end().min(b)) - a) * RATE as f64) as usize;
-            for f in from..to.min(n) {
-                let t = a + f as f64 / RATE as f64;
-                let si = ((t - c.start + c.offset) * RATE as f64) as usize;
-                if si >= buf.frames() {
-                    break;
-                }
-                let g = c.env(t) * tv;
-                out[f * 2] += buf.data[si * 2] * g;
-                out[f * 2 + 1] += buf.data[si * 2 + 1] * g;
-            }
-        }
+        let gains = duck_gains(s, sounds, ti, a, n, wait);
+        add_track(&mut out, s, sounds, ti, a, n, wait, gains.as_deref());
     }
     out
+}
+
+/// Ajoute une piste au mélange, avec un gain par échantillon en plus (ducking)
+#[allow(clippy::too_many_arguments)]
+fn add_track(out: &mut [f32], s: &Session, sounds: &Sounds, ti: usize, a: f64, n: usize, wait: bool, gains: Option<&[f32]>) {
+    let tr = &s.tracks[ti];
+    let tv = db(tr.volume);
+    let b = a + n as f64 / RATE as f64;
+    for c in &tr.clips {
+        if c.end() <= a || c.start >= b {
+            continue;
+        }
+        let Some(buf) = (if wait { sounds.wait(c) } else { sounds.ready(c) }) else { continue };
+        let from = ((c.start.max(a) - a) * RATE as f64) as usize;
+        let to = (((c.end().min(b)) - a) * RATE as f64) as usize;
+        for f in from..to.min(n) {
+            let t = a + f as f64 / RATE as f64;
+            let si = ((t - c.start + c.offset) * RATE as f64) as usize;
+            if si >= buf.frames() {
+                break;
+            }
+            let g = c.env(t) * tv * gains.map_or(1.0, |g| g[f]);
+            out[f * 2] += buf.data[si * 2] * g;
+            out[f * 2 + 1] += buf.data[si * 2 + 1] * g;
+        }
+    }
+}
+
+/// Seuil au-dessus duquel la piste de référence « parle » (environ -36 dBFS)
+const DUCK_THRESHOLD: f32 = 0.016;
+
+/// Gains du ducking de la piste `ti` sur [a, a + n) : suit le niveau de la piste de référence,
+/// descend en 30 ms et remonte en `release`. On commence une seconde plus tôt pour que l'état soit juste.
+pub fn duck_gains(s: &Session, sounds: &Sounds, ti: usize, a: f64, n: usize, wait: bool) -> Option<Vec<f32>> {
+    let d = s.tracks.get(ti)?.duck.as_ref()?;
+    let key = s.tracks.get(d.under)?;
+    if d.under == ti || key.mute || d.amount <= 0.0 {
+        return None;
+    }
+    let pre = (RATE as usize).min((a.max(0.0) * RATE as f64) as usize);
+    let total = pre + n;
+    let a0 = a - pre as f64 / RATE as f64;
+    let mut sig = vec![0.0f32; total * 2];
+    add_track(&mut sig, s, sounds, d.under, a0, total, wait, None);
+    let low = db(-d.amount);
+    let (att, rel) = (1.0 - (-1.0 / (0.03 * RATE as f32)).exp(), 1.0 - (-1.0 / (d.release.max(0.02) * RATE as f32)).exp());
+    let det_rel = 1.0 - (-1.0 / (0.12 * RATE as f32)).exp();
+    let (mut level, mut g) = (0.0f32, 1.0f32);
+    let mut out = Vec::with_capacity(n);
+    for f in 0..total {
+        let x = sig[f * 2].abs().max(sig[f * 2 + 1].abs());
+        // Détecteur de crête : monte tout de suite, retombe en 120 ms
+        level = if x > level { x } else { level + (x - level) * det_rel };
+        let target = if level > DUCK_THRESHOLD { low } else { 1.0 };
+        g += (target - g) * if target < g { att } else { rel };
+        if f >= pre {
+            out.push(g);
+        }
+    }
+    Some(out)
+}
+
+/// Courbe de ducking pour l'affichage : `steps` gains de a à b
+pub fn duck_curve(s: &Session, sounds: &Sounds, ti: usize, a: f64, b: f64, steps: usize) -> Option<Vec<f32>> {
+    let n = (((b - a) * RATE as f64).max(0.0)) as usize;
+    let g = duck_gains(s, sounds, ti, a, n, false)?;
+    Some((0..steps).map(|k| g.get(k * n / steps.max(1)).copied().unwrap_or(1.0)).collect())
 }
 
 /// Spectre moyen d'un passage (en secondes du son) : `bands` valeurs en dB sur une échelle de fréquences
@@ -570,6 +657,30 @@ mod tests {
         let f = |j: usize| 20.0 * 1000f64.powf(j as f64 / 120.0);
         assert!(f(best) <= 440.0 && f(best + 1) >= 430.0, "pic à {} Hz", f(best));
         assert!(sp[best] - sp[110] > 40.0, "les aigus sont loin dessous");
+    }
+
+    #[test]
+    fn la_musique_baisse_sous_la_voix() {
+        let sounds = Sounds::new("/nulle-part");
+        // Voix de 2 à 4 s, musique tout le long
+        sounds.put("voix.wav", tone(2.0, 0.5, &[]));
+        sounds.put("musique.wav", tone(6.0, 0.5, &[]));
+        let mut s = Session::starter();
+        s.tracks[0].clips.push(Clip { src: "voix.wav".into(), start: 2.0, offset: 0.0, len: 2.0, gain: 0.0, fade_in: 0.0, fade_out: 0.0, fx: vec![] });
+        s.tracks[1].clips.push(Clip { src: "musique.wav".into(), start: 0.0, offset: 0.0, len: 6.0, gain: 0.0, fade_in: 0.0, fade_out: 0.0, fx: vec![] });
+        s.tracks[1].duck = Some(Duck::new(0));
+        let g = duck_curve(&s, &sounds, 1, 0.0, 6.0, 60).unwrap();
+        assert!(g[10] > 0.99, "avant la voix : plein volume");
+        assert!((g[30] - db(-12.0)).abs() < 0.02, "pendant : -12 dB ({})", g[30]);
+        assert!(g[55] > 0.95, "après : remonté ({})", g[55]);
+        // Le calcul par morceaux (lecture) donne le même gain qu'en une fois
+        let n = RATE as usize / 2;
+        let part = duck_gains(&s, &sounds, 1, 3.0, n, false).unwrap();
+        let whole = duck_gains(&s, &sounds, 1, 0.0, 6 * RATE as usize, false).unwrap();
+        assert!((part[100] - whole[3 * RATE as usize + 100]).abs() < 0.01);
+        // Supprimer la voix retire la baisse
+        s.remove_track(0);
+        assert!(s.tracks[0].duck.is_none());
     }
 
     #[test]

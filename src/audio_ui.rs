@@ -53,6 +53,8 @@ pub struct Editor {
     export_rx: Option<std::sync::mpsc::Receiver<Result<PathBuf, String>>>,
     /// Dernier spectre calculé (ce qu'il décrit, ses bandes)
     spec: Option<(String, Vec<f32>)>,
+    /// Courbes de ducking affichées (signature de ce dont elles dépendent, gains à 50 par seconde)
+    duck_view: std::collections::HashMap<usize, (String, Arc<Vec<f32>>)>,
 }
 
 impl Drop for Editor {
@@ -122,6 +124,7 @@ impl Editor {
             insp_tab: 0,
             export_rx: None,
             spec: None,
+            duck_view: Default::default(),
         }
     }
 
@@ -722,7 +725,7 @@ impl Editor {
             hr.context_menu(|ui| {
                 if ui.button(crate::i18n::t("supprimer la piste")).clicked() {
                     actions.push(Box::new(move |e: &mut Editor| {
-                        e.session.tracks.remove(ti);
+                        e.session.remove_track(ti);
                         e.sel_clip = None;
                         e.sel_track = 0;
                         e.changed();
@@ -868,6 +871,27 @@ impl Editor {
                         }
                     });
                 }
+            }
+            // Ducking : la courbe du volume sur la piste, et ce qui la commande
+            if let Some(d) = &tr.duck {
+                if let Some(curve) = self.duck_view_for(ti) {
+                    let (t0, t1) = (t_of(lane.left()), t_of(lane.right()));
+                    let top = lane.top() + 6.0;
+                    let h = lane.height() - 12.0;
+                    let low = audio::db(-d.amount.max(0.1));
+                    let mut pts = vec![];
+                    let mut tt = t0;
+                    let dt = (1.0 / zoom * 3.0).max(0.02);
+                    while tt <= t1 + dt {
+                        let g = curve.get((tt * 50.0) as usize).copied().unwrap_or(1.0);
+                        let k = ((1.0 - g) / (1.0 - low)).clamp(0.0, 1.0);
+                        pts.push(pos2(x_of(tt), top + k * h * 0.6));
+                        tt += dt;
+                    }
+                    lp.add(egui::Shape::line(pts, Stroke::new(1.5, p.warning.gamma_multiply(0.9))));
+                }
+                let under = self.session.tracks.get(d.under).map(|t| t.name.clone()).unwrap_or_default();
+                lp.text(pos2(lane.right() - 8.0, lane.bottom() - 6.0), egui::Align2::RIGHT_BOTTOM, format!("↓ {} dB · {under}", d.amount.round()), egui::FontId::proportional(10.5), p.warning);
             }
             y += TRACK_H;
         }
@@ -1205,7 +1229,13 @@ impl Editor {
 
     fn clip_props(&mut self, ui: &mut egui::Ui) {
         let p = crate::theme::pal();
-        let Some((ti, ci)) = self.sel_clip.filter(|(t, c)| self.session.tracks.get(*t).is_some_and(|tr| *c < tr.clips.len())) else { return };
+        let Some((ti, ci)) = self.sel_clip.filter(|(t, c)| self.session.tracks.get(*t).is_some_and(|tr| *c < tr.clips.len())) else {
+            // Sans clip : les réglages de la piste choisie
+            if self.sel_track < self.session.tracks.len() && self.track_props(ui, self.sel_track) {
+                self.changed();
+            }
+            return;
+        };
         let mut changed = false;
         let mut drop_fx = None;
         {
@@ -1247,15 +1277,68 @@ impl Editor {
             self.session.tracks[ti].clips[ci].fx.remove(k);
             changed = true;
         }
+        changed |= self.track_props(ui, ti);
+        if changed {
+            self.changed();
+        }
+    }
+
+    /// Réglages de la piste : couleur, volume, ducking
+    fn track_props(&mut self, ui: &mut egui::Ui, ti: usize) -> bool {
+        let mut changed = false;
         let tr = &mut self.session.tracks[ti];
         section(ui, &crate::i18n::t("Piste"));
         ui.horizontal(|ui| {
             changed |= ui.color_edit_button_srgb(&mut tr.color).changed();
             changed |= ui.add(egui::DragValue::new(&mut tr.volume).speed(0.1).range(-60.0..=12.0).max_decimals(1).prefix(crate::i18n::t("volume ")).suffix(" dB")).changed();
         });
-        if changed {
-            self.changed();
+        // Ducking : la piste baisse quand une autre joue (la musique sous la voix)
+        let names: Vec<(usize, String)> = self.session.tracks.iter().enumerate().filter(|(i, _)| *i != ti).map(|(i, t)| (i, t.name.clone())).collect();
+        let tr = &mut self.session.tracks[ti];
+        ui.horizontal(|ui| {
+            ui.label(crate::i18n::t("Baisser sous"));
+            let cur = tr.duck.as_ref().and_then(|d| names.iter().find(|n| n.0 == d.under)).map(|n| n.1.clone()).unwrap_or_else(|| crate::i18n::t("aucune piste"));
+            egui::ComboBox::from_id_salt(("duck", ti)).selected_text(cur).show_ui(ui, |ui| {
+                if ui.selectable_label(tr.duck.is_none(), crate::i18n::t("aucune piste")).clicked() {
+                    tr.duck = None;
+                    changed = true;
+                }
+                for (i, n) in &names {
+                    if ui.selectable_label(tr.duck.as_ref().is_some_and(|d| d.under == *i), n).clicked() {
+                        let keep = tr.duck.take();
+                        tr.duck = Some(audio::Duck { under: *i, ..keep.unwrap_or_else(|| audio::Duck::new(*i)) });
+                        changed = true;
+                    }
+                }
+            }).response.on_hover_text(crate::i18n::t("La piste baisse toute seule quand celle-ci joue (la musique sous la voix)"));
+        });
+        if let Some(d) = &mut tr.duck {
+            ui.horizontal(|ui| {
+                changed |= ui.add(egui::DragValue::new(&mut d.amount).speed(0.2).range(1.0..=40.0).max_decimals(0).prefix(crate::i18n::t("de ")).suffix(" dB")).changed();
+                changed |= ui.add(egui::DragValue::new(&mut d.release).speed(0.01).range(0.05..=3.0).max_decimals(2).prefix(crate::i18n::t("remontée ")).suffix(" s")).changed();
+            });
         }
+        changed
+    }
+
+    /// Gains du ducking de la piste `ti`, toutes les 20 ms depuis 0 ; recalculés quand la piste de
+    /// référence, ses sons ou les réglages changent
+    fn duck_view_for(&mut self, ti: usize) -> Option<Arc<Vec<f32>>> {
+        let tr = self.session.tracks.get(ti)?;
+        let d = tr.duck.as_ref()?;
+        let key = self.session.tracks.get(d.under)?;
+        let ready = key.clips.iter().filter(|c| self.sounds.ready(c).is_some()).count();
+        let sig = format!("{}|{}|{}|{}", serde_json::to_string(&key.clips).unwrap_or_default(), key.mute, serde_json::to_string(d).unwrap_or_default(), ready);
+        if let Some((s, c)) = self.duck_view.get(&ti) {
+            if *s == sig {
+                return Some(c.clone());
+            }
+        }
+        let dur = self.session.duration();
+        let steps = (dur * 50.0).ceil() as usize + 1;
+        let curve = Arc::new(audio::duck_curve(&self.session, &self.sounds, ti, 0.0, steps as f64 / 50.0, steps).unwrap_or_default());
+        self.duck_view.insert(ti, (sig, curve.clone()));
+        Some(curve)
     }
 
     // ---------- État ----------

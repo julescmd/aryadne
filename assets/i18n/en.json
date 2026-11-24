@@ -2236,5 +2236,10 @@
   "depuis le dernier commit": "since the last commit",
   "depuis l'ouverture": "since the file was opened",
   "restaurer": "restore",
-  "Remettre ces lignes comme avant": "Put these lines back as they were"
+  "Remettre ces lignes comme avant": "Put these lines back as they were",
+  "Baisser sous": "Duck under",
+  "aucune piste": "no track",
+  "La piste baisse toute seule quand celle-ci joue (la musique sous la voix)": "This track lowers itself while that one plays (music under a voice)",
+  "de ": "by ",
+  "remontée ": "release "
 }
