@@ -767,6 +767,53 @@ impl Editor {
                 _ => this.effects_panel(ui),
             }
         };
+        // Disposition de la maquette (quand aucun panneau n'a sa propre case) : médias à gauche,
+        // inspecteur à droite, moniteurs source et programme côte à côte, timeline dessous
+        if bin_r.is_none() && tl_r.is_none() && fx_r.is_none() && prog_r.is_none() {
+            egui::Panel::left("montage-media").resizable(true).default_size(250.0).min_size(190.0).max_size(460.0).frame(panel_frame).show(ui, |ui| {
+                pane_head(ui, &crate::i18n::t("Médias"), None);
+                egui::Frame::new().inner_margin(6).show(ui, |ui| self.bin_panel(ui));
+            });
+            egui::Panel::right("montage-inspector").resizable(true).default_size(290.0).min_size(240.0).max_size(460.0).frame(panel_frame).show(ui, |ui| {
+                let (hr, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 34.0), Sense::hover());
+                ui.painter().hline(hr.x_range(), hr.bottom() - 0.5, Stroke::new(1.0, p.line));
+                let mut x = hr.left() + 6.0;
+                let cur = if self.top_tab == 1 { 0 } else { self.top_tab };
+                for (k, label) in [(0u8, "Clip"), (2, "Effets")] {
+                    let g = ui.painter().layout_no_wrap(crate::i18n::t(label), egui::FontId::proportional(12.5), p.text);
+                    let r = Rect::from_min_size(pos2(x, hr.center().y - 12.0), egui::vec2(g.size().x + 16.0, 24.0));
+                    let resp = ui.interact(r, egui::Id::new(("montage-insp", k)), Sense::click());
+                    let on = cur == k;
+                    if on {
+                        ui.painter().rect(r, 2.0, p.raised, Stroke::new(1.0, p.line), egui::StrokeKind::Inside);
+                    }
+                    ui.painter().galley(pos2(r.left() + 8.0, r.center().y - g.size().y / 2.0), g, if on { p.text } else { p.muted });
+                    if resp.clicked() {
+                        self.top_tab = k;
+                    }
+                    x = r.right() + 2.0;
+                }
+                egui::Frame::new().inner_margin(12).show(ui, |ui| if cur == 2 { self.effects_panel(ui) } else { self.effect_controls(ui) });
+            });
+            egui::Panel::bottom("montage-lower").resizable(true).default_size((full_h * 0.4).max(240.0)).min_size(180.0).max_size((full_h * 0.75).max(200.0)).frame(egui::Frame::new()).show(ui, |ui| timeline_block(self, ui));
+            egui::CentralPanel::default().frame(egui::Frame::new().fill(p.code_bg).inner_margin(egui::Margin::symmetric(16, 12))).show(ui, |ui| {
+                // Deux moniteurs de même largeur, chacun dans sa case (rien ne déborde sur le voisin)
+                let full = ui.available_rect_before_wrap();
+                let w = (full.width() - 16.0) / 2.0;
+                for (k, left) in [(0, full.left()), (1, full.left() + w + 16.0)] {
+                    let r = Rect::from_min_size(pos2(left, full.top()), egui::vec2(w, full.height()));
+                    let mut cui = ui.new_child(egui::UiBuilder::new().max_rect(r).layout(egui::Layout::top_down(egui::Align::Min)));
+                    cui.set_clip_rect(r.expand(1.0));
+                    if k == 0 {
+                        self.source_panel(&mut cui);
+                    } else {
+                        self.program_monitor(&mut cui);
+                    }
+                }
+                ui.allocate_rect(full, Sense::hover());
+            });
+            return;
+        }
         if bin_r.is_none() || tl_r.is_none() {
             egui::Panel::bottom("montage-lower").resizable(true).default_size((full_h * 0.46).max(220.0)).min_size(180.0).max_size((full_h * 0.75).max(200.0)).frame(egui::Frame::new()).show(ui, |ui| {
                 if bin_r.is_none() {
@@ -1364,5 +1411,18 @@ mod tests {
         let n = e.history.len();
         e.undo(false);
         assert_eq!(e.history.len(), n - 1);
+    }
+}
+
+/// En-tête de panneau de 34 px, comme la maquette : titre en gras, compte discret
+pub(crate) fn pane_head(ui: &mut egui::Ui, title: &str, count: Option<&str>) {
+    let p = crate::theme::pal();
+    let (hr, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 34.0), Sense::hover());
+    ui.painter().hline(hr.x_range(), hr.bottom() - 0.5, Stroke::new(1.0, p.line));
+    let g = ui.painter().layout_no_wrap(title.to_string(), egui::FontId::new(13.0, crate::theme::bold()), p.text);
+    let w = g.size().x;
+    ui.painter().galley(pos2(hr.left() + 12.0, hr.center().y - g.size().y / 2.0), g, p.text);
+    if let Some(c) = count {
+        ui.painter().text(pos2(hr.left() + 20.0 + w, hr.center().y), egui::Align2::LEFT_CENTER, c, egui::FontId::proportional(11.0), p.muted);
     }
 }
