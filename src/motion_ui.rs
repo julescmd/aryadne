@@ -1224,7 +1224,7 @@ impl Editor {
         if self.compo.music.is_some() {
             let beats = self.wave().map(|w| w.beats.clone()).unwrap_or_default();
             let ok = self.sel.is_some() && !beats.is_empty();
-            if child.add_enabled(ok, egui::Button::new(format!("{}  {}", l::MUSIC, crate::i18n::t("Caler sur le rythme")))).on_hover_text(crate::i18n::t("Les clés du calque choisi vont sur les temps forts les plus proches")).clicked() {
+            if child.add_enabled(ok, egui::Button::new(egui::RichText::new(l::MUSIC).size(14.0))).on_hover_text(crate::i18n::t("Les clés du calque choisi vont sur les temps forts les plus proches")).clicked() {
                 if let Some(i) = self.sel {
                     let n = motion::snap_to_beats(&mut self.compo.layers[i], &beats);
                     self.message = Some(format!("{n} {}", crate::i18n::t_mid("clé(s) calée(s) sur le rythme")));
@@ -1232,9 +1232,9 @@ impl Editor {
                 }
             }
         }
-        child.toggle_value(&mut self.onion, format!("{}  {}", l::LAYERS, crate::i18n::t("Pelure"))).on_hover_text(crate::i18n::t("Pelure d'oignon : le calque choisi aux images d'avant (rouge) et d'après (vert)"));
-        child.toggle_value(&mut self.curves_open, format!("{}  {}", l::SPLINE, crate::i18n::t("Courbes"))).on_hover_text(crate::i18n::t("Éditeur de courbes : toutes les clés du calque, tangentes comprises (comme le Graph Editor de Maya)"));
-        child.toggle_value(&mut self.anim_tools, format!("{}  {}", l::WAND_SPARKLES, crate::i18n::t("Outils"))).on_hover_text(crate::i18n::t("Outils d'animation : tweener, décaler les clés, poses, miroir…"));
+        child.toggle_value(&mut self.onion, egui::RichText::new(l::LAYERS).size(14.0)).on_hover_text(crate::i18n::t("Pelure d'oignon : le calque choisi aux images d'avant (rouge) et d'après (vert)"));
+        child.toggle_value(&mut self.curves_open, egui::RichText::new(l::SPLINE).size(14.0)).on_hover_text(crate::i18n::t("Éditeur de courbes : toutes les clés du calque, tangentes comprises (comme le Graph Editor de Maya)"));
+        child.toggle_value(&mut self.anim_tools, egui::RichText::new(l::WAND_SPARKLES).size(14.0)).on_hover_text(crate::i18n::t("Outils d'animation : tweener, décaler les clés, poses, miroir…"));
         let wide = bar.width() > 900.0;
         child.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if !wide {
@@ -1267,7 +1267,6 @@ impl Editor {
               egui::ScrollArea::horizontal().id_salt("motion-anim-tools").scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden).show(ui, |ui| {
               ui.horizontal_centered(|ui| {
                 let Some(i) = sel else { return };
-                ui.label(egui::RichText::new(crate::i18n::t("Tweener")).size(11.5).color(p.muted));
                 ui.spacing_mut().slider_width = 90.0;
                 let mut apply = ui.add(egui::Slider::new(&mut self.tween_w, -0.5..=1.5).show_value(false)).on_hover_text(format!("{} · {:.0} %", crate::i18n::t("Entre la clé d'avant (0 %) et celle d'après (100 %) ; au-delà : dépassement"), self.tween_w * 100.0)).changed();
                 for (lab, w) in [("0", 0.0), ("¼", 0.25), ("½", 0.5), ("¾", 0.75), ("1", 1.0)] {
@@ -1312,13 +1311,13 @@ impl Editor {
                     }
                 }
                 ui.separator();
-                if ui.small_button(crate::i18n::t("Alléger")).on_hover_text(crate::i18n::t("Retire les clés que les voisines redonnent déjà (l'animation ne change pas)")).clicked() {
+                if ui.small_button(l::MINIMIZE_2).on_hover_text(crate::i18n::t("Retire les clés que les voisines redonnent déjà (l'animation ne change pas)")).clicked() {
                     let n = at::reduce(&mut self.compo.layers[i]);
                     self.message = Some(format!("{} · {n}", crate::i18n::t("Clés retirées")));
                     changed |= n > 0;
                 }
                 let mut off = 0i32;
-                if ui.add(egui::DragValue::new(&mut off).speed(0.15).prefix(format!("{} ", crate::i18n::t("décaler"))).suffix(crate::i18n::t_mid(" im."))).on_hover_text(crate::i18n::t("Glisser : décale toute l'animation des objets choisis")).changed() && off != 0 {
+                if ui.add(egui::DragValue::new(&mut off).speed(0.15).prefix(format!("{} ", l::MOVE_HORIZONTAL)).suffix(crate::i18n::t_mid(" im."))).on_hover_text(crate::i18n::t("Glisser : décale toute l'animation des objets choisis")).changed() && off != 0 {
                     at::offset_all(&mut self.compo.layers[i], off as f32 * step);
                     changed = true;
                 }

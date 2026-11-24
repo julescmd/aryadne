@@ -5689,9 +5689,10 @@ impl Viewer {
                     r.response.on_hover_text(crate::i18n::t("Passage vers la clé suivante"));
                 }
                 let auto_col = if self.anim_auto { p.text } else { p.muted };
-                ui.toggle_value(&mut self.anim_auto, egui::RichText::new(crate::i18n::t("Auto-clé")).size(11.0).color(auto_col)).on_hover_text(crate::i18n::t("Chaque déplacement pose une clé à l'image courante"));
-                ui.toggle_value(&mut self.anim_tools, egui::RichText::new(format!("{} {}", crate::lucide::WAND_SPARKLES, crate::i18n::t("Outils"))).size(12.5)).on_hover_text(crate::i18n::t("Outils d'animation : tweener, décaler les clés, poses, miroir…"));
-                if ui.toggle_value(&mut self.anim_graph, egui::RichText::new(crate::i18n::t("Courbes")).size(12.5)).on_hover_text(crate::i18n::t("Éditeur de courbes : clés et poignées de Bézier par canal (Maj+F6)")).changed() {
+                let rec_col = if self.anim_auto { Color32::from_rgb(230, 80, 80) } else { auto_col };
+                ui.toggle_value(&mut self.anim_auto, egui::RichText::new(crate::lucide::CIRCLE_DOT).size(14.0).color(rec_col)).on_hover_text(crate::i18n::t("Chaque déplacement pose une clé à l'image courante"));
+                ui.toggle_value(&mut self.anim_tools, egui::RichText::new(crate::lucide::WAND_SPARKLES).size(14.0)).on_hover_text(crate::i18n::t("Outils d'animation : tweener, décaler les clés, poses, miroir…"));
+                if ui.toggle_value(&mut self.anim_graph, egui::RichText::new(crate::lucide::SPLINE).size(14.0)).on_hover_text(crate::i18n::t("Éditeur de courbes : clés et poignées de Bézier par canal (Maj+F6)")).changed() {
                     self.graph.reset_view();
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -5724,7 +5725,6 @@ impl Viewer {
                   egui::ScrollArea::horizontal().id_salt("anim-tools").scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden).show(ui, |ui| {
                   ui.horizontal_centered(|ui| {
                     // Tweener : la pose entre la clé d'avant et celle d'après, avec dépassement possible
-                    ui.label(egui::RichText::new(crate::i18n::t("Tweener")).size(11.5).color(p.muted));
                     ui.spacing_mut().slider_width = 90.0;
                     let r = ui.add(egui::Slider::new(&mut self.tween_w, -0.5..=1.5).show_value(false)).on_hover_text(format!("{} · {:.0} %", crate::i18n::t("Entre la clé d'avant (0 %) et celle d'après (100 %) ; au-delà : dépassement"), self.tween_w * 100.0));
                     let mut apply = r.changed();
@@ -5808,19 +5808,19 @@ impl Viewer {
                     }
                     sep(ui);
                     // Toute l'animation
-                    if ui.small_button(crate::i18n::t("Partager")).on_hover_text(crate::i18n::t("Chaque objet choisi reçoit une clé partout où l'un d'eux en a une")).clicked() {
+                    if ui.small_button(crate::lucide::LINK).on_hover_text(crate::i18n::t("Chaque objet choisi reçoit une clé partout où l'un d'eux en a une")).clicked() {
                         let mut objs: Vec<&mut crate::scene::Object> = scene.objects.iter_mut().enumerate().filter(|(i, _)| targets.contains(i)).map(|(_, o)| o).collect();
                         let n = at::share_keys(&mut objs);
                         crate::notify(format!("{} · {n}", crate::i18n::t("Clés ajoutées")));
                         changed |= n > 0;
                     }
-                    if ui.small_button(crate::i18n::t("Alléger")).on_hover_text(crate::i18n::t("Retire les clés que les voisines redonnent déjà (l'animation ne change pas)")).clicked() {
+                    if ui.small_button(crate::lucide::MINIMIZE_2).on_hover_text(crate::i18n::t("Retire les clés que les voisines redonnent déjà (l'animation ne change pas)")).clicked() {
                         let n: usize = targets.iter().map(|&k| at::reduce(&mut scene.objects[k], 1e-3)).sum();
                         crate::notify(format!("{} · {n}", crate::i18n::t("Clés retirées")));
                         changed |= n > 0;
                     }
                     let mut off = 0i32;
-                    let r = ui.add(egui::DragValue::new(&mut off).speed(0.15).prefix(format!("{} ", crate::i18n::t("décaler"))).suffix(crate::i18n::t_mid(" im."))).on_hover_text(crate::i18n::t("Glisser : décale toute l'animation des objets choisis"));
+                    let r = ui.add(egui::DragValue::new(&mut off).speed(0.15).prefix(format!("{} ", crate::lucide::MOVE_HORIZONTAL)).suffix(crate::i18n::t_mid(" im."))).on_hover_text(crate::i18n::t("Glisser : décale toute l'animation des objets choisis"));
                     if r.changed() && off != 0 {
                         for &k in &targets {
                             at::offset_all(&mut scene.objects[k], off);

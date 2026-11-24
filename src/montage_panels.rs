@@ -1286,7 +1286,7 @@ impl Editor {
             }
         });
         let mag = self.project.magnetic;
-        let b = egui::Button::new(RichText::new(format!("{}  {}", crate::lucide::MAGNET, crate::i18n::t("Magnétique"))).size(12.0).color(if mag { p.text } else { p.muted })).fill(if mag { p.selection } else { Color32::TRANSPARENT }).corner_radius(12);
+        let b = egui::Button::new(RichText::new(crate::lucide::MAGNET).size(14.0).color(if mag { p.text } else { p.muted })).fill(if mag { p.selection } else { Color32::TRANSPARENT }).corner_radius(12);
         if hui.add(b).on_hover_text(crate::i18n::t("Timeline magnétique : la piste V1 raconte l'histoire, sans trous ; titres, calques et sons restent accrochés à leur plan")).clicked() {
             self.project.magnetic = !mag;
             self.changed();
@@ -1304,7 +1304,7 @@ impl Editor {
                 self.changed();
             }
         }
-        if hui.add(egui::Button::new(RichText::new(format!("{}  {}", crate::lucide::BOOKMARK, crate::i18n::t("Chapitre"))).size(12.0))).on_hover_text(crate::i18n::t("Commencer un chapitre à la tête de lecture (clic droit sur sa bande : renommer, supprimer)")).clicked() {
+        if hui.add(egui::Button::new(RichText::new(crate::lucide::BOOKMARK).size(14.0))).on_hover_text(crate::i18n::t("Commencer un chapitre à la tête de lecture (clic droit sur sa bande : renommer, supprimer)")).clicked() {
             let t = self.playhead;
             if !self.project.chapters.iter().any(|c| (c.start - t).abs() < 1e-3) {
                 let n = self.project.chapters.len() + 1;
@@ -1320,7 +1320,7 @@ impl Editor {
             self.undo(true);
         }
         hui.add_space(8.0);
-        hui.toggle_value(&mut self.curves_open, RichText::new(format!("{} {}", crate::lucide::SPLINE, crate::i18n::t("Courbes"))).size(12.0)).on_hover_text(crate::i18n::t("Éditeur de courbes : les clés du clip choisi (position, taille, opacité), tangentes comprises"));
+        hui.toggle_value(&mut self.curves_open, RichText::new(crate::lucide::SPLINE).size(14.0)).on_hover_text(crate::i18n::t("Éditeur de courbes : les clés du clip choisi (position, taille, opacité), tangentes comprises"));
         if self.curves_open {
             let mut open = true;
             let pick = self.sel.first().and_then(|id| self.project.index(*id));
