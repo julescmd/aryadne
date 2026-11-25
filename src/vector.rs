@@ -117,6 +117,29 @@ pub enum Paint {
     Radial { stops: Vec<(f32, [u8; 4])> },
     /// Motif répété : genre (voir `MOTIFS`), couleur du motif et du fond, taille d'une case (unités), angle
     Pattern { motif: u8, fg: [u8; 4], bg: [u8; 4], size: f32, angle: f32 },
+    /// Dégradé à points libres : des couleurs posées n'importe où (0..1 dans le cadre de la forme), fondues entre elles
+    Freeform { pts: Vec<([f32; 2], [u8; 4])> },
+}
+
+/// La couleur d'un dégradé à points libres au point (u, v) : moyenne pondérée par l'inverse du carré de la distance
+pub fn freeform_at(pts: &[([f32; 2], [u8; 4])], u: f32, v: f32, aspect: f32) -> [u8; 4] {
+    let mut acc = [0.0f32; 4];
+    let mut sw = 0.0;
+    for (p, c) in pts {
+        let d2 = ((u - p[0]) * aspect).powi(2) + (v - p[1]).powi(2);
+        if d2 < 1e-7 {
+            return *c;
+        }
+        let w = 1.0 / (d2 * d2.sqrt());
+        for i in 0..4 {
+            acc[i] += c[i] as f32 * w;
+        }
+        sw += w;
+    }
+    if sw == 0.0 {
+        return [0, 0, 0, 0];
+    }
+    acc.map(|x| (x / sw).round().clamp(0.0, 255.0) as u8)
 }
 
 /// Les motifs proposés (dans l'ordre de `Paint::Pattern::motif`)
@@ -144,6 +167,7 @@ impl Paint {
             Paint::Solid { c } => *c,
             Paint::Linear { stops, .. } | Paint::Radial { stops } => stops.first().map(|s| s.1).unwrap_or([0, 0, 0, 255]),
             Paint::Pattern { fg, .. } => *fg,
+            Paint::Freeform { pts } => pts.first().map(|p| p.1).unwrap_or([0, 0, 0, 255]),
         }
     }
 }
@@ -820,6 +844,7 @@ pub fn css_of(d: &Doc, s: &Shape) -> String {
             Paint::Linear { stops, angle } => format!("linear-gradient({:.0}deg, {})", angle + 90.0, stops.iter().map(|(t, c)| format!("{} {:.0}%", rgba(*c), t * 100.0)).collect::<Vec<_>>().join(", ")),
             Paint::Radial { stops } => format!("radial-gradient({})", stops.iter().map(|(t, c)| format!("{} {:.0}%", rgba(*c), t * 100.0)).collect::<Vec<_>>().join(", ")),
             Paint::Pattern { bg, .. } => rgba(*bg),
+            Paint::Freeform { pts } => pts.first().map(|p| rgba(p.1)).unwrap_or_default(),
         };
         out.push_str(&format!("{}: {v};\n", if is_text { "color" } else if matches!(f, Paint::Solid { .. }) { "background-color" } else { "background" }));
     }
@@ -1119,6 +1144,13 @@ impl Gen<'_> {
                 self.defs.push_str("</radialGradient>");
                 (format!("url(#{id})"), 1.0)
             }
+            Paint::Freeform { pts } => {
+                // Ailleurs qu'un remplissage (contour, texte sur tracé) : la couleur moyenne
+                let n = pts.len().max(1) as u32;
+                let avg = [0, 1, 2, 3].map(|i| (pts.iter().map(|p| p.1[i] as u32).sum::<u32>() / n) as u8);
+                let _ = bounds;
+                (hex(avg), avg[3] as f32 / 255.0)
+            }
             Paint::Pattern { motif, fg, bg, size, angle } => {
                 let id = self.id("m");
                 let s = size.max(1.0);
@@ -1296,6 +1328,21 @@ impl Gen<'_> {
                 let closed = !matches!(sh.kind, Kind::Line { .. } | Kind::Path { closed: false, .. });
                 for f in &sh.fills {
                     if !closed && !matches!(sh.kind, Kind::Path { .. }) {
+                        continue;
+                    }
+                    // Dégradé à points libres : la couleur moyenne, puis un halo par point qui s'efface
+                    if let Paint::Freeform { pts } = f {
+                        let (p, o) = self.paint(f, bounds);
+                        let _ = write!(out, r#"<path d="{d}" fill="{p}" fill-opacity="{o}" fill-rule="nonzero"/>"#);
+                        let (bw, bh) = ((bounds[2] - bounds[0]).max(1e-3), (bounds[3] - bounds[1]).max(1e-3));
+                        let r = (bw * bw + bh * bh).sqrt() * 0.45;
+                        for (uv, c) in pts {
+                            let id = self.id("g");
+                            let (cx, cy) = (bounds[0] + uv[0] * bw, bounds[1] + uv[1] * bh);
+                            let (hx, a) = (hex(*c), c[3] as f32 / 255.0);
+                            let _ = write!(self.defs, r#"<radialGradient id="{id}" gradientUnits="userSpaceOnUse" cx="{cx}" cy="{cy}" r="{r}"><stop offset="0" stop-color="{hx}" stop-opacity="{a}"/><stop offset="0.35" stop-color="{hx}" stop-opacity="{}"/><stop offset="1" stop-color="{hx}" stop-opacity="0"/></radialGradient>"#, a * 0.8);
+                            let _ = write!(out, r#"<path d="{d}" fill="url(#{id})" fill-rule="nonzero"/>"#);
+                        }
                         continue;
                     }
                     let (p, o) = self.paint(f, bounds);
@@ -1826,6 +1873,7 @@ impl Doc {
                 add(*fg);
                 add(*bg);
             }
+            Paint::Freeform { pts } => pts.iter().for_each(|p| add(p.1)),
         };
         for s in self.shapes.iter().filter(|s| set.contains(&s.id)) {
             s.fills.iter().for_each(&mut paint);
@@ -1854,6 +1902,7 @@ impl Doc {
                         fix(fg);
                         fix(bg);
                     }
+                    Paint::Freeform { pts } => pts.iter_mut().for_each(|p| fix(&mut p.1)),
                 }
             }
         }
@@ -2577,6 +2626,31 @@ mod print_tests {
         assert!((v[2] - v[0] - 300.0).abs() < 0.01 && (v[3] - v[1] - 225.0).abs() < 0.01, "{v:?}");
         if std::env::var("ARY_DEMO").is_ok() {
             std::fs::write("/tmp/print.pdf", &pdf).unwrap();
+        }
+    }
+}
+#[cfg(test)]
+mod freeform_tests {
+    use super::*;
+    #[test]
+    fn points_libres() {
+        let pts = vec![([0.0, 0.0], [255, 0, 0, 255]), ([1.0, 1.0], [0, 0, 255, 255])];
+        assert_eq!(freeform_at(&pts, 0.0, 0.0, 1.0), [255, 0, 0, 255]);
+        let mid = freeform_at(&pts, 0.5, 0.5, 1.0);
+        assert!(mid[0] > 100 && mid[2] > 100);
+        let mut d = Doc::starter();
+        d.shapes.clear();
+        let id = d.new_id();
+        let (bx, by) = (d.boards[0].x, d.boards[0].y);
+        d.shapes.push(Shape { id, kind: Kind::Ellipse { w: 600.0, h: 420.0 }, x: bx + 240.0, y: by + 120.0, fills: vec![Paint::Freeform { pts: vec![([0.2, 0.3], [236, 108, 89, 255]), ([0.8, 0.2], [244, 191, 80, 255]), ([0.7, 0.8], [84, 128, 220, 255]), ([0.25, 0.75], [150, 110, 210, 255]), ([0.5, 0.5], [255, 255, 255, 255])] }], ..Shape::base() });
+        let id = d.new_id();
+        d.shapes.push(Shape { id, kind: Kind::Text { text: "Aurore".into(), size: 190.0, font: "inter-bold".into(), align: 0, width: None, spacing: 0.0, leading: 1.2 }, x: bx + 220.0, y: by + 600.0, fills: vec![Paint::Freeform { pts: vec![([0.0, 0.5], [86, 166, 122, 255]), ([0.5, 0.0], [84, 128, 220, 255]), ([1.0, 0.6], [236, 108, 89, 255])] }], ..Shape::base() });
+        let img = export_png(&d, 0, "/tmp", 0.6).unwrap();
+        // Au centre de l'ellipse : presque blanc ; vers la gauche : plutôt rouge
+        let c = img.get_pixel(((240.0 + 300.0) * 0.6) as u32, ((120.0 + 210.0) * 0.6) as u32);
+        assert!(c[0] > 170 && c[1] > 150 && c[2] > 150, "{c:?}");
+        if std::env::var("ARY_DEMO").is_ok() {
+            img.save("/tmp/freeform.png").unwrap();
         }
     }
 }

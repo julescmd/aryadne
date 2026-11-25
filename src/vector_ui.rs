@@ -50,6 +50,8 @@ enum Drag {
     /// Mise à l'échelle par une poignée : cadre de départ, coin fixe (0..8), formes de départ
     Scale { handle: usize, b0: [f32; 4], orig: Vec<Shape> },
     Rotate { center: [f32; 2], a0: f32, orig: Vec<Shape> },
+    /// Un point d'un dégradé à points libres : forme, remplissage, point
+    FreePt { id: u64, fill: usize, pt: usize },
     /// Nouvelle forme qu'on tire depuis un point
     Create { from: [f32; 2], id: u64 },
     /// Point (0), poignée d'entrée (1) ou de sortie (2) d'un tracé
@@ -182,6 +184,24 @@ impl Editor {
                 }
             }
         }
+    }
+
+    /// Les points de dégradé libre de la forme choisie (seule) : (forme, remplissage, point, position à l'écran)
+    fn free_points(&self, to_screen: &dyn Fn([f32; 2]) -> Pos2) -> Vec<(u64, usize, usize, Pos2)> {
+        let [id] = self.sel[..] else { return vec![] };
+        let Some(s) = self.doc.get(id) else { return vec![] };
+        let lb = crate::vector::local_bounds(s);
+        let (sn, cs) = s.rot.to_radians().sin_cos();
+        let mut out = vec![];
+        for (fi, f) in s.fills.iter().enumerate() {
+            if let Paint::Freeform { pts } = f {
+                for (k, (uv, _)) in pts.iter().enumerate() {
+                    let l = [lb[0] + uv[0] * (lb[2] - lb[0]), lb[1] + uv[1] * (lb[3] - lb[1])];
+                    out.push((id, fi, k, to_screen([s.x + l[0] * cs - l[1] * sn, s.y + l[0] * sn + l[1] * cs])));
+                }
+            }
+        }
+        out
     }
 
     fn checkpoint(&mut self) {
@@ -2157,6 +2177,19 @@ impl Editor {
             }
         }
         self.mouse(ui, &resp, rect, &to_world, &to_screen, label_hit);
+        // Dégradé à points libres : ses points, de leur couleur, qu'on tire à la souris
+        if self.tool == Tool::Select {
+            if let Some(s) = self.sel.first().and_then(|i| self.doc.get(*i)) {
+                let cols: Vec<[u8; 4]> = s.fills.iter().flat_map(|f| match f {
+                    Paint::Freeform { pts } => pts.iter().map(|p| p.1).collect::<Vec<_>>(),
+                    _ => vec![],
+                }).collect();
+                for ((_, _, _, q), c) in self.free_points(&to_screen).into_iter().zip(cols) {
+                    painter.circle(q, 7.0, Color32::from_rgb(c[0], c[1], c[2]), Stroke::new(2.0, Color32::WHITE));
+                    painter.circle_stroke(q, 8.0, Stroke::new(1.0, Color32::from_black_alpha(120)));
+                }
+            }
+        }
         // Sélection : cadre, poignées, rotation ; points en sélection directe
         let sel_col = Color32::from_rgb(40, 140, 255);
         if let Some(b) = self.selection_bounds() {
@@ -2527,6 +2560,11 @@ impl Editor {
         }
         match self.tool {
             Tool::Select => {
+                // Points d'un dégradé à points libres (forme seule choisie)
+                if let Some((id, fill, pt)) = self.free_points(to_screen).into_iter().find(|x| x.3.distance(o) < 9.0).map(|x| (x.0, x.1, x.2)) {
+                    self.checkpoint();
+                    return Some(Drag::FreePt { id, fill, pt });
+                }
                 // Poignées du cadre de sélection
                 if let Some(b) = self.selection_bounds() {
                     let r = Rect::from_two_pos(to_screen([b[0], b[1]]), to_screen([b[2], b[3]]));
@@ -2770,6 +2808,22 @@ impl Editor {
                     self.changed();
                 }
             }
+            Drag::FreePt { id, fill, pt } => {
+                let (id, fill, pt) = (*id, *fill, *pt);
+                if let Some(s) = self.doc.get(id) {
+                    let lb = crate::vector::local_bounds(s);
+                    let (sn, cs) = (-s.rot.to_radians()).sin_cos();
+                    let (dx, dy) = (w[0] - s.x, w[1] - s.y);
+                    let l = [dx * cs - dy * sn, dx * sn + dy * cs];
+                    let uv = [((l[0] - lb[0]) / (lb[2] - lb[0]).max(1e-3)).clamp(0.0, 1.0), ((l[1] - lb[1]) / (lb[3] - lb[1]).max(1e-3)).clamp(0.0, 1.0)];
+                    if let Some(Paint::Freeform { pts }) = self.shape_mut(id).and_then(|s| s.fills.get_mut(fill)) {
+                        if let Some(p) = pts.get_mut(pt) {
+                            p.0 = uv;
+                        }
+                    }
+                    self.changed();
+                }
+            }
             Drag::Rotate { center, a0, orig } => {
                 let mut da = (w[1] - center[1]).atan2(w[0] - center[0]) - a0;
                 if shift {
@@ -2972,7 +3026,7 @@ impl Editor {
                     self.changed();
                 }
             }
-            Some(Drag::PenHandle { .. }) | Some(Drag::Node { .. }) | Some(Drag::Move { .. }) | Some(Drag::Scale { .. }) | Some(Drag::Rotate { .. }) | Some(Drag::BoardMove { .. }) => self.changed(),
+            Some(Drag::PenHandle { .. }) | Some(Drag::Node { .. }) | Some(Drag::Move { .. }) | Some(Drag::Scale { .. }) | Some(Drag::Rotate { .. }) | Some(Drag::BoardMove { .. }) | Some(Drag::FreePt { .. }) => self.changed(),
             _ => {}
         }
     }
@@ -3303,10 +3357,12 @@ fn paint_ui(ui: &mut egui::Ui, p: &mut Paint, k: usize) -> bool {
         Paint::Linear { .. } => 1,
         Paint::Radial { .. } => 2,
         Paint::Pattern { .. } => 3,
+        Paint::Freeform { .. } => 4,
     };
     let mut new_kind = kind;
-    egui::ComboBox::from_id_salt(("vec-paint", k)).width(70.0).selected_text(crate::i18n::t(["uni", "linéaire", "radial", "motif"][kind])).show_ui(ui, |ui| {
-        for (v, name) in ["uni", "linéaire", "radial", "motif"].iter().enumerate() {
+    let names = ["uni", "linéaire", "radial", "motif", "points libres"];
+    egui::ComboBox::from_id_salt(("vec-paint", k)).width(70.0).selected_text(crate::i18n::t(names[kind])).show_ui(ui, |ui| {
+        for (v, name) in names.iter().enumerate() {
             ui.selectable_value(&mut new_kind, v, crate::i18n::t(name));
         }
     });
@@ -3317,7 +3373,9 @@ fn paint_ui(ui: &mut egui::Ui, p: &mut Paint, k: usize) -> bool {
             0 => Paint::Solid { c },
             1 => Paint::Linear { stops, angle: 0.0 },
             2 => Paint::Radial { stops },
-            _ => Paint::Pattern { motif: 0, fg: c, bg: [255, 255, 255, 0], size: 24.0, angle: 0.0 },
+            3 => Paint::Pattern { motif: 0, fg: c, bg: [255, 255, 255, 0], size: 24.0, angle: 0.0 },
+            // Quatre points de départ : la couleur actuelle et trois teintes voisines
+            _ => Paint::Freeform { pts: vec![([0.2, 0.25], c), ([0.8, 0.2], [244, 191, 80, 255]), ([0.7, 0.8], [84, 128, 220, 255]), ([0.25, 0.75], [150, 110, 210, 255])] },
         };
         ch = true;
     }
@@ -3346,6 +3404,28 @@ fn paint_ui(ui: &mut egui::Ui, p: &mut Paint, k: usize) -> bool {
                     s.1 = arr(col);
                     ch = true;
                 }
+            }
+        }
+        Paint::Freeform { pts } => {
+            let mut drop = None;
+            for (i, pt) in pts.iter_mut().enumerate() {
+                let mut col = c32(pt.1);
+                let r = ui.color_edit_button_srgba(&mut col).on_hover_text(crate::i18n::t("clic droit : retirer ce point · les points se déplacent sur la toile"));
+                if r.changed() {
+                    pt.1 = arr(col);
+                    ch = true;
+                }
+                if r.secondary_clicked() {
+                    drop = Some(i);
+                }
+            }
+            if let Some(i) = drop.filter(|_| pts.len() > 2) {
+                pts.remove(i);
+                ch = true;
+            }
+            if ui.small_button(l::PLUS).on_hover_text(crate::i18n::t("un point de couleur de plus, au milieu")).clicked() {
+                pts.push(([0.5, 0.5], [255, 255, 255, 255]));
+                ch = true;
             }
         }
         Paint::Pattern { motif, fg, bg, size, angle } => {
