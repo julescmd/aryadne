@@ -2947,5 +2947,10 @@
   "taches": "spots",
   "EXR multicouche (passes)": "Multilayer EXR (passes)",
   "attends la fin du rendu pour les passes EXR": "wait for the render to finish for EXR passes",
-  "passes EXR enregistrées :": "EXR passes saved:"
+  "passes EXR enregistrées :": "EXR passes saved:",
+  "correcteur orthographique des notes (français et anglais)": "spell checker for notes (French and English)",
+  "Les mots inconnus sont soulignés ; clic droit pour une correction ou pour l'ajouter au dictionnaire": "Unknown words are underlined; right-click for a correction or to add it to the dictionary",
+  "aucune suggestion": "no suggestion",
+  "ajouter au dictionnaire": "add to dictionary",
+  "Ce mot ne sera plus souligné dans ce coffre": "This word will no longer be underlined in this vault"
 }

@@ -43,6 +43,8 @@ pub struct Prefs {
     /// Thème de la charte (« rose », « sauge », « lagon », « argile », « graphite », « clair ») ;
     /// vide = d'après l'ancien réglage clair / sombre
     pub theme: String,
+    /// Correcteur orthographique des notes (français et anglais)
+    pub spell: bool,
 }
 
 /// Unités de longueur proposées : nom et nombre d'unités dans un mètre.
@@ -81,6 +83,7 @@ impl Default for Prefs {
             editor_size: 13.0,
             wrap_code: false,
             line_numbers: true,
+            spell: true,
             minimap: true,
             autosave_ms: 500,
             import_mode: "link".into(),
@@ -363,6 +366,7 @@ impl App {
         ui.checkbox(&mut self.prefs.line_numbers, crate::i18n::t("numéros de ligne (fichiers de code)"));
         ui.checkbox(&mut self.prefs.minimap, crate::i18n::t("mini-carte à droite (fichiers de code)"));
         ui.checkbox(&mut self.prefs.wrap_code, crate::i18n::t("retour à la ligne dans le code"));
+        ui.checkbox(&mut self.prefs.spell, crate::i18n::t("correcteur orthographique des notes (français et anglais)")).on_hover_text(crate::i18n::t("Les mots inconnus sont soulignés ; clic droit pour une correction ou pour l'ajouter au dictionnaire"));
         ui.add_space(10.0);
         ui.label(caps(&crate::i18n::t("sauvegarde automatique")));
         ui.add(egui::Slider::new(&mut self.prefs.autosave_ms, 200..=5000).step_by(100.0).custom_formatter(|v, _| format!("{:.1} s après la dernière frappe", v / 1000.0)));

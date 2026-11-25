@@ -139,6 +139,7 @@ pub const SQUARE_SQUARE: &str = "\u{f060e}";
 pub const PEN_LINE: &str = "\u{f0130}";
 pub const SQUARE_MINUS: &str = "\u{f0171}";
 pub const VIBRATE_OFF: &str = "\u{f029d}";
+pub const BOOK_PLUS: &str = "\u{f03f3}";
 pub const FLIP_HORIZONTAL_2: &str = "\u{f035e}";
 pub const GLOBE: &str = "\u{f00e8}";
 pub const UNDO_2: &str = "\u{f02a1}";

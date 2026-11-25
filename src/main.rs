@@ -15,6 +15,7 @@ mod vgeom;
 mod track2d;
 mod gltfscene;
 mod fbxscene;
+mod spell;
 mod vector_ui;
 mod keymap;
 mod lucide;
@@ -3496,6 +3497,7 @@ impl App {
             }
 
             let vault_root = self.root();
+            let spell_on = self.prefs.spell;
             let doc = &mut self.docs[i];
             match &mut doc.content {
                 Content::Unreadable(msg) => {
@@ -3875,9 +3877,15 @@ impl App {
                         }
                     }
                     let folds = ed.folds.clone();
+                    let spell_root = (spell_on && lang == "md").then(|| vault_root.clone());
                     let mut layouter = |ui: &egui::Ui, buf: &dyn egui::TextBuffer, width: f32| {
                         let mut job = if lang == "md" {
-                            md_layout(buf.as_str(), fs)
+                            let mut j = md_layout(buf.as_str(), fs);
+                            // Fautes d'orthographe soulignées en rouge
+                            if let Some(root) = &spell_root {
+                                crate::spell::underline(&mut j, &crate::spell::misspelled(buf.as_str(), root), egui::Color32::from_rgb(232, 72, 72));
+                            }
+                            j
                         } else if hl::supports(&lang) {
                             // Couleurs de la charte (maquette) pour les langages courants
                             let cols = hl::colors(dark);
@@ -3929,6 +3937,10 @@ impl App {
                                 .layouter(&mut layouter);
                             let out = edit.show(ui);
                             changed |= out.response.changed();
+                            // Clic droit sur un mot souligné : corrections, ou l'ajouter au dictionnaire
+                            if let Some(root) = &spell_root {
+                                changed |= crate::spell::context_menu(ui, &out, text, root);
+                            }
                             code::after(ui, ed, text, &lang, &out, &notes, typed_now && out.response.changed(), code::View { minimap: !is_md && self.prefs.minimap, changes: !is_md, gutter: numbers, font_size: fs, bg });
                         });
                         });
