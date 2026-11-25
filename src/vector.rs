@@ -203,6 +203,9 @@ pub struct Shape {
     /// Style partagé utilisé (vide : aucun)
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub style: String,
+    /// Prototype : un clic sur la forme mène à ce plan de travail (son nom ; vide : aucun lien)
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub link: String,
 }
 
 fn is_default_c(c: &[u8; 2]) -> bool {
@@ -623,7 +626,7 @@ fn union(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {
 
 impl Shape {
     pub fn base() -> Shape {
-        Shape { id: 0, name: String::new(), kind: Kind::Rect { w: 100.0, h: 100.0, r: [0.0; 4] }, x: 0.0, y: 0.0, rot: 0.0, fills: vec![], strokes: vec![], opacity: 1.0, visible: true, locked: false, parent: 0, shadow: None, blur: 0.0, blend: String::new(), layout: None, component: false, instance_of: 0, widths: vec![], constraint: [0, 0], style: String::new() }
+        Shape { id: 0, name: String::new(), kind: Kind::Rect { w: 100.0, h: 100.0, r: [0.0; 4] }, x: 0.0, y: 0.0, rot: 0.0, fills: vec![], strokes: vec![], opacity: 1.0, visible: true, locked: false, parent: 0, shadow: None, blur: 0.0, blend: String::new(), layout: None, component: false, instance_of: 0, widths: vec![], constraint: [0, 0], style: String::new(), link: String::new() }
     }
 
     pub fn kind_label(&self) -> &'static str {

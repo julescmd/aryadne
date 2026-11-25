@@ -102,6 +102,11 @@ pub struct Editor {
     offset_by: f32,
     /// Bibliothèque d'icônes ouverte : la recherche
     icon_pick: Option<String>,
+    /// Présentation du prototype : le plan affiché et son image (clé, texture)
+    present: Option<usize>,
+    present_tex: Option<(u64, egui::TextureHandle)>,
+    /// Un fichier à ouvrir (la composition Motion tirée d'un plan de travail)
+    pub open_request: Option<PathBuf>,
 }
 
 fn c32(c: [u8; 4]) -> Color32 {
@@ -146,6 +151,9 @@ impl Editor {
             builder_tex: None,
             offset_by: 10.0,
             icon_pick: None,
+            present: None,
+            present_tex: None,
+            open_request: None,
         })
     }
 
@@ -356,6 +364,11 @@ impl Editor {
     pub fn show(&mut self, ui: &mut egui::Ui) {
         let p = crate::theme::pal();
         let key = (self.path.to_string_lossy().to_string(), "vec");
+        // Présentation du prototype : seul le plan de travail, les liens se cliquent
+        if self.present.is_some() {
+            self.present_ui(ui);
+            return;
+        }
         // Outils à gauche
         egui::Panel::left(egui::Id::unique(("vec-tools", &key))).resizable(false).exact_size(44.0).frame(egui::Frame::new().fill(p.panel).stroke(Stroke::new(1.0, p.line)).inner_margin(egui::Margin::symmetric(4, 8))).show(ui, |ui| {
             ui.vertical_centered(|ui| {
@@ -406,6 +419,10 @@ impl Editor {
                 self.undo(true);
             }
             ui.separator();
+            if ib(ui, l::PLAY, "Présenter le prototype : les formes liées mènent à leur plan de travail (Échap pour sortir)", !self.doc.boards.is_empty()) {
+                self.present = Some(self.sel_board.or_else(|| self.board_of_selection()).unwrap_or(0));
+                self.present_tex = None;
+            }
             if ib(ui, l::SMILE_PLUS, "Bibliothèque d'icônes Lucide (plus de 2 400)", true) {
                 self.icon_pick = if self.icon_pick.is_some() { None } else { Some(String::new()) };
             }
@@ -694,6 +711,25 @@ impl Editor {
                 ch |= ui.add(egui::DragValue::new(&mut s.y).speed(1.0).max_decimals(1).prefix("y ")).changed();
                 ch |= ui.add(egui::DragValue::new(&mut s.rot).speed(0.5).max_decimals(1).suffix("°")).changed();
             });
+            // Prototype : un clic sur la forme (en présentation) mène à un autre plan de travail
+            if self.doc.boards.len() > 1 {
+                let names: Vec<String> = self.doc.boards.iter().map(|b| b.name.clone()).collect();
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new(l::MOUSE_POINTER_CLICK).color(p.muted)).on_hover_text(crate::i18n::t("Prototype : au clic, aller vers ce plan de travail (bouton Présenter)"));
+                    egui::ComboBox::from_id_salt("vec-proto").width(160.0).selected_text(if s.link.is_empty() { crate::i18n::t("aucun lien") } else { s.link.clone() }).show_ui(ui, |ui| {
+                        if ui.selectable_label(s.link.is_empty(), crate::i18n::t("aucun lien")).clicked() {
+                            s.link.clear();
+                            ch = true;
+                        }
+                        for n in &names {
+                            if ui.selectable_label(&s.link == n, n).clicked() {
+                                s.link = n.clone();
+                                ch = true;
+                            }
+                        }
+                    });
+                });
+            }
             // Contraintes (comme Figma) : ce que fait la forme quand le plan de travail change de taille
             if s.parent == 0 {
                 ui.horizontal(|ui| {
@@ -1274,6 +1310,184 @@ impl Editor {
         }
     }
 
+    /// Le plan de travail `bi` en composition Motion (à côté du dessin) : rectangles, ellipses, textes,
+    /// tracés et images deviennent des calques du même genre, à la même place
+    fn board_to_motion(&mut self, bi: usize) -> Result<PathBuf, String> {
+        use crate::motion::{Compo, Kind as MK, Layer as ML};
+        let b = self.doc.boards.get(bi).cloned().ok_or("plan introuvable")?;
+        self.doc.sync_instances();
+        self.doc.apply_layouts();
+        let bg = b.bg.map(|c| [c[0], c[1], c[2]]).unwrap_or([255, 255, 255]);
+        let mut c = Compo { w: b.w.round().max(2.0) as u32, h: b.h.round().max(2.0) as u32, bg, layers: vec![], ..Compo::default() };
+        c.layers.clear();
+        let rgb = |s: &Shape| -> ([u8; 3], f32) {
+            match s.fills.first().or(s.strokes.first().map(|k| &k.paint)) {
+                Some(crate::vector::Paint::Solid { c }) => ([c[0], c[1], c[2]], c[3] as f32 / 255.0),
+                Some(p) => {
+                    let c = p.first();
+                    ([c[0], c[1], c[2]], c[3] as f32 / 255.0)
+                }
+                None => ([0, 0, 0], 1.0),
+            }
+        };
+        let inside = |bb: [f32; 4]| bb[2] > b.x && bb[0] < b.x + b.w && bb[3] > b.y && bb[1] < b.y + b.h;
+        let mut out: Vec<ML> = vec![];
+        for s in self.doc.shapes.iter().filter(|s| s.visible && !matches!(s.kind, Kind::Group { .. })) {
+            // Visible seulement si ses groupes le sont
+            let mut up = s.parent;
+            let mut hidden = false;
+            while up != 0 {
+                match self.doc.get(up) {
+                    Some(g) => {
+                        hidden |= !g.visible;
+                        up = g.parent;
+                    }
+                    None => break,
+                }
+            }
+            let bb = self.doc.bounds(s);
+            if hidden || !inside(bb) {
+                continue;
+            }
+            let (col, alpha) = rgb(s);
+            let (sn, cs) = s.rot.to_radians().sin_cos();
+            let world = |p: [f32; 2]| [s.x + p[0] * cs - p[1] * sn, s.y + p[0] * sn + p[1] * cs];
+            let kind_center = |w: f32, h: f32| world([w / 2.0, h / 2.0]);
+            let (kind, center, rot) = match &s.kind {
+                Kind::Rect { w, h, r } => (MK::Rect { w: *w, h: *h, radius: r[0], color: col }, kind_center(*w, *h), s.rot),
+                Kind::Ellipse { w, h } => (MK::Ellipse { w: *w, h: *h, color: col }, kind_center(*w, *h), s.rot),
+                Kind::Text { text, size, font, align, spacing, .. } => {
+                    (MK::Text { text: text.clone(), size: *size, color: col, font: font.clone(), tracking: *spacing, align: *align }, [(bb[0] + bb[2]) / 2.0, (bb[1] + bb[3]) / 2.0], 0.0)
+                }
+                Kind::Image { path, w, h } => (MK::Image { path: path.clone() }, kind_center(*w, *h), s.rot),
+                _ => {
+                    // Tracés, lignes, polygones, étoiles : un tracé Motion qui passe par des points du contour
+                    let nodes = match &s.kind {
+                        Kind::Path { nodes, .. } => nodes.clone(),
+                        Kind::Line { x2, y2 } => vec![Node::corner([0.0, 0.0]), Node::corner([*x2, *y2])],
+                        Kind::Polygon { sides, r } => (0..(*sides).max(3)).map(|k| { let a = -std::f32::consts::FRAC_PI_2 + k as f32 / (*sides).max(3) as f32 * std::f32::consts::TAU; Node::corner([r * a.cos(), r * a.sin()]) }).collect(),
+                        Kind::Star { points, r1, r2 } => (0..(*points).max(2) * 2).map(|k| { let a = -std::f32::consts::FRAC_PI_2 + k as f32 / ((*points).max(2) * 2) as f32 * std::f32::consts::TAU; let r = if k % 2 == 0 { r1 } else { r2 }; Node::corner([r * a.cos(), r * a.sin()]) }).collect(),
+                        _ => continue,
+                    };
+                    let closed = !matches!(s.kind, Kind::Line { .. } | Kind::Path { closed: false, .. });
+                    let curved = nodes.iter().any(|n| !n.is_corner());
+                    let pts: Vec<[f32; 2]> = if curved {
+                        let flat = crate::vgeom::flatten(&nodes, closed);
+                        let step = (flat.last().map(|x| x.1).unwrap_or(0.0) / 48.0).max(4.0);
+                        let mut v = vec![];
+                        let mut next = 0.0;
+                        for (p, d) in flat {
+                            if d >= next {
+                                v.push(world(p));
+                                next = d + step;
+                            }
+                        }
+                        v
+                    } else {
+                        nodes.iter().map(|n| world(n.p)).collect()
+                    };
+                    let cen = [(bb[0] + bb[2]) / 2.0, (bb[1] + bb[3]) / 2.0];
+                    let width = s.strokes.first().map(|k| k.width).unwrap_or(0.0);
+                    let stroke_col = s.strokes.first().map(|k| k.paint.first()).map(|c| [c[0], c[1], c[2]]).unwrap_or(col);
+                    let fill = (closed && !s.fills.is_empty()).then_some(col);
+                    (MK::Path { points: pts.iter().map(|p| [p[0] - cen[0], p[1] - cen[1]]).collect(), closed, width, color: stroke_col, arrow: false, fill, keys: vec![] }, cen, 0.0)
+                }
+            };
+            let mut l = ML::new(&s.name, kind, &c);
+            l.pos.v = [center[0] - b.x, center[1] - b.y];
+            l.rot.v = [rot, 0.0];
+            l.opacity.v = [(s.opacity * alpha * 100.0).clamp(0.0, 100.0), 0.0];
+            // Une image garde sa taille dans le dessin
+            if let Kind::Image { path, w, .. } = &s.kind {
+                if let Ok((iw, _)) = image::image_dimensions(std::path::Path::new(&self.root).join(path)) {
+                    let k = w / iw.max(1) as f32 * 100.0;
+                    l.scale.v = [k, k];
+                }
+            }
+            out.push(l);
+        }
+        if out.is_empty() {
+            return Err(crate::i18n::t("rien à animer sur ce plan de travail"));
+        }
+        // Motion : le premier calque passe devant
+        out.reverse();
+        c.layers = out;
+        let dir = self.path.parent().map(|p| p.to_path_buf()).unwrap_or_default();
+        let dir = if dir.to_string_lossy().contains(crate::untitled::DIR) { std::path::Path::new(&self.root).join("motion") } else { dir };
+        let _ = std::fs::create_dir_all(&dir);
+        let stem: String = b.name.chars().map(|ch| if "/\\:*?\"<>|".contains(ch) { '-' } else { ch }).collect();
+        let mut path = dir.join(format!("{stem}.{}", crate::formats::ext("motion")));
+        let mut n = 2;
+        while path.exists() {
+            path = dir.join(format!("{stem} {n}.{}", crate::formats::ext("motion")));
+            n += 1;
+        }
+        c.write(&path)?;
+        Ok(path)
+    }
+
+    /// Mode présentation : le plan de travail en grand ; un clic sur une forme liée change de plan ;
+    /// flèches : plan précédent ou suivant ; Échap : retour à l'édition
+    fn present_ui(&mut self, ui: &mut egui::Ui) {
+        let Some(bi) = self.present.filter(|b| *b < self.doc.boards.len()) else {
+            self.present = None;
+            return;
+        };
+        let rect = ui.available_rect_before_wrap();
+        let resp = ui.allocate_rect(rect, Sense::click());
+        ui.painter().rect_filled(rect, 0.0, Color32::from_gray(18));
+        let b = self.doc.boards[bi].clone();
+        let k = ((rect.width() - 40.0) / b.w).min((rect.height() - 60.0) / b.h).max(0.01);
+        let r = Rect::from_center_size(rect.center(), vec2(b.w * k, b.h * k));
+        // L'image du plan (refaite si le document ou la taille changent)
+        let key = {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            serde_json::to_string(&self.doc).unwrap_or_default().hash(&mut h);
+            bi.hash(&mut h);
+            (k * 100.0).round().to_bits().hash(&mut h);
+            h.finish()
+        };
+        if self.present_tex.as_ref().is_none_or(|t| t.0 != key) {
+            let scale = (k * ui.ctx().pixels_per_point()).clamp(0.05, 4.0);
+            if let Some(img) = crate::vector::export_png(&self.doc, bi, &self.root, scale) {
+                let ci = egui::ColorImage::from_rgba_unmultiplied([img.width() as usize, img.height() as usize], img.as_raw());
+                self.present_tex = Some((key, ui.ctx().load_texture("vec-present", ci, egui::TextureOptions::LINEAR)));
+            }
+        }
+        if let Some((_, t)) = &self.present_tex {
+            ui.painter().image(t.id(), r, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+        }
+        // Zones cliquables : les formes liées posées sur ce plan
+        let to_screen = |w: [f32; 2]| pos2(r.left() + (w[0] - b.x) * k, r.top() + (w[1] - b.y) * k);
+        let mut go = None;
+        for s in self.doc.shapes.iter().filter(|s| !s.link.is_empty() && s.visible) {
+            let bb = self.doc.bounds(s);
+            let hr = Rect::from_two_pos(to_screen([bb[0], bb[1]]), to_screen([bb[2], bb[3]]));
+            if !hr.intersects(r) {
+                continue;
+            }
+            if resp.hover_pos().is_some_and(|h| hr.contains(h)) {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                ui.painter().rect_stroke(hr, 2.0, Stroke::new(1.5, Color32::from_rgb(56, 132, 255)), egui::StrokeKind::Outside);
+                if resp.clicked() {
+                    go = self.doc.boards.iter().position(|x| x.name == s.link);
+                }
+            }
+        }
+        ui.painter().text(rect.center_bottom() - vec2(0.0, 16.0), egui::Align2::CENTER_CENTER, format!("{}  ·  {} / {}  ·  {}", b.name, bi + 1, self.doc.boards.len(), crate::i18n::t("Échap : quitter, flèches : plans")), egui::FontId::proportional(12.0), Color32::from_gray(150));
+        let (left, right, esc) = ui.input(|i| (i.key_pressed(egui::Key::ArrowLeft), i.key_pressed(egui::Key::ArrowRight), i.key_pressed(egui::Key::Escape)));
+        if esc {
+            self.present = None;
+        } else if let Some(g) = go {
+            self.present = Some(g);
+        } else if right {
+            self.present = Some((bi + 1) % self.doc.boards.len());
+        } else if left {
+            self.present = Some((bi + self.doc.boards.len() - 1) % self.doc.boards.len());
+        }
+    }
+
     /// La bibliothèque d'icônes : recherche par nom (en anglais), un clic pose l'icône au centre de la vue
     fn icon_window(&mut self, ctx: &egui::Context) {
         let Some(q) = self.icon_pick.as_mut() else { return };
@@ -1503,6 +1717,13 @@ impl Editor {
             }
             if ui.button(format!("{}  SVG", l::DOWNLOAD)).clicked() {
                 self.export(bi, "svg");
+            }
+            // Le plan de travail devient une composition Motion, chaque forme un calque qu'on anime
+            if ui.button(l::FILM).on_hover_text(crate::i18n::t("Animer dans Motion : chaque forme du plan devient un calque modifiable")).clicked() {
+                match self.board_to_motion(bi) {
+                    Ok(p) => self.open_request = Some(p),
+                    Err(e) => self.message = Some(e),
+                }
             }
             // Le plan de travail part vers un autre outil
             if let Some(t) = crate::sendto::button(ui, true, "vector") {

@@ -3713,6 +3713,9 @@ impl App {
                 }
                 Content::Vector(ed) => {
                     egui::Frame::new().inner_margin(egui::Margin::symmetric(8, 6)).show(ui, |ui| ed.show(ui));
+                    if let Some(p) = ed.open_request.take() {
+                        open_file = Some(p);
+                    }
                 }
                 Content::Story(ed) => {
                     egui::Frame::new().inner_margin(egui::Margin::symmetric(10, 6)).show(ui, |ui| ed.show(ui));

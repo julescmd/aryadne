@@ -3015,5 +3015,12 @@
   "Détacher du style": "Detach from style",
   "Nouvelle variante (un composant frère : « Nom / Variante 2 »)": "New variant (a sibling component: “Name / Variant 2”)",
   "Défaut": "Default",
-  "Variante": "Variant"
+  "Variante": "Variant",
+  "Présenter le prototype : les formes liées mènent à leur plan de travail (Échap pour sortir)": "Present the prototype: linked shapes lead to their artboard (Esc to exit)",
+  "Échap : quitter, flèches : plans": "Esc: exit, arrows: artboards",
+  "Prototype : au clic, aller vers ce plan de travail (bouton Présenter)": "Prototype: on click, go to this artboard (Present button)",
+  "aucun lien": "no link",
+  "Animer dans Motion : chaque forme du plan devient un calque modifiable": "Animate in Motion: each shape of the artboard becomes an editable layer",
+  "rien à animer sur ce plan de travail": "nothing to animate on this artboard",
+  "plan introuvable": "artboard not found"
 }
