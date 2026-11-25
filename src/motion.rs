@@ -8,6 +8,7 @@
 //!
 //! Le rendu est fait au processeur, le même pour l'aperçu et pour l'export MP4 (ffmpeg).
 
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -238,6 +239,21 @@ pub enum Kind {
     /// Précomposition : une autre composition Motion du coffre, jouée depuis le début du calque
     /// Objet nul : invisible, sert de parent et de poignée pour piloter d'autres calques
     Null,
+    /// Bruit fractal animé (fumée, nuages, texture qui bouge), entre deux couleurs
+    Noise {
+        w: f32,
+        h: f32,
+        /// Taille des plus gros motifs, en px
+        scale: f32,
+        /// Évolution par seconde (0 : figé)
+        speed: f32,
+        contrast: f32,
+        color: [u8; 3],
+        color2: [u8; 3],
+        /// Turbulent : des filaments plutôt que des nuages
+        turbulent: bool,
+        seed: u32,
+    },
     Compo {
         /// Chemin dans le coffre
         path: String,
@@ -262,6 +278,7 @@ impl Kind {
             Kind::Compo { .. } => "composition",
             Kind::Null => "nul",
             Kind::Path { .. } => "tracé",
+            Kind::Noise { .. } => "bruit fractal",
         }
     }
 }
@@ -317,6 +334,9 @@ pub struct Layer {
     /// Masques (comme After Effects) : des formes, animables, qui découpent le calque
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub masks: Vec<Mask>,
+    /// Effets de déformation, dans l'ordre
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fx: Vec<Effect>,
     /// Orientation automatique : le calque tourne pour suivre la direction de son mouvement
     #[serde(default, skip_serializing_if = "is_false_b")]
     pub auto_orient: bool,
@@ -730,6 +750,7 @@ impl Layer {
             exprs: Default::default(),
             masks: vec![],
             auto_orient: false,
+            fx: vec![],
             repeat: None,
         }
     }
@@ -1236,7 +1257,7 @@ pub fn size(l: &Layer, cache: &mut Cache) -> [f32; 2] {
             let t = layout_text(text, *size, font, *tracking, *align, Unit::Letter);
             [t.w, t.h]
         }
-        Kind::Rect { w, h, .. } | Kind::Ellipse { w, h, .. } => [*w, *h],
+        Kind::Rect { w, h, .. } | Kind::Ellipse { w, h, .. } | Kind::Noise { w, h, .. } => [*w, *h],
         Kind::Image { path } => cache.image(path).map(|i| [i.width() as f32, i.height() as f32]).unwrap_or([200.0, 120.0]),
         Kind::Compo { path, .. } => cache.compo(path).map(|c| [c.w as f32, c.h as f32]).unwrap_or([400.0, 225.0]),
         Kind::Null => [100.0, 100.0],
@@ -1450,6 +1471,25 @@ fn shape_bitmap(w: f32, h: f32, k: f32, color: [u8; 3], cover: impl Fn(f32, f32)
 
 fn bitmap(l: &Layer, t: f32, k: f32, cache: &mut Cache) -> Option<Bitmap> {
     match &l.kind {
+        Kind::Noise { w, h, scale, speed, contrast, color, color2, turbulent, seed } => {
+            let (pw, ph) = (((w * k).round() as u32).clamp(1, 4096), ((h * k).round() as u32).clamp(1, 4096));
+            let z = (t - l.start) * speed;
+            let (sc, ct) = (scale.max(1.0), *contrast);
+            let mut img = image::RgbaImage::new(pw, ph);
+            img.par_chunks_mut(4 * pw as usize).enumerate().for_each(|(y, row)| {
+                for x in 0..pw as usize {
+                    let (fx, fy) = (x as f32 / k / sc, y as f32 / k / sc);
+                    let v = fbm(fx, fy, z, *seed, *turbulent);
+                    let v = ((v - 0.5) * ct + 0.5).clamp(0.0, 1.0);
+                    let o = x * 4;
+                    for c in 0..3 {
+                        row[o + c] = (color[c] as f32 + (color2[c] as f32 - color[c] as f32) * v).round() as u8;
+                    }
+                    row[o + 3] = 255;
+                }
+            });
+            Some(Bitmap { img, ox: -w / 2.0, oy: -h / 2.0, k })
+        }
         Kind::Rect { w, h, radius, color } => {
             let (hw, hh) = (w / 2.0, h / 2.0);
             let r = radius.clamp(0.0, hw.min(hh));
@@ -1785,8 +1825,10 @@ fn prep_layer(c: &Compo, li: usize, t: f32, scale: f32, cache: &mut Cache, (w, h
     let k = (scale * x.max_scale()).clamp(0.02, 8.0);
     // Un contenu qui ne bouge pas à l'intérieur du calque se dessine une fois (l'export reste rapide)
     let still = l.masks.iter().all(|m| m.keys.is_empty())
+        && l.fx.iter().all(|e| !e.moves())
         && match (&l.kind, &l.reveal) {
         (Kind::Compo { .. }, _) => false,
+        (Kind::Noise { speed, .. }, _) if *speed != 0.0 => false,
         (Kind::Path { keys, .. }, _) => !l.trim.animated() && l.cycle.is_none() && keys.is_empty(),
         (Kind::Text { text, .. }, Some(r)) => t - l.start >= text.chars().count() as f32 * r.delay + r.dur,
         _ => true,
@@ -1799,6 +1841,7 @@ fn prep_layer(c: &Compo, li: usize, t: f32, scale: f32, cache: &mut Cache, (w, h
         serde_json::to_string(&l.style).unwrap_or_default().hash(&mut h);
         serde_json::to_string(&l.trim).unwrap_or_default().hash(&mut h);
         serde_json::to_string(&l.masks).unwrap_or_default().hash(&mut h);
+        serde_json::to_string(&l.fx).unwrap_or_default().hash(&mut h);
         (h.finish(), k.to_bits())
     });
     let cached = key.and_then(|k| cache.bitmaps.get(&k).cloned());
@@ -1808,6 +1851,9 @@ fn prep_layer(c: &Compo, li: usize, t: f32, scale: f32, cache: &mut Cache, (w, h
             let mut b = bitmap(l, t, k, cache)?;
             if !l.masks.is_empty() {
                 apply_masks(&mut b, &l.masks, t);
+            }
+            for e in &l.fx {
+                b = e.apply(b, t - l.start);
             }
             let b = if l.style.is_plain() { b } else { styled(b, &l.style) };
             let b = Arc::new(b);
@@ -2608,6 +2654,147 @@ mod svg_tests {
         }
         // Centré dans la composition
         assert!((l[1].pos.v[0] - c.w as f32 / 2.0).abs() < 1.0);
+    }
+}
+
+
+/// Bruit de valeur 3D (x, y, temps), entre 0 et 1
+fn vnoise3(x: f32, y: f32, z: f32, seed: u32) -> f32 {
+    let h = |i: i32, j: i32, k: i32| -> f32 {
+        let mut n = (i as u32).wrapping_mul(0x8da6_b343) ^ (j as u32).wrapping_mul(0xd816_3841) ^ (k as u32).wrapping_mul(0xcb1a_b31f) ^ seed.wrapping_mul(0x9e37_79b9);
+        n = (n ^ (n >> 13)).wrapping_mul(0x5bd1_e995);
+        ((n ^ (n >> 15)) & 0xffff) as f32 / 65535.0
+    };
+    let (xi, yi, zi) = (x.floor() as i32, y.floor() as i32, z.floor() as i32);
+    let s = |t: f32| t * t * (3.0 - 2.0 * t);
+    let (fx, fy, fz) = (s(x - xi as f32), s(y - yi as f32), s(z - zi as f32));
+    let l = |a: f32, b: f32, t: f32| a + (b - a) * t;
+    let face = |k: i32| l(l(h(xi, yi, k), h(xi + 1, yi, k), fx), l(h(xi, yi + 1, k), h(xi + 1, yi + 1, k), fx), fy);
+    l(face(zi), face(zi + 1), fz)
+}
+
+/// Bruit fractal (5 octaves) ; turbulent : la somme des écarts, en filaments
+pub fn fbm(x: f32, y: f32, z: f32, seed: u32, turbulent: bool) -> f32 {
+    let (mut sum, mut amp, mut f, mut norm) = (0.0, 0.5, 1.0, 0.0);
+    for o in 0..5 {
+        let v = vnoise3(x * f, y * f, z * (1.0 + o as f32 * 0.3), seed.wrapping_add(o * 101));
+        sum += if turbulent { (v - 0.5).abs() * 2.0 } else { v } * amp;
+        norm += amp;
+        amp *= 0.5;
+        f *= 2.0;
+    }
+    sum / norm
+}
+
+/// Effets de déformation d'un calque (ondulation, turbulence, décalage), appliqués à son image
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum Effect {
+    /// Ondulation : amplitude (px), longueur d'onde (px), vitesse (ondes par seconde), sens vertical
+    Wave { amp: f32, length: f32, speed: f32, #[serde(default)] vertical: bool },
+    /// Turbulence : déplacement par un bruit fractal (quantité en px, taille des remous, évolution)
+    Turbulence { amount: f32, size: f32, speed: f32 },
+    /// Décalage : l'image glisse et revient par l'autre bord (px par seconde en x et y)
+    Offset { x: f32, y: f32 },
+}
+
+impl Effect {
+    pub const ALL: [&'static str; 3] = ["Ondulation", "Turbulence", "Décalage"];
+
+    pub fn new(i: usize) -> Effect {
+        match i {
+            0 => Effect::Wave { amp: 12.0, length: 120.0, speed: 1.0, vertical: false },
+            1 => Effect::Turbulence { amount: 20.0, size: 80.0, speed: 0.5 },
+            _ => Effect::Offset { x: 60.0, y: 0.0 },
+        }
+    }
+
+    pub fn name(&self) -> &'static str {
+        match self {
+            Effect::Wave { .. } => Self::ALL[0],
+            Effect::Turbulence { .. } => Self::ALL[1],
+            Effect::Offset { .. } => Self::ALL[2],
+        }
+    }
+
+    /// L'effet change avec le temps (le calque ne peut pas rester en cache)
+    pub fn moves(&self) -> bool {
+        match self {
+            Effect::Wave { speed, .. } | Effect::Turbulence { speed, .. } => *speed != 0.0,
+            Effect::Offset { x, y } => *x != 0.0 || *y != 0.0,
+        }
+    }
+
+    /// Applique l'effet à l'image du calque (t : temps depuis le début du calque)
+    fn apply(&self, b: Bitmap, t: f32) -> Bitmap {
+        let (w, h) = (b.img.width() as usize, b.img.height() as usize);
+        if w == 0 || h == 0 {
+            return b;
+        }
+        let k = b.k;
+        let src = b.img.as_raw();
+        let sample = |x: f32, y: f32, wrap: bool| -> [u8; 4] {
+            let (mut xi, mut yi) = (x.round() as i64, y.round() as i64);
+            if wrap {
+                xi = xi.rem_euclid(w as i64);
+                yi = yi.rem_euclid(h as i64);
+            } else if xi < 0 || yi < 0 || xi >= w as i64 || yi >= h as i64 {
+                return [0; 4];
+            }
+            let i = (yi as usize * w + xi as usize) * 4;
+            [src[i], src[i + 1], src[i + 2], src[i + 3]]
+        };
+        let mut out = vec![0u8; w * h * 4];
+        out.par_chunks_mut(w * 4).enumerate().for_each(|(y, row)| {
+            for x in 0..w {
+                let (fx, fy) = (x as f32, y as f32);
+                let c = match *self {
+                    Effect::Wave { amp, length, speed, vertical } => {
+                        let ph = std::f32::consts::TAU * (if vertical { fx } else { fy } / k / length.max(1.0) - speed * t);
+                        let d = ph.sin() * amp * k;
+                        if vertical { sample(fx, fy + d, false) } else { sample(fx + d, fy, false) }
+                    }
+                    Effect::Turbulence { amount, size, speed } => {
+                        let (u, v) = (fx / k / size.max(1.0), fy / k / size.max(1.0));
+                        let dx = (fbm(u, v, t * speed, 7, false) - 0.5) * 2.0 * amount * k;
+                        let dy = (fbm(u + 31.7, v + 11.3, t * speed, 9, false) - 0.5) * 2.0 * amount * k;
+                        sample(fx + dx, fy + dy, false)
+                    }
+                    Effect::Offset { x: vx, y: vy } => sample(fx - vx * t * k, fy - vy * t * k, true),
+                };
+                row[x * 4..x * 4 + 4].copy_from_slice(&c);
+            }
+        });
+        Bitmap { img: image::RgbaImage::from_raw(w as u32, h as u32, out).unwrap_or_default(), ..b }
+    }
+}
+
+#[cfg(test)]
+mod fx_tests {
+    use super::*;
+
+    #[test]
+    fn bruit_et_effets() {
+        // Le bruit : entre 0 et 1, varie dans l'espace et le temps, reproductible
+        let a = fbm(1.3, 2.7, 0.0, 1, false);
+        assert!((0.0..=1.0).contains(&a));
+        assert_ne!(a, fbm(5.1, 0.4, 0.0, 1, false));
+        assert_ne!(a, fbm(1.3, 2.7, 0.8, 1, false));
+        assert_eq!(a, fbm(1.3, 2.7, 0.0, 1, false));
+        // Décalage de 10 px en une seconde : le pixel (0, 0) prend ce qui était en (w - 10, 0)
+        let mut img = image::RgbaImage::new(40, 4);
+        img.put_pixel(30, 0, image::Rgba([255, 0, 0, 255]));
+        let b = Bitmap { img, ox: 0.0, oy: 0.0, k: 1.0 };
+        let o = Effect::Offset { x: 10.0, y: 0.0 }.apply(b, 1.0);
+        assert_eq!(o.img.get_pixel(0, 0)[0], 255);
+        // L'ondulation garde la taille et déplace des pixels
+        let mut img = image::RgbaImage::new(40, 40);
+        for x in 0..40 {
+            img.put_pixel(x, 20, image::Rgba([255; 4]));
+        }
+        let o = Effect::Wave { amp: 5.0, length: 20.0, speed: 0.0, vertical: true }.apply(Bitmap { img: img.clone(), ox: 0.0, oy: 0.0, k: 1.0 }, 0.0);
+        assert_eq!(o.img.dimensions(), (40, 40));
+        assert_ne!(o.img.as_raw(), img.as_raw());
     }
 }
 

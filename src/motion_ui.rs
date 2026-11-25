@@ -144,6 +144,7 @@ fn layer_color(k: &Kind) -> Color32 {
         Kind::Compo { .. } => crate::theme::ws_color("motion").unwrap_or(p.accent),
         Kind::Path { .. } => p.accent,
         Kind::Null => p.muted,
+        Kind::Noise { .. } => p.info,
     }
 }
 
@@ -156,6 +157,7 @@ fn layer_icon(k: &Kind) -> &'static str {
         Kind::Compo { .. } => l::FILM,
         Kind::Path { .. } => l::PEN_TOOL,
         Kind::Null => l::CIRCLE_DASHED,
+        Kind::Noise { .. } => l::CLOUD_FOG,
     }
 }
 
@@ -284,6 +286,7 @@ impl Editor {
             Kind::Compo { path, .. } => path.rsplit('/').next().unwrap_or("Composition").trim_end_matches(".arymotion"),
             Kind::Path { .. } => "Tracé",
             Kind::Null => "Nul",
+            Kind::Noise { .. } => "Bruit fractal",
         };
         let name = self.compo.fresh_name(&crate::i18n::t(base));
         let mut layer = Layer::new(&name, kind, &self.compo);
@@ -555,6 +558,10 @@ impl Editor {
                 }
                 if ui.add(egui::Button::new(egui::RichText::new(l::IMAGE_PLUS).size(14.0)).min_size(egui::vec2(24.0, 20.0))).on_hover_text(crate::i18n::t("Image…")).clicked() {
                     self.add_image();
+                }
+                if ui.add(egui::Button::new(egui::RichText::new(l::CLOUD_FOG).size(14.0)).min_size(egui::vec2(24.0, 20.0))).on_hover_text(crate::i18n::t("Bruit fractal animé : fumée, nuages, textures qui bougent")).clicked() {
+                    let (w, h) = (self.compo.w as f32, self.compo.h as f32);
+                    self.add_layer(Kind::Noise { w, h, scale: 260.0, speed: 0.4, contrast: 1.6, color: [0x14, 0x10, 0x1a], color2: [0xcc, 0xac, 0xb9], turbulent: false, seed: 1 }, Some([c.0, c.1]));
                 }
                 if ui.add(egui::Button::new(egui::RichText::new(l::SPLINE).size(14.0)).min_size(egui::vec2(24.0, 20.0))).on_hover_text(crate::i18n::t("Importer un SVG en calques de forme (un logo d'Illustrator, de Figma, du Vectoriel)")).clicked() {
                     self.import_svg();
@@ -1265,6 +1272,22 @@ impl Editor {
                 Kind::Null => {
                     ui.label(egui::RichText::new(crate::i18n::t("Invisible au rendu. Les calques dont il est le parent suivent ses mouvements.")).size(11.0).color(p.muted));
                 }
+                Kind::Noise { w, h, scale, speed, contrast, color, color2, turbulent, seed } => {
+                    section(ui, "Bruit fractal");
+                    ui.horizontal(|ui| {
+                        changed |= ui.add(egui::DragValue::new(w).speed(2.0).range(1.0..=8000.0).prefix("L ")).changed();
+                        changed |= ui.add(egui::DragValue::new(h).speed(2.0).range(1.0..=8000.0).prefix("H ")).changed();
+                        changed |= ui.color_edit_button_srgb(color).changed();
+                        changed |= ui.color_edit_button_srgb(color2).changed();
+                    });
+                    changed |= crate::modifiers::row_slider(ui, "taille des motifs", egui::Slider::new(scale, 4.0..=2000.0).logarithmic(true).suffix(" px"));
+                    changed |= crate::modifiers::row_slider(ui, "évolution", egui::Slider::new(speed, 0.0..=5.0).suffix(crate::i18n::t_mid(" /s")));
+                    changed |= crate::modifiers::row_slider(ui, "contraste", egui::Slider::new(contrast, 0.2..=6.0));
+                    ui.horizontal(|ui| {
+                        changed |= ui.checkbox(turbulent, crate::i18n::t("turbulent (filaments)")).changed();
+                        changed |= ui.add(egui::DragValue::new(seed).range(0..=9999).prefix(crate::i18n::t("graine "))).changed();
+                    });
+                }
                 Kind::Compo { path, speed, offset, looped } => {
                     section(ui, "Précomposition");
                     ui.label(egui::RichText::new(path.as_str()).size(11.5).color(p.muted));
@@ -1577,6 +1600,56 @@ impl Editor {
                     changed |= ui.color_edit_button_srgb(&mut g.color).changed();
                 });
             }
+            section(ui, "Effets");
+            let mut fx_act: Option<(usize, bool)> = None;
+            for (k, e) in lay.fx.iter_mut().enumerate() {
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new(crate::i18n::t(e.name())).strong());
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.add(egui::Button::new(egui::RichText::new(l::X).size(12.0)).frame(false)).on_hover_text(crate::i18n::t("retirer l'effet")).clicked() {
+                            fx_act = Some((k, false));
+                        }
+                        if k > 0 && ui.add(egui::Button::new(egui::RichText::new(l::ARROW_UP).size(12.0)).frame(false)).on_hover_text(crate::i18n::t("monter")).clicked() {
+                            fx_act = Some((k, true));
+                        }
+                    });
+                });
+                match e {
+                    motion::Effect::Wave { amp, length, speed, vertical } => {
+                        changed |= crate::modifiers::row_slider(ui, "amplitude", egui::Slider::new(amp, 0.0..=200.0).suffix(" px"));
+                        changed |= crate::modifiers::row_slider(ui, "longueur d'onde", egui::Slider::new(length, 4.0..=2000.0).logarithmic(true).suffix(" px"));
+                        changed |= crate::modifiers::row_slider(ui, "vitesse", egui::Slider::new(speed, -5.0..=5.0));
+                        changed |= ui.checkbox(vertical, crate::i18n::t("onde verticale")).changed();
+                    }
+                    motion::Effect::Turbulence { amount, size, speed } => {
+                        changed |= crate::modifiers::row_slider(ui, "quantité", egui::Slider::new(amount, 0.0..=300.0).suffix(" px"));
+                        changed |= crate::modifiers::row_slider(ui, "taille des remous", egui::Slider::new(size, 4.0..=2000.0).logarithmic(true).suffix(" px"));
+                        changed |= crate::modifiers::row_slider(ui, "évolution", egui::Slider::new(speed, 0.0..=5.0));
+                    }
+                    motion::Effect::Offset { x, y } => {
+                        changed |= crate::modifiers::row_slider(ui, "x par seconde", egui::Slider::new(x, -2000.0..=2000.0).suffix(" px"));
+                        changed |= crate::modifiers::row_slider(ui, "y par seconde", egui::Slider::new(y, -2000.0..=2000.0).suffix(" px"));
+                    }
+                }
+                ui.add_space(6.0);
+            }
+            if let Some((k, up)) = fx_act {
+                if up {
+                    lay.fx.swap(k, k - 1);
+                } else {
+                    lay.fx.remove(k);
+                }
+                changed = true;
+            }
+            egui::containers::menu::MenuButton::new(format!("{}  {}", l::PLUS, crate::i18n::t("ajouter un effet"))).ui(ui, |ui| {
+                for (i, name) in motion::Effect::ALL.iter().enumerate() {
+                    if ui.button(crate::i18n::t(name)).clicked() {
+                        lay.fx.push(motion::Effect::new(i));
+                        changed = true;
+                        ui.close();
+                    }
+                }
+            });
             section(ui, "Trajectoire");
             changed |= ui.checkbox(&mut lay.auto_orient, crate::i18n::t("Orientation automatique")).on_hover_text(crate::i18n::t("Le calque tourne pour suivre la direction de son mouvement (une voiture sur une route, un avion en papier)")).changed();
             section(ui, "Tremblement");

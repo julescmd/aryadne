@@ -3141,5 +3141,22 @@
   "Orientation automatique": "Auto-orient",
   "Le calque tourne pour suivre la direction de son mouvement (une voiture sur une route, un avion en papier)": "The layer rotates to follow the direction of its motion (a car on a road, a paper plane)",
   "Importer un SVG en calques de forme (un logo d'Illustrator, de Figma, du Vectoriel)": "Import an SVG as shape layers (a logo from Illustrator, Figma, Vector)",
-  "Aucun tracé dans ce SVG": "No path in this SVG"
+  "Aucun tracé dans ce SVG": "No path in this SVG",
+  "bruit fractal": "fractal noise",
+  "Bruit fractal": "Fractal noise",
+  "taille des motifs": "pattern size",
+  "évolution": "evolution",
+  "turbulent (filaments)": "turbulent (filaments)",
+  "graine ": "seed ",
+  "Bruit fractal animé : fumée, nuages, textures qui bougent": "Animated fractal noise: smoke, clouds, moving textures",
+  "retirer l'effet": "remove the effect",
+  "Ondulation": "Wave",
+  "Turbulence": "Turbulence",
+  "amplitude": "amplitude",
+  "longueur d'onde": "wavelength",
+  "onde verticale": "vertical wave",
+  "taille des remous": "eddy size",
+  "x par seconde": "x per second",
+  "y par seconde": "y per second",
+  "ajouter un effet": "add an effect"
 }
