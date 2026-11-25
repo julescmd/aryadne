@@ -22,9 +22,10 @@ pub enum Tool {
     Width,
     Builder,
     Pencil,
+    Paint,
 }
 
-const TOOLS: [(Tool, &str, &str, &str); 13] = [
+const TOOLS: [(Tool, &str, &str, &str); 14] = [
     (Tool::Select, l::MOUSE_POINTER_2, "sélection", "V"),
     (Tool::Direct, l::MOUSE_POINTER, "sélection directe : les points d'un tracé", "A"),
     (Tool::Pen, l::PEN_TOOL, "plume : clic pour un point, glisser pour une courbe", "P"),
@@ -38,6 +39,7 @@ const TOOLS: [(Tool, &str, &str, &str); 13] = [
     (Tool::Board, l::FRAME, "plan de travail", "F"),
     (Tool::Width, l::SPLINE, "largeur : glisser sur un contour pour l'épaissir à cet endroit (Alt+clic : retirer le point)", "W"),
     (Tool::Builder, l::SHAPES, "concepteur de formes : glisser sur les zones des formes choisies pour les fusionner (Alt : effacer)", "M"),
+    (Tool::Paint, l::PAINT_BUCKET, "peinture dynamique : clic dans une zone fermée par des traits pour la remplir (Alt+clic : prendre la couleur)", "K"),
 ];
 
 enum Drag {
@@ -96,6 +98,8 @@ pub struct Editor {
     /// Concepteur de formes : zones des formes choisies (avec leur empreinte) et zones balayées
     builder: Option<(u64, crate::vgeom::Regions)>,
     picked: Vec<u32>,
+    /// Peinture dynamique : la couleur du pot
+    paint_color: [u8; 4],
     /// Surbrillance des zones (zones affichées, texture)
     builder_tex: Option<(Vec<u32>, egui::TextureHandle)>,
     /// Décalage de tracé (unités)
@@ -150,6 +154,7 @@ impl Editor {
             width_edit: None,
             builder: None,
             picked: vec![],
+            paint_color: [236, 108, 89, 255],
             builder_tex: None,
             offset_by: 10.0,
             blend_steps: 5,
@@ -414,6 +419,13 @@ impl Editor {
                     let b = egui::Button::new(egui::RichText::new(icon).size(15.0).color(if on { p.on_accent } else { p.text })).fill(if on { p.accent } else { Color32::TRANSPARENT }).min_size(vec2(32.0, 28.0));
                     if ui.add(b).on_hover_text(format!("{} ({hk})", crate::i18n::t(label))).clicked() {
                         self.set_tool(t);
+                    }
+                    // La couleur du pot, juste sous l'outil
+                    if t == Tool::Paint && on {
+                        let mut c = egui::Color32::from_rgba_unmultiplied(self.paint_color[0], self.paint_color[1], self.paint_color[2], self.paint_color[3]);
+                        if egui::color_picker::color_edit_button_srgba(ui, &mut c, egui::color_picker::Alpha::OnlyBlend).on_hover_text(crate::i18n::t("couleur du pot")).changed() {
+                            self.paint_color = c.to_srgba_unmultiplied();
+                        }
                     }
                 }
             });
@@ -2310,6 +2322,34 @@ impl Editor {
             }
         }
         let tol = 4.0 / self.zoom;
+        if !space && self.tool == Tool::Paint && !resp.drag_started_by(egui::PointerButton::Middle) && !matches!(self.drag, Some(Drag::Pan)) {
+            if resp.hovered() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::Cell);
+            }
+            if resp.clicked() {
+                if let Some(h) = resp.interact_pointer_pos() {
+                    let w = to_world(h);
+                    if alt {
+                        // Pipette : la couleur de la forme pleine sous le pointeur
+                        if let Some(c) = self.doc.shapes.iter().rev().find(|s| !s.fills.is_empty() && self.doc.bounds_of(&[s.id]).is_some_and(|b| w[0] >= b[0] && w[0] <= b[2] && w[1] >= b[1] && w[1] <= b[3])).map(|s| s.fills[0].first()) {
+                            self.paint_color = c;
+                        }
+                    } else {
+                        let snapshot = self.doc.clone();
+                        match live_paint(&mut self.doc, w, self.paint_color) {
+                            Ok(id) => {
+                                self.undo.push(snapshot);
+                                self.redo.clear();
+                                self.sel = vec![id];
+                                self.changed();
+                            }
+                            Err(e) => self.message = Some(e),
+                        }
+                    }
+                }
+            }
+            return;
+        }
         if !space && matches!(self.tool, Tool::Width | Tool::Builder) && !resp.drag_started_by(egui::PointerButton::Middle) && !matches!(self.drag, Some(Drag::Pan)) {
             if self.tool == Tool::Width {
                 self.width_mouse(ui, resp, to_world, tol, alt);
@@ -2475,7 +2515,7 @@ impl Editor {
                 self.sel = vec![id];
                 Some(Drag::Pencil { id, pts: vec![w] })
             }
-            Tool::Width | Tool::Builder => None,
+            Tool::Width | Tool::Builder | Tool::Paint => None,
         }
     }
 
@@ -3294,4 +3334,117 @@ pub(crate) fn blend_doc(doc: &mut crate::vector::Doc, a: u64, b: u64, steps: u32
     let mut out = vec![a, b];
     out.extend(made);
     Some(out)
+}
+
+/// Nom des remplissages posés par la peinture dynamique (ils ne font pas mur, on peut les recolorer)
+const PAINT_NAME: &str = "Peinture";
+
+/// Peinture dynamique (comme Live Paint) : la zone fermée par les traits autour de `w` devient une forme
+/// pleine de couleur `c`, glissée sous le dessin. Un clic sur une zone déjà peinte la recolore.
+pub(crate) fn live_paint(doc: &mut crate::vector::Doc, w: [f32; 2], c: [u8; 4]) -> Result<u64, String> {
+    let t = |s: &str| crate::i18n::t(s);
+    // Le plan de travail sous le clic borne la recherche
+    let board = doc.boards.iter().find(|b| w[0] >= b.x && w[0] <= b.x + b.w && w[1] >= b.y && w[1] <= b.y + b.h).cloned();
+    let inside = |b: [f32; 4]| board.as_ref().is_none_or(|bd| b[2] >= bd.x && b[0] <= bd.x + bd.w && b[3] >= bd.y && b[1] <= bd.y + bd.h);
+    let walls: Vec<u64> = doc.shapes.iter().filter(|s| s.name != PAINT_NAME && s.parent == 0 && doc.bounds_of(&[s.id]).is_some_and(inside)).map(|s| s.id).collect();
+    if walls.is_empty() {
+        return Err(t("Rien à peindre ici : dessine d'abord des traits qui ferment une zone."));
+    }
+    let g = crate::vgeom::Grid::around(doc, &walls, 6.0, 1100).ok_or(t("Rien à peindre ici."))?;
+    let start = g.cell_of(w).ok_or(t("Clique à l'intérieur d'une zone fermée par des traits."))?;
+    let n = g.w * g.h;
+    let mut wall = vec![false; n];
+    for id in &walls {
+        for (k, on) in g.mask(doc, *id).into_iter().enumerate() {
+            wall[k] |= on;
+        }
+    }
+    // Les petits trous d'un trait (1 cellule) se ferment
+    let thick: Vec<bool> = (0..n).map(|k| {
+        let (x, y) = ((k % g.w) as i64, (k / g.w) as i64);
+        (-1..=1).any(|dy| (-1..=1).any(|dx| {
+            let (xx, yy) = (x + dx, y + dy);
+            xx >= 0 && yy >= 0 && (xx as usize) < g.w && (yy as usize) < g.h && wall[yy as usize * g.w + xx as usize]
+        }))
+    }).collect();
+    if thick[start] {
+        return Err(t("Clique dans le vide d'une zone, pas sur un trait."));
+    }
+    let mut region = vec![false; n];
+    let mut stack = vec![start];
+    region[start] = true;
+    let mut open = false;
+    while let Some(k) = stack.pop() {
+        let (x, y) = (k % g.w, k / g.w);
+        if x == 0 || y == 0 || x + 1 == g.w || y + 1 == g.h {
+            open = true;
+            break;
+        }
+        for nk in [k - 1, k + 1, k - g.w, k + g.w] {
+            if !region[nk] && !thick[nk] {
+                region[nk] = true;
+                stack.push(nk);
+            }
+        }
+    }
+    if open {
+        return Err(t("Cette zone n'est pas fermée : le remplissage déborderait."));
+    }
+    // Le remplissage passe un peu sous les traits (pas de liseré blanc)
+    let grown: Vec<bool> = (0..n).map(|k| {
+        let (x, y) = ((k % g.w) as i64, (k / g.w) as i64);
+        region[k] || (-2..=2).any(|dy| (-2..=2).any(|dx| {
+            let (xx, yy) = (x + dx, y + dy);
+            xx >= 0 && yy >= 0 && (xx as usize) < g.w && (yy as usize) < g.h && region[yy as usize * g.w + xx as usize]
+        }))
+    }).collect();
+    // Une zone déjà peinte au même endroit : on change sa couleur
+    let old: Vec<u64> = doc.shapes.iter().filter(|s| s.name == PAINT_NAME).map(|s| s.id).filter(|id| g.mask(doc, *id)[start]).collect();
+    if let Some(&id) = old.last() {
+        if let Some(s) = doc.shapes.iter_mut().find(|s| s.id == id) {
+            s.fills = vec![Paint::solid(c)];
+        }
+        return Ok(id);
+    }
+    let like = Shape { fills: vec![Paint::solid(c)], strokes: vec![], ..Shape::base() };
+    let id = crate::vgeom::add_traced(doc, &g, g.trace(&grown), &like, PAINT_NAME).ok_or(t("Zone trop petite."))?;
+    // Sous le dessin : juste en dessous du trait le plus bas
+    let lowest = walls.iter().filter_map(|w| doc.index(*w)).min().unwrap_or(0);
+    if let Some(i) = doc.index(id) {
+        let s = doc.shapes.remove(i);
+        doc.shapes.insert(lowest.min(doc.shapes.len()), s);
+    }
+    Ok(id)
+}
+
+#[cfg(test)]
+mod live_paint_tests {
+    use crate::vector::*;
+    #[test]
+    fn peinture_dynamique() {
+        let mut d = Doc::starter();
+        d.shapes.clear();
+        let (bx, by) = (d.boards[0].x, d.boards[0].y);
+        let stroke = || vec![Stroke { paint: Paint::solid([20, 20, 24, 255]), width: 6.0, cap: 1, join: 1, dash: vec![], arrow: false }];
+        // Trois traits qui se croisent : un triangle fermé au milieu
+        for (a, b) in [([100.0, 500.0], [700.0, 120.0]), ([100.0, 120.0], [700.0, 500.0]), ([50.0, 420.0], [750.0, 420.0])] {
+            let id = d.new_id();
+            d.shapes.push(Shape { id, kind: Kind::Path { nodes: vec![Node::corner(a), Node::corner(b)], closed: false }, x: bx, y: by, strokes: stroke(), ..Shape::base() });
+        }
+        // Le triangle du bas, entre le croisement et la ligne horizontale
+        let id = super::live_paint(&mut d, [bx + 400.0, by + 390.0], [240, 180, 60, 255]).unwrap();
+        assert_eq!(d.index(id), Some(0));
+        let b = d.bounds_of(&[id]).unwrap();
+        assert!(b[2] - b[0] < 330.0 && b[2] - b[0] > 120.0, "{b:?}");
+        // Recolorer la même zone ne crée rien de plus
+        let n = d.shapes.len();
+        let id2 = super::live_paint(&mut d, [bx + 400.0, by + 395.0], [60, 140, 240, 255]).unwrap();
+        assert_eq!((id2, d.shapes.len()), (id, n));
+        // Une zone ouverte refuse
+        assert!(super::live_paint(&mut d, [bx + 400.0, by + 200.0], [0, 0, 0, 255]).is_err());
+        if std::env::var("ARY_DEMO").is_ok() {
+            super::live_paint(&mut d, [bx + 160.0, by + 450.0], [120, 200, 140, 255]).ok();
+            export_png(&d, 0, "/tmp", 0.6).unwrap().save("/tmp/livepaint.png").unwrap();
+        }
+    }
 }

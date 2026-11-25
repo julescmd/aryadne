@@ -3296,5 +3296,14 @@
   "IK à deux os": "Two-bone IK",
   "Ce calque, son enfant et l'enfant de celui-ci forment un bras (ou une jambe) : un contrôleur tire le bout, l'épaule et le coude tournent tout seuls": "This layer, its child and that child's child form an arm (or a leg): a controller pulls the tip, the shoulder and elbow turn on their own",
   "Il faut une chaîne : ce calque, un enfant, et un enfant de cet enfant (relie-les avec le parent).": "A chain is needed: this layer, a child, and a child of that child (link them with parenting).",
-  "Contrôleur": "Controller"
+  "Contrôleur": "Controller",
+  "peinture dynamique : clic dans une zone fermée par des traits pour la remplir (Alt+clic : prendre la couleur)": "live paint: click inside an area closed by strokes to fill it (Alt+click: pick the color)",
+  "couleur du pot": "bucket color",
+  "Rien à peindre ici : dessine d'abord des traits qui ferment une zone.": "Nothing to paint here: first draw strokes that close an area.",
+  "Rien à peindre ici.": "Nothing to paint here.",
+  "Clique à l'intérieur d'une zone fermée par des traits.": "Click inside an area closed by strokes.",
+  "Clique dans le vide d'une zone, pas sur un trait.": "Click in the empty part of an area, not on a stroke.",
+  "Cette zone n'est pas fermée : le remplissage déborderait.": "This area isn't closed: the fill would spill out.",
+  "Zone trop petite.": "Area too small.",
+  "Peinture": "Paint"
 }
