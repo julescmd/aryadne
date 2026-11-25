@@ -1233,6 +1233,28 @@ mod tests {
     use super::*;
 
     #[test]
+    fn api_de_scripts_python() {
+        let py = if cfg!(windows) { "python" } else { "python3" };
+        if std::process::Command::new(py).arg("--version").output().is_err() {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("aryadne-api-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("3d")).unwrap();
+        std::fs::write(dir.join("3d/s.aryscene"), r#"{"version":1,"objects":[{"name":"boule","file":"@sphere","pos":[0,0,0]}]}"#).unwrap();
+        let root = dir.to_string_lossy().to_string();
+        let api = install_script_api(&root).unwrap();
+        let script = "import aryadne\nc=aryadne.Coffre()\ns=c.scene('3d/s.aryscene')\ns.cle('boule', 12, pos=[1,2,3])\ns.enregistrer()\nprint(c.fichiers('.aryscene'))";
+        let o = std::process::Command::new(py).args(["-c", script]).env("PYTHONPATH", &api).env("ARYADNE_VAULT", &root).output().unwrap();
+        assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+        assert!(String::from_utf8_lossy(&o.stdout).contains("3d/s.aryscene"));
+        let sc = crate::scene::Scene::read(&dir.join("3d/s.aryscene")).unwrap();
+        assert_eq!(sc.objects[0].keys[0].frame, 12);
+        assert_eq!(sc.objects[0].keys[0].pos, [1.0, 2.0, 3.0]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+
+    #[test]
     fn taches_historique_tags() {
         let dir = std::env::temp_dir().join(format!("aryadne-extras-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -1635,6 +1657,12 @@ impl App {
         let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let mut cmd = std::process::Command::new(&prog);
         cmd.args(&args).arg(&path).current_dir(path.parent().unwrap_or(std::path::Path::new("."))).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).stdin(std::process::Stdio::null());
+        // API de scripts : le module « aryadne » et le coffre sont à portée du script Python
+        if let Some(dir) = install_script_api(&self.root()) {
+            let sep = if cfg!(windows) { ";" } else { ":" };
+            let pp = std::env::var("PYTHONPATH").ok().filter(|x| !x.is_empty()).map(|x| format!("{}{sep}{x}", dir.display())).unwrap_or_else(|| dir.display().to_string());
+            cmd.env("PYTHONPATH", pp).env("ARYADNE_VAULT", self.root());
+        }
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;
@@ -1750,6 +1778,42 @@ pub struct Run {
     pub done: std::sync::Arc<std::sync::atomic::AtomicBool>,
     pub child: Option<std::sync::Arc<std::sync::Mutex<std::process::Child>>>,
 }
+
+/// Le module Python « aryadne » (API de scripts), posé dans .app/python du coffre ; rend son dossier
+pub fn install_script_api(root: &str) -> Option<std::path::PathBuf> {
+    const SRC: &str = include_str!("../assets/aryadne.py");
+    let dir = std::path::Path::new(root).join(".app").join("python");
+    let f = dir.join("aryadne.py");
+    if std::fs::read_to_string(&f).ok().as_deref() != Some(SRC) {
+        std::fs::create_dir_all(&dir).ok()?;
+        std::fs::write(&f, SRC).ok()?;
+    }
+    Some(dir)
+}
+
+/// Un script d'exemple de l'API, à ouvrir et adapter
+pub const SCRIPT_EXAMPLE: &str = r#"# Script Aryadne : F5 pour le lancer. Le module « aryadne » lit et modifie les fichiers du coffre.
+import aryadne
+
+coffre = aryadne.Coffre()
+
+print("Scènes 3D :")
+for f in coffre.fichiers(".aryscene"):
+    scene = coffre.scene(f)
+    print(f"  {f} : {len(scene.objets())} objets, {scene.cadence()} i/s")
+
+print("Montages :")
+for f in coffre.fichiers(".aryav"):
+    m = coffre.montage(f)
+    print(f"  {f} : {len(m.clips())} clips, {m.duree():.1f} s")
+    # m.renommer_plans("Plan {n}")   # renomme les plans dans l'ordre de la timeline
+    # m.enregistrer()
+
+print("Dessins :")
+for f in coffre.fichiers(".aryvec"):
+    d = coffre.dessin(f)
+    print(f"  {f} : {len(d.plans())} plans, {len(d.formes())} formes")
+"#;
 
 /// Programme qui exécute ce fichier (et ses arguments avant le chemin).
 pub fn runner_for(rel: &str) -> Option<(String, Vec<String>)> {

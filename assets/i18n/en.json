@@ -3450,5 +3450,6 @@
   "Un squelette animé depuis un fichier BVH ; si un os est choisi, le mouvement va sur son squelette (os de même nom)": "An animated skeleton from a BVH file; if a bone is selected, the motion goes onto its skeleton (bones with the same names)",
   "Aucun os du squelette ne porte le nom d'une articulation du BVH (Hips, Spine, LeftArm…).": "No bone in the skeleton has the name of a BVH joint (Hips, Spine, LeftArm…).",
   "os animés": "bones animated",
-  "os importés": "bones imported"
+  "os importés": "bones imported",
+  "Script Python d'exemple (API)": "Example Python script (API)"
 }

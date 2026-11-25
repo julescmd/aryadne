@@ -216,6 +216,13 @@ fn project_root(file: &Path, vault_root: &Path) -> PathBuf {
 fn start(lang: &'static str, args: Vec<String>, exe: PathBuf, root: PathBuf, ctx: eframe::egui::Context) -> Result<Arc<Server>, String> {
     let mut cmd = Command::new(&exe);
     cmd.args(&args).current_dir(&root).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
+    // Python : le module « aryadne » de l'API de scripts est connu de l'analyse (pas de faux « import introuvable »)
+    if lang == "python" {
+        let vr = crate::nodes::vault_root();
+        if let Some(d) = (!vr.is_empty()).then(|| crate::extras::install_script_api(&vr)).flatten() {
+            cmd.env("PYTHONPATH", d);
+        }
+    }
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;

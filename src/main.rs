@@ -3017,6 +3017,17 @@ impl App {
                         if item(ui, "Vérifier les mises à jour", "") {
                             cmd = Some(extras::Cmd::Updates);
                         }
+                        // API de scripts : un exemple prêt à lancer (F5) dans le dossier scripts
+                        if item(ui, "Script Python d'exemple (API)", "") {
+                            let rel = "scripts/exemple aryadne.py".to_string();
+                            let full = std::path::Path::new(&self.root()).join(&rel);
+                            if !full.exists() {
+                                let _ = std::fs::create_dir_all(full.parent().unwrap_or(std::path::Path::new(".")));
+                                let _ = std::fs::write(&full, extras::SCRIPT_EXAMPLE);
+                            }
+                            extras::install_script_api(&self.root());
+                            self.open(rel);
+                        }
                         ui.separator();
                         ui.label(RichText::new(format!("Aryadne {}", env!("CARGO_PKG_VERSION"))).size(11.0).color(p.muted));
                     });
