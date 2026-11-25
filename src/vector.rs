@@ -2457,3 +2457,126 @@ mod persp_tests {
         assert!(h_at(200.0) < 250.0);
     }
 }
+
+// ---------- PDF pour l'impression ----------
+
+/// Réglages d'un PDF d'impression
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PrintOpts {
+    /// Fonds perdus (mm) : le dessin dépasse du format coupé
+    pub bleed_mm: f32,
+    /// Traits de coupe aux coins
+    pub marks: bool,
+    /// Couleurs en CMJN (DeviceCMYK) plutôt qu'en RVB
+    pub cmyk: bool,
+    pub dpi: f32,
+}
+
+impl Default for PrintOpts {
+    fn default() -> PrintOpts {
+        PrintOpts { bleed_mm: 3.0, marks: true, cmyk: true, dpi: 300.0 }
+    }
+}
+
+/// RVB (0..1) vers CMJN (0..1), sans profil : retrait du noir simple
+pub fn rgb_to_cmyk(r: f32, g: f32, b: f32) -> [f32; 4] {
+    let k = 1.0 - r.max(g).max(b);
+    if k >= 0.9999 {
+        return [0.0, 0.0, 0.0, 1.0];
+    }
+    [(1.0 - r - k) / (1.0 - k), (1.0 - g - k) / (1.0 - k), (1.0 - b - k) / (1.0 - k), k]
+}
+
+/// Le plan de travail `board` en PDF d'impression : image à `dpi`, fonds perdus, traits de coupe,
+/// boîtes TrimBox et BleedBox (comme un PDF/X simple)
+pub fn print_pdf(doc: &Doc, board: usize, root: &str, o: PrintOpts) -> Result<Vec<u8>, String> {
+    use std::io::Write as _;
+    let b = doc.boards.get(board).ok_or("plan introuvable")?;
+    // Unités du document : px à 96 par pouce ; PDF : points à 72 par pouce
+    let px_mm = 96.0 / 25.4;
+    let bleed = o.bleed_mm.max(0.0) * px_mm;
+    let slug = if o.marks { 10.0 * px_mm } else { 0.0 };
+    let area = [b.x - bleed, b.y - bleed, b.w + 2.0 * bleed, b.h + 2.0 * bleed];
+    let k = o.dpi / 96.0;
+    let (iw, ih) = (((area[2] * k).round() as u32).clamp(1, 20000), ((area[3] * k).round() as u32).clamp(1, 20000));
+    let svg = to_svg(doc, area, [iw, ih], root, true);
+    let px = rasterize(&svg, iw, ih).ok_or("rendu impossible")?;
+    // Posé sur du blanc (le papier), puis en CMJN ou RVB
+    let mut raw = Vec::with_capacity((iw * ih) as usize * if o.cmyk { 4 } else { 3 });
+    for c in px.chunks_exact(4) {
+        let a = c[3] as f32 / 255.0;
+        let rgb = [0, 1, 2].map(|i| (c[i] as f32 / 255.0) * a + (1.0 - a));
+        if o.cmyk {
+            raw.extend(rgb_to_cmyk(rgb[0], rgb[1], rgb[2]).map(|v| (v * 255.0).round() as u8));
+        } else {
+            raw.extend(rgb.map(|v| (v * 255.0).round() as u8));
+        }
+    }
+    let mut z = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+    z.write_all(&raw).map_err(|e| e.to_string())?;
+    let data = z.finish().map_err(|e| e.to_string())?;
+    let pt = 0.75f32;
+    let (tw, th, bl, sl) = (b.w * pt, b.h * pt, bleed * pt, slug * pt);
+    let (pw, ph) = (tw + 2.0 * (bl + sl), th + 2.0 * (bl + sl));
+    // Contenu : l'image, puis les traits de coupe dans la marge (en noir de repérage)
+    let mut cs = format!("q {:.3} 0 0 {:.3} {:.3} {:.3} cm /Im0 Do Q\n", tw + 2.0 * bl, th + 2.0 * bl, sl, sl);
+    if o.marks {
+        let (x0, y0, x1, y1) = (sl + bl, sl + bl, sl + bl + tw, sl + bl + th);
+        let (gap, len) = (bl + 3.0, (sl - 3.0).max(4.0));
+        cs += if o.cmyk { "0.25 w 1 1 1 1 K\n" } else { "0.25 w 0 0 0 RG\n" };
+        for (x, y, sx, sy) in [(x0, y0, -1.0, -1.0), (x1, y0, 1.0, -1.0), (x0, y1, -1.0, 1.0), (x1, y1, 1.0, 1.0)] {
+            cs += &format!("{:.3} {:.3} m {:.3} {:.3} l S\n", x + sx * gap, y, x + sx * (gap + len), y);
+            cs += &format!("{:.3} {:.3} m {:.3} {:.3} l S\n", x, y + sy * gap, x, y + sy * (gap + len));
+        }
+    }
+    let mut out: Vec<u8> = b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n".to_vec();
+    let mut offs = vec![];
+    let mut obj = |out: &mut Vec<u8>, body: &[u8]| {
+        offs.push(out.len());
+        out.extend(format!("{} 0 obj\n", offs.len()).as_bytes());
+        out.extend(body);
+        out.extend(b"\nendobj\n");
+    };
+    obj(&mut out, b"<< /Type /Catalog /Pages 2 0 R >>");
+    obj(&mut out, b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>");
+    let page = format!(
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {pw:.3} {ph:.3}] /BleedBox [{:.3} {:.3} {:.3} {:.3}] /TrimBox [{:.3} {:.3} {:.3} {:.3}] /Resources << /XObject << /Im0 5 0 R >> >> /Contents 4 0 R >>",
+        sl, sl, pw - sl, ph - sl, sl + bl, sl + bl, pw - sl - bl, ph - sl - bl
+    );
+    obj(&mut out, page.as_bytes());
+    obj(&mut out, format!("<< /Length {} >>\nstream\n{cs}endstream", cs.len()).as_bytes());
+    let mut img = format!("<< /Type /XObject /Subtype /Image /Width {iw} /Height {ih} /ColorSpace /{} /BitsPerComponent 8 /Filter /FlateDecode /Length {} >>\nstream\n", if o.cmyk { "DeviceCMYK" } else { "DeviceRGB" }, data.len()).into_bytes();
+    img.extend(&data);
+    img.extend(b"\nendstream");
+    obj(&mut out, &img);
+    let xref = out.len();
+    out.extend(format!("xref\n0 {}\n0000000000 65535 f \n", offs.len() + 1).as_bytes());
+    for o in &offs {
+        out.extend(format!("{o:010} 00000 n \n").as_bytes());
+    }
+    out.extend(format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n", offs.len() + 1).as_bytes());
+    Ok(out)
+}
+
+#[cfg(test)]
+mod print_tests {
+    use super::*;
+    #[test]
+    fn pdf_impression() {
+        assert_eq!(rgb_to_cmyk(0.0, 0.0, 0.0), [0.0, 0.0, 0.0, 1.0]);
+        assert_eq!(rgb_to_cmyk(1.0, 0.0, 0.0), [0.0, 1.0, 1.0, 0.0]);
+        let mut d = Doc::starter();
+        d.boards[0].w = 400.0;
+        d.boards[0].h = 300.0;
+        let pdf = print_pdf(&d, 0, "/tmp", PrintOpts { dpi: 72.0, ..PrintOpts::default() }).unwrap();
+        let s = String::from_utf8_lossy(&pdf);
+        assert!(s.starts_with("%PDF-1.4") && s.contains("/TrimBox [") && s.contains("/DeviceCMYK") && s.trim_end().ends_with("%%EOF"));
+        // TrimBox = le format coupé : 400 px = 300 pt
+        let tb = s.split("/TrimBox [").nth(1).unwrap().split(']').next().unwrap();
+        let v: Vec<f32> = tb.split_whitespace().map(|x| x.parse().unwrap()).collect();
+        assert!((v[2] - v[0] - 300.0).abs() < 0.01 && (v[3] - v[1] - 225.0).abs() < 0.01, "{v:?}");
+        if std::env::var("ARY_DEMO").is_ok() {
+            std::fs::write("/tmp/print.pdf", &pdf).unwrap();
+        }
+    }
+}

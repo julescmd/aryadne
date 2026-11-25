@@ -3332,5 +3332,11 @@
   "plaquer": "stick",
   "sur le mur de gauche": "on the left wall",
   "sur le mur de droite": "on the right wall",
-  "sur le sol": "on the floor"
+  "sur le sol": "on the floor",
+  "fonds perdus": "bleed",
+  "Le dessin dépasse du format coupé (3 mm d'habitude)": "The artwork runs past the trimmed size (usually 3 mm)",
+  "résolution": "resolution",
+  "traits de coupe": "crop marks",
+  "couleurs CMJN (impression)": "CMYK colors (print)",
+  "enregistrer le PDF": "save PDF"
 }

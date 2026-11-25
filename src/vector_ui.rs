@@ -108,6 +108,8 @@ pub struct Editor {
     blend_steps: u32,
     /// Déformation : le genre (voir WARPS) et l'intensité (%)
     warp_kind: usize,
+    /// PDF d'impression : fonds perdus, traits de coupe, CMJN
+    print: crate::vector::PrintOpts,
     warp_bend: f32,
     /// Bibliothèque d'icônes ouverte : la recherche
     icon_pick: Option<String>,
@@ -162,6 +164,7 @@ impl Editor {
             offset_by: 10.0,
             blend_steps: 5,
             warp_kind: 0,
+            print: crate::vector::PrintOpts::default(),
             warp_bend: 50.0,
             icon_pick: None,
             present: None,
@@ -1916,6 +1919,27 @@ impl Editor {
             if ui.button(format!("{}  SVG", l::DOWNLOAD)).clicked() {
                 self.export(bi, "svg");
             }
+            // PDF pour l'imprimeur : fonds perdus, traits de coupe, CMJN
+            ui.menu_button(egui::RichText::new(format!("{}  PDF", l::PRINTER)), |ui| {
+                ui.set_width(250.0);
+                ui.spacing_mut().item_spacing = vec2(6.0, 8.0);
+                crate::modifiers::row(ui, &crate::i18n::t("fonds perdus"), |ui| {
+                    ui.add(egui::DragValue::new(&mut self.print.bleed_mm).range(0.0..=20.0).speed(0.1).suffix(" mm")).on_hover_text(crate::i18n::t("Le dessin dépasse du format coupé (3 mm d'habitude)"));
+                });
+                crate::modifiers::row(ui, &crate::i18n::t("résolution"), |ui| {
+                    for d in [150.0f32, 300.0] {
+                        if ui.selectable_label(self.print.dpi == d, format!("{d:.0} ppp")).clicked() {
+                            self.print.dpi = d;
+                        }
+                    }
+                });
+                ui.checkbox(&mut self.print.marks, crate::i18n::t("traits de coupe"));
+                ui.checkbox(&mut self.print.cmyk, crate::i18n::t("couleurs CMJN (impression)"));
+                if ui.button(format!("{}  {}", l::DOWNLOAD, crate::i18n::t("enregistrer le PDF"))).clicked() {
+                    ui.close();
+                    self.export(bi, "pdf");
+                }
+            });
             // Le plan de travail devient une composition Motion, chaque forme un calque qu'on anime
             if ui.button(l::FILM).on_hover_text(crate::i18n::t("Animer dans Motion : chaque forme du plan devient un calque modifiable")).clicked() {
                 match self.board_to_motion(bi) {
@@ -1962,6 +1986,7 @@ impl Editor {
         let Some(out) = d.save_file() else { return };
         let r = match ext {
             "svg" => crate::vector::export_svg(&self.doc, bi, &self.root).ok_or("export impossible".to_string()).and_then(|s| std::fs::write(&out, s).map_err(|e| e.to_string())),
+            "pdf" => crate::vector::print_pdf(&self.doc, bi, &self.root, self.print).and_then(|b| std::fs::write(&out, b).map_err(|e| e.to_string())),
             _ => crate::vector::export_png(&self.doc, bi, &self.root, self.export_scale).ok_or("export impossible".to_string()).and_then(|img| img.save(&out).map_err(|e| e.to_string())),
         };
         self.message = Some(match r {
