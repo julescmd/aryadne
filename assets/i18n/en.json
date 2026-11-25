@@ -2690,5 +2690,18 @@
   "os dans la chaîne": "bones in chain",
   "portée des os": "bone reach",
   "squelette": "skeleton",
-  "Os": "Bone"
+  "Os": "Bone",
+  "Pinceaux qui modèlent la surface : dessiner, argile, gonfler, lisser, saisir, aplatir, pincer": "Brushes that shape the surface: draw, clay, inflate, smooth, grab, flatten, pinch",
+  "quitter la sculpture": "leave sculpting",
+  "rayon ([ et ])": "radius ([ and ])",
+  "sculpture": "sculpt",
+  "SCULPTURE": "SCULPT",
+  "subdiviser tout le maillage, pour plus de détails": "subdivide the whole mesh for more detail",
+  "symétrie sur X": "X symmetry",
+  "argile": "clay",
+  "gonfler": "inflate",
+  "lisser (Maj)": "smooth (Shift)",
+  "saisir": "grab",
+  "aplatir": "flatten",
+  "pincer": "pinch"
 }

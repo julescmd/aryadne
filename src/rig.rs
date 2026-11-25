@@ -216,7 +216,8 @@ pub fn deform(scene: &Scene, model: usize, pos: &mut [V3]) {
     }
 }
 
-/// Le poids de l'os `bone` sur chaque sommet (pour l'affichage des poids).
+/// Le poids de l'os `bone` sur chaque sommet.
+#[cfg(test)]
 pub fn bone_weights(scene: &Scene, model: usize, bone: usize, pos: &[V3]) -> Vec<f32> {
     let o = &scene.objects[model];
     let Some(root) = scene.objects.iter().position(|x| x.name == o.skin && x.role == "bone") else { return vec![0.0; pos.len()] };

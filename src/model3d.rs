@@ -2160,6 +2160,34 @@ struct MeshEdit {
     knife: Option<Vec<crate::meshedit::KnifePoint>>,
 }
 
+/// Mode sculpture : pinceau, réglages, et le geste en cours
+struct SculptUi {
+    brush: crate::sculpt::Brush,
+    /// Rayon à l'écran (pixels) et force
+    radius: f32,
+    strength: f32,
+    sym: bool,
+    stroke: Option<SculptStroke>,
+    mirror: (usize, Vec<Option<u32>>),
+}
+
+/// Un geste de sculpture : positions au départ, sommets pris par « saisir » (et leurs reflets), voisins,
+/// souris au départ et à la dernière touche, point de départ sur la surface
+struct SculptStroke {
+    start: Vec<V3>,
+    grabbed: Vec<(Vec<(usize, f32)>, bool)>,
+    nb: Vec<Vec<u32>>,
+    at0: Pos2,
+    last: Pos2,
+    centre: V3,
+}
+
+impl SculptUi {
+    fn new() -> SculptUi {
+        SculptUi { brush: crate::sculpt::Brush::Draw, radius: 60.0, strength: 0.5, sym: true, stroke: None, mirror: (usize::MAX, vec![]) }
+    }
+}
+
 /// Outil réglé à la souris (biseau, incrustation, coupe en boucle), rejoué depuis le maillage de
 /// départ à chaque changement : pendant l'outil, puis dans le panneau « dernière opération ».
 struct ParamOp {
@@ -2561,6 +2589,7 @@ pub struct Viewer {
     box_sel: Option<Option<Pos2>>,
     /// Mode édition (Tab) : le maillage de l'objet actif, modifiable sommet par sommet
     mesh: Option<MeshEdit>,
+    sculpt: Option<SculptUi>,
     /// Mode édition : sommets déplacés pendant le geste, affichés sur place ; écrits au relâché
     mesh_moved: bool,
     /// Trajectoire de l'objet choisi : signature, points (une image sur deux au plus) et positions des clés
@@ -2772,6 +2801,7 @@ impl Viewer {
             box_sel: None,
             mesh: None,
             mesh_moved: false,
+            sculpt: None,
             motion_path: None,
             mesh_unsaved: false,
             mesh_map: None,
@@ -3484,9 +3514,13 @@ impl Viewer {
             }
         }
         let (Some((lo, hi)), Some(scene)) = (self.scene_frame, self.scene.as_ref()) else { return };
-        let Some(obj) = self.mesh.as_ref().map(|m| m.obj) else { return };
+        let Some(obj) = self.mesh.as_ref().map(|m| m.obj) else {
+            self.sculpt = None;
+            return;
+        };
         if obj >= scene.objects.len() || self.scene_sel != Some(obj) {
             self.mesh = None;
+            self.sculpt = None;
             return;
         }
         // De l'objet vers la scène : origine et axes ; et le chemin inverse
@@ -3515,6 +3549,7 @@ impl Viewer {
             self.xray = !self.xray;
         }
         let xray = self.xray;
+        let freeze_vis = self.sculpt.as_ref().is_some_and(|s| s.stroke.is_some());
         let me = self.mesh.as_mut().unwrap();
         me.sel.resize(me.mesh.pos.len(), false);
         // Comme Blender : sans rayons X, les sommets cachés derrière le maillage ne se voient
@@ -3542,7 +3577,7 @@ impl Viewer {
                 h.finish()
             };
             match &me.vis {
-                Some((k, v)) if *k == key && v.len() == me.mesh.pos.len() => v.clone(),
+                Some((k, v)) if (*k == key || freeze_vis) && v.len() == me.mesh.pos.len() => v.clone(),
                 _ => {
                     let vp: Vec<V3> = me.mesh.pos.iter().map(|&v| view(to_world(v))).collect();
                     let mut tris: Vec<[u32; 3]> = vec![];
@@ -3598,6 +3633,189 @@ impl Viewer {
             }
         };
         let idle = me.op.is_none() && me.modal.is_none() && me.loopcut.is_none() && me.boxing.is_none() && me.knife.is_none();
+        // ---- Sculpture : le pinceau remplace la sélection et les outils du mode édition
+        if let Some(sc) = self.sculpt.as_mut() {
+            use crate::sculpt::Brush;
+            let (shift, cmd, down, released) = ui.input(|i| (i.modifiers.shift, i.modifiers.command, i.pointer.primary_down(), i.pointer.primary_released()));
+            if !typing && hovered {
+                for (b, _, _, k) in crate::sculpt::BRUSHES {
+                    if Key::from_name(k).is_some_and(|kk| key(kk)) {
+                        sc.brush = b;
+                    }
+                }
+                if ui.input(|i| i.key_pressed(Key::OpenBracket)) {
+                    sc.radius = (sc.radius / 1.15).max(4.0);
+                }
+                if ui.input(|i| i.key_pressed(Key::CloseBracket)) {
+                    sc.radius = (sc.radius * 1.15).min(600.0);
+                }
+            }
+            // Annuler, rétablir
+            if !typing && ui.input(|i| i.modifiers.command && i.key_pressed(Key::Z)) && sc.stroke.is_none() {
+                let redo = ui.input(|i| i.modifiers.shift);
+                let (from, to) = if redo { (&mut me.redo, &mut me.hist) } else { (&mut me.hist, &mut me.redo) };
+                if let Some((m, sl)) = from.pop() {
+                    to.push((std::mem::replace(&mut me.mesh, m), std::mem::replace(&mut me.sel, sl)));
+                    let _ = me.mesh.write_obj(&me.file);
+                    self.scene_dirty = true;
+                    self.mesh_map = None;
+                }
+            }
+            if sc.mirror.0 != me.mesh.pos.len() {
+                sc.mirror = (me.mesh.pos.len(), me.mesh.mirror_map());
+            }
+            let brush = if shift { Brush::Smooth } else { sc.brush };
+            let r = sc.radius;
+            // Le point de la surface sous la souris (le sommet visible le plus proche à l'écran),
+            // et le rayon du pinceau ramené dans le repère du maillage, à sa profondeur
+            let probe = |me: &MeshEdit, at: Pos2| -> Option<(V3, f32)> {
+                let mut best: Option<(usize, f32)> = None;
+                for i in 0..me.mesh.pos.len() {
+                    if let Some(q) = project_v(me, i) {
+                        let d = (q - at).length();
+                        if d < r && best.is_none_or(|b| d < b.1) {
+                            best = Some((i, d));
+                        }
+                    }
+                }
+                let (i, _) = best?;
+                let c = me.mesh.pos[i];
+                let q = view(to_world(c));
+                let per_px = if cam.ortho { cam.dist / focal } else { -q[2] / focal } * longest;
+                let v = crate::meshedit::apply(&inv, cam.unrotate([r * per_px, 0.0, 0.0]));
+                Some((c, (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt().max(1e-6)))
+            };
+            // Les sommets dans la sphère du pinceau, chacun avec son atténuation ; et son reflet sur X
+            let sphere = |pos: &[V3], c: V3, rr: f32| -> Vec<(usize, f32)> {
+                pos.iter()
+                    .enumerate()
+                    .filter_map(|(i, p)| {
+                        let d = ((p[0] - c[0]).powi(2) + (p[1] - c[1]).powi(2) + (p[2] - c[2]).powi(2)).sqrt();
+                        (d < rr).then(|| (i, crate::sculpt::falloff(d / rr)))
+                    })
+                    .collect()
+            };
+            let sym = sc.sym;
+            let sets = |pos: &[V3], c: V3, rr: f32| -> Vec<(Vec<(usize, f32)>, bool)> {
+                let mut v = vec![(sphere(pos, c, rr), false)];
+                // Pinceau au milieu : un seul passage, sinon il compterait deux fois
+                if sym && c[0].abs() > rr * 0.05 {
+                    v.push((sphere(pos, [-c[0], c[1], c[2]], rr), true));
+                }
+                v
+            };
+            // Un clic sur la vue (pas sur la barre du bas) commence un geste
+            let bar = egui::Rect::from_center_size(pos2(rect.center().x, rect.bottom() - 52.0), egui::vec2(560.0, 44.0));
+            if let (true, true, Some(at)) = (pressed, hovered, cur) {
+                if !bar.contains(at) {
+                    if let Some((c, rr)) = probe(me, at) {
+                        snapshot(me);
+                        let grabbed = sets(&me.mesh.pos, c, rr);
+                        sc.stroke = Some(SculptStroke { start: me.mesh.pos.clone(), grabbed, nb: me.mesh.neighbors(), at0: at, last: at, centre: c });
+                    }
+                }
+            }
+            if let (Some(st), Some(at), true) = (sc.stroke.as_mut(), cur, down) {
+                if brush == Brush::Grab {
+                    // La souris bouge dans le plan de la vue, à la profondeur de la zone prise
+                    let q = view(to_world(st.centre));
+                    let per_px = if cam.ortho { cam.dist / focal } else { -q[2] / focal } * longest;
+                    let d = at - st.at0;
+                    let dl = crate::meshedit::apply(&inv, cam.unrotate([d.x * per_px, -d.y * per_px, 0.0]));
+                    for (set, _) in &st.grabbed {
+                        for &(i, _) in set {
+                            me.mesh.pos[i] = st.start[i];
+                        }
+                    }
+                    for (set, mirrored) in &st.grabbed {
+                        let dd = if *mirrored { [-dl[0], dl[1], dl[2]] } else { dl };
+                        crate::sculpt::grab(&mut me.mesh, set, dd);
+                    }
+                    st.last = at;
+                    self.mesh_moved = true;
+                } else if (at - st.last).length() > 1.5 || brush == Brush::Smooth {
+                    // Des touches régulières le long du trait, quelle que soit la vitesse de la souris
+                    let spacing = (r * 0.12).max(2.0);
+                    let n = (((at - st.last).length() / spacing).ceil() as usize).clamp(1, 12);
+                    for k in 1..=n {
+                        let q = st.last + (at - st.last) * (k as f32 / n as f32);
+                        let Some((c, rr)) = probe(me, q) else { continue };
+                        let step = rr * 0.025 * sc.strength;
+                        for (set, _) in sets(&me.mesh.pos, c, rr) {
+                            crate::sculpt::dab(&mut me.mesh, &st.nb, brush, &set, step, cmd);
+                        }
+                    }
+                    st.last = at;
+                    self.mesh_moved = true;
+                }
+                ui.ctx().request_repaint();
+            }
+            if released || (!down && sc.stroke.is_some()) {
+                sc.stroke = None;
+                self.mesh_unsaved = true;
+            }
+            // Le cercle du pinceau
+            let painter = ui.painter_at(rect);
+            if let Some(at) = cur.filter(|c| rect.contains(*c) && !bar.contains(*c)) {
+                let col = if cmd && brush != Brush::Smooth { Color32::from_rgb(110, 160, 255) } else { Color32::WHITE };
+                painter.circle_stroke(at, r, Stroke::new(1.5, col.gamma_multiply(0.85)));
+                painter.circle_stroke(at, r * 0.5, Stroke::new(1.0, col.gamma_multiply(0.35)));
+                if hovered {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
+                }
+            }
+            // La barre des pinceaux, en bas de la vue
+            let mut subdivide = false;
+            let mut leave = false;
+            let mut bui = ui.new_child(egui::UiBuilder::new().max_rect(bar).layout(egui::Layout::left_to_right(egui::Align::Center)));
+            egui::Frame::new().fill(p.panel).stroke(Stroke::new(1.0, p.line)).corner_radius(6.0).inner_margin(egui::Margin::symmetric(8, 5)).show(&mut bui, |ui| {
+                ui.spacing_mut().item_spacing.x = 3.0;
+                for (b, icon, name, k) in crate::sculpt::BRUSHES {
+                    let on = sc.brush == b;
+                    let bt = egui::Button::new(egui::RichText::new(icon).size(15.0).color(if on { p.on_accent } else { p.text })).fill(if on { p.accent } else { Color32::TRANSPARENT }).min_size(egui::vec2(28.0, 26.0));
+                    if ui.add(bt).on_hover_text(format!("{} ({k})", crate::i18n::t(name))).clicked() {
+                        sc.brush = b;
+                    }
+                }
+                ui.separator();
+                ui.label(egui::RichText::new(crate::lucide::CIRCLE).size(13.0).color(p.muted)).on_hover_text(crate::i18n::t("rayon ([ et ])"));
+                ui.add(egui::DragValue::new(&mut sc.radius).range(4.0..=600.0).speed(1.0).suffix(" px"));
+                ui.label(egui::RichText::new(crate::lucide::GAUGE).size(13.0).color(p.muted)).on_hover_text(crate::i18n::t("force"));
+                ui.add(egui::Slider::new(&mut sc.strength, 0.05..=2.0).show_value(false));
+                let on = sc.sym;
+                let sb = egui::Button::new(egui::RichText::new(crate::lucide::FLIP_HORIZONTAL_2).size(15.0).color(if on { p.on_accent } else { p.text })).fill(if on { p.accent } else { Color32::TRANSPARENT }).min_size(egui::vec2(28.0, 26.0));
+                if ui.add(sb).on_hover_text(crate::i18n::t("symétrie sur X")).clicked() {
+                    sc.sym = !sc.sym;
+                }
+                if ui.add(egui::Button::new(egui::RichText::new(crate::lucide::GRID_3X3).size(15.0)).fill(Color32::TRANSPARENT).min_size(egui::vec2(28.0, 26.0))).on_hover_text(crate::i18n::t("subdiviser tout le maillage, pour plus de détails")).clicked() {
+                    subdivide = true;
+                }
+                if ui.add(egui::Button::new(egui::RichText::new(crate::lucide::X).size(15.0)).fill(Color32::TRANSPARENT).min_size(egui::vec2(28.0, 26.0))).on_hover_text(crate::i18n::t("quitter la sculpture")).clicked() {
+                    leave = true;
+                }
+            });
+            if subdivide {
+                snapshot(me);
+                // Catmull-Clark : plus de sommets, et une surface arrondie plutôt qu'à facettes
+                let (tris, edges) = me.mesh.triangles();
+                let cols = vec![Color32::WHITE; tris.len()];
+                let (np, nt, _, ne) = catmull_clark(&me.mesh.pos, &tris, &cols, &edges, 1, false);
+                let (pp, polys, _) = rebuild_polygons(&np, &nt, &ne);
+                if !polys.is_empty() {
+                    me.mesh = crate::meshedit::EMesh { pos: pp, polys };
+                    me.sel = vec![false; me.mesh.pos.len()];
+                    let _ = me.mesh.write_obj(&me.file);
+                    self.scene_dirty = true;
+                    self.mesh_map = None;
+                } else {
+                    me.hist.pop();
+                }
+            }
+            if leave {
+                self.sculpt = None;
+            }
+            return;
+        }
         if idle && hovered && secondary && !ui.input(|i| i.modifiers.shift) {
             me.menu = cur.map(|c| (c, 0));
         }
@@ -6699,7 +6917,7 @@ impl Viewer {
                         }
                     }
                     Hdr::Mode => {
-                        let mode = if self.mesh.is_some() { "mode édition" } else if self.edit.is_some() { "UV et matériaux" } else { "mode objet" };
+                        let mode = if self.sculpt.is_some() { "sculpture" } else if self.mesh.is_some() { "mode édition" } else if self.edit.is_some() { "UV et matériaux" } else { "mode objet" };
                     egui::containers::menu::MenuButton::from_button(egui::Button::new(egui::RichText::new(format!("◆ {} ▾", crate::i18n::t(mode))).family(theme::bold()).size(12.0)).fill(p.panel)).ui(ui, |ui| {
                             ui.set_min_width(220.0);
                             if ui.selectable_label(self.mesh.is_none() && self.edit.is_none(), crate::i18n::t("mode objet")).clicked() {
@@ -6710,10 +6928,18 @@ impl Viewer {
                                 ui.close();
                             }
                             if is_scene {
-                                if ui.selectable_label(self.mesh.is_some(), format!("{}   Tab", crate::i18n::t("mode édition"))).on_hover_text(crate::i18n::t("Sommets, extrusion, faces de l'objet choisi")).clicked() {
+                                if ui.selectable_label(self.mesh.is_some() && self.sculpt.is_none(), format!("{}   Tab", crate::i18n::t("mode édition"))).on_hover_text(crate::i18n::t("Sommets, extrusion, faces de l'objet choisi")).clicked() {
+                                    self.sculpt = None;
                                     if self.mesh.is_none() {
                                         self.mesh_toggle = true;
                                     }
+                                    ui.close();
+                                }
+                                if ui.selectable_label(self.sculpt.is_some(), format!("{}  {}", crate::lucide::BRUSH, crate::i18n::t("sculpture"))).on_hover_text(crate::i18n::t("Pinceaux qui modèlent la surface : dessiner, argile, gonfler, lisser, saisir, aplatir, pincer")).clicked() {
+                                    if self.mesh.is_none() {
+                                        self.mesh_toggle = true;
+                                    }
+                                    self.sculpt = Some(SculptUi::new());
                                     ui.close();
                                 }
                                 if ui.selectable_label(false, crate::i18n::t("UV, matériaux et retopo")).on_hover_text(crate::i18n::t("IDs de matériau, coutures, UV et retopo de l'objet choisi")).clicked() {
@@ -8698,7 +8924,7 @@ impl Viewer {
             painter.text(rect.right_bottom() + vec2(-12.0, -10.0), egui::Align2::RIGHT_BOTTOM, &self.stats_text, egui::FontId::monospace(10.5), col);
         }
         if self.mesh.is_some() {
-            let g = painter.layout_no_wrap(crate::i18n::t("MODE ÉDITION"), egui::FontId::monospace(11.0), p.on_accent);
+            let g = painter.layout_no_wrap(crate::i18n::t(if self.sculpt.is_some() { "SCULPTURE" } else { "MODE ÉDITION" }), egui::FontId::monospace(11.0), p.on_accent);
             let r = egui::Rect::from_min_size(rect.right_top() + vec2(-g.size().x - 26.0, 56.0), g.size() + vec2(14.0, 8.0));
             painter.rect_filled(r, 4.0, p.accent);
             painter.galley(r.min + vec2(7.0, 4.0), g, p.on_accent);

@@ -3,6 +3,7 @@
 mod cloud;
 mod rig;
 mod scopes;
+mod sculpt;
 mod expr;
 mod bases;
 mod vector;

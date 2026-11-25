@@ -1790,7 +1790,6 @@ impl EMesh {
         }
     }
 
-    #[cfg(test)]
     pub fn triangles(&self) -> (Vec<[u32; 3]>, Vec<u8>) {
         let (mut tris, mut edges) = (vec![], vec![]);
         for p in &self.polys {

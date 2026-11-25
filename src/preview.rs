@@ -356,7 +356,7 @@ pub fn section(text: &str, title: &str) -> Option<String> {
 fn properties(ui: &mut egui::Ui, props: &[(String, Vec<String>)], ctx: &Ctx, out: &mut Option<Out>) {
     let p = theme::pal();
     // Édition en cours : (clé, texte) ; une clé vide avec « nouvelle » : la ligne d'ajout
-    let eid = ui.id().with("prop-edit");
+    let eid = ui.scope_id().with("prop-edit");
     let mut edit: Option<(String, String, String)> = ui.data(|d| d.get_temp(eid));
     let is_list = |k: &str, vals: &[String]| vals.len() > 1 || matches!(k.to_lowercase().as_str(), "tags" | "tag" | "aliases" | "alias" | "cssclasses");
     let parse = |k: &str, buf: &str, list: bool| -> Vec<String> {
@@ -383,7 +383,7 @@ fn properties(ui: &mut egui::Ui, props: &[(String, Vec<String>)], ctx: &Ctx, out
                     _ => crate::lucide::TEXT_ICON,
                 };
                 // Renommer partout : la clé devient un champ ; Entrée renomme dans toutes les notes
-                let rid = ui.id().with("prop-rename");
+                let rid = ui.scope_id().with("prop-rename");
                 let mut renaming: Option<(String, String)> = ui.data(|d| d.get_temp(rid));
                 match renaming.as_mut().filter(|r| &r.0 == k) {
                     Some(r) => {
@@ -449,11 +449,11 @@ fn properties(ui: &mut egui::Ui, props: &[(String, Vec<String>)], ctx: &Ctx, out
                                 }
                             }
                         });
-                        let r = ui.interact(row.response.rect, ui.id().with(("prop", k)), egui::Sense::click());
+                        let r = ui.interact(row.response.rect, ui.scope_id().with(("prop", k)), egui::Sense::click());
                         // Retirer la propriété : la corbeille paraît après la valeur, au survol de la ligne
                         let x = egui::Rect::from_center_size(egui::pos2(row.response.rect.right() + 14.0, row.response.rect.center().y), egui::vec2(18.0, 18.0));
                         if ui.rect_contains_pointer(row.response.rect.union(x)) {
-                            let xr = ui.interact(x, ui.id().with(("prop-del", k)), egui::Sense::click());
+                            let xr = ui.interact(x, ui.scope_id().with(("prop-del", k)), egui::Sense::click());
                             ui.painter().text(x.center(), egui::Align2::CENTER_CENTER, crate::lucide::TRASH_2, egui::FontId::proportional(12.0), if xr.hovered() { p.missing } else { p.muted });
                             if xr.clicked() {
                                 *out = Some(Out::SetProp { key: k.clone(), vals: None, list });
