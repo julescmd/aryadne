@@ -5,6 +5,7 @@ mod rig;
 mod scopes;
 mod story;
 mod story_ui;
+mod fountain;
 mod sculpt;
 mod transcribe;
 mod expr;
@@ -2649,10 +2650,10 @@ impl App {
             }
         }
         // Ctrl+E : lecture / édition d'une note (ailleurs, l'éditeur ouvert garde la touche : menu des arêtes en 3D)
-        let on_note = self.active.and_then(|i| self.docs.get(i)).is_some_and(|d| vault::is_md(&d.rel));
+        let on_note = self.active.and_then(|i| self.docs.get(i)).is_some_and(|d| vault::is_md(&d.rel) || fountain::is_fountain(&d.rel));
         if on_note && pressed(Modifiers::COMMAND, Key::E) {
             if let Some(d) = self.active.and_then(|i| self.docs.get_mut(i)) {
-                if vault::is_md(&d.rel) {
+                if vault::is_md(&d.rel) || fountain::is_fountain(&d.rel) {
                     d.preview = !d.preview;
                 }
             }
@@ -3391,7 +3392,7 @@ impl App {
                         if can_summarize && ui.add(egui::Button::new(egui::RichText::new(lucide::SPARKLES).size(14.0)).min_size(egui::vec2(24.0, 20.0))).on_hover_text(crate::i18n::t("Résumé IA de ce fichier")).clicked() {
                             self.actions.push(Action::Summarize);
                         }
-                        if is_md {
+                        if is_md || fountain::is_fountain(&self.docs[i].rel) {
                             // Texte (édition) ou Lecture (rendu), comme des onglets
                             let d = &mut self.docs[i];
                             ui.add_space(4.0);
@@ -3439,6 +3440,7 @@ impl App {
             ui.painter().hline(br.x_range(), br.bottom(), egui::Stroke::new(1.0, p.line));
             }
 
+            let vault_root = self.root();
             let doc = &mut self.docs[i];
             match &mut doc.content {
                 Content::Unreadable(msg) => {
@@ -3614,6 +3616,37 @@ impl App {
                         images::Slot::Failed(e) => {
                             ui.label(RichText::new(e).color(p.missing));
                         }
+                    }
+                }
+                Content::Text(text) if doc.preview && fountain::is_fountain(&doc.rel) => {
+                    let mut act = None;
+                    egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
+                        ui.with_layout(egui::Layout::top_down(egui::Align::Center), |ui| {
+                            ui.set_max_width(760.0_f32.min(ui.available_width()));
+                            egui::Frame::new().inner_margin(egui::Margin { left: 16, right: 16, top: 20, bottom: 60 }).show(ui, |ui| {
+                                act = fountain::show(ui, text);
+                            });
+                        });
+                    });
+                    match act {
+                        Some(1) => {
+                            let stem = std::path::Path::new(&rel).file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+                            if let Some(f) = rfd::FileDialog::new().set_file_name(format!("{stem}.pdf")).add_filter("PDF", &["pdf"]).save_file() {
+                                let r = std::fs::write(&f, fountain::pdf(text)).map_err(|e| e.to_string());
+                                self.toast = Some((match r {
+                                    Ok(_) => format!("{} {}", crate::i18n::t("exporté :"), f.display()),
+                                    Err(e) => e,
+                                }, Instant::now()));
+                            }
+                        }
+                        Some(2) => {
+                            self.toast = Some((match fountain::breakdown(&vault_root, &rel, text) {
+                                Ok(n) => format!("{n} {}", crate::i18n::t_mid("notes créées (personnages et décors)")),
+                                Err(e) => e,
+                            }, Instant::now()));
+                            live::bump();
+                        }
+                        _ => {}
                     }
                 }
                 Content::Text(text) if doc.preview => {

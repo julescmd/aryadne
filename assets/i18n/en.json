@@ -2821,5 +2821,15 @@
   "MP4…": "MP4…",
   "GIF…": "GIF…",
   "exporter l'animation en vidéo": "export the animation as video",
-  "exporter l'animation en GIF animé": "export the animation as an animated GIF"
+  "exporter l'animation en GIF animé": "export the animation as an animated GIF",
+  "page": "page",
+  "pages": "pages",
+  "séquences": "scenes",
+  "personnages": "characters",
+  "exporter le scénario en PDF (Courier 12, mise en page standard)": "export the screenplay as PDF (Courier 12, standard layout)",
+  "dépouillement": "breakdown",
+  "Crée une note par personnage et par décor (s'ils n'existent pas), liées au scénario": "Creates a note per character and location (if missing), linked to the screenplay",
+  "notes créées (personnages et décors)": "notes created (characters and locations)",
+  "nouveau scénario (Fountain)": "new screenplay (Fountain)",
+  "séquence": "scene"
 }

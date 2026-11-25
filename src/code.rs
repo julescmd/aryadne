@@ -1317,6 +1317,19 @@ pub fn symbols(text: &str, lang: &str) -> Vec<Symbol> {
         m
     });
     let mut out = vec![];
+    if lang == "fountain" {
+        // Scénario : les séquences, et les sections #
+        for (i, l) in text.lines().enumerate() {
+            let t = l.trim();
+            let u = t.to_uppercase();
+            if (t.starts_with('.') && !t.starts_with("..")) || ["INT.", "EXT.", "INT/EXT", "EST.", "I/E"].iter().any(|p| u.starts_with(p)) {
+                out.push(Symbol { line: i, depth: 1, name: t.trim_start_matches('.').to_string(), kind: "séquence" });
+            } else if let Some(h) = t.strip_prefix('#') {
+                out.push(Symbol { line: i, depth: 0, name: h.trim_start_matches('#').trim().to_string(), kind: "section" });
+            }
+        }
+        return out;
+    }
     if lang == "md" {
         let mut code = false;
         for (i, l) in text.lines().enumerate() {

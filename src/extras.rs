@@ -100,6 +100,7 @@ pub enum Cmd {
     NewVector,
     NewStory,
     NewProduction,
+    NewScript,
 }
 
 impl App {
@@ -128,6 +129,7 @@ impl App {
             ("nouveau dessin vectoriel", "", Cmd::NewVector),
             ("nouveau storyboard", "", Cmd::NewStory),
             ("nouveau suivi de production", "", Cmd::NewProduction),
+            ("nouveau scénario (Fountain)", "", Cmd::NewScript),
             ("nouveau matériau (nodes)", "", Cmd::NewMaterial),
             ("nouveau compositing (nodes)", "", Cmd::NewCompositor),
             ("importer des fichiers…", "", Cmd::Import),
@@ -288,6 +290,7 @@ impl App {
             Cmd::NewLayered => self.new_untitled(crate::formats::ext("mat"), |p| nodes::Graph::new_layered().save(p)),
             Cmd::NewCompositor => self.new_untitled(crate::formats::ext("comp"), |p| nodes::Graph::new_compositor().save(p)),
             Cmd::NewVector => self.new_untitled(crate::formats::ext("vector"), |p| crate::vector::Doc::starter().save(p)),
+            Cmd::NewScript => self.new_untitled("fountain", |p| crate::vault::atomic_write(p, crate::fountain::STARTER).map_err(|e| e.to_string())),
             Cmd::NewProduction => {
                 let root = self.root();
                 let r = production_starter(&root);
