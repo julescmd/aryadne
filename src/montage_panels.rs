@@ -1698,14 +1698,17 @@ impl Editor {
             v.hovered.bg_stroke = Stroke::NONE;
         }
         hui.spacing_mut().item_spacing.x = 6.0;
-        egui::Frame::new().fill(p.field).stroke(Stroke::new(1.0, p.line)).corner_radius(6).inner_margin(2).show(&mut hui, |ui| {
-            ui.spacing_mut().item_spacing.x = 1.0;
-            for (tool, key, tip) in TOOLS {
-                let tip = format!("{} ({key})", crate::i18n::t(tip));
-                if icon_button(ui, Icon::Tool(tool), self.tool == tool, &tip).clicked() {
-                    self.tool = tool;
+        // Le groupe d'outils garde sa hauteur (sinon le cadre colle aux bords de la barre)
+        hui.allocate_ui_with_layout(vec2(600.0, 30.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+            egui::Frame::new().fill(p.field).stroke(Stroke::new(1.0, p.line)).corner_radius(7).inner_margin(egui::Margin::symmetric(4, 3)).show(ui, |ui| {
+                ui.spacing_mut().item_spacing.x = 2.0;
+                for (tool, key, tip) in TOOLS {
+                    let tip = format!("{} ({key})", crate::i18n::t(tip));
+                    if icon_button(ui, Icon::Tool(tool), self.tool == tool, &tip).clicked() {
+                        self.tool = tool;
+                    }
                 }
-            }
+            });
         });
         let mag = self.project.magnetic;
         let b = egui::Button::new(RichText::new(crate::lucide::MAGNET).size(14.0).color(if mag { p.text } else { p.muted })).fill(if mag { p.selection } else { Color32::TRANSPARENT }).corner_radius(12);
