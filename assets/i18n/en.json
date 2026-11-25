@@ -2989,5 +2989,9 @@
   "relecture par l'IA": "AI proofreading",
   "propriétés proposées par l'IA": "properties suggested by AI",
   "explication de l'erreur": "error explanation",
-  "Des corrections une par une, sans réécrire ton texte": "Corrections one by one, without rewriting your text"
+  "Des corrections une par une, sans réécrire ton texte": "Corrections one by one, without rewriting your text",
+  "crayon : un trait à main levée, lissé (finir près du départ : fermé)": "pencil: a smoothed freehand stroke (end near the start: closed)",
+  "Simplifier : moins de points, même allure": "Simplify: fewer points, same shape",
+  "Couper le tracé au point choisi (sélection directe)": "Cut the path at the chosen point (direct selection)",
+  "Choisis un point avec la sélection directe (A)": "Pick a point with direct selection (A)"
 }

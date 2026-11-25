@@ -1328,6 +1328,172 @@ pub fn trace(img: &image::RgbaImage, threshold: f32, detail: f32) -> (Vec<Vec<No
     (out, color)
 }
 
+/// Des points (un geste, un tracé aplati) deviennent peu de nœuds lisses : on garde les points
+/// qui s'écartent de plus de `eps`, et chaque angle doux reçoit des poignées
+pub fn fit_nodes(pts: &[[f32; 2]], eps: f32, closed: bool) -> Vec<Node> {
+    fn rdp(pts: &[[f32; 2]], eps: f32, keep: &mut Vec<bool>, a: usize, b: usize) {
+        if b <= a + 1 {
+            return;
+        }
+        let (pa, pb) = (pts[a], pts[b]);
+        let ab = [pb[0] - pa[0], pb[1] - pa[1]];
+        let len = (ab[0] * ab[0] + ab[1] * ab[1]).sqrt();
+        let (mut far, mut fi) = (0.0f32, a);
+        for (i, p) in pts.iter().enumerate().take(b).skip(a + 1) {
+            let d = if len < 1e-6 { ((p[0] - pa[0]).powi(2) + (p[1] - pa[1]).powi(2)).sqrt() } else { ((p[0] - pa[0]) * ab[1] - (p[1] - pa[1]) * ab[0]).abs() / len };
+            if d > far {
+                far = d;
+                fi = i;
+            }
+        }
+        if far > eps {
+            keep[fi] = true;
+            rdp(pts, eps, keep, a, fi);
+            rdp(pts, eps, keep, fi, b);
+        }
+    }
+    if pts.len() < 2 {
+        return pts.iter().map(|p| Node::corner(*p)).collect();
+    }
+    let mut keep = vec![false; pts.len()];
+    keep[0] = true;
+    keep[pts.len() - 1] = true;
+    rdp(pts, eps, &mut keep, 0, pts.len() - 1);
+    let mut simp: Vec<[f32; 2]> = pts.iter().zip(&keep).filter(|x| *x.1).map(|x| *x.0).collect();
+    if closed && simp.len() > 2 && (simp[0][0] - simp[simp.len() - 1][0]).hypot(simp[0][1] - simp[simp.len() - 1][1]) < eps {
+        simp.pop();
+    }
+    let n = simp.len();
+    (0..n)
+        .map(|k| {
+            let p = simp[k];
+            let (a, b) = if closed { (simp[(k + n - 1) % n], simp[(k + 1) % n]) } else { (simp[k.saturating_sub(1)], simp[(k + 1).min(n - 1)]) };
+            if !closed && (k == 0 || k + 1 == n) {
+                // Les bouts : une poignée vers le voisin seulement
+                let q = if k == 0 { b } else { a };
+                let h = [(q[0] - p[0]) / 3.0, (q[1] - p[1]) / 3.0];
+                return if k == 0 { Node { p, i: p, o: [p[0] + h[0], p[1] + h[1]] } } else { Node { p, i: [p[0] + h[0], p[1] + h[1]], o: p } };
+            }
+            let (d1, d2) = ([p[0] - a[0], p[1] - a[1]], [b[0] - p[0], b[1] - p[1]]);
+            let (l1, l2) = ((d1[0] * d1[0] + d1[1] * d1[1]).sqrt().max(1e-6), (d2[0] * d2[0] + d2[1] * d2[1]).sqrt().max(1e-6));
+            if (d1[0] * d2[0] + d1[1] * d2[1]) / (l1 * l2) < 0.2 {
+                return Node::corner(p);
+            }
+            let t = [(b[0] - a[0]) / (l1 + l2), (b[1] - a[1]) / (l1 + l2)];
+            Node { p, i: [p[0] - t[0] * l1 / 3.0, p[1] - t[1] * l1 / 3.0], o: [p[0] + t[0] * l2 / 3.0, p[1] + t[1] * l2 / 3.0] }
+        })
+        .collect()
+}
+
+impl Doc {
+    /// Les nœuds d'un tracé dans le repère du monde (position et rotation appliquées)
+    pub fn path_world(&self, id: u64) -> Option<(Vec<Node>, bool)> {
+        let s = self.get(id)?;
+        let Kind::Path { nodes, closed } = &s.kind else { return None };
+        let (sn, cs) = s.rot.to_radians().sin_cos();
+        let t = |p: [f32; 2]| [s.x + p[0] * cs - p[1] * sn, s.y + p[0] * sn + p[1] * cs];
+        Some((nodes.iter().map(|n| Node { p: t(n.p), i: t(n.i), o: t(n.o) }).collect(), *closed))
+    }
+
+    /// Moins de points pour un tracé, même allure (tolérance en unités)
+    pub fn simplify_path(&mut self, id: u64, eps: f32) -> Option<usize> {
+        let s = self.get(id)?.clone();
+        let Kind::Path { nodes, closed } = &s.kind else { return None };
+        let pts: Vec<[f32; 2]> = crate::vgeom::flatten(nodes, *closed).into_iter().map(|x| x.0).collect();
+        let fitted = fit_nodes(&pts, eps, *closed);
+        let n = fitted.len();
+        if let Some(sh) = self.shapes.iter_mut().find(|x| x.id == id) {
+            sh.kind = Kind::Path { nodes: fitted, closed: *closed };
+        }
+        Some(n)
+    }
+
+    /// Coupe un tracé au nœud `k` : un tracé fermé s'ouvre là, un tracé ouvert devient deux
+    pub fn cut_path(&mut self, id: u64, k: usize) -> Option<u64> {
+        let s = self.get(id)?.clone();
+        let Kind::Path { nodes, closed } = &s.kind else { return None };
+        if k >= nodes.len() {
+            return None;
+        }
+        if *closed {
+            let mut v: Vec<Node> = nodes[k..].iter().chain(nodes[..k].iter()).copied().collect();
+            v.push(nodes[k]);
+            if let Some(sh) = self.shapes.iter_mut().find(|x| x.id == id) {
+                sh.kind = Kind::Path { nodes: v, closed: false };
+            }
+            return Some(id);
+        }
+        if k == 0 || k + 1 >= nodes.len() {
+            return None;
+        }
+        let (a, b) = (nodes[..=k].to_vec(), nodes[k..].to_vec());
+        if let Some(sh) = self.shapes.iter_mut().find(|x| x.id == id) {
+            sh.kind = Kind::Path { nodes: a, closed: false };
+        }
+        let nid = self.new_id();
+        let mut c = s.clone();
+        c.id = nid;
+        c.name = format!("{} 2", s.name);
+        c.kind = Kind::Path { nodes: b, closed: false };
+        let at = self.index(id).map(|i| i + 1).unwrap_or(self.shapes.len());
+        self.shapes.insert(at, c);
+        if s.parent != 0 {
+            if let Some(Shape { kind: Kind::Group { children, .. }, .. }) = self.shapes.iter_mut().find(|x| x.id == s.parent) {
+                children.push(nid);
+            }
+        }
+        Some(nid)
+    }
+
+    /// Joint deux tracés ouverts par leurs bouts les plus proches (un seul : il se ferme) ; rend le tracé obtenu
+    pub fn join_paths(&mut self, a: u64, b: Option<u64>) -> Option<u64> {
+        let Some(b) = b else {
+            if let Some(Shape { kind: Kind::Path { closed, .. }, .. }) = self.shapes.iter_mut().find(|x| x.id == a) {
+                *closed = true;
+            }
+            return Some(a);
+        };
+        let (mut na, ca) = self.path_world(a)?;
+        let (mut nb, cb) = self.path_world(b)?;
+        if ca || cb || na.is_empty() || nb.is_empty() {
+            return None;
+        }
+        let rev = |v: &mut Vec<Node>| {
+            v.reverse();
+            for n in v.iter_mut() {
+                std::mem::swap(&mut n.i, &mut n.o);
+            }
+        };
+        let d = |p: [f32; 2], q: [f32; 2]| (p[0] - q[0]).hypot(p[1] - q[1]);
+        // Les quatre façons de mettre bout à bout : la plus courte
+        let opts = [d(na[na.len() - 1].p, nb[0].p), d(na[na.len() - 1].p, nb[nb.len() - 1].p), d(na[0].p, nb[0].p), d(na[0].p, nb[nb.len() - 1].p)];
+        let best = (0..4).min_by(|x, y| opts[*x].total_cmp(&opts[*y])).unwrap_or(0);
+        match best {
+            1 => rev(&mut nb),
+            2 => rev(&mut na),
+            3 => {
+                rev(&mut na);
+                rev(&mut nb);
+            }
+            _ => {}
+        }
+        // Bouts confondus : un seul nœud
+        if d(na[na.len() - 1].p, nb[0].p) < 0.5 {
+            let last = na.pop().unwrap();
+            nb[0].i = last.i;
+        }
+        na.extend(nb);
+        let s = self.get(a)?.clone();
+        if let Some(sh) = self.shapes.iter_mut().find(|x| x.id == a) {
+            (sh.x, sh.y, sh.rot) = (0.0, 0.0, 0.0);
+            sh.kind = Kind::Path { nodes: na, closed: false };
+        }
+        let _ = s;
+        self.remove(&[b]);
+        Some(a)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1372,6 +1538,26 @@ mod tests {
         }
         d.apply_layouts();
         assert_eq!(d.bounds(d.get(ids[1]).unwrap())[0], 180.0);
+    }
+
+    #[test]
+    fn outils_de_trace() {
+        // Un geste en arc : peu de nœuds, lisses
+        let pts: Vec<[f32; 2]> = (0..=60).map(|k| { let a = k as f32 / 60.0 * std::f32::consts::PI; [100.0 * a.cos(), 100.0 * a.sin()] }).collect();
+        let n = fit_nodes(&pts, 1.0, false);
+        assert!(n.len() < 20 && n.len() >= 4, "{}", n.len());
+        let mut d = Doc::starter();
+        let a = d.new_id();
+        d.shapes.push(Shape { id: a, kind: Kind::Path { nodes: vec![Node::corner([0.0, 0.0]), Node::corner([10.0, 0.0])], closed: false }, ..Shape::base() });
+        let b = d.new_id();
+        d.shapes.push(Shape { id: b, kind: Kind::Path { nodes: vec![Node::corner([30.0, 0.0]), Node::corner([10.0, 0.0])], closed: false }, x: 0.0, ..Shape::base() });
+        let j = d.join_paths(a, Some(b)).unwrap();
+        let Kind::Path { nodes, .. } = &d.get(j).unwrap().kind else { panic!() };
+        assert_eq!(nodes.iter().map(|n| n.p[0]).collect::<Vec<_>>(), vec![0.0, 10.0, 30.0]);
+        assert!(d.get(b).is_none());
+        let c = d.cut_path(j, 1).unwrap();
+        assert_ne!(c, j);
+        assert!(matches!(&d.get(c).unwrap().kind, Kind::Path { nodes, .. } if nodes.len() == 2));
     }
 
     #[test]

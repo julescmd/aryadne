@@ -21,12 +21,14 @@ pub enum Tool {
     Board,
     Width,
     Builder,
+    Pencil,
 }
 
-const TOOLS: [(Tool, &str, &str, &str); 12] = [
+const TOOLS: [(Tool, &str, &str, &str); 13] = [
     (Tool::Select, l::MOUSE_POINTER_2, "sélection", "V"),
     (Tool::Direct, l::MOUSE_POINTER, "sélection directe : les points d'un tracé", "A"),
     (Tool::Pen, l::PEN_TOOL, "plume : clic pour un point, glisser pour une courbe", "P"),
+    (Tool::Pencil, l::PENCIL, "crayon : un trait à main levée, lissé (finir près du départ : fermé)", "N"),
     (Tool::Rect, l::SQUARE, "rectangle (Maj : carré)", "R"),
     (Tool::Ellipse, l::CIRCLE, "ellipse (Maj : cercle)", "E"),
     (Tool::Polygon, l::HEXAGON, "polygone", "Y"),
@@ -54,6 +56,8 @@ enum Drag {
     PenHandle { id: u64 },
     BoardMove { i: usize, from: [f32; 2], orig: Board, shapes: Vec<(u64, f32, f32)> },
     BoardCreate { from: [f32; 2] },
+    /// Crayon : le tracé et les points du geste (monde)
+    Pencil { id: u64, pts: Vec<[f32; 2]> },
 }
 
 pub struct Editor {
@@ -594,6 +598,7 @@ impl Editor {
         let mut ch = false;
         let mut outline_text: Option<u64> = None;
         let single = (self.sel.len() == 1).then(|| self.sel[0]);
+        let mut path_act: Option<&'static str> = None;
         if let Some(id) = single {
             let root = self.root.clone();
             let _ = root;
@@ -659,6 +664,13 @@ impl Editor {
                     ui.horizontal(|ui| {
                         ui.label(egui::RichText::new(format!("{} {}", nodes.len(), crate::i18n::t_mid("points"))).color(p.muted));
                         ch |= ui.checkbox(closed, crate::i18n::t("fermé")).changed();
+                        if ui.button(l::SPLINE_POINTER).on_hover_text(crate::i18n::t("Simplifier : moins de points, même allure")).clicked() {
+                            path_act = Some("simplify");
+                        }
+                        let one_node = self.nodes_sel.iter().filter(|(i, _)| *i == id).count() == 1;
+                        if ui.add_enabled(one_node, egui::Button::new(l::SCISSORS)).on_hover_text(crate::i18n::t("Couper le tracé au point choisi (sélection directe)")).on_disabled_hover_text(crate::i18n::t("Choisis un point avec la sélection directe (A)")).clicked() {
+                            path_act = Some("cut");
+                        }
                     });
                 }
                 Kind::Text { text, size, font, align, width, spacing, leading } => {
@@ -1000,6 +1012,27 @@ impl Editor {
         }
         if let Some(id) = outline_text {
             self.outline_text(id);
+            ch = true;
+        }
+        // Outils de tracé : simplifier, couper au point choisi
+        if let (Some(act), Some(id)) = (path_act, single) {
+            self.doc = snapshot.clone();
+            match act {
+                "simplify" => {
+                    let tol = 1.5 / self.zoom.max(0.01);
+                    if let Some(n) = self.doc.simplify_path(id, tol) {
+                        self.message = Some(format!("{n} {}", crate::i18n::t_mid("points")));
+                    }
+                }
+                _ => {
+                    if let Some(k) = self.nodes_sel.iter().find(|(i, _)| *i == id).map(|x| x.1) {
+                        if let Some(n) = self.doc.cut_path(id, k) {
+                            self.sel = if n == id { vec![id] } else { vec![id, n] };
+                        }
+                        self.nodes_sel.clear();
+                    }
+                }
+            }
             ch = true;
         }
         if ch {
@@ -1808,6 +1841,12 @@ impl Editor {
                 Some(Drag::Create { from: w, id })
             }
             Tool::Board => Some(Drag::BoardCreate { from: self.snap_point(w) }),
+            Tool::Pencil => {
+                self.checkpoint();
+                let id = self.new_shape(Kind::Path { nodes: vec![Node::corner([0.0, 0.0])], closed: false }, w[0], w[1]);
+                self.sel = vec![id];
+                Some(Drag::Pencil { id, pts: vec![w] })
+            }
             Tool::Width | Tool::Builder => None,
         }
     }
@@ -1867,13 +1906,26 @@ impl Editor {
     }
 
     fn update(&mut self, w: [f32; 2], d: egui::Vec2, shift: bool, alt: bool) {
+        // Crayon : un point de plus quand la souris a assez bougé ; le trait brut s'affiche pendant le geste
+        if let Some(Drag::Pencil { id, pts }) = &mut self.drag {
+            let id = *id;
+            if pts.last().is_none_or(|q| (q[0] - w[0]).hypot(q[1] - w[1]) * self.zoom > 1.5) {
+                pts.push(w);
+                let o = pts[0];
+                let nodes: Vec<Node> = pts.iter().map(|q| Node::corner([q[0] - o[0], q[1] - o[1]])).collect();
+                if let Some(s) = self.shape_mut(id) {
+                    s.kind = Kind::Path { nodes, closed: false };
+                }
+            }
+            return;
+        }
         let Some(drag) = self.drag.take() else { return };
         match &drag {
             Drag::Pan => {
                 self.center[0] -= d.x / self.zoom;
                 self.center[1] -= d.y / self.zoom;
             }
-            Drag::Marquee(_) => {}
+            Drag::Marquee(_) | Drag::Pencil { .. } => {}
             Drag::Move { from, orig, bounds } => {
                 let (mut dx, mut dy) = (w[0] - from[0], w[1] - from[1]);
                 if shift {
@@ -2092,6 +2144,22 @@ impl Editor {
                     }
                 }
             }
+            Some(Drag::Pencil { id, pts }) => {
+                // Lissé : peu de nœuds, courbes douces ; fini près du départ, le tracé se ferme
+                let o = pts[0];
+                let local: Vec<[f32; 2]> = pts.iter().map(|q| [q[0] - o[0], q[1] - o[1]]).collect();
+                let near = pts.len() > 8 && (pts[0][0] - pts[pts.len() - 1][0]).hypot(pts[0][1] - pts[pts.len() - 1][1]) * self.zoom < 12.0;
+                if local.len() < 2 {
+                    self.doc.remove(&[id]);
+                    self.sel.clear();
+                } else {
+                    let nodes = crate::vector::fit_nodes(&local, 2.5 / self.zoom, near);
+                    if let Some(s) = self.shape_mut(id) {
+                        s.kind = Kind::Path { nodes, closed: near };
+                    }
+                }
+                self.changed();
+            }
             Some(Drag::Create { id, .. }) => {
                 // Un simple clic : une forme de taille par défaut
                 let tiny = self.doc.get(id).map(|s| self.doc.bounds(s)).is_some_and(|b| (b[2] - b[0]) < 3.0 && (b[3] - b[1]) < 3.0);
@@ -2300,6 +2368,16 @@ impl Editor {
                 self.sel = vec![g];
             }
             self.changed();
+        } else if cmd && k(egui::Key::J) && !self.sel.is_empty() {
+            // Ctrl+J : joindre deux tracés ouverts, ou fermer un tracé
+            let paths: Vec<u64> = self.sel.iter().copied().filter(|i| matches!(self.doc.get(*i).map(|s| &s.kind), Some(Kind::Path { .. }))).collect();
+            if !paths.is_empty() && paths.len() <= 2 {
+                self.checkpoint();
+                if let Some(j) = self.doc.join_paths(paths[0], paths.get(1).copied()) {
+                    self.sel = vec![j];
+                }
+                self.changed();
+            }
         } else if cmd && k(egui::Key::G) && !self.sel.is_empty() {
             self.checkpoint();
             self.combine(0);
