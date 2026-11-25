@@ -270,6 +270,59 @@ pub struct Shape {
     /// Variable de couleur du remplissage (comme Figma) : sa valeur suit le mode du plan
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub fill_var: String,
+    /// État au survol, en présentation (composant interactif) : autre remplissage, opacité, ombre
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hover: Option<Hover>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct Hover {
+    /// Remplissage au survol (aucun : inchangé)
+    pub fill: Option<[u8; 4]>,
+    pub opacity: f32,
+    /// Ombre portée au survol (la forme se soulève)
+    #[serde(default)]
+    pub lift: bool,
+}
+
+impl Default for Hover {
+    fn default() -> Self {
+        Hover { fill: None, opacity: 1.0, lift: true }
+    }
+}
+
+impl Doc {
+    /// Le document tel qu'on le voit quand la souris survole la forme `id` (et ce qu'elle contient)
+    pub fn hovered(&self, id: u64) -> Doc {
+        let mut d = self.clone();
+        let Some(h) = self.get(id).and_then(|s| s.hover.clone()) else { return d };
+        if let Some(s) = d.shapes.iter_mut().find(|s| s.id == id) {
+            if let Some(c) = h.fill {
+                match s.fills.first_mut() {
+                    Some(f) => *f = Paint::Solid { c },
+                    None => s.fills.push(Paint::Solid { c }),
+                }
+                // Un groupe (bouton) : son fond, la première forme, prend la couleur
+                if let Kind::Group { children, .. } = &s.kind {
+                    if let Some(&first) = children.first() {
+                        if let Some(bg) = d.shapes.iter_mut().find(|x| x.id == first) {
+                            match bg.fills.first_mut() {
+                                Some(f) => *f = Paint::Solid { c },
+                                None => bg.fills.push(Paint::Solid { c }),
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(s) = d.shapes.iter_mut().find(|s| s.id == id) {
+            s.opacity *= h.opacity;
+            if h.lift && s.shadow.is_none() {
+                s.shadow = Some(Shadow { dx: 0.0, dy: 6.0, blur: 18.0, c: [0, 0, 0, 70], inner: false });
+            }
+        }
+        d
+    }
 }
 
 fn is_default_c(c: &[u8; 2]) -> bool {
@@ -777,7 +830,7 @@ fn union(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {
 
 impl Shape {
     pub fn base() -> Shape {
-        Shape { id: 0, name: String::new(), kind: Kind::Rect { w: 100.0, h: 100.0, r: [0.0; 4] }, x: 0.0, y: 0.0, rot: 0.0, fills: vec![], strokes: vec![], opacity: 1.0, visible: true, locked: false, parent: 0, shadow: None, blur: 0.0, blend: String::new(), layout: None, component: false, instance_of: 0, widths: vec![], constraint: [0, 0], style: String::new(), link: String::new(), on_path: 0, fill_var: String::new() }
+        Shape { id: 0, name: String::new(), kind: Kind::Rect { w: 100.0, h: 100.0, r: [0.0; 4] }, x: 0.0, y: 0.0, rot: 0.0, fills: vec![], strokes: vec![], opacity: 1.0, visible: true, locked: false, parent: 0, shadow: None, blur: 0.0, blend: String::new(), layout: None, component: false, instance_of: 0, widths: vec![], constraint: [0, 0], style: String::new(), link: String::new(), on_path: 0, fill_var: String::new(), hover: None }
     }
 
     pub fn kind_label(&self) -> &'static str {
@@ -2290,6 +2343,19 @@ impl Doc {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn etat_au_survol() {
+        let mut d = Doc::default();
+        d.shapes.push(Shape { id: 1, fills: vec![Paint::Solid { c: [10, 10, 10, 255] }], hover: Some(Hover { fill: Some([200, 0, 0, 255]), opacity: 0.5, lift: true }), ..Shape::base() });
+        let h = d.hovered(1);
+        assert_eq!(h.shapes[0].fills[0], Paint::Solid { c: [200, 0, 0, 255] });
+        assert_eq!(h.shapes[0].opacity, 0.5);
+        assert!(h.shapes[0].shadow.is_some());
+        // L'original ne bouge pas
+        assert_eq!(d.shapes[0].fills[0], Paint::Solid { c: [10, 10, 10, 255] });
+    }
+
 
     #[test]
     fn animation_des_plans() {

@@ -1030,6 +1030,40 @@ impl Editor {
                     });
                 });
             }
+            // Composant interactif : son état au survol, en présentation
+            ui.horizontal(|ui| {
+                let mut on = s.hover.is_some();
+                if ui.checkbox(&mut on, crate::i18n::t("état au survol")).on_hover_text(crate::i18n::t("En présentation, la forme change quand la souris passe dessus (bouton, carte)")).changed() {
+                    s.hover = on.then(|| crate::vector::Hover { fill: s.fills.first().map(|f| {
+                        let c = f.first();
+                        // Un peu plus clair par défaut
+                        [c[0].saturating_add(24), c[1].saturating_add(24), c[2].saturating_add(24), c[3]]
+                    }), ..Default::default() });
+                    ch = true;
+                }
+            });
+            if let Some(h) = &mut s.hover {
+                crate::modifiers::row(ui, &crate::i18n::t("couleur"), |ui| {
+                    let mut has = h.fill.is_some();
+                    if ui.checkbox(&mut has, "").changed() {
+                        h.fill = has.then_some([120, 120, 130, 255]);
+                        ch = true;
+                    }
+                    if let Some(c) = &mut h.fill {
+                        let mut col = c32(*c);
+                        if ui.color_edit_button_srgba(&mut col).changed() {
+                            *c = arr(col);
+                            ch = true;
+                        }
+                    }
+                });
+                crate::modifiers::row(ui, &crate::i18n::t("opacité"), |ui| {
+                    ch |= ui.add(egui::Slider::new(&mut h.opacity, 0.0..=1.0).show_value(false)).changed();
+                });
+                crate::modifiers::row(ui, &crate::i18n::t("se soulève"), |ui| {
+                    ch |= ui.checkbox(&mut h.lift, "").on_hover_text(crate::i18n::t("Une ombre apparaît sous la forme au survol")).changed();
+                });
+            }
             // Contraintes (comme Figma) : ce que fait la forme quand le plan de travail change de taille
             if s.parent == 0 {
                 ui.horizontal(|ui| {
@@ -1870,11 +1904,21 @@ impl Editor {
         let b = self.doc.boards[bi].clone();
         let k = ((rect.width() - 40.0) / b.w).min((rect.height() - 60.0) / b.h).max(0.01);
         let r = Rect::from_center_size(rect.center(), vec2(b.w * k, b.h * k));
-        // L'image du plan (refaite si le document ou la taille changent)
+        // Composant interactif : la forme la plus en avant sous la souris qui a un état de survol
+        let to_world = |q: Pos2| [b.x + (q.x - r.left()) / k, b.y + (q.y - r.top()) / k];
+        let hovered = resp.hover_pos().and_then(|h| {
+            let w = to_world(h);
+            self.doc.shapes.iter().rev().filter(|s| s.hover.is_some() && s.visible).find(|s| {
+                let bb = self.doc.bounds(s);
+                w[0] >= bb[0] && w[0] <= bb[2] && w[1] >= bb[1] && w[1] <= bb[3]
+            }).map(|s| s.id)
+        });
+        // L'image du plan (refaite si le document, la taille ou la forme survolée changent)
         let key = {
             use std::hash::{Hash, Hasher};
             let mut h = std::collections::hash_map::DefaultHasher::new();
             serde_json::to_string(&self.doc).unwrap_or_default().hash(&mut h);
+            hovered.hash(&mut h);
             bi.hash(&mut h);
             (k * 100.0).round().to_bits().hash(&mut h);
             h.finish()
@@ -1895,7 +1939,11 @@ impl Editor {
             ui.ctx().request_repaint();
         } else if self.present_tex.as_ref().is_none_or(|t| t.0 != key) {
             let scale = (k * ui.ctx().pixels_per_point()).clamp(0.05, 4.0);
-            if let Some(img) = crate::vector::export_png(&self.doc, bi, &self.root, scale) {
+            let shown = match hovered {
+                Some(id) => std::borrow::Cow::Owned(self.doc.hovered(id)),
+                None => std::borrow::Cow::Borrowed(&self.doc),
+            };
+            if let Some(img) = crate::vector::export_png(&shown, bi, &self.root, scale) {
                 let ci = egui::ColorImage::from_rgba_unmultiplied([img.width() as usize, img.height() as usize], img.as_raw());
                 self.present_tex = Some((key, ui.ctx().load_texture("vec-present", ci, egui::TextureOptions::LINEAR)));
             }

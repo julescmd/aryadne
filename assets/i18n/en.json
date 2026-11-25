@@ -3431,5 +3431,9 @@
   "Les plans de même taille à la suite ; les formes de même nom glissent de l'un à l'autre.": "Artboards of the same size in sequence; shapes with the same name glide from one to the next.",
   "rien à animer": "nothing to animate",
   "sur chaque plan": "on each artboard",
-  "animation": "animation"
+  "animation": "animation",
+  "état au survol": "hover state",
+  "En présentation, la forme change quand la souris passe dessus (bouton, carte)": "In presentation, the shape changes when the mouse passes over it (button, card)",
+  "se soulève": "lifts",
+  "Une ombre apparaît sous la forme au survol": "A shadow appears under the shape on hover"
 }
