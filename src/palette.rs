@@ -207,3 +207,8 @@ mod tests {
         assert!(adjust(&[], 0.0, 0.0).is_empty());
     }
 }
+
+/// Les `n` couleurs dominantes d'un ensemble de pixels (regroupées, de la plus présente à la moins présente)
+pub fn dominant(px: &[Color32], n: usize) -> Vec<Color32> {
+    cluster(px, n)
+}

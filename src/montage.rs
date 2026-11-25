@@ -2112,3 +2112,56 @@ mod ripple_tests {
         assert!((v[0].1 - 4.0).abs() < 1e-3 && (v[1].0 - 4.0).abs() < 1e-3 && (v[1].1 - 8.0).abs() < 1e-3 && (v[2].0 - 10.0).abs() < 1e-3, "{v:?}");
     }
 }
+
+/// Color script : une vignette par plan visuel du montage (l'image du milieu), avec ses quatre couleurs
+/// dominantes dessous ; une rangée par 12 plans. Enregistré à côté du montage.
+pub fn color_script(p: &Project, project: &Path) -> Result<PathBuf, String> {
+    let ff = ffmpeg::find("ffmpeg").ok_or(crate::i18n::t("ffmpeg n'est pas installé."))?;
+    let mut shots: Vec<&Clip> = p.clips.iter().filter(|c| matches!(c.kind.as_str(), "video" | "image") && c.name != SUBTITLE).collect();
+    shots.sort_by(|a, b| a.start.total_cmp(&b.start).then(a.track.cmp(&b.track)));
+    // Un plan par instant : celui de la piste la plus haute qui commence là
+    shots.dedup_by(|a, b| (a.start - b.start).abs() < 0.05);
+    if shots.is_empty() {
+        return Err(crate::i18n::t("Aucun plan à montrer."));
+    }
+    let (tw, th) = (240u32, (240.0 * p.height as f32 / p.width.max(1) as f32).round() as u32);
+    let band = 28u32;
+    let gap = 8u32;
+    let per_row = 12usize.min(shots.len());
+    let rows = shots.len().div_ceil(per_row);
+    let mut out = image::RgbaImage::from_pixel(per_row as u32 * (tw + gap) + gap, rows as u32 * (th + band + gap) + gap, image::Rgba([20, 16, 26, 255]));
+    let tmp = std::env::temp_dir().join(format!("ary-cs-{}.png", std::process::id()));
+    for (k, c) in shots.iter().enumerate() {
+        let media = resolve(project, &c.file);
+        let thumb = if c.kind == "image" {
+            image::open(&media).ok().map(|i| i.thumbnail_exact(tw, th).to_rgba8())
+        } else {
+            let mid = c.src_in + (c.src_out - c.src_in) / 2.0;
+            let ok = ffmpeg::command(ff.clone()).args(["-v", "error", "-y", "-ss", &format!("{mid:.3}"), "-i"]).arg(&media).args(["-frames:v", "1", "-vf", &format!("scale={tw}:{th}")]).arg(&tmp).status().is_ok_and(|s| s.success());
+            if ok { image::open(&tmp).ok().map(|i| i.to_rgba8()) } else { None }
+        };
+        let Some(t) = thumb else { continue };
+        let (x, y) = ((k % per_row) as u32 * (tw + gap) + gap, (k / per_row) as u32 * (th + band + gap) + gap);
+        image::imageops::overlay(&mut out, &t, x as i64, y as i64);
+        // Les couleurs dominantes, en bandes égales
+        let px: Vec<egui::Color32> = t.pixels().step_by(7).map(|q| egui::Color32::from_rgb(q[0], q[1], q[2])).collect();
+        let cols = crate::palette::dominant(&px, 4);
+        let bw = tw / cols.len().max(1) as u32;
+        for (j, col) in cols.iter().enumerate() {
+            for yy in 0..band - 6 {
+                for xx in 0..bw {
+                    let px_x = x + j as u32 * bw + xx;
+                    if px_x < out.width() {
+                        out.put_pixel(px_x, y + th + 4 + yy, image::Rgba([col.r(), col.g(), col.b(), 255]));
+                    }
+                }
+            }
+        }
+    }
+    let _ = std::fs::remove_file(&tmp);
+    let stem = project.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "montage".into());
+    let path = project.with_file_name(format!("{stem} - color script.png"));
+    out.save(&path).map_err(|e| e.to_string())?;
+    Ok(path)
+}
+

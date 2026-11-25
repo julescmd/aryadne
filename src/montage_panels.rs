@@ -957,6 +957,14 @@ impl Editor {
                             ui.close();
                         }
                     }
+                    ui.separator();
+                    if ui.button(format!("{}  {}", crate::lucide::PALETTE, crate::i18n::t("Color script (vignettes et couleurs)"))).on_hover_text(crate::i18n::t("Une vignette par plan avec ses couleurs dominantes, pour juger les couleurs du film ; PNG à côté du montage")).clicked() {
+                        self.message = Some(match crate::montage::color_script(&self.project, &self.path) {
+                            Ok(f) => format!("{} {}", crate::i18n::t("exporté :"), f.file_name().map(|x| x.to_string_lossy().to_string()).unwrap_or_default()),
+                            Err(e) => e,
+                        });
+                        ui.close();
+                    }
                 })
                 .response
                 .on_hover_text(crate::i18n::t("Préréglages d'export ; plusieurs exports se suivent dans une file"));
