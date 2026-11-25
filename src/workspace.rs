@@ -106,7 +106,7 @@ pub struct Tool {
 pub fn tools(kind: &str) -> &'static [Tool] {
     use crate::lucide as l;
     const NOTES: [Tool; 3] = [Tool { id: "notes", label: "Notes", icon: l::FILE_TEXT, view: "files" }, Tool { id: "tasks", label: "Tâches", icon: l::LIST_CHECKS, view: "tasks" }, Tool { id: "brain", label: "Cerveau", icon: l::NETWORK, view: "brain" }];
-    const D2: [Tool; 3] = [Tool { id: "board", label: "Moodboard", icon: l::LAYOUT_DASHBOARD, view: "boards" }, Tool { id: "image", label: "Retouche", icon: l::IMAGE, view: "files" }, Tool { id: "comp", label: "Compositing", icon: l::WORKFLOW, view: "files" }];
+    const D2: [Tool; 4] = [Tool { id: "board", label: "Moodboard", icon: l::LAYOUT_DASHBOARD, view: "boards" }, Tool { id: "image", label: "Retouche", icon: l::IMAGE, view: "files" }, Tool { id: "vector", label: "Vectoriel", icon: l::PEN_TOOL, view: "files" }, Tool { id: "comp", label: "Compositing", icon: l::WORKFLOW, view: "files" }];
     const D3: [Tool; 2] = [Tool { id: "scene", label: "Scène", icon: l::BOX, view: "files" }, Tool { id: "mat", label: "Matériaux", icon: l::BLEND, view: "files" }];
     const MOTION: [Tool; 1] = [Tool { id: "motion", label: "Compos", icon: l::SPLINE, view: "files" }];
     const VIDEO: [Tool; 2] = [Tool { id: "seq", label: "Montage", icon: l::CLAPPERBOARD, view: "files" }, Tool { id: "review", label: "Revue", icon: l::MESSAGE_SQUARE, view: "files" }];
@@ -131,6 +131,7 @@ pub fn tool_of(rel: &str) -> &'static str {
     match owner(rel) {
         "2d" if crate::board::is_board(rel) => "board",
         "2d" if crate::formats::has(rel, "comp") => "comp",
+        "2d" if crate::formats::has(rel, "vector") => "vector",
         "2d" => "image",
         "3d" if crate::formats::has(rel, "mat") => "mat",
         "3d" => "scene",
@@ -202,7 +203,7 @@ pub fn owner(rel: &str) -> &'static str {
         "3d"
     } else if crate::montage::is_project(rel) || crate::video::is_video(rel) || crate::formats::has(rel, "seq") || matches!(ext, "wav" | "mp3" | "ogg" | "flac" | "m4a" | "aac") {
         "video"
-    } else if crate::board::is_board(rel) || crate::images::is_image(rel) || crate::formats::has(rel, "image") {
+    } else if crate::board::is_board(rel) || crate::images::is_image(rel) || crate::formats::has(rel, "image") || crate::formats::has(rel, "vector") {
         "2d"
     } else if CODE.contains(&ext) && crate::formats::of(rel).is_none() {
         "code"

@@ -4,6 +4,8 @@ mod cloud;
 mod scopes;
 mod expr;
 mod bases;
+mod vector;
+mod vector_ui;
 mod keymap;
 mod lucide;
 mod hl;
@@ -236,6 +238,7 @@ enum Content {
     Nodes(Box<nodes::Editor>),
     /// Image à calques (.aryimg)
     Paint(Box<paint::Editor>),
+    Vector(Box<vector_ui::Editor>),
     /// Vidéo ouverte alors que ffmpeg n'est pas encore installé.
     NeedFfmpeg(Option<std::sync::Arc<std::sync::Mutex<ffmpeg::InstallState>>>),
     Unreadable(String),
@@ -870,6 +873,7 @@ impl App {
                     self.new_untitled(ext, move |p| g.save(p));
                 }
                 "arycomp" => self.new_untitled(ext, |p| nodes::Graph::new_compositor().save(p)),
+                "aryvec" => self.new_untitled(ext, |p| vector::Doc::starter().save(p)),
                 "aryimg" => {
                     let (_, w, h) = NF_IMG[o.img_size];
                     let white = o.img_white;
@@ -1094,6 +1098,7 @@ impl App {
         let accent = workspace::accent_of(self.ws.cur()).map(|c| egui::Color32::from_rgb(c[0], c[1], c[2])).unwrap_or(p.accent);
         let (about, actions): (&str, Vec<(&str, extras::Cmd)>) = match tool {
             "image" => ("Peinture et retouche à calques, comme Photoshop. Ouvre une image, ou crée une image à calques.", vec![("Nouvelle image à calques", extras::Cmd::NewFile), ("Importer des images…", extras::Cmd::Import)]),
+            "vector" => ("Logos, illustrations et maquettes d'écrans en vecteurs, comme Illustrator et Figma : plume, formes, textes, booléens, plans de travail exportés en SVG ou PNG.", vec![("Nouveau dessin vectoriel", extras::Cmd::NewVector)]),
             "comp" => ("Retoucher une image en nodes : couleurs, flous, masques, et l'étalonnage des clips du montage.", vec![("Nouveau compositing", extras::Cmd::NewCompositor)]),
             "scene" => ("Modèles, lumières, caméras et animation. Un modèle ouvert seul arrive dans une scène toute prête.", vec![("Nouvelle scène 3D", extras::Cmd::NewScene), ("Importer des modèles…", extras::Cmd::Import)]),
             "mat" => ("Les matériaux des modèles : en nodes, ou à calques comme Substance.", vec![("Nouveau matériau (nodes)", extras::Cmd::NewMaterial), ("Nouveau matériau à calques", extras::Cmd::NewLayered)]),
@@ -1948,6 +1953,9 @@ impl App {
         if let Content::Paint(ed) = &mut doc.content {
             ed.save_if_due(true);
         }
+        if let Content::Vector(ed) = &mut doc.content {
+            ed.save_if_due(true);
+        }
         if doc.dirty_since.take().is_none() {
             return;
         }
@@ -2095,6 +2103,11 @@ impl App {
                     }
                     (Err(e), _) => Content::Unreadable(e),
                     _ => Content::Unreadable("Contexte indisponible.".into()),
+                }
+            } else if vector::is_vector(&rel) {
+                match vault::safe(&self.root(), &rel).and_then(|p| vector_ui::Editor::open(p, &self.root())) {
+                    Ok(e) => Content::Vector(Box::new(e)),
+                    Err(e) => Content::Unreadable(e),
                 }
             } else if paint::is_image_doc(&rel) {
                 match vault::safe(&self.root(), &rel).and_then(paint::Editor::open) {
@@ -2686,6 +2699,7 @@ impl App {
                             ("matériau en nodes", extras::Cmd::NewMaterial),
                             ("matériau à calques (atelier)", extras::Cmd::NewLayered),
                             ("compositing en nodes", extras::Cmd::NewCompositor),
+                            ("dessin vectoriel", extras::Cmd::NewVector),
                         ] {
                             if ui.button(crate::i18n::t(label)).clicked() {
                                 cmd = Some(c);
@@ -3482,6 +3496,9 @@ impl App {
                 }
                 Content::Paint(ed) => {
                     egui::Frame::new().inner_margin(egui::Margin::symmetric(12, 8)).show(ui, |ui| ed.show(ui));
+                }
+                Content::Vector(ed) => {
+                    egui::Frame::new().inner_margin(egui::Margin::symmetric(8, 6)).show(ui, |ui| ed.show(ui));
                 }
                 Content::Nodes(ed) => {
                     ed.show(ui);

@@ -5,7 +5,8 @@ use std::path::{Path, PathBuf};
 
 /// Fichier d'image à calques.
 pub fn is_layered(path: &str) -> bool {
-    path.to_lowercase().ends_with(".aryimg")
+    let l = path.to_lowercase();
+    l.ends_with(".aryimg") || l.ends_with(".aryvec")
 }
 
 fn cache_dir() -> PathBuf {
@@ -33,6 +34,15 @@ pub fn media(path: &Path) -> PathBuf {
     if out.is_file() {
         return out;
     }
+    // Un dessin vectoriel : son premier plan de travail, rendu à 2048 px au plus
+    if path.to_string_lossy().to_lowercase().ends_with(".aryvec") {
+        let _ = std::fs::create_dir_all(cache_dir());
+        let tmp = out.with_extension("tmp.png");
+        return match crate::vector::thumbnail(path, 2048) {
+            Ok(img) if img.save(&tmp).is_ok() && std::fs::rename(&tmp, &out).is_ok() => out,
+            _ => path.to_path_buf(),
+        };
+    }
     match crate::paint::Doc::load(path) {
         Ok(doc) => {
             let _ = std::fs::create_dir_all(cache_dir());
@@ -58,6 +68,11 @@ pub fn image(path: &Path) -> Result<image::DynamicImage, String> {
 
 /// Dimensions d'un .aryimg (lues dans l'en-tête, sans décoder les calques).
 pub fn dims(path: &Path) -> Option<[u32; 2]> {
+    if path.to_string_lossy().to_lowercase().ends_with(".aryvec") {
+        let d = crate::vector::Doc::load(path).ok()?;
+        let b = d.boards.first()?;
+        return Some([b.w.round() as u32, b.h.round() as u32]);
+    }
     let b = std::fs::read(path).ok()?;
     if !b.starts_with(b"ARYIMG1\n") {
         return image::load_from_memory(&b).ok().map(|i| [i.width(), i.height()]);
