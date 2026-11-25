@@ -102,7 +102,28 @@ fn adj_block(a: &Adj) -> Option<([u8; 4], Vec<u8>)> {
             }
             *b"levl"
         }
-        Adj::BlackWhite => return None,
+        Adj::BlackWhite => {
+            // Réglage « Noir et blanc » de Photoshop, curseurs par défaut (un descripteur)
+            let o = |c: &str, items: Vec<(&str, Val)>| Val::Obj(c.into(), items.into_iter().map(|(k, v)| (k.to_string(), v)).collect());
+            let d = o(
+                "null",
+                vec![
+                    ("Rd  ", Val::Long(40)),
+                    ("Yllw", Val::Long(60)),
+                    ("Grn ", Val::Long(40)),
+                    ("Cyn ", Val::Long(60)),
+                    ("Bl  ", Val::Long(20)),
+                    ("Mgnt", Val::Long(80)),
+                    ("useTint", Val::Bool(false)),
+                    ("tintColor", o("RGBC", vec![("Rd  ", Val::Num(225.0)), ("Grn ", Val::Num(211.0)), ("Bl  ", Val::Num(179.0))])),
+                    ("bwPresetKind", Val::Long(1)),
+                    ("blackAndWhitePresetFileName", Val::Text(String::new())),
+                ],
+            );
+            w.u32(16);
+            put_desc(&mut w, &d);
+            *b"blwh"
+        }
     };
     Some((key, w.0))
 }
@@ -118,6 +139,7 @@ fn adj_of(key: &[u8], d: &[u8]) -> Option<Adj> {
         b"brit" => Adj::BrightContrast { b: i(0)? / 150.0, c: i(2)? / 100.0 },
         b"expA" => Adj::Exposure { ev: f(2)? },
         b"hue2" => Adj::HueSat { h: i(10)? / 360.0, s: i(12)? / 100.0, l: i(14)? / 100.0 },
+        b"blwh" => Adj::BlackWhite,
         b"levl" => Adj::Levels { black: u(2)? as f32 / 255.0, white: u(4)? as f32 / 255.0, gamma: u(10)? as f32 / 100.0 },
         _ => return None,
     })
@@ -699,6 +721,11 @@ mod tests {
         d.groups.push(Group { id: 3, name: "Dossier".into(), visible: true, opacity: 1.0, blend: None, collapsed: false });
         d.layers.push(Layer { adj: Some(Adj::HueSat { h: 0.25, s: 0.5, l: 0.0 }), mask: Some(Layer::new_mask(6, 4, 255)), ..Layer::blank("Teinte", 1, 1) });
         d.layers.push(Layer { adj: Some(Adj::Levels { black: 0.1, white: 0.9, gamma: 1.2 }), ..Layer::blank("Niveaux", 1, 1) });
+        let (nb, _) = write(&Doc { layers: vec![Layer { adj: Some(Adj::BlackWhite), ..Layer::blank("NB", 1, 1) }], ..Doc::new(6, 4, true) });
+        assert!(read(&nb).unwrap().layers.iter().any(|l| l.adj == Some(Adj::BlackWhite)));
+        if let Ok(p) = std::env::var("PSD_OUT_NB") {
+            std::fs::write(p, &nb).unwrap();
+        }
         let (bytes, lost) = write(&d);
         assert!(lost.is_empty(), "{lost:?}");
         d.layers.truncate(2);
