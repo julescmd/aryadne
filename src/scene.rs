@@ -407,7 +407,21 @@ impl Scene {
             }
             let Some(t) = self.objects.iter().position(|o| o.name == self.objects[k].aim).filter(|&t| t != k) else { continue };
             let (p, q) = (self.world(k, [0.0; 3]), self.world(t, [0.0; 3]));
-            let rot = aim_rotation([q[0] - p[0], q[1] - p[1], q[2] - p[2]], self.objects[k].rot[2]);
+            let mut d = [q[0] - p[0], q[1] - p[1], q[2] - p[2]];
+            // Sous un parent, la direction se ramène dans son repère (sa rotation et sa taille sont compensées)
+            if let Some(up) = self.parent_of(k) {
+                let o = self.world(up, [0.0; 3]);
+                let col = |e: [f32; 3]| {
+                    let w = self.world(up, e);
+                    [w[0] - o[0], w[1] - o[1], w[2] - o[2]]
+                };
+                let (a, b, c) = (col([1.0, 0.0, 0.0]), col([0.0, 1.0, 0.0]), col([0.0, 0.0, 1.0]));
+                let m = [[a[0], b[0], c[0]], [a[1], b[1], c[1]], [a[2], b[2], c[2]]];
+                if let Some(inv) = inverse3(m) {
+                    d = [0, 1, 2].map(|i| inv[i][0] * d[0] + inv[i][1] * d[1] + inv[i][2] * d[2]);
+                }
+            }
+            let rot = aim_rotation(d, self.objects[k].rot[2]);
             if let Some(r) = rot {
                 if (0..3).any(|i| (r[i] - self.objects[k].rot[i]).abs() > 1e-4) {
                     self.objects[k].rot = r;
@@ -722,6 +736,21 @@ pub fn primitive(id: &str) -> Option<crate::model3d::Model> {
 pub fn resolve(scene_path: &Path, file: &str) -> PathBuf {
     let p = Path::new(file);
     if p.is_absolute() { p.to_path_buf() } else { scene_path.parent().unwrap_or(Path::new("")).join(p) }
+}
+
+/// Inverse d'une matrice 3 × 3 (None si elle est plate)
+fn inverse3(m: [[f32; 3]; 3]) -> Option<[[f32; 3]; 3]> {
+    let det = m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1]) - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0]) + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]);
+    if det.abs() < 1e-12 {
+        return None;
+    }
+    let c = |r0: usize, c0: usize, r1: usize, c1: usize| m[r0][c0] * m[r1][c1] - m[r0][c1] * m[r1][c0];
+    let i = 1.0 / det;
+    Some([
+        [c(1, 1, 2, 2) * i, -c(0, 1, 2, 2) * i, c(0, 1, 1, 2) * i],
+        [-c(1, 0, 2, 2) * i, c(0, 0, 2, 2) * i, -c(0, 0, 1, 2) * i],
+        [c(1, 0, 2, 1) * i, -c(0, 0, 2, 1) * i, c(0, 0, 1, 1) * i],
+    ])
 }
 
 /// Rotation (degrés) qui tourne l'avant d'un objet (-Z) vers la direction `d`, la tête vers le haut (+Y)
@@ -1177,6 +1206,20 @@ mod curve_tests {
             assert!((f[i] - d[i] / l).abs() < 1e-4, "{f:?}");
         }
         assert!(!sc.apply_aims());
+        // Sous un parent tourné de 90° autour de Y : l'avant pointe toujours vers la cible
+        let mut rig = Object::new("rig".into(), "@empty".into());
+        rig.rot = [0.0, 90.0, 0.0];
+        rig.pos = [0.0, 2.0, 10.0];
+        sc.objects[0].pos = [0.0; 3];
+        sc.objects[0].parent = "rig".into();
+        sc.objects.push(rig);
+        sc.apply_aims();
+        let w0 = sc.world(0, [0.0; 3]);
+        let w1 = sc.world(0, [0.0, 0.0, -1.0]);
+        let f = [w1[0] - w0[0], w1[1] - w0[1], w1[2] - w0[2]];
+        for i in 0..3 {
+            assert!((f[i] - d[i] / l).abs() < 1e-3, "{f:?}");
+        }
     }
 
     #[test]

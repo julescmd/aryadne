@@ -811,7 +811,13 @@ impl Project {
         if t < c.start - 1e-3 || t > c.end() + 1e-3 || dur <= 0.0 {
             return None;
         }
-        let ids: Vec<u64> = self.clips.iter().filter(|x| x.start < t - 1e-3 && x.end() > t + 1e-3).map(|x| x.id).collect();
+        // Ce qui passe à cet instant : vidéo et son sont coupés (ils restent synchro), titres et images fixes s'allongent
+        let fixed = |x: &Clip| x.kind == "text" || x.kind == "image";
+        let spans = |x: &Clip| x.start < t - 1e-3 && x.end() > t + 1e-3;
+        let ids: Vec<u64> = self.clips.iter().enumerate().filter(|(k, x)| spans(x) && (*k == i || !fixed(x))).map(|(_, x)| x.id).collect();
+        for x in self.clips.iter_mut().enumerate().filter(|(k, x)| *k != i && spans(x) && fixed(x)).map(|(_, x)| x) {
+            x.src_out += dur * x.speed;
+        }
         self.split_linked(&ids, t);
         for x in self.clips.iter_mut().filter(|x| x.start >= t - 1e-3) {
             x.start += dur;
@@ -1303,7 +1309,15 @@ mod tests {
         (after.start, after.src_out) = (4.0, 2.0);
         p.clips.push(after);
         p.ensure_ids();
+        let mut titre = Clip::test();
+        (titre.kind, titre.track, titre.start, titre.src_out) = ("text".into(), 2, 1.0, 2.0);
+        p.clips.push(titre);
+        p.ensure_ids();
         let k = p.freeze_frame(0, 1.5, 2.0, "arrets/c 1.5.png".into()).unwrap();
+        // Le titre par-dessus n'est pas coupé : il dure 2 s de plus
+        let ts: Vec<&Clip> = p.clips.iter().filter(|c| c.kind == "text").collect();
+        assert_eq!(ts.len(), 1);
+        assert_eq!((ts[0].start, ts[0].len()), (1.0, 4.0));
         let f = &p.clips[k];
         assert_eq!((f.kind.as_str(), f.start, f.len()), ("image", 1.5, 2.0));
         // Le plan est coupé, sa suite et le son reculent de 2 s, le plan d'après aussi
