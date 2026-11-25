@@ -150,6 +150,25 @@ static REGISTRY: LazyLock<Mutex<HashMap<(String, &'static str), Arc<Server>>>> =
 static DIAG_TICK: AtomicI64 = AtomicI64::new(0);
 
 /// Arrête tous les serveurs (à la fermeture d'Aryadne).
+/// Tous les problèmes connus des serveurs de langage ouverts : (fichier, ligne, message), triés
+pub fn all_diags() -> Vec<(PathBuf, usize, String)> {
+    let mut v = vec![];
+    for srv in REGISTRY.lock().map(|r| r.values().cloned().collect::<Vec<_>>()).unwrap_or_default() {
+        if let Ok(d) = srv.diags.lock() {
+            for (uri, (_, list)) in d.iter() {
+                if let Some(p) = from_uri(uri) {
+                    for (line, msg) in list {
+                        v.push((p.clone(), *line, msg.clone()));
+                    }
+                }
+            }
+        }
+    }
+    v.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+    v.dedup();
+    v
+}
+
 pub fn shutdown_all() {
     if let Ok(mut r) = REGISTRY.lock() {
         for s in r.values() {

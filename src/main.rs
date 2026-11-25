@@ -3993,6 +3993,35 @@ impl App {
                             ui.ctx().request_repaint_after(Duration::from_millis(60));
                         }
                     }
+                    // Panneau Problèmes : toutes les erreurs connues du projet, en bas à droite de l'éditeur
+                    let probs = crate::lsp::all_diags();
+                    if !probs.is_empty() {
+                        let pid = egui::Id::unique("problems-open");
+                        let mut open: bool = ui.ctx().data(|d| d.get_temp(pid).unwrap_or(false));
+                        let br = ui.max_rect().right_bottom() + egui::vec2(-12.0, -12.0);
+                        egui::Area::new(egui::Id::unique(("problems", &rel))).order(egui::Order::Foreground).pivot(egui::Align2::RIGHT_BOTTOM).fixed_pos(br).show(ui.ctx(), |ui| {
+                            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                                if open {
+                                    ui.set_width(420.0);
+                                    egui::ScrollArea::vertical().max_height(280.0).show(ui, |ui| {
+                                        for (path, line, msg) in &probs {
+                                            let file = path.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default();
+                                            let r = ui.add(egui::Button::new(RichText::new(format!("{file}:{}   {}", line + 1, msg.lines().next().unwrap_or(""))).monospace().size(11.0)).frame(false).truncate());
+                                            if r.on_hover_text(msg).clicked() {
+                                                lsp_goto = Some((path.clone(), *line));
+                                            }
+                                        }
+                                    });
+                                    ui.separator();
+                                }
+                                let label = format!("{}  {} {}", crate::lucide::TRIANGLE_ALERT, probs.len(), crate::i18n::t_mid(if probs.len() == 1 { "problème" } else { "problèmes" }));
+                                if ui.add(egui::Button::new(RichText::new(label).size(12.0).color(p.warning)).frame(false)).on_hover_text(crate::i18n::t("Toutes les erreurs et alertes du projet (clic pour la liste)")).clicked() {
+                                    open = !open;
+                                }
+                            });
+                        });
+                        ui.ctx().data_mut(|d| d.insert_temp(pid, open));
+                    }
                     // F2 : le nouveau nom, dans une petite barre en haut de l'éditeur
                     let corner = ui.max_rect().right_top() + egui::vec2(-380.0, 8.0);
                     if let Some((at, mut name)) = ed.rename.take() {

@@ -3190,5 +3190,8 @@
   "Pose des repères : chaque région va d'un repère au suivant.": "Add markers: each region runs from one marker to the next.",
   "exporter chaque région": "export each region",
   "Un WAV par région, d'un repère au suivant, nommé comme le repère (banques de bruitages)": "One WAV per region, from one marker to the next, named after the marker (sound effect libraries)",
-  "régions exportées": "regions exported"
+  "régions exportées": "regions exported",
+  "problème": "problem",
+  "problèmes": "problems",
+  "Toutes les erreurs et alertes du projet (clic pour la liste)": "All errors and warnings of the project (click for the list)"
 }
