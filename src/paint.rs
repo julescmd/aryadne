@@ -530,6 +530,8 @@ struct Head {
     guides: Vec<Guide>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     anim: Option<Anim>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    palette: Vec<[u8; 4]>,
 }
 
 impl Layer {
@@ -772,6 +774,8 @@ pub struct Doc {
     pub guides: Vec<Guide>,
     /// Animation image par image : les calques d'un groupe sont les images
     pub anim: Option<Anim>,
+    /// Palette de référence (les couleurs du modèle d'un personnage) : le coloriage d'après un dessin ne pose qu'elles
+    pub palette: Vec<[u8; 4]>,
 }
 
 /// Réglages de l'animation : le groupe des images, la cadence, la pelure d'oignon
@@ -915,7 +919,7 @@ impl Doc {
 
     pub fn new(w: usize, h: usize, white: bool) -> Doc {
         let base = if white { Layer::filled("fond", w, h, [255, 255, 255, 255]) } else { Layer::blank("calque 1", w, h) };
-        Doc { w, h, layers: vec![base], active: 0, groups: vec![], guides: vec![], anim: None }
+        Doc { w, h, layers: vec![base], active: 0, groups: vec![], guides: vec![], anim: None, palette: vec![] }
     }
 
     pub fn save(&self, path: &Path) -> Result<(), String> {
@@ -935,6 +939,7 @@ impl Doc {
             groups: self.groups.iter().map(|g| Group { has_mask: g.mask.0.is_some(), mask: GroupMask(None), ..g.clone() }).collect(),
             guides: self.guides.clone(),
             anim: self.anim.clone(),
+            palette: self.palette.clone(),
         };
         let json = serde_json::to_vec(&head).map_err(|e| e.to_string())?;
         let mut out = b"ARYIMG1\n".to_vec();
@@ -976,7 +981,7 @@ impl Doc {
             // Une image ordinaire renommée : un seul calque
             let img = image::load_from_memory(&b).map_err(|_| "fichier .aryimg illisible".to_string())?.to_rgba8();
             let (w, h) = (img.width() as usize, img.height() as usize);
-            return Ok(Doc { w, h, layers: vec![Layer { px: img.into_raw(), ..Layer::blank("calque 1", w, h) }], active: 0, groups: vec![], guides: vec![], anim: None });
+            return Ok(Doc { w, h, layers: vec![Layer { px: img.into_raw(), ..Layer::blank("calque 1", w, h) }], active: 0, groups: vec![], guides: vec![], anim: None, palette: vec![] });
         }
         let mut at = 8;
         let rd = |at: &mut usize| -> Result<usize, String> {
@@ -1013,7 +1018,7 @@ impl Doc {
                 g.mask = GroupMask(Some(Box::new(Layer { px: mpx, ..Layer::blank("masque", mw, mh) })));
             }
         }
-        Ok(Doc { w: head.w, h: head.h, active: head.active.min(layers.len() - 1), layers, groups, guides: head.guides, anim: head.anim })
+        Ok(Doc { w: head.w, h: head.h, active: head.active.min(layers.len() - 1), layers, groups, guides: head.guides, anim: head.anim, palette: head.palette })
     }
 
     /// Mélange les calques visibles dans `out` (RGBA du document) pour la zone `r` (x0, y0, x1, y1) :
@@ -1097,67 +1102,7 @@ pub fn blend_if_k(lo: f32, hi: f32, l: f32) -> f32 {
     a * b
 }
 
-/// Remplissage qui ne passe pas par les trous plus petits que `gap` : la zone `open` (où l'on peut peindre)
-/// est rétrécie de `gap`, remplie depuis la graine, puis regagne `gap` + 1 pixels sans sortir de `open`.
-/// None si la graine tombe dans le trait épaissi (on remplit alors normalement).
-pub fn gap_fill(open: &[bool], w: usize, h: usize, sx: usize, sy: usize, gap: usize) -> Option<Vec<bool>> {
-    // Distance au premier pixel fermé (carrés successifs : passes de dilatation en croix et diagonales)
-    let mut blocked: Vec<bool> = open.iter().map(|o| !o).collect();
-    for _ in 0..gap {
-        let prev = blocked.clone();
-        for y in 0..h {
-            for x in 0..w {
-                if prev[y * w + x] {
-                    continue;
-                }
-                let n = (x > 0 && prev[y * w + x - 1]) || (x + 1 < w && prev[y * w + x + 1]) || (y > 0 && prev[(y - 1) * w + x]) || (y + 1 < h && prev[(y + 1) * w + x]);
-                if n {
-                    blocked[y * w + x] = true;
-                }
-            }
-        }
-    }
-    if blocked[sy * w + sx] {
-        return None;
-    }
-    let mut region = vec![false; w * h];
-    let mut stack = vec![(sx, sy)];
-    while let Some((x, y)) = stack.pop() {
-        let i = y * w + x;
-        if region[i] || blocked[i] {
-            continue;
-        }
-        region[i] = true;
-        if x > 0 {
-            stack.push((x - 1, y));
-        }
-        if x + 1 < w {
-            stack.push((x + 1, y));
-        }
-        if y > 0 {
-            stack.push((x, y - 1));
-        }
-        if y + 1 < h {
-            stack.push((x, y + 1));
-        }
-    }
-    // La zone regagne le terrain perdu, jusqu'au trait
-    for _ in 0..=gap {
-        let prev = region.clone();
-        for y in 0..h {
-            for x in 0..w {
-                let i = y * w + x;
-                if prev[i] || !open[i] {
-                    continue;
-                }
-                if (x > 0 && prev[i - 1]) || (x + 1 < w && prev[i + 1]) || (y > 0 && prev[i - w]) || (y + 1 < h && prev[i + w]) {
-                    region[i] = true;
-                }
-            }
-        }
-    }
-    Some(region)
-}
+pub use crate::colorize::gap_fill;
 
 /// Bruit blanc fixe (grain de film)
 fn grain_noise(x: i32, y: i32) -> f32 {
@@ -3297,6 +3242,43 @@ impl Editor {
                     ui.add(egui::Slider::new(&mut self.tolerance, 0.0..=1.0).text(crate::i18n::t("tolérance")));
                     if self.tool == Tool::Fill {
                         ui.add(egui::Slider::new(&mut self.fill_gap, 0.0..=24.0).step_by(1.0).text(crate::i18n::t("fermer les trous (px)"))).on_hover_text(crate::i18n::t("Le remplissage ne passe pas par les ouvertures du trait plus petites que cette taille, et va jusqu'au trait"));
+                        // Palette de référence : les couleurs du modèle, à portée de clic
+                        ui.separator();
+                        if ui.add(egui::Button::new(egui::RichText::new(crate::lucide::PALETTE).size(14.0)).min_size(egui::vec2(24.0, 20.0))).on_hover_text(crate::i18n::t("Palette de référence : reprendre les couleurs du calque actif (un dessin déjà colorié). Maj+clic : depuis une image de l'ordinateur. Le coloriage d'après l'image d'avant ne pose que ces couleurs.")).clicked() {
+                            let from_file = ui.input(|i| i.modifiers.shift);
+                            let px = if from_file {
+                                rfd::FileDialog::new().add_filter("image", &["png", "jpg", "jpeg", "webp"]).pick_file().and_then(|f| image::open(f).ok()).map(|i| i.to_rgba8().into_raw())
+                            } else {
+                                Some(self.doc.layers[self.doc.active].px.clone())
+                            };
+                            if let Some(px) = px {
+                                let pal = crate::colorize::palette_of(&px, 16);
+                                if pal.is_empty() {
+                                    self.message = Some(crate::i18n::t("Aucun aplat de couleur trouvé pour la palette."));
+                                } else {
+                                    self.doc.palette = pal;
+                                    self.save_due = Some(Instant::now());
+                                }
+                            }
+                        }
+                        let mut drop = None;
+                        for (k, c) in self.doc.palette.iter().enumerate() {
+                            let col = Color32::from_rgba_unmultiplied(c[0], c[1], c[2], c[3]);
+                            let (r, resp) = ui.allocate_exact_size(egui::vec2(16.0, 16.0), egui::Sense::click());
+                            ui.painter().rect_filled(r, 3.0, col);
+                            ui.painter().rect_stroke(r, 3.0, Stroke::new(if self.color == col { 2.0 } else { 1.0 }, if self.color == col { p.accent } else { p.line }), egui::StrokeKind::Inside);
+                            let resp = resp.on_hover_text(format!("#{:02x}{:02x}{:02x} · {}", c[0], c[1], c[2], crate::i18n::t("clic : peindre avec · clic droit : retirer de la palette")));
+                            if resp.clicked() {
+                                self.color = col;
+                            }
+                            if resp.secondary_clicked() {
+                                drop = Some(k);
+                            }
+                        }
+                        if let Some(k) = drop {
+                            self.doc.palette.remove(k);
+                            self.save_due = Some(Instant::now());
+                        }
                     }
                 }
                 Tool::Gradient => {
@@ -4410,6 +4392,48 @@ impl Editor {
         self.save_due = Some(Instant::now());
     }
 
+    /// Un calque vu à la taille du document (RGBA)
+    fn layer_doc_px(&self, li: usize) -> Vec<u8> {
+        let (w, h) = (self.doc.w, self.doc.h);
+        let l = &self.doc.layers[li];
+        let mut out = vec![0u8; w * h * 4];
+        for y in 0..h {
+            for x in 0..w {
+                out[(y * w + x) * 4..][..4].copy_from_slice(&l.at(x as i32, y as i32));
+            }
+        }
+        out
+    }
+
+    /// Colorie le calque actif d'après le calque `model` (le dessin d'avant, déjà colorié) : chaque zone fermée
+    /// du trait prend la couleur de la même zone du modèle ; avec une palette de référence, seules ses couleurs.
+    fn colorize_from(&mut self, model: usize) {
+        if model >= self.doc.layers.len() || model == self.doc.active || self.locked() {
+            return;
+        }
+        let reference = self.layer_doc_px(model);
+        if reference.chunks_exact(4).all(|c| c[3] < 128) {
+            self.message = Some(crate::i18n::t("Le dessin d'avant est vide : rien à reprendre."));
+            return;
+        }
+        self.checkpoint();
+        self.grow_to_doc();
+        let (w, h) = (self.doc.w, self.doc.h);
+        let mut cur = self.layer_doc_px(self.doc.active);
+        let n = crate::colorize::colorize(&mut cur, &reference, w, h, self.fill_gap.round().max(1.0) as usize, &self.doc.palette, false);
+        let l = &mut self.doc.layers[self.doc.active];
+        for y in 0..h {
+            let (lx, ly) = (-l.off[0], y as i32 - l.off[1]);
+            if lx < 0 || ly < 0 || ly as usize >= l.h || lx as usize + w > l.w {
+                continue;
+            }
+            let dst = (ly as usize * l.w + lx as usize) * 4;
+            l.px[dst..dst + w * 4].copy_from_slice(&cur[y * w * 4..(y + 1) * w * 4]);
+        }
+        self.message = Some(if n == 0 { crate::i18n::t("Aucune zone fermée à colorier : vérifie que le trait est fermé (ou monte « fermer les trous »).") } else { format!("{n} {}", crate::i18n::t("zones coloriées d'après le dessin d'avant")) });
+        self.all();
+    }
+
     /// Passe en animation : un groupe « Animation » avec une première image vide au-dessus du calque actif.
     fn anim_start(&mut self) {
         self.checkpoint();
@@ -4570,6 +4594,15 @@ impl Editor {
                     self.anim_play = None;
                     self.anim_delete();
                 }
+                if b(ui, crate::lucide::PAINT_ROLLER, "colorier d'après l'image d'avant : chaque zone fermée du trait reprend sa couleur (les trous du trait sont refermés, réglage du pot de peinture)") {
+                    self.anim_play = None;
+                    let k = self.cur_frame();
+                    if k > 0 {
+                        self.colorize_from(frames[k - 1]);
+                    } else {
+                        self.message = Some(crate::i18n::t("C'est la première image : colorie-la à la main, les suivantes la reprendront."));
+                    }
+                }
                 ui.separator();
                 if let Some(a) = &mut self.doc.anim {
                     ui.add(egui::DragValue::new(&mut a.fps).range(1.0..=60.0).speed(0.2).suffix(" i/s")).on_hover_text(crate::i18n::t("images par seconde"));
@@ -4716,7 +4749,7 @@ impl Editor {
         base.blend = Blend::Normal;
         let mut top = self.doc.layers[a].clone();
         top.clip = false;
-        let pair = Doc { w: self.doc.w, h: self.doc.h, layers: vec![base, top], active: 1, groups: vec![], guides: vec![], anim: None };
+        let pair = Doc { w: self.doc.w, h: self.doc.h, layers: vec![base, top], active: 1, groups: vec![], guides: vec![], anim: None, palette: vec![] };
         let mut out = vec![0u8; self.doc.w * self.doc.h * 4];
         pair.composite(&mut out, [0, 0, self.doc.w, self.doc.h]);
         let below = &self.doc.layers[a - 1];
@@ -5853,6 +5886,47 @@ mod reglages_tests {
         assert_eq!(blend_if_k(0.3, 0.7, 0.1), 0.0);
         assert!(blend_if_k(0.3, 0.7, 0.26) > 0.0 && blend_if_k(0.3, 0.7, 0.26) < 1.0);
         assert_eq!(blend_if_k(0.0, 1.0, 0.0), 1.0);
+    }
+
+    #[test]
+    fn coloriage_d_apres_l_image_d_avant() {
+        // Deux images d'animation : un rond colorié, puis le même rond au trait, un peu plus loin et plus petit calque
+        let mut e = Editor::new_test(64, 48);
+        let ring = |l: &mut Layer, cx: f32, cy: f32, fill: Option<[u8; 4]>| {
+            for y in 0..l.h {
+                for x in 0..l.w {
+                    let d = ((x as f32 + l.off[0] as f32 - cx).powi(2) + (y as f32 + l.off[1] as f32 - cy).powi(2)).sqrt();
+                    let c = if (d - 12.0).abs() <= 1.2 { Some([20, 20, 24, 255]) } else if d < 12.0 { fill } else { None };
+                    if let Some(c) = c {
+                        l.px[(y * l.w + x) * 4..][..4].copy_from_slice(&c);
+                    }
+                }
+            }
+        };
+        let mut a = Layer::blank("image 1", 64, 48);
+        ring(&mut a, 26.0, 24.0, Some([240, 190, 60, 255]));
+        let mut b = Layer { off: [10, 4], ..Layer::blank("image 2", 50, 40) };
+        ring(&mut b, 30.0, 25.0, None);
+        e.doc.layers = vec![a, b];
+        e.doc.active = 1;
+        e.fill_gap = 2.0;
+        e.colorize_from(0);
+        let l = &e.doc.layers[1];
+        assert_eq!(l.at(30, 25), [240, 190, 60, 255], "le dedans du rond a repris sa couleur");
+        assert_eq!(l.at(2, 2), [0, 0, 0, 0], "le fond reste vide");
+        assert_eq!(l.at(42, 25)[3], 255);
+        assert!(l.at(42, 25)[0] < 60, "le trait est intact : {:?}", l.at(42, 25));
+        // Avec une palette de référence, la couleur posée vient de la palette ; annuler rend le trait seul
+        e.undo();
+        assert_eq!(e.doc.layers[1].at(30, 25), [0, 0, 0, 0]);
+        e.doc.palette = vec![[250, 200, 70, 255], [20, 20, 24, 255]];
+        e.colorize_from(0);
+        assert_eq!(e.doc.layers[1].at(30, 25), [250, 200, 70, 255]);
+        // La palette voyage avec le fichier
+        let f = std::env::temp_dir().join(format!("ary-coloriage-{}.aryimg", std::process::id()));
+        e.doc.save(&f).unwrap();
+        assert_eq!(Doc::load(&f).unwrap().palette, e.doc.palette);
+        let _ = std::fs::remove_file(&f);
     }
 
     #[test]

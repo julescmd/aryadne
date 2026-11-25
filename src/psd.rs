@@ -455,7 +455,7 @@ pub fn read(bytes: &[u8]) -> Result<Doc, String> {
         layers.push(Layer { px, ..Layer::blank("calque 1", w, h) });
     }
     let n = layers.len();
-    Ok(Doc { w, h, layers, active: n - 1, groups, guides: vec![], anim: None })
+    Ok(Doc { w, h, layers, active: n - 1, groups, guides: vec![], anim: None, palette: vec![] })
 }
 
 fn unpack(row: &[u8], w: usize) -> Vec<u8> {

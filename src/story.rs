@@ -199,6 +199,8 @@ pub enum Tool {
     Tone,
     Fill,
     Eraser,
+    /// Pot de peinture : un clic remplit la zone fermée par le trait
+    Bucket,
 }
 
 /// Un trait de pinceau entre deux points, avec bouts arrondis.
@@ -211,7 +213,7 @@ pub fn stroke(pm: &mut Pixmap, tool: Tool, color: [u8; 4], size: f32, pts: &[(f3
         Tool::Pencil => (0.85, size),
         Tool::Ink => (1.0, size),
         Tool::Tone => (0.22, size),
-        Tool::Fill => (1.0, size),
+        Tool::Fill | Tool::Bucket => (1.0, size),
         Tool::Eraser => (1.0, size),
     };
     paint.set_color_rgba8(color[0], color[1], color[2], (color[3] as f32 * alpha) as u8);
@@ -249,6 +251,32 @@ pub fn fill(pm: &mut Pixmap, color: [u8; 4], pts: &[(f32, f32, f32)]) {
     let mut paint = tiny_skia::Paint { anti_alias: true, ..Default::default() };
     paint.set_color_rgba8(color[0], color[1], color[2], color[3]);
     pm.fill_path(&path, &paint, tiny_skia::FillRule::Winding, tiny_skia::Transform::identity(), None);
+}
+
+/// Les trous du trait refermés par le pot et le coloriage, selon la taille de la case
+fn gap_of(pm: &Pixmap) -> usize {
+    (pm.width() as usize / 320).clamp(2, 8)
+}
+
+/// Pot de peinture : remplit la zone fermée par le trait autour de (x, y) ; les petits trous du trait sont refermés.
+pub fn bucket(pm: &mut Pixmap, color: [u8; 4], x: f32, y: f32) -> bool {
+    let (w, h) = (pm.width() as usize, pm.height() as usize);
+    if x < 0.0 || y < 0.0 {
+        return false;
+    }
+    let gap = gap_of(pm);
+    crate::colorize::bucket(pm.data_mut(), w, h, x as usize, y as usize, color, 0.12, gap, true)
+}
+
+/// Colorie la case d'après une autre (la précédente, déjà coloriée) : chaque zone fermée du trait reprend la
+/// couleur de la même zone. Rend le nombre de zones coloriées.
+pub fn colorize_from(pm: &mut Pixmap, model: &Pixmap) -> usize {
+    if pm.width() != model.width() || pm.height() != model.height() {
+        return 0;
+    }
+    let (w, h) = (pm.width() as usize, pm.height() as usize);
+    let gap = gap_of(pm);
+    crate::colorize::colorize(pm.data_mut(), model.data(), w, h, gap, &[], true)
 }
 
 // ---------- texte (planche) ----------
@@ -465,6 +493,35 @@ pub fn to_montage(story_path: &Path, s: &Story, out: &Path) -> Result<(), String
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pot_et_coloriage_d_une_case() {
+        // Une case : un rond à l'encre avec une petite ouverture ; le pot le remplit sans déborder
+        let ring = |cx: f32, open: bool| {
+            let mut pm = Pixmap::new(320, 180).unwrap();
+            let n = if open { 252 } else { 257 };
+            let pts: Vec<(f32, f32, f32)> = (0..n).map(|k| {
+                let a = k as f32 / 256.0 * std::f32::consts::TAU;
+                (cx + 50.0 * a.cos(), 90.0 + 50.0 * a.sin(), 1.0)
+            }).collect();
+            stroke(&mut pm, Tool::Ink, [20, 20, 24, 255], 4.0, &pts);
+            pm
+        };
+        let px = |pm: &Pixmap, x: u32, y: u32| { let c = pm.pixel(x, y).unwrap(); [c.red(), c.green(), c.blue(), c.alpha()] };
+        let mut a = ring(120.0, false);
+        assert!(bucket(&mut a, [230, 120, 40, 255], 120.0, 90.0));
+        assert_eq!(px(&a, 120, 90), [230, 120, 40, 255]);
+        assert_eq!(px(&a, 10, 10), [0, 0, 0, 0]);
+        assert!(!bucket(&mut a, [0, 0, 0, 255], -4.0, 90.0));
+        // La case suivante : le même rond déplacé, trait ouvert de quelques pixels ; il reprend la couleur
+        let mut b = ring(150.0, true);
+        assert_eq!(colorize_from(&mut b, &a), 1);
+        assert_eq!(px(&b, 150, 90), [230, 120, 40, 255]);
+        assert_eq!(px(&b, 10, 10), [0, 0, 0, 0]);
+        assert_eq!(px(&b, 150, 40)[3], 255);
+        assert!(px(&b, 150, 40)[0] < 80, "le trait reste : {:?}", px(&b, 150, 40));
+        assert_eq!(colorize_from(&mut b, &Pixmap::new(10, 10).unwrap()), 0);
+    }
 
     #[test]
     fn storyboard() {

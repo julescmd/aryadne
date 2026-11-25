@@ -14,6 +14,7 @@ mod expr;
 mod bases;
 mod vector;
 mod vgeom;
+mod colorize;
 mod track2d;
 mod gltfscene;
 mod fbxscene;

@@ -88,6 +88,27 @@ impl Editor {
         self.pix.get_mut(&id).unwrap()
     }
 
+    /// Colorie la case d'après celle d'avant (chaque zone fermée du trait reprend sa couleur).
+    fn colorize_from_previous(&mut self) {
+        if self.cur == 0 || self.cur >= self.story.panels.len() {
+            self.message = Some(crate::i18n::t("C'est la première case : colorie-la d'abord, les suivantes la reprendront."));
+            return;
+        }
+        let (id, prev) = (self.story.panels[self.cur].id, self.story.panels[self.cur - 1].id);
+        let model = self.pixmap(prev).clone();
+        let before = self.pixmap(id).data().to_vec();
+        let n = story::colorize_from(self.pixmap(id), &model);
+        if n == 0 {
+            self.message = Some(crate::i18n::t("Rien à reprendre : la case d'avant n'a pas de couleur dans ces zones, ou le trait n'est pas fermé."));
+            return;
+        }
+        self.undo.push(Undo::Pixels(id, before));
+        self.redo.clear();
+        self.bump(id);
+        self.save_panel(id);
+        self.message = Some(format!("{n} {}", crate::i18n::t("zones coloriées d'après la case d'avant")));
+    }
+
     fn bump(&mut self, id: u64) {
         *self.ver.entry(id).or_insert(0) += 1;
     }
@@ -172,7 +193,7 @@ impl Editor {
         if !typing {
             let (cmd, shift, alt) = ui.input(|i| (i.modifiers.command, i.modifiers.shift, i.modifiers.alt));
             let key = |k: Key| ui.input(|i| i.key_pressed(k));
-            for (t, k) in [(Tool::Pencil, Key::P), (Tool::Ink, Key::I), (Tool::Tone, Key::T), (Tool::Fill, Key::F), (Tool::Eraser, Key::E)] {
+            for (t, k) in [(Tool::Pencil, Key::P), (Tool::Ink, Key::I), (Tool::Tone, Key::T), (Tool::Fill, Key::F), (Tool::Eraser, Key::E), (Tool::Bucket, Key::G)] {
                 if !cmd && key(k) {
                     self.tool = t;
                 }
@@ -218,7 +239,7 @@ impl Editor {
         // ---- Barre d'outils
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 3.0;
-            let tools = [(Tool::Pencil, crate::lucide::PENCIL, "crayon (P)"), (Tool::Ink, crate::lucide::PEN_TOOL, "encre (I)"), (Tool::Tone, crate::lucide::BRUSH, "ton, gris léger (T)"), (Tool::Fill, crate::lucide::LASSO, "aplat : entourer une zone pour la remplir (F)"), (Tool::Eraser, crate::lucide::ERASER, "gomme (E)")];
+            let tools = [(Tool::Pencil, crate::lucide::PENCIL, "crayon (P)"), (Tool::Ink, crate::lucide::PEN_TOOL, "encre (I)"), (Tool::Tone, crate::lucide::BRUSH, "ton, gris léger (T)"), (Tool::Fill, crate::lucide::LASSO, "aplat : entourer une zone pour la remplir (F)"), (Tool::Eraser, crate::lucide::ERASER, "gomme (E)"), (Tool::Bucket, crate::lucide::PAINT_BUCKET, "pot de peinture : clic dans une zone fermée par le trait, les petits trous du trait sont refermés (G)")];
             for (t, icon, tip) in tools {
                 let on = self.tool == t;
                 if ui.add(egui::Button::new(RichText::new(icon).size(15.0).color(if on { p.on_accent } else { p.text })).fill(if on { p.accent } else { Color32::TRANSPARENT }).min_size(vec2(28.0, 26.0))).on_hover_text(crate::i18n::t(tip)).clicked() {
@@ -247,6 +268,9 @@ impl Editor {
             let on = self.onion;
             if ui.add(egui::Button::new(RichText::new(crate::lucide::LAYERS).size(15.0).color(if on { p.on_accent } else { p.text })).fill(if on { p.accent } else { Color32::TRANSPARENT }).min_size(vec2(28.0, 26.0))).on_hover_text(crate::i18n::t("pelure d'oignon : la case précédente en transparence (O)")).clicked() {
                 self.onion = !self.onion;
+            }
+            if ui.add(egui::Button::new(RichText::new(crate::lucide::PAINT_ROLLER).size(15.0)).frame(false)).on_hover_text(crate::i18n::t("colorier d'après la case d'avant : chaque zone fermée du trait reprend sa couleur")).clicked() {
+                self.colorize_from_previous();
             }
             if ui.add(egui::Button::new(RichText::new(crate::lucide::UNDO_2).size(15.0)).frame(false)).on_hover_text(crate::i18n::t("annuler (Ctrl+Z)")).clicked() {
                 self.undo_step(false);
@@ -494,7 +518,7 @@ impl Editor {
                     let last = *st.last().unwrap();
                     if (x - last.0).hypot(y - last.1) > 0.8 {
                         st.push((x, y, force));
-                        if tool != Tool::Fill {
+                        if tool != Tool::Fill && tool != Tool::Bucket {
                             // Seulement le nouveau bout du trait : le reste est déjà dans l'image
                             let seg = [last, (x, y, force)];
                             let (color, size) = (self.color, self.size);
@@ -515,6 +539,11 @@ impl Editor {
                 let (color, size) = (self.color, self.size);
                 if tool == Tool::Fill {
                     story::fill(self.pixmap(id), color, &st);
+                } else if tool == Tool::Bucket {
+                    // Le pot part du point où le clic a commencé
+                    if !story::bucket(self.pixmap(id), color, st[0].0, st[0].1) {
+                        self.undo.pop();
+                    }
                 } else if st.len() == 1 {
                     story::stroke(self.pixmap(id), tool, color, size, &st);
                 }
@@ -533,7 +562,7 @@ impl Editor {
             }
         }
         if let Some(h) = resp.hover_pos() {
-            if self.tool != Tool::Fill {
+            if self.tool != Tool::Fill && self.tool != Tool::Bucket {
                 painter.circle_stroke(h, (self.size * s * 0.5).max(1.5), Stroke::new(1.0, Color32::from_gray(120)));
             }
             ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
