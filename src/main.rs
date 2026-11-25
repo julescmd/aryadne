@@ -429,6 +429,8 @@ struct App {
     side_hidden: bool,
     /// Onglet de l'inspecteur : 0 plan, 1 liens, 2 Assistant
     insp_tab: u8,
+    /// Cerveau : les notes colorées par tag
+    brain_tags: bool,
     view_panels: Vec<String>,
     /// Zones de l'interface (image précédente) : la barre du bas montre les raccourcis de celle sous la souris
     zones_last: Vec<(&'static str, egui::Rect)>,
@@ -4398,6 +4400,23 @@ impl App {
                 Some(center) => vault::local_graph(vault::graph(&self.root(), &self.entries, false, self.brain.with_files, ""), &center, 2),
                 None => vault::graph(&self.root(), &self.entries, self.brain.with_folders, self.brain.with_files, &self.brain.scope.clone()),
             };
+            // Groupes de couleur : les tags les plus portés du coffre
+            self.brain.group_of.clear();
+            if self.brain_tags {
+                let root = self.root();
+                let tags = extras::collect_tags(&root, &self.entries);
+                self.brain.groups = tags.into_iter().take(6).map(|t| t.0).collect();
+                for n in g.nodes.iter().filter(|n| vault::is_md(&n.rel)) {
+                    if let Ok(t) = vault::read(&root, &n.rel) {
+                        let mine = extras::tags_in(&t);
+                        if let Some(k) = self.brain.groups.iter().position(|g| mine.contains(g)) {
+                            self.brain.group_of.insert(n.rel.clone(), k);
+                        }
+                    }
+                }
+            } else {
+                self.brain.groups.clear();
+            }
             self.brain.set_graph(g);
         }
         egui::CentralPanel::default().frame(egui::Frame::new().fill(p.bg)).show(ui, |ui| {
@@ -4429,6 +4448,9 @@ impl App {
                         self.brain.dirty = true;
                     }
                     if ui.checkbox(&mut self.brain.with_files, crate::i18n::t("tous les fichiers")).changed() {
+                        self.brain.dirty = true;
+                    }
+                    if ui.checkbox(&mut self.brain_tags, crate::i18n::t("couleurs par tag")).on_hover_text(crate::i18n::t("Les notes prennent la couleur de leur tag le plus courant (les six tags les plus portés)")).changed() {
                         self.brain.dirty = true;
                     }
                     // Graphe local de la dernière note ouverte

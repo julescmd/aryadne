@@ -1140,31 +1140,47 @@ fn download_image(root: &str, dir: &str, url: &str) -> Result<String, String> {
 
 // ---------- tags ----------
 
-/// Tags #mot des notes, avec leur nombre d'apparitions.
+/// Les tags d'une note (en-tête et #mot du texte, hors blocs de code), en minuscules, dans l'ordre et une fois chacun
+pub fn tags_in(t: &str) -> Vec<String> {
+    static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let re = RE.get_or_init(|| regex::Regex::new(r"(?:^|\s)#([\p{L}\p{N}_][\p{L}\p{N}_/-]*)").unwrap());
+    let mut out: Vec<String> = vec![];
+    let mut add = |t: String| {
+        let t = t.to_lowercase();
+        if !out.contains(&t) {
+            out.push(t);
+        }
+    };
+    for tag in vault::front_tags(t) {
+        add(tag);
+    }
+    let skip = vault::frontmatter(t).map(|f| f.1).unwrap_or(0);
+    let mut in_code = false;
+    for l in t.lines().skip(skip) {
+        if l.trim_start().starts_with("```") {
+            in_code = !in_code;
+        }
+        if in_code {
+            continue;
+        }
+        for c in re.captures_iter(l) {
+            let tag = c[1].to_string();
+            let hex = matches!(tag.len(), 3 | 6 | 8) && tag.chars().any(|c| c.is_ascii_digit()) && tag.chars().all(|c| c.is_ascii_hexdigit());
+            if !hex {
+                add(tag);
+            }
+        }
+    }
+    out
+}
+
+/// Tags #mot des notes, avec le nombre de notes qui les portent.
 pub fn collect_tags(root: &str, entries: &[Entry]) -> Vec<(String, usize)> {
-    let re = regex::Regex::new(r"(?:^|\s)#([\p{L}\p{N}_][\p{L}\p{N}_/-]*)").unwrap();
     let mut count: HashMap<String, usize> = HashMap::new();
     for e in entries.iter().filter(|e| !e.is_dir && vault::is_md(&e.rel)).take(3000) {
         let Ok(t) = vault::read(root, &e.rel) else { continue };
-        for tag in vault::front_tags(&t) {
-            *count.entry(tag.to_lowercase()).or_default() += 1;
-        }
-        let skip = vault::frontmatter(&t).map(|f| f.1).unwrap_or(0);
-        let mut in_code = false;
-        for l in t.lines().skip(skip) {
-            if l.trim_start().starts_with("```") {
-                in_code = !in_code;
-            }
-            if in_code {
-                continue;
-            }
-            for c in re.captures_iter(l) {
-                let tag = c[1].to_string();
-                let hex = matches!(tag.len(), 3 | 6 | 8) && tag.chars().any(|c| c.is_ascii_digit()) && tag.chars().all(|c| c.is_ascii_hexdigit());
-                if !hex {
-                    *count.entry(tag.to_lowercase()).or_default() += 1;
-                }
-            }
+        for tag in tags_in(&t) {
+            *count.entry(tag).or_default() += 1;
         }
     }
     let mut v: Vec<(String, usize)> = count.into_iter().collect();

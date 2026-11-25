@@ -3047,5 +3047,9 @@
   "retirer des signets": "remove from bookmarks",
   "signets": "bookmarks",
   "ajouter aux signets": "add to bookmarks",
-  "ajouter ce titre aux signets": "bookmark this heading"
+  "ajouter ce titre aux signets": "bookmark this heading",
+  "Les notes prennent la couleur de leur tag le plus courant (les six tags les plus portés)": "Notes take the color of their most common tag (the six most used tags)",
+  "couleurs par tag": "colors by tag",
+  "molette : zoom   glisser : déplacer   clic : ouvrir": "wheel: zoom   drag: pan   click: open",
+  "nœuds": "nodes"
 }

@@ -4,6 +4,19 @@ use crate::vault::Graph;
 use eframe::egui::{self, pos2, vec2, Color32, Pos2, Rect, Sense, Stroke, Vec2};
 use std::collections::HashMap;
 
+/// Couleur d'un groupe de tag dans le graphe
+pub fn group_color(k: usize) -> Color32 {
+    const C: [Color32; 6] = [
+        Color32::from_rgb(0xe0, 0x8a, 0x5a),
+        Color32::from_rgb(0x5a, 0xb0, 0xe0),
+        Color32::from_rgb(0x7c, 0xc4, 0x7a),
+        Color32::from_rgb(0xc9, 0x7a, 0xd6),
+        Color32::from_rgb(0xe0, 0xc8, 0x5a),
+        Color32::from_rgb(0x5a, 0xd0, 0xb8),
+    ];
+    C[k % C.len()]
+}
+
 pub struct Brain {
     pub graph: Graph,
     pos: Vec<Vec2>,
@@ -19,6 +32,9 @@ pub struct Brain {
     pub scope: String,
     /// Graphe local : la note au centre (ses voisines à deux liens) ; None : tout le coffre
     pub local: Option<String>,
+    /// Groupes de couleur : les tags montrés, et le groupe de chaque note (par son chemin)
+    pub groups: Vec<String>,
+    pub group_of: HashMap<String, usize>,
     /// Cadre automatiquement le graphe tant que l'utilisateur n'a pas bougé la vue.
     auto_fit: bool,
 }
@@ -38,6 +54,8 @@ impl Default for Brain {
             dirty: true,
             scope: String::new(),
             local: None,
+            groups: vec![],
+            group_of: HashMap::new(),
             auto_fit: true,
         }
     }
@@ -233,7 +251,8 @@ impl Brain {
                 painter.rect_filled(r, 0.0, p.bg);
                 painter.rect_stroke(r, 0.0, Stroke::new(1.5, fade(p.accent)), egui::StrokeKind::Inside);
             } else if crate::vault::is_md(&node.rel) {
-                painter.rect_filled(r, 0.0, fade(if Some(i) == focus { p.accent } else { p.text }));
+                let base = self.group_of.get(&node.rel).map(|g| group_color(*g)).unwrap_or(p.text);
+                painter.rect_filled(r, 0.0, fade(if Some(i) == focus { p.accent } else { base }));
             } else {
                 painter.rect_filled(r, 0.0, fade(p.muted));
             }
@@ -244,11 +263,24 @@ impl Brain {
             }
         }
 
+        // Légende des groupes de couleur (en bas à droite)
+        let mut ly = rect.bottom() - 14.0;
+        for (k, tag) in self.groups.iter().enumerate().rev() {
+            let g = painter.layout_no_wrap(format!("#{tag}"), egui::FontId::proportional(11.5), p.text);
+            let x = rect.right() - 14.0 - g.size().x;
+            painter.galley(pos2(x, ly - g.size().y), g.clone(), p.text);
+            painter.rect_filled(Rect::from_center_size(pos2(x - 10.0, ly - g.size().y / 2.0), vec2(8.0, 8.0)), 0.0, group_color(k));
+            ly -= g.size().y + 6.0;
+        }
+
         // Légende et aide
         let info = format!(
-            "{} nœuds · {} liens   ·   molette : zoom   glisser : déplacer   clic : ouvrir",
+            "{} {} · {} {}   ·   {}",
             self.graph.nodes.len(),
-            self.graph.edges.iter().filter(|e| !e.2).count()
+            crate::i18n::t("nœuds"),
+            self.graph.edges.iter().filter(|e| !e.2).count(),
+            crate::i18n::t("liens"),
+            crate::i18n::t("molette : zoom   glisser : déplacer   clic : ouvrir")
         );
         painter.text(rect.left_bottom() + vec2(12.0, -12.0), egui::Align2::LEFT_BOTTOM, info, egui::FontId::monospace(11.0), p.muted);
 
