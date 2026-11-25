@@ -188,6 +188,9 @@ pub struct Stroke {
     /// Flèche au bout d'une ligne ou d'un tracé ouvert
     #[serde(default)]
     pub arrow: bool,
+    /// Forme de pinceau (voir BRUSHES) : 0 uniforme, 1 calligraphique, 2 effilé, 3 dispersion
+    #[serde(default, skip_serializing_if = "is_zero_u8")]
+    pub brush: u8,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -277,6 +280,13 @@ pub fn constrain(c: u8, s0: f32, s1: f32, a0: f32, a1: f32, b0: f32, b1: f32) ->
         _ => (s0 + b0 - a0, s1 + b0 - a0),
     }
 }
+
+fn is_zero_u8(v: &u8) -> bool {
+    *v == 0
+}
+
+/// Les formes de pinceau d'un contour
+pub const BRUSHES: [&str; 4] = ["uniforme", "calligraphique", "effilé", "dispersion"];
 
 fn is_zero(v: &u64) -> bool {
     *v == 0
@@ -1348,8 +1358,8 @@ impl Gen<'_> {
                     let (p, o) = self.paint(f, bounds);
                     let _ = write!(out, r#"<path d="{d}" fill="{p}" fill-opacity="{o}" fill-rule="nonzero"/>"#);
                 }
-                // Contour à largeur variable : un tracé plein, peint comme le contour
-                if !sh.widths.is_empty() {
+                // Contour à largeur variable ou en forme de pinceau : un tracé plein, peint comme le contour
+                if !sh.widths.is_empty() || sh.strokes.first().is_some_and(|k| k.brush != 0) {
                     if let (Some(k), Some(wd)) = (sh.strokes.first(), crate::vgeom::width_outline(sh)) {
                         let (p, o) = self.paint(&k.paint, bounds);
                         let _ = write!(out, r#"<path d="{wd}" fill="{p}" fill-opacity="{o}" fill-rule="nonzero"/>"#);
@@ -1570,7 +1580,7 @@ pub fn import_svg(doc: &mut Doc, svg: &str, at: [f32; 2]) -> Result<usize, Strin
                             usvg::Paint::Color(c) => [c.red, c.green, c.blue, (s.opacity().get() * 255.0) as u8],
                             _ => [0, 0, 0, 255],
                         };
-                        Stroke { paint: Paint::solid(c), width: s.width().get() * t.sx.abs().max(t.sy.abs()), cap: 1, join: 1, dash: vec![], arrow: false }
+                        Stroke { paint: Paint::solid(c), width: s.width().get() * t.sx.abs().max(t.sy.abs()), cap: 1, join: 1, dash: vec![], arrow: false, brush: 0 }
                     });
                     for (sp, closed) in subpaths {
                         if sp.len() < 2 {
@@ -2651,6 +2661,31 @@ mod freeform_tests {
         assert!(c[0] > 170 && c[1] > 150 && c[2] > 150, "{c:?}");
         if std::env::var("ARY_DEMO").is_ok() {
             img.save("/tmp/freeform.png").unwrap();
+        }
+    }
+}
+#[cfg(test)]
+mod brush_tests {
+    use super::*;
+    #[test]
+    fn pinceaux() {
+        let mut d = Doc::starter();
+        d.shapes.clear();
+        let (bx, by) = (d.boards[0].x, d.boards[0].y);
+        for (k, brush) in [0u8, 1, 2, 3].into_iter().enumerate() {
+            let id = d.new_id();
+            let y = 140.0 + k as f32 * 220.0;
+            let nodes = vec![Node { p: [100.0, y], i: [100.0, y], o: [300.0, y - 160.0] }, Node { p: [600.0, y], i: [450.0, y + 160.0], o: [700.0, y - 80.0] }, Node { p: [950.0, y], i: [850.0, y - 100.0], o: [950.0, y] }];
+            d.shapes.push(Shape { id, kind: Kind::Path { nodes, closed: false }, x: bx, y: by, strokes: vec![Stroke { paint: Paint::solid([30, 30, 36, 255]), width: 26.0, cap: 1, join: 1, dash: vec![], arrow: false, brush }], ..Shape::base() });
+        }
+        let img = export_png(&d, 0, "/tmp", 0.6).unwrap();
+        let ink = |y0: u32, y1: u32| (y0..y1).flat_map(|y| (0..img.width()).map(move |x| (x, y))).filter(|&(x, y)| img.get_pixel(x, y)[0] < 128).count();
+        // Chaque pinceau dépose de l'encre ; l'effilé moins que l'uniforme
+        let bands: Vec<usize> = (0..4).map(|k| ink(k * 132, k * 132 + 132)).collect();
+        assert!(bands.iter().all(|&n| n > 200), "{bands:?}");
+        assert!(bands[2] < bands[0], "{bands:?}");
+        if std::env::var("ARY_DEMO").is_ok() {
+            img.save("/tmp/brushes.png").unwrap();
         }
     }
 }

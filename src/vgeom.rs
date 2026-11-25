@@ -365,7 +365,33 @@ pub fn width_outline(s: &Shape) -> Option<String> {
     let (pts, closed) = spine(s)?;
     let total = pts.last()?.1.max(1e-6);
     let base = s.strokes.first().map(|k| k.width).unwrap_or(2.0);
+    let brush = s.strokes.first().map(|k| k.brush).unwrap_or(0);
     let n = pts.len();
+    // Dispersion : des pastilles le long du tracé, taille et écart un peu au hasard (toujours le même)
+    if brush == 3 {
+        let mut d = String::new();
+        let step = (base * 1.6).max(1.0);
+        let mut at = 0.0f32;
+        let mut k = 0u32;
+        let mut seg = 0usize;
+        while at <= total && k < 4000 {
+            while seg + 1 < n - 1 && pts[seg + 1].1 < at {
+                seg += 1;
+            }
+            let ((a, sa), (b, sb)) = (pts[seg], pts[(seg + 1).min(n - 1)]);
+            let f = ((at - sa) / (sb - sa).max(1e-6)).clamp(0.0, 1.0);
+            let h = |x: u32| ((x.wrapping_mul(2654435761) >> 8) & 0xffff) as f32 / 65535.0;
+            let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+            let l = (dx * dx + dy * dy).sqrt().max(1e-6);
+            let off = (h(k * 3 + 1) - 0.5) * base * 1.2;
+            let c = [a[0] + dx * f - dy / l * off, a[1] + dy * f + dx / l * off];
+            let r = base * (0.3 + 0.45 * h(k * 3 + 2)) * width_at(&s.widths, 1.0, at / total);
+            let _ = write!(d, "M{:.2} {:.2}a{r:.2} {r:.2} 0 1 0 {:.2} 0a{r:.2} {r:.2} 0 1 0 {:.2} 0Z", c[0] - r, c[1], 2.0 * r, -2.0 * r);
+            at += step * (0.7 + 0.6 * h(k * 3 + 3));
+            k += 1;
+        }
+        return Some(d);
+    }
     let mut left = Vec::with_capacity(n);
     let mut right = Vec::with_capacity(n);
     for i in 0..n {
@@ -373,7 +399,15 @@ pub fn width_outline(s: &Shape) -> Option<String> {
         let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
         let l = (dx * dx + dy * dy).sqrt().max(1e-6);
         let nrm = [-dy / l, dx / l];
-        let w = width_at(&s.widths, base, pts[i].1 / total) / 2.0;
+        let t = pts[i].1 / total;
+        let shape = match brush {
+            // Plume tenue à 45° : épais en travers, fin dans le sens de la plume
+            1 => 0.15 + 0.85 * (dy.atan2(dx) - std::f32::consts::FRAC_PI_4).sin().abs(),
+            // Effilé aux deux bouts (un tracé fermé reste plein)
+            2 if !closed => (std::f32::consts::PI * t).sin().max(0.0).powf(0.6).max(0.04),
+            _ => 1.0,
+        };
+        let w = width_at(&s.widths, base, t) / 2.0 * shape;
         let p = pts[i].0;
         left.push([p[0] + nrm[0] * w, p[1] + nrm[1] * w]);
         right.push([p[0] - nrm[0] * w, p[1] - nrm[1] * w]);

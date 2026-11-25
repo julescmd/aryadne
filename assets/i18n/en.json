@@ -3341,5 +3341,7 @@
   "enregistrer le PDF": "save PDF",
   "points libres": "freeform",
   "clic droit : retirer ce point · les points se déplacent sur la toile": "right click: remove this point · drag the points on the canvas",
-  "un point de couleur de plus, au milieu": "one more color point, in the middle"
+  "un point de couleur de plus, au milieu": "one more color point, in the middle",
+  "calligraphique": "calligraphic",
+  "dispersion": "scatter"
 }

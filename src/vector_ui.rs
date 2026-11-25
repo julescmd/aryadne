@@ -336,8 +336,8 @@ impl Editor {
         let mut s = Shape { id, kind, x, y, ..Shape::base() };
         s.name = format!("{} {n}", crate::i18n::t(s.kind_label()));
         match s.kind {
-            Kind::Line { .. } => s.strokes = vec![VStroke { paint: Paint::solid([24, 24, 27, 255]), width: 4.0, cap: 1, join: 1, dash: vec![], arrow: false }],
-            Kind::Path { .. } => s.strokes = vec![VStroke { paint: Paint::solid([24, 24, 27, 255]), width: 3.0, cap: 1, join: 1, dash: vec![], arrow: false }],
+            Kind::Line { .. } => s.strokes = vec![VStroke { paint: Paint::solid([24, 24, 27, 255]), width: 4.0, cap: 1, join: 1, dash: vec![], arrow: false, brush: 0 }],
+            Kind::Path { .. } => s.strokes = vec![VStroke { paint: Paint::solid([24, 24, 27, 255]), width: 3.0, cap: 1, join: 1, dash: vec![], arrow: false, brush: 0 }],
             Kind::Text { .. } => s.fills = vec![Paint::solid([24, 24, 27, 255])],
             _ => s.fills = vec![Paint::solid([236, 108, 89, 255])],
         }
@@ -1041,6 +1041,18 @@ impl Editor {
                         }
                     });
                     ch |= pattern_ui(ui, &mut st.paint);
+                    // Forme du pinceau (sur le premier contour)
+                    if k == 0 {
+                        ui.horizontal(|ui| {
+                            ui.label(egui::RichText::new(crate::i18n::t("pinceau")).size(11.5).color(crate::theme::pal().muted));
+                            for (v, (icon, name)) in [(l::MINUS, crate::vector::BRUSHES[0]), (l::PEN_TOOL, crate::vector::BRUSHES[1]), (l::BRUSH, crate::vector::BRUSHES[2]), (l::SPRAY_CAN, crate::vector::BRUSHES[3])].into_iter().enumerate() {
+                                if ui.selectable_label(st.brush == v as u8, egui::RichText::new(icon).size(13.0)).on_hover_text(crate::i18n::t(name)).clicked() {
+                                    st.brush = v as u8;
+                                    ch = true;
+                                }
+                            }
+                        });
+                    }
                     ui.horizontal(|ui| {
                         for (v, icon, tip) in [(0u8, "⊢", "extrémité plate"), (1, "◖", "extrémité ronde"), (2, "▭", "extrémité carrée")] {
                             if ui.selectable_label(st.cap == v, icon).on_hover_text(crate::i18n::t(tip)).clicked() {
@@ -1072,7 +1084,7 @@ impl Editor {
                     ch = true;
                 }
                 if ui.small_button(format!("{}  {}", l::PLUS, crate::i18n::t("contour"))).clicked() {
-                    s.strokes.push(VStroke { paint: Paint::solid([24, 24, 27, 255]), width: 2.0, cap: 1, join: 1, dash: vec![], arrow: false });
+                    s.strokes.push(VStroke { paint: Paint::solid([24, 24, 27, 255]), width: 2.0, cap: 1, join: 1, dash: vec![], arrow: false, brush: 0 });
                     ch = true;
                 }
             }
@@ -3691,7 +3703,7 @@ mod live_paint_tests {
         let mut d = Doc::starter();
         d.shapes.clear();
         let (bx, by) = (d.boards[0].x, d.boards[0].y);
-        let stroke = || vec![Stroke { paint: Paint::solid([20, 20, 24, 255]), width: 6.0, cap: 1, join: 1, dash: vec![], arrow: false }];
+        let stroke = || vec![Stroke { paint: Paint::solid([20, 20, 24, 255]), width: 6.0, cap: 1, join: 1, dash: vec![], arrow: false, brush: 0 }];
         // Trois traits qui se croisent : un triangle fermé au milieu
         for (a, b) in [([100.0, 500.0], [700.0, 120.0]), ([100.0, 120.0], [700.0, 500.0]), ([50.0, 420.0], [750.0, 420.0])] {
             let id = d.new_id();
