@@ -979,6 +979,26 @@ impl Editor {
             ui.horizontal(|ui| {
                 if s.instance_of != 0 {
                     let mname = self.doc.get(s.instance_of).map(|m| m.name.clone()).unwrap_or_default();
+                    // Variantes : les composants qui partagent le nom avant « / » (Bouton / Normal, Bouton / Survol…)
+                    let base = mname.split(" / ").next().unwrap_or(&mname).to_string();
+                    let vars: Vec<(u64, String)> = self.doc.shapes.iter().filter(|m| m.component && m.name.split(" / ").next() == Some(base.as_str())).map(|m| (m.id, m.name.clone())).collect();
+                    if vars.len() > 1 {
+                        let mut pick = None;
+                        egui::ComboBox::from_id_salt("vec-variant").width(130.0).selected_text(mname.rsplit(" / ").next().unwrap_or(&mname).to_string()).show_ui(ui, |ui| {
+                            for (vid, vn) in &vars {
+                                if ui.selectable_label(*vid == s.instance_of, vn.rsplit(" / ").next().unwrap_or(vn)).clicked() {
+                                    pick = Some(*vid);
+                                }
+                            }
+                        });
+                        if let Some(v) = pick {
+                            self.doc = snapshot.clone();
+                            if let Some(x) = self.doc.shapes.iter_mut().find(|x| x.id == gid) {
+                                x.instance_of = v;
+                            }
+                            ch = true;
+                        }
+                    }
                     ui.label(egui::RichText::new(format!("{} {mname}", l::DIAMOND)).weak());
                     if ui.button(l::CROSSHAIR).on_hover_text(crate::i18n::t("aller au composant")).clicked() {
                         self.sel = vec![s.instance_of];
@@ -996,6 +1016,28 @@ impl Editor {
                         self.doc = snapshot.clone();
                         if let Some(i) = self.doc.instantiate(gid) {
                             self.sel = vec![i];
+                        }
+                        ch = true;
+                    }
+                    if ui.button(l::LAYERS_2).on_hover_text(crate::i18n::t("Nouvelle variante (un composant frère : « Nom / Variante 2 »)")).clicked() {
+                        self.doc = snapshot.clone();
+                        let base = s.name.split(" / ").next().unwrap_or(&s.name).to_string();
+                        if !s.name.contains(" / ") {
+                            if let Some(x) = self.doc.shapes.iter_mut().find(|x| x.id == gid) {
+                                x.name = format!("{base} / {}", crate::i18n::t("Défaut"));
+                            }
+                        }
+                        let n = self.doc.shapes.iter().filter(|m| m.component && m.name.split(" / ").next() == Some(base.as_str())).count() + 1;
+                        if let Some(v) = self.clone_tree(gid, 0.0) {
+                            let b = self.doc.get(gid).map(|g| self.doc.bounds(g)).unwrap_or([0.0; 4]);
+                            self.doc.translate(v, b[2] - b[0] + 40.0, 0.0);
+                            if let Some(x) = self.doc.shapes.iter_mut().find(|x| x.id == v) {
+                                // Une copie de composant devient une instance : on la remet en composant
+                                x.instance_of = 0;
+                                x.component = true;
+                                x.name = format!("{base} / {} {n}", crate::i18n::t("Variante"));
+                            }
+                            self.sel = vec![v];
                         }
                         ch = true;
                     }
@@ -1068,6 +1110,78 @@ impl Editor {
                     s.layout = lay;
                 }
                 self.doc.apply_layouts();
+                ch = true;
+            }
+        }
+        // Styles partagés (comme Figma) : poser, créer, mettre à jour pour toutes les formes, détacher
+        if let Some(id) = single.filter(|i| self.doc.get(*i).is_some_and(|s| !matches!(s.kind, Kind::Group { .. }))) {
+            head(ui, "Style");
+            let cur = self.doc.get(id).map(|s| s.style.clone()).unwrap_or_default();
+            let mut act: Option<(u8, String)> = None;
+            ui.horizontal(|ui| {
+                egui::ComboBox::from_id_salt("vec-style").width(130.0).selected_text(if cur.is_empty() { crate::i18n::t("aucun") } else { cur.clone() }).show_ui(ui, |ui| {
+                    for st in &self.doc.styles {
+                        if ui.selectable_label(st.name == cur, &st.name).clicked() {
+                            act = Some((0, st.name.clone()));
+                        }
+                    }
+                });
+                if ui.button(l::PLUS).on_hover_text(crate::i18n::t("Nouveau style depuis cette forme (couleurs, contour, effets, police)")).clicked() {
+                    let mut n = self.doc.styles.len() + 1;
+                    while self.doc.styles.iter().any(|s| s.name == format!("Style {n}")) {
+                        n += 1;
+                    }
+                    act = Some((1, format!("Style {n}")));
+                }
+                if !cur.is_empty() {
+                    if ui.button(l::REFRESH_CW).on_hover_text(crate::i18n::t("Mettre à jour le style avec cette forme : toutes ses formes changent")).clicked() {
+                        act = Some((1, cur.clone()));
+                    }
+                    if ui.button(l::UNLINK).on_hover_text(crate::i18n::t("Détacher du style")).clicked() {
+                        act = Some((2, String::new()));
+                    }
+                }
+            });
+            if !cur.is_empty() {
+                // Renommer le style
+                let mut name = cur.clone();
+                if ui.add(egui::TextEdit::singleline(&mut name).desired_width(f32::INFINITY)).lost_focus() && name.trim() != cur && !name.trim().is_empty() {
+                    act = Some((3, name.trim().to_string()));
+                }
+            }
+            if let Some((what, name)) = act {
+                self.doc = snapshot.clone();
+                match what {
+                    0 => {
+                        if let Some(st) = self.doc.styles.iter().find(|s| s.name == name).cloned() {
+                            if let Some(s) = self.shape_mut(id) {
+                                st.apply(s);
+                            }
+                        }
+                    }
+                    1 => {
+                        if let Some(sh) = self.doc.get(id).cloned() {
+                            let st = crate::vector::NamedStyle::of(&name, &sh);
+                            self.doc.set_style(st);
+                            if let Some(s) = self.shape_mut(id) {
+                                s.style = name;
+                            }
+                        }
+                    }
+                    2 => {
+                        if let Some(s) = self.shape_mut(id) {
+                            s.style.clear();
+                        }
+                    }
+                    _ => {
+                        for st in self.doc.styles.iter_mut().filter(|s| s.name == cur) {
+                            st.name = name.clone();
+                        }
+                        for s in self.doc.shapes.iter_mut().filter(|s| s.style == cur) {
+                            s.style = name.clone();
+                        }
+                    }
+                }
                 ch = true;
             }
         }

@@ -3009,5 +3009,11 @@
   "Des colonnes qui guident et aimantent la mise en page (jamais exportées)": "Columns that guide and snap the layout (never exported)",
   "colonnes": "columns",
   "gouttière": "gutter",
-  "espace entre deux colonnes": "space between two columns"
+  "espace entre deux colonnes": "space between two columns",
+  "Nouveau style depuis cette forme (couleurs, contour, effets, police)": "New style from this shape (colors, stroke, effects, font)",
+  "Mettre à jour le style avec cette forme : toutes ses formes changent": "Update the style from this shape: all its shapes change",
+  "Détacher du style": "Detach from style",
+  "Nouvelle variante (un composant frère : « Nom / Variante 2 »)": "New variant (a sibling component: “Name / Variant 2”)",
+  "Défaut": "Default",
+  "Variante": "Variant"
 }

@@ -200,6 +200,9 @@ pub struct Shape {
     /// 0 début (gauche, haut), 1 fin (droite, bas), 2 les deux (étirer), 3 centre, 4 échelle
     #[serde(default, skip_serializing_if = "is_default_c")]
     pub constraint: [u8; 2],
+    /// Style partagé utilisé (vide : aucun)
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub style: String,
 }
 
 fn is_default_c(c: &[u8; 2]) -> bool {
@@ -263,6 +266,64 @@ pub struct Doc {
     /// Nuances du document (palette)
     #[serde(default)]
     pub swatches: Vec<[u8; 4]>,
+    /// Styles partagés (comme Figma) : changer un style change toutes les formes qui l'utilisent
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub styles: Vec<NamedStyle>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct NamedStyle {
+    pub name: String,
+    pub fills: Vec<Paint>,
+    pub strokes: Vec<Stroke>,
+    #[serde(default)]
+    pub shadow: Option<Shadow>,
+    #[serde(default)]
+    pub blur: f32,
+    #[serde(default = "one")]
+    pub opacity: f32,
+    /// Style de texte : police, taille, interligne, interlettrage
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<(String, f32, f32, f32)>,
+}
+
+impl NamedStyle {
+    pub fn of(name: &str, s: &Shape) -> NamedStyle {
+        let text = match &s.kind {
+            Kind::Text { font, size, leading, spacing, .. } => Some((font.clone(), *size, *leading, *spacing)),
+            _ => None,
+        };
+        NamedStyle { name: name.to_string(), fills: s.fills.clone(), strokes: s.strokes.clone(), shadow: s.shadow.clone(), blur: s.blur, opacity: s.opacity, text }
+    }
+
+    /// Pose le style sur une forme
+    pub fn apply(&self, s: &mut Shape) {
+        s.fills = self.fills.clone();
+        s.strokes = self.strokes.clone();
+        s.shadow = self.shadow.clone();
+        s.blur = self.blur;
+        s.opacity = self.opacity;
+        s.style = self.name.clone();
+        if let (Some((f, z, l, sp)), Kind::Text { font, size, leading, spacing, .. }) = (&self.text, &mut s.kind) {
+            (*font, *size, *leading, *spacing) = (f.clone(), *z, *l, *sp);
+        }
+    }
+}
+
+impl Doc {
+    /// Enregistre le style (nouveau ou mis à jour) et le repose sur toutes les formes qui l'utilisent
+    pub fn set_style(&mut self, st: NamedStyle) -> usize {
+        match self.styles.iter_mut().find(|x| x.name == st.name) {
+            Some(x) => *x = st.clone(),
+            None => self.styles.push(st.clone()),
+        }
+        let mut n = 0;
+        for s in self.shapes.iter_mut().filter(|s| s.style == st.name) {
+            st.apply(s);
+            n += 1;
+        }
+        n
+    }
 }
 
 impl Doc {
@@ -272,6 +333,7 @@ impl Doc {
             shapes: vec![],
             next_id: 1,
             swatches: vec![[24, 24, 27, 255], [255, 255, 255, 255], [236, 108, 89, 255], [244, 191, 80, 255], [86, 166, 122, 255], [84, 128, 220, 255], [150, 110, 210, 255]],
+            styles: vec![],
         }
     }
 
@@ -561,7 +623,7 @@ fn union(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {
 
 impl Shape {
     pub fn base() -> Shape {
-        Shape { id: 0, name: String::new(), kind: Kind::Rect { w: 100.0, h: 100.0, r: [0.0; 4] }, x: 0.0, y: 0.0, rot: 0.0, fills: vec![], strokes: vec![], opacity: 1.0, visible: true, locked: false, parent: 0, shadow: None, blur: 0.0, blend: String::new(), layout: None, component: false, instance_of: 0, widths: vec![], constraint: [0, 0] }
+        Shape { id: 0, name: String::new(), kind: Kind::Rect { w: 100.0, h: 100.0, r: [0.0; 4] }, x: 0.0, y: 0.0, rot: 0.0, fills: vec![], strokes: vec![], opacity: 1.0, visible: true, locked: false, parent: 0, shadow: None, blur: 0.0, blend: String::new(), layout: None, component: false, instance_of: 0, widths: vec![], constraint: [0, 0], style: String::new() }
     }
 
     pub fn kind_label(&self) -> &'static str {
@@ -1729,6 +1791,26 @@ mod tests {
         assert_eq!(c.len(), 4);
         assert_eq!(c[0], (40.0, 255.0));
         assert!((c[3].1 - 960.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn styles_partages() {
+        let mut d = Doc::starter();
+        let mut ids = vec![];
+        for _ in 0..2 {
+            let id = d.new_id();
+            d.shapes.push(Shape { id, fills: vec![Paint::solid([1, 1, 1, 255])], ..Shape::base() });
+            ids.push(id);
+        }
+        let st = NamedStyle::of("Accent", d.get(ids[0]).unwrap());
+        for id in &ids {
+            let s = d.shapes.iter_mut().find(|s| s.id == *id).unwrap();
+            st.apply(s);
+        }
+        let mut st2 = st.clone();
+        st2.fills = vec![Paint::solid([200, 50, 50, 255])];
+        assert_eq!(d.set_style(st2), 2);
+        assert!(ids.iter().all(|i| d.get(*i).unwrap().fills[0].first() == [200, 50, 50, 255]));
     }
 
     #[test]
