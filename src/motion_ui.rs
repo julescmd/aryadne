@@ -28,9 +28,12 @@ enum ViewDrag {
     Draw { a: [f32; 2], b: [f32; 2] },
     /// Tracé à main levée : les points du geste (composition)
     Pen(Vec<[f32; 2]>),
-    /// Un point d'un tracé, qu'on déplace
+    /// Un point d'un tracé (0..) ou d'un masque (MASK_PT + masque × 10 000 + point), qu'on déplace
     PathPt(usize),
 }
+
+/// Les points de masque sont numérotés à part de ceux d'un tracé
+const MASK_PT: usize = 1_000_000;
 
 /// Simplifie un geste (Ramer-Douglas-Peucker) : garde les points qui s'écartent de plus de `eps`
 fn simplify(pts: &[[f32; 2]], eps: f32) -> Vec<[f32; 2]> {
@@ -654,12 +657,26 @@ impl Editor {
                 painter.line_segment([top, rot], Stroke::new(1.0, p.accent));
                 handles.push((rot, 1));
                 // Tracé : ses points se déplacent à la souris
-                if let Kind::Path { points, .. } = &lay.kind {
+                if let Kind::Path { points, keys, .. } = &lay.kind {
                     let x = self.compo.world(i, self.time);
-                    for (k, q) in points.iter().enumerate() {
+                    for (k, q) in motion::points_at(points, keys, self.time).iter().enumerate() {
                         let sp = to_screen(x.apply(*q));
                         path_pts.push((sp, k));
                         painter.circle(sp, 4.0, Color32::WHITE, Stroke::new(1.5, p.accent));
+                    }
+                }
+                // Masques : leur contour (jaune, comme After Effects) et leurs points
+                let x = self.compo.world(i, self.time);
+                let mcol = Color32::from_rgb(240, 200, 60);
+                for (mi, m) in lay.masks.iter().enumerate() {
+                    let line: Vec<Pos2> = m.outline(self.time).iter().map(|q| to_screen(x.apply(*q))).collect();
+                    if line.len() > 2 {
+                        painter.add(egui::Shape::closed_line(line, Stroke::new(1.5, mcol)));
+                    }
+                    for (k, q) in motion::points_at(&m.points, &m.keys, self.time).iter().enumerate() {
+                        let sp = to_screen(x.apply(*q));
+                        path_pts.push((sp, MASK_PT + mi * 10_000 + k));
+                        painter.rect(Rect::from_center_size(sp, vec2(7.0, 7.0)), 0.0, Color32::WHITE, Stroke::new(1.5, mcol), egui::StrokeKind::Middle);
                     }
                 }
                 for (q, kind) in &handles {
@@ -727,10 +744,25 @@ impl Editor {
                     ViewDrag::PathPt(k) => {
                         if let Some(i) = self.sel {
                             let x = self.compo.world(i, t);
-                            if let (Some(lp), Kind::Path { points, .. }) = (x.inverse(cp), &mut self.compo.layers[i].kind) {
-                                if let Some(q) = points.get_mut(*k) {
-                                    *q = lp;
-                                    self.rev += 1;
+                            let k = *k;
+                            if let Some(lp) = x.inverse(cp) {
+                                let lay = &mut self.compo.layers[i];
+                                // Un point d'une forme animée : la clé de cet instant change (créée au besoin)
+                                let target = if k >= MASK_PT {
+                                    let (mi, pk) = ((k - MASK_PT) / 10_000, (k - MASK_PT) % 10_000);
+                                    lay.masks.get_mut(mi).map(|m| (&mut m.points, &mut m.keys, pk))
+                                } else if let Kind::Path { points, keys, .. } = &mut lay.kind {
+                                    Some((points, keys, k))
+                                } else {
+                                    None
+                                };
+                                if let Some((pts, keys, pk)) = target {
+                                    let mut now = motion::points_at(pts, keys, t);
+                                    if let Some(q) = now.get_mut(pk) {
+                                        *q = lp;
+                                        motion::set_points_at(pts, keys, t, now);
+                                        self.rev += 1;
+                                    }
                                 }
                             }
                         }
@@ -799,7 +831,7 @@ impl Editor {
                     let (lo, hi) = pts.iter().fold(([f32::MAX; 2], [f32::MIN; 2]), |(lo, hi), q| ([lo[0].min(q[0]), lo[1].min(q[1])], [hi[0].max(q[0]), hi[1].max(q[1])]));
                     let c = [(lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0];
                     let points = pts.iter().map(|q| [q[0] - c[0], q[1] - c[1]]).collect();
-                    self.add_layer(Kind::Path { points, closed: false, width: 12.0, color: [0xf4, 0xee, 0xf1], arrow: false }, Some(c));
+                    self.add_layer(Kind::Path { points, closed: false, width: 12.0, color: [0xf4, 0xee, 0xf1], arrow: false, fill: None, keys: vec![] }, Some(c));
                 }
             }
         }
@@ -1207,6 +1239,82 @@ impl Editor {
                         changed = true;
                     }
                 }
+            }
+            // Calque de forme : fond du tracé fermé, et forme animée
+            if let Kind::Path { points, keys, fill, closed, .. } = &mut lay.kind {
+                ui.horizontal(|ui| {
+                    let mut has = fill.is_some();
+                    if ui.toggle_value(&mut has, egui::RichText::new(l::PAINT_BUCKET).size(14.0)).on_hover_text(crate::i18n::t("Remplir le dedans (calque de forme)")).changed() {
+                        *fill = has.then_some([0xec, 0x6c, 0x59]);
+                        if has {
+                            *closed = true;
+                        }
+                        changed = true;
+                    }
+                    if let Some(c) = fill {
+                        changed |= ui.color_edit_button_srgb(c).changed();
+                    }
+                    ui.separator();
+                    let at = keys.iter().any(|k| (k.t - t).abs() < motion::KEY_EPS);
+                    let anim = !keys.is_empty();
+                    let (r, b) = ui.allocate_exact_size(vec2(16.0, 22.0), Sense::click());
+                    diamond(ui.painter(), r.center(), 4.5, if at { Some(p.accent) } else if anim { Some(p.accent.gamma_multiply(0.35)) } else { None }, if anim { p.accent } else { p.muted });
+                    if b.on_hover_text(crate::i18n::t("Clé de forme : déplace ensuite les points à un autre instant, la forme se transforme")).clicked() {
+                        motion::key_points(points, keys, t);
+                        changed = true;
+                    }
+                    ui.label(egui::RichText::new(crate::i18n::t("forme")).size(11.5).color(p.muted));
+                });
+            }
+            // Masques (comme After Effects)
+            if !matches!(lay.kind, Kind::Null) {
+                section(ui, "Masques");
+                let mut remove = None;
+                let n = lay.masks.len();
+                for (mi, m) in lay.masks.iter_mut().enumerate() {
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new(format!("{} {}", l::SQUARE_DASHED, mi + 1)).color(Color32::from_rgb(240, 200, 60)));
+                        for (mode, icon, tip) in [(0u8, l::SQUARE_PLUS, "Ajouter"), (1, l::SQUARE_MINUS, "Soustraire"), (2, l::SQUARE_SQUARE, "Intersection")] {
+                            if ui.selectable_label(m.mode == mode, icon).on_hover_text(crate::i18n::t(tip)).clicked() {
+                                m.mode = mode;
+                                changed = true;
+                            }
+                        }
+                        changed |= ui.toggle_value(&mut m.invert, l::FLIP_HORIZONTAL_2).on_hover_text(crate::i18n::t("Inverser le masque")).changed();
+                        changed |= ui.toggle_value(&mut m.smooth, l::SPLINE).on_hover_text(crate::i18n::t("Lisser le contour")).changed();
+                        let at = m.keys.iter().any(|k| (k.t - t).abs() < motion::KEY_EPS);
+                        let anim = !m.keys.is_empty();
+                        let (r, b) = ui.allocate_exact_size(vec2(16.0, 22.0), Sense::click());
+                        diamond(ui.painter(), r.center(), 4.5, if at { Some(p.accent) } else if anim { Some(p.accent.gamma_multiply(0.35)) } else { None }, if anim { p.accent } else { p.muted });
+                        if b.on_hover_text(crate::i18n::t("Clé de masque : déplace ensuite les points à un autre instant")).clicked() {
+                            motion::key_points(&m.points, &mut m.keys, t);
+                            changed = true;
+                        }
+                        if ui.small_button(l::TRASH_2).on_hover_text(crate::i18n::t("Supprimer le masque")).clicked() {
+                            remove = Some(mi);
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        changed |= ui.add(egui::DragValue::new(&mut m.feather).speed(0.3).range(0.0..=500.0).max_decimals(1).prefix(format!("{} ", crate::i18n::t("contour progressif"))).suffix(" px")).changed();
+                        changed |= ui.add(egui::DragValue::new(&mut m.opacity).speed(0.5).range(0.0..=100.0).max_decimals(0).suffix(" %")).on_hover_text(crate::i18n::t("Opacité du masque")).changed();
+                    });
+                }
+                if let Some(mi) = remove {
+                    lay.masks.remove(mi);
+                    changed = true;
+                }
+                let sz = motion::size(lay, &mut self.cache);
+                ui.horizontal(|ui| {
+                    if ui.button(format!("{} {}", l::SQUARE, crate::i18n::t("masque"))).on_hover_text(crate::i18n::t("Nouveau masque rectangulaire (glisse ses points dans la vue)")).clicked() {
+                        lay.masks.push(motion::Mask::rect(sz[0] * 0.6, sz[1] * 0.6));
+                        changed = true;
+                    }
+                    if ui.button(format!("{} {}", l::CIRCLE, crate::i18n::t("masque"))).on_hover_text(crate::i18n::t("Nouveau masque elliptique")).clicked() {
+                        lay.masks.push(motion::Mask::ellipse(sz[0] * 0.6, sz[1] * 0.6));
+                        changed = true;
+                    }
+                });
+                let _ = n;
             }
             if matches!(lay.kind, Kind::Path { .. }) {
                 section(ui, "Tracé progressif");

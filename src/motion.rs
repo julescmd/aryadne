@@ -228,6 +228,12 @@ pub enum Kind {
         /// Une pointe de flèche au bout (elle suit le tracé progressif)
         #[serde(default)]
         arrow: bool,
+        /// Calque de forme : le dedans du tracé fermé est rempli de cette couleur
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        fill: Option<[u8; 3]>,
+        /// La forme animée : ses points à certains instants (interpolés entre deux clés)
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        keys: Vec<PathKey>,
     },
     /// Précomposition : une autre composition Motion du coffre, jouée depuis le début du calque
     /// Objet nul : invisible, sert de parent et de poignée pour piloter d'autres calques
@@ -308,6 +314,169 @@ pub struct Layer {
     /// Expressions par propriété (« pos », « scale », « rot », « opacity ») : une formule remplace la valeur
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub exprs: std::collections::BTreeMap<String, String>,
+    /// Masques (comme After Effects) : des formes, animables, qui découpent le calque
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub masks: Vec<Mask>,
+}
+
+/// La forme d'un tracé ou d'un masque à un instant
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct PathKey {
+    pub t: f32,
+    pub points: Vec<[f32; 2]>,
+}
+
+/// Les points à l'instant `t` : la forme de base, ou l'interpolation (adoucie) entre les deux clés voisines
+pub fn points_at(base: &[[f32; 2]], keys: &[PathKey], t: f32) -> Vec<[f32; 2]> {
+    if keys.is_empty() {
+        return base.to_vec();
+    }
+    let i = keys.partition_point(|k| k.t <= t);
+    if i == 0 {
+        return keys[0].points.clone();
+    }
+    if i >= keys.len() {
+        return keys[keys.len() - 1].points.clone();
+    }
+    let (a, b) = (&keys[i - 1], &keys[i]);
+    let f = ((t - a.t) / (b.t - a.t).max(1e-6)).clamp(0.0, 1.0);
+    let f = f * f * (3.0 - 2.0 * f);
+    if a.points.len() != b.points.len() {
+        return if f < 0.5 { a.points.clone() } else { b.points.clone() };
+    }
+    a.points.iter().zip(&b.points).map(|(p, q)| [p[0] + (q[0] - p[0]) * f, p[1] + (q[1] - p[1]) * f]).collect()
+}
+
+/// Change la forme à l'instant `t` : la base si rien n'est animé, sinon la clé de cet instant (créée au besoin)
+pub fn set_points_at(base: &mut Vec<[f32; 2]>, keys: &mut Vec<PathKey>, t: f32, pts: Vec<[f32; 2]>) {
+    if keys.is_empty() {
+        *base = pts;
+        return;
+    }
+    match keys.iter_mut().find(|k| (k.t - t).abs() < KEY_EPS) {
+        Some(k) => k.points = pts,
+        None => {
+            keys.push(PathKey { t, points: pts });
+            keys.sort_by(|a, b| a.t.total_cmp(&b.t));
+        }
+    }
+}
+
+/// Une clé de forme à l'instant `t` (la première clé reprend aussi la forme de base)
+pub fn key_points(base: &[[f32; 2]], keys: &mut Vec<PathKey>, t: f32) {
+    let now = points_at(base, keys, t);
+    if keys.iter().any(|k| (k.t - t).abs() < KEY_EPS) {
+        keys.retain(|k| (k.t - t).abs() >= KEY_EPS);
+        return;
+    }
+    keys.push(PathKey { t, points: now });
+    keys.sort_by(|a, b| a.t.total_cmp(&b.t));
+}
+
+/// Un masque de calque : une forme fermée (px du calque, autour de son origine)
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct Mask {
+    pub points: Vec<[f32; 2]>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub keys: Vec<PathKey>,
+    /// Bord adouci (px)
+    #[serde(default)]
+    pub feather: f32,
+    #[serde(default)]
+    pub invert: bool,
+    /// 0 ajouter, 1 soustraire, 2 intersection
+    #[serde(default)]
+    pub mode: u8,
+    /// En %
+    #[serde(default = "hundred")]
+    pub opacity: f32,
+    /// Lissé (courbe qui passe par les points) ou à angles vifs
+    #[serde(default)]
+    pub smooth: bool,
+}
+
+impl Mask {
+    pub fn rect(w: f32, h: f32) -> Mask {
+        let (a, b) = (w / 2.0, h / 2.0);
+        Mask { points: vec![[-a, -b], [a, -b], [a, b], [-a, b]], keys: vec![], feather: 0.0, invert: false, mode: 0, opacity: 100.0, smooth: false }
+    }
+    pub fn ellipse(w: f32, h: f32) -> Mask {
+        let pts = (0..8).map(|k| {
+            let a = k as f32 / 8.0 * std::f32::consts::TAU;
+            [a.cos() * w / 2.0, a.sin() * h / 2.0]
+        });
+        Mask { points: pts.collect(), smooth: true, ..Mask::rect(w, h) }
+    }
+    /// Le contour à l'instant `t`, prêt à remplir
+    pub fn outline(&self, t: f32) -> Vec<[f32; 2]> {
+        let p = points_at(&self.points, &self.keys, t);
+        if self.smooth {
+            smooth_path(&p, true)
+        } else {
+            p
+        }
+    }
+}
+
+/// La part de chaque pixel d'une grille (origine `o`, `k` px par unité) couverte par un polygone (pair-impair)
+pub fn poly_coverage(poly: &[[f32; 2]], o: [f32; 2], k: f32, w: usize, h: usize) -> Vec<f32> {
+    let mut cov = vec![0.0f32; w * h];
+    if poly.len() < 3 {
+        return cov;
+    }
+    const SUB: usize = 4;
+    let mut xs: Vec<f32> = vec![];
+    for y in 0..h {
+        for s in 0..SUB {
+            let py = o[1] + (y as f32 + (s as f32 + 0.5) / SUB as f32) / k;
+            xs.clear();
+            for i in 0..poly.len() {
+                let (a, b) = (poly[i], poly[(i + 1) % poly.len()]);
+                if (a[1] <= py) != (b[1] <= py) {
+                    let x = a[0] + (py - a[1]) / (b[1] - a[1]) * (b[0] - a[0]);
+                    xs.push((x - o[0]) * k);
+                }
+            }
+            xs.sort_by(|a, b| a.total_cmp(b));
+            for pair in xs.chunks_exact(2) {
+                let (x0, x1) = (pair[0].max(0.0), pair[1].min(w as f32));
+                if x0 >= x1 {
+                    continue;
+                }
+                let (i0, i1) = (x0.floor() as usize, (x1.ceil() as usize).min(w));
+                for x in i0..i1 {
+                    let a = (x1.min(x as f32 + 1.0) - x0.max(x as f32)).clamp(0.0, 1.0);
+                    cov[y * w + x] += a / SUB as f32;
+                }
+            }
+        }
+    }
+    cov
+}
+
+/// Applique les masques d'un calque à son image (repère du calque)
+fn apply_masks(bm: &mut Bitmap, masks: &[Mask], t: f32) {
+    let (w, h) = (bm.img.width() as usize, bm.img.height() as usize);
+    let start = if masks.first().is_some_and(|m| m.mode != 0) { 1.0 } else { 0.0 };
+    let mut acc = vec![start; w * h];
+    for m in masks {
+        let mut c = poly_coverage(&m.outline(t), [bm.ox, bm.oy], bm.k, w, h);
+        if m.feather > 0.0 {
+            blur(&mut c, w, h, m.feather * bm.k / 2.0);
+        }
+        let op = (m.opacity / 100.0).clamp(0.0, 1.0);
+        for (a, v) in acc.iter_mut().zip(c) {
+            let v = (if m.invert { 1.0 - v.min(1.0) } else { v.min(1.0) }) * op;
+            *a = match m.mode {
+                1 => *a * (1.0 - v),
+                2 => *a * v,
+                _ => *a + v - *a * v,
+            };
+        }
+    }
+    for (px, a) in bm.img.pixels_mut().zip(acc) {
+        px[3] = (px[3] as f32 * a.clamp(0.0, 1.0)).round() as u8;
+    }
 }
 
 /// Copies d'un calque : chacune décalée de `pos`, tournée de `rot`, mise à l'échelle de `scale` % par rapport
@@ -556,6 +725,7 @@ impl Layer {
             matte: None,
             trim: full_trim(),
             exprs: Default::default(),
+            masks: vec![],
             repeat: None,
         }
     }
@@ -1057,9 +1227,10 @@ pub fn size(l: &Layer, cache: &mut Cache) -> [f32; 2] {
         Kind::Image { path } => cache.image(path).map(|i| [i.width() as f32, i.height() as f32]).unwrap_or([200.0, 120.0]),
         Kind::Compo { path, .. } => cache.compo(path).map(|c| [c.w as f32, c.h as f32]).unwrap_or([400.0, 225.0]),
         Kind::Null => [100.0, 100.0],
-        Kind::Path { points, width, arrow, .. } => {
-            // Le cadre est centré sur l'origine du calque : il couvre les points les plus éloignés (et la flèche)
-            let (mx, my) = points.iter().fold((0.0f32, 0.0f32), |(a, b), p| (a.max(p[0].abs()), b.max(p[1].abs())));
+        Kind::Path { points, width, arrow, keys, .. } => {
+            // Le cadre est centré sur l'origine du calque : il couvre les points les plus éloignés (et la flèche),
+            // à tous les instants d'une forme animée
+            let (mx, my) = points.iter().chain(keys.iter().flat_map(|k| k.points.iter())).fold((0.0f32, 0.0f32), |(a, b), p| (a.max(p[0].abs()), b.max(p[1].abs())));
             let pad = if *arrow { width * 4.0 } else { *width };
             [2.0 * mx + pad, 2.0 * my + pad]
         }
@@ -1290,8 +1461,9 @@ fn bitmap(l: &Layer, t: f32, k: f32, cache: &mut Cache) -> Option<Bitmap> {
             let (w, h) = (img.width() as f32, img.height() as f32);
             Some(Bitmap { img: (*img).clone(), ox: -w / 2.0, oy: -h / 2.0, k: 1.0 })
         }
-        Kind::Path { points, closed, width, color, arrow } => {
+        Kind::Path { points, closed, width, color, arrow, fill, keys } => {
             let [w, h] = size(l, cache);
+            let points = &points_at(points, keys, t);
             let tr = l.value(&l.trim, t);
             let line = trim_path(&smooth_path(points, *closed), tr[1] / 100.0, tr[0] / 100.0);
             let tip = if *arrow { arrow_head(&line, width.max(0.1)) } else { None };
@@ -1306,8 +1478,26 @@ fn bitmap(l: &Layer, t: f32, k: f32, cache: &mut Cache) -> Option<Bitmap> {
                 _ => line,
             };
             let mut bm = stroke_bitmap(&body, width.max(0.1), *color, k, [w / 2.0, h / 2.0]);
+            if *width <= 0.0 {
+                bm.img.pixels_mut().for_each(|p| p[3] = 0);
+            }
             if let Some(tri) = tip {
                 fill_triangle(&mut bm, tri, *color);
+            }
+            // Calque de forme : le fond passe sous le contour
+            if let Some(fc) = fill {
+                let (bw, bh) = (bm.img.width() as usize, bm.img.height() as usize);
+                let cov = poly_coverage(&smooth_path(points, true), [bm.ox, bm.oy], bm.k, bw, bh);
+                for (px, c) in bm.img.pixels_mut().zip(cov) {
+                    let (sa, fa) = (px[3] as f32 / 255.0, c.min(1.0));
+                    let a = sa + fa * (1.0 - sa);
+                    if a > 0.0 {
+                        for ch in 0..3 {
+                            px[ch] = ((px[ch] as f32 * sa + fc[ch] as f32 * fa * (1.0 - sa)) / a).round() as u8;
+                        }
+                        px[3] = (a * 255.0).round() as u8;
+                    }
+                }
             }
             Some(bm)
         }
@@ -1581,9 +1771,10 @@ fn prep_layer(c: &Compo, li: usize, t: f32, scale: f32, cache: &mut Cache, (w, h
     // Le contenu est calculé à la résolution où il sera vu (net même agrandi)
     let k = (scale * x.max_scale()).clamp(0.02, 8.0);
     // Un contenu qui ne bouge pas à l'intérieur du calque se dessine une fois (l'export reste rapide)
-    let still = match (&l.kind, &l.reveal) {
+    let still = l.masks.iter().all(|m| m.keys.is_empty())
+        && match (&l.kind, &l.reveal) {
         (Kind::Compo { .. }, _) => false,
-        (Kind::Path { .. }, _) => !l.trim.animated() && l.cycle.is_none(),
+        (Kind::Path { keys, .. }, _) => !l.trim.animated() && l.cycle.is_none() && keys.is_empty(),
         (Kind::Text { text, .. }, Some(r)) => t - l.start >= text.chars().count() as f32 * r.delay + r.dur,
         _ => true,
     };
@@ -1594,13 +1785,17 @@ fn prep_layer(c: &Compo, li: usize, t: f32, scale: f32, cache: &mut Cache, (w, h
         serde_json::to_string(&l.reveal).unwrap_or_default().hash(&mut h);
         serde_json::to_string(&l.style).unwrap_or_default().hash(&mut h);
         serde_json::to_string(&l.trim).unwrap_or_default().hash(&mut h);
+        serde_json::to_string(&l.masks).unwrap_or_default().hash(&mut h);
         (h.finish(), k.to_bits())
     });
     let cached = key.and_then(|k| cache.bitmaps.get(&k).cloned());
     let bm = match cached {
         Some(b) => b,
         None => {
-            let b = bitmap(l, t, k, cache)?;
+            let mut b = bitmap(l, t, k, cache)?;
+            if !l.masks.is_empty() {
+                apply_masks(&mut b, &l.masks, t);
+            }
             let b = if l.style.is_plain() { b } else { styled(b, &l.style) };
             let b = Arc::new(b);
             if let Some(key) = key {
@@ -1986,7 +2181,7 @@ mod tests {
         assert!(sm.iter().any(|p| (p[0] - 10.0).abs() < 1e-4 && (p[1] - 10.0).abs() < 1e-4));
         let mut c = Compo { layers: vec![], ..Compo::default() };
         (c.w, c.h, c.bg) = (120, 20, [0, 0, 0]);
-        let mut l = Layer::new("t", Kind::Path { points: line, closed: false, width: 6.0, color: [255, 255, 255], arrow: false }, &c);
+        let mut l = Layer::new("t", Kind::Path { points: line, closed: false, width: 6.0, color: [255, 255, 255], arrow: false, fill: None, keys: vec![] }, &c);
         l.pos.v = [60.0, 10.0];
         l.trim = Track::new(50.0, 0.0);
         c.layers = vec![l];
@@ -2173,6 +2368,38 @@ mod tests {
         render_cached(&comp, true);
         assert!(generation() > g && !stale(&comp, &out));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn masques_et_formes() {
+        let mut c = Compo { layers: vec![], ..Compo::default() };
+        (c.w, c.h, c.bg, c.duration) = (100, 40, [0, 0, 0], 2.0);
+        let mut l = Layer::new("r", Kind::Rect { w: 100.0, h: 40.0, radius: 0.0, color: [255, 255, 255] }, &c);
+        l.pos.v = [50.0, 20.0];
+        // Un masque sur la moitié gauche, qui glisse jusqu'à la moitié droite en 1 s
+        let mut m = Mask::rect(50.0, 40.0);
+        m.points.iter_mut().for_each(|p| p[0] -= 25.0);
+        let right: Vec<[f32; 2]> = m.points.iter().map(|p| [p[0] + 50.0, p[1]]).collect();
+        m.keys = vec![PathKey { t: 0.0, points: m.points.clone() }, PathKey { t: 1.0, points: right }];
+        l.masks = vec![m];
+        c.layers = vec![l];
+        let mut cache = Cache::new(Path::new("."));
+        let img = render(&c, 0.0, 1.0, &mut cache);
+        assert!(img.get_pixel(10, 20)[0] > 200 && img.get_pixel(90, 20)[0] < 10);
+        let img = render(&c, 1.0, 1.0, &mut cache);
+        assert!(img.get_pixel(10, 20)[0] < 10 && img.get_pixel(90, 20)[0] > 200);
+        // Inversé et soustrait : le contraire
+        c.layers[0].masks[0].invert = true;
+        let img = render(&c, 1.0, 1.0, &mut cache);
+        assert!(img.get_pixel(10, 20)[0] > 200 && img.get_pixel(90, 20)[0] < 10);
+        // Calque de forme : un triangle rempli, sans contour
+        let tri = vec![[-20.0, 15.0], [20.0, 15.0], [0.0, -15.0]];
+        let mut f = Layer::new("f", Kind::Path { points: tri, closed: true, width: 0.0, color: [0, 0, 0], arrow: false, fill: Some([0, 255, 0]), keys: vec![] }, &c);
+        f.pos.v = [50.0, 20.0];
+        c.layers = vec![f];
+        let img = render(&c, 0.0, 1.0, &mut cache);
+        assert!(img.get_pixel(50, 25)[1] > 200, "{:?}", img.get_pixel(50, 25));
+        assert!(img.get_pixel(5, 5)[1] < 10);
     }
 
     #[test]

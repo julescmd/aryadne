@@ -137,6 +137,7 @@ pub const COMPONENT: &str = "\u{f02ad}";
 pub const SHAPES: &str = "\u{f04b3}";
 pub const SQUARE_SQUARE: &str = "\u{f060e}";
 pub const PEN_LINE: &str = "\u{f0130}";
+pub const SQUARE_MINUS: &str = "\u{f0171}";
 pub const FLIP_HORIZONTAL_2: &str = "\u{f035e}";
 pub const GLOBE: &str = "\u{f00e8}";
 pub const UNDO_2: &str = "\u{f02a1}";

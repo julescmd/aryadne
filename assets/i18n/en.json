@@ -2899,5 +2899,17 @@
   "vectoriser le contour : il devient une forme pleine": "outline stroke: it becomes a filled shape",
   "largeur : glisser sur un contour pour l'épaissir à cet endroit (Alt+clic : retirer le point)": "width: drag on a stroke to thicken it at that spot (Alt+click: remove the point)",
   "concepteur de formes : glisser sur les zones des formes choisies pour les fusionner (Alt : effacer)": "shape builder: drag across regions of the selected shapes to merge them (Alt: erase)",
-  "Décalage": "Offset"
+  "Décalage": "Offset",
+  "Masques": "Masks",
+  "Remplir le dedans (calque de forme)": "Fill the inside (shape layer)",
+  "Clé de forme : déplace ensuite les points à un autre instant, la forme se transforme": "Shape key: then move the points at another time and the shape morphs",
+  "Soustraire": "Subtract",
+  "Intersection": "Intersect",
+  "Inverser le masque": "Invert mask",
+  "Lisser le contour": "Smooth outline",
+  "Clé de masque : déplace ensuite les points à un autre instant": "Mask key: then move the points at another time",
+  "contour progressif": "feather",
+  "Opacité du masque": "Mask opacity",
+  "Nouveau masque rectangulaire (glisse ses points dans la vue)": "New rectangular mask (drag its points in the view)",
+  "Nouveau masque elliptique": "New elliptical mask"
 }
