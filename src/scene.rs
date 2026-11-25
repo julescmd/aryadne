@@ -125,6 +125,49 @@ pub struct Object {
     pub copy_rot: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<[[f32; 3]; 2]>,
+    /// Calques d'animation : des clés de décalage par calque, ajoutées à l'animation de base
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub layer_keys: Vec<LayerKeys>,
+}
+
+/// Un calque d'animation de la scène (comme Maya) : ses décalages s'ajoutent à la base, selon son poids
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct AnimLayer {
+    pub name: String,
+    #[serde(default = "one")]
+    pub weight: f32,
+    #[serde(default)]
+    pub mute: bool,
+}
+
+/// Les clés d'un objet dans un calque : position, rotation, taille en décalage par rapport à la base
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct LayerKeys {
+    pub layer: String,
+    pub keys: Vec<Key>,
+}
+
+thread_local! {
+    /// Les calques de la scène en cours d'édition et celui où vont les nouvelles clés (vide : la base)
+    static LAYER_CTX: std::cell::RefCell<(Vec<AnimLayer>, String)> = const { std::cell::RefCell::new((Vec::new(), String::new())) };
+}
+
+/// Ce que les nouvelles clés doivent savoir des calques (appelé quand la scène s'affiche)
+pub fn set_layer_context(layers: &[AnimLayer], active: &str) {
+    LAYER_CTX.with(|c| *c.borrow_mut() = (layers.to_vec(), active.to_string()));
+}
+
+/// Pose lue dans une liste de clés (constante avant la première et après la dernière)
+pub fn sample_keys(k: &[Key], f: f32) -> Option<([f32; 3], [f32; 3], [f32; 3])> {
+    let (first, last) = (k.first()?, k.last()?);
+    if f <= first.frame as f32 {
+        return Some((first.pos, first.rot, first.scale));
+    }
+    if f >= last.frame as f32 {
+        return Some((last.pos, last.rot, last.scale));
+    }
+    let ch = |c: usize| channel_at(k, c, f);
+    Some(([ch(0), ch(1), ch(2)], [ch(3), ch(4), ch(5)], [ch(6), ch(7), ch(8)]))
 }
 
 /// Une forme : un fichier au même nombre de sommets que le modèle, et sa part dans le mélange.
@@ -346,8 +389,60 @@ impl Object {
         Some(([ch(0), ch(1), ch(2)], [ch(3), ch(4), ch(5)], [ch(6), ch(7), ch(8)]))
     }
 
-    /// Pose une clé à l'image `frame` avec la pose actuelle (ou remplace celle qui s'y trouve).
+    /// Pose complète à l'image `f` : la base, plus les décalages des calques actifs selon leur poids
+    pub fn layered_pose(&self, f: f32, layers: &[AnimLayer], skip: Option<&str>) -> Option<([f32; 3], [f32; 3], [f32; 3])> {
+        let (mut p, mut r, mut s) = self.pose_at(f)?;
+        for lk in &self.layer_keys {
+            let Some(l) = layers.iter().find(|l| l.name == lk.layer) else { continue };
+            if l.mute || Some(l.name.as_str()) == skip {
+                continue;
+            }
+            if let Some((dp, dr, ds)) = sample_keys(&lk.keys, f) {
+                for i in 0..3 {
+                    p[i] += l.weight * dp[i];
+                    r[i] += l.weight * dr[i];
+                    s[i] += l.weight * ds[i];
+                }
+            }
+        }
+        Some((p, r, s))
+    }
+
+    /// Pose une clé à l'image `frame` avec la pose actuelle, dans le calque d'animation actif s'il y en a un
     pub fn set_key(&mut self, frame: i32) {
+        let (layers, active) = LAYER_CTX.with(|c| c.borrow().clone());
+        if let Some(l) = layers.iter().find(|l| l.name == active).cloned() {
+            // Sans animation de base, la pose d'aujourd'hui devient la base
+            if self.keys.is_empty() {
+                self.set_base_key(frame);
+            }
+            let f = frame as f32;
+            let (bp, br, bs) = self.layered_pose(f, &layers, Some(&l.name)).unwrap_or((self.pos, self.rot, self.scale));
+            let w = if l.weight.abs() < 1e-3 { 1.0 } else { l.weight };
+            let d = |a: [f32; 3], b: [f32; 3]| [(a[0] - b[0]) / w, (a[1] - b[1]) / w, (a[2] - b[2]) / w];
+            let key = Key { frame, pos: d(self.pos, bp), rot: d(self.rot, br), scale: d(self.scale, bs), ease: true, interp: String::new(), handle: 0, handles: vec![] };
+            let i = match self.layer_keys.iter().position(|x| x.layer == l.name) {
+                Some(i) => i,
+                None => {
+                    self.layer_keys.push(LayerKeys { layer: l.name.clone(), keys: vec![] });
+                    self.layer_keys.len() - 1
+                }
+            };
+            let ks = &mut self.layer_keys[i].keys;
+            match ks.iter().position(|k| k.frame == frame) {
+                Some(j) => ks[j] = key,
+                None => {
+                    ks.push(key);
+                    ks.sort_by_key(|k| k.frame);
+                }
+            }
+            return;
+        }
+        self.set_base_key(frame);
+    }
+
+    /// Pose une clé de base à l'image `frame` avec la pose actuelle (ou remplace celle qui s'y trouve).
+    pub fn set_base_key(&mut self, frame: i32) {
         let key = Key { frame, pos: self.pos, rot: self.rot, scale: self.scale, ease: true, interp: String::new(), handle: 0, handles: vec![] };
         match self.keys.iter().position(|k| k.frame == frame) {
             // Une clé qui existe garde son passage et ses poignées : seule la pose change
@@ -363,7 +458,7 @@ impl Object {
     }
 
     pub fn new(name: String, file: String) -> Object {
-        Object { name, file, pos: [0.0; 3], rot: [0.0; 3], scale: [1.0; 3], visible: true, color: None, mods: vec![], material: String::new(), paint: String::new(), parent: String::new(), opacity: 0.5, role: String::new(), energy: 1.2, point: false, range: 8.0, shape: 0, spot: spot_deg(), blend: spot_blend(), size: area_size(), keys: vec![], cycle: Default::default(), aim: String::new(), length: 1.0, rest: None, skin: String::new(), ik: String::new(), ik_chain: 2, reach: 1.0, morphs: vec![], copy_loc: String::new(), copy_rot: String::new(), limit: None }
+        Object { name, file, pos: [0.0; 3], rot: [0.0; 3], scale: [1.0; 3], visible: true, color: None, mods: vec![], material: String::new(), paint: String::new(), parent: String::new(), opacity: 0.5, role: String::new(), energy: 1.2, point: false, range: 8.0, shape: 0, spot: spot_deg(), blend: spot_blend(), size: area_size(), keys: vec![], cycle: Default::default(), aim: String::new(), length: 1.0, rest: None, skin: String::new(), ik: String::new(), ik_chain: 2, reach: 1.0, morphs: vec![], copy_loc: String::new(), copy_rot: String::new(), limit: None, layer_keys: vec![] }
     }
 }
 
@@ -423,7 +518,7 @@ pub fn kind(o: &Object) -> Kind {
 
 impl Default for Scene {
     fn default() -> Scene {
-        Scene { version: 1, objects: vec![], fps: 24.0, start: 0, end: 120 }
+        Scene { version: 1, objects: vec![], fps: 24.0, start: 0, end: 120, layers: vec![], active_layer: String::new() }
     }
 }
 
@@ -440,6 +535,11 @@ pub struct Scene {
     pub start: i32,
     #[serde(default = "end")]
     pub end: i32,
+    /// Calques d'animation (ajoutés à la base dans l'ordre), et celui où l'on pose les clés (vide : la base)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub layers: Vec<AnimLayer>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub active_layer: String,
 }
 
 fn fps() -> f32 {
@@ -479,7 +579,7 @@ impl Scene {
                     }
                 }
             }
-            if let Some((p, r, s)) = o.pose_at(f) {
+            if let Some((p, r, s)) = o.layered_pose(f, &self.layers, None) {
                 if (o.pos, o.rot, o.scale) != (p, r, s) {
                     (o.pos, o.rot, o.scale) = (p, r, s);
                     moved = true;
@@ -1108,6 +1208,37 @@ pub fn build_ranges(scene: &Scene, scene_path: &Path) -> (Result<crate::model3d:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn calques_d_animation() {
+        let mut sc = Scene::default();
+        let k = sc.add_primitive("@cube");
+        // Base : de 0 à 10 en X sur 10 images
+        sc.objects[k].set_key(0);
+        sc.objects[k].pos = [10.0, 0.0, 0.0];
+        sc.objects[k].set_key(10);
+        // Un calque « rebond » : +2 en Y à l'image 5, posé par-dessus
+        sc.layers.push(AnimLayer { name: "rebond".into(), weight: 1.0, mute: false });
+        set_layer_context(&sc.layers, "rebond");
+        sc.apply_frame(5.0);
+        let x5 = sc.objects[k].pos[0];
+        sc.objects[k].pos[1] = 2.0;
+        sc.objects[k].set_key(5);
+        set_layer_context(&[], "");
+        // La base n'a pas bougé : toujours deux clés, Y à zéro
+        assert_eq!(sc.objects[k].keys.len(), 2);
+        assert!(sc.objects[k].keys.iter().all(|k| k.pos[1] == 0.0));
+        sc.apply_frame(5.0);
+        assert!((sc.objects[k].pos[1] - 2.0).abs() < 1e-4 && (sc.objects[k].pos[0] - x5).abs() < 1e-4);
+        // Poids à moitié : la moitié du décalage ; muet : rien
+        sc.layers[0].weight = 0.5;
+        sc.apply_frame(5.0);
+        assert!((sc.objects[k].pos[1] - 1.0).abs() < 1e-4);
+        sc.layers[0].mute = true;
+        sc.apply_frame(5.0);
+        assert!(sc.objects[k].pos[1].abs() < 1e-4);
+    }
+
 
     #[test]
     fn contraintes_copier() {

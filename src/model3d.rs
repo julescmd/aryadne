@@ -5418,6 +5418,10 @@ impl Viewer {
             self.look.material = Material::Color;
             self.scene_dirty = true;
         }
+        // Les clés posées cette image vont dans le calque d'animation actif
+        if let Some(sc) = &self.scene {
+            crate::scene::set_layer_context(&sc.layers, &sc.active_layer);
+        }
         // Résultat d'une reconstruction lancée après un changement
         if let Some(rx) = &self.scene_rx {
             if let Ok((m, errs, ranges)) = rx.try_recv() {
@@ -6090,6 +6094,62 @@ impl Viewer {
                                     changed |= ui.add(egui::DragValue::new(&mut scene.end)).changed();
                                 });
                                 ui.label(egui::RichText::new(format!("{} {}", scene.objects.len(), crate::i18n::t_mid("objet(s)"))).size(11.0).color(p.muted));
+                                ui.separator();
+                                // Calques d'animation : la base, puis des calques qui s'ajoutent par-dessus (poids, muet)
+                                ui.horizontal(|ui| {
+                                    ui.label(egui::RichText::new(crate::i18n::t("CALQUES D'ANIMATION")).size(10.5).color(p.muted));
+                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                        if ui.add(egui::Button::new(crate::lucide::PLUS).frame(false)).on_hover_text(crate::i18n::t("Nouveau calque d'animation : les clés posées dedans s'ajoutent à l'animation de base sans la toucher")).clicked() {
+                                            let mut n = scene.layers.len() + 1;
+                                            while scene.layers.iter().any(|l| l.name == format!("{} {n}", crate::i18n::t("calque"))) {
+                                                n += 1;
+                                            }
+                                            let name = format!("{} {n}", crate::i18n::t("calque"));
+                                            scene.layers.push(crate::scene::AnimLayer { name: name.clone(), weight: 1.0, mute: false });
+                                            scene.active_layer = name;
+                                            changed = true;
+                                        }
+                                    });
+                                });
+                                let base_on = scene.active_layer.is_empty();
+                                if ui.selectable_label(base_on, format!("{}  {}", crate::lucide::LAYERS, crate::i18n::t("base"))).on_hover_text(crate::i18n::t("Les clés vont dans l'animation de base")).clicked() {
+                                    scene.active_layer.clear();
+                                    changed = true;
+                                }
+                                let mut remove = None;
+                                for (i, l) in scene.layers.iter_mut().enumerate() {
+                                    let on = scene.active_layer == l.name;
+                                    ui.horizontal(|ui| {
+                                        let eye = if l.mute { crate::lucide::EYE_OFF } else { crate::lucide::EYE };
+                                        if ui.add(egui::Button::new(egui::RichText::new(eye).color(if l.mute { p.muted } else { p.text })).frame(false)).on_hover_text(crate::i18n::t("muet : le calque ne compte plus")).clicked() {
+                                            l.mute = !l.mute;
+                                            changed = true;
+                                        }
+                                        if ui.selectable_label(on, &l.name).on_hover_text(crate::i18n::t("Les nouvelles clés (I) vont dans ce calque")).clicked() {
+                                            scene.active_layer = l.name.clone();
+                                            changed = true;
+                                        }
+                                        ui.spacing_mut().slider_width = 70.0;
+                                        changed |= ui.add(egui::Slider::new(&mut l.weight, 0.0..=1.0).show_value(false)).on_hover_text(crate::i18n::t("poids du calque")).changed();
+                                        if ui.add(egui::Button::new(egui::RichText::new(crate::lucide::X).color(p.muted)).frame(false)).on_hover_text(crate::i18n::t("supprimer le calque et ses clés")).clicked() {
+                                            remove = Some(i);
+                                        }
+                                    });
+                                }
+                                if let Some(i) = remove {
+                                    let name = scene.layers.remove(i).name;
+                                    for o in &mut scene.objects {
+                                        o.layer_keys.retain(|lk| lk.layer != name);
+                                    }
+                                    if scene.active_layer == name {
+                                        scene.active_layer.clear();
+                                    }
+                                    changed = true;
+                                }
+                                if changed {
+                                    let f = self.anim_frame;
+                                    scene.apply_frame(f);
+                                }
                                 ui.separator();
                                 ui.label(egui::RichText::new(crate::i18n::t("SUPERPOSITIONS")).size(10.5).color(p.muted));
                                 overlays_ui(&mut self.look, ui);

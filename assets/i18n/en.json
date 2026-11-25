@@ -3469,5 +3469,13 @@
   "variation de taille": "size variation",
   "seulement le dessus": "top only",
   "suivre la surface": "follow the surface",
-  "Les copies se dressent selon la surface (sinon toutes droites)": "Copies stand along the surface (otherwise all upright)"
+  "Les copies se dressent selon la surface (sinon toutes droites)": "Copies stand along the surface (otherwise all upright)",
+  "CALQUES D'ANIMATION": "ANIMATION LAYERS",
+  "Nouveau calque d'animation : les clés posées dedans s'ajoutent à l'animation de base sans la toucher": "New animation layer: keys set in it add to the base animation without changing it",
+  "base": "base",
+  "Les clés vont dans l'animation de base": "Keys go into the base animation",
+  "muet : le calque ne compte plus": "mute: the layer no longer counts",
+  "Les nouvelles clés (I) vont dans ce calque": "New keys (I) go into this layer",
+  "poids du calque": "layer weight",
+  "supprimer le calque et ses clés": "delete the layer and its keys"
 }
