@@ -175,6 +175,10 @@ pub struct Viewer {
     comment_input: String,
     comments_todo_only: bool,
     pub show_comments: bool,
+    /// Comparaison avec une autre version : sa vidéo, côte à côte (0) ou en volet (1), position du volet
+    compare: Option<Box<Viewer>>,
+    cmp_mode: u8,
+    wipe: f32,
 }
 
 /// Un retour sur une image : le texte, s'il est réglé, et quand il a été écrit
@@ -266,6 +270,9 @@ impl Viewer {
             comment_input: String::new(),
             comments_todo_only: false,
             show_comments: true,
+            compare: None,
+            cmp_mode: 0,
+            wipe: 0.5,
         };
         if v.info.is_ok() {
             v.start_extract(ctx.clone());
@@ -763,6 +770,28 @@ impl Viewer {
                 self.clock = None;
             }
             ui.separator();
+            // Comparer avec une autre version, synchronisée image par image
+            egui::containers::menu::MenuButton::new(RichText::new(crate::lucide::COLUMNS_2).size(14.0)).ui(ui, |ui| {
+                ui.set_min_width(240.0);
+                if ui.button(format!("{}  {}", crate::lucide::FOLDER_OPEN, crate::i18n::t("comparer avec une autre vidéo…"))).clicked() {
+                    if let Some(f) = rfd::FileDialog::new().set_directory(self.path.parent().unwrap_or(std::path::Path::new(""))).add_filter(crate::i18n::t("vidéos"), &["mp4", "mov", "webm", "mkv", "avi", "gif"]).pick_file() {
+                        let tmp = std::env::temp_dir().join(format!("aryadne-compare-{}.notes", std::process::id()));
+                        self.compare = Some(Box::new(Viewer::open(f, tmp, ui.ctx())));
+                    }
+                    ui.close();
+                }
+                if self.compare.is_some() {
+                    ui.separator();
+                    ui.radio_value(&mut self.cmp_mode, 0, crate::i18n::t("côte à côte"));
+                    ui.radio_value(&mut self.cmp_mode, 1, crate::i18n::t("volet (glisser la ligne)"));
+                    if ui.button(format!("{}  {}", crate::lucide::X, crate::i18n::t("arrêter la comparaison"))).clicked() {
+                        self.compare = None;
+                        ui.close();
+                    }
+                }
+            })
+            .0
+            .on_hover_text(crate::i18n::t("Comparer deux versions, synchronisées"));
             ui.checkbox(&mut self.onion, crate::i18n::t("pelures"));
             let stay = egui::containers::menu::MenuConfig::new().close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
             egui::containers::menu::MenuButton::new("▾").config(stay.clone()).ui(ui, |ui| {
@@ -849,8 +878,11 @@ impl Viewer {
         painter.rect_filled(rect, 0.0, Color32::from_gray(18));
         let aspect = info.width.max(1) as f32 / info.height.max(1) as f32;
         let vsize = vec2(info.width.max(1) as f32, info.height.max(1) as f32);
-        self.zoom.interact(ui, &resp, rect, vsize, !self.draw);
-        let img_rect = self.zoom.image_rect(rect, vsize);
+        // Côte à côte : la version actuelle dans la moitié gauche, l'autre à droite
+        let side = self.compare.is_some() && self.cmp_mode == 0;
+        let main_area = if side { Rect::from_min_max(rect.min, pos2(rect.center().x - 2.0, rect.max.y)) } else { rect };
+        self.zoom.interact(ui, &resp, main_area, vsize, !self.draw && !(self.compare.is_some() && self.cmp_mode == 1));
+        let img_rect = self.zoom.image_rect(main_area, vsize);
         let _ = aspect;
         let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
         // Pelures : les plus éloignées sont les plus pâles.
@@ -878,6 +910,36 @@ impl Viewer {
             None => {
                 painter.text(rect.center(), egui::Align2::CENTER_CENTER, "extraction des images…", egui::FontId::monospace(13.0), p.muted);
             }
+        }
+        // L'autre version, à la même seconde
+        if let Some(cmp) = self.compare.as_mut() {
+            let (cf, cinfo) = (cmp.extract.lock().map(|e| e.frames).unwrap_or(0), cmp.info.clone());
+            let j = ((held as f32 / self.preview_fps.max(1.0)) * cmp.preview_fps.max(1.0)).round() as usize;
+            let j = j.min(cf.saturating_sub(1));
+            if let (Ok(ci), Some(t)) = (cinfo, cmp.frame_tex(&ctx, j)) {
+                let cs = vec2(ci.width.max(1) as f32, ci.height.max(1) as f32);
+                if self.cmp_mode == 0 {
+                    let area = Rect::from_min_max(pos2(rect.center().x + 2.0, rect.min.y), rect.max);
+                    let k = (area.width() / cs.x).min(area.height() / cs.y);
+                    painter.image(t.id(), Rect::from_center_size(area.center(), cs * k), uv, Color32::WHITE);
+                    painter.vline(rect.center().x, rect.y_range(), Stroke::new(1.0, p.line));
+                } else {
+                    // Volet : l'autre version à droite de la ligne, par-dessus
+                    if let Some(m) = resp.interact_pointer_pos().filter(|_| resp.dragged() || resp.clicked()) {
+                        self.wipe = ((m.x - img_rect.left()) / img_rect.width()).clamp(0.0, 1.0);
+                    }
+                    let x = img_rect.left() + img_rect.width() * self.wipe;
+                    let clip = Rect::from_min_max(pos2(x, img_rect.top()), img_rect.max);
+                    painter.with_clip_rect(clip.intersect(rect)).image(t.id(), img_rect, uv, Color32::WHITE);
+                    painter.vline(x, img_rect.y_range(), Stroke::new(2.0, Color32::WHITE));
+                    painter.circle_filled(pos2(x, img_rect.center().y), 7.0, Color32::WHITE);
+                }
+            } else {
+                painter.text(pos2(rect.right() - 12.0, rect.top() + 12.0), egui::Align2::RIGHT_TOP, crate::i18n::t("extraction de l'autre version…"), egui::FontId::monospace(11.0), p.muted);
+                ctx.request_repaint_after(std::time::Duration::from_millis(200));
+            }
+            let name = cmp.path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+            painter.text(pos2(rect.right() - 8.0, rect.bottom() - 8.0), egui::Align2::RIGHT_BOTTOM, name, egui::FontId::proportional(11.0), Color32::from_white_alpha(200));
         }
         // Les pelures passent par-dessus l'image courante, en transparence.
         for (i, tint) in &ghosts {

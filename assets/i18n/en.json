@@ -2846,5 +2846,10 @@
   "dans l'ordre": "in order",
   "à l'envers": "reversed",
   "du centre vers les bords": "from the center out",
-  "au hasard": "random"
+  "au hasard": "random",
+  "comparer avec une autre vidéo…": "compare with another video…",
+  "volet (glisser la ligne)": "wipe (drag the line)",
+  "arrêter la comparaison": "stop comparing",
+  "Comparer deux versions, synchronisées": "Compare two versions, in sync",
+  "extraction de l'autre version…": "extracting the other version…"
 }
