@@ -5488,7 +5488,7 @@ impl Viewer {
                             }
                             None => {
                                 self.scene_sel = Some(crate::mocap::import(scene, &b, ""));
-                                crate::notify(format!("{} {} · {} {}", b.joints.len(), crate::i18n::t("os"), b.frames.len(), crate::i18n::t("images")));
+                                crate::notify(format!("{} {} · {} {}", b.joints.len(), crate::i18n::t("os importés"), b.frames.len(), crate::i18n::t("images")));
                             }
                         }
                         changed = true;
