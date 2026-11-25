@@ -17,6 +17,8 @@ mod gltfscene;
 mod fbxscene;
 mod spell;
 mod sendto;
+mod aitasks;
+mod related;
 mod vector_ui;
 mod keymap;
 mod lucide;
@@ -279,6 +281,8 @@ enum Action {
     Move(String, String),
     Close(usize),
     Summarize,
+    /// Tâche d'IA sur le fichier actif : « edit », « proof », « props », « explain »
+    AiTask(&'static str),
     Reload(String),
 }
 
@@ -2424,6 +2428,38 @@ impl App {
                     self.images.forget(&rel);
                     self.open(rel);
                 }
+                Action::AiTask(kind) => {
+                    let Some(a) = self.active else { continue };
+                    let ai_ctx = aitasks::Ctx { settings: self.ai.clone().unwrap_or_default(), local: self.local.clone(), lang: ext(&self.docs[a].rel) };
+                    let rel = self.docs[a].rel.clone();
+                    let d = &mut self.docs[a];
+                    let Content::Text(t) = &d.content else { continue };
+                    let task = match kind {
+                        "edit" => {
+                            // La sélection du champ (sinon la ligne du curseur)
+                            let id = egui::Id::unique(("code", &rel));
+                            let range = egui::TextEdit::load_state(ctx, id).and_then(|s| s.cursor.char_range()).map(|r| {
+                                let (a, b): (usize, usize) = (r.primary.index.into(), r.secondary.index.into());
+                                (a.min(b), a.max(b))
+                            });
+                            let byte = |c: usize| t.char_indices().nth(c).map(|x| x.0).unwrap_or(t.len());
+                            let (mut s, mut e) = range.map(|(a, b)| (byte(a), byte(b))).unwrap_or((0, 0));
+                            if s == e {
+                                s = t[..s].rfind('\n').map(|k| k + 1).unwrap_or(0);
+                                e = t[e..].find('\n').map(|k| e + k).unwrap_or(t.len());
+                            }
+                            aitasks::Task::new(aitasks::Kind::Edit { start: s, end: e, original: t[s..e].to_string() })
+                        }
+                        "proof" => aitasks::Task::new(aitasks::Kind::Proofread),
+                        "props" => aitasks::Task::new(aitasks::Kind::Props),
+                        _ => aitasks::Task::new(aitasks::Kind::Explain { error: d.code.diags.first().map(|g| format!("ligne {} : {}", g.line + 1, g.msg)).unwrap_or_default() }),
+                    };
+                    let mut task = task;
+                    if kind != "edit" {
+                        aitasks::start(&mut task, t, &ai_ctx, ctx);
+                    }
+                    d.code.ai = Some(task);
+                }
                 Action::Summarize => {
                     let Some(doc) = self.current() else { continue };
                     let Content::Text(t) = &doc.content else { continue };
@@ -3504,8 +3540,38 @@ impl App {
                                 Err(e) => self.error = Some(e),
                             }
                         }
-                        if can_summarize && ui.add(egui::Button::new(egui::RichText::new(lucide::SPARKLES).size(14.0)).min_size(egui::vec2(24.0, 20.0))).on_hover_text(crate::i18n::t("Résumé IA de ce fichier")).clicked() {
-                            self.actions.push(Action::Summarize);
+                        if can_summarize {
+                            // L'IA sur ce fichier : résumer, modifier la sélection, relire, remplir les propriétés, expliquer une erreur
+                            let has_diag = !self.docs[i].code.diags.is_empty();
+                            let mut act = None;
+                            egui::containers::menu::MenuButton::new(egui::RichText::new(lucide::SPARKLES).size(14.0)).ui(ui, |ui| {
+                                ui.set_min_width(250.0);
+                                if ui.button(format!("{}  {}", lucide::SCROLL_TEXT, crate::i18n::t("résumer ce fichier"))).clicked() {
+                                    act = Some(Action::Summarize);
+                                    ui.close();
+                                }
+                                if ui.button(format!("{}  {}", lucide::WAND_SPARKLES, crate::i18n::t("modifier la sélection…   Ctrl+Maj+I"))).on_hover_text(crate::i18n::t("Une consigne (« plus court », « en anglais »…) ; tu vois la différence avant d'accepter")).clicked() {
+                                    act = Some(Action::AiTask("edit"));
+                                    ui.close();
+                                }
+                                if is_md {
+                                    if ui.button(format!("{}  {}", lucide::SPELL_CHECK, crate::i18n::t("relire (fautes, répétitions)"))).on_hover_text(crate::i18n::t("Des corrections une par une, sans réécrire ton texte")).clicked() {
+                                        act = Some(Action::AiTask("proof"));
+                                        ui.close();
+                                    }
+                                    if ui.button(format!("{}  {}", lucide::TAGS, crate::i18n::t("remplir les propriétés"))).on_hover_text(crate::i18n::t("Tags, type et résumé déduits du texte, ajoutés à l'en-tête YAML")).clicked() {
+                                        act = Some(Action::AiTask("props"));
+                                        ui.close();
+                                    }
+                                }
+                                if has_diag && ui.button(format!("{}  {}", lucide::BUG, crate::i18n::t("expliquer l'erreur"))).clicked() {
+                                    act = Some(Action::AiTask("explain"));
+                                    ui.close();
+                                }
+                            }).0.on_hover_text(crate::i18n::t("IA sur ce fichier"));
+                            if let Some(a) = act {
+                                self.actions.push(a);
+                            }
                         }
                         if is_md || fountain::is_fountain(&self.docs[i].rel) {
                             // Texte (édition) ou Lecture (rendu), comme des onglets
@@ -3557,6 +3623,7 @@ impl App {
 
             let vault_root = self.root();
             let spell_on = self.prefs.spell;
+            let ai_ctx = aitasks::Ctx { settings: self.ai.clone().unwrap_or_default(), local: self.local.clone(), lang: String::new() };
             let doc = &mut self.docs[i];
             match &mut doc.content {
                 Content::Unreadable(msg) => {
@@ -3960,6 +4027,11 @@ impl App {
                     };
                     let mut changed = code::find_bar(ui, ed, text, id);
                     code::goto_bar(ui, ed, text, &lang);
+                    // IA : la tâche en cours (consigne, différence à valider, relecture…)
+                    if ui.input(|i| i.modifiers.command && i.modifiers.shift && i.key_pressed(egui::Key::I)) {
+                        self.actions.push(Action::AiTask("edit"));
+                    }
+                    changed |= aitasks::bar(ui, &mut ed.ai, text, &ai_ctx);
                     changed |= code::before(ui, ed, text, &lang, id, &notes);
                     let typed_now = ui.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Text(_))));
                     // Erreurs trouvées à l'enregistrement
@@ -4148,6 +4220,39 @@ impl App {
                         }
                         if let Some((rel, all)) = link {
                             self.link_mention(&rel, all);
+                        }
+                        ui.add_space(14.0);
+                        // Notes proches : elles parlent des mêmes choses, sans lien pour l'instant
+                        let cur = self.current().and_then(|d| if let Content::Text(t) = &d.content { Some((d.rel.clone(), t.clone())) } else { None });
+                        if let Some((rel, text)) = cur {
+                            let notes: Vec<(String, String, u64)> = self.entries.iter().filter(|e| !e.is_dir && vault::is_md(&e.rel)).map(|e| (e.rel.clone(), e.name.trim_end_matches(".md").to_string(), e.modified)).collect();
+                            let sug = crate::related::suggest(&self.root(), &rel, &text, &notes);
+                            ui.label(caps(&format!("{} · {}", crate::i18n::t("notes proches"), sug.len()))).on_hover_text(crate::i18n::t("Elles parlent des mêmes choses (mots rares en commun) et ne sont pas encore liées"));
+                            ui.add_space(4.0);
+                            if sug.is_empty() {
+                                ui.label(RichText::new(crate::i18n::t("rien de proche pour l'instant")).color(p.muted).size(11.5));
+                            }
+                            let mut insert = None;
+                            for (r, name, score) in sug {
+                                egui::Frame::new().fill(p.bg).stroke(egui::Stroke::new(1.0, p.line)).inner_margin(8).show(ui, |ui| {
+                                    ui.set_width(ui.available_width());
+                                    ui.horizontal(|ui| {
+                                        if ui.add(egui::Button::new(RichText::new(&name).family(theme::bold()).size(12.5)).frame(false)).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                                            self.actions.push(Action::Open(r.clone()));
+                                        }
+                                        ui.label(RichText::new(format!("{:.0} %", score * 100.0)).color(p.muted).size(10.5));
+                                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                            if ui.small_button(crate::lucide::LINK).on_hover_text(crate::i18n::t("Insérer le lien [[ ]] au curseur")).clicked() {
+                                                insert = Some(format!("[[{name}]]"));
+                                            }
+                                        });
+                                    });
+                                });
+                                ui.add_space(4.0);
+                            }
+                            if let (Some(t), Some(a)) = (insert, self.active) {
+                                self.docs[a].code.insert = Some(t);
+                            }
                         }
                         ui.add_space(16.0);
                     }

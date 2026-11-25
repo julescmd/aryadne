@@ -15,6 +15,8 @@ use crate::theme;
 
 #[derive(Default)]
 pub struct Editor {
+    /// Tâche d'IA en cours sur ce fichier (modifier, relire, propriétés, expliquer)
+    pub ai: Option<crate::aitasks::Task>,
     popup: Option<Popup>,
     pub find: Option<Find>,
     /// Texte à insérer au curseur (envoyé par l'assistant IA).
