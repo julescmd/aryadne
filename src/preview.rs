@@ -10,11 +10,19 @@ use std::sync::LazyLock;
 static LINK: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\[\[([^\]|#]+)(?:#[^\]|]*)?(?:\|([^\]]+))?\]\]").unwrap());
 /// Morceaux d'une ligne : lien de note, lien web, gras, italique, barré, surligné, étiquette
 static TOKENS: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"\[\[[^\]]+\]\]|\[([^\]]+)\]\((https?://[^)\s]+)\)|\*\*([^*]+)\*\*|__([^_]+)__|\*([^*\s][^*]*)\*|~~([^~]+)~~|==([^=]+)==|(?:^|\s)(#[\p{L}\p{N}_/-]+)|(https?://[^\s)]+)").unwrap()
+    Regex::new(r"\[\[[^\]]+\]\]|\[([^\]]+)\]\((https?://[^)\s]+)\)|\*\*([^*]+)\*\*|__([^_]+)__|\*([^*\s][^*]*)\*|~~([^~]+)~~|==([^=]+)==|(?:^|\s)(#[\p{L}\p{N}_/-]+)|(https?://[^\s)]+)|\[\^([^\]\s]+)\]").unwrap()
 });
 static TASK: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(\s*)[-*+] \[([ xX])\] (.*)$").unwrap());
 static BULLET: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(\s*)[-*+] (.*)$").unwrap());
 static NUMBERED: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(\s*)(\d+)[.)] (.*)$").unwrap());
+/// Définition d'une note de bas de page : « [^id]: texte »
+static FOOTDEF: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\[\^([^\]\s]+)\]:\s?(.*)$").unwrap());
+
+thread_local! {
+    /// Notes de bas de page du document en cours de rendu : (id, texte), dans l'ordre du document
+    static FOOTNOTES: std::cell::RefCell<Vec<(String, String)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
 static IMAGE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^!\[\[([^\]|]+)(?:\|(\d+))?\]\]$|^!\[[^\]]*\]\(([^)]+)\)$").unwrap());
 static CALLOUT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\[!(\w+)\][+-]?\s*(.*)$").unwrap());
 
@@ -40,6 +48,9 @@ pub fn show_doc(ui: &mut egui::Ui, text: &str, existing: &HashSet<String>, paths
     let lines: Vec<&str> = text.lines().collect();
     let mut i = 0;
     let ctx = Ctx { existing, paths };
+    // Notes de bas de page : leurs définitions sont gardées pour les numéros et la liste du bas
+    let notes: Vec<(String, String)> = lines.iter().filter_map(|l| FOOTDEF.captures(l.trim_end())).map(|c| (c[1].to_string(), c[2].to_string())).collect();
+    let saved = FOOTNOTES.with(|f| std::mem::replace(&mut *f.borrow_mut(), notes.clone()));
     // En-tête YAML : un tableau de propriétés (comme Obsidian), pas du texte brut
     if let Some((props, n)) = crate::vault::frontmatter(text) {
         properties(ui, &props, &ctx, &mut out);
@@ -48,6 +59,11 @@ pub fn show_doc(ui: &mut egui::Ui, text: &str, existing: &HashSet<String>, paths
     while i < lines.len() {
         let line = lines[i];
         let trimmed = line.trim_start();
+        // Définition de note de bas de page : affichée en bas
+        if FOOTDEF.is_match(line.trim_end()) {
+            i += 1;
+            continue;
+        }
         // Bloc de code
         if let Some(lang) = trimmed.strip_prefix("```") {
             let mut code = String::new();
@@ -146,6 +162,18 @@ pub fn show_doc(ui: &mut egui::Ui, text: &str, existing: &HashSet<String>, paths
         }
         i += 1;
     }
+    if !notes.is_empty() {
+        let p = theme::pal();
+        ui.add_space(10.0);
+        ui.separator();
+        for (k, (_, t)) in notes.iter().enumerate() {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(RichText::new(format!("{}.  ", k + 1)).color(p.muted));
+                inline(ui, t, &ctx, &mut out, None);
+            });
+        }
+    }
+    FOOTNOTES.with(|f| *f.borrow_mut() = saved);
     out
 }
 
@@ -483,6 +511,17 @@ fn inline(ui: &mut egui::Ui, text: &str, ctx: &Ctx, out: &mut Option<Out>, size:
                 ui.label(base(t.as_str()).color(p.accent).background_color(p.accent.gamma_multiply(0.12)));
             } else if let Some(u) = cap.get(9) {
                 ui.hyperlink_to(base(u.as_str()).color(p.link), u.as_str());
+            } else if let Some(id) = cap.get(10) {
+                // Renvoi à une note de bas de page : son numéro en exposant, la note au survol
+                let found = FOOTNOTES.with(|f| f.borrow().iter().position(|(n, _)| n == id.as_str()).map(|k| (k + 1, f.borrow()[k].1.clone())));
+                match found {
+                    Some((n, t)) => {
+                        ui.add(egui::Label::new(RichText::new(n.to_string()).small().raised().color(p.link)).sense(egui::Sense::hover())).on_hover_text(t);
+                    }
+                    None => {
+                        ui.label(base(whole).color(p.missing));
+                    }
+                }
             }
             last = m.end();
         }
@@ -535,6 +574,16 @@ mod tests {
         assert_eq!(cells("| a | **b** |"), vec!["a", "**b**"]);
         assert!(CALLOUT.captures("[!astuce] Garder le nombre de polygones bas").is_some());
         assert!(IMAGE.captures("![[croquis.png|300]]").is_some());
+    }
+
+    #[test]
+    fn notes_de_bas_de_page() {
+        assert!(FOOTDEF.is_match("[^1]: Une source"));
+        assert!(!FOOTDEF.is_match("texte [^1] suite"));
+        let c = TOKENS.captures("voir[^src] ici").unwrap();
+        assert_eq!(c.get(10).map(|m| m.as_str()), Some("src"));
+        // Un lien Markdown n'est pas une note
+        assert!(TOKENS.captures("[a](https://x.org)").unwrap().get(10).is_none());
     }
 
     #[test]
