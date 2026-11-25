@@ -107,6 +107,28 @@ fn at_rest(scene: &Scene) -> Scene {
     s
 }
 
+/// La scène dans sa pose de repos (pour l'export)
+pub fn rest_pose(scene: &Scene) -> Scene {
+    at_rest(scene)
+}
+
+/// Les os qui déforment un modèle et, pour chaque sommet (placé dans la scène au repos),
+/// ses quatre os (indices dans la liste) et leurs poids.
+pub fn skin_weights(rest: &Scene, model: usize, pos: &[V3]) -> Option<(Vec<usize>, Vec<Vec<(usize, f32)>>)> {
+    let o = &rest.objects[model];
+    if o.skin.is_empty() {
+        return None;
+    }
+    let root = rest.objects.iter().position(|x| x.name == o.skin && x.role == "bone")?;
+    let list = bones_of(rest, root);
+    let prep = prepare(rest, root);
+    if prep.len() != list.len() || list.is_empty() {
+        return None;
+    }
+    let w = pos.iter().map(|v| weights(&prep, *v, o.reach)).collect();
+    Some((list, w))
+}
+
 /// Enregistre la pose actuelle comme pose de repos de tout le squelette.
 pub fn set_rest(scene: &mut Scene, root: usize) {
     for b in bones_of(scene, root) {

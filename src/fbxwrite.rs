@@ -3,7 +3,7 @@
 use crate::uvedit::{Edit, V3};
 use std::io::Write;
 
-enum P {
+pub(crate) enum P {
     I(i32),
     L(i64),
     D(f64),
@@ -11,29 +11,31 @@ enum P {
     C(bool),
     Di(Vec<f64>),
     Ii(Vec<i32>),
+    Fi(Vec<f32>),
+    Li(Vec<i64>),
 }
 
-struct Node {
+pub(crate) struct Node {
     name: &'static str,
     props: Vec<P>,
     kids: Vec<Node>,
 }
 
-fn n(name: &'static str, props: Vec<P>, kids: Vec<Node>) -> Node {
+pub(crate) fn n(name: &'static str, props: Vec<P>, kids: Vec<Node>) -> Node {
     Node { name, props, kids }
 }
-fn s(x: &str) -> P {
+pub(crate) fn s(x: &str) -> P {
     P::S(x.as_bytes().to_vec())
 }
 /// Nom d'objet FBX : « nom\0\x01Classe »
-fn oname(name: &str, class: &str) -> P {
+pub(crate) fn oname(name: &str, class: &str) -> P {
     let mut v = name.as_bytes().to_vec();
     v.extend([0u8, 1u8]);
     v.extend(class.as_bytes());
     P::S(v)
 }
 /// Propriété « P » d'un Properties70
-fn pp(name: &str, ty: &str, label: &str, flags: &str, vals: Vec<P>) -> Node {
+pub(crate) fn pp(name: &str, ty: &str, label: &str, flags: &str, vals: Vec<P>) -> Node {
     let mut props = vec![s(name), s(ty), s(label), s(flags)];
     props.extend(vals);
     n("P", props, vec![])
@@ -72,6 +74,24 @@ fn write_props(out: &mut Vec<u8>, props: &[P]) {
                     out.extend(x.to_le_bytes());
                 }
             }
+            P::Fi(v) => {
+                out.push(b'f');
+                out.extend((v.len() as u32).to_le_bytes());
+                out.extend(0u32.to_le_bytes());
+                out.extend(((v.len() * 4) as u32).to_le_bytes());
+                for x in v {
+                    out.extend(x.to_le_bytes());
+                }
+            }
+            P::Li(v) => {
+                out.push(b'l');
+                out.extend((v.len() as u32).to_le_bytes());
+                out.extend(0u32.to_le_bytes());
+                out.extend(((v.len() * 8) as u32).to_le_bytes());
+                for x in v {
+                    out.extend(x.to_le_bytes());
+                }
+            }
             P::Ii(v) => {
                 out.push(b'i');
                 out.extend((v.len() as u32).to_le_bytes());
@@ -85,7 +105,7 @@ fn write_props(out: &mut Vec<u8>, props: &[P]) {
     }
 }
 
-fn write_node(out: &mut Vec<u8>, node: &Node) {
+pub(crate) fn write_node(out: &mut Vec<u8>, node: &Node) {
     let start = out.len();
     out.extend([0u8; 12]); // fin, nombre de propriétés, longueur des propriétés
     out.push(node.name.len() as u8);
@@ -221,9 +241,44 @@ pub fn export(e: &Edit, world: &dyn Fn(V3) -> V3, path: &std::path::Path) -> Res
         ],
     );
     let top = vec![header, global, n("Documents", vec![], vec![n("Count", vec![P::I(1)], vec![])]), n("References", vec![], vec![]), n("Objects", vec![], objects), n("Connections", vec![], conns)];
+    write_file(&top, path)
+}
+
+/// En-tête, en Y vers le haut et en centimètres
+pub(crate) fn header_nodes() -> (Node, Node) {
+    let header = n(
+        "FBXHeaderExtension",
+        vec![],
+        vec![n("FBXHeaderVersion", vec![P::I(1003)], vec![]), n("FBXVersion", vec![P::I(7400)], vec![]), n("Creator", vec![s("Aryadne")], vec![])],
+    );
+    let global = n(
+        "GlobalSettings",
+        vec![],
+        vec![
+            n("Version", vec![P::I(1000)], vec![]),
+            n(
+                "Properties70",
+                vec![],
+                vec![
+                    pp("UpAxis", "int", "Integer", "", vec![P::I(1)]),
+                    pp("UpAxisSign", "int", "Integer", "", vec![P::I(1)]),
+                    pp("FrontAxis", "int", "Integer", "", vec![P::I(2)]),
+                    pp("FrontAxisSign", "int", "Integer", "", vec![P::I(1)]),
+                    pp("CoordAxis", "int", "Integer", "", vec![P::I(0)]),
+                    pp("CoordAxisSign", "int", "Integer", "", vec![P::I(1)]),
+                    pp("UnitScaleFactor", "double", "Number", "", vec![P::D(100.0)]),
+                ],
+            ),
+        ],
+    );
+    (header, global)
+}
+
+/// Écrit les nœuds du haut dans un FBX binaire complet
+pub(crate) fn write_file(top: &[Node], path: &std::path::Path) -> Result<(), String> {
     let mut out = b"Kaydara FBX Binary  \x00\x1a\x00".to_vec();
     out.extend(7400u32.to_le_bytes());
-    for node in &top {
+    for node in top {
         write_node(&mut out, node);
     }
     out.extend([0u8; 13]);

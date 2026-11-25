@@ -7649,7 +7649,7 @@ impl Viewer {
             egui::Window::new(crate::i18n::t("exporter le modèle")).collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]).show(ui.ctx(), |ui| {
                 ui.set_min_width(460.0);
                 ui.label(crate::theme::section(&crate::i18n::t("FORMAT")));
-                for (f, help) in [("obj", "OBJ : quads et n-gones gardés"), ("fbx", "FBX : Maya, 3ds Max, Blender, Unity, Unreal (quads, UV, matériaux)"), ("glb", "glTF binaire : Blender, Unity, Unreal, web"), ("stl", "STL binaire : impression 3D"), ("ply", "PLY : scans, MeshLab")] {
+                for (f, help) in [("obj", "OBJ : quads et n-gones gardés"), ("fbx", "FBX : Maya, 3ds Max, Blender, Unity, Unreal (quads, UV, matériaux ; une scène garde ses os et l'animation)"), ("glb", "glTF binaire : Blender, Unity, Unreal, web (une scène garde ses os, ses poids et l'animation)"), ("stl", "STL binaire : impression 3D"), ("ply", "PLY : scans, MeshLab")] {
                     ui.horizontal(|ui| {
                         if ui.radio(*fmt == f, egui::RichText::new(f.to_uppercase()).family(theme::bold())).clicked() && *fmt != f {
                             // Le chemin suit le format choisi
@@ -7724,6 +7724,15 @@ impl Viewer {
                 let o = if z_up { [p[0], -p[2], p[1]] } else { p };
                 [o[0] * longest + c[0], o[1] * longest + c[1], o[2] * longest + c[2]]
             };
+            // Une scène en glTF : ses objets, ses squelettes, les poids et l'animation des os
+            if let (Some(sc), "glb" | "fbx", None) = (self.scene.as_ref(), fmt, self.edit.as_ref()) {
+                let r = if fmt == "glb" { crate::gltfscene::export(sc, &self.path, &out) } else { crate::fbxscene::export(sc, &self.path, &out) };
+                self.capture_msg = Some(match r {
+                    Ok((bones, skinned)) if bones > 0 => format!("{} {} ({bones} {}, {skinned} {})", crate::i18n::t("exporté :"), out.to_string_lossy(), crate::i18n::t_mid("os"), crate::i18n::t_mid("modèles liés")),
+                    Ok(_) => format!("{} {}", crate::i18n::t("exporté :"), out.to_string_lossy()),
+                    Err(e) => format!("{} {e}", crate::i18n::t("export impossible :")),
+                });
+            } else {
             let with_edit = self.edit.as_ref().filter(|_| fmt == "obj" || fmt == "glb" || fmt == "fbx");
             self.capture_msg = Some(match with_edit.map(|e| match fmt {
                 "obj" => crate::uvedit::export_obj(e, &world, &out),
@@ -7733,6 +7742,7 @@ impl Viewer {
                 Ok(()) => format!("exporté : {}", out.to_string_lossy()),
                 Err(e) => format!("export impossible : {e}"),
             });
+            }
         }
         let avail = ui.available_size();
         let (full, _) = ui.allocate_exact_size(avail.max(egui::vec2(50.0, 50.0)), Sense::hover());

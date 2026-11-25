@@ -2924,5 +2924,9 @@
   "Aucune vidéo sous ce clip à cet instant.": "No video under this clip at this time.",
   "Stabilisation": "Stabilization",
   "Suivi de mouvement": "Motion tracking",
-  "Agrandissement": "Zoom"
+  "Agrandissement": "Zoom",
+  "modèles liés": "skinned models",
+  "glTF binaire : Blender, Unity, Unreal, web (une scène garde ses os, ses poids et l'animation)": "Binary glTF: Blender, Unity, Unreal, web (a scene keeps its bones, weights and animation)",
+  "FBX : Maya, 3ds Max, Blender, Unity, Unreal (quads, UV, matériaux ; une scène garde ses os et l'animation)": "FBX: Maya, 3ds Max, Blender, Unity, Unreal (quads, UVs, materials; a scene keeps its bones and animation)",
+  "export impossible :": "export failed:"
 }

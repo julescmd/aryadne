@@ -13,6 +13,8 @@ mod bases;
 mod vector;
 mod vgeom;
 mod track2d;
+mod gltfscene;
+mod fbxscene;
 mod vector_ui;
 mod keymap;
 mod lucide;
