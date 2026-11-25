@@ -20,6 +20,9 @@ pub struct Accum {
     /// Contraste (0 : AgX de base, 1 : « punchy » de Blender) et saturation (1 : inchangée)
     pub contrast: f32,
     pub saturation: f32,
+    /// Contours : épaisseur (px) et couleur
+    pub outline: f32,
+    pub outline_color: [u8; 3],
 }
 
 #[derive(Clone, Copy)]
@@ -52,17 +55,20 @@ pub struct Settings {
     pub saturation: f32,
     /// Fond de studio : gris uni (lumière linéaire) au lieu du ciel, quand le sol se fond au loin
     pub backdrop_gray: f32,
+    /// Contours stylisés (line art) : épaisseur en pixels (0 : aucun) et couleur
+    pub outline: f32,
+    pub outline_color: [u8; 3],
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { bounces: 6, floor: true, clamp: 12.0, floor_visible: false, denoise: true, gpu: true, aperture: 0.0, focus: 0.0, agx: true, live: true, rig: 1, backdrop: true, contrast: 0.5, saturation: 1.1, backdrop_gray: 0.045 }
+        Settings { bounces: 6, floor: true, clamp: 12.0, floor_visible: false, denoise: true, gpu: true, aperture: 0.0, focus: 0.0, agx: true, live: true, rig: 1, backdrop: true, contrast: 0.5, saturation: 1.1, backdrop_gray: 0.045, outline: 0.0, outline_color: [20, 18, 22] }
     }
 }
 
 impl Accum {
     pub fn new(w: usize, h: usize) -> Accum {
-        Accum { w, h, sum: vec![[0.0; 3]; w * h], cover: vec![0.0; w * h], nrm: vec![[0.0; 3]; w * h], alb: vec![[0.0; 3]; w * h], spp: 0, agx: true, contrast: 0.0, saturation: 1.0 }
+        Accum { w, h, sum: vec![[0.0; 3]; w * h], cover: vec![0.0; w * h], nrm: vec![[0.0; 3]; w * h], alb: vec![[0.0; 3]; w * h], spp: 0, agx: true, contrast: 0.0, saturation: 1.0, outline: 0.0, outline_color: [20, 18, 22] }
     }
 
     /// Lumière moyenne de chaque pixel (couleur non prémultipliée) et couverture.
@@ -153,7 +159,56 @@ impl Accum {
             o[..3].copy_from_slice(&if self.agx { agx_look(col[i], e, self.contrast, self.saturation) } else { tone(col[i], e) });
             o[3] = (cover[i] * 255.0) as u8;
         });
+        if self.outline > 0.0 {
+            self.draw_outline(&mut out, &cover);
+        }
         out
+    }
+
+    /// Contours stylisés : la silhouette (bord avec le fond) et les plis (normales qui tournent vite),
+    /// sur une épaisseur réglable, comme le Line Art de Blender
+    fn draw_outline(&self, out: &mut [u8], cover: &[f32]) {
+        let (w, h) = (self.w, self.h);
+        let r = self.outline.max(0.5);
+        let ri = r.ceil() as i64;
+        let nrm: Vec<V3> = self.nrm.iter().map(|v| { let l = dot(*v, *v).sqrt(); if l > 1e-6 { scale(*v, 1.0 / l) } else { [0.0; 3] } }).collect();
+        // Force du trait en chaque pixel : ce qui change le plus dans le voisinage
+        let edge: Vec<f32> = (0..w * h)
+            .into_par_iter()
+            .map(|i| {
+                let (x, y) = ((i % w) as i64, (i / w) as i64);
+                let mut e = 0.0f32;
+                for dy in -ri..=ri {
+                    for dx in -ri..=ri {
+                        let d2 = (dx * dx + dy * dy) as f32;
+                        if d2 == 0.0 || d2 > r * r + 0.5 {
+                            continue;
+                        }
+                        let (xx, yy) = (x + dx, y + dy);
+                        let j = if xx < 0 || yy < 0 || xx >= w as i64 || yy >= h as i64 { usize::MAX } else { yy as usize * w + xx as usize };
+                        let cj = if j == usize::MAX { 0.0 } else { cover[j] };
+                        // Silhouette : l'un couvert, l'autre pas
+                        let sil = (cover[i] - cj).abs();
+                        // Pli : l'angle entre les normales (au-delà d'environ 35°)
+                        let crease = if j != usize::MAX && cover[i] > 0.5 && cj > 0.5 { ((0.82 - dot(nrm[i], nrm[j])) / 0.3).clamp(0.0, 1.0) } else { 0.0 };
+                        e = e.max(sil).max(crease);
+                    }
+                }
+                e
+            })
+            .collect();
+        let c = self.outline_color;
+        out.par_chunks_mut(4).enumerate().for_each(|(i, o)| {
+            let k = edge[i];
+            if k <= 0.0 {
+                return;
+            }
+            for ch in 0..3 {
+                o[ch] = (o[ch] as f32 + (c[ch] as f32 - o[ch] as f32) * k).round() as u8;
+            }
+            // Le trait déborde un peu sur le fond : il reste visible sur un fond transparent
+            o[3] = o[3].max((k * 255.0) as u8);
+        });
     }
 
 }
@@ -243,6 +298,8 @@ impl Job {
             acc.agx = set.agx;
             acc.contrast = set.contrast;
             acc.saturation = set.saturation;
+            acc.outline = set.outline;
+            acc.outline_color = set.outline_color;
             let mut last = std::time::Instant::now();
             let mut gpu = None;
             let on_gpu = set.gpu && super::gputrace::hardware() && super::gputrace::prepare(&mut gpu, &m, &look, 0xF12, w, h);
@@ -920,5 +977,38 @@ mod banc_rendu {
         }
         eprintln!("{spp} passes en {:.1} s", t.elapsed().as_secs_f32());
         image::RgbaImage::from_raw(w as u32, h as u32, acc.image(0.0, true)).unwrap().save(&out).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod outline_tests {
+    use super::*;
+
+    #[test]
+    fn contours_silhouette_et_plis() {
+        // Un carré blanc couvert au milieu, deux faces (normales différentes) de part et d'autre de x = 10
+        let (w, h) = (20usize, 20usize);
+        let mut a = Accum::new(w, h);
+        a.spp = 1;
+        a.agx = false;
+        for y in 4..16 {
+            for x in 4..16 {
+                let i = y * w + x;
+                a.sum[i] = [0.8; 3];
+                a.cover[i] = 1.0;
+                a.nrm[i] = if x < 10 { [0.0, 0.0, 1.0] } else { [1.0, 0.0, 0.0] };
+            }
+        }
+        let plain = a.image_ex(0.0, false, false);
+        a.outline = 1.0;
+        a.outline_color = [0, 0, 0];
+        let lined = a.image_ex(0.0, false, false);
+        let px = |img: &[u8], x: usize, y: usize| img[(y * w + x) * 4];
+        // Bord de la silhouette : noirci ; milieu d'une face : inchangé ; le pli au centre : noirci
+        assert!(px(&lined, 4, 8) < px(&plain, 4, 8) / 4, "{} {}", px(&lined, 4, 8), px(&plain, 4, 8));
+        assert_eq!(px(&lined, 6, 8), px(&plain, 6, 8));
+        assert!(px(&lined, 10, 8) < px(&plain, 10, 8) / 4);
+        // Le trait déborde sur le fond
+        assert!(lined[(8 * w + 3) * 4 + 3] > 0);
     }
 }

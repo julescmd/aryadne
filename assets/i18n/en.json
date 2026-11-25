@@ -3122,5 +3122,7 @@
   "Appliquer aux objets choisis (et poser une clé)": "Apply to the selected objects (and set a key)",
   "Appliquer en miroir": "Apply mirrored",
   "Supprimer la pose": "Delete the pose",
-  "Bibliothèque de poses": "Pose library"
+  "Bibliothèque de poses": "Pose library",
+  "contours (line art)": "outlines (line art)",
+  "Line art : la silhouette et les plis tracés, en pixels (0 : aucun)": "Line art: silhouette and creases drawn, in pixels (0: none)"
 }

@@ -7377,6 +7377,10 @@ impl Viewer {
                                 }
                                 ch |= ui.add(egui::Slider::new(&mut self.trace_set.contrast, -0.5..=1.0).text(crate::i18n::t("contraste"))).changed();
                                 ch |= ui.add(egui::Slider::new(&mut self.trace_set.saturation, 0.0..=2.0).text(crate::i18n::t("saturation"))).changed();
+                                ui.horizontal(|ui| {
+                                    ch |= ui.add(egui::Slider::new(&mut self.trace_set.outline, 0.0..=6.0).step_by(0.5).text(crate::i18n::t("contours (line art)"))).on_hover_text(crate::i18n::t("Line art : la silhouette et les plis tracés, en pixels (0 : aucun)")).changed();
+                                    ch |= ui.color_edit_button_srgb(&mut self.trace_set.outline_color).changed();
+                                });
                                 ui.separator();
                                 ch |= ui.add(egui::Slider::new(&mut self.trace_set.bounces, 1..=16).clamping(egui::SliderClamping::Never).text(crate::i18n::t("rebonds"))).changed();
                                 ch |= ui.add(egui::Slider::new(&mut self.trace_max, 16..=4096).clamping(egui::SliderClamping::Never).logarithmic(true).text(crate::i18n::t("échantillons"))).changed();
@@ -8647,6 +8651,8 @@ impl Viewer {
                         acc.agx = self.trace_set.agx;
                         acc.contrast = self.trace_set.contrast;
                         acc.saturation = self.trace_set.saturation;
+                        acc.outline = self.trace_set.outline;
+                        acc.outline_color = self.trace_set.outline_color;
                         let img = egui::ColorImage::from_rgba_unmultiplied([acc.w, acc.h], &acc.image_ex(look.exposure, self.trace_set.denoise, ai));
                         match &mut self.tex {
                             Some(t) => t.set(img, egui::TextureOptions::LINEAR),
