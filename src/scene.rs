@@ -112,6 +112,42 @@ pub struct Object {
     /// Modèle lié : portée de l'influence des os (1 = normale)
     #[serde(default = "one", skip_serializing_if = "is_one")]
     pub reach: f32,
+    /// Formes (blendshapes) : d'autres versions du même maillage, mélangées selon leur valeur
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub morphs: Vec<Morph>,
+}
+
+/// Une forme : un fichier au même nombre de sommets que le modèle, et sa part dans le mélange.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct Morph {
+    pub name: String,
+    pub file: String,
+    #[serde(default)]
+    pub value: f32,
+    /// Clés (image, valeur), triées ; entre deux clés la valeur passe en ligne droite
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub keys: Vec<(i32, f32)>,
+}
+
+impl Morph {
+    pub fn value_at(&self, f: f32) -> Option<f32> {
+        let (first, last) = (self.keys.first()?, self.keys.last()?);
+        if f <= first.0 as f32 {
+            return Some(first.1);
+        }
+        if f >= last.0 as f32 {
+            return Some(last.1);
+        }
+        let w = self.keys.windows(2).find(|w| f >= w[0].0 as f32 && f <= w[1].0 as f32)?;
+        let t = (f - w[0].0 as f32) / (w[1].0 - w[0].0).max(1) as f32;
+        Some(w[0].1 + (w[1].1 - w[0].1) * t)
+    }
+    /// Pose (ou remplace) une clé à l'image `f`.
+    pub fn set_key(&mut self, f: i32) {
+        self.keys.retain(|k| k.0 != f);
+        self.keys.push((f, self.value));
+        self.keys.sort_by_key(|k| k.0);
+    }
 }
 
 fn bone_len() -> f32 {
@@ -317,7 +353,7 @@ impl Object {
     }
 
     pub fn new(name: String, file: String) -> Object {
-        Object { name, file, pos: [0.0; 3], rot: [0.0; 3], scale: [1.0; 3], visible: true, color: None, mods: vec![], material: String::new(), parent: String::new(), opacity: 0.5, role: String::new(), energy: 1.2, point: false, range: 8.0, shape: 0, spot: spot_deg(), blend: spot_blend(), size: area_size(), keys: vec![], cycle: Default::default(), aim: String::new(), length: 1.0, rest: None, skin: String::new(), ik: String::new(), ik_chain: 2, reach: 1.0 }
+        Object { name, file, pos: [0.0; 3], rot: [0.0; 3], scale: [1.0; 3], visible: true, color: None, mods: vec![], material: String::new(), parent: String::new(), opacity: 0.5, role: String::new(), energy: 1.2, point: false, range: 8.0, shape: 0, spot: spot_deg(), blend: spot_blend(), size: area_size(), keys: vec![], cycle: Default::default(), aim: String::new(), length: 1.0, rest: None, skin: String::new(), ik: String::new(), ik_chain: 2, reach: 1.0, morphs: vec![] }
     }
 }
 
@@ -425,6 +461,14 @@ impl Scene {
     pub fn apply_frame(&mut self, f: f32) -> bool {
         let mut moved = false;
         for o in &mut self.objects {
+            for m in &mut o.morphs {
+                if let Some(v) = m.value_at(f) {
+                    if (v - m.value).abs() > 1e-6 {
+                        m.value = v;
+                        moved = true;
+                    }
+                }
+            }
             if let Some((p, r, s)) = o.pose_at(f) {
                 if (o.pos, o.rot, o.scale) != (p, r, s) {
                     (o.pos, o.rot, o.scale) = (p, r, s);
@@ -905,6 +949,27 @@ pub fn build(scene: &Scene, scene_path: &Path) -> (Result<crate::model3d::Model,
     (m, e)
 }
 
+/// Mélange les formes d'un objet dans son modèle (seulement celles qui ont autant de sommets que lui).
+pub fn blend_morphs(scene_path: &Path, o: &Object, m: Arc<crate::model3d::Model>) -> Arc<crate::model3d::Model> {
+    let active: Vec<&Morph> = o.morphs.iter().filter(|x| x.value.abs() > 1e-4).collect();
+    if active.is_empty() {
+        return m;
+    }
+    let mut out = (*m).clone();
+    for mo in active {
+        let Ok(t) = cached(&resolve(scene_path, &mo.file)) else { continue };
+        if t.positions.len() != m.positions.len() {
+            continue;
+        }
+        for (i, p) in out.positions.iter_mut().enumerate() {
+            for k in 0..3 {
+                p[k] += (t.positions[i][k] - m.positions[i][k]) * mo.value;
+            }
+        }
+    }
+    Arc::new(out)
+}
+
 /// Comme `build`, avec en plus la plage de triangles de chaque objet (objet, début, fin) :
 /// c'est ce qui permet de retrouver l'objet sous le curseur.
 pub fn build_ranges(scene: &Scene, scene_path: &Path) -> (Result<crate::model3d::Model, String>, Vec<Option<String>>, Vec<(usize, usize, usize)>) {
@@ -922,6 +987,7 @@ pub fn build_ranges(scene: &Scene, scene_path: &Path) -> (Result<crate::model3d:
             continue;
         }
         let loaded = if o.file.starts_with('@') { primitive(&o.file).map(Arc::new).ok_or_else(|| format!("forme inconnue : {}", o.file)) } else { cached(&path) };
+        let loaded = loaded.map(|m| blend_morphs(scene_path, o, m));
         match loaded {
             Ok(m) => {
                 let base = pos.len() as u32;
@@ -978,6 +1044,22 @@ pub fn build_ranges(scene: &Scene, scene_path: &Path) -> (Result<crate::model3d:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn formes() {
+        let mut m = Morph { name: "sourire".into(), file: String::new(), value: 0.0, keys: vec![] };
+        assert_eq!(m.value_at(5.0), None);
+        m.set_key(0);
+        m.value = 1.0;
+        m.set_key(10);
+        assert!((m.value_at(5.0).unwrap() - 0.5).abs() < 1e-6);
+        assert_eq!(m.value_at(20.0), Some(1.0));
+        let mut sc = Scene::default();
+        let k = sc.add_primitive("@cube");
+        sc.objects[k].morphs.push(m);
+        assert!(sc.apply_frame(2.0));
+        assert!((sc.objects[k].morphs[0].value - 0.2).abs() < 1e-6);
+    }
 
     #[test]
     fn courbes() {

@@ -28,6 +28,7 @@ pub mod pathtrace;
 #[path = "gputrace.rs"]
 pub mod gputrace;
 
+#[derive(Clone)]
 pub struct Model {
     pub positions: Vec<V3>,
     pub tris: Vec<[u32; 3]>,
@@ -5353,6 +5354,10 @@ impl Viewer {
         let mut look_through: Option<usize> = None;
         // Squelette : 1 lier (pose de repos prise), 2 définir le repos, 3 revenir au repos, 4 ajouter un os enfant
         let mut rig_op: Option<(u8, usize)> = None;
+        // Formes : 1 garder l'édition en cours comme forme, 2 ajouter depuis un fichier
+        let mut morph_op: Option<(u8, usize)> = None;
+        let editing_obj = self.mesh.as_ref().map(|m| m.obj);
+        let frame_now = self.anim_frame.round() as i32;
         let bone_roots: Vec<String> = (0..scene.objects.len()).filter(|&k| crate::rig::is_bone(scene, k) && crate::rig::root_of(scene, k) == k).map(|k| scene.objects[k].name.clone()).collect();
         for f in std::mem::take(&mut self.scene_add) {
             let image = crate::scene::kind(&crate::scene::Object::new(String::new(), f.to_string_lossy().to_string())) == crate::scene::Kind::Image;
@@ -5828,6 +5833,44 @@ impl Viewer {
                                                     ui.label(egui::RichText::new(crate::i18n::t("portée des os")).size(11.0).color(p.muted));
                                                     changed |= ui.add(egui::Slider::new(&mut o.reach, 0.2..=4.0).logarithmic(true)).on_hover_text(crate::i18n::t("Plus grand : chaque os entraîne la peau plus loin, les plis sont plus doux")).changed();
                                                 });
+                                            }
+                                        }
+                                        // Formes (blendshapes)
+                                        if crate::scene::kind(o) == crate::scene::Kind::Model {
+                                            ui.add_space(4.0);
+                                            ui.horizontal(|ui| {
+                                                ui.label(egui::RichText::new(crate::i18n::t("Formes")).size(11.0).color(p.muted)).on_hover_text(crate::i18n::t("Blendshapes : d'autres versions du même maillage (sourire, clignement…), mélangées par un curseur qui s'anime"));
+                                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                                    if ui.add(egui::Button::new(egui::RichText::new(crate::lucide::FOLDER_OPEN).size(13.0)).frame(false)).on_hover_text(crate::i18n::t("ajouter une forme depuis un fichier OBJ (même nombre de sommets)")).clicked() {
+                                                        morph_op = self.scene_sel.map(|k| (2, k));
+                                                    }
+                                                    if editing_obj == self.scene_sel && ui.add(egui::Button::new(egui::RichText::new(crate::lucide::PLUS).size(13.0)).frame(false)).on_hover_text(crate::i18n::t("garder l'édition en cours comme forme : le maillage revient à son état de départ, la forme se règle avec son curseur")).clicked() {
+                                                        morph_op = self.scene_sel.map(|k| (1, k));
+                                                    }
+                                                });
+                                            });
+                                            let mut gone: Option<usize> = None;
+                                            for (mi, m) in o.morphs.iter_mut().enumerate() {
+                                                ui.horizontal(|ui| {
+                                                    ui.add(egui::TextEdit::singleline(&mut m.name).desired_width(70.0).font(egui::FontId::proportional(11.0)));
+                                                    changed |= ui.add(egui::Slider::new(&mut m.value, 0.0..=1.0).show_value(false).clamping(egui::SliderClamping::Never)).changed();
+                                                    let keyed = m.keys.iter().any(|k| k.0 == frame_now);
+                                                    let kb = egui::Button::new(egui::RichText::new(if keyed { crate::lucide::DIAMOND_PLUS } else { crate::lucide::DIAMOND }).size(12.0).color(if keyed { p.warning } else { p.muted })).frame(false);
+                                                    if ui.add(kb).on_hover_text(crate::i18n::t("clé à l'image actuelle (clic droit : retirer toutes les clés)")).clicked() {
+                                                        m.set_key(frame_now);
+                                                        changed = true;
+                                                    } else if ui.ctx().input(|i| i.pointer.secondary_clicked()) && ui.rect_contains_pointer(ui.min_rect()) && !m.keys.is_empty() {
+                                                        m.keys.clear();
+                                                        changed = true;
+                                                    }
+                                                    if ui.add(egui::Button::new(egui::RichText::new(crate::lucide::X).size(11.0).color(p.muted)).frame(false)).on_hover_text(crate::i18n::t("retirer la forme (le fichier reste)")).clicked() {
+                                                        gone = Some(mi);
+                                                    }
+                                                });
+                                            }
+                                            if let Some(g) = gone {
+                                                o.morphs.remove(g);
+                                                changed = true;
                                             }
                                         }
 
@@ -6427,6 +6470,45 @@ impl Viewer {
                 o.rot = [-self.cam.pitch.to_degrees(), -self.cam.yaw.to_degrees(), 0.0];
                 o.parent.clear();
                 changed = true;
+            }
+            if let Some((op, k)) = morph_op.filter(|x| x.1 < scene.objects.len()) {
+                let dir = path.parent().unwrap_or(std::path::Path::new("")).to_path_buf();
+                let rel = |f: &std::path::Path| f.strip_prefix(&dir).map(|r| r.to_string_lossy().replace('\\', "/")).unwrap_or_else(|_| f.to_string_lossy().to_string());
+                match op {
+                    1 => match self.mesh.as_mut().filter(|m| m.obj == k) {
+                        Some(me) => match me.hist.first().map(|h| h.0.clone()) {
+                            Some(base) if base.pos.len() == me.mesh.pos.len() && base.polys == me.mesh.polys => {
+                                let stem = me.file.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+                                let mut n = scene.objects[k].morphs.len() + 1;
+                                let mut f = dir.join(format!("{stem} forme {n}.obj"));
+                                while f.exists() {
+                                    n += 1;
+                                    f = dir.join(format!("{stem} forme {n}.obj"));
+                                }
+                                match me.mesh.write_obj(&f) {
+                                    Ok(()) => {
+                                        me.hist.push((me.mesh.clone(), me.sel.clone()));
+                                        me.mesh = base;
+                                        let _ = me.mesh.write_obj(&me.file);
+                                        self.mesh_map = None;
+                                        scene.objects[k].morphs.push(crate::scene::Morph { name: format!("{} {n}", crate::i18n::t_mid("forme")), file: rel(&f), value: 0.0, keys: vec![] });
+                                        changed = true;
+                                    }
+                                    Err(e) => self.capture_msg = Some(e),
+                                }
+                            }
+                            _ => self.capture_msg = Some(crate::i18n::t("rien à garder : modifiez d'abord le maillage, sans ajouter ni retirer de sommets")),
+                        },
+                        None => {}
+                    },
+                    _ => {
+                        if let Some(f) = rfd::FileDialog::new().add_filter("OBJ", &["obj"]).set_directory(&dir).pick_file() {
+                            let name = f.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+                            scene.objects[k].morphs.push(crate::scene::Morph { name, file: rel(&f), value: 0.0, keys: vec![] });
+                            changed = true;
+                        }
+                    }
+                }
             }
             if let Some((op, k)) = rig_op.filter(|x| x.1 < scene.objects.len()) {
                 match op {
