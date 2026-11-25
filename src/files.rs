@@ -247,9 +247,16 @@ impl App {
                         ui.set_width(ui.available_width() - 10.0);
                         ui.horizontal(|ui| {
                             ui.label(RichText::new(crate::lucide::SEARCH).size(13.0).color(p.muted));
-                            ui.add(egui::TextEdit::singleline(&mut self.filter).hint_text(crate::i18n::t("chercher un fichier")).frame(egui::Frame::NONE).margin(egui::Margin::ZERO).desired_width(ui.available_width() - 20.0));
+                            let fw = if self.filter.is_empty() { 20.0 } else { 44.0 };
+                            ui.add(egui::TextEdit::singleline(&mut self.filter).hint_text(crate::i18n::t("chercher un fichier")).frame(egui::Frame::NONE).margin(egui::Margin::ZERO).desired_width(ui.available_width() - fw));
                             if !self.filter.is_empty() && ui.add(egui::Button::new(RichText::new(crate::lucide::X).size(12.0).color(p.muted)).frame(false)).on_hover_text(crate::i18n::t("effacer")).clicked() {
                                 self.filter.clear();
+                            }
+                            // Garder cette recherche dans les signets
+                            let key = format!("?{}", self.filter.trim());
+                            if !self.filter.trim().is_empty() && !self.files.pinned.contains(&key) && ui.add(egui::Button::new(RichText::new(crate::lucide::STAR).size(12.0).color(p.muted)).frame(false)).on_hover_text(crate::i18n::t("ajouter cette recherche aux signets")).clicked() {
+                                self.files.pinned.push(key);
+                                self.files.save();
                             }
                         });
                     });
@@ -267,16 +274,55 @@ impl App {
                         self.flat_list(ui);
                     } else {
                         // Épinglés et récents
-                        let pinned: Vec<Entry> = self.files.pinned.iter().filter_map(|r| self.entries.iter().find(|e| e.rel == *r).cloned()).collect();
-                        if !pinned.is_empty() {
+                        // Signets : fichiers, titres de notes (« note.md#Titre ») et recherches (« ?texte »)
+                        let marks: Vec<String> = self.files.pinned.iter().filter(|r| r.starts_with('?') || self.entries.iter().any(|e| e.rel == **r || r.split_once(".md#").is_some_and(|(f, _)| e.rel == format!("{f}.md")))).cloned().collect();
+                        if !marks.is_empty() {
                             let mut open = !self.files.pinned_closed;
-                            if fold_section(ui, &crate::i18n::t("épinglés"), pinned.len(), &mut open) {
+                            if fold_section(ui, &crate::i18n::t("signets"), marks.len(), &mut open) {
                                 self.files.pinned_closed = !open;
                                 self.files.save();
                             }
                             if open {
-                                for e in &pinned {
-                                    self.row(ui, e, 0, true);
+                                let mut unpin = None;
+                                for m in &marks {
+                                    if let Some(e) = self.entries.iter().find(|e| e.rel == *m).cloned() {
+                                        self.row(ui, &e, 0, true);
+                                        continue;
+                                    }
+                                    // Titre ou recherche : une ligne simple
+                                    let (icon, label, note, tip) = if let Some(q) = m.strip_prefix('?') {
+                                        (crate::lucide::SEARCH, q.to_string(), String::new(), crate::i18n::t("recherche enregistrée"))
+                                    } else {
+                                        let (f, h) = m.split_once(".md#").unwrap_or((m, ""));
+                                        (crate::lucide::HASH, h.to_string(), f.rsplit('/').next().unwrap_or(f).to_string(), vault::display_rel(&format!("{f}.md")))
+                                    };
+                                    let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 24.0), egui::Sense::click());
+                                    if resp.hovered() {
+                                        ui.painter().rect_filled(rect, 0.0, p.raised);
+                                    }
+                                    ui.painter().text(egui::pos2(rect.left() + 22.0, rect.center().y), egui::Align2::CENTER_CENTER, icon, egui::FontId::proportional(12.0), p.muted);
+                                    let lr = ui.painter().text(egui::pos2(rect.left() + 36.0, rect.center().y), egui::Align2::LEFT_CENTER, &label, egui::FontId::proportional(13.0), p.text);
+                                    if !note.is_empty() {
+                                        ui.painter().text(egui::pos2(lr.right() + 8.0, rect.center().y), egui::Align2::LEFT_CENTER, &note, egui::FontId::proportional(11.5), p.muted);
+                                    }
+                                    let resp = resp.on_hover_text(tip);
+                                    if resp.clicked() {
+                                        if let Some(q) = m.strip_prefix('?') {
+                                            self.filter = q.to_string();
+                                        } else if let Some((f, h)) = m.split_once(".md#") {
+                                            self.actions.push(Action::OpenHeading(format!("{f}.md"), h.to_string()));
+                                        }
+                                    }
+                                    resp.context_menu(|ui| {
+                                        if ui.button(format!("{}  {}", crate::lucide::X, crate::i18n::t("retirer des signets"))).clicked() {
+                                            unpin = Some(m.clone());
+                                            ui.close();
+                                        }
+                                    });
+                                }
+                                if let Some(m) = unpin {
+                                    self.files.pinned.retain(|k| *k != m);
+                                    self.files.save();
                                 }
                                 ui.add_space(6.0);
                             }
@@ -666,7 +712,7 @@ impl App {
         let e = e.clone();
         resp.context_menu(|ui| {
             let pinned = self.files.pinned.contains(&e.rel);
-            if ui.button(if pinned { "désépingler" } else { "épingler en haut" }).clicked() {
+            if ui.button(format!("{}  {}", crate::lucide::STAR, crate::i18n::t(if pinned { "retirer des signets" } else { "ajouter aux signets" }))).clicked() {
                 if pinned {
                     self.files.pinned.retain(|r| *r != e.rel);
                 } else {

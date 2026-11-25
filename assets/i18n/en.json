@@ -3041,5 +3041,11 @@
   "Exporter en .canvas…": "Export as .canvas…",
   "Images, notes, textes et palettes ; les traits à main levée restent dans le board": "Images, notes, texts and palettes; freehand strokes stay in the board",
   "Importer un .canvas (Obsidian)…": "Import a .canvas (Obsidian)…",
-  "canvas importé en board (le .canvas reste tel quel)": "canvas imported as a board (the .canvas stays as is)"
+  "canvas importé en board (le .canvas reste tel quel)": "canvas imported as a board (the .canvas stays as is)",
+  "ajouter cette recherche aux signets": "bookmark this search",
+  "recherche enregistrée": "saved search",
+  "retirer des signets": "remove from bookmarks",
+  "signets": "bookmarks",
+  "ajouter aux signets": "add to bookmarks",
+  "ajouter ce titre aux signets": "bookmark this heading"
 }

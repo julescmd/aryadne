@@ -273,6 +273,8 @@ struct Doc {
 enum Action {
     Open(String),
     OpenLink(String),
+    /// Ouvrir une note et aller à un de ses titres
+    OpenHeading(String, String),
     /// Renommer ou retirer une propriété dans toutes les notes
     RenameProp(String, Option<String>),
     /// Changer une propriété d'une note (sa valeur) : glisser une carte de kanban
@@ -2358,14 +2360,27 @@ impl App {
         for a in std::mem::take(&mut self.actions) {
             match a {
                 Action::Open(rel) => self.open(rel),
+                Action::OpenHeading(rel, heading) => {
+                    self.open(rel.clone());
+                    self.goto_heading(&rel, &heading);
+                }
                 Action::OpenLink(name) => {
-                    // [[Note#Titre]] et [[Note^bloc]] : on ouvre la note
+                    // [[Note#Titre]] et [[Note^bloc]] : on ouvre la note (et on va au titre)
+                    let heading = name.split_once('#').map(|(_, h)| h.trim().to_string()).filter(|h| !h.is_empty() && !h.starts_with('^'));
                     let name = name.split(['#', '^']).next().unwrap_or(&name).trim().to_string();
                     if name.is_empty() {
                         continue;
                     }
                     if self.entries.iter().any(|e| e.rel == name && !e.is_dir) {
-                        self.open(name);
+                        self.open(name.clone());
+                        if let Some(h) = heading {
+                            self.goto_heading(&name, &h);
+                        }
+                        continue;
+                    }
+                    if let (Some(h), Some(rel)) = (&heading, self.md.get(&name.to_lowercase()).cloned()) {
+                        self.open(rel.clone());
+                        self.goto_heading(&rel, h);
                         continue;
                     }
                     let rel = match self.md.get(&name.to_lowercase()) {
@@ -4192,8 +4207,24 @@ impl App {
                                     _ => p.muted,
                                 };
                                 ui.label(RichText::new(match sy.kind { "fn" | "méthode" => "ƒ", "type" | "impl" => "◇", "titre" => "#", _ => "·" }).color(col).size(11.0));
-                                if ui.add(egui::Button::new(RichText::new(&sy.name).size(11.5)).frame(false)).on_hover_text(format!("ligne {}", sy.line + 1)).clicked() {
+                                let r = ui.add(egui::Button::new(RichText::new(&sy.name).size(11.5)).frame(false)).on_hover_text(format!("ligne {}", sy.line + 1));
+                                if r.clicked() {
                                     jump = Some(sy.line);
+                                }
+                                if sy.kind == "titre" && is_md {
+                                    r.context_menu(|ui| {
+                                        let key = format!("{}#{}", self.current().map(|d| d.rel.clone()).unwrap_or_default(), sy.name.trim_start_matches('#').trim());
+                                        let on = self.files.pinned.contains(&key);
+                                        if ui.button(format!("{}  {}", lucide::STAR, crate::i18n::t(if on { "retirer des signets" } else { "ajouter ce titre aux signets" }))).clicked() {
+                                            if on {
+                                                self.files.pinned.retain(|k| *k != key);
+                                            } else {
+                                                self.files.pinned.push(key);
+                                            }
+                                            self.files.save();
+                                            ui.close();
+                                        }
+                                    });
                                 }
                             });
                         }
@@ -4574,6 +4605,22 @@ impl App {
         }
         self.selected = Some(rel);
         self.view = Some(View::Boards);
+    }
+
+    /// Place le curseur de la note ouverte sur un titre (par son texte)
+    fn goto_heading(&mut self, rel: &str, heading: &str) {
+        let Some(i) = self.docs.iter().position(|d| d.rel == rel) else { return };
+        let line = if let Content::Text(t) = &self.docs[i].content {
+            t.lines().position(|l| {
+                let l = l.trim_start();
+                l.starts_with('#') && l.trim_start_matches('#').trim().eq_ignore_ascii_case(heading.trim())
+            })
+        } else {
+            None
+        };
+        if let Some(l) = line {
+            self.docs[i].code.jump = Some(l);
+        }
     }
 
     /// Convertit un .canvas du coffre en board (à côté, même nom) et l'ouvre
