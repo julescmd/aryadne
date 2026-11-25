@@ -3,6 +3,8 @@
 mod cloud;
 mod rig;
 mod scopes;
+mod story;
+mod story_ui;
 mod sculpt;
 mod expr;
 mod bases;
@@ -241,6 +243,7 @@ enum Content {
     /// Image à calques (.aryimg)
     Paint(Box<paint::Editor>),
     Vector(Box<vector_ui::Editor>),
+    Story(Box<story_ui::Editor>),
     /// Vidéo ouverte alors que ffmpeg n'est pas encore installé.
     NeedFfmpeg(Option<std::sync::Arc<std::sync::Mutex<ffmpeg::InstallState>>>),
     Unreadable(String),
@@ -876,6 +879,7 @@ impl App {
                 }
                 "arycomp" => self.new_untitled(ext, |p| nodes::Graph::new_compositor().save(p)),
                 "aryvec" => self.new_untitled(ext, |p| vector::Doc::starter().save(p)),
+                "arystory" => self.new_untitled(ext, |p| story::Story::starter().save(p)),
                 "aryimg" => {
                     let (_, w, h) = NF_IMG[o.img_size];
                     let white = o.img_white;
@@ -1107,6 +1111,7 @@ impl App {
             "music" => ("Composer avec des synthés et une batterie intégrés : régions, rouleau de piano, idées d'accords et de rythmes.", vec![("Nouveau morceau", extras::Cmd::NewMusic)]),
             "audio" => ("Voix, musiques et ambiances sur plusieurs pistes : couper, nettoyer, mixer, exporter.", vec![("Nouvelle session audio", extras::Cmd::NewAudio), ("Importer des sons…", extras::Cmd::Import)]),
             "motion" => ("Titres, formes et images animés par clés, avec des préréglages, puis exportés en MP4.", vec![("Nouvelle composition", extras::Cmd::NewMotion)]),
+            "story" => ("Dessiner le film case par case : plan, caméra, action et dialogue, puis lire l'animatique et l'envoyer au montage.", vec![("Nouveau storyboard", extras::Cmd::NewStory)]),
             "seq" => ("Assembler des plans, des titres et des sons sur une timeline magnétique.", vec![("Nouveau montage", extras::Cmd::NewMontage), ("Importer des fichiers…", extras::Cmd::Import)]),
             "review" => ("Regarder un plan image par image, l'annoter et le commenter, comme SyncSketch.", vec![("Importer une vidéo…", extras::Cmd::Import)]),
             "code" => ("Scripts, shaders et pages, avec l'exécution et l'aide d'un serveur de langage.", vec![("Nouveau fichier", extras::Cmd::NewFile)]),
@@ -1958,6 +1963,9 @@ impl App {
         if let Content::Vector(ed) = &mut doc.content {
             ed.save_if_due(true);
         }
+        if let Content::Story(ed) = &mut doc.content {
+            ed.save_if_due(true);
+        }
         if doc.dirty_since.take().is_none() {
             return;
         }
@@ -2105,6 +2113,11 @@ impl App {
                     }
                     (Err(e), _) => Content::Unreadable(e),
                     _ => Content::Unreadable("Contexte indisponible.".into()),
+                }
+            } else if story::is_story(&rel) {
+                match vault::safe(&self.root(), &rel).and_then(story_ui::Editor::open) {
+                    Ok(e) => Content::Story(Box::new(e)),
+                    Err(e) => Content::Unreadable(e),
                 }
             } else if vector::is_vector(&rel) {
                 match vault::safe(&self.root(), &rel).and_then(|p| vector_ui::Editor::open(p, &self.root())) {
@@ -3225,6 +3238,7 @@ impl App {
         let mut lsp_goto: Option<(PathBuf, usize)> = None;
         let mut lsp_note: Option<String> = None;
         let mut open_material: Option<PathBuf> = None;
+        let mut open_file: Option<PathBuf> = None;
         let mut open_tab: Option<PathBuf> = None;
         self.feed_project_words();
         egui::CentralPanel::default().frame(egui::Frame::new().fill(p.bg)).show(ui, |ui| {
@@ -3509,6 +3523,13 @@ impl App {
                 }
                 Content::Vector(ed) => {
                     egui::Frame::new().inner_margin(egui::Margin::symmetric(8, 6)).show(ui, |ui| ed.show(ui));
+                }
+                Content::Story(ed) => {
+                    egui::Frame::new().inner_margin(egui::Margin::symmetric(10, 6)).show(ui, |ui| ed.show(ui));
+                    ed.save_if_due(false);
+                    if let Some(p) = ed.open_request.take() {
+                        open_file = Some(p);
+                    }
                 }
                 Content::Nodes(ed) => {
                     ed.show(ui);
@@ -3836,6 +3857,12 @@ impl App {
         if let Some(rel) = open_tab.and_then(|p| vault::inside(&self.root(), &p)) {
             self.refresh();
             self.open(rel);
+        }
+        if let Some(path) = open_file {
+            if let Some(rel) = vault::inside(&self.root(), &path) {
+                self.refresh();
+                self.open(rel);
+            }
         }
         if let Some(path) = open_material {
             if let Some(rel) = vault::inside(&self.root(), &path) {

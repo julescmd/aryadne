@@ -98,6 +98,7 @@ pub enum Cmd {
     RunFile,
     NewBoard,
     NewVector,
+    NewStory,
 }
 
 impl App {
@@ -124,6 +125,7 @@ impl App {
             ("nouveau morceau (séquenceur)", "", Cmd::NewMusic),
             ("nouveau matériau à calques (atelier)", "", Cmd::NewLayered),
             ("nouveau dessin vectoriel", "", Cmd::NewVector),
+            ("nouveau storyboard", "", Cmd::NewStory),
             ("nouveau matériau (nodes)", "", Cmd::NewMaterial),
             ("nouveau compositing (nodes)", "", Cmd::NewCompositor),
             ("importer des fichiers…", "", Cmd::Import),
@@ -284,6 +286,7 @@ impl App {
             Cmd::NewLayered => self.new_untitled(crate::formats::ext("mat"), |p| nodes::Graph::new_layered().save(p)),
             Cmd::NewCompositor => self.new_untitled(crate::formats::ext("comp"), |p| nodes::Graph::new_compositor().save(p)),
             Cmd::NewVector => self.new_untitled(crate::formats::ext("vector"), |p| crate::vector::Doc::starter().save(p)),
+            Cmd::NewStory => self.new_untitled(crate::formats::ext("story"), |p| crate::story::Story::starter().save(p)),
             Cmd::NewBoard => {
                 self.new_board("Moodboard");
                 self.view = Some(View::Boards);
