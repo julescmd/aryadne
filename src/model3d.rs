@@ -2616,6 +2616,8 @@ pub struct Viewer {
     prop_tab: PropTab,
     /// Éditeur de courbes à la place de la timeline
     anim_graph: bool,
+    /// L'éditeur de courbes dans sa propre fenêtre du système (on peut la sortir de l'application)
+    graph_window: bool,
     /// Barre d'outils d'animation (tweener, décaler, poses…)
     anim_tools: bool,
     /// Pelure d'oignon : l'objet choisi aux clés d'avant et d'après, en fil de fer
@@ -2823,6 +2825,7 @@ impl Viewer {
             scene_refs: None,
             prop_tab: PropTab::Object,
             anim_graph: false,
+            graph_window: false,
             anim_tools: false,
             onion: false,
             look_through: false,
@@ -6187,7 +6190,7 @@ impl Viewer {
         let seek_before = seek;
         // Timeline (une bande) ou éditeur de courbes (un panneau qu'on agrandit)
         let tl_frame = egui::Frame::new().fill(p.panel).stroke(Stroke::new(1.0, p.line));
-        let tl_panel = if self.anim_graph { egui::Panel::bottom("scene-graph").resizable(true).default_size(300.0).min_size(160.0).max_size((ui.available_height() * 0.7).max(180.0)) } else { egui::Panel::bottom("scene-timeline").resizable(true).default_size(120.0).min_size(70.0).max_size(320.0) };
+        let tl_panel = if self.anim_graph && !self.graph_window { egui::Panel::bottom("scene-graph").resizable(true).default_size(300.0).min_size(160.0).max_size((ui.available_height() * 0.7).max(180.0)) } else { egui::Panel::bottom("scene-timeline").resizable(true).default_size(120.0).min_size(70.0).max_size(320.0) };
         let sub_body = |ui: &mut egui::Ui| {
             // Comme la maquette : une barre de 30 px (lecture, temps, image), puis la règle et les pistes
             let (hr, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 30.0), egui::Sense::hover());
@@ -6253,6 +6256,9 @@ impl Viewer {
                 ui.toggle_value(&mut self.onion, egui::RichText::new(crate::lucide::LAYERS).size(14.0)).on_hover_text(crate::i18n::t("Pelure d'oignon : l'objet choisi aux clés d'avant (rouge) et d'après (vert)"));
                 ui.toggle_value(&mut self.anim_tools, egui::RichText::new(crate::lucide::WAND_SPARKLES).size(14.0)).on_hover_text(crate::i18n::t("Outils d'animation : tweener, décaler les clés, poses, miroir…"));
                 if ui.toggle_value(&mut self.anim_graph, egui::RichText::new(crate::lucide::SPLINE).size(14.0)).on_hover_text(crate::i18n::t("Éditeur de courbes : clés et poignées de Bézier par canal (Maj+F6)")).changed() {
+                }
+                if self.anim_graph {
+                    ui.toggle_value(&mut self.graph_window, egui::RichText::new(crate::lucide::APP_WINDOW).size(14.0)).on_hover_text(crate::i18n::t("Éditeur de courbes dans sa propre fenêtre, qu'on peut sortir de l'application (sur un autre écran)"));
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     changed |= ui.add(egui::DragValue::new(&mut scene.fps).range(1.0..=1000.0).suffix(" i/s")).changed();
@@ -6447,7 +6453,11 @@ impl Viewer {
                 }
             }
             if self.anim_graph {
-                // L'éditeur de courbes commun (le même qu'au Motion et au montage)
+                // L'éditeur de courbes commun (le même qu'au Motion et au montage), dans le panneau ou dans
+                // sa propre fenêtre du système
+                let in_window = self.graph_window;
+                let ctx_w = ui.ctx().clone();
+                let mut draw = |ui: &mut egui::Ui| {
                 let sel = self.scene_sel.filter(|&k| k < scene.objects.len());
                 match sel {
                     Some(k) => {
@@ -6477,7 +6487,15 @@ impl Viewer {
                         ui.centered_and_justified(|ui| ui.label(egui::RichText::new(crate::i18n::t("choisis un objet pour voir ses courbes")).color(p.muted)));
                     }
                 }
-                return;
+                };
+                if in_window {
+                    if !crate::dock::os_window(&ctx_w, "3d-curves", &crate::i18n::t("Éditeur de courbes"), egui::vec2(900.0, 420.0), |ui| draw(ui)) {
+                        self.graph_window = false;
+                    }
+                } else {
+                    draw(ui);
+                    return;
+                }
             }
             // La règle et les pistes : un clic ou un glissement déplace la tête de lecture ; une piste par objet animé
             let full = ui.available_rect_before_wrap();

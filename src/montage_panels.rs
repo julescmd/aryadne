@@ -1751,7 +1751,8 @@ impl Editor {
             let pick = self.sel.first().and_then(|id| self.project.index(*id));
             let name = pick.map(|i| self.project.clips[i].name.clone()).unwrap_or_default();
             let fps = self.project.fps as f32;
-            egui::Window::new(format!("{} · {name}", crate::i18n::t("Éditeur de courbes"))).id(egui::Id::unique("montage-curves")).open(&mut open).resizable(true).default_size(vec2(780.0, 360.0)).show(&hui.ctx().clone(), |ui| {
+            // Une vraie fenêtre, qu'on peut sortir de l'application (comme le Graph Editor de Maya)
+            open = crate::dock::os_window(&hui.ctx().clone(), "montage-curves", &format!("{} · {name}", crate::i18n::t("Éditeur de courbes")), vec2(820.0, 400.0), |ui| {
                 let Some(i) = pick else {
                     ui.label(crate::i18n::t("Choisis un clip (avec des clés) pour voir ses courbes."));
                     return;

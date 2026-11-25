@@ -2214,7 +2214,8 @@ impl Editor {
         if self.curves_open {
             let mut open = true;
             let name = self.sel.and_then(|i| self.compo.layers.get(i)).map(|l| l.name.clone()).unwrap_or_default();
-            egui::Window::new(format!("{} · {name}", crate::i18n::t("Éditeur de courbes"))).id(egui::Id::unique("motion-curves")).open(&mut open).resizable(true).default_size(vec2(780.0, 380.0)).show(ui.ctx(), |ui| {
+            // Une vraie fenêtre, qu'on peut sortir de l'application (comme le Graph Editor de Maya)
+            open = crate::dock::os_window(&ui.ctx().clone(), "motion-curves", &format!("{} · {name}", crate::i18n::t("Éditeur de courbes")), vec2(820.0, 400.0), |ui| {
                 let Some(i) = self.sel.filter(|&i| i < self.compo.layers.len()) else {
                     ui.label(crate::i18n::t("Choisis un calque pour voir ses courbes."));
                     return;

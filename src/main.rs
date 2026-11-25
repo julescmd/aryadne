@@ -3043,7 +3043,7 @@ impl App {
                     let short = path.split(['/', '\\']).filter(|s| !s.is_empty()).last().unwrap_or("").to_string();
                     // Le logo et le nom sont passés dans la barre de menus : ici, le coffre seul
                     let mut job = egui::text::LayoutJob::default();
-                    job.append(&format!("{}  {short}  {}", lucide::VAULT, lucide::CHEVRON_DOWN), 0.0, egui::TextFormat { font_id: egui::FontId::proportional(12.5), color: p.text, ..Default::default() });
+                    job.append(&format!("{}  {short}  {}", lucide::FOLDER, lucide::CHEVRON_DOWN), 0.0, egui::TextFormat { font_id: egui::FontId::proportional(12.5), color: p.text, ..Default::default() });
                     let (r, _) = egui::containers::menu::MenuButton::from_button(egui::Button::new(job).frame(false)).ui(ui, |ui| {
                         ui.set_min_width(240.0);
                         ui.label(RichText::new(&path).color(p.muted).size(10.5));

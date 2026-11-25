@@ -401,3 +401,33 @@ pub fn show_ex<R>(ui: &mut Ui, id: &str, title: &str, default: Side, size: f32, 
         }
     }
 }
+
+/// Une vraie fenêtre du système (comme les fenêtres de Maya) : on peut la sortir de l'application, sur un
+/// autre écran. `key` la reconnaît d'une image à l'autre ; sa place et sa taille sont gardées pendant la
+/// session. Rend false quand on la ferme.
+pub fn os_window(ctx: &egui::Context, key: &str, title: &str, size: egui::Vec2, body: impl FnOnce(&mut Ui)) -> bool {
+    static PLACES: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String, ([f32; 2], [f32; 2])>>> = std::sync::LazyLock::new(Default::default);
+    let main = ctx.input(|i| i.viewport().outer_rect).map(|r| r.min).unwrap_or(Pos2::ZERO);
+    let known = PLACES.lock().ok().and_then(|m| m.get(key).copied());
+    let (pos, sz) = known.unwrap_or(([main.x + 120.0, main.y + 160.0], [size.x, size.y]));
+    let vp = egui::ViewportBuilder::default().with_title(format!("{title} · Aryadne")).with_inner_size(sz).with_min_inner_size(vec2(320.0, 180.0)).with_position(Pos2::new(pos[0], pos[1]));
+    let mut open = true;
+    let mut body = Some(body);
+    let k = key.to_string();
+    ctx.show_viewport_immediate(egui::ViewportId::from_hash_of(("os-window", key)), vp, |ui, _class| {
+        let (close, outer, inner) = ui.ctx().input(|i| (i.viewport().close_requested(), i.viewport().outer_rect, i.viewport().inner_rect));
+        if close {
+            open = false;
+        }
+        if let (Some(o), Some(r)) = (outer, inner) {
+            if let Ok(mut m) = PLACES.lock() {
+                m.insert(k.clone(), ([o.min.x, o.min.y], [r.width(), r.height()]));
+            }
+        }
+        let p = crate::theme::pal();
+        if let Some(b) = body.take() {
+            egui::CentralPanel::default().frame(egui::Frame::new().fill(p.panel).inner_margin(8)).show(ui, b);
+        }
+    });
+    open
+}
