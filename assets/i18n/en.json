@@ -2566,5 +2566,14 @@
   "Pour le web": "For the web",
   "15 images par seconde, 480 px de large": "15 frames per second, 480 px wide",
   "Une image par trame : nom_00001.png, nom_00002.png…": "One image per frame: name_00001.png, name_00002.png…",
-  "Le mixage, sans l'image": "The mix, without picture"
+  "Le mixage, sans l'image": "The mix, without picture",
+  "Limiteur": "Limiter",
+  "Gate": "Gate",
+  "rien ne dépasse −1 dB : plus de crêtes qui saturent": "nothing goes above −1 dB: no more clipping peaks",
+  "coupe le souffle entre les phrases (sous −45 dB)": "cuts the hiss between sentences (below −45 dB)",
+  "Automation du volume : clic sur la ligne pour un point, glisser pour le régler, double-clic pour le retirer": "Volume automation: click the line to add a point, drag to adjust, double-click to remove",
+  "Arrêter la prise (R)": "Stop recording (R)",
+  "Enregistrer au micro sur la piste choisie (R)": "Record from the microphone on the selected track (R)",
+  "Enregistrement impossible :": "Can't record:",
+  "Prise ajoutée :": "Take added:"
 }

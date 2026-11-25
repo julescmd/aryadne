@@ -50,6 +50,10 @@ pub enum Fx {
     Reverb { amount: f32 },
     /// Adoucit les « s » qui sifflent
     Deess,
+    /// Limiteur : rien ne dépasse le plafond (dBFS)
+    Limiter { ceiling: f32 },
+    /// Gate : coupe ce qui reste sous le seuil (dBFS), le souffle entre les phrases
+    Gate { threshold: f32 },
 }
 
 impl Fx {
@@ -63,6 +67,8 @@ impl Fx {
             Fx::Pitch { semitones } => format!("{} {semitones:+.1} {}", crate::i18n::t("Hauteur"), crate::i18n::t_mid("demi-tons")),
             Fx::Reverb { amount } => format!("{} {:.0} %", crate::i18n::t("Réverbération"), amount * 100.0),
             Fx::Deess => crate::i18n::t("De-esser"),
+            Fx::Limiter { ceiling } => format!("{} {ceiling:+.1} dB", crate::i18n::t("Limiteur")),
+            Fx::Gate { threshold } => format!("{} {threshold:.0} dB", crate::i18n::t("Gate")),
         }
     }
 
@@ -84,6 +90,8 @@ impl Fx {
                 format!("aecho=0.85:0.9:{:.0}|{:.0}|{:.0}:{:.3}|{:.3}|{:.3}", 30.0 + 40.0 * a, 55.0 + 80.0 * a, 85.0 + 130.0 * a, 0.12 + 0.3 * a, 0.08 + 0.22 * a, 0.05 + 0.16 * a)
             }
             Fx::Deess => "deesser=i=0.6:m=0.5:f=0.5".into(),
+            Fx::Limiter { ceiling } => format!("alimiter=limit={:.4}:attack=5:release=50:level=disabled", db(ceiling.clamp(-24.0, 0.0))),
+            Fx::Gate { threshold } => format!("agate=threshold={:.5}:ratio=8:attack=5:release=120", db(threshold.clamp(-80.0, -10.0))),
         }
     }
 }
@@ -151,6 +159,27 @@ pub struct Track {
     /// Baisse automatique sous une autre piste (la musique sous la voix)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duck: Option<Duck>,
+    /// Automation du volume : points (instant en s, gain en dB), reliés en ligne droite
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub auto: Vec<[f64; 2]>,
+}
+
+impl Track {
+    /// Gain de l'automation à l'instant `t`, en dB (0 sans points)
+    pub fn auto_db(&self, t: f64) -> f64 {
+        let a = &self.auto;
+        match a.len() {
+            0 => 0.0,
+            _ if t <= a[0][0] => a[0][1],
+            _ if t >= a[a.len() - 1][0] => a[a.len() - 1][1],
+            _ => {
+                let k = a.partition_point(|p| p[0] <= t);
+                let (p, q) = (a[k - 1], a[k]);
+                let u = (t - p[0]) / (q[0] - p[0]).max(1e-9);
+                p[1] + (q[1] - p[1]) * u
+            }
+        }
+    }
 }
 
 /// La piste baisse de `amount` dB quand la piste `under` joue
@@ -194,7 +223,7 @@ impl Session {
     }
 
     pub fn new_track(i: usize) -> Track {
-        Track { name: format!("{} {}", crate::i18n::t("Piste"), i + 1), color: COLORS[i % COLORS.len()], volume: 0.0, mute: false, solo: false, clips: vec![], duck: None }
+        Track { name: format!("{} {}", crate::i18n::t("Piste"), i + 1), color: COLORS[i % COLORS.len()], volume: 0.0, mute: false, solo: false, clips: vec![], duck: None, auto: vec![] }
     }
 
     pub fn read(path: &Path) -> Result<Session, String> {
@@ -403,6 +432,84 @@ impl Sounds {
 }
 
 /// Le mixage stéréo des pistes audibles entre `a` et `b` secondes. `wait` attend les sons pas encore décodés.
+/// Entrée micro pour ffmpeg selon le système : (format, périphérique)
+pub fn mic_input() -> Option<(String, String)> {
+    if cfg!(target_os = "windows") {
+        // Le premier périphérique audio que DirectShow annonce
+        let ff = crate::ffmpeg::find("ffmpeg")?;
+        let out = crate::ffmpeg::command(ff).args(["-hide_banner", "-list_devices", "true", "-f", "dshow", "-i", "dummy"]).output().ok()?;
+        let text = String::from_utf8_lossy(&out.stderr).to_string();
+        let name = text.lines().find(|l| l.contains("(audio)")).and_then(|l| l.split('"').nth(1))?.to_string();
+        Some(("dshow".into(), format!("audio={name}")))
+    } else if cfg!(target_os = "macos") {
+        Some(("avfoundation".into(), ":0".into()))
+    } else {
+        Some(("pulse".into(), "default".into()))
+    }
+}
+
+/// Une prise en cours : ffmpeg écrit le WAV ; « q » sur son entrée l'arrête proprement
+pub struct Recording {
+    pub child: std::process::Child,
+    pub out: PathBuf,
+    pub started: std::time::Instant,
+    /// Instant de la session où la prise commence, et sa piste
+    pub at: f64,
+    pub track: usize,
+}
+
+pub fn start_recording(out: &Path, at: f64, track: usize) -> Result<Recording, String> {
+    let ff = crate::ffmpeg::find("ffmpeg").ok_or("ffmpeg n'est pas installé.")?;
+    let (fmt, dev) = mic_input().ok_or("Aucun micro trouvé.")?;
+    if let Some(d) = out.parent() {
+        std::fs::create_dir_all(d).map_err(|e| e.to_string())?;
+    }
+    let child = crate::ffmpeg::command(ff)
+        .args(["-v", "error", "-y", "-f", &fmt, "-i", &dev, "-ac", "2", "-ar", &RATE.to_string(), "-c:a", "pcm_s16le"])
+        .arg(out)
+        .stdin(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    Ok(Recording { child, out: out.to_path_buf(), started: std::time::Instant::now(), at, track })
+}
+
+impl Recording {
+    /// Arrête la prise ; Err si ffmpeg n'a rien pu enregistrer
+    pub fn stop(mut self) -> Result<PathBuf, String> {
+        use std::io::Write;
+        if let Some(mut i) = self.child.stdin.take() {
+            let _ = i.write_all(b"q");
+        }
+        let start = std::time::Instant::now();
+        loop {
+            match self.child.try_wait() {
+                Ok(Some(_)) => break,
+                _ if start.elapsed().as_secs() > 4 => {
+                    let _ = self.child.kill();
+                    break;
+                }
+                _ => std::thread::sleep(std::time::Duration::from_millis(30)),
+            }
+        }
+        if std::fs::metadata(&self.out).map(|m| m.len() > 100).unwrap_or(false) {
+            Ok(self.out)
+        } else {
+            let mut err = String::new();
+            if let Some(mut e) = self.child.stderr.take() {
+                use std::io::Read;
+                let _ = e.read_to_string(&mut err);
+            }
+            Err(format!("{} {}", crate::i18n::t("Enregistrement impossible :"), err.lines().last().unwrap_or("micro introuvable")))
+        }
+    }
+
+    /// Ffmpeg s'est arrêté tout seul (micro absent, refusé)
+    pub fn failed(&mut self) -> bool {
+        matches!(self.child.try_wait(), Ok(Some(_)))
+    }
+}
+
 pub fn mix(s: &Session, sounds: &Sounds, a: f64, b: f64, wait: bool) -> Vec<f32> {
     let n = (((b - a) * RATE as f64).max(0.0)) as usize;
     let mut out = vec![0.0f32; n * 2];
@@ -456,7 +563,8 @@ fn add_track(out: &mut [f32], s: &Session, sounds: &Sounds, ti: usize, a: f64, n
             if si >= buf.frames() {
                 break;
             }
-            let g = c.env(t) * tv * gains.map_or(1.0, |g| g[f]);
+            let auto = if tr.auto.is_empty() { 1.0 } else { db(tr.auto_db(t) as f32) };
+            let g = c.env(t) * tv * auto * gains.map_or(1.0, |g| g[f]);
             out[f * 2] += buf.data[si * 2] * g;
             out[f * 2 + 1] += buf.data[si * 2 + 1] * g;
         }

@@ -57,6 +57,11 @@ pub struct Editor {
     spec: Option<(String, Vec<f32>)>,
     /// Courbes de ducking affichées (signature de ce dont elles dépendent, gains à 50 par seconde)
     duck_view: std::collections::HashMap<usize, (String, Arc<Vec<f32>>)>,
+    /// Pistes dont on montre la ligne d'automation, et le point qu'on glisse (piste, point)
+    auto_shown: std::collections::HashSet<usize>,
+    auto_drag: Option<(usize, usize)>,
+    /// Prise au micro en cours
+    rec: Option<audio::Recording>,
 }
 
 impl Drop for Editor {
@@ -128,6 +133,9 @@ impl Editor {
             export_rx: None,
             spec: None,
             duck_view: Default::default(),
+            auto_shown: Default::default(),
+            auto_drag: None,
+            rec: None,
         }
     }
 
@@ -279,6 +287,48 @@ impl Editor {
         self.changed();
     }
 
+    /// Démarre ou arrête une prise au micro ; la prise arrêtée devient un clip là où elle a commencé
+    fn toggle_record(&mut self) {
+        match self.rec.take() {
+            Some(r) => {
+                let (at, ti) = (r.at, r.track);
+                match r.stop() {
+                    Ok(out) => {
+                        let rel = out.strip_prefix(&self.root).map(|p| p.to_string_lossy().replace('\\', "/")).unwrap_or_else(|_| out.to_string_lossy().to_string());
+                        while self.session.tracks.len() <= ti {
+                            let k = self.session.tracks.len();
+                            self.session.tracks.push(Session::new_track(k));
+                        }
+                        self.session.tracks[ti].clips.push(Clip { src: rel.clone(), start: at, offset: 0.0, len: 0.0, gain: 0.0, fade_in: 0.0, fade_out: 0.0, fx: vec![] });
+                        self.sel_clip = Some((ti, self.session.tracks[ti].clips.len() - 1));
+                        self.time = at;
+                        self.changed();
+                        self.say(format!("{} {}", crate::i18n::t("Prise ajoutée :"), rel.rsplit('/').next().unwrap_or(&rel)));
+                    }
+                    Err(e) => self.say(e),
+                }
+            }
+            None => {
+                self.stop();
+                let stem = self.path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "session".into());
+                let dir = self.path.parent().map(|d| d.join("prises")).unwrap_or_else(|| PathBuf::from("prises"));
+                let mut k = 1;
+                let out = loop {
+                    let p = dir.join(format!("{stem} - prise {k}.wav"));
+                    if !p.exists() {
+                        break p;
+                    }
+                    k += 1;
+                };
+                let ti = self.sel_track.min(self.session.tracks.len().saturating_sub(1));
+                match audio::start_recording(&out, self.time, ti) {
+                    Ok(r) => self.rec = Some(r),
+                    Err(e) => self.say(e),
+                }
+            }
+        }
+    }
+
     fn add_file(&mut self, rel: &str) {
         let ti = self.sel_track.min(self.session.tracks.len().saturating_sub(1));
         if self.session.tracks.is_empty() {
@@ -352,6 +402,9 @@ impl Editor {
         }
         if !cmd && i.key_pressed(egui::Key::L) {
             self.looping ^= true;
+        }
+        if !cmd && i.key_pressed(egui::Key::R) {
+            self.toggle_record();
         }
         if !cmd && i.key_pressed(egui::Key::V) {
             self.tool = Tool::Select;
@@ -535,6 +588,11 @@ impl Editor {
         if ib(&mut ui, l::REPEAT, "Boucle sur la plage (L)", self.looping, None) {
             self.looping ^= true;
         }
+        // Enregistrer au micro sur la piste choisie, à la tête de lecture (R)
+        let recording = self.rec.is_some();
+        if ib(&mut ui, if recording { l::CIRCLE_STOP } else { l::MIC }, if recording { "Arrêter la prise (R)" } else { "Enregistrer au micro sur la piste choisie (R)" }, recording, Some(if recording { Color32::from_rgb(230, 70, 70) } else { p.text })) {
+            self.toggle_record();
+        }
         ui.add_space(6.0);
         ui.separator();
         if ib(&mut ui, l::MOUSE_POINTER_2, "Sélection (V)", self.tool == Tool::Select, None) {
@@ -548,7 +606,21 @@ impl Editor {
         ui.add_space(4.0);
         let (cr, _) = ui.allocate_exact_size(vec2(118.0, 30.0), Sense::hover());
         ui.painter().rect(cr, 2.0, p.code_bg, Stroke::new(1.0, p.line), egui::StrokeKind::Inside);
-        ui.painter().text(cr.center(), egui::Align2::CENTER_CENTER, clock(self.time), egui::FontId::monospace(17.0), p.text);
+        let (now, tc) = match &self.rec {
+            Some(r) => (r.at + r.started.elapsed().as_secs_f64(), Color32::from_rgb(230, 70, 70)),
+            None => (self.time, p.text),
+        };
+        ui.painter().text(cr.center(), egui::Align2::CENTER_CENTER, clock(now), egui::FontId::monospace(17.0), tc);
+        if self.rec.is_some() {
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
+            if self.rec.as_mut().is_some_and(|r| r.failed()) {
+                if let Some(r) = self.rec.take() {
+                    if let Err(e) = r.stop() {
+                        self.say(e);
+                    }
+                }
+            }
+        }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let busy = self.export_rx.is_some();
             ui.menu_button(format!("{}  {}", l::DOWNLOAD, crate::i18n::t(if busy { "Export…" } else { "Exporter" })), |ui| {
@@ -697,7 +769,8 @@ impl Editor {
             painter.vline(head.right(), head.y_range(), Stroke::new(1.0, p.line));
             painter.hline(full.x_range(), row.bottom() - 0.5, Stroke::new(1.0, p.line));
             let dim = tr.mute || (solo && !tr.solo);
-            // En-tête : couleur, nom, M S, volume
+            // En-tête : couleur, nom, M S, volume (la zone cliquable de l'en-tête passe dessous les boutons)
+            let hr = ui.interact(head, ui.scope_id().with(("audio-head", ti)), Sense::click());
             let mut hu = ui.new_child(egui::UiBuilder::new().max_rect(head.shrink2(vec2(10.0, 8.0))).layout(egui::Layout::top_down(egui::Align::Min)));
             hu.horizontal(|ui| {
                 let (d, _) = ui.allocate_exact_size(vec2(8.0, 16.0), Sense::hover());
@@ -726,6 +799,14 @@ impl Editor {
                         e.changed();
                     }));
                 }
+                let shown = self.auto_shown.contains(&ti);
+                if ui.add(egui::Button::new(egui::RichText::new(crate::lucide::CHART_SPLINE).size(12.0)).selected(shown || !tr.auto.is_empty()).min_size(vec2(22.0, 20.0))).on_hover_text(crate::i18n::t("Automation du volume : clic sur la ligne pour un point, glisser pour le régler, double-clic pour le retirer")).clicked() {
+                    actions.push(Box::new(move |e: &mut Editor| {
+                        if !e.auto_shown.remove(&ti) {
+                            e.auto_shown.insert(ti);
+                        }
+                    }));
+                }
                 let mut v = tr.volume;
                 let r = ui.add(egui::Slider::new(&mut v, -40.0..=12.0).show_value(false)).on_hover_text(format!("{v:+.1} dB"));
                 if r.changed() {
@@ -735,7 +816,6 @@ impl Editor {
                     actions.push(Box::new(|e: &mut Editor| e.changed()));
                 }
             });
-            let hr = ui.interact(head, ui.scope_id().with(("audio-head", ti)), Sense::click());
             if hr.clicked() {
                 self.sel_track = ti;
             }
@@ -909,6 +989,82 @@ impl Editor {
                 }
                 let under = self.session.tracks.get(d.under).map(|t| t.name.clone()).unwrap_or_default();
                 lp.text(pos2(lane.right() - 8.0, lane.bottom() - 6.0), egui::Align2::RIGHT_BOTTOM, format!("↓ {} dB · {under}", d.amount.round()), egui::FontId::proportional(10.5), p.warning);
+            }
+            // Automation du volume : +6 dB en haut, −40 dB en bas, 0 dB au tiers
+            if self.auto_shown.contains(&ti) || !tr.auto.is_empty() {
+                let (top, bot) = (lane.top() + 6.0, lane.bottom() - 6.0);
+                let y_of = |d: f64| {
+                    let d = d.clamp(-40.0, 6.0);
+                    if d >= 0.0 { top + (6.0 - d as f32) / 6.0 * (bot - top) / 3.0 } else { top + (bot - top) / 3.0 + (-d as f32) / 40.0 * (bot - top) * 2.0 / 3.0 }
+                };
+                let db_of = |yy: f32| -> f64 {
+                    let third = top + (bot - top) / 3.0;
+                    if yy <= third { 6.0 - ((yy - top) / ((bot - top) / 3.0) * 6.0) as f64 } else { -(((yy - third) / ((bot - top) * 2.0 / 3.0)) * 40.0) as f64 }
+                };
+                let col = Color32::from_rgb(120, 200, 255);
+                let pts: Vec<Pos2> = if tr.auto.is_empty() {
+                    vec![pos2(lane.left(), y_of(0.0)), pos2(lane.right(), y_of(0.0))]
+                } else {
+                    let mut v = vec![pos2(lane.left(), y_of(tr.auto[0][1]))];
+                    v.extend(tr.auto.iter().map(|q| pos2(x_of(q[0]), y_of(q[1]))));
+                    v.push(pos2(lane.right(), y_of(tr.auto[tr.auto.len() - 1][1])));
+                    v
+                };
+                lp.add(egui::Shape::line(pts, Stroke::new(1.5, col)));
+                let mut new_pt = None;
+                let mut del = None;
+                for (k, q) in tr.auto.iter().enumerate() {
+                    let c = pos2(x_of(q[0]), y_of(q[1]));
+                    lp.circle_filled(c, 4.0, col);
+                    let pr = ui.interact(Rect::from_center_size(c, vec2(12.0, 12.0)), ui.scope_id().with(("auto-pt", ti, k)), Sense::click_and_drag()).on_hover_text(format!("{:+.1} dB", q[1]));
+                    if pr.drag_started() {
+                        self.auto_drag = Some((ti, k));
+                    }
+                    if pr.double_clicked() {
+                        del = Some(k);
+                    }
+                }
+                // Clic sur la ligne : un nouveau point (le clic garde aussi son effet habituel)
+                if self.auto_shown.contains(&ti) && self.auto_drag.is_none() && ui.input(|i| i.pointer.primary_clicked()) {
+                    if let Some(h) = ui.input(|i| i.pointer.interact_pos()).filter(|h| lane.contains(*h)) {
+                        let t = t_of(h.x);
+                        let on_pt = tr.auto.iter().any(|q| (x_of(q[0]) - h.x).abs() < 7.0);
+                        if !on_pt && (h.y - y_of(tr.auto_db(t))).abs() < 7.0 {
+                            new_pt = Some([t.max(0.0), tr.auto_db(t)]);
+                        }
+                    }
+                }
+                if let Some((dt, k)) = self.auto_drag.filter(|d| d.0 == ti) {
+                    if let Some(m) = ui.input(|i| i.pointer.interact_pos()) {
+                        let (t, d) = (t_of(m.x).max(0.0), db_of(m.y).clamp(-40.0, 6.0));
+                        actions.push(Box::new(move |e: &mut Editor| {
+                            if let Some(q) = e.session.tracks[dt].auto.get_mut(k) {
+                                *q = [t, d];
+                            }
+                        }));
+                    }
+                    if ui.input(|i| i.pointer.any_released()) {
+                        self.auto_drag = None;
+                        actions.push(Box::new(move |e: &mut Editor| {
+                            e.session.tracks[dt].auto.sort_by(|a, b| a[0].total_cmp(&b[0]));
+                            e.changed();
+                        }));
+                    }
+                }
+                if let Some(q) = new_pt {
+                    actions.push(Box::new(move |e: &mut Editor| {
+                        let a = &mut e.session.tracks[ti].auto;
+                        a.push(q);
+                        a.sort_by(|x, y| x[0].total_cmp(&y[0]));
+                        e.changed();
+                    }));
+                }
+                if let Some(k) = del {
+                    actions.push(Box::new(move |e: &mut Editor| {
+                        e.session.tracks[ti].auto.remove(k);
+                        e.changed();
+                    }));
+                }
             }
             y += TRACK_H;
         }
@@ -1184,6 +1340,12 @@ impl Editor {
             if fx_btn(ui, "De-esser", "adoucit les « s » qui sifflent") {
                 self.add_fx(Fx::Deess);
             }
+            if fx_btn(ui, "Limiteur", "rien ne dépasse −1 dB : plus de crêtes qui saturent") {
+                self.add_fx(Fx::Limiter { ceiling: -1.0 });
+            }
+            if fx_btn(ui, "Gate", "coupe le souffle entre les phrases (sous −45 dB)") {
+                self.add_fx(Fx::Gate { threshold: -45.0 });
+            }
             section(ui, &crate::i18n::t("Espace et voix"));
             if fx_btn(ui, "Réverbération", "une pièce : réglable dans l'onglet Clip") {
                 self.add_fx(Fx::Reverb { amount: 0.35 });
@@ -1330,6 +1492,14 @@ impl Editor {
                         Fx::Pitch { semitones } => {
                             ui.label(crate::i18n::t("Hauteur"));
                             fx_edit |= ui.add(egui::DragValue::new(semitones).range(-12.0..=12.0).speed(0.05).max_decimals(1).suffix(" st")).changed();
+                        }
+                        Fx::Limiter { ceiling } => {
+                            ui.label(crate::i18n::t("Limiteur"));
+                            fx_edit |= ui.add(egui::DragValue::new(ceiling).range(-24.0..=0.0).speed(0.1).max_decimals(1).suffix(" dB")).changed();
+                        }
+                        Fx::Gate { threshold } => {
+                            ui.label(crate::i18n::t("Gate"));
+                            fx_edit |= ui.add(egui::DragValue::new(threshold).range(-80.0..=-10.0).speed(0.5).max_decimals(0).suffix(" dB")).changed();
                         }
                         Fx::Reverb { amount } => {
                             ui.label(crate::i18n::t("Réverbération"));
