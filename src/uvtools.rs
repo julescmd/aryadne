@@ -692,6 +692,19 @@ impl Edit {
             painter.line_segment([to([t, 0.0]), to([t, 1.0])], Stroke::new(1.0, col));
             painter.line_segment([to([0.0, t]), to([1.0, t])], Stroke::new(1.0, col));
         }
+        // Tuiles UDIM : les autres tuiles occupées ont leur carré, et chacune son numéro
+        let tiles = crate::uvedit::udim_tiles(&self.data);
+        if tiles.iter().any(|t| *t != (0, 0)) {
+            for t in &tiles {
+                let (u, v) = (t.0 as f32, t.1 as f32);
+                let sq = Rect::from_two_pos(to([u, v]), to([u + 1.0, v + 1.0]));
+                if *t != (0, 0) {
+                    painter.rect_filled(sq, 0.0, Color32::from_gray(42));
+                    painter.rect_stroke(sq, 0.0, Stroke::new(1.0, Color32::from_gray(78)), egui::StrokeKind::Inside);
+                }
+                painter.text(sq.left_top() + egui::vec2(5.0, 4.0), egui::Align2::LEFT_TOP, crate::uvedit::udim_number(*t).to_string(), egui::FontId::monospace(11.0), p.muted);
+            }
+        }
         if !self.data.has_uv() {
             painter.text(rect.center(), egui::Align2::CENTER_CENTER, crate::i18n::t("pas encore d'UV : U → déplier"), egui::FontId::proportional(13.0), p.muted);
             if resp.secondary_clicked() {

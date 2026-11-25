@@ -8290,26 +8290,41 @@ impl Viewer {
                     self.open_request = Some(std::path::PathBuf::from(&s.material));
                 }
             }
-            if std::mem::take(&mut e.bake_request) {
+            // Cuisson des textures, en arrière-plan : demandée au bouton, ou toute seule quand le modèle, ses UV
+            // ou ses matériaux ont changé depuis la dernière (une fois que ça ne bouge plus)
+            if let Some(msg) = e.bake_poll() {
+                e.message = Some(msg);
+            }
+            let stamp = {
+                use std::hash::{Hash, Hasher};
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                for p in &self.slot_progs {
+                    p.as_ref().map(|x| (&x.0, x.1)).hash(&mut h);
+                }
+                e.bake_hash(h.finish())
+            };
+            let idle = !ui.input(|i| i.pointer.any_down());
+            let due = idle && e.bake_due(stamp, std::time::Instant::now(), std::time::Duration::from_millis(1200));
+            if e.bake_stale(stamp) && e.bake_job.is_none() {
+                ui.ctx().request_repaint_after(std::time::Duration::from_millis(300));
+            }
+            if (std::mem::take(&mut e.bake_request) || due) && e.bake_job.is_none() {
                 let progs: Vec<Option<std::sync::Arc<crate::nodes::Program>>> = self.slot_progs.iter().map(|p| p.as_ref().map(|x| x.2.clone())).collect();
                 let dir = std::path::Path::new(&self.root).join("textures");
                 let stem = self.path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "modele".into());
-                let t0 = std::time::Instant::now();
                 // Modèle haute définition : même mise à l'échelle que le modèle ouvert
-                let high = (!e.bake_high.trim().is_empty())
-                    .then(|| {
-                        let raw = std::path::PathBuf::from(e.bake_high.trim());
-                        let path = if raw.is_absolute() { raw } else { std::path::Path::new(&self.root).join(raw) };
-                        load(&path).ok().map(|m| {
-                            let mesh = crate::modifiers::Mesh::from_model(&m, z_up);
-                            (mesh.pos, mesh.tris)
-                        })
-                    })
-                    .flatten();
-                e.message = Some(match e.bake(&progs, &dir, &stem, high.as_ref()) {
-                    Ok(files) => format!("{} textures écrites dans textures/ ({} px, {:.1} s)", files.len(), e.bake_size, t0.elapsed().as_secs_f32()),
-                    Err(err) => format!("bake impossible : {err}"),
+                let high_path = (!e.bake_high.trim().is_empty()).then(|| {
+                    let raw = std::path::PathBuf::from(e.bake_high.trim());
+                    if raw.is_absolute() { raw } else { std::path::Path::new(&self.root).join(raw) }
                 });
+                let high = move || {
+                    let m = load(&high_path?).ok()?;
+                    let mesh = crate::modifiers::Mesh::from_model(&m, z_up);
+                    Some((mesh.pos, mesh.tris))
+                };
+                let ctx = ui.ctx().clone();
+                e.bake_start(stamp, progs, dir, stem, high, move || ctx.request_repaint());
+                e.message = Some(crate::i18n::t(if due { "le modèle a changé : recuisson des textures…" } else { "cuisson des textures…" }));
             }
             self.slot_progs.resize(e.data.slots.len(), None);
             for (k, s) in e.data.slots.iter().enumerate() {

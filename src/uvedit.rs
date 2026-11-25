@@ -127,6 +127,26 @@ pub struct EditData {
     /// Coins d'UV épinglés (face, coin) : le dépliage les laisse où ils sont
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub pins: BTreeSet<(u32, u32)>,
+    /// Recuire les textures toutes seules quand le modèle, ses UV ou ses matériaux changent
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub auto_bake: bool,
+    /// Empreinte de ce qui a été cuit la dernière fois (0 : jamais cuit)
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub bake_stamp: u64,
+}
+
+fn is_false(v: &bool) -> bool {
+    !*v
+}
+fn is_zero_u64(v: &u64) -> bool {
+    *v == 0
+}
+
+/// Une cuisson en arrière-plan : l'empreinte de ce qu'elle cuit, et son résultat quand il arrive (fichiers, secondes)
+pub struct BakeJob {
+    pub stamp: u64,
+    pub size: u32,
+    pub rx: std::sync::mpsc::Receiver<Result<(Vec<PathBuf>, f32), String>>,
 }
 
 fn tex_default() -> u32 {
@@ -138,7 +158,7 @@ fn margin_default() -> f32 {
 
 impl EditData {
     pub fn fresh(t: &Topo) -> EditData {
-        EditData { polys: t.polys.len(), face_mat: vec![0; t.polys.len()], slots: vec![Slot { name: "matériau 1".into(), color: PALETTE[0], material: String::new() }], seams: BTreeSet::new(), uv: vec![], chart: vec![], texture_px: 2048, margin_px: 8.0, guides: vec![], density: vec![], pins: BTreeSet::new() }
+        EditData { polys: t.polys.len(), face_mat: vec![0; t.polys.len()], slots: vec![Slot { name: "matériau 1".into(), color: PALETTE[0], material: String::new() }], seams: BTreeSet::new(), uv: vec![], chart: vec![], texture_px: 2048, margin_px: 8.0, guides: vec![], density: vec![], pins: BTreeSet::new(), auto_bake: false, bake_stamp: 0 }
     }
 
     pub fn fits(&self, t: &Topo) -> bool {
@@ -877,9 +897,391 @@ pub fn triangulate(t: &Topo, d: &EditData) -> (Vec<[u32; 3]>, Vec<u32>, Vec<u8>,
     (tris, owner, edges, uvs)
 }
 
+// ---------- UDIM ----------
+
+/// La tuile d'UV (colonne 0 à 9, rangée) où tombe une face : celle du milieu de ses coins
+pub fn udim_tile(uv: &[V2]) -> (i32, i32) {
+    if uv.is_empty() {
+        return (0, 0);
+    }
+    let n = uv.len() as f32;
+    let (u, v) = (uv.iter().map(|p| p[0]).sum::<f32>() / n, uv.iter().map(|p| p[1]).sum::<f32>() / n);
+    if !u.is_finite() || !v.is_finite() {
+        return (0, 0);
+    }
+    ((u.floor() as i32).clamp(0, 9), (v.floor() as i32).clamp(0, 99))
+}
+
+/// Numéro UDIM d'une tuile : 1001 pour la première, +1 par colonne, +10 par rangée
+pub fn udim_number(tile: (i32, i32)) -> u32 {
+    (1001 + tile.0.clamp(0, 9) + 10 * tile.1.max(0)) as u32
+}
+
+/// Les tuiles occupées par les UV
+pub fn udim_tiles(d: &EditData) -> Vec<(i32, i32)> {
+    d.uv.iter().map(|uv| udim_tile(uv)).collect::<BTreeSet<_>>().into_iter().collect()
+}
+
+/// Répartit les îlots sur `count` tuiles UDIM (1001, 1002…) : les plus grands d'abord, chacun dans la
+/// tuile la moins remplie, puis chaque tuile est rangée pour elle-même. Plus de tuiles : plus de
+/// pixels par îlot. Avec une seule tuile, tout revient dans le carré de base.
+pub fn distribute_udim(t: &Topo, d: &mut EditData, count: usize, o: &PackOptions) {
+    let count = count.clamp(1, 100);
+    if !d.has_uv() || d.uv.len() != t.polys.len() || d.chart.len() != t.polys.len() {
+        return;
+    }
+    let mut groups: Vec<(f32, Vec<usize>)> = chart_faces(d).into_iter().filter(|g| !g.is_empty()).map(|g| (g.iter().map(|&f| t.area(f)).sum::<f32>(), g)).collect();
+    groups.sort_by(|a, b| b.0.total_cmp(&a.0));
+    let mut load = vec![0.0f32; count];
+    let mut faces_of: Vec<Vec<usize>> = vec![vec![]; count];
+    for (area, g) in groups {
+        let k = (0..count).min_by(|&a, &b| load[a].total_cmp(&load[b])).unwrap_or(0);
+        load[k] += area.max(0.0);
+        faces_of[k].extend(g);
+    }
+    for (k, faces) in faces_of.iter().enumerate() {
+        if faces.is_empty() {
+            continue;
+        }
+        // Un petit maillage fait des seules faces de la tuile, rangé comme d'habitude
+        let sub_t = Topo { pos: t.pos.clone(), polys: faces.iter().map(|&f| t.polys[f].clone()).collect(), edge_faces: HashMap::new() };
+        let mut ids: HashMap<u32, u32> = HashMap::new();
+        let chart = faces.iter().map(|&f| { let n = ids.len() as u32; *ids.entry(d.chart[f]).or_insert(n) }).collect();
+        let mut sub = EditData { polys: faces.len(), uv: faces.iter().map(|&f| d.uv[f].clone()).collect(), chart, texture_px: d.texture_px, margin_px: d.margin_px, ..Default::default() };
+        pack(&sub_t, &mut sub, o);
+        let (du, dv) = ((k % 10) as f32, (k / 10) as f32);
+        for (i, &f) in faces.iter().enumerate() {
+            d.uv[f] = sub.uv[i].iter().map(|p| [p[0] + du, p[1] + dv]).collect();
+        }
+    }
+}
+
+/// Écrit les textures du modèle à partir de ses UV : couleur, rugosité, métal, émission
+/// (matériaux en nodes de chaque ID, ou couleur de l'ID), normale et courbure.
+/// Les texels sont calculés en parallèle ; le bord des îlots est étendu pour éviter les coutures visibles.
+#[allow(clippy::too_many_arguments)]
+pub fn bake_to(topo: &Topo, data: &EditData, size: u32, rays_in: u32, progs: &[Option<std::sync::Arc<crate::nodes::Program>>], dir: &std::path::Path, stem: &str, high: Option<&(Vec<V3>, Vec<[u32; 3]>)>) -> Result<Vec<PathBuf>, String> {
+    use rayon::prelude::*;
+    if !data.has_uv() || data.uv.len() != topo.polys.len() {
+        return Err("déplie d'abord les UV (onglet UV › auto)".into());
+    }
+    let n = size.clamp(64, 4096) as usize;
+    let pos = &topo.pos;
+    // Normales lisses et courbure par sommet
+    let mut all_tris: Vec<[u32; 3]> = vec![];
+    let mut rec: Vec<(usize, [usize; 3])> = vec![];
+    for (f, p) in topo.polys.iter().enumerate() {
+        for tr in poly_tris(pos, p) {
+            all_tris.push([p[tr[0]], p[tr[1]], p[tr[2]]]);
+            rec.push((f, tr));
+        }
+    }
+    let mut nrm = vec![[0.0f32; 3]; pos.len()];
+    for t in &all_tris {
+        let (a, b, c) = (pos[t[0] as usize], pos[t[1] as usize], pos[t[2] as usize]);
+        let (u, v) = ([b[0] - a[0], b[1] - a[1], b[2] - a[2]], [c[0] - a[0], c[1] - a[1], c[2] - a[2]]);
+        let fnm = [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]];
+        for &i in t {
+            for k in 0..3 {
+                nrm[i as usize][k] += fnm[k];
+            }
+        }
+    }
+    for x in nrm.iter_mut() {
+        let l = (x[0] * x[0] + x[1] * x[1] + x[2] * x[2]).sqrt().max(1e-12);
+        *x = [x[0] / l, x[1] / l, x[2] / l];
+    }
+    let curv = crate::model3d::vertex_curvature(pos, &nrm, &all_tris);
+    // Lancer de rayons : le modèle lui-même (occlusion, épaisseur) et le modèle haute définition
+    let rays = rays_in.min(256) as usize;
+    // Distances relatives à la taille du modèle
+    let diag = {
+        let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
+        for q in pos.iter() {
+            for k in 0..3 {
+                lo[k] = lo[k].min(q[k]);
+                hi[k] = hi[k].max(q[k]);
+            }
+        }
+        ((hi[0] - lo[0]).powi(2) + (hi[1] - lo[1]).powi(2) + (hi[2] - lo[2]).powi(2)).sqrt().max(1e-9)
+    };
+    let (eps, ao_far, th_far, cage) = (diag * 1e-4, diag * 0.25, diag * 0.2, diag * 0.02);
+    let bvh = (rays > 0).then(|| crate::bvh::Bvh::new(pos, &all_tris));
+    let high_data = high.map(|(hp, ht)| {
+        let mut hn = vec![[0.0f32; 3]; hp.len()];
+        for t in ht {
+            let (a, b, c) = (hp[t[0] as usize], hp[t[1] as usize], hp[t[2] as usize]);
+            let (u, v) = ([b[0] - a[0], b[1] - a[1], b[2] - a[2]], [c[0] - a[0], c[1] - a[1], c[2] - a[2]]);
+            let fnm = [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]];
+            for &i in t {
+                for k in 0..3 {
+                    hn[i as usize][k] += fnm[k];
+                }
+            }
+        }
+        (crate::bvh::Bvh::new(hp, ht), hn, ht)
+    });
+    // Tangente de chaque triangle (direction où u augmente), pour la normale en espace tangent
+    let tangents: Vec<V3> = rec
+        .iter()
+        .zip(&all_tris)
+        .map(|((f, tr), t)| {
+            let uv = &data.uv[*f];
+            let (p0, p1, p2) = (pos[t[0] as usize], pos[t[1] as usize], pos[t[2] as usize]);
+            let (e1, e2) = ([p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2]], [p2[0] - p0[0], p2[1] - p0[1], p2[2] - p0[2]]);
+            let (du1, dv1, du2, dv2) = (uv[tr[1]][0] - uv[tr[0]][0], uv[tr[1]][1] - uv[tr[0]][1], uv[tr[2]][0] - uv[tr[0]][0], uv[tr[2]][1] - uv[tr[0]][1]);
+            let det = du1 * dv2 - du2 * dv1;
+            let k = if det.abs() > 1e-12 { 1.0 / det } else { 0.0 };
+            [(e1[0] * dv2 - e2[0] * dv1) * k, (e1[1] * dv2 - e2[1] * dv1) * k, (e1[2] * dv2 - e2[2] * dv1) * k]
+        })
+        .collect();
+    // Tuiles UDIM : chaque face va dans la tuile où tombe le milieu de ses UV, et chaque tuile a ses images
+    let face_tile: Vec<(i32, i32)> = data.uv.iter().map(|uv| udim_tile(uv)).collect();
+    let tiles: Vec<(i32, i32)> = face_tile.iter().copied().collect::<BTreeSet<_>>().into_iter().collect();
+    let multi = tiles.iter().any(|t| *t != (0, 0));
+    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    let mut out = vec![];
+    for tile in tiles {
+        // Quel triangle couvre chaque texel (coordonnées barycentriques)
+        let mut cover: Vec<Option<(u32, [f32; 3])>> = vec![None; n * n];
+        for (ti, (f, tr)) in rec.iter().enumerate() {
+            if face_tile[*f] != tile {
+                continue;
+            }
+            let uv = &data.uv[*f];
+            let p: [[f32; 2]; 3] = [0, 1, 2].map(|k| [(uv[tr[k]][0] - tile.0 as f32) * n as f32, (1.0 - (uv[tr[k]][1] - tile.1 as f32)) * n as f32]);
+            let d = (p[1][1] - p[2][1]) * (p[0][0] - p[2][0]) + (p[2][0] - p[1][0]) * (p[0][1] - p[2][1]);
+            if d.abs() < 1e-12 {
+                continue;
+            }
+            let (x0, x1) = (p.iter().map(|q| q[0]).fold(f32::MAX, f32::min).floor().max(0.0) as usize, (p.iter().map(|q| q[0]).fold(f32::MIN, f32::max).ceil() as usize).min(n - 1));
+            let (y0, y1) = (p.iter().map(|q| q[1]).fold(f32::MAX, f32::min).floor().max(0.0) as usize, (p.iter().map(|q| q[1]).fold(f32::MIN, f32::max).ceil() as usize).min(n - 1));
+            for y in y0..=y1 {
+                for x in x0..=x1 {
+                    let (px, py) = (x as f32 + 0.5, y as f32 + 0.5);
+                    let w0 = ((p[1][1] - p[2][1]) * (px - p[2][0]) + (p[2][0] - p[1][0]) * (py - p[2][1])) / d;
+                    let w1 = ((p[2][1] - p[0][1]) * (px - p[2][0]) + (p[0][0] - p[2][0]) * (py - p[2][1])) / d;
+                    let w2 = 1.0 - w0 - w1;
+                    if w0 >= -0.02 && w1 >= -0.02 && w2 >= -0.02 {
+                        cover[y * n + x] = Some((ti as u32, [w0, w1, w2]));
+                    }
+                }
+            }
+        }
+        // Évaluation des matériaux, texel par texel
+        let texels: Vec<Option<[[f32; 3]; 7]>> = cover
+            .par_iter()
+            .enumerate()
+            .map_init(Vec::new, |regs, (i, c)| {
+                let (ti, w) = (*c)?;
+                let t = all_tris[ti as usize];
+                let mix3 = |a: V3, b: V3, c: V3| [a[0] * w[0] + b[0] * w[1] + c[0] * w[2], a[1] * w[0] + b[1] * w[1] + c[1] * w[2], a[2] * w[0] + b[2] * w[1] + c[2] * w[2]];
+                let p = mix3(pos[t[0] as usize], pos[t[1] as usize], pos[t[2] as usize]);
+                let nn = mix3(nrm[t[0] as usize], nrm[t[1] as usize], nrm[t[2] as usize]);
+                let l = (nn[0] * nn[0] + nn[1] * nn[1] + nn[2] * nn[2]).sqrt().max(1e-12);
+                let nn = [nn[0] / l, nn[1] / l, nn[2] / l];
+                let cv = curv[t[0] as usize] * w[0] + curv[t[1] as usize] * w[1] + curv[t[2] as usize] * w[2];
+                let slot = data.face_mat.get(rec[ti as usize].0).copied().unwrap_or(0) as usize;
+                let (col, rough, metal, emit) = match progs.get(slot).and_then(|p| p.as_ref()) {
+                    Some(prog) => {
+                        let ctx = crate::nodes::Ctx { masks: [0.0; 4], uv: [(i % n) as f32 / n as f32, (i / n) as f32 / n as f32], pos: p, nrm: nn, view: nn, vcol: [1.0; 4], res: [n as f32, n as f32], curv: cv };
+                        let sf = prog.material(&ctx, regs);
+                        ([sf.color[0], sf.color[1], sf.color[2]], sf.rough, sf.metal, [sf.emit[0], sf.emit[1], sf.emit[2]])
+                    }
+                    None => {
+                        let c = data.slots.get(slot).map(|s| s.color).unwrap_or(PALETTE[0]);
+                        ([c[0] as f32 / 255.0, c[1] as f32 / 255.0, c[2] as f32 / 255.0], 0.5, 0.0, [0.0; 3])
+                    }
+                };
+                let k = (0.5 + cv).clamp(0.0, 1.0);
+                // Repère local autour de la normale
+                let dotp = |a: V3, b: V3| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+                let crossp = |a: V3, b: V3| [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+                let unit = |a: V3| { let l = dotp(a, a).sqrt().max(1e-12); [a[0] / l, a[1] / l, a[2] / l] };
+                let tg = tangents[ti as usize];
+                let tg = { let d = dotp(tg, nn); [tg[0] - nn[0] * d, tg[1] - nn[1] * d, tg[2] - nn[2] * d] };
+                let tg = if dotp(tg, tg) > 1e-12 { unit(tg) } else { unit(crossp(nn, if nn[0].abs() < 0.9 { [1.0, 0.0, 0.0] } else { [0.0, 1.0, 0.0] })) };
+                let bt = crossp(nn, tg);
+                // Normale géométrique du triangle : les rayons partent de ce côté, même si la normale lissée penche
+                let ng = {
+                    let (a, b, c) = (pos[t[0] as usize], pos[t[1] as usize], pos[t[2] as usize]);
+                    let g = unit(crossp([b[0] - a[0], b[1] - a[1], b[2] - a[2]], [c[0] - a[0], c[1] - a[1], c[2] - a[2]]));
+                    if dotp(g, nn) < 0.0 { [-g[0], -g[1], -g[2]] } else { g }
+                };
+                // Occlusion (rayons vers l'extérieur) et épaisseur (vers l'intérieur)
+                let (mut ao, mut thick) = (1.0f32, 1.0f32);
+                if let Some(bvh) = &bvh {
+                    let mut seed = (i as u32).wrapping_mul(747796405).wrapping_add(2891336453);
+                    let mut rnd = || {
+                        seed ^= seed << 13;
+                        seed ^= seed >> 17;
+                        seed ^= seed << 5;
+                        (seed >> 8) as f32 / 16777216.0
+                    };
+                    let (mut open, mut depth) = (0.0f32, 0.0f32);
+                    for _ in 0..rays {
+                        // Direction tirée selon le cosinus autour de la normale
+                        let (r1, r2) = (rnd(), rnd());
+                        let (rad, phi) = (r1.sqrt(), r2 * std::f32::consts::TAU);
+                        let (x, y, z) = (rad * phi.cos(), rad * phi.sin(), (1.0 - r1).max(0.0).sqrt());
+                        let mut d = [tg[0] * x + bt[0] * y + nn[0] * z, tg[1] * x + bt[1] * y + nn[1] * z, tg[2] * x + bt[2] * y + nn[2] * z];
+                        let below = dotp(d, ng);
+                        if below < 1e-3 {
+                            let r = 2.0 * (1e-3 - below);
+                            d = unit([d[0] + ng[0] * r, d[1] + ng[1] * r, d[2] + ng[2] * r]);
+                        }
+                        if !bvh.occluded([p[0] + ng[0] * eps, p[1] + ng[1] * eps, p[2] + ng[2] * eps], d, eps, ao_far) {
+                            open += 1.0;
+                        }
+                        let inw = [-d[0], -d[1], -d[2]];
+                        depth += bvh.closest([p[0] - ng[0] * eps, p[1] - ng[1] * eps, p[2] - ng[2] * eps], inw, eps, th_far).map(|h| h.t).unwrap_or(th_far) / th_far;
+                    }
+                    ao = open / rays as f32;
+                    thick = depth / rays as f32;
+                }
+                // Détails du modèle haute définition, exprimés dans le repère tangent
+                let mut tn = [0.5f32, 0.5, 1.0];
+                if let Some((hb, hn, ht)) = &high_data {
+                    let o = [p[0] + nn[0] * cage, p[1] + nn[1] * cage, p[2] + nn[2] * cage];
+                    if let Some(h) = hb.closest(o, [-nn[0], -nn[1], -nn[2]], 0.0, cage * 2.0) {
+                        let t = ht[h.tri as usize];
+                        let w0 = 1.0 - h.u - h.v;
+                        let n3 = [0, 1, 2].map(|k| hn[t[0] as usize][k] * w0 + hn[t[1] as usize][k] * h.u + hn[t[2] as usize][k] * h.v);
+                        let n3 = unit(n3);
+                        tn = [dotp(n3, tg) * 0.5 + 0.5, dotp(n3, bt) * 0.5 + 0.5, dotp(n3, nn).max(0.0) * 0.5 + 0.5];
+                    }
+                }
+                Some([col, [rough, metal, k], emit, [nn[0] * 0.5 + 0.5, nn[1] * 0.5 + 0.5, nn[2] * 0.5 + 0.5], p, [ao, thick, 0.0], tn])
+            })
+            .collect();
+        // Extension des bords : chaque texel vide prend la valeur d'un voisin rempli (8 passes)
+        let mut tex = texels;
+        for _ in 0..8 {
+            let old = tex.clone();
+            tex.par_iter_mut().enumerate().for_each(|(i, t)| {
+                if t.is_some() {
+                    return;
+                }
+                let (x, y) = ((i % n) as i64, (i / n) as i64);
+                for (dx, dy) in [(1i64, 0i64), (-1, 0), (0, 1), (0, -1), (1, 1), (-1, -1), (1, -1), (-1, 1)] {
+                    let (xx, yy) = (x + dx, y + dy);
+                    if xx >= 0 && yy >= 0 && xx < n as i64 && yy < n as i64 {
+                        if let Some(v) = old[yy as usize * n + xx as usize] {
+                            *t = Some(v);
+                            return;
+                        }
+                    }
+                }
+            });
+        }
+        let q = |x: f32| (x.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
+        let any_emit = tex.iter().flatten().any(|t| t[2].iter().any(|x| *x > 0.003));
+        let (has_rays, has_high) = (rays > 0, high.is_some());
+        let maps: [(&str, Box<dyn Fn(&[[f32; 3]; 7]) -> [u8; 3] + Sync>, [u8; 3], bool); 9] = [
+            ("couleur", Box::new(move |t| [q(t[0][0]), q(t[0][1]), q(t[0][2])]), [128, 128, 128], true),
+            ("rugosite", Box::new(move |t| [q(t[1][0]); 3]), [128; 3], true),
+            ("metal", Box::new(move |t| [q(t[1][1]); 3]), [0; 3], true),
+            ("emission", Box::new(move |t| [q(t[2][0]), q(t[2][1]), q(t[2][2])]), [0; 3], any_emit),
+            ("normale", Box::new(move |t| [q(t[3][0]), q(t[3][1]), q(t[3][2])]), [128, 128, 255], true),
+            ("courbure", Box::new(move |t| [q(t[1][2]); 3]), [128; 3], true),
+            ("occlusion", Box::new(move |t| [q(t[5][0]); 3]), [255; 3], has_rays),
+            ("epaisseur", Box::new(move |t| [q(t[5][1]); 3]), [255; 3], has_rays),
+            ("normale_tangente", Box::new(move |t| [q(t[6][0]), q(t[6][1]), q(t[6][2])]), [128, 128, 255], has_high),
+        ];
+        for (name, f, empty, wanted) in maps.iter() {
+            if !*wanted {
+                continue;
+            }
+            let bytes: Vec<u8> = tex.iter().flat_map(|t| t.as_ref().map(|t| f(t)).unwrap_or(*empty)).collect();
+            // Plusieurs tuiles : le numéro UDIM dans le nom (1001, 1002…), comme partout ailleurs
+            let path = dir.join(if multi { format!("{stem}_{name}.{}.png", udim_number(tile)) } else { format!("{stem}_{name}.png") });
+            image::RgbImage::from_raw(n as u32, n as u32, bytes).ok_or("image invalide")?.save(&path).map_err(|e| e.to_string())?;
+            out.push(path);
+        }
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn udim_et_recuisson() {
+        let t = cube();
+        let mut e = Edit { topo: t, ..Edit::open(&crate::modifiers::Mesh { pos: vec![], tris: vec![], colors: vec![], edges: vec![] }, std::env::temp_dir().join(format!("aryadne-udim-test-{}.json", std::process::id())), 1.0) };
+        e.data = EditData::fresh(&e.topo);
+        e.auto_now(true);
+        assert_eq!(udim_tiles(&e.data), vec![(0, 0)]);
+        assert_eq!((udim_number((0, 0)), udim_number((1, 0)), udim_number((9, 0)), udim_number((0, 1)), udim_number((3, 2))), (1001, 1002, 1010, 1011, 1024));
+        assert_eq!((udim_tile(&[]), udim_tile(&[[f32::NAN, 0.0]]), udim_tile(&[[12.5, -3.0]])), ((0, 0), (0, 0), (9, 0)));
+        // Trois tuiles : chaque îlot tient entier dans sa tuile, et les trois sont occupées
+        let charts: BTreeSet<u32> = e.data.chart.iter().copied().collect();
+        distribute_udim(&e.topo, &mut e.data, 3, &PackOptions::default());
+        let tiles = udim_tiles(&e.data);
+        assert_eq!(tiles.len(), 3.min(charts.len()), "{tiles:?}");
+        for uv in &e.data.uv {
+            let (tu, tv) = udim_tile(uv);
+            assert!(uv.iter().all(|p| p[0] >= tu as f32 - 1e-4 && p[0] <= tu as f32 + 1.0 + 1e-4 && p[1] >= tv as f32 - 1e-4 && p[1] <= tv as f32 + 1.0 + 1e-4), "{uv:?}");
+        }
+        // Les faces d'un même îlot restent dans la même tuile
+        for c in &charts {
+            let ts: BTreeSet<(i32, i32)> = (0..e.data.uv.len()).filter(|&f| e.data.chart[f] == *c).map(|f| udim_tile(&e.data.uv[f])).collect();
+            assert_eq!(ts.len(), 1);
+        }
+        // Cuisson : une image par tuile, numérotée
+        let dir = std::env::temp_dir().join(format!("aryadne-udim-{}", std::process::id()));
+        (e.bake_size, e.bake_rays) = (64, 0);
+        let files = e.bake(&[None], &dir, "cube", None).unwrap();
+        let names: Vec<String> = files.iter().map(|f| f.file_name().unwrap().to_string_lossy().to_string()).collect();
+        for n in [1001, 1002, 1003].iter().take(tiles.len()) {
+            assert!(names.contains(&format!("cube_couleur.{n}.png")), "{names:?}");
+        }
+        // Chaque tuile a bien de la matière : pas une image vide
+        let img = image::open(dir.join("cube_normale.1002.png")).unwrap().to_rgb8();
+        assert!(img.pixels().filter(|p| p.0 != [128, 128, 255]).count() > 200);
+        // Retour à une tuile : tout dans le carré de base, et les noms d'avant (sans numéro)
+        distribute_udim(&e.topo, &mut e.data, 1, &PackOptions::default());
+        assert_eq!(udim_tiles(&e.data), vec![(0, 0)]);
+        let files = e.bake(&[None], &dir, "cube", None).unwrap();
+        assert!(files.iter().any(|f| f.file_name().unwrap().to_string_lossy() == "cube_couleur.png"));
+
+        // Recuisson automatique : l'empreinte change avec la forme, les UV, les réglages
+        let h0 = e.bake_hash(7);
+        assert_eq!(h0, e.bake_hash(7));
+        assert_ne!(h0, e.bake_hash(8), "un matériau a changé");
+        assert!(!e.bake_stale(h0), "pas coché : rien à recuire");
+        e.data.auto_bake = true;
+        assert!(e.bake_stale(h0), "jamais cuit");
+        // Cuisson en arrière-plan : le résultat arrive, l'empreinte est retenue
+        e.bake_start(h0, vec![None], dir.clone(), "cube".into(), || None, || {});
+        let msg = loop {
+            if let Some(m) = e.bake_poll() {
+                break m;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        };
+        assert!(msg.contains("textures"), "{msg}");
+        assert!(e.bake_job.is_none() && e.data.bake_stamp == h0 && !e.bake_stale(h0));
+        // Le modèle est sculpté : même topologie, sommet déplacé → à recuire, mais pas avant que ça se calme
+        e.topo.pos[0][0] -= 0.25;
+        let h1 = e.bake_hash(7);
+        assert!(h1 != h0 && e.bake_stale(h1));
+        let now = std::time::Instant::now();
+        let wait = std::time::Duration::from_millis(800);
+        assert!(!e.bake_due(h1, now, wait));
+        assert!(!e.bake_due(h1, now + std::time::Duration::from_millis(300), wait));
+        // Ça bouge encore : l'attente repart
+        e.topo.pos[0][0] -= 0.05;
+        let h2 = e.bake_hash(7);
+        assert!(!e.bake_due(h2, now + std::time::Duration::from_millis(900), wait));
+        assert!(e.bake_due(h2, now + std::time::Duration::from_millis(1800), wait));
+        // Réglage décoché : plus rien
+        e.data.auto_bake = false;
+        assert!(!e.bake_due(h2, now + std::time::Duration::from_secs(60), wait));
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_file(&e.file);
+    }
 
     #[test]
     fn bake_des_textures() {
@@ -1718,6 +2120,11 @@ pub struct Edit {
     pub bake_rays: u32,
     /// Modèle haute définition dont on reporte les détails dans la normale (chemin, vide si aucun)
     pub bake_high: String,
+    /// Cuisson en cours, et recuisson automatique : la dernière empreinte vue et depuis quand elle ne bouge plus
+    pub bake_job: Option<BakeJob>,
+    pub bake_seen: Option<(u64, std::time::Instant)>,
+    /// Nombre de tuiles UDIM pour « répartir »
+    pub udim_count: usize,
     /// Annuler / rétablir : l'état enregistré avant chaque action terminée
     pending: std::cell::Cell<bool>,
     /// Outils façon Blender (arêtes, éditeur UV, menus) : voir uvtools.rs
@@ -1767,7 +2174,7 @@ impl Edit {
         let data = std::fs::read_to_string(&file).ok().and_then(|t| serde_json::from_str::<EditData>(&t).ok()).filter(|d| d.fits(&topo)).unwrap_or_else(|| EditData::fresh(&topo));
         let n = topo.polys.len();
         let checker = data.has_uv();
-        Edit { topo, data, sel: BTreeSet::new(), tool: Tool::Faces, tab: 0, version: 1, seam_angle: 45.0, smart_angle: 66.0, min_faces: (n / 400).clamp(4, 300), optimize: true, rotate: true, density_target: 1024.0, file, scale, message: None, owner: vec![], checker, auto: AutoOptions::default(), retopo_opt: crate::retopo::Options { faces: (n * 2).clamp(200, 8000) / 100 * 100, ..Default::default() }, retopo: None, retopo_job: None, retopo_export: false, retopo_show: true, guide_now: vec![], mat_request: None, tri_mat: vec![], bake_request: false, bake_size: 1024, bake_rays: 24, bake_high: String::new(), pending: Default::default(), tools: tools::State::new(), last: None, undo: vec![], redo: vec![] }
+        Edit { topo, data, sel: BTreeSet::new(), tool: Tool::Faces, tab: 0, version: 1, seam_angle: 45.0, smart_angle: 66.0, min_faces: (n / 400).clamp(4, 300), optimize: true, rotate: true, density_target: 1024.0, file, scale, message: None, owner: vec![], checker, auto: AutoOptions::default(), retopo_opt: crate::retopo::Options { faces: (n * 2).clamp(200, 8000) / 100 * 100, ..Default::default() }, retopo: None, retopo_job: None, retopo_export: false, retopo_show: true, guide_now: vec![], mat_request: None, tri_mat: vec![], bake_request: false, bake_size: 1024, bake_rays: 24, bake_high: String::new(), bake_job: None, bake_seen: None, udim_count: 0, pending: Default::default(), tools: tools::State::new(), last: None, undo: vec![], redo: vec![] }
     }
 
     pub fn save(&self) {
@@ -2293,240 +2700,92 @@ impl Edit {
         }
     }
 
-    /// Écrit les textures du modèle à partir de ses UV : couleur, rugosité, métal, émission
-    /// (matériaux en nodes de chaque ID, ou couleur de l'ID), normale et courbure.
-    /// Les texels sont calculés en parallèle ; le bord des îlots est étendu pour éviter les coutures visibles.
-    pub fn bake(&self, progs: &[Option<std::sync::Arc<crate::nodes::Program>>], dir: &std::path::Path, stem: &str, high: Option<&(Vec<V3>, Vec<[u32; 3]>)>) -> Result<Vec<PathBuf>, String> {
-        use rayon::prelude::*;
-        if !self.data.has_uv() || self.data.uv.len() != self.topo.polys.len() {
-            return Err("déplie d'abord les UV (onglet UV › auto)".into());
+    /// Empreinte de tout ce dont la cuisson dépend : forme, UV, IDs de matériau, réglages. `mats` : celle
+    /// des matériaux en nodes (la vue 3D la connaît). Sert à savoir si les textures cuites sont encore à jour.
+    pub fn bake_hash(&self, mats: u64) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        mats.hash(&mut h);
+        (self.bake_size, self.bake_rays, self.bake_high.trim()).hash(&mut h);
+        for p in &self.topo.pos {
+            p.map(f32::to_bits).hash(&mut h);
         }
-        let n = self.bake_size.clamp(64, 4096) as usize;
-        let pos = &self.topo.pos;
-        // Normales lisses et courbure par sommet
-        let mut all_tris: Vec<[u32; 3]> = vec![];
-        let mut rec: Vec<(usize, [usize; 3])> = vec![];
-        for (f, p) in self.topo.polys.iter().enumerate() {
-            for tr in poly_tris(pos, p) {
-                all_tris.push([p[tr[0]], p[tr[1]], p[tr[2]]]);
-                rec.push((f, tr));
+        self.topo.polys.hash(&mut h);
+        for uv in &self.data.uv {
+            for p in uv {
+                p.map(f32::to_bits).hash(&mut h);
             }
         }
-        let mut nrm = vec![[0.0f32; 3]; pos.len()];
-        for t in &all_tris {
-            let (a, b, c) = (pos[t[0] as usize], pos[t[1] as usize], pos[t[2] as usize]);
-            let (u, v) = ([b[0] - a[0], b[1] - a[1], b[2] - a[2]], [c[0] - a[0], c[1] - a[1], c[2] - a[2]]);
-            let fnm = [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]];
-            for &i in t {
-                for k in 0..3 {
-                    nrm[i as usize][k] += fnm[k];
-                }
+        self.data.face_mat.hash(&mut h);
+        for s in &self.data.slots {
+            (s.color, &s.material).hash(&mut h);
+        }
+        // 0 veut dire « jamais cuit »
+        h.finish().max(1)
+    }
+
+    /// Les textures sont-elles à recuire toutes seules ? (réglage coché, UV présents, empreinte différente)
+    pub fn bake_stale(&self, stamp: u64) -> bool {
+        self.data.auto_bake && self.data.has_uv() && self.data.uv.len() == self.topo.polys.len() && self.data.bake_stamp != stamp
+    }
+
+    /// Recuisson automatique : vrai quand ce qui a changé ne bouge plus depuis `wait` (on ne recuit pas à chaque geste)
+    pub fn bake_due(&mut self, stamp: u64, now: std::time::Instant, wait: std::time::Duration) -> bool {
+        if !self.bake_stale(stamp) || self.bake_job.is_some() {
+            self.bake_seen = None;
+            return false;
+        }
+        match self.bake_seen {
+            Some((s, since)) if s == stamp => now.duration_since(since) >= wait,
+            _ => {
+                self.bake_seen = Some((stamp, now));
+                false
             }
         }
-        for x in nrm.iter_mut() {
-            let l = (x[0] * x[0] + x[1] * x[1] + x[2] * x[2]).sqrt().max(1e-12);
-            *x = [x[0] / l, x[1] / l, x[2] / l];
-        }
-        let curv = crate::model3d::vertex_curvature(pos, &nrm, &all_tris);
-        // Quel triangle couvre chaque texel (coordonnées barycentriques)
-        let mut cover: Vec<Option<(u32, [f32; 3])>> = vec![None; n * n];
-        for (ti, (f, tr)) in rec.iter().enumerate() {
-            let uv = &self.data.uv[*f];
-            let p: [[f32; 2]; 3] = [0, 1, 2].map(|k| [uv[tr[k]][0] * n as f32, (1.0 - uv[tr[k]][1]) * n as f32]);
-            let d = (p[1][1] - p[2][1]) * (p[0][0] - p[2][0]) + (p[2][0] - p[1][0]) * (p[0][1] - p[2][1]);
-            if d.abs() < 1e-12 {
-                continue;
-            }
-            let (x0, x1) = (p.iter().map(|q| q[0]).fold(f32::MAX, f32::min).floor().max(0.0) as usize, (p.iter().map(|q| q[0]).fold(f32::MIN, f32::max).ceil() as usize).min(n - 1));
-            let (y0, y1) = (p.iter().map(|q| q[1]).fold(f32::MAX, f32::min).floor().max(0.0) as usize, (p.iter().map(|q| q[1]).fold(f32::MIN, f32::max).ceil() as usize).min(n - 1));
-            for y in y0..=y1 {
-                for x in x0..=x1 {
-                    let (px, py) = (x as f32 + 0.5, y as f32 + 0.5);
-                    let w0 = ((p[1][1] - p[2][1]) * (px - p[2][0]) + (p[2][0] - p[1][0]) * (py - p[2][1])) / d;
-                    let w1 = ((p[2][1] - p[0][1]) * (px - p[2][0]) + (p[0][0] - p[2][0]) * (py - p[2][1])) / d;
-                    let w2 = 1.0 - w0 - w1;
-                    if w0 >= -0.02 && w1 >= -0.02 && w2 >= -0.02 {
-                        cover[y * n + x] = Some((ti as u32, [w0, w1, w2]));
-                    }
-                }
-            }
-        }
-        let data = &self.data;
-        // Lancer de rayons : le modèle lui-même (occlusion, épaisseur) et le modèle haute définition
-        let rays = self.bake_rays.min(256) as usize;
-        // Distances relatives à la taille du modèle
-        let diag = {
-            let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
-            for q in pos.iter() {
-                for k in 0..3 {
-                    lo[k] = lo[k].min(q[k]);
-                    hi[k] = hi[k].max(q[k]);
-                }
-            }
-            ((hi[0] - lo[0]).powi(2) + (hi[1] - lo[1]).powi(2) + (hi[2] - lo[2]).powi(2)).sqrt().max(1e-9)
-        };
-        let (eps, ao_far, th_far, cage) = (diag * 1e-4, diag * 0.25, diag * 0.2, diag * 0.02);
-        let bvh = (rays > 0).then(|| crate::bvh::Bvh::new(pos, &all_tris));
-        let high_data = high.map(|(hp, ht)| {
-            let mut hn = vec![[0.0f32; 3]; hp.len()];
-            for t in ht {
-                let (a, b, c) = (hp[t[0] as usize], hp[t[1] as usize], hp[t[2] as usize]);
-                let (u, v) = ([b[0] - a[0], b[1] - a[1], b[2] - a[2]], [c[0] - a[0], c[1] - a[1], c[2] - a[2]]);
-                let fnm = [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]];
-                for &i in t {
-                    for k in 0..3 {
-                        hn[i as usize][k] += fnm[k];
-                    }
-                }
-            }
-            (crate::bvh::Bvh::new(hp, ht), hn, ht)
+    }
+
+    /// Lance la cuisson dans un fil, sur une copie du modèle : l'interface reste libre. `high` : le
+    /// modèle haute définition, chargé dans le fil. `wake` réveille l'interface à la fin.
+    #[allow(clippy::too_many_arguments)]
+    pub fn bake_start(&mut self, stamp: u64, progs: Vec<Option<std::sync::Arc<crate::nodes::Program>>>, dir: PathBuf, stem: String, high: impl FnOnce() -> Option<(Vec<V3>, Vec<[u32; 3]>)> + Send + 'static, wake: impl Fn() + Send + 'static) {
+        let topo = Topo { pos: self.topo.pos.clone(), polys: self.topo.polys.clone(), edge_faces: HashMap::new() };
+        let (data, size, rays) = (self.data.clone(), self.bake_size, self.bake_rays);
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let t0 = std::time::Instant::now();
+            let high = high();
+            let r = bake_to(&topo, &data, size, rays, &progs, &dir, &stem, high.as_ref()).map(|f| (f, t0.elapsed().as_secs_f32()));
+            let _ = tx.send(r);
+            wake();
         });
-        // Tangente de chaque triangle (direction où u augmente), pour la normale en espace tangent
-        let tangents: Vec<V3> = rec
-            .iter()
-            .zip(&all_tris)
-            .map(|((f, tr), t)| {
-                let uv = &self.data.uv[*f];
-                let (p0, p1, p2) = (pos[t[0] as usize], pos[t[1] as usize], pos[t[2] as usize]);
-                let (e1, e2) = ([p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2]], [p2[0] - p0[0], p2[1] - p0[1], p2[2] - p0[2]]);
-                let (du1, dv1, du2, dv2) = (uv[tr[1]][0] - uv[tr[0]][0], uv[tr[1]][1] - uv[tr[0]][1], uv[tr[2]][0] - uv[tr[0]][0], uv[tr[2]][1] - uv[tr[0]][1]);
-                let det = du1 * dv2 - du2 * dv1;
-                let k = if det.abs() > 1e-12 { 1.0 / det } else { 0.0 };
-                [(e1[0] * dv2 - e2[0] * dv1) * k, (e1[1] * dv2 - e2[1] * dv1) * k, (e1[2] * dv2 - e2[2] * dv1) * k]
-            })
-            .collect();
-        // Évaluation des matériaux, texel par texel
-        let texels: Vec<Option<[[f32; 3]; 7]>> = cover
-            .par_iter()
-            .enumerate()
-            .map_init(Vec::new, |regs, (i, c)| {
-                let (ti, w) = (*c)?;
-                let t = all_tris[ti as usize];
-                let mix3 = |a: V3, b: V3, c: V3| [a[0] * w[0] + b[0] * w[1] + c[0] * w[2], a[1] * w[0] + b[1] * w[1] + c[1] * w[2], a[2] * w[0] + b[2] * w[1] + c[2] * w[2]];
-                let p = mix3(pos[t[0] as usize], pos[t[1] as usize], pos[t[2] as usize]);
-                let nn = mix3(nrm[t[0] as usize], nrm[t[1] as usize], nrm[t[2] as usize]);
-                let l = (nn[0] * nn[0] + nn[1] * nn[1] + nn[2] * nn[2]).sqrt().max(1e-12);
-                let nn = [nn[0] / l, nn[1] / l, nn[2] / l];
-                let cv = curv[t[0] as usize] * w[0] + curv[t[1] as usize] * w[1] + curv[t[2] as usize] * w[2];
-                let slot = data.face_mat.get(rec[ti as usize].0).copied().unwrap_or(0) as usize;
-                let (col, rough, metal, emit) = match progs.get(slot).and_then(|p| p.as_ref()) {
-                    Some(prog) => {
-                        let ctx = crate::nodes::Ctx { masks: [0.0; 4], uv: [(i % n) as f32 / n as f32, (i / n) as f32 / n as f32], pos: p, nrm: nn, view: nn, vcol: [1.0; 4], res: [n as f32, n as f32], curv: cv };
-                        let sf = prog.material(&ctx, regs);
-                        ([sf.color[0], sf.color[1], sf.color[2]], sf.rough, sf.metal, [sf.emit[0], sf.emit[1], sf.emit[2]])
-                    }
-                    None => {
-                        let c = data.slots.get(slot).map(|s| s.color).unwrap_or(PALETTE[0]);
-                        ([c[0] as f32 / 255.0, c[1] as f32 / 255.0, c[2] as f32 / 255.0], 0.5, 0.0, [0.0; 3])
-                    }
-                };
-                let k = (0.5 + cv).clamp(0.0, 1.0);
-                // Repère local autour de la normale
-                let dotp = |a: V3, b: V3| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
-                let crossp = |a: V3, b: V3| [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
-                let unit = |a: V3| { let l = dotp(a, a).sqrt().max(1e-12); [a[0] / l, a[1] / l, a[2] / l] };
-                let tg = tangents[ti as usize];
-                let tg = { let d = dotp(tg, nn); [tg[0] - nn[0] * d, tg[1] - nn[1] * d, tg[2] - nn[2] * d] };
-                let tg = if dotp(tg, tg) > 1e-12 { unit(tg) } else { unit(crossp(nn, if nn[0].abs() < 0.9 { [1.0, 0.0, 0.0] } else { [0.0, 1.0, 0.0] })) };
-                let bt = crossp(nn, tg);
-                // Normale géométrique du triangle : les rayons partent de ce côté, même si la normale lissée penche
-                let ng = {
-                    let (a, b, c) = (pos[t[0] as usize], pos[t[1] as usize], pos[t[2] as usize]);
-                    let g = unit(crossp([b[0] - a[0], b[1] - a[1], b[2] - a[2]], [c[0] - a[0], c[1] - a[1], c[2] - a[2]]));
-                    if dotp(g, nn) < 0.0 { [-g[0], -g[1], -g[2]] } else { g }
-                };
-                // Occlusion (rayons vers l'extérieur) et épaisseur (vers l'intérieur)
-                let (mut ao, mut thick) = (1.0f32, 1.0f32);
-                if let Some(bvh) = &bvh {
-                    let mut seed = (i as u32).wrapping_mul(747796405).wrapping_add(2891336453);
-                    let mut rnd = || {
-                        seed ^= seed << 13;
-                        seed ^= seed >> 17;
-                        seed ^= seed << 5;
-                        (seed >> 8) as f32 / 16777216.0
-                    };
-                    let (mut open, mut depth) = (0.0f32, 0.0f32);
-                    for _ in 0..rays {
-                        // Direction tirée selon le cosinus autour de la normale
-                        let (r1, r2) = (rnd(), rnd());
-                        let (rad, phi) = (r1.sqrt(), r2 * std::f32::consts::TAU);
-                        let (x, y, z) = (rad * phi.cos(), rad * phi.sin(), (1.0 - r1).max(0.0).sqrt());
-                        let mut d = [tg[0] * x + bt[0] * y + nn[0] * z, tg[1] * x + bt[1] * y + nn[1] * z, tg[2] * x + bt[2] * y + nn[2] * z];
-                        let below = dotp(d, ng);
-                        if below < 1e-3 {
-                            let r = 2.0 * (1e-3 - below);
-                            d = unit([d[0] + ng[0] * r, d[1] + ng[1] * r, d[2] + ng[2] * r]);
-                        }
-                        if !bvh.occluded([p[0] + ng[0] * eps, p[1] + ng[1] * eps, p[2] + ng[2] * eps], d, eps, ao_far) {
-                            open += 1.0;
-                        }
-                        let inw = [-d[0], -d[1], -d[2]];
-                        depth += bvh.closest([p[0] - ng[0] * eps, p[1] - ng[1] * eps, p[2] - ng[2] * eps], inw, eps, th_far).map(|h| h.t).unwrap_or(th_far) / th_far;
-                    }
-                    ao = open / rays as f32;
-                    thick = depth / rays as f32;
-                }
-                // Détails du modèle haute définition, exprimés dans le repère tangent
-                let mut tn = [0.5f32, 0.5, 1.0];
-                if let Some((hb, hn, ht)) = &high_data {
-                    let o = [p[0] + nn[0] * cage, p[1] + nn[1] * cage, p[2] + nn[2] * cage];
-                    if let Some(h) = hb.closest(o, [-nn[0], -nn[1], -nn[2]], 0.0, cage * 2.0) {
-                        let t = ht[h.tri as usize];
-                        let w0 = 1.0 - h.u - h.v;
-                        let n3 = [0, 1, 2].map(|k| hn[t[0] as usize][k] * w0 + hn[t[1] as usize][k] * h.u + hn[t[2] as usize][k] * h.v);
-                        let n3 = unit(n3);
-                        tn = [dotp(n3, tg) * 0.5 + 0.5, dotp(n3, bt) * 0.5 + 0.5, dotp(n3, nn).max(0.0) * 0.5 + 0.5];
-                    }
-                }
-                Some([col, [rough, metal, k], emit, [nn[0] * 0.5 + 0.5, nn[1] * 0.5 + 0.5, nn[2] * 0.5 + 0.5], p, [ao, thick, 0.0], tn])
-            })
-            .collect();
-        // Extension des bords : chaque texel vide prend la valeur d'un voisin rempli (8 passes)
-        let mut tex = texels;
-        for _ in 0..8 {
-            let old = tex.clone();
-            tex.par_iter_mut().enumerate().for_each(|(i, t)| {
-                if t.is_some() {
-                    return;
-                }
-                let (x, y) = ((i % n) as i64, (i / n) as i64);
-                for (dx, dy) in [(1i64, 0i64), (-1, 0), (0, 1), (0, -1), (1, 1), (-1, -1), (1, -1), (-1, 1)] {
-                    let (xx, yy) = (x + dx, y + dy);
-                    if xx >= 0 && yy >= 0 && xx < n as i64 && yy < n as i64 {
-                        if let Some(v) = old[yy as usize * n + xx as usize] {
-                            *t = Some(v);
-                            return;
-                        }
-                    }
-                }
-            });
-        }
-        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-        let q = |x: f32| (x.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
-        let any_emit = tex.iter().flatten().any(|t| t[2].iter().any(|x| *x > 0.003));
-        let mut out = vec![];
-        let (has_rays, has_high) = (rays > 0, high.is_some());
-        let maps: [(&str, Box<dyn Fn(&[[f32; 3]; 7]) -> [u8; 3] + Sync>, [u8; 3], bool); 9] = [
-            ("couleur", Box::new(move |t| [q(t[0][0]), q(t[0][1]), q(t[0][2])]), [128, 128, 128], true),
-            ("rugosite", Box::new(move |t| [q(t[1][0]); 3]), [128; 3], true),
-            ("metal", Box::new(move |t| [q(t[1][1]); 3]), [0; 3], true),
-            ("emission", Box::new(move |t| [q(t[2][0]), q(t[2][1]), q(t[2][2])]), [0; 3], any_emit),
-            ("normale", Box::new(move |t| [q(t[3][0]), q(t[3][1]), q(t[3][2])]), [128, 128, 255], true),
-            ("courbure", Box::new(move |t| [q(t[1][2]); 3]), [128; 3], true),
-            ("occlusion", Box::new(move |t| [q(t[5][0]); 3]), [255; 3], has_rays),
-            ("epaisseur", Box::new(move |t| [q(t[5][1]); 3]), [255; 3], has_rays),
-            ("normale_tangente", Box::new(move |t| [q(t[6][0]), q(t[6][1]), q(t[6][2])]), [128, 128, 255], has_high),
-        ];
-        for (name, f, empty, wanted) in maps.iter() {
-            if !*wanted {
-                continue;
+        self.bake_job = Some(BakeJob { stamp, size, rx });
+        self.bake_seen = None;
+    }
+
+    /// Résultat d'une cuisson lancée par `bake_start`, s'il est arrivé : le message à montrer.
+    /// L'empreinte est retenue (et enregistrée) quand la cuisson a réussi.
+    pub fn bake_poll(&mut self) -> Option<String> {
+        let job = self.bake_job.as_ref()?;
+        let r = match job.rx.try_recv() {
+            Ok(r) => r,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return None,
+            Err(_) => Err("la cuisson s'est arrêtée".to_string()),
+        };
+        let (stamp, size) = (job.stamp, job.size);
+        self.bake_job = None;
+        Some(match r {
+            Ok((files, secs)) => {
+                self.data.bake_stamp = stamp;
+                self.write();
+                format!("{} textures écrites dans textures/ ({} px, {:.1} s)", files.len(), size, secs)
             }
-            let bytes: Vec<u8> = tex.iter().flat_map(|t| t.as_ref().map(|t| f(t)).unwrap_or(*empty)).collect();
-            let path = dir.join(format!("{stem}_{name}.png"));
-            image::RgbImage::from_raw(n as u32, n as u32, bytes).ok_or("image invalide")?.save(&path).map_err(|e| e.to_string())?;
-            out.push(path);
-        }
-        Ok(out)
+            Err(err) => format!("bake impossible : {err}"),
+        })
+    }
+
+    /// Écrit les textures du modèle (voir `bake_to`)
+    pub fn bake(&self, progs: &[Option<std::sync::Arc<crate::nodes::Program>>], dir: &std::path::Path, stem: &str, high: Option<&(Vec<V3>, Vec<[u32; 3]>)>) -> Result<Vec<PathBuf>, String> {
+        bake_to(&self.topo, &self.data, self.bake_size, self.bake_rays, progs, dir, stem, high)
     }
 
     fn tab_uv(&mut self, ui: &mut egui::Ui) {
@@ -2549,6 +2808,32 @@ impl Edit {
                     ui.selectable_value(&mut self.bake_size, s, format!("{s} px"));
                 }
             });
+            if self.bake_job.is_some() {
+                ui.spinner();
+            }
+        });
+        ui.horizontal(|ui| {
+            if ui.checkbox(&mut self.data.auto_bake, crate::i18n::t("recuire quand le modèle change")).on_hover_text(crate::i18n::t("Les textures sont recuites toutes seules, en arrière-plan, dès que la forme, les UV ou les matériaux ont changé (aussi quand le modèle a été sculpté ou modifié ailleurs)")).changed() {
+                self.save();
+            }
+        });
+        // UDIM : plusieurs tuiles d'UV, donc plusieurs images par texture
+        ui.horizontal(|ui| {
+            let tiles = udim_tiles(&self.data);
+            if self.udim_count == 0 {
+                self.udim_count = tiles.len().max(1);
+            }
+            ui.label(RichText::new("UDIM").size(11.0).color(p.muted));
+            ui.add(egui::DragValue::new(&mut self.udim_count).range(1..=20).suffix(format!(" {}", crate::i18n::t("tuiles"))));
+            if ui.add_enabled(self.data.has_uv(), egui::Button::new(crate::i18n::t("répartir"))).on_hover_text(crate::i18n::t("Répartit les îlots sur ce nombre de tuiles UDIM (1001, 1002…) : chaque tuile a ses propres images à la cuisson, donc plus de détail par îlot. 1 : tout revient dans le carré de base")).clicked() {
+                distribute_udim(&self.topo, &mut self.data, self.udim_count, &PackOptions { optimize: self.optimize, rotate: self.rotate, fixed_scale: None });
+                self.version += 1;
+                self.save();
+                self.message = Some(format!("{} {}", udim_tiles(&self.data).len(), crate::i18n::t("tuiles")));
+            }
+            if tiles.len() > 1 {
+                ui.label(RichText::new(format!("{} – {}", udim_number(tiles[0]), udim_number(tiles[tiles.len() - 1]))).size(11.0).color(p.muted));
+            }
         });
         ui.horizontal_wrapped(|ui| {
             if ui.button(crate::i18n::t("auto (coutures + UV)")).on_hover_text(crate::i18n::t("Coutures automatiques avancées, dépliage, îlots redressés et rangés")).clicked() {
