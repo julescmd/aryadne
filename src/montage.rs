@@ -365,10 +365,24 @@ pub fn lut_file(grade: &Path) -> PathBuf {
     dirs::cache_dir().unwrap_or_else(std::env::temp_dir).join("aryadne").join("lut").join(format!("{:016x}.cube", h.finish()))
 }
 
+/// Une LUT .cube donnée telle quelle (un look, le profil d'une caméra), au lieu d'un graphe de nodes
+pub fn is_cube(grade: &str) -> bool {
+    grade.to_lowercase().ends_with(".cube")
+}
+
+/// La table de couleurs à appliquer à un clip : son fichier .cube, ou celle calculée de son graphe
+pub fn grade_lut(project: &Path, grade: &str) -> PathBuf {
+    if is_cube(grade) {
+        resolve(project, grade)
+    } else {
+        lut_file(&resolve(project, grade))
+    }
+}
+
 /// Calcule les tables de couleurs manquantes. Renvoie vrai si au moins une a été écrite.
 pub fn bake_luts(p: &Project, project: &Path, root: &str) -> bool {
     let mut any = false;
-    for c in p.clips.iter().filter(|c| !c.grade.is_empty()) {
+    for c in p.clips.iter().filter(|c| !c.grade.is_empty() && !is_cube(&c.grade)) {
         let g = resolve(project, &c.grade);
         let out = lut_file(&g);
         if out.exists() || !g.exists() {
@@ -1052,7 +1066,7 @@ pub fn graph(p: &Project, project: &Path, from: f32, w: u32, h: u32, realtime: b
             let animated = c.keys.len() > 1;
             filter += &format!("[{n}:v]fps={},setpts=(PTS-STARTPTS)/{:.4}+{st:.3}/TB", p.fps, c.speed.max(0.01));
             if !c.grade.is_empty() {
-                let lut = lut_file(&resolve(project, &c.grade));
+                let lut = grade_lut(project, &c.grade);
                 if lut.exists() {
                     filter += &format!(",lut3d=file='{}'", lut.to_string_lossy().replace('\\', "/").replace(':', "\\:"));
                 }
@@ -1445,6 +1459,35 @@ mod tests {
         let (_, f, _, _) = graph(&q, Path::new("/x/m.aryav"), 0.0, 640, 360, false, true);
         assert!(f.contains("fade=t=in:st=3.000:d=1.000:alpha=1") && f.contains("afade=t=out:st=3.000:d=1.000") && f.contains("afade=t=in:st=0:d=1.000"), "{f}");
         assert_eq!(expr(&[(1.0, 0.0), (3.0, 10.0)], "t"), "if(lt(t,1.0000),0.0000,if(lt(t,3.0000),0.0000+(10.0000)*(t-(1.0000))/2.0000,10.0000))");
+    }
+
+    #[test]
+    fn lut_cube() {
+        // Une LUT .cube qui inverse les couleurs, appliquée telle quelle à un plan blanc : il devient noir
+        let Some(ff) = ffmpeg::find("ffmpeg") else { return };
+        let dir = std::env::temp_dir().join(format!("aryadne-lut-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("luts")).unwrap();
+        let mut cube = String::from("LUT_3D_SIZE 2\n");
+        for b in 0..2 {
+            for g in 0..2 {
+                for r in 0..2 {
+                    cube += &format!("{} {} {}\n", 1 - r, 1 - g, 1 - b);
+                }
+            }
+        }
+        std::fs::write(dir.join("luts/inverse.cube"), cube).unwrap();
+        let st = ffmpeg::command(ff).args(["-v", "error", "-y", "-f", "lavfi", "-i", "color=white:size=64x48:duration=1:rate=24", "-pix_fmt", "yuv420p"]).arg(dir.join("blanc.mp4")).status().unwrap();
+        assert!(st.success());
+        let file = dir.join("essai.aryav");
+        let mut p = Project { width: 64, height: 48, ..Default::default() };
+        let mut c = import(&file, &dir.join("blanc.mp4"), 1, 0.0).unwrap();
+        c.grade = "luts/inverse.cube".into();
+        assert!(is_cube(&c.grade) && grade_lut(&file, &c.grade).exists());
+        p.clips.push(c);
+        let img = frame(&p, &file, 0.5, 64).unwrap();
+        let px = img.get_pixel(32, 24);
+        assert!(px[0] < 30 && px[1] < 30 && px[2] < 30, "{px:?}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

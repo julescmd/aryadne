@@ -2472,5 +2472,7 @@
   "ouvrir la précomposition": "open the precomp",
   "recharger": "reload",
   "Relit la précomposition après l'avoir modifiée": "Reads the precomp again after you've changed it",
-  "Précomposition : une autre composition du coffre, jouée comme un calque": "Precomp: another composition from the vault, played as a layer"
+  "Précomposition : une autre composition du coffre, jouée comme un calque": "Precomp: another composition from the vault, played as a layer",
+  "LUT appliquée à ce clip": "LUT applied to this clip",
+  "Appliquer une LUT .cube (un look, le profil Log d'une caméra)": "Apply a .cube LUT (a look, a camera's Log profile)"
 }

@@ -675,6 +675,26 @@ impl Editor {
         self.changed();
     }
 
+    /// Choisit une LUT .cube pour le clip `s` ; prise hors du dossier du montage, elle est copiée dans « luts/ »
+    pub(crate) fn pick_lut(&mut self, s: usize) -> bool {
+        let Some(f) = rfd::FileDialog::new().add_filter("LUT", &["cube"]).pick_file() else { return false };
+        let dir = self.path.parent().unwrap_or(Path::new("")).to_path_buf();
+        let rel = match f.strip_prefix(&dir) {
+            Ok(r) => r.to_string_lossy().replace('\\', "/"),
+            Err(_) => {
+                let name = f.file_name().map(|x| x.to_string_lossy().to_string()).unwrap_or_else(|| "look.cube".into());
+                let _ = std::fs::create_dir_all(dir.join("luts"));
+                if let Err(e) = std::fs::copy(&f, dir.join("luts").join(&name)) {
+                    self.message = Some(e.to_string());
+                    return false;
+                }
+                format!("luts/{name}")
+            }
+        };
+        self.project.clips[s].grade = rel;
+        true
+    }
+
     fn new_grade(&mut self, s: usize) {
         if !self.project.clips[s].grade.is_empty() {
             self.open_request = Some(resolve(&self.path, &self.project.clips[s].grade));

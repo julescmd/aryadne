@@ -493,6 +493,7 @@ impl Editor {
         let mut ch = false;
         let mut ch_text = false;
         let mut new_grade = false;
+        let mut pick_lut = false;
         let mut do_xfade = false;
         let mut key_toggle = false;
         let mut pose_before = None;
@@ -608,8 +609,14 @@ impl Editor {
                         ch |= row(ui, "Saturation", &mut |ui| scrub(ui, &mut c.saturation, 0.01, 0.0..=3.0, "", 2));
                         ui.horizontal(|ui| {
                             ui.add_space(22.0);
-                            if ui.button(if c.grade.is_empty() { crate::i18n::t("＋ étalonnage en nodes") } else { crate::i18n::t("nodes ✎") }).on_hover_text(crate::i18n::t("Un graphe de nodes (courbes, rampes, balance…) appliqué aux couleurs de ce clip")).clicked() {
+                            if crate::montage::is_cube(&c.grade) {
+                                let name = c.grade.rsplit('/').next().unwrap_or(&c.grade).to_string();
+                                ui.label(egui::RichText::new(format!("{}  {name}", crate::lucide::PALETTE)).size(12.0)).on_hover_text(crate::i18n::t("LUT appliquée à ce clip"));
+                            } else if ui.button(if c.grade.is_empty() { crate::i18n::t("＋ étalonnage en nodes") } else { crate::i18n::t("nodes ✎") }).on_hover_text(crate::i18n::t("Un graphe de nodes (courbes, rampes, balance…) appliqué aux couleurs de ce clip")).clicked() {
                                 new_grade = true;
+                            }
+                            if c.grade.is_empty() && ui.add(egui::Button::new(egui::RichText::new(format!("{}  LUT", crate::lucide::PALETTE)).size(12.0))).on_hover_text(crate::i18n::t("Appliquer une LUT .cube (un look, le profil Log d'une caméra)")).clicked() {
+                                pick_lut = true;
                             }
                             if !c.grade.is_empty() && ui.add(egui::Button::new(egui::RichText::new(crate::lucide::X).size(13.0)).min_size(egui::vec2(24.0, 20.0))).on_hover_text(crate::i18n::t("retirer")).clicked() {
                                 c.grade.clear();
@@ -693,6 +700,9 @@ impl Editor {
         if new_grade {
             self.new_grade(s);
             ch = true;
+        }
+        if pick_lut {
+            ch |= self.pick_lut(s);
         }
         if ch || ch_text {
             self.changed();
