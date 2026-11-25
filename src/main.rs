@@ -7,6 +7,7 @@ mod story;
 mod story_ui;
 mod fountain;
 mod sculpt;
+mod multires;
 mod transcribe;
 mod expr;
 mod bases;

@@ -216,14 +216,15 @@ fn grid_simplify(positions: &[V3], tris_in: &[[u32; 3]], colors_in: &[Color32], 
 /// devenus plats sont retirés ; `keep` dit lesquels restent, pour les données par triangle.
 pub fn weld(positions: &[V3], tris: &[[u32; 3]]) -> (Vec<V3>, Vec<[u32; 3]>, Vec<bool>) {
     let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
-    for p in positions {
+    // Un sommet infini (fichier abîmé) rendrait la tolérance infinie : tous les sommets fusionneraient en un seul
+    for p in positions.iter().filter(|p| p.iter().all(|x| x.is_finite())) {
         for k in 0..3 {
             lo[k] = lo[k].min(p[k]);
             hi[k] = hi[k].max(p[k]);
         }
     }
-    let diag = ((hi[0] - lo[0]).powi(2) + (hi[1] - lo[1]).powi(2) + (hi[2] - lo[2]).powi(2)).sqrt().max(1e-9);
-    let tol = (diag * 1e-6) as f64;
+    let diag = ((hi[0] - lo[0]).powi(2) + (hi[1] - lo[1]).powi(2) + (hi[2] - lo[2]).powi(2)).sqrt();
+    let tol = (if diag.is_finite() { diag.max(1e-9) } else { 1.0 } * 1e-6) as f64;
     let mut ids: HashMap<[i64; 3], u32> = HashMap::new();
     let mut out = Vec::with_capacity(positions.len());
     let remap: Vec<u32> = positions
@@ -2332,6 +2333,12 @@ struct SculptUi {
     sym: bool,
     stroke: Option<SculptStroke>,
     mirror: (usize, Vec<Option<u32>>),
+    /// Remaillage dynamique : subdiviser sous le pinceau, et la taille du détail (part du rayon)
+    dyntopo: bool,
+    detail: f32,
+    /// Niveaux de multirésolution du maillage sculpté, et le fichier pour lequel ils ont été lus
+    multires: Option<crate::multires::Multires>,
+    mr_for: Option<std::path::PathBuf>,
 }
 
 /// Un geste de sculpture : positions au départ, sommets pris par « saisir » (et leurs reflets), voisins,
@@ -2347,7 +2354,7 @@ struct SculptStroke {
 
 impl SculptUi {
     fn new() -> SculptUi {
-        SculptUi { brush: crate::sculpt::Brush::Draw, radius: 60.0, strength: 0.5, sym: true, stroke: None, mirror: (usize::MAX, vec![]) }
+        SculptUi { brush: crate::sculpt::Brush::Draw, radius: 60.0, strength: 0.5, sym: true, stroke: None, mirror: (usize::MAX, vec![]), dyntopo: false, detail: 0.25, multires: None, mr_for: None }
     }
 }
 
@@ -4146,6 +4153,11 @@ impl Viewer {
             if sc.mirror.0 != me.mesh.pos.len() {
                 sc.mirror = (me.mesh.pos.len(), me.mesh.mirror_map());
             }
+            // Niveaux de multirésolution : lus une fois par maillage, gardés s'ils correspondent encore à lui
+            if sc.mr_for.as_ref() != Some(&me.file) {
+                sc.mr_for = Some(me.file.clone());
+                sc.multires = crate::multires::Multires::load(&me.file).filter(|mr| mr.matches(&me.mesh));
+            }
             let brush = if shift { Brush::Smooth } else { sc.brush };
             let r = sc.radius;
             // Le point de la surface sous la souris (le sommet visible le plus proche à l'écran),
@@ -4187,7 +4199,7 @@ impl Viewer {
                 v
             };
             // Un clic sur la vue (pas sur la barre du bas) commence un geste
-            let bar = egui::Rect::from_center_size(pos2(rect.center().x, rect.bottom() - 52.0), egui::vec2(560.0, 44.0));
+            let bar = egui::Rect::from_center_size(pos2(rect.center().x, rect.bottom() - 52.0), egui::vec2(760.0f32.min(rect.width() - 16.0).max(200.0), 44.0));
             if let (true, true, Some(at)) = (pressed, hovered, cur) {
                 if !bar.contains(at) {
                     if let Some((c, rr)) = probe(me, at) {
@@ -4223,6 +4235,20 @@ impl Viewer {
                         let q = st.last + (at - st.last) * (k as f32 / n as f32);
                         let Some((c, rr)) = probe(me, q) else { continue };
                         let step = rr * 0.025 * sc.strength;
+                        // Remaillage dynamique : la surface se subdivise sous le pinceau (et sous son reflet) avant la touche
+                        if sc.dyntopo && brush != Brush::Smooth && me.mesh.pos.len() < 400_000 {
+                            let mut added = crate::multires::refine(&mut me.mesh, c, rr, rr * sc.detail, 20_000);
+                            if sym && c[0].abs() > rr * 0.05 {
+                                added += crate::multires::refine(&mut me.mesh, [-c[0], c[1], c[2]], rr, rr * sc.detail, 20_000);
+                            }
+                            if added > 0 {
+                                st.topo = crate::sculpt::Topo::new(&me.mesh);
+                                // Les niveaux de multirésolution ne décrivent plus ce maillage
+                                if sc.multires.take().is_some() {
+                                    let _ = std::fs::remove_file(crate::multires::Multires::file_for(&me.file));
+                                }
+                            }
+                        }
                         for (set, _) in sets(&me.mesh.pos, c, rr) {
                             crate::sculpt::dab(&mut me.mesh, &st.topo, brush, &set, step, cmd);
                         }
@@ -4247,8 +4273,9 @@ impl Viewer {
                 }
             }
             // La barre des pinceaux, en bas de la vue
-            let mut subdivide = false;
+            let mut level_step = 0i32;
             let mut leave = false;
+            let (level, top) = sc.multires.as_ref().map(|mr| (mr.current, mr.top())).unwrap_or((0, 0));
             let mut bui = ui.new_child(egui::UiBuilder::new().max_rect(bar).layout(egui::Layout::left_to_right(egui::Align::Center)));
             egui::Frame::new().fill(p.panel).stroke(Stroke::new(1.0, p.line)).corner_radius(6.0).inner_margin(egui::Margin::symmetric(8, 5)).show(&mut bui, |ui| {
                 ui.spacing_mut().item_spacing.x = 3.0;
@@ -4269,29 +4296,56 @@ impl Viewer {
                 if ui.add(sb).on_hover_text(crate::i18n::t("symétrie sur X")).clicked() {
                     sc.sym = !sc.sym;
                 }
-                if ui.add(egui::Button::new(egui::RichText::new(crate::lucide::GRID_3X3).size(15.0)).fill(Color32::TRANSPARENT).min_size(egui::vec2(28.0, 26.0))).on_hover_text(crate::i18n::t("subdiviser tout le maillage, pour plus de détails")).clicked() {
-                    subdivide = true;
+                ui.separator();
+                // Multirésolution : descendre, le niveau courant, monter (au sommet : un niveau de plus)
+                let small = |icon: &str| egui::Button::new(egui::RichText::new(icon).size(15.0)).fill(Color32::TRANSPARENT).min_size(egui::vec2(24.0, 26.0));
+                if ui.add_enabled(level > 0, small(crate::lucide::CHEVRON_DOWN)).on_hover_text(crate::i18n::t("niveau moins détaillé : les grandes formes, le détail fin est gardé")).clicked() {
+                    level_step = -1;
+                }
+                ui.label(egui::RichText::new(format!("{} {level}/{top}", crate::lucide::LAYERS_2)).size(12.0).color(p.muted)).on_hover_text(crate::i18n::t("niveau de multirésolution (0 : la forme de base)"));
+                let up_tip = if level < top { "niveau plus détaillé" } else { "ajouter un niveau : subdivise tout le maillage, pour plus de détails" };
+                if ui.add(small(if level < top { crate::lucide::CHEVRON_UP } else { crate::lucide::PLUS })).on_hover_text(crate::i18n::t(up_tip)).clicked() {
+                    level_step = 1;
+                }
+                ui.separator();
+                let on = sc.dyntopo;
+                let db = egui::Button::new(egui::RichText::new(crate::lucide::GRID_3X3).size(15.0).color(if on { p.on_accent } else { p.text })).fill(if on { p.accent } else { Color32::TRANSPARENT }).min_size(egui::vec2(28.0, 26.0));
+                if ui.add(db).on_hover_text(crate::i18n::t("remaillage dynamique : la surface se subdivise sous le pinceau (remplace les niveaux de multirésolution)")).clicked() {
+                    sc.dyntopo = !sc.dyntopo;
+                }
+                if sc.dyntopo {
+                    let mut pct = sc.detail * 100.0;
+                    if ui.add(egui::DragValue::new(&mut pct).range(5.0..=100.0).speed(0.5).suffix(" %")).on_hover_text(crate::i18n::t("taille du détail, en part du rayon du pinceau (plus petit : plus fin)")).changed() {
+                        sc.detail = (pct / 100.0).clamp(0.05, 1.0);
+                    }
                 }
                 if ui.add(egui::Button::new(egui::RichText::new(crate::lucide::X).size(15.0)).fill(Color32::TRANSPARENT).min_size(egui::vec2(28.0, 26.0))).on_hover_text(crate::i18n::t("quitter la sculpture")).clicked() {
                     leave = true;
                 }
             });
-            if subdivide {
-                snapshot(me);
-                // Catmull-Clark : plus de sommets, et une surface arrondie plutôt qu'à facettes
-                let (tris, edges) = me.mesh.triangles();
-                let cols = vec![Color32::WHITE; tris.len()];
-                let (np, nt, _, ne) = catmull_clark(&me.mesh.pos, &tris, &cols, &edges, 1, false);
-                let (pp, polys, _) = rebuild_polygons(&np, &nt, &ne);
-                if !polys.is_empty() {
-                    me.mesh = crate::meshedit::EMesh { pos: pp, polys };
+            if level_step != 0 {
+                // Le maillage sculpté est rangé dans son niveau, puis on passe au niveau voisin (ou on en ajoute un)
+                let mut mr = sc.multires.take().filter(|mr| mr.matches(&me.mesh)).unwrap_or_else(|| crate::multires::Multires::new(&me.mesh));
+                mr.store(&me.mesh);
+                let next = if level_step > 0 {
+                    if mr.current < mr.top() { Some(mr.go(mr.current + 1)) } else { mr.add_level() }
+                } else if mr.current > 0 {
+                    Some(mr.go(mr.current - 1))
+                } else {
+                    None
+                };
+                if let Some(mesh) = next {
+                    me.mesh = mesh;
                     me.sel = vec![false; me.mesh.pos.len()];
+                    // L'historique d'un autre niveau n'a pas le même nombre de sommets : il repart de zéro
+                    me.hist.clear();
+                    me.redo.clear();
                     let _ = me.mesh.write_obj(&me.file);
+                    let _ = mr.save(&me.file);
                     self.scene_dirty = true;
                     self.mesh_map = None;
-                } else {
-                    me.hist.pop();
                 }
+                sc.multires = Some(mr);
             }
             if leave {
                 self.sculpt = None;
