@@ -435,6 +435,8 @@ struct Head {
     groups: Vec<Group>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     guides: Vec<Guide>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    anim: Option<Anim>,
 }
 
 impl Layer {
@@ -619,6 +621,17 @@ pub struct Doc {
     pub groups: Vec<Group>,
     /// Repères tirés des règles
     pub guides: Vec<Guide>,
+    /// Animation image par image : les calques d'un groupe sont les images
+    pub anim: Option<Anim>,
+}
+
+/// Réglages de l'animation : le groupe des images, la cadence, la pelure d'oignon
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+pub struct Anim {
+    pub group: u32,
+    pub fps: f32,
+    #[serde(default = "yes")]
+    pub onion: bool,
 }
 
 /// Un repère : une ligne verticale (à x) ou horizontale (à y), en pixels du document
@@ -675,6 +688,16 @@ impl PartialEq for GroupMask {
 impl std::fmt::Debug for GroupMask {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         write!(f, "{}", if self.0.is_some() { "masque" } else { "-" })
+    }
+}
+
+impl Doc {
+    /// Les calques-images de l'animation, de la première à la dernière (de bas en haut).
+    pub fn frames(&self) -> Vec<usize> {
+        match &self.anim {
+            Some(a) => (0..self.layers.len()).filter(|&i| self.layers[i].group == a.group).collect(),
+            None => vec![],
+        }
     }
 }
 
@@ -743,7 +766,7 @@ impl Doc {
 
     pub fn new(w: usize, h: usize, white: bool) -> Doc {
         let base = if white { Layer::filled("fond", w, h, [255, 255, 255, 255]) } else { Layer::blank("calque 1", w, h) };
-        Doc { w, h, layers: vec![base], active: 0, groups: vec![], guides: vec![] }
+        Doc { w, h, layers: vec![base], active: 0, groups: vec![], guides: vec![], anim: None }
     }
 
     pub fn save(&self, path: &Path) -> Result<(), String> {
@@ -762,6 +785,7 @@ impl Doc {
             layers: self.layers.iter().map(|l| LayerHead { name: l.name.clone(), visible: l.visible, opacity: l.opacity, blend: l.blend, off: l.off, w: l.w, h: l.h, mask: l.mask.is_some(), mask_on: l.mask_on, fill: l.fill, lock_alpha: l.lock_alpha, lock_all: l.lock_all, clip: l.clip, adj: l.adj, group: l.group, fx: l.fx.clone() }).collect(),
             groups: self.groups.iter().map(|g| Group { has_mask: g.mask.0.is_some(), mask: GroupMask(None), ..g.clone() }).collect(),
             guides: self.guides.clone(),
+            anim: self.anim.clone(),
         };
         let json = serde_json::to_vec(&head).map_err(|e| e.to_string())?;
         let mut out = b"ARYIMG1\n".to_vec();
@@ -803,7 +827,7 @@ impl Doc {
             // Une image ordinaire renommée : un seul calque
             let img = image::load_from_memory(&b).map_err(|_| "fichier .aryimg illisible".to_string())?.to_rgba8();
             let (w, h) = (img.width() as usize, img.height() as usize);
-            return Ok(Doc { w, h, layers: vec![Layer { px: img.into_raw(), ..Layer::blank("calque 1", w, h) }], active: 0, groups: vec![], guides: vec![] });
+            return Ok(Doc { w, h, layers: vec![Layer { px: img.into_raw(), ..Layer::blank("calque 1", w, h) }], active: 0, groups: vec![], guides: vec![], anim: None });
         }
         let mut at = 8;
         let rd = |at: &mut usize| -> Result<usize, String> {
@@ -840,7 +864,7 @@ impl Doc {
                 g.mask = GroupMask(Some(Box::new(Layer { px: mpx, ..Layer::blank("masque", mw, mh) })));
             }
         }
-        Ok(Doc { w: head.w, h: head.h, active: head.active.min(layers.len() - 1), layers, groups, guides: head.guides })
+        Ok(Doc { w: head.w, h: head.h, active: head.active.min(layers.len() - 1), layers, groups, guides: head.guides, anim: head.anim })
     }
 
     /// Mélange les calques visibles dans `out` (RGBA du document) pour la zone `r` (x0, y0, x1, y1) :
@@ -1232,6 +1256,10 @@ pub struct Editor {
     persp_drag: Option<usize>,
     /// Départ du trait en cours (pour l'aimantation de perspective)
     stroke_from: Option<Pos2>,
+    /// Lecture de l'animation : départ et image de départ
+    anim_play: Option<(Instant, usize)>,
+    /// Vignettes des images de l'animation : (calque, clé, texture)
+    anim_thumbs: Vec<(usize, u64, egui::TextureHandle)>,
     /// Recadrage en cours (x0, y0, x1, y1 du document), le format et le geste (0 : nouveau cadre, 1 : déplacer)
     crop: Option<[f32; 4]>,
     crop_ratio: usize,
@@ -1386,6 +1414,8 @@ impl Editor {
             persp_snap: true,
             persp_drag: None,
             stroke_from: None,
+            anim_play: None,
+            anim_thumbs: vec![],
             tolerance: 0.12,
             sel: None,
             lasso: vec![],
@@ -2420,6 +2450,10 @@ impl Editor {
             });
             egui::containers::menu::MenuButton::new(crate::i18n::t("calque ▾")).ui(ui, |ui| {
                 ui.set_min_width(230.0);
+                if self.doc.anim.is_none() && ui.button(format!("{}  {}", crate::lucide::FILM, crate::i18n::t("animation image par image"))).on_hover_text(crate::i18n::t("Les calques d'un groupe « Animation » deviennent les images : pelure d'oignon, lecture, export GIF ou MP4")).clicked() {
+                    self.anim_start();
+                    ui.close();
+                }
                 if ui.button(format!("{}  {}", crate::lucide::PLUS, crate::i18n::t("nouveau calque   Ctrl+Maj+N"))).clicked() {
                     self.new_layer();
                     ui.close();
@@ -2588,6 +2622,10 @@ impl Editor {
         });
         if let Some(m) = &self.message {
             ui.label(egui::RichText::new(m).size(11.0).color(p.muted));
+        }
+        // ---- Bande de l'animation, en bas
+        if self.doc.anim.is_some() {
+            self.anim_panel(ui);
         }
         // ---- Colonne des outils à gauche, comme Photoshop, avec les couleurs en bas
         egui::Panel::left(egui::Id::unique(("paint-tools", self.path.to_string_lossy().to_string()))).resizable(false).exact_size(44.0).frame(egui::Frame::new().fill(p.panel).stroke(Stroke::new(1.0, p.line)).inner_margin(egui::Margin::symmetric(4, 8))).show(ui, |ui| {
@@ -2813,6 +2851,32 @@ impl Editor {
                 self.comp = vec![0; self.doc.w * self.doc.h * 4];
             }
             self.doc.composite(&mut self.comp, d);
+            // Pelure d'oignon : l'image d'avant en rouge, celle d'après en vert, en transparence
+            if let (Some(a), None) = (&self.doc.anim, self.anim_play) {
+                if a.onion {
+                    let frames = self.doc.frames();
+                    if let Some(k) = frames.iter().position(|&i| i == self.doc.active) {
+                        let near: Vec<(usize, [f32; 3])> = [(k.checked_sub(1), [235.0, 70.0, 70.0]), (frames.get(k + 1).map(|_| k + 1), [70.0, 190.0, 90.0])].into_iter().filter_map(|(f, c)| f.map(|f| (frames[f], c))).collect();
+                        for (li, tint) in near {
+                            let l = &self.doc.layers[li];
+                            for y in d[1]..d[3].min(self.doc.h) {
+                                for x in d[0]..d[2].min(self.doc.w) {
+                                    let s = l.at(x as i32, y as i32);
+                                    if s[3] == 0 {
+                                        continue;
+                                    }
+                                    let a = s[3] as f32 / 255.0 * 0.28;
+                                    let i = (y * self.doc.w + x) * 4;
+                                    for ch in 0..3 {
+                                        self.comp[i + ch] = (self.comp[i + ch] as f32 * (1.0 - a) + tint[ch] * a) as u8;
+                                    }
+                                    self.comp[i + 3] = self.comp[i + 3].max((a * 255.0) as u8);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
             // Alt+clic sur la vignette du masque : on voit le masque seul, en gris
             if self.mask_view {
                 let l = &self.doc.layers[self.doc.active];
@@ -3587,6 +3651,220 @@ impl Editor {
         self.save_due = Some(Instant::now());
     }
 
+    /// Passe en animation : un groupe « Animation » avec une première image vide au-dessus du calque actif.
+    fn anim_start(&mut self) {
+        self.checkpoint();
+        let id = self.doc.groups.iter().map(|g| g.id).max().unwrap_or(0) + 1;
+        self.doc.groups.push(Group::new(id, crate::i18n::t("Animation"), 0));
+        let at = (self.doc.active + 1).min(self.doc.layers.len());
+        self.doc.layers.insert(at, Layer { group: id, ..Layer::blank(&format!("{} 1", crate::i18n::t_mid("image")), self.doc.w, self.doc.h) });
+        self.doc.active = at;
+        self.doc.anim = Some(Anim { group: id, fps: 12.0, onion: true });
+        self.set_frame(0);
+    }
+
+    /// Montre l'image `k` (les autres images se cachent) et la rend active.
+    fn set_frame(&mut self, k: usize) {
+        let frames = self.doc.frames();
+        let Some(&li) = frames.get(k.min(frames.len().saturating_sub(1))) else { return };
+        for &f in &frames {
+            self.doc.layers[f].visible = f == li;
+        }
+        self.doc.active = li;
+        self.all();
+    }
+
+    fn cur_frame(&self) -> usize {
+        self.doc.frames().iter().position(|&i| i == self.doc.active).unwrap_or(0)
+    }
+
+    /// Nouvelle image après l'image actuelle : vide, ou copie de l'actuelle.
+    fn anim_add(&mut self, copy: bool) {
+        let Some(a) = self.doc.anim.clone() else { return };
+        self.checkpoint();
+        let frames = self.doc.frames();
+        let k = self.cur_frame();
+        let at = frames.get(k).map(|i| i + 1).unwrap_or(self.doc.layers.len());
+        let n = frames.len() + 1;
+        let l = if copy { Layer { name: format!("{} {n}", crate::i18n::t_mid("image")), ..self.doc.layers[frames[k]].clone() } } else { Layer { group: a.group, ..Layer::blank(&format!("{} {n}", crate::i18n::t_mid("image")), self.doc.w, self.doc.h) } };
+        self.doc.layers.insert(at, l);
+        self.set_frame(k + 1);
+    }
+
+    fn anim_delete(&mut self) {
+        let frames = self.doc.frames();
+        if frames.len() < 2 {
+            return;
+        }
+        self.checkpoint();
+        let k = self.cur_frame();
+        self.doc.layers.remove(frames[k]);
+        self.set_frame(k.saturating_sub(1));
+    }
+
+    /// Exporte l'animation : chaque image posée sur le reste du document (fond compris), puis GIF ou MP4.
+    fn anim_export(&mut self, gif: bool) {
+        let Some(a) = self.doc.anim.clone() else { return };
+        let stem = self.path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+        let ext = if gif { "gif" } else { "mp4" };
+        let Some(out) = rfd::FileDialog::new().set_directory(self.path.parent().unwrap_or(std::path::Path::new(""))).set_file_name(format!("{stem}.{ext}")).add_filter(ext.to_uppercase(), &[ext]).save_file() else { return };
+        let keep = (self.doc.active, self.doc.layers.iter().map(|l| l.visible).collect::<Vec<_>>());
+        let tmp = std::env::temp_dir().join(format!("aryadne-anim-{}", std::process::id()));
+        let r = (|| -> Result<(), String> {
+            std::fs::create_dir_all(&tmp).map_err(|e| e.to_string())?;
+            let frames = self.doc.frames();
+            for (k, &li) in frames.iter().enumerate() {
+                for &f in &frames {
+                    self.doc.layers[f].visible = f == li;
+                }
+                let img = self.doc.flatten();
+                // Dimensions paires pour l'encodeur vidéo
+                let (w, h) = (img.width() & !1, img.height() & !1);
+                image::imageops::crop_imm(&img, 0, 0, w.max(2), h.max(2)).to_image().save(tmp.join(format!("{k:05}.png"))).map_err(|e| e.to_string())?;
+            }
+            let ff = crate::ffmpeg::find("ffmpeg").ok_or("ffmpeg introuvable")?;
+            let mut cmd = crate::ffmpeg::command(ff);
+            cmd.args(["-y", "-v", "error", "-framerate", &format!("{}", a.fps.max(1.0)), "-i"]).arg(tmp.join("%05d.png"));
+            if gif {
+                cmd.args(["-vf", "split[a][b];[a]palettegen=reserve_transparent=0[p];[b][p]paletteuse", "-loop", "0"]);
+            } else {
+                cmd.args(["-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "18"]);
+            }
+            let o = cmd.arg(&out).output().map_err(|e| e.to_string())?;
+            if !o.status.success() {
+                return Err(String::from_utf8_lossy(&o.stderr).lines().last().unwrap_or("échec de ffmpeg").to_string());
+            }
+            Ok(())
+        })();
+        let _ = std::fs::remove_dir_all(&tmp);
+        for (l, v) in self.doc.layers.iter_mut().zip(keep.1) {
+            l.visible = v;
+        }
+        self.doc.active = keep.0;
+        self.all();
+        self.message = Some(match r {
+            Ok(()) => format!("{} {}", crate::i18n::t("exporté :"), out.file_name().map(|x| x.to_string_lossy().to_string()).unwrap_or_default()),
+            Err(e) => e,
+        });
+    }
+
+    /// La bande de l'animation : lecture, cadence, pelure d'oignon, les images en vignettes.
+    fn anim_panel(&mut self, ui: &mut egui::Ui) {
+        let p = theme::pal();
+        let frames = self.doc.frames();
+        if frames.is_empty() {
+            self.doc.anim = None;
+            return;
+        }
+        // Lecture
+        if let Some((t0, from)) = self.anim_play {
+            let fps = self.doc.anim.as_ref().map(|a| a.fps).unwrap_or(12.0).max(1.0);
+            let k = (from + (t0.elapsed().as_secs_f32() * fps) as usize) % frames.len();
+            if k != self.cur_frame() {
+                self.set_frame(k);
+            }
+            ui.ctx().request_repaint();
+        }
+        let typing = ui.ctx().egui_wants_keyboard_input();
+        if !typing {
+            let (left, right) = ui.input(|i| (i.key_pressed(egui::Key::Comma), i.key_pressed(egui::Key::Period)));
+            if left {
+                let k = self.cur_frame();
+                self.set_frame(if k == 0 { frames.len() - 1 } else { k - 1 });
+            }
+            if right {
+                self.set_frame((self.cur_frame() + 1) % frames.len());
+            }
+        }
+        egui::Panel::bottom(egui::Id::unique(("paint-anim", self.path.to_string_lossy().to_string()))).resizable(false).exact_size(96.0).frame(egui::Frame::new().fill(p.panel).stroke(Stroke::new(1.0, p.line)).inner_margin(egui::Margin::symmetric(8, 6))).show(ui, |ui| {
+            ui.horizontal(|ui| {
+                let b = |ui: &mut egui::Ui, icon: &str, tip: &str| ui.add(egui::Button::new(egui::RichText::new(icon).size(14.0)).min_size(vec2(26.0, 22.0))).on_hover_text(crate::i18n::t(tip)).clicked();
+                let playing = self.anim_play.is_some();
+                if b(ui, if playing { crate::lucide::PAUSE } else { crate::lucide::PLAY }, "lire l'animation") {
+                    self.anim_play = if playing { None } else { Some((Instant::now(), self.cur_frame())) };
+                    self.all();
+                }
+                if b(ui, crate::lucide::PLUS, "nouvelle image vide après celle-ci") {
+                    self.anim_play = None;
+                    self.anim_add(false);
+                }
+                if b(ui, crate::lucide::COPY, "copier cette image à la suite") {
+                    self.anim_play = None;
+                    self.anim_add(true);
+                }
+                if b(ui, crate::lucide::TRASH_2, "supprimer cette image") {
+                    self.anim_play = None;
+                    self.anim_delete();
+                }
+                ui.separator();
+                if let Some(a) = &mut self.doc.anim {
+                    ui.add(egui::DragValue::new(&mut a.fps).range(1.0..=60.0).speed(0.2).suffix(" i/s")).on_hover_text(crate::i18n::t("images par seconde"));
+                    let on = a.onion;
+                    if ui.add(egui::Button::new(egui::RichText::new(crate::lucide::LAYERS).size(14.0)).selected(on).min_size(vec2(26.0, 22.0))).on_hover_text(crate::i18n::t("pelure d'oignon : l'image d'avant en rouge, celle d'après en vert")).clicked() {
+                        a.onion = !on;
+                        self.all();
+                    }
+                }
+                ui.label(egui::RichText::new(format!("{} / {}", self.cur_frame() + 1, frames.len())).monospace().size(11.0).color(p.muted)).on_hover_text(crate::i18n::t(", et . : image précédente, suivante"));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button(crate::i18n::t("MP4…")).on_hover_text(crate::i18n::t("exporter l'animation en vidéo")).clicked() {
+                        self.anim_export(false);
+                    }
+                    if ui.button(crate::i18n::t("GIF…")).on_hover_text(crate::i18n::t("exporter l'animation en GIF animé")).clicked() {
+                        self.anim_export(true);
+                    }
+                });
+            });
+            // Les images
+            egui::ScrollArea::horizontal().id_salt("paint-anim-strip").show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    let th = 48.0;
+                    let tw = th * self.doc.w as f32 / self.doc.h.max(1) as f32;
+                    let cur = self.cur_frame();
+                    let mut pick = None;
+                    for (k, &li) in frames.iter().enumerate() {
+                        // Vignette refaite quand le calque change (clé : taille et quelques pixels)
+                        let l = &self.doc.layers[li];
+                        let key = {
+                            use std::hash::{Hash, Hasher};
+                            let mut h = std::collections::hash_map::DefaultHasher::new();
+                            (l.w, l.h, l.off).hash(&mut h);
+                            for c in l.px.iter().step_by(97) {
+                                c.hash(&mut h);
+                            }
+                            h.finish()
+                        };
+                        if !self.anim_thumbs.iter().any(|t| t.0 == li && t.1 == key) {
+                            let s = (64.0 / l.w.max(1) as f32).min(64.0 / l.h.max(1) as f32).min(1.0);
+                            let img = image::RgbaImage::from_raw(l.w as u32, l.h as u32, l.px.clone()).map(|i| image::imageops::thumbnail(&i, ((l.w as f32 * s) as u32).max(1), ((l.h as f32 * s) as u32).max(1)));
+                            if let Some(img) = img {
+                                let ci = egui::ColorImage::from_rgba_unmultiplied([img.width() as usize, img.height() as usize], img.as_raw());
+                                let t = ui.ctx().load_texture(format!("anim-{li}"), ci, egui::TextureOptions::LINEAR);
+                                self.anim_thumbs.retain(|t| t.0 != li);
+                                self.anim_thumbs.push((li, key, t));
+                            }
+                        }
+                        let (r, resp) = ui.allocate_exact_size(vec2(tw, th + 12.0), egui::Sense::click());
+                        let img = Rect::from_min_size(r.min, vec2(tw, th));
+                        ui.painter().rect_filled(img, 2.0, Color32::WHITE);
+                        if let Some((_, _, t)) = self.anim_thumbs.iter().find(|t| t.0 == li) {
+                            ui.painter().image(t.id(), img, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+                        }
+                        ui.painter().rect_stroke(img, 2.0, Stroke::new(if k == cur { 2.0 } else { 1.0 }, if k == cur { p.accent } else { p.line }), egui::StrokeKind::Outside);
+                        ui.painter().text(pos2(img.center().x, img.bottom() + 1.0), egui::Align2::CENTER_TOP, (k + 1).to_string(), egui::FontId::proportional(10.0), if k == cur { p.text } else { p.muted });
+                        if resp.clicked() {
+                            pick = Some(k);
+                        }
+                    }
+                    if let Some(k) = pick {
+                        self.anim_play = None;
+                        self.set_frame(k);
+                    }
+                });
+            });
+        });
+    }
+
     fn new_layer(&mut self) {
         self.checkpoint();
         let n = self.doc.layers.len() + 1;
@@ -3627,7 +3905,7 @@ impl Editor {
         base.blend = Blend::Normal;
         let mut top = self.doc.layers[a].clone();
         top.clip = false;
-        let pair = Doc { w: self.doc.w, h: self.doc.h, layers: vec![base, top], active: 1, groups: vec![], guides: vec![] };
+        let pair = Doc { w: self.doc.w, h: self.doc.h, layers: vec![base, top], active: 1, groups: vec![], guides: vec![], anim: None };
         let mut out = vec![0u8; self.doc.w * self.doc.h * 4];
         pair.composite(&mut out, [0, 0, self.doc.w, self.doc.h]);
         let below = &self.doc.layers[a - 1];

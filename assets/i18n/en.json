@@ -2808,5 +2808,18 @@
   "craie": "chalk",
   "aérographe": "airbrush",
   "peinture sèche": "dry paint",
-  "pinceau rond": "round brush"
+  "pinceau rond": "round brush",
+  "animation image par image": "frame-by-frame animation",
+  "Les calques d'un groupe « Animation » deviennent les images : pelure d'oignon, lecture, export GIF ou MP4": "The layers of an “Animation” group become the frames: onion skin, playback, GIF or MP4 export",
+  "lire l'animation": "play the animation",
+  "nouvelle image vide après celle-ci": "new empty frame after this one",
+  "copier cette image à la suite": "copy this frame after it",
+  "supprimer cette image": "delete this frame",
+  "images par seconde": "frames per second",
+  "pelure d'oignon : l'image d'avant en rouge, celle d'après en vert": "onion skin: previous frame in red, next in green",
+  ", et . : image précédente, suivante": ", and . : previous, next frame",
+  "MP4…": "MP4…",
+  "GIF…": "GIF…",
+  "exporter l'animation en vidéo": "export the animation as video",
+  "exporter l'animation en GIF animé": "export the animation as an animated GIF"
 }
