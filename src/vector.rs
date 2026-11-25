@@ -157,6 +157,16 @@ pub struct Shape {
     /// Groupe en mise en page automatique (comme Figma) : ses formes se suivent, avec un écart et des marges
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub layout: Option<AutoLayout>,
+    /// Groupe maître d'un composant (comme Figma) : ses instances le suivent
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub component: bool,
+    /// Instance du composant `instance_of` (0 : aucun)
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub instance_of: u64,
+}
+
+fn is_zero(v: &u64) -> bool {
+    *v == 0
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -243,6 +253,96 @@ impl Doc {
             }
         }
         out
+    }
+
+    /// Le contenu d'un groupe, en profondeur (le groupe exclu), dans l'ordre de ses enfants
+    pub fn preorder(&self, id: u64) -> Vec<u64> {
+        let mut out = vec![];
+        if let Some(Shape { kind: Kind::Group { children, .. }, .. }) = self.get(id) {
+            for c in children {
+                if out.len() > 10_000 {
+                    break;
+                }
+                out.push(*c);
+                out.extend(self.preorder(*c));
+            }
+        }
+        out
+    }
+
+    /// Recopie chaque composant dans ses instances, décalé à leur place.
+    /// Le texte d'une instance reste le sien (comme un remplacement Figma).
+    pub fn sync_instances(&mut self) {
+        let insts: Vec<(u64, u64)> = self.shapes.iter().filter(|s| s.instance_of != 0).map(|s| (s.id, s.instance_of)).collect();
+        for (iid, mid) in insts {
+            let Some(m) = self.get(mid).filter(|m| m.component && matches!(m.kind, Kind::Group { .. })).cloned() else { continue };
+            let mpre = self.preorder(mid);
+            if mpre.contains(&iid) || self.preorder(iid).contains(&mid) {
+                continue;
+            }
+            let Some(inst) = self.get(iid).cloned() else { continue };
+            let (dx, dy) = (inst.x - m.x, inst.y - m.y);
+            let ipre = self.preorder(iid);
+            let same = ipre.len() == mpre.len()
+                && mpre.iter().zip(&ipre).all(|(a, b)| match (self.get(*a), self.get(*b)) {
+                    (Some(x), Some(y)) => std::mem::discriminant(&x.kind) == std::mem::discriminant(&y.kind) && matches!((&x.kind, &y.kind), (Kind::Group { children: c1, .. }, Kind::Group { children: c2, .. }) if c1.len() == c2.len()) == matches!(x.kind, Kind::Group { .. }),
+                    _ => false,
+                });
+            let new_ids: Vec<u64> = if same { ipre.clone() } else { mpre.iter().map(|_| self.new_id()).collect() };
+            let map = |id: u64| if id == mid { iid } else { mpre.iter().position(|x| *x == id).map(|k| new_ids[k]).unwrap_or(id) };
+            let mut copies = vec![];
+            for (k, src) in mpre.iter().enumerate() {
+                let Some(mut c) = self.get(*src).cloned() else { continue };
+                c.id = new_ids[k];
+                c.parent = map(c.parent);
+                c.x += dx;
+                c.y += dy;
+                c.component = false;
+                if let Kind::Group { children, .. } = &mut c.kind {
+                    *children = children.iter().map(|x| map(*x)).collect();
+                }
+                // Le texte remplacé dans l'instance est gardé
+                if same {
+                    if let (Kind::Text { text, .. }, Some(Shape { kind: Kind::Text { text: own, .. }, .. })) = (&mut c.kind, self.get(new_ids[k])) {
+                        *text = own.clone();
+                    }
+                }
+                copies.push(c);
+            }
+            if !same {
+                self.remove(&ipre);
+            }
+            for c in copies {
+                match self.index(c.id) {
+                    Some(i) => self.shapes[i] = c,
+                    None => self.shapes.push(c),
+                }
+            }
+            if let Some(i) = self.index(iid) {
+                let s = &mut self.shapes[i];
+                if let (Kind::Group { children, op }, Kind::Group { children: mc, op: mop }) = (&mut s.kind, &m.kind) {
+                    *children = mc.iter().map(|x| map(*x)).collect();
+                    *op = *mop;
+                }
+                s.layout = m.layout.clone();
+                s.fills = m.fills.clone();
+                s.strokes = m.strokes.clone();
+                s.shadow = m.shadow.clone();
+                s.blur = m.blur;
+                s.blend = m.blend.clone();
+            }
+        }
+    }
+
+    /// Une nouvelle instance du composant `mid`, posée à côté ; rend son identifiant
+    pub fn instantiate(&mut self, mid: u64) -> Option<u64> {
+        let m = self.get(mid).filter(|m| m.component)?.clone();
+        let b = self.bounds(&m);
+        let id = self.new_id();
+        let name = format!("{} · {}", m.name, crate::i18n::t("instance"));
+        self.shapes.push(Shape { id, name, kind: Kind::Group { children: vec![], op: 0 }, x: b[2] + 40.0, y: m.y, instance_of: mid, ..Shape::base() });
+        self.sync_instances();
+        Some(id)
     }
 
     /// Place les formes des groupes en mise en page automatique (les groupes intérieurs d'abord).
@@ -403,7 +503,7 @@ fn union(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {
 
 impl Shape {
     pub fn base() -> Shape {
-        Shape { id: 0, name: String::new(), kind: Kind::Rect { w: 100.0, h: 100.0, r: [0.0; 4] }, x: 0.0, y: 0.0, rot: 0.0, fills: vec![], strokes: vec![], opacity: 1.0, visible: true, locked: false, parent: 0, shadow: None, blur: 0.0, blend: String::new(), layout: None }
+        Shape { id: 0, name: String::new(), kind: Kind::Rect { w: 100.0, h: 100.0, r: [0.0; 4] }, x: 0.0, y: 0.0, rot: 0.0, fills: vec![], strokes: vec![], opacity: 1.0, visible: true, locked: false, parent: 0, shadow: None, blur: 0.0, blend: String::new(), layout: None, component: false, instance_of: 0 }
     }
 
     pub fn kind_label(&self) -> &'static str {
@@ -1260,6 +1360,39 @@ mod tests {
         }
         d.apply_layouts();
         assert_eq!(d.bounds(d.get(ids[1]).unwrap())[0], 180.0);
+    }
+
+    #[test]
+    fn composants() {
+        let mut d = Doc::starter();
+        let a = d.new_id();
+        d.shapes.push(Shape { id: a, kind: Kind::Rect { w: 80.0, h: 30.0, r: [6.0; 4] }, x: 10.0, y: 10.0, fills: vec![Paint::solid([255, 0, 0, 255])], ..Shape::base() });
+        let t = d.new_id();
+        d.shapes.push(Shape { id: t, kind: Kind::Text { text: "OK".into(), size: 14.0, font: "inter".into(), align: 0, width: None, spacing: 0.0, leading: 1.0 }, x: 20.0, y: 15.0, ..Shape::base() });
+        let m = d.group(&[a, t], 0).unwrap();
+        d.shapes.iter_mut().find(|s| s.id == m).unwrap().component = true;
+        let i = d.instantiate(m).unwrap();
+        let kids = d.preorder(i);
+        assert_eq!(kids.len(), 2);
+        let ib = d.bounds(d.get(i).unwrap());
+        assert!((ib[0] - 130.0).abs() < 0.5, "{ib:?}");
+        // Remplacer le texte de l'instance, puis changer la couleur du maître
+        if let Some(Shape { kind: Kind::Text { text, .. }, .. }) = d.shapes.iter_mut().find(|s| s.id == kids[1]) {
+            *text = "Annuler".into();
+        }
+        d.shapes.iter_mut().find(|s| s.id == a).unwrap().fills = vec![Paint::solid([0, 0, 255, 255])];
+        d.sync_instances();
+        assert_eq!(d.preorder(i), kids, "mêmes identifiants");
+        assert_eq!(d.get(kids[0]).unwrap().fills[0].first(), [0, 0, 255, 255]);
+        assert!(matches!(&d.get(kids[1]).unwrap().kind, Kind::Text { text, .. } if text == "Annuler"));
+        // Une forme de plus dans le maître : l'instance est refaite
+        let e = d.new_id();
+        d.shapes.push(Shape { id: e, kind: Kind::Ellipse { w: 8.0, h: 8.0 }, x: 2.0, y: 2.0, parent: m, ..Shape::base() });
+        if let Some(Shape { kind: Kind::Group { children, .. }, .. }) = d.shapes.iter_mut().find(|s| s.id == m) {
+            children.push(e);
+        }
+        d.sync_instances();
+        assert_eq!(d.preorder(i).len(), 3);
     }
 
     #[test]

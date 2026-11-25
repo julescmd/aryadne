@@ -2884,5 +2884,12 @@
   "en ligne": "horizontal",
   "en colonne": "vertical",
   "aligner au début": "align start",
-  "aligner à la fin": "align end"
+  "aligner à la fin": "align end",
+  "aller au composant": "go to main component",
+  "créer un composant": "create component",
+  "détacher l'instance (redevient un groupe)": "detach instance (becomes a plain group)",
+  "maître": "main",
+  "n'est plus un composant": "no longer a component",
+  "nouvelle instance (Alt+glisser marche aussi)": "new instance (Alt+drag works too)",
+  "Composant": "Component"
 }

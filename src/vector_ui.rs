@@ -476,6 +476,8 @@ impl Editor {
             Kind::Path { .. } => l::PEN_TOOL,
             Kind::Text { .. } => l::TYPE,
             Kind::Image { .. } => l::IMAGE,
+            Kind::Group { .. } if s.component => l::COMPONENT,
+            Kind::Group { .. } if s.instance_of != 0 => l::DIAMOND,
             Kind::Group { op: 0, .. } => l::FOLDER,
             Kind::Group { .. } => l::SQUARE_DASHED,
         };
@@ -841,6 +843,49 @@ impl Editor {
                 }
             }
         }
+        // Composants (comme Figma) : un groupe maître et ses instances
+        if let Some(gid) = single.filter(|i| self.doc.get(*i).is_some_and(|s| matches!(s.kind, Kind::Group { .. }))) {
+            let s = self.doc.get(gid).cloned().unwrap();
+            head(ui, "Composant");
+            ui.horizontal(|ui| {
+                if s.instance_of != 0 {
+                    let mname = self.doc.get(s.instance_of).map(|m| m.name.clone()).unwrap_or_default();
+                    ui.label(egui::RichText::new(format!("{} {mname}", l::DIAMOND)).weak());
+                    if ui.button(l::CROSSHAIR).on_hover_text(crate::i18n::t("aller au composant")).clicked() {
+                        self.sel = vec![s.instance_of];
+                    }
+                    if ui.button(l::UNLINK).on_hover_text(crate::i18n::t("détacher l'instance (redevient un groupe)")).clicked() {
+                        self.doc = snapshot.clone();
+                        if let Some(x) = self.doc.shapes.iter_mut().find(|x| x.id == gid) {
+                            x.instance_of = 0;
+                        }
+                        ch = true;
+                    }
+                } else if s.component {
+                    ui.label(egui::RichText::new(format!("{} {}", l::COMPONENT, crate::i18n::t("maître"))).weak());
+                    if ui.button(l::COPY_PLUS).on_hover_text(crate::i18n::t("nouvelle instance (Alt+glisser marche aussi)")).clicked() {
+                        self.doc = snapshot.clone();
+                        if let Some(i) = self.doc.instantiate(gid) {
+                            self.sel = vec![i];
+                        }
+                        ch = true;
+                    }
+                    if ui.button(l::X).on_hover_text(crate::i18n::t("n'est plus un composant")).clicked() {
+                        self.doc = snapshot.clone();
+                        if let Some(x) = self.doc.shapes.iter_mut().find(|x| x.id == gid) {
+                            x.component = false;
+                        }
+                        ch = true;
+                    }
+                } else if ui.button(format!("{} {}", l::COMPONENT, crate::i18n::t("créer un composant"))).on_hover_text("Ctrl+Alt+K").clicked() {
+                    self.doc = snapshot.clone();
+                    if let Some(x) = self.doc.shapes.iter_mut().find(|x| x.id == gid) {
+                        x.component = true;
+                    }
+                    ch = true;
+                }
+            });
+        }
         // Mise en page automatique d'un groupe (comme Figma)
         if let Some(gid) = single.filter(|i| self.doc.get(*i).is_some_and(|s| matches!(s.kind, Kind::Group { op: 0, .. }))) {
             head(ui, "Mise en page auto");
@@ -1169,7 +1214,8 @@ impl Editor {
         let ppp = ctx.pixels_per_point();
         let (pw, ph) = ((rect.width() * ppp).round().max(1.0) as u32, (rect.height() * ppp).round().max(1.0) as u32);
         let area = [c[0] - rect.width() / 2.0 / z, c[1] - rect.height() / 2.0 / z, rect.width() / z, rect.height() / z];
-        // Les cadres en mise en page automatique replacent leurs formes avant le rendu
+        // Les instances suivent leur composant, puis les cadres en mise en page automatique replacent leurs formes
+        self.doc.sync_instances();
         self.doc.apply_layouts();
         let key = {
             use std::hash::{Hash, Hasher};
@@ -1847,6 +1893,12 @@ impl Editor {
         c.id = nid;
         c.x += off;
         c.y += off;
+        // Copier un composant donne une instance (comme Figma)
+        if s.component {
+            c.component = false;
+            c.instance_of = s.id;
+            c.name = format!("{} · {}", s.name, crate::i18n::t("instance"));
+        }
         if let Kind::Group { children, op } = &s.kind {
             let mut kids = vec![];
             for k in children {
@@ -1901,6 +1953,27 @@ impl Editor {
             // Maj+A : la sélection dans un cadre en mise en page automatique (comme Figma)
             self.checkpoint();
             self.auto_layout_selection();
+            self.changed();
+        } else if !self.sel.is_empty() && ui.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Key { key: egui::Key::K, pressed: true, modifiers, .. } if modifiers.command && modifiers.alt))) {
+            // Ctrl+Alt+K : la sélection devient un composant (groupée si besoin)
+            self.checkpoint();
+            let gid = match self.sel.as_slice() {
+                [one] if matches!(self.doc.get(*one).map(|s| &s.kind), Some(Kind::Group { .. })) => Some(*one),
+                _ => {
+                    let ids: Vec<u64> = self.sel.iter().map(|i| self.top_of(*i)).collect();
+                    self.doc.group(&ids, 0)
+                }
+            };
+            if let Some(g) = gid {
+                if let Some(s) = self.doc.shapes.iter_mut().find(|s| s.id == g) {
+                    s.component = true;
+                    s.instance_of = 0;
+                    if s.name.is_empty() || s.name == "Groupe" {
+                        s.name = crate::i18n::t("Composant");
+                    }
+                }
+                self.sel = vec![g];
+            }
             self.changed();
         } else if cmd && k(egui::Key::G) && !self.sel.is_empty() {
             self.checkpoint();

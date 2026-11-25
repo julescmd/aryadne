@@ -61,7 +61,13 @@ pub fn pressed(ctx: &egui::Context, id: &str) -> bool {
         return false;
     }
     let b = bindings(id);
-    ctx.input_mut(|i| b.iter().any(|s| i.consume_shortcut(s)))
+    // Alt en trop ne compte pas comme le même raccourci (Ctrl+Alt+K n'est pas Ctrl+K)
+    ctx.input_mut(|i| {
+        b.iter().any(|s| {
+            let alt_extra = i.events.iter().any(|e| matches!(e, egui::Event::Key { key, pressed: true, modifiers, .. } if *key == s.logical_key && modifiers.alt != s.modifiers.alt));
+            !alt_extra && i.consume_shortcut(s)
+        })
+    })
 }
 
 /// Remplace les raccourcis d'une action (vide = aucun) et enregistre.
