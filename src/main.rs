@@ -28,6 +28,7 @@ mod text3d;
 mod timetrack;
 mod timenav;
 mod paint3d;
+mod mocap;
 mod pbrphoto;
 mod vector_ui;
 mod keymap;

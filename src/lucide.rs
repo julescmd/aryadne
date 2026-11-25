@@ -159,6 +159,7 @@ pub const PRINTER: &str = "\u{f0141}";
 pub const SPRAY_CAN: &str = "\u{f0495}";
 pub const MESSAGE_CIRCLE: &str = "\u{f0116}";
 pub const VAULT: &str = "\u{f058f}";
+pub const PERSON_STANDING: &str = "\u{f021e}";
 pub const FLIP_HORIZONTAL_2: &str = "\u{f035e}";
 pub const GLOBE: &str = "\u{f00e8}";
 pub const UNDO_2: &str = "\u{f02a1}";

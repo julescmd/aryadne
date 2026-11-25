@@ -5466,6 +5466,37 @@ impl Viewer {
             self.anim_last = None;
         }
         let n_before = scene.objects.len();
+        // Capture de mouvement : un squelette neuf, ou le mouvement reciblé sur le squelette de l'os choisi
+        if self.hdr_add == Some("bvh") {
+            self.hdr_add = None;
+            let mut d = rfd::FileDialog::new().add_filter("BVH", &["bvh"]);
+            if !self.root.is_empty() {
+                d = d.set_directory(&self.root);
+            }
+            if let Some(f) = d.pick_file() {
+                match std::fs::read_to_string(&f).map_err(|e| e.to_string()).and_then(|t| crate::mocap::parse(&t)) {
+                    Ok(b) => {
+                        let target = self.scene_sel.filter(|&k| crate::rig::is_bone(scene, k)).map(|k| crate::rig::root_of(scene, k));
+                        match target {
+                            Some(root) => {
+                                let n = crate::mocap::retarget(scene, &b, root);
+                                crate::notify(if n == 0 {
+                                    crate::i18n::t("Aucun os du squelette ne porte le nom d'une articulation du BVH (Hips, Spine, LeftArm…).")
+                                } else {
+                                    format!("{n} {} · {} {}", crate::i18n::t("os animés"), b.frames.len(), crate::i18n::t("images"))
+                                });
+                            }
+                            None => {
+                                self.scene_sel = Some(crate::mocap::import(scene, &b, ""));
+                                crate::notify(format!("{} {} · {} {}", b.joints.len(), crate::i18n::t("os"), b.frames.len(), crate::i18n::t("images")));
+                            }
+                        }
+                        changed = true;
+                    }
+                    Err(e) => crate::notify(format!("BVH : {e}")),
+                }
+            }
+        }
         // Menu « ajouter » de l'en-tête
         if let Some(id) = self.hdr_add.take() {
             let k = match id {
@@ -7742,6 +7773,10 @@ impl Viewer {
                                     self.hdr_add = Some(id);
                                     ui.close();
                                 }
+                            }
+                            if ui.button(format!("{}  {}", crate::lucide::PERSON_STANDING, crate::i18n::t("capture de mouvement (BVH)…"))).on_hover_text(crate::i18n::t("Un squelette animé depuis un fichier BVH ; si un os est choisi, le mouvement va sur son squelette (os de même nom)")).clicked() {
+                                self.hdr_add = Some("bvh");
+                                ui.close();
                             }
                             ui.separator();
                             ui.label(egui::RichText::new(crate::i18n::t("Maj+A dans la vue : le même menu sous le curseur")).size(10.5).color(p.muted));

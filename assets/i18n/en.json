@@ -3445,5 +3445,9 @@
   "composant introuvable": "component not found",
   "décalque": "decal",
   "décalque : projeter une image sur l'objet au clic (logo, étiquette)": "decal: project an image onto the object where you click (logo, label)",
-  "image illisible": "unreadable image"
+  "image illisible": "unreadable image",
+  "capture de mouvement (BVH)…": "motion capture (BVH)…",
+  "Un squelette animé depuis un fichier BVH ; si un os est choisi, le mouvement va sur son squelette (os de même nom)": "An animated skeleton from a BVH file; if a bone is selected, the motion goes onto its skeleton (bones with the same names)",
+  "Aucun os du squelette ne porte le nom d'une articulation du BVH (Hips, Spine, LeftArm…).": "No bone in the skeleton has the name of a BVH joint (Hips, Spine, LeftArm…).",
+  "os animés": "bones animated"
 }
