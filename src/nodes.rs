@@ -2893,7 +2893,7 @@ impl Editor {
                 for name in MATERIAL_PRESETS {
                     let Some(g) = material_preset(name) else { continue };
                     let Ok(prog) = Program::compile(&g, &root, 256) else { continue };
-                    let img = crate::model3d::render_material_preview(&sphere, std::sync::Arc::new(prog), 80);
+                    let img = crate::model3d::render_material_thumb(&sphere, std::sync::Arc::new(prog), 80);
                     if tx.send((name, img)).is_err() {
                         return;
                     }
@@ -4936,7 +4936,7 @@ impl Editor {
         std::thread::spawn(move || {
             for (k, g) in todo {
                 let Ok(prog) = Program::compile(&g, &root, 256) else { continue };
-                let img = crate::model3d::render_material_preview(&sphere, std::sync::Arc::new(prog), 96);
+                let img = crate::model3d::render_material_thumb(&sphere, std::sync::Arc::new(prog), 96);
                 if tx.send((k, img)).is_err() {
                     return;
                 }
@@ -5098,9 +5098,11 @@ impl Editor {
                             None if self.pv_shape.unwrap_or(if self.graph.stack.is_some() { 1 } else { 0 }) == 1 => self.boxy.get_or_insert_with(|| std::sync::Arc::new(crate::model3d::preview_box())).clone(),
                             None => self.sphere.get_or_insert_with(|| std::sync::Arc::new(crate::model3d::preview_sphere())).clone(),
                         };
-                        let (yaw, pitch, dist, env) = (self.pv_yaw, self.pv_pitch, self.pv_dist, self.pv_env);
+                        // Le cube a des coins plus loin du centre que la sphère : un peu plus de recul pour le voir en entier
+                        let boxed = self.pv_model.is_none() && self.pv_shape.unwrap_or(if self.graph.stack.is_some() { 1 } else { 0 }) == 1;
+                        let (yaw, pitch, dist, env) = (self.pv_yaw, self.pv_pitch, self.pv_dist * if boxed { 1.6 } else { 1.0 }, self.pv_env);
                         std::thread::spawn(move || {
-                            let img = crate::model3d::render_material_view(&model, std::sync::Arc::new(prog), 360, yaw, pitch, dist, env);
+                            let img = crate::model3d::render_material_view(&model, std::sync::Arc::new(prog), 480, yaw, pitch, dist, env);
                             let _ = tx.send((key, img));
                             ctx2.request_repaint();
                         });

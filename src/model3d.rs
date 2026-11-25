@@ -2491,6 +2491,19 @@ pub fn render_material_preview(sphere: &Prepared, prog: std::sync::Arc<crate::no
     render_material_view(sphere, prog, size, 0.4, 0.25, 2.0, 0)
 }
 
+/// Miniature d'un matériau pour les bibliothèques : la sphère seule, sur fond transparent
+pub fn render_material_thumb(sphere: &Prepared, prog: std::sync::Arc<crate::nodes::Program>, size: usize) -> crate::nodes::Img {
+    let mut img = render_material_preview(sphere, prog, size);
+    let look = Look { material: Material::Gray, ..Default::default() };
+    // Le masque de la sphère : là où un rendu sans fond a quelque chose
+    let f = render(sphere, &Camera { yaw: 0.4, pitch: 0.25, dist: 2.0, ..Default::default() }, &look, size, size);
+    for (k, p) in img.px.iter_mut().enumerate() {
+        let a = f.rgba.get(k * 4 + 3).copied().unwrap_or(255) as f32 / 255.0;
+        p[3] = a;
+    }
+    img
+}
+
 /// Aperçu d'un matériau sur un modèle, avec la caméra et l'éclairage choisis.
 pub fn render_material_view(model: &Prepared, prog: std::sync::Arc<crate::nodes::Program>, size: usize, yaw: f32, pitch: f32, dist: f32, env: usize) -> crate::nodes::Img {
     let look = Look { nodes: Some(prog), show_bg: true, blur_bg: true, env: Env::preset(env), ..Default::default() };
@@ -10107,5 +10120,18 @@ mod fast_move_tests {
                 assert!((back[k] - v[k]).abs() < 1e-4, "{back:?} {v:?}");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod thumb_tests {
+    #[test]
+    fn miniature_fond_transparent() {
+        let s = super::preview_sphere();
+        let look = super::Look { material: super::Material::Gray, ..Default::default() };
+        let f = super::render(&s, &super::Camera { yaw: 0.4, pitch: 0.25, dist: 2.0, ..Default::default() }, &look, 48, 48);
+        let a = |x: usize, y: usize| f.rgba[(y * 48 + x) * 4 + 3];
+                assert_eq!(a(24, 24), 255);
+        assert_eq!(a(1, 1), 0);
     }
 }
