@@ -3269,5 +3269,11 @@
   "focale": "focal length",
   "flou": "blur",
   "Coche « Calque 3D » sur un calque pour lui donner une profondeur.": "Tick “3D layer” on a layer to give it depth.",
-  "Monochrome clair": "Light monochrome"
+  "Monochrome clair": "Light monochrome",
+  "fichier de police (.ttf, .otf)…": "font file (.ttf, .otf)…",
+  "Une police variable montre ses axes (graisse, largeur, inclinaison…), animables": "A variable font shows its axes (weight, width, slant…), which can be animated",
+  "graisse": "weight",
+  "inclinaison": "slant",
+  "italique": "italic",
+  "taille optique": "optical size"
 }

@@ -340,6 +340,9 @@ pub struct Layer {
     /// Orientation automatique : le calque tourne pour suivre la direction de son mouvement
     #[serde(default, skip_serializing_if = "is_false_b")]
     pub auto_orient: bool,
+    /// Police variable d'un texte : valeur de chaque axe (wght, wdth, slnt…), animable (v[0])
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub font_axes: std::collections::BTreeMap<String, Track>,
     /// Calque 3D (2,5D) : sa profondeur (v[0], px ; plus grand = plus loin), vue par la caméra de la composition
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub depth: Option<Track>,
@@ -753,6 +756,7 @@ impl Layer {
             exprs: Default::default(),
             masks: vec![],
             auto_orient: false,
+            font_axes: Default::default(),
             depth: None,
             fx: vec![],
             repeat: None,
@@ -1173,8 +1177,76 @@ impl Compo {
 
 // ---------- Rendu ----------
 
+/// Dossier du coffre, pour les polices qu'il contient (chemins relatifs)
+static FONT_ROOT: OnceLock<std::sync::Mutex<PathBuf>> = OnceLock::new();
+
+fn is_font_file(name: &str) -> bool {
+    let n = name.to_lowercase();
+    n.ends_with(".ttf") || n.ends_with(".otf")
+}
+
+/// La police d'un calque texte à l'instant `t` : son nom, ou pour un fichier de police, le fichier et
+/// la valeur de ses axes variables (« chemin|wght=600;wdth=80 »)
+pub fn font_spec(l: &Layer, fname: &str, t: f32) -> String {
+    if !is_font_file(fname) {
+        return fname.to_string();
+    }
+    let axes: Vec<String> = l.font_axes.iter().map(|(k, tr)| format!("{k}={:.0}", tr.at(t)[0])).collect();
+    format!("{fname}|{}", axes.join(";"))
+}
+
+/// Les axes d'une police variable (fichier du coffre) : (étiquette, min, défaut, max)
+pub fn font_file_axes(fname: &str) -> Vec<(String, f32, f32, f32)> {
+    use ab_glyph::VariableFont;
+    let Some(bytes) = font_bytes(fname) else { return vec![] };
+    let Ok(f) = ab_glyph::FontRef::try_from_slice(bytes) else { return vec![] };
+    f.variations().into_iter().map(|a| (String::from_utf8_lossy(&a.tag).to_string(), a.min_value, a.default_value, a.max_value)).collect()
+}
+
+/// Les octets d'un fichier de police, lus une fois et gardés
+fn font_bytes(fname: &str) -> Option<&'static [u8]> {
+    static FILES: OnceLock<std::sync::Mutex<HashMap<String, &'static [u8]>>> = OnceLock::new();
+    let files = FILES.get_or_init(Default::default);
+    if let Some(b) = files.lock().ok()?.get(fname) {
+        return Some(b);
+    }
+    let path = if Path::new(fname).is_absolute() { PathBuf::from(fname) } else { FONT_ROOT.get()?.lock().ok()?.join(fname) };
+    let data: &'static [u8] = Box::leak(std::fs::read(path).ok()?.into_boxed_slice());
+    files.lock().ok()?.insert(fname.to_string(), data);
+    Some(data)
+}
+
 pub fn font(name: &str) -> &'static ab_glyph::FontArc {
     use ab_glyph::FontArc;
+    if is_font_file(name.split('|').next().unwrap_or("")) {
+        // Une police du coffre, avec ses axes : une instance par réglage (arrondi à l'unité)
+        static VARIANTS: OnceLock<std::sync::Mutex<HashMap<String, &'static FontArc>>> = OnceLock::new();
+        let vars = VARIANTS.get_or_init(Default::default);
+        if let Some(f) = vars.lock().ok().and_then(|m| m.get(name).copied()) {
+            return f;
+        }
+        let (file, axes) = name.split_once('|').unwrap_or((name, ""));
+        let made = font_bytes(file).and_then(|b| ab_glyph::FontRef::try_from_slice(b).ok()).map(|mut f| {
+            use ab_glyph::VariableFont;
+            for kv in axes.split(';').filter(|s| !s.is_empty()) {
+                if let Some((k, v)) = kv.split_once('=') {
+                    let tag: Vec<u8> = k.bytes().chain(std::iter::repeat(b' ')).take(4).collect();
+                    let _ = f.set_variation(&[tag[0], tag[1], tag[2], tag[3]], v.parse().unwrap_or(0.0));
+                }
+            }
+            &*Box::leak(Box::new(FontArc::new(f)))
+        });
+        if let Some(f) = made {
+            if let Ok(mut m) = vars.lock() {
+                // Une animation d'axe crée beaucoup d'instances : on borne (elles sont petites)
+                if m.len() < 4000 {
+                    m.insert(name.to_string(), f);
+                }
+            }
+            return f;
+        }
+        return font("inter-bold");
+    }
     static FONTS: OnceLock<Vec<(&'static str, FontArc)>> = OnceLock::new();
     let list = FONTS.get_or_init(|| {
         let f = |b: &'static [u8]| FontArc::try_from_slice(b).expect("police intégrée");
@@ -1290,6 +1362,9 @@ pub struct Cache {
 
 impl Cache {
     pub fn new(root: &Path) -> Cache {
+        if let Ok(mut r) = FONT_ROOT.get_or_init(Default::default).lock() {
+            *r = root.to_path_buf();
+        }
         Cache { images: HashMap::new(), bitmaps: HashMap::new(), root: root.to_path_buf(), compos: HashMap::new(), depth: 0 }
     }
 
@@ -1328,7 +1403,7 @@ impl Cache {
 pub fn size(l: &Layer, cache: &mut Cache) -> [f32; 2] {
     match &l.kind {
         Kind::Text { text, size, font, tracking, align, .. } => {
-            let t = layout_text(text, *size, font, *tracking, *align, Unit::Letter);
+            let t = layout_text(text, *size, &font_spec(l, font, l.start), *tracking, *align, Unit::Letter);
             [t.w, t.h]
         }
         Kind::Rect { w, h, .. } | Kind::Ellipse { w, h, .. } | Kind::Noise { w, h, .. } => [*w, *h],
@@ -1670,6 +1745,8 @@ fn bitmap(l: &Layer, t: f32, k: f32, cache: &mut Cache) -> Option<Bitmap> {
         }
         Kind::Text { text, size, color, font: fname, tracking, align } => {
             use ab_glyph::{Font, ScaleFont};
+            let spec = font_spec(l, fname, t);
+            let fname = &spec;
             let by = l.reveal.as_ref().map(|r| r.by).unwrap_or_default();
             let lay = layout_text(text, *size, fname, *tracking, *align, by);
             let rise = l.reveal.as_ref().map(|r| r.rise.abs().max(r.slide.abs()) + size * (r.scale - 1.0).max(0.0)).unwrap_or(0.0);
@@ -1930,6 +2007,7 @@ fn prep_layer(c: &Compo, li: usize, t: f32, scale: f32, cache: &mut Cache, (w, h
         (Kind::Compo { .. }, _) => false,
         (Kind::Noise { speed, .. }, _) if *speed != 0.0 => false,
         (Kind::Path { keys, .. }, _) => !l.trim.animated() && l.cycle.is_none() && keys.is_empty(),
+        (Kind::Text { .. }, _) if l.font_axes.values().any(|a| a.animated()) => false,
         (Kind::Text { text, .. }, Some(r)) => t - l.start >= text.chars().count() as f32 * r.delay + r.dur,
         _ => true,
     };
@@ -1942,6 +2020,7 @@ fn prep_layer(c: &Compo, li: usize, t: f32, scale: f32, cache: &mut Cache, (w, h
         serde_json::to_string(&l.trim).unwrap_or_default().hash(&mut h);
         serde_json::to_string(&l.masks).unwrap_or_default().hash(&mut h);
         serde_json::to_string(&l.fx).unwrap_or_default().hash(&mut h);
+        serde_json::to_string(&l.font_axes).unwrap_or_default().hash(&mut h);
         ((defocus * 4.0).round() as i32).hash(&mut h);
         (h.finish(), k.to_bits())
     });
@@ -2931,5 +3010,32 @@ mod cam_tests {
         // Derrière la caméra : rien
         c.layers[1].depth = Some(Track::new(-5000.0, 0.0));
         assert!(c.projected(1, 0.0).is_none());
+    }
+}
+#[cfg(test)]
+mod varfont_tests {
+    use super::*;
+    #[test]
+    fn police_variable() {
+        let f = "/usr/share/fonts/truetype/google-fonts/ofl/montserrat/Montserrat[wght].ttf";
+        if !Path::new(f).exists() {
+            return;
+        }
+        let axes = font_file_axes(f);
+        assert!(axes.iter().any(|a| a.0 == "wght" && a.1 < 200.0 && a.3 > 800.0), "{axes:?}");
+        let mut c = Compo { layers: vec![], w: 1200, h: 600, ..Compo::default() };
+        let mut out = vec![];
+        for (k, wg) in [100.0, 500.0, 900.0].into_iter().enumerate() {
+            let mut l = Layer::new("t", Kind::Text { text: "Aryadne".into(), size: 140.0, color: [240, 236, 240], font: f.into(), tracking: 0.0, align: 1 }, &c);
+            l.pos = Track::new(600.0, 110.0 + k as f32 * 190.0);
+            l.font_axes.insert("wght".into(), Track::new(wg, 0.0));
+            c.layers.push(l);
+            out.push(size(&c.layers[k], &mut Cache::new(Path::new("/tmp")))[0]);
+        }
+        // Plus gras, plus large
+        assert!(out[0] < out[1] && out[1] < out[2], "{out:?}");
+        if std::env::var("ARY_DEMO").is_ok() {
+            render(&c, 0.5, 0.5, &mut Cache::new(Path::new("/tmp"))).save("/tmp/varfont.png").unwrap();
+        }
     }
 }

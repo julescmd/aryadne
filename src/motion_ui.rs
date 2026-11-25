@@ -1215,17 +1215,72 @@ impl Editor {
                 Kind::Text { text, size, color, font, tracking, align } => {
                     section(ui, "Texte");
                     changed |= ui.add(egui::TextEdit::multiline(text).desired_rows(2).desired_width(f32::INFINITY)).changed();
+                    let mut pick_font = false;
                     ui.horizontal(|ui| {
-                        egui::ComboBox::from_id_salt("motion-font").selected_text(motion::FONTS.iter().find(|f| f.0 == font).map(|f| f.1).unwrap_or("Inter gras")).show_ui(ui, |ui| {
+                        let shown = motion::FONTS.iter().find(|f| f.0 == font).map(|f| f.1.to_string()).unwrap_or_else(|| font.rsplit('/').next().unwrap_or(font).to_string());
+                        egui::ComboBox::from_id_salt("motion-font").selected_text(shown).width(180.0).show_ui(ui, |ui| {
                             for (id, name) in motion::FONTS {
                                 if ui.selectable_label(font == id, name).clicked() {
                                     *font = id.to_string();
+                                    lay.font_axes.clear();
                                     changed = true;
                                 }
+                            }
+                            ui.separator();
+                            if ui.button(format!("{}  {}", l::FOLDER_OPEN, crate::i18n::t("fichier de police (.ttf, .otf)…"))).on_hover_text(crate::i18n::t("Une police variable montre ses axes (graisse, largeur, inclinaison…), animables")).clicked() {
+                                pick_font = true;
                             }
                         });
                         changed |= ui.color_edit_button_srgb(color).changed();
                     });
+                    if pick_font {
+                        if let Some(f) = rfd::FileDialog::new().add_filter("police", &["ttf", "otf"]).pick_file() {
+                            let rel = if let Some(rel) = crate::vault::inside(&self.root, &f) {
+                                Ok(rel)
+                            } else {
+                                let here = crate::vault::inside(&self.root, &self.path).map(|r| crate::vault::parent(&r)).unwrap_or_default();
+                                crate::vault::import(&self.root, &here, &f, false)
+                            };
+                            match rel {
+                                Ok(rel) => {
+                                    *font = rel;
+                                    lay.font_axes.clear();
+                                    changed = true;
+                                }
+                                Err(e) => self.message = Some(e),
+                            }
+                        }
+                    }
+                    // Axes d'une police variable : un curseur par axe, et sa clé
+                    let axes = motion::font_file_axes(font);
+                    if !axes.is_empty() {
+                        let now = self.time - lay.start;
+                        let now = now.max(0.0) + lay.start;
+                        for (tag, lo, def, hi) in axes {
+                            let label = match tag.as_str() {
+                                "wght" => crate::i18n::t("graisse"),
+                                "wdth" => crate::i18n::t("largeur"),
+                                "slnt" => crate::i18n::t("inclinaison"),
+                                "ital" => crate::i18n::t("italique"),
+                                "opsz" => crate::i18n::t("taille optique"),
+                                _ => tag.clone(),
+                            };
+                            let tr = lay.font_axes.entry(tag.clone()).or_insert_with(|| motion::Track::new(def, 0.0));
+                            crate::modifiers::row(ui, &label, |ui| {
+                                let mut v = tr.at(now)[0];
+                                ui.spacing_mut().slider_width = (ui.available_width() - 80.0).max(60.0);
+                                if ui.add(egui::Slider::new(&mut v, lo..=hi).max_decimals(0)).changed() {
+                                    tr.set(now, [v, 0.0]);
+                                    changed = true;
+                                }
+                                let keyed = tr.key_at(now).is_some();
+                                if ui.add(egui::Button::new(egui::RichText::new(if keyed { "◆" } else { "◇" }).size(13.0)).frame(false)).on_hover_text(crate::i18n::t("Clé à cet instant")).clicked() {
+                                    tr.toggle_key(now);
+                                    changed = true;
+                                }
+                            });
+                        }
+                    }
                     ui.horizontal(|ui| {
                         changed |= ui.add(egui::DragValue::new(size).speed(1.0).range(4.0..=1000.0).prefix(crate::i18n::t("taille ")).suffix(" px")).changed();
                         changed |= ui.add(egui::DragValue::new(tracking).speed(0.2).range(-50.0..=200.0).prefix(crate::i18n::t("espace "))).changed();
