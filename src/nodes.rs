@@ -174,6 +174,9 @@ pub const DEFS: &[Def] = &[
     Def { op: "sunbeams", label: "Rayons de lumière", cat: "filtre", inputs: &[("image", Sock::Color, GRAY)], outputs: &[("image", Sock::Color)], params: &[ParamDef::Float("seuil", 0.0, 1.0, 0.7), ParamDef::Float("longueur", 0.0, 1.0, 0.4), ParamDef::Float("force", 0.0, 3.0, 1.0), ParamDef::Float("centre x", 0.0, 1.0, 0.5), ParamDef::Float("centre y", 0.0, 1.0, 0.3)], mat: false, comp: true },
     Def { op: "emboss", label: "Gaufrage", cat: "filtre", inputs: &[("image", Sock::Color, GRAY)], outputs: &[("image", Sock::Color)], params: &[ParamDef::Float("force", 0.0, 4.0, 1.0), ParamDef::Float("angle", -180.0, 180.0, 135.0)], mat: false, comp: true },
     Def { op: "glitch", label: "Glitch", cat: "filtre", inputs: &[("image", Sock::Color, GRAY)], outputs: &[("image", Sock::Color)], params: &[ParamDef::Float("force", 0.0, 1.0, 0.3), ParamDef::Float("blocs", 2.0, 80.0, 24.0), ParamDef::Float("graine", 0.0, 100.0, 1.0)], mat: false, comp: true },
+    Def { op: "unmult", label: "Retirer le noir (unmult)", cat: "couleur", inputs: &[("image", Sock::Color, GRAY)], outputs: &[("image", Sock::Color)], params: &[], mat: false, comp: true },
+    Def { op: "zdefocus", label: "Flou de profondeur (passe Z)", cat: "filtre", inputs: &[("image", Sock::Color, GRAY), ("profondeur", Sock::Float, f(0.0))], outputs: &[("image", Sock::Color)], params: &[ParamDef::Float("mise au point", 0.0, 1000.0, 5.0), ParamDef::Float("étendue nette", 0.0, 500.0, 1.0), ParamDef::Float("étalement", 0.01, 500.0, 4.0), ParamDef::Float("rayon max (px)", 0.0, 80.0, 14.0)], mat: false, comp: true },
+    Def { op: "grainmatch", label: "Grain assorti (mesuré sur la plaque)", cat: "filtre", inputs: &[("image", Sock::Color, GRAY), ("plaque", Sock::Color, GRAY)], outputs: &[("image", Sock::Color), ("force mesurée", Sock::Float)], params: &[ParamDef::Float("taille du grain", 0.5, 4.0, 1.0), ParamDef::Float("dosage", 0.0, 2.0, 1.0)], mat: false, comp: true },
 ];
 
 pub const DEFAULT_CURVES: &str = "0,0;1,1|0,0;1,1|0,0;1,1|0,0;1,1";
@@ -1707,6 +1710,67 @@ impl Program {
                     }).collect();
                     if s.op == "edges" { vec![out.clone(), out] } else { vec![out] }
                 }
+                "zdefocus" => {
+                    let src = get(&s.ins[0]);
+                    let depth = get(&s.ins[1]);
+                    let img = Img { w, h, px: src };
+                    let (focus, sharp, spread, rmax) = (pnum(&s.params, "mise au point", 5.0), pnum(&s.params, "étendue nette", 1.0), pnum(&s.params, "étalement", 4.0).max(1e-3), pnum(&s.params, "rayon max (px)", 14.0));
+                    // Disque d'échantillons (spirale de Vogel), le rayon dépend de la distance à la mise au point
+                    const TAPS: usize = 32;
+                    let disk: Vec<[f32; 2]> = (0..TAPS).map(|k| {
+                        let r = ((k as f32 + 0.5) / TAPS as f32).sqrt();
+                        let a = k as f32 * 2.399_963;
+                        [r * a.cos(), r * a.sin()]
+                    }).collect();
+                    let coc = |z: f32| (((z - focus).abs() - sharp).max(0.0) / spread).min(1.0) * rmax;
+                    let out: Vec<V> = (0..n).into_par_iter().map(|i| {
+                        let r = coc(depth[i][0]);
+                        if r < 0.5 {
+                            return img.px[i];
+                        }
+                        let (x, y) = ((i % w) as f32 + 0.5, (i / w) as f32 + 0.5);
+                        let mut acc = [0.0f32; 4];
+                        let mut wsum = 0.0;
+                        for d in &disk {
+                            let (sx, sy) = (x + d[0] * r, y + d[1] * r);
+                            let (ix, iy) = ((sx as i32).clamp(0, w as i32 - 1) as usize, (sy as i32).clamp(0, h as i32 - 1) as usize);
+                            let j = iy * w + ix;
+                            // Un voisin net et plus proche ne bave pas sur le flou de derrière
+                            let wk = if depth[j][0] < depth[i][0] && coc(depth[j][0]) < r * 0.5 { 0.15 } else { 1.0 };
+                            for ch in 0..4 {
+                                acc[ch] += img.px[j][ch] * wk;
+                            }
+                            wsum += wk;
+                        }
+                        acc.map(|v| v / wsum.max(1e-6))
+                    }).collect();
+                    vec![out]
+                }
+                "grainmatch" => {
+                    let src = get(&s.ins[0]);
+                    let plate = get(&s.ins[1]);
+                    // Le grain de la plaque : l'écart type de ce que le léger flou retire
+                    let b = blur(&plate, w, h, 1.5);
+                    let step = (n / 200_000).max(1);
+                    let (mut sum, mut sum2, mut cnt) = (0.0f64, 0.0f64, 0.0f64);
+                    for k in (0..n).step_by(step) {
+                        let d = (lum(plate[k]) - lum(b[k])) as f64;
+                        sum += d;
+                        sum2 += d * d;
+                        cnt += 1.0;
+                    }
+                    let mean = sum / cnt.max(1.0);
+                    let sd = ((sum2 / cnt.max(1.0) - mean * mean).max(0.0)).sqrt() as f32;
+                    let size = pnum(&s.params, "taille du grain", 1.0).max(0.5);
+                    let amt = sd * pnum(&s.params, "dosage", 1.0) * 3.46; // écart type d'un bruit uniforme centré : amplitude / √12
+                    let out: Vec<V> = (0..n).into_par_iter().map(|i| {
+                        let (x, y) = (((i % w) as f32 / size) as i32, ((i / w) as f32 / size) as i32);
+                        let g = (hash3(x, y, 11) - 0.5) * amt;
+                        let c = src[i];
+                        [c[0] + g, c[1] + g, c[2] + g, c[3]]
+                    }).collect();
+                    vec![out, vec![[sd, sd, sd, 1.0]; n]]
+                }
                 "transform" | "flip" | "displace" | "emboss" | "glitch" | "sunbeams" => {
                     let src = get(&s.ins[0]);
                     let map = if s.op == "displace" { get(&s.ins[1]) } else { vec![] };
@@ -2394,6 +2458,15 @@ fn pixel(s: &Step, i: &[V], c: &Ctx) -> [V; 4] {
         "grain" => {
             let n = (hash3((c.uv[0] * c.res[0]) as i32, (c.uv[1] * c.res[1]) as i32, 3) - 0.5) * i[1][0];
             [[i[0][0] + n, i[0][1] + n, i[0][2] + n, i[0][3]], z, z, z]
+        }
+        "unmult" => {
+            // Le noir devient transparent : l'alpha vient de la composante la plus forte
+            let m = i[0][0].max(i[0][1]).max(i[0][2]).clamp(0.0, 1.0);
+            if m <= 1e-5 {
+                [[0.0, 0.0, 0.0, 0.0], z, z, z]
+            } else {
+                [[i[0][0] / m, i[0][1] / m, i[0][2] / m, i[0][3] * m], z, z, z]
+            }
         }
         "math" => {
             let (a, b) = (i[0][0], i[1][0]);
@@ -5037,6 +5110,49 @@ mod tests {
         g.connect(cv, 0, out, 0);
         g.nodes.iter_mut().find(|n| n.id == out).unwrap().pos = [800.0, 60.0];
         g.save(std::path::Path::new(&out_path)).unwrap();
+    }
+
+    #[test]
+    fn unmult_profondeur_grain() {
+        // Un graphe image → node → sortie, l'image venant de `over`
+        let run = |op: &str, params: &[(&str, f32)], over: &Img, plate_too: bool| -> Img {
+            let mut g = Graph::new_compositor();
+            g.nodes.retain(|n| n.op == "image" || n.op == "comp_out");
+            g.links.clear();
+            let (img, out) = (g.nodes[0].id, g.nodes[1].id);
+            let k = g.add(op, [100.0, 0.0]);
+            for (name, v) in params {
+                g.nodes.iter_mut().find(|n| n.id == k).unwrap().params.insert(name.to_string(), Param::F(*v));
+            }
+            g.connect(img, 0, k, 0);
+            if plate_too {
+                g.connect(img, 0, k, 1);
+            }
+            g.connect(k, 0, out, 0);
+            Program::compile(&g, "", 64).ok().unwrap().composite_over(Some([over.w, over.h]), Some(over))
+        };
+        // Retirer le noir : le noir devient transparent, la couleur garde sa teinte pleine
+        let one = Img { w: 1, h: 1, px: vec![[0.5, 0.25, 0.0, 1.0]] };
+        let o = run("unmult", &[], &one, false);
+        assert!((o.px[0][0] - 1.0).abs() < 1e-4 && (o.px[0][1] - 0.5).abs() < 1e-4 && (o.px[0][3] - 0.5).abs() < 1e-4, "{:?}", o.px[0]);
+        // Damier fin : net à la mise au point, moyenné loin d'elle (profondeur 0 partout)
+        let (w, h) = (24usize, 24usize);
+        let checker = Img { w, h, px: (0..w * h).map(|i| if (i % w + i / w) % 2 == 0 { [1.0, 1.0, 1.0, 1.0] } else { [0.0, 0.0, 0.0, 1.0] }).collect() };
+        let net = run("zdefocus", &[("mise au point", 0.0)], &checker, false);
+        assert_eq!(net.px[12 * w + 12], checker.px[12 * w + 12]);
+        let flou = run("zdefocus", &[("mise au point", 50.0), ("rayon max (px)", 4.0)], &checker, false);
+        assert!((flou.px[12 * w + 12][0] - 0.5).abs() < 0.2, "{:?}", flou.px[12 * w + 12]);
+        // Grain assorti : rien sur une plaque lisse, du grain sur une plaque bruitée
+        let flat = Img { w, h, px: vec![[0.5, 0.5, 0.5, 1.0]; w * h] };
+        let a = run("grainmatch", &[], &flat, true);
+        assert!(a.px.iter().all(|c| (c[0] - 0.5).abs() < 1e-4));
+        let noisy = Img { w, h, px: (0..w * h).map(|i| { let v = 0.5 + (hash3(i as i32, 0, 5) - 0.5) * 0.2; [v, v, v, 1.0] }).collect() };
+        let b = run("grainmatch", &[], &flat_to(&noisy), true);
+        let spread = b.px.iter().map(|c| c[0]).fold(0.0f32, f32::max) - b.px.iter().map(|c| c[0]).fold(1.0f32, f32::min);
+        assert!(spread > 0.05, "{spread}");
+        fn flat_to(i: &Img) -> Img {
+            Img { w: i.w, h: i.h, px: i.px.clone() }
+        }
     }
 
     #[test]

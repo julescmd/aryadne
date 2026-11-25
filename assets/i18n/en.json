@@ -3096,5 +3096,16 @@
   "5 minutes": "5 minutes",
   "sans minuteur": "no timer",
   "aucune image sur le board": "no image on the board",
-  "pause (Espace)": "pause (Space)"
+  "pause (Espace)": "pause (Space)",
+  "Retirer le noir (unmult)": "Unmultiply (remove black)",
+  "Flou de profondeur (passe Z)": "Depth of field (Z pass)",
+  "Grain assorti (mesuré sur la plaque)": "Grain match (measured on the plate)",
+  "profondeur": "depth",
+  "mise au point": "focus distance",
+  "étendue nette": "sharp range",
+  "étalement": "falloff",
+  "rayon max (px)": "max radius (px)",
+  "plaque": "plate",
+  "force mesurée": "measured strength",
+  "dosage": "amount"
 }
