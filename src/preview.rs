@@ -12,6 +12,7 @@ static LINK: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\[\[([^\]|#]+)(?:#[
 static TOKENS: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"\[\[[^\]]+\]\]|\[([^\]]+)\]\((https?://[^)\s]+)\)|\*\*([^*]+)\*\*|__([^_]+)__|\*([^*\s][^*]*)\*|~~([^~]+)~~|==([^=]+)==|(?:^|\s)(#[\p{L}\p{N}_/-]+)|(https?://[^\s)]+)|\[\^([^\]\s]+)\]").unwrap()
 });
+static MATH_INLINE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\$([^\s$](?:[^$]*[^\s$])?)\$").unwrap());
 static TASK: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(\s*)[-*+] \[([ xX])\] (.*)$").unwrap());
 static BULLET: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(\s*)[-*+] (.*)$").unwrap());
 static NUMBERED: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(\s*)(\d+)[.)] (.*)$").unwrap());
@@ -24,7 +25,7 @@ thread_local! {
 }
 
 static IMAGE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^!\[\[([^\]|]+)(?:\|(\d+))?\]\]$|^!\[[^\]]*\]\(([^)]+)\)$").unwrap());
-static CALLOUT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\[!(\w+)\][+-]?\s*(.*)$").unwrap());
+static CALLOUT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\[!(\w+)\]([+-]?)\s*(.*)$").unwrap());
 
 /// Ce que demande un clic dans la note
 pub enum Out {
@@ -84,9 +85,38 @@ pub fn show_doc(ui: &mut egui::Ui, text: &str, existing: &HashSet<String>, paths
             match lang.trim() {
                 "base" | "bases" => base_block(ui, &code, &ctx, &mut out),
                 "tasks" | "tâches" => tasks_block(ui, &code, &ctx, &mut out),
+                "math" | "latex" | "tex" => math_block(ui, &code),
+                "mermaid" => match crate::mdextra::parse_flow(&code) {
+                    Some(f) => mermaid_block(ui, &f),
+                    None => code_block(ui, &code, "mermaid"),
+                },
                 l => code_block(ui, &code, l),
             }
             i += 1;
+            continue;
+        }
+        // Formule en bloc : $$ … $$ (sur une ou plusieurs lignes)
+        if let Some(r) = trimmed.strip_prefix("$$") {
+            let mut code = String::new();
+            if let Some(one) = r.trim_end().strip_suffix("$$") {
+                code.push_str(one);
+                i += 1;
+            } else {
+                code.push_str(r);
+                i += 1;
+                while i < lines.len() {
+                    let l = lines[i].trim_end();
+                    i += 1;
+                    if let Some(end) = l.strip_suffix("$$") {
+                        code.push(' ');
+                        code.push_str(end);
+                        break;
+                    }
+                    code.push(' ');
+                    code.push_str(l);
+                }
+            }
+            math_block(ui, &code);
             continue;
         }
         // Tableau : une ligne d'en-tête, une ligne de tirets, puis les rangées
@@ -252,6 +282,8 @@ fn table(ui: &mut egui::Ui, rows: &[Vec<String>], ctx: &Ctx, out: &mut Option<Ou
 fn quote(ui: &mut egui::Ui, body: &[&str], ctx: &Ctx, out: &mut Option<Out>) {
     let p = theme::pal();
     let callout = body.first().and_then(|l| CALLOUT.captures(l));
+    // « [!note]- » : replié au départ ; « [!note]+ » : repliable, ouvert au départ
+    let fold = callout.as_ref().map(|c| c[2].to_string()).filter(|m| !m.is_empty());
     let (color, icon, title, rest) = match &callout {
         Some(c) => {
             let kind = c[1].to_lowercase();
@@ -263,14 +295,14 @@ fn quote(ui: &mut egui::Ui, body: &[&str], ctx: &Ctx, out: &mut Option<Out>) {
                 "todo" | "afaire" => (p.accent, crate::lucide::CHECK),
                 _ => (p.info, crate::lucide::BOOKMARK),
             };
-            let title = if c[2].trim().is_empty() {
+            let title = if c[3].trim().is_empty() {
                 let mut k = kind.clone();
                 if let Some(f) = k.get_mut(0..1) {
                     f.make_ascii_uppercase();
                 }
                 k
             } else {
-                c[2].trim().to_string()
+                c[3].trim().to_string()
             };
             (color, Some(icon), Some(title), &body[1..])
         }
@@ -280,11 +312,29 @@ fn quote(ui: &mut egui::Ui, body: &[&str], ctx: &Ctx, out: &mut Option<Out>) {
     let fill = if callout.is_some() { color.gamma_multiply(0.1) } else { Color32::TRANSPARENT };
     let resp = egui::Frame::new().fill(fill).corner_radius(4).inner_margin(egui::Margin { left: 14, right: 10, top: 6, bottom: 6 }).show(ui, |ui| {
         ui.set_width(ui.available_width());
+        let fid = ui.id().with(("callout", title.clone(), rest.first().copied().unwrap_or("")));
+        let mut open = fold.as_deref() != Some("-");
+        if fold.is_some() {
+            open = ui.ctx().data(|d| d.get_temp::<bool>(fid)).unwrap_or(open);
+        }
         if let (Some(icon), Some(title)) = (icon, &title) {
-            ui.horizontal(|ui| {
+            let r = ui.horizontal(|ui| {
                 ui.label(RichText::new(icon).color(color));
                 ui.label(RichText::new(title).strong().color(color));
+                if fold.is_some() {
+                    ui.label(RichText::new(if open { crate::lucide::CHEVRON_DOWN } else { crate::lucide::CHEVRON_RIGHT }).color(color));
+                }
             });
+            if fold.is_some() {
+                let resp = ui.interact(r.response.rect, fid.with("hdr"), egui::Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
+                if resp.clicked() {
+                    open = !open;
+                    ui.ctx().data_mut(|d| d.insert_temp(fid, open));
+                }
+            }
+        }
+        if !open {
+            return;
         }
         for l in rest {
             if l.is_empty() {
@@ -609,6 +659,23 @@ fn inline(ui: &mut egui::Ui, text: &str, ctx: &Ctx, out: &mut Option<Out>, size:
             }
             continue;
         }
+        // Formules dans le texte : $x^2$ (pas d'espace juste à l'intérieur des $, comme Obsidian)
+        if seg.contains('$') && MATH_INLINE.is_match(seg) {
+            let mut last = 0;
+            for m in MATH_INLINE.captures_iter(seg) {
+                let all = m.get(0).unwrap();
+                if all.start() > last {
+                    inline(ui, &seg[last..all.start()], ctx, out, size);
+                }
+                let f = crate::mdextra::tex(&m[1]);
+                ui.label(RichText::new(f).italics().size(size.unwrap_or(14.0) + 1.0).color(p.text));
+                last = all.end();
+            }
+            if last < seg.len() {
+                inline(ui, &seg[last..], ctx, out, size);
+            }
+            continue;
+        }
         let mut last = 0;
         for cap in TOKENS.captures_iter(seg) {
             let m = cap.get(0).unwrap();
@@ -866,6 +933,132 @@ fn tasks_block(ui: &mut egui::Ui, src: &str, ctx: &Ctx, out: &mut Option<Out>) {
             ui.label(RichText::new(crate::i18n::t("Aucune tâche.")).color(p.muted));
         }
     });
+}
+
+/// Formule centrée, en caractères Unicode
+fn math_block(ui: &mut egui::Ui, code: &str) {
+    let p = theme::pal();
+    ui.add_space(6.0);
+    let f = crate::mdextra::tex(code.trim());
+    ui.vertical_centered(|ui| {
+        ui.label(RichText::new(f).italics().size(19.0).color(p.text)).on_hover_text(code.trim());
+    });
+    ui.add_space(6.0);
+}
+
+/// Organigramme Mermaid dessiné : boîtes par couches, flèches, étiquettes
+fn mermaid_block(ui: &mut egui::Ui, f: &crate::mdextra::Flow) {
+    use crate::mdextra::Shape;
+    let p = theme::pal();
+    let font = egui::FontId::proportional(13.0);
+    // Taille de chaque boîte d'après son texte
+    let sizes: Vec<egui::Vec2> = f.nodes.iter().map(|n| {
+        let g = ui.painter().layout_no_wrap(n.label.clone(), font.clone(), p.text);
+        let s = g.size() + egui::vec2(28.0, 18.0);
+        match n.shape {
+            Shape::Diamond => egui::vec2(s.x * 1.4, s.y * 1.5),
+            Shape::Circle => egui::Vec2::splat(s.x.max(s.y)),
+            _ => s,
+        }
+    }).collect();
+    let layers = f.nodes.iter().map(|n| n.layer).max().unwrap_or(0) + 1;
+    let mut cell = egui::vec2(0.0, 0.0);
+    for s in &sizes {
+        cell = cell.max(*s);
+    }
+    let (gap_main, gap_cross) = (56.0, 24.0);
+    let per: Vec<usize> = (0..layers).map(|l| f.nodes.iter().filter(|n| n.layer == l).count()).collect();
+    let most = per.iter().copied().max().unwrap_or(1) as f32;
+    let (main, cross) = if f.horizontal { (cell.x, cell.y) } else { (cell.y, cell.x) };
+    let total_main = layers as f32 * main + (layers as f32 - 1.0) * gap_main;
+    let total_cross = most * cross + (most - 1.0) * gap_cross;
+    let size = if f.horizontal { egui::vec2(total_main, total_cross) } else { egui::vec2(total_cross, total_main) };
+    // Liens qui remontent (boucles) : une courbe sous le diagramme (à droite s'il va de haut en bas)
+    let backs = f.edges.iter().any(|(a, b, _, _)| f.nodes[*b].layer <= f.nodes[*a].layer && a != b);
+    let extra = if backs { 46.0 } else { 0.0 };
+    let w = ui.available_width();
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(w, size.y + 24.0 + if f.horizontal { extra } else { 0.0 }), egui::Sense::hover());
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, 4.0, p.code_bg);
+    let origin = egui::pos2(rect.center().x - size.x / 2.0, rect.top() + 12.0);
+    let centers: Vec<egui::Pos2> = f.nodes.iter().map(|n| {
+        let count = per[n.layer] as f32;
+        let span = count * cross + (count - 1.0) * gap_cross;
+        let c_off = (total_cross - span) / 2.0 + n.slot as f32 * (cross + gap_cross) + cross / 2.0;
+        let m_off = n.layer as f32 * (main + gap_main) + main / 2.0;
+        if f.horizontal { origin + egui::vec2(m_off, c_off) } else { origin + egui::vec2(c_off, m_off) }
+    }).collect();
+    // Bord d'une boîte dans la direction d'un point
+    let edge_pt = |k: usize, toward: egui::Pos2| -> egui::Pos2 {
+        let c = centers[k];
+        let h = sizes[k] / 2.0;
+        let d = toward - c;
+        if d.length() < 1.0 {
+            return c;
+        }
+        let t = if f.nodes[k].shape == Shape::Circle || f.nodes[k].shape == Shape::Diamond {
+            let r = if f.nodes[k].shape == Shape::Circle { h.x } else { 1.0 / (d.x.abs() / h.x + d.y.abs() / h.y) * d.length() };
+            r / d.length()
+        } else {
+            (h.x / d.x.abs().max(1e-3)).min(h.y / d.y.abs().max(1e-3))
+        };
+        c + d * t
+    };
+    for (a, b, label, dashed) in &f.edges {
+        let st = egui::Stroke::new(1.4, p.muted);
+        let back = f.nodes[*b].layer <= f.nodes[*a].layer && a != b;
+        let pts: Vec<egui::Pos2> = if back {
+            // Sous les boîtes (ou à leur droite), en arc
+            let out = |k: usize| if f.horizontal { centers[k] + egui::vec2(0.0, sizes[k].y / 2.0) } else { centers[k] + egui::vec2(sizes[k].x / 2.0, 0.0) };
+            let (pa, pb) = (out(*a), out(*b));
+            let far = if f.horizontal { egui::vec2(0.0, origin.y + size.y + extra - 4.0 - pa.y.max(pb.y)) } else { egui::vec2(origin.x + size.x + 40.0 - pa.x.max(pb.x), 0.0) };
+            let (c1, c2) = (pa + far * 1.3, pb + far * 1.3);
+            (0..=24).map(|k| {
+                let t = k as f32 / 24.0;
+                let u = 1.0 - t;
+                (pa.to_vec2() * u * u * u + c1.to_vec2() * 3.0 * u * u * t + c2.to_vec2() * 3.0 * u * t * t + pb.to_vec2() * t * t * t).to_pos2()
+            }).collect()
+        } else {
+            vec![edge_pt(*a, centers[*b]), edge_pt(*b, centers[*a])]
+        };
+        if *dashed {
+            painter.extend(egui::Shape::dashed_line(&pts, st, 5.0, 4.0));
+        } else {
+            painter.add(egui::Shape::line(pts.clone(), st));
+        }
+        let (pa, pb) = (pts[pts.len() - 2], pts[pts.len() - 1]);
+        let d = (pb - pa).normalized();
+        let n = egui::vec2(-d.y, d.x);
+        painter.add(egui::Shape::convex_polygon(vec![pb, pb - d * 9.0 + n * 4.5, pb - d * 9.0 - n * 4.5], p.muted, egui::Stroke::NONE));
+        if !label.is_empty() {
+            let m = if back { pts[pts.len() / 2] } else { pts[0] + (pb - pts[0]) * 0.5 };
+            let g = painter.layout_no_wrap(label.clone(), egui::FontId::proportional(11.5), p.text);
+            let r = egui::Rect::from_center_size(m, g.size() + egui::vec2(8.0, 4.0));
+            painter.rect_filled(r, 3.0, p.panel);
+            painter.galley(r.min + egui::vec2(4.0, 2.0), g, p.text);
+        }
+    }
+    for (k, n) in f.nodes.iter().enumerate() {
+        let r = egui::Rect::from_center_size(centers[k], sizes[k]);
+        let st = egui::Stroke::new(1.3, p.accent);
+        match n.shape {
+            Shape::Rect => {
+                painter.rect(r, 3.0, p.panel, st, egui::StrokeKind::Inside);
+            }
+            Shape::Round => {
+                painter.rect(r, r.height() / 2.0, p.panel, st, egui::StrokeKind::Inside);
+            }
+            Shape::Circle => {
+                painter.circle(r.center(), r.width() / 2.0, p.panel, st);
+            }
+            Shape::Diamond => {
+                let c = r.center();
+                painter.add(egui::Shape::convex_polygon(vec![egui::pos2(c.x, r.top()), egui::pos2(r.right(), c.y), egui::pos2(c.x, r.bottom()), egui::pos2(r.left(), c.y)], p.panel, st));
+            }
+        }
+        painter.text(r.center(), egui::Align2::CENTER_CENTER, &n.label, font.clone(), p.text);
+    }
+    ui.add_space(6.0);
 }
 
 fn code_block(ui: &mut egui::Ui, code: &str, lang: &str) {

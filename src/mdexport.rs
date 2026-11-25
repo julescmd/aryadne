@@ -12,6 +12,14 @@ fn inline(s: &str, root: &std::path::Path) -> String {
     let mut out = String::new();
     let mut rest = s;
     while !rest.is_empty() {
+        // Formule $x^2$ (sans espace juste à l'intérieur des $)
+        if let Some(r) = rest.strip_prefix('$') {
+            if let Some(end) = r.find('$').filter(|e| *e > 0 && !r.starts_with(' ') && !r[..*e].ends_with(' ')) {
+                let _ = write!(out, "<em>{}</em>", esc(&crate::mdextra::tex(&r[..end])));
+                rest = &r[end + 1..];
+                continue;
+            }
+        }
         if let Some(r) = rest.strip_prefix("![") {
             if let Some((alt, after)) = r.split_once("](") {
                 if let Some((src, tail)) = after.split_once(')') {
@@ -83,6 +91,7 @@ fn body(text: &str) -> &str {
 pub fn to_html(text: &str, title: &str, root: &std::path::Path) -> String {
     let mut h = String::new();
     let mut in_code = false;
+    let mut mermaid = false;
     let mut list: Option<&str> = None;
     let mut para: Vec<String> = vec![];
     let flush = |h: &mut String, para: &mut Vec<String>| {
@@ -101,15 +110,40 @@ pub fn to_html(text: &str, title: &str, root: &std::path::Path) -> String {
     while i < lines.len() {
         let line = lines[i];
         let t = line.trim();
-        if t.starts_with("```") {
+        if let Some(lang) = t.strip_prefix("```") {
             flush(&mut h, &mut para);
             close_list(&mut h, &mut list);
+            let lang = lang.trim();
+            // Formule et diagramme : rendus à part
+            if !in_code && matches!(lang, "math" | "latex" | "tex" | "mermaid") {
+                let mut code = String::new();
+                i += 1;
+                while i < lines.len() && !lines[i].trim().starts_with("```") {
+                    code.push_str(lines[i]);
+                    code.push('\n');
+                    i += 1;
+                }
+                if lang == "mermaid" {
+                    mermaid = true;
+                    let _ = writeln!(h, r#"<pre class="mermaid">{}</pre>"#, esc(&code));
+                } else {
+                    let _ = writeln!(h, r#"<p class="math">{}</p>"#, esc(&crate::mdextra::tex(code.trim())));
+                }
+                i += 1;
+                continue;
+            }
             if in_code {
                 h.push_str("</code></pre>\n");
             } else {
                 h.push_str("<pre><code>");
             }
             in_code = !in_code;
+            i += 1;
+            continue;
+        }
+        if let Some(m) = t.strip_prefix("$$").and_then(|r| r.strip_suffix("$$")) {
+            flush(&mut h, &mut para);
+            let _ = writeln!(h, r#"<p class="math">{}</p>"#, esc(&crate::mdextra::tex(m.trim())));
             i += 1;
             continue;
         }
@@ -207,10 +241,13 @@ blockquote {{ border-left: 3px solid #cbbfd0; margin: 1em 0; padding: .2em 1em; 
 .callout {{ background: #f6f1f5; border-left: 3px solid #b9789c; padding: .6em 1em; margin: 1em 0; border-radius: 4px; }}
 .link {{ color: #8a4f72; }} img {{ max-width: 100%; border-radius: 4px; }}
 table {{ border-collapse: collapse; margin: 1em 0; }} th, td {{ border: 1px solid #ddd5d9; padding: 6px 10px; text-align: left; }}
+.math {{ text-align: center; font-style: italic; font-size: 1.2em; }} pre.mermaid {{ background: none; text-align: center; }}
 </style></head><body>
-{h}</body></html>
+{h}{}</body></html>
 "#,
-        esc(title)
+        esc(title),
+        // Les diagrammes Mermaid se dessinent à l'ouverture (avec une connexion Internet) ; sinon le texte reste lisible
+        if mermaid { "<script type=\"module\">import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs'; mermaid.initialize({ startOnLoad: true });</script>\n" } else { "" }
     )
 }
 
@@ -369,6 +406,8 @@ mod tests {
         let h = super::to_html(t, "Essai", std::path::Path::new("."));
         assert!(h.contains("<h1>Titre</h1>") && h.contains("<strong>gras</strong>") && h.contains(">alias</span>") && h.contains("☑ fait") && h.contains("class=\"callout note\"") && h.contains("<td>2</td>"), "{h}");
         assert!(!h.contains("tags:"));
+        let m = super::to_html("Soit $x^2$, 5 $ ou 6 $.\n\n$$\\pi r^2$$\n\n```mermaid\ngraph TD\nA-->B\n```\n", "M", std::path::Path::new("."));
+        assert!(m.contains("<em>x²</em>") && m.contains("5 $ ou 6 $") && m.contains("π r²") && m.contains("class=\"mermaid\"") && m.contains("mermaid.initialize"), "{m}");
         let p = super::to_pdf(t, "Essai");
         assert!(p.starts_with(b"%PDF-1.4") && p.ends_with(b"%%EOF\n"));
         assert_eq!(super::plain("le [[Lien|alias]] et [x](http://a)"), "le alias et x");

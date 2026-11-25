@@ -22,6 +22,7 @@ mod related;
 mod lucide_all;
 mod mdexport;
 mod canvas;
+mod mdextra;
 mod vector_ui;
 mod keymap;
 mod lucide;
