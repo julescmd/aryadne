@@ -12,7 +12,7 @@ use std::sync::mpsc::{channel, Receiver};
 
 pub const EXT: [&str; 12] = ["obj", "fbx", "glb", "gltf", "stl", "3ds", "ply", "ma", "mb", "max", "aryscene", "arya3"];
 /// Nombre de triangles visé pour l'affichage interactif.
-const MAX_TRIS: usize = 150_000;
+const MAX_TRIS: usize = 2_000_000;
 
 pub fn is_model(rel: &str) -> bool {
     let e = rel.rsplit_once('.').map(|(_, e)| e.to_lowercase()).unwrap_or_default();
@@ -970,6 +970,8 @@ pub struct Prepared {
     curv: std::sync::OnceLock<Vec<f32>>,
     /// Arbre de rayons pour les ombres portées, construit au premier besoin
     bvh: std::sync::OnceLock<crate::bvh::Bvh>,
+    /// Dernier tracé (pixols) de ce maillage : changer l'éclairage ou le matériau ne retrace rien
+    pix: std::sync::Mutex<Option<std::sync::Arc<Pixols>>>,
 }
 
 impl Prepared {
@@ -985,7 +987,7 @@ impl Prepared {
         let floor = pos.iter().map(|v| v[1]).fold(f32::MAX, f32::min);
         let lin = |c: u8| (c as f32 / 255.0).powf(2.2);
         let colors = colors.iter().map(|c| [lin(c.r()), lin(c.g()), lin(c.b())]).collect();
-        Self { pos, nrm, tris, colors, edges, floor, uv: vec![], mat: vec![], curv: std::sync::OnceLock::new(), bvh: std::sync::OnceLock::new() }
+        Self { pos, nrm, tris, colors, edges, floor, uv: vec![], mat: vec![], curv: std::sync::OnceLock::new(), bvh: std::sync::OnceLock::new(), pix: Default::default() }
     }
     pub fn tri_count(&self) -> usize {
         self.tris.len()
@@ -998,7 +1000,7 @@ impl Prepared {
         let nrm = vertex_normals(&m.pos, &m.tris);
         let lin = |c: u8| (c as f32 / 255.0).powf(2.2);
         let colors = m.colors.iter().map(|c| [lin(c.r()), lin(c.g()), lin(c.b())]).collect();
-        Self { pos: m.pos, nrm, tris: m.tris, colors, edges: m.edges, floor, uv: vec![], mat: vec![], curv: std::sync::OnceLock::new(), bvh: std::sync::OnceLock::new() }
+        Self { pos: m.pos, nrm, tris: m.tris, colors, edges: m.edges, floor, uv: vec![], mat: vec![], curv: std::sync::OnceLock::new(), bvh: std::sync::OnceLock::new(), pix: Default::default() }
     }
 
     pub fn from_mesh(m: crate::modifiers::Mesh) -> Self {
@@ -1018,7 +1020,7 @@ impl Prepared {
         let floor = pos.iter().map(|v| v[1]).fold(f32::MAX, f32::min);
         let lin = |c: u8| (c as f32 / 255.0).powf(2.2);
         let colors = m.colors.iter().map(|c| [lin(c.r()), lin(c.g()), lin(c.b())]).collect();
-        Self { pos, nrm, tris: m.tris, colors, edges: m.edges, floor, uv: vec![], mat: vec![], curv: std::sync::OnceLock::new(), bvh: std::sync::OnceLock::new() }
+        Self { pos, nrm, tris: m.tris, colors, edges: m.edges, floor, uv: vec![], mat: vec![], curv: std::sync::OnceLock::new(), bvh: std::sync::OnceLock::new(), pix: Default::default() }
     }
 }
 
@@ -1282,7 +1284,7 @@ fn patch_vertices(prep: &Prepared, t0: usize, t1: usize, map: &[(u32, u32)], now
     for &(v, _) in map {
         nrm[v as usize] = norm(nrm[v as usize]);
     }
-    Prepared { pos, nrm, tris: prep.tris.clone(), colors: prep.colors.clone(), edges: prep.edges.clone(), floor: prep.floor, uv: prep.uv.clone(), mat: prep.mat.clone(), curv: std::sync::OnceLock::new(), bvh: std::sync::OnceLock::new() }
+    Prepared { pos, nrm, tris: prep.tris.clone(), colors: prep.colors.clone(), edges: prep.edges.clone(), floor: prep.floor, uv: prep.uv.clone(), mat: prep.mat.clone(), curv: std::sync::OnceLock::new(), bvh: std::sync::OnceLock::new(), pix: Default::default() }
 }
 
 /// Déplacement rapide : si seules les poses des objets ont changé depuis `built`, renvoie le
@@ -1336,7 +1338,7 @@ fn fast_move(built: &crate::scene::Scene, scene: &crate::scene::Scene, ranges: &
     if !any {
         return None;
     }
-    Some(Prepared { pos, nrm, tris: prep.tris.clone(), colors: prep.colors.clone(), edges: prep.edges.clone(), floor: prep.floor, uv: prep.uv.clone(), mat: prep.mat.clone(), curv: std::sync::OnceLock::new(), bvh: std::sync::OnceLock::new() })
+    Some(Prepared { pos, nrm, tris: prep.tris.clone(), colors: prep.colors.clone(), edges: prep.edges.clone(), floor: prep.floor, uv: prep.uv.clone(), mat: prep.mat.clone(), curv: std::sync::OnceLock::new(), bvh: std::sync::OnceLock::new(), pix: Default::default() })
 }
 
 /// Réglages d'affichage (comme le panneau d'affichage de Substance).
@@ -1646,13 +1648,149 @@ fn persp_bary(w: [f32; 3], inv_depth: [f32; 3]) -> (f32, [f32; 2]) {
     (z, [w[0] * inv_depth[0] / z, w[1] * inv_depth[1] / z])
 }
 
+/// Hauteur des bandes d'image traitées par un même cœur
+const PIX_BAND: usize = 16;
+
+/// Le tracé d'une vue, sans éclairage, façon « pixols » : pour chaque pixel, le triangle visible,
+/// ses poids et sa profondeur. Gardé avec le maillage : changer une lumière, un matériau ou
+/// l'exposition relit ce tracé au lieu de repasser sur tous les triangles.
+pub struct Pixols {
+    cam: Camera,
+    w: usize,
+    h: usize,
+    /// Sommets projetés (x, y à l'écran, profondeur de vue)
+    screen: Vec<[f32; 3]>,
+    /// Plus grand = plus près (1/profondeur en perspective) ; f32::MIN : fond
+    depth: Vec<f32>,
+    tri: Vec<u32>,
+    bary: Vec<[f32; 2]>,
+    /// Part de lumière reçue par pixel et par lumière (NaN : pas encore calculée), avec la clé des lumières
+    shadows: std::sync::Mutex<Option<(String, Vec<f32>)>>,
+}
+
+/// Tracé de la vue, repris du cache du maillage quand la caméra et la taille n'ont pas changé
+fn pixols(m: &Prepared, cam: &Camera, w: usize, h: usize) -> std::sync::Arc<Pixols> {
+    if let Some(p) = m.pix.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+        if p.cam == *cam && p.w == w && p.h == h {
+            return p.clone();
+        }
+    }
+    let p = std::sync::Arc::new(raster(m, cam, w, h));
+    *m.pix.lock().unwrap_or_else(|e| e.into_inner()) = Some(p.clone());
+    p
+}
+
+/// Passe de visibilité : triangle le plus proche à chaque pixel. Un triangle plus petit qu'un
+/// pixel est posé comme un point (son centre), sans tests d'arêtes : sur un maillage très dense,
+/// c'est presque tous les triangles, et aucun ne passe entre les centres de pixels.
+fn raster(m: &Prepared, cam: &Camera, w: usize, h: usize) -> Pixols {
+    use rayon::prelude::*;
+    let pr = Proj::new(cam, w as f32, h as f32);
+    let screen: Vec<[f32; 3]> = m.pos.par_iter().map(|v| pr.screen(*v)).collect();
+    use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+    // Buffer de visibilité : par pixel, profondeur (rendue ordonnable comme un entier) dans les 32 bits
+    // hauts et numéro du triangle dans les bas. Un maximum atomique garde le plus proche : chaque
+    // triangle écrit directement, sans ranger d'abord les triangles par bande (méthode de Nanite)
+    let vis: Vec<AtomicU64> = (0..w * h).into_par_iter().map(|_| AtomicU64::new(0)).collect();
+    let order = |z: f32| -> u64 {
+        let b = z.to_bits();
+        (if b >> 31 == 1 { !b } else { b | 0x8000_0000 }) as u64
+    };
+    let put = |x: i64, y: i64, z: f32, ti: usize| {
+        let v = (order(z) << 32) | ti as u64;
+        let cell = &vis[y as usize * w + x as usize];
+        if cell.load(Relaxed) < v {
+            cell.fetch_max(v, Relaxed);
+        }
+    };
+    let persp = !cam.ortho;
+    let (wf, hf) = (w as f32, h as f32);
+    m.tris.par_chunks(4096).enumerate().for_each(|(ci, chunk)| {
+        for (j, t) in chunk.iter().enumerate() {
+            let ti = ci * 4096 + j;
+            let (a, b, c) = (screen[t[0] as usize], screen[t[1] as usize], screen[t[2] as usize]);
+            let (lx, hx) = (a[0].min(b[0]).min(c[0]), a[0].max(b[0]).max(c[0]));
+            let (ly, hy) = (a[1].min(b[1]).min(c[1]), a[1].max(b[1]).max(c[1]));
+            // NaN (derrière la caméra : les comparaisons sont fausses) ou hors de l'image
+            if !(hx >= 0.0 && lx <= wf && hy >= 0.0 && ly <= hf) {
+                continue;
+            }
+            let area = (b[0] - a[0]) * (c[1] - a[1]) - (c[0] - a[0]) * (b[1] - a[1]);
+            if !(area.abs() >= 1e-9) {
+                continue;
+            }
+            // En perspective, ce qui varie linéairement à l'écran est 1/profondeur
+            let (ia, ib, ic) = if persp { (1.0 / -a[2], 1.0 / -b[2], 1.0 / -c[2]) } else { (a[2], b[2], c[2]) };
+            // Plus petit qu'un pixel : un point au centre du triangle, sans tests d'arêtes
+            if hx - lx < 1.0 && hy - ly < 1.0 {
+                let (x, y) = (((a[0] + b[0] + c[0]) / 3.0).floor() as i64, ((a[1] + b[1] + c[1]) / 3.0).floor() as i64);
+                if x >= 0 && x < w as i64 && y >= 0 && y < h as i64 {
+                    put(x, y, (ia + ib + ic) / 3.0, ti);
+                }
+                continue;
+            }
+            let miny = ly.floor().max(0.0) as i64;
+            let maxy = (hy.ceil().min(hf - 1.0)) as i64;
+            let minx = lx.floor().max(0.0) as i64;
+            let maxx = (hx.ceil().min(wf - 1.0)) as i64;
+            let inv = 1.0 / area;
+            for y in miny..=maxy {
+                let py = y as f32 + 0.5;
+                for x in minx..=maxx {
+                    let pxf = x as f32 + 0.5;
+                    let w0 = ((b[0] - pxf) * (c[1] - py) - (c[0] - pxf) * (b[1] - py)) * inv;
+                    let w1 = ((c[0] - pxf) * (a[1] - py) - (a[0] - pxf) * (c[1] - py)) * inv;
+                    let w2 = 1.0 - w0 - w1;
+                    if w0 < 0.0 || w1 < 0.0 || w2 < 0.0 {
+                        continue;
+                    }
+                    // Plus grand = plus proche, dans les deux cas
+                    put(x, y, w0 * ia + w1 * ib + w2 * ic, ti);
+                }
+            }
+        }
+    });
+    // Les poids de chaque pixel, recalculés depuis son triangle (pour un point, ramenés dans le triangle)
+    let mut depth = vec![f32::MIN; w * h];
+    let mut tri = vec![u32::MAX; w * h];
+    let mut bary = vec![[0.0f32; 2]; w * h];
+    let band = PIX_BAND;
+    depth.par_chunks_mut(w * band).zip(tri.par_chunks_mut(w * band)).zip(bary.par_chunks_mut(w * band)).enumerate().for_each(|(bi, ((depth, tri), bary))| {
+        for k in 0..depth.len() {
+            let v = vis[bi * band * w + k].load(Relaxed);
+            if v == 0 {
+                continue;
+            }
+            let ti = (v & 0xFFFF_FFFF) as usize;
+            let t = &m.tris[ti];
+            let (a, b, c) = (screen[t[0] as usize], screen[t[1] as usize], screen[t[2] as usize]);
+            let (px, py) = ((k % w) as f32 + 0.5, (bi * band + k / w) as f32 + 0.5);
+            let inv = 1.0 / ((b[0] - a[0]) * (c[1] - a[1]) - (c[0] - a[0]) * (b[1] - a[1]));
+            let mut w0 = ((b[0] - px) * (c[1] - py) - (c[0] - px) * (b[1] - py)) * inv;
+            let mut w1 = ((c[0] - px) * (a[1] - py) - (a[0] - px) * (c[1] - py)) * inv;
+            let mut w2 = 1.0 - w0 - w1;
+            if w0 < 0.0 || w1 < 0.0 || w2 < 0.0 {
+                (w0, w1, w2) = (w0.max(0.0), w1.max(0.0), w2.max(0.0));
+                let s = (w0 + w1 + w2).max(1e-9);
+                (w0, w1, w2) = (w0 / s, w1 / s, w2 / s);
+            }
+            let (z, bw) = if persp { persp_bary([w0, w1, w2], [1.0 / -a[2], 1.0 / -b[2], 1.0 / -c[2]]) } else { (w0 * a[2] + w1 * b[2] + w2 * c[2], [w0, w1]) };
+            depth[k] = z;
+            tri[k] = ti as u32;
+            bary[k] = bw;
+        }
+    });
+    Pixols { cam: *cam, w, h, screen, depth, tri, bary, shadows: Default::default() }
+}
+
 pub fn render(m: &Prepared, cam: &Camera, look: &Look, w: usize, h: usize) -> Frame {
     use rayon::prelude::*;
     let focal = w.min(h) as f32 * 1.2 * cam.zoom;
     let ortho_scale = focal / cam.dist;
     let (cx, cy) = (w as f32 / 2.0, h as f32 / 2.0);
     let pr = Proj::new(cam, w as f32, h as f32);
-    let screen: Vec<[f32; 3]> = m.pos.par_iter().map(|v| pr.screen(*v)).collect();
+    let pix = pixols(m, cam, w, h);
+    let screen = &pix.screen;
     // Rotation de l'environnement : sinus et cosinus une fois, pas à chaque pixel
     let (env_s, env_c) = (-look.env_rot).sin_cos();
     let env_dir = |d: V3| -> V3 { [d[0] * env_c + d[2] * env_s, d[1], -d[0] * env_s + d[2] * env_c] };
@@ -1702,98 +1840,26 @@ pub fn render(m: &Prepared, cam: &Camera, look: &Look, w: usize, h: usize) -> Fr
     let (albedo0, rough, metal) = look.material.params();
     let wire = look.wire;
 
-    let band = 16usize;
+    let band = PIX_BAND;
     let mut rgba = vec![0u8; w * h * 4];
-    // Chaque bande ne parcourt que ses triangles : on range d'abord chaque triangle dans les bandes
-    // qu'il touche (avant, toutes les bandes relisaient tout le maillage)
-    let n_bands = h.div_ceil(band).max(1);
-    let spans: Vec<(u32, u32)> = m
-        .tris
-        .par_iter()
-        .map(|t| {
-            let (a, b, c) = (screen[t[0] as usize], screen[t[1] as usize], screen[t[2] as usize]);
-            let (y0, y1) = (a[1].min(b[1]).min(c[1]).floor(), a[1].max(b[1]).max(c[1]).ceil());
-            let (x0, x1) = (a[0].min(b[0]).min(c[0]), a[0].max(b[0]).max(c[0]));
-            // NaN (derrière la caméra) ou hors de l'image : aucune bande
-            if !(y1 >= 0.0 && y0 <= h as f32 - 1.0 && x1 >= 0.0 && x0 <= w as f32) || a[0].is_nan() || b[0].is_nan() || c[0].is_nan() {
-                return (1, 0);
-            }
-            ((y0.max(0.0) as usize / band) as u32, ((y1.min(h as f32 - 1.0).max(0.0) as usize / band).min(n_bands - 1)) as u32)
-        })
-        .collect();
-    let mut bin_start = vec![0usize; n_bands + 1];
-    for &(b0, b1) in &spans {
-        for b in b0..=b1 {
-            bin_start[b as usize + 1] += 1;
+    // Ombres déjà calculées pour ce tracé et ces lumières : on les relit (changer un matériau,
+    // l'exposition ou l'environnement ne relance aucun rayon)
+    let nl = lamps.len().max(1);
+    let sh_key = format!("{:?}|{soft}|{samples}|{}", lamps, bvh.is_some());
+    let mut sh = {
+        let mut g = pix.shadows.lock().unwrap_or_else(|e| e.into_inner());
+        match g.take() {
+            Some((k, v)) if k == sh_key && v.len() == w * h * nl => v,
+            _ => vec![f32::NAN; w * h * nl],
         }
-    }
-    for b in 0..n_bands {
-        bin_start[b + 1] += bin_start[b];
-    }
-    let mut bins = vec![0u32; bin_start[n_bands]];
-    let mut fill = bin_start.clone();
-    for (ti, &(b0, b1)) in spans.iter().enumerate() {
-        for b in b0..=b1 {
-            bins[fill[b as usize]] = ti as u32;
-            fill[b as usize] += 1;
-        }
-    }
-    drop(spans);
-    let bands: Vec<(Vec<u32>, Vec<f32>)> = rgba.par_chunks_mut(w * 4 * band).enumerate().map(|(bi, chunk)| {
+    };
+    rgba.par_chunks_mut(w * 4 * band).zip(sh.par_chunks_mut(w * band * nl)).enumerate().for_each(|(bi, (chunk, sh))| {
         let y0 = bi * band;
         let rows = chunk.len() / (w * 4);
         let n = w * rows;
-        let mut depth = vec![f32::MIN; n];
-        let mut tri = vec![u32::MAX; n];
-        let mut bary = vec![[0.0f32; 2]; n];
-        // Passe 1 : triangle visible de chaque pixel
-        for &ti in &bins[bin_start[bi]..bin_start[bi + 1]] {
-            let ti = ti as usize;
-            let t = &m.tris[ti];
-            let (a, b, c) = (screen[t[0] as usize], screen[t[1] as usize], screen[t[2] as usize]);
-            if a[0].is_nan() || b[0].is_nan() || c[0].is_nan() {
-                continue;
-            }
-            let miny = a[1].min(b[1]).min(c[1]).floor().max(y0 as f32) as i32;
-            let maxy = a[1].max(b[1]).max(c[1]).ceil().min((y0 + rows) as f32 - 1.0) as i32;
-            if miny > maxy {
-                continue;
-            }
-            let minx = a[0].min(b[0]).min(c[0]).floor().max(0.0) as i32;
-            let maxx = a[0].max(b[0]).max(c[0]).ceil().min(w as f32 - 1.0) as i32;
-            if minx > maxx {
-                continue;
-            }
-            let area = (b[0] - a[0]) * (c[1] - a[1]) - (c[0] - a[0]) * (b[1] - a[1]);
-            if area.abs() < 1e-9 {
-                continue;
-            }
-            let inv = 1.0 / area;
-            // En perspective, ce qui varie linéairement à l'écran est 1/profondeur : on interpole ça, et les poids
-            // (UV, normales, position) sont corrigés d'autant. Sinon les textures glissent quand la caméra bouge.
-            let persp = !cam.ortho;
-            let (ia, ib, ic) = if persp { (1.0 / -a[2], 1.0 / -b[2], 1.0 / -c[2]) } else { (1.0, 1.0, 1.0) };
-            for y in miny..=maxy {
-                let py = y as f32 + 0.5;
-                for x in minx..=maxx {
-                    let pxf = x as f32 + 0.5;
-                    let w0 = ((b[0] - pxf) * (c[1] - py) - (c[0] - pxf) * (b[1] - py)) * inv;
-                    let w1 = ((c[0] - pxf) * (a[1] - py) - (a[0] - pxf) * (c[1] - py)) * inv;
-                    let w2 = 1.0 - w0 - w1;
-                    if w0 < 0.0 || w1 < 0.0 || w2 < 0.0 {
-                        continue;
-                    }
-                    // Plus grand = plus proche, dans les deux cas
-                    let (z, bw) = if persp { persp_bary([w0, w1, w2], [ia, ib, ic]) } else { (w0 * a[2] + w1 * b[2] + w2 * c[2], [w0, w1]) };
-                    let k = (y as usize - y0) * w + x as usize;
-                    if z > depth[k] {
-                        depth[k] = z;
-                        tri[k] = ti as u32;
-                        bary[k] = bw;
-                    }
-                }
-            }
-        }
+        let tri = &pix.tri[y0 * w..y0 * w + n];
+        let bary = &pix.bary[y0 * w..y0 * w + n];
+        let _ = rows;
         // Passe 2 : éclairage
         for k in 0..n {
             let x = k % w;
@@ -1823,14 +1889,18 @@ pub fn render(m: &Prepared, cam: &Camera, look: &Look, w: usize, h: usize) -> Fr
                         if tt > 0.0 {
                             let hit = [eye[0] + ray[0] * tt, m.floor + 1e-3, eye[2] + ray[2] * tt];
                             let (mut dark, mut total) = (0.0f32, 0.0f32);
-                            for lamp in &lamps {
+                            for (li, lamp) in lamps.iter().enumerate() {
                                 let (dir, reach, fall) = if lamp.point { lamp.sample(hit, [0.5, 0.5]) } else { (lamp.at, 1e6, 1.0) };
                                 let e = lamp.intensity * fall * dir[1].max(0.0);
                                 if e <= 0.0 {
                                     continue;
                                 }
                                 total += e;
-                                dark += e * (1.0 - shadow(b, hit, dir, reach, lamp.point, x, y));
+                                let c = &mut sh[k * nl + li];
+                                if c.is_nan() {
+                                    *c = shadow(b, hit, dir, reach, lamp.point, x, y);
+                                }
+                                dark += e * (1.0 - *c);
                             }
                             if dark > 0.0 {
                                 chunk[o..o + 3].copy_from_slice(&[0, 0, 0]);
@@ -1968,7 +2038,7 @@ pub fn render(m: &Prepared, cam: &Camera, look: &Look, w: usize, h: usize) -> Fr
                 // Chaque lumière ajoute sa part : éclairage direct, reflet, et lumière qui déborde (sous-surface)
                 let (mut l_diff, mut l_spec, mut l_wrap) = ([0.0f32; 3], [0.0f32; 3], [0.0f32; 3]);
                 let here = [pa[0] * w0 + pb[0] * w1 + pc[0] * w2, pa[1] * w0 + pb[1] * w1 + pc[1] * w2, pa[2] * w0 + pb[2] * w1 + pc[2] * w2];
-                for lamp in &lamps {
+                for (li, lamp) in lamps.iter().enumerate() {
                     let (dir, reach, fall) = if lamp.point { lamp.sample(here, [0.5, 0.5]) } else { (lamp.at, f32::MAX, 1.0) };
                     if fall <= 0.0 || lamp.intensity <= 0.0 {
                         continue;
@@ -1980,7 +2050,11 @@ pub fn render(m: &Prepared, cam: &Camera, look: &Look, w: usize, h: usize) -> Fr
                         if raw > 0.0 || sss > 0.0 {
                             let side = if dot(face, dir) >= 0.0 { 1.0 } else { -1.0 };
                             let o = [here[0] + face[0] * side * 2e-3, here[1] + face[1] * side * 2e-3, here[2] + face[2] * side * 2e-3];
-                            lit *= shadow(b, o, dir, if lamp.point { reach - 4e-3 } else { 1e6 }, lamp.point, x, y);
+                            let c = &mut sh[k * nl + li];
+                            if c.is_nan() {
+                                *c = shadow(b, o, dir, if lamp.point { reach - 4e-3 } else { 1e6 }, lamp.point, x, y);
+                            }
+                            lit *= *c;
                         }
                     }
                     if lit <= 0.0 {
@@ -2074,20 +2148,11 @@ pub fn render(m: &Prepared, cam: &Camera, look: &Look, w: usize, h: usize) -> Fr
             let _ = col;
             chunk[o..o + 3].copy_from_slice(&rgb);
         }
-        // Le reste du programme attend la profondeur de vue (négative devant la caméra) : on la redonne
-        if !cam.ortho {
-            for d in depth.iter_mut().filter(|d| **d > 0.0) {
-                *d = -1.0 / *d;
-            }
-        }
-        (tri, depth)
-    }).collect();
-    let (mut ids, mut depth) = (Vec::with_capacity(w * h), Vec::with_capacity(w * h));
-    for (i, d) in bands {
-        ids.extend(i);
-        depth.extend(d);
-    }
-    Frame { w, h, rgba, ids, depth }
+    });
+    *pix.shadows.lock().unwrap_or_else(|e| e.into_inner()) = Some((sh_key, sh));
+    // Le reste du programme attend la profondeur de vue (négative devant la caméra) : on la redonne
+    let depth = if cam.ortho { pix.depth.clone() } else { pix.depth.par_iter().map(|&d| if d > 0.0 { -1.0 / d } else { d }).collect() };
+    Frame { w, h, rgba, ids: pix.tri.clone(), depth }
 }
 
 fn add3(a: V3, b: V3) -> V3 {
@@ -11280,6 +11345,73 @@ mod banc {
                 let n = 8;
                 let sum: u64 = (0..n).map(|_| render(&p, &cam, &look, 1280, 720).rgba[1000] as u64).sum();
                 println!("BANC {} triangles, {name} : rendu {:.1} ms ({sum})", p.tri_count(), t.elapsed().as_secs_f64() * 1000.0 / n as f64);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod bench_pixols {
+    use super::*;
+
+    /// Sphère bosselée d'environ `tris` triangles (dense comme un sculpt)
+    pub fn dense_sphere(tris: usize) -> Prepared {
+        let n = ((tris as f32 / 2.0).sqrt() * 1.41) as usize;
+        let m = n / 2;
+        let mut pos = Vec::with_capacity((n + 1) * (m + 1));
+        for j in 0..=m {
+            let t = j as f32 / m as f32 * std::f32::consts::PI;
+            for i in 0..=n {
+                let p = i as f32 / n as f32 * std::f32::consts::TAU;
+                let r = 1.0 + 0.03 * (p * 23.0).sin() * (t * 17.0).sin();
+                pos.push([r * t.sin() * p.cos(), r * t.cos(), r * t.sin() * p.sin()]);
+            }
+        }
+        let mut tr = Vec::with_capacity(n * m * 2);
+        for j in 0..m {
+            for i in 0..n {
+                let a = (j * (n + 1) + i) as u32;
+                let b = a + n as u32 + 1;
+                tr.push([a, a + 1, b + 1]);
+                tr.push([a, b + 1, b]);
+            }
+        }
+        let (nt, nv) = (tr.len(), pos.len());
+        // Directement, sans passer par Model::new qui simplifie pour l'affichage
+        let _ = nv;
+        Prepared::from_mesh(crate::modifiers::Mesh { pos, tris: tr, colors: vec![egui::Color32::from_gray(200); nt], edges: vec![0b111; nt] })
+    }
+
+    #[test]
+    #[ignore]
+    fn mesure_vue() {
+        let cam = Camera { yaw: 0.5, pitch: 0.3, dist: 2.6, ..Default::default() };
+        let ms = |t: std::time::Instant, k: usize| t.elapsed().as_secs_f32() * 1000.0 / k as f32;
+        for tris in [100_000usize, 1_000_000, 5_000_000] {
+            let s = dense_sphere(tris);
+            let k = 3;
+            let t = std::time::Instant::now();
+            for i in 0..k {
+                let c = Camera { yaw: 0.5 + i as f32 * 0.01, ..cam };
+                let _ = raster(&s, &c, 1280, 720);
+            }
+            eprintln!("MESURE {} tris : tracé seul {:.0} ms", s.tri_count(), ms(t, k));
+            for shadows in [false, true] {
+                let look = Look { material: Material::Clay, shadows, ..Default::default() };
+                let _ = render(&s, &cam, &look, 320, 200);
+                // Caméra qui bouge : tout est refait
+                let t = std::time::Instant::now();
+                for i in 0..k {
+                    let _ = render(&s, &Camera { yaw: 0.5 + i as f32 * 0.01, ..cam }, &look, 1280, 720);
+                }
+                let moving = ms(t, k);
+                // Caméra fixe, exposition qui change : tracé et ombres relus
+                let _ = render(&s, &cam, &look, 1280, 720);
+                let t = std::time::Instant::now();
+                for i in 0..k {
+                    let _ = render(&s, &cam, &Look { exposure: i as f32 * 0.1, ..look.clone() }, 1280, 720);
+                }
+                eprintln!("MESURE {} tris, ombres {shadows} : {moving:.0} ms en mouvement, {:.0} ms en changeant l'éclairage", s.tri_count(), ms(t, k));
             }
         }
     }
