@@ -82,6 +82,7 @@ pub const TEXT_ICON: &str = "\u{f0185}";
 pub const CORNER_LEFT_UP: &str = "\u{f00a4}";
 pub const STAMP: &str = "\u{f03bb}";
 pub const CROSSHAIR: &str = "\u{f00ac}";
+pub const MOVE_RIGHT: &str = "\u{f0490}";
 pub const FLIP_HORIZONTAL_2: &str = "\u{f035e}";
 pub const GLOBE: &str = "\u{f00e8}";
 pub const UNDO_2: &str = "\u{f02a1}";

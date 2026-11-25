@@ -185,6 +185,9 @@ pub enum Kind {
         closed: bool,
         width: f32,
         color: [u8; 3],
+        /// Une pointe de flèche au bout (elle suit le tracé progressif)
+        #[serde(default)]
+        arrow: bool,
     },
     /// Précomposition : une autre composition Motion du coffre, jouée depuis le début du calque
     Compo {
@@ -875,10 +878,11 @@ pub fn size(l: &Layer, cache: &mut Cache) -> [f32; 2] {
         Kind::Rect { w, h, .. } | Kind::Ellipse { w, h, .. } => [*w, *h],
         Kind::Image { path } => cache.image(path).map(|i| [i.width() as f32, i.height() as f32]).unwrap_or([200.0, 120.0]),
         Kind::Compo { path } => cache.compo(path).map(|c| [c.w as f32, c.h as f32]).unwrap_or([400.0, 225.0]),
-        Kind::Path { points, width, .. } => {
-            // Le cadre est centré sur l'origine du calque : il couvre les points les plus éloignés
+        Kind::Path { points, width, arrow, .. } => {
+            // Le cadre est centré sur l'origine du calque : il couvre les points les plus éloignés (et la flèche)
             let (mx, my) = points.iter().fold((0.0f32, 0.0f32), |(a, b), p| (a.max(p[0].abs()), b.max(p[1].abs())));
-            [2.0 * mx + width, 2.0 * my + width]
+            let pad = if *arrow { width * 4.0 } else { *width };
+            [2.0 * mx + pad, 2.0 * my + pad]
         }
     }
 }
@@ -940,6 +944,63 @@ pub fn trim_path(pts: &[[f32; 2]], a: f32, b: f32) -> Vec<[f32; 2]> {
         out.push(lerp(pts[i], pts[i + 1], t1));
     }
     out
+}
+
+/// La pointe de flèche au bout d'une ligne : la pointe, puis les deux coins de la base
+fn arrow_head(line: &[[f32; 2]], width: f32) -> Option<[[f32; 2]; 3]> {
+    let tip = *line.last()?;
+    let len = width * 3.0;
+    // Direction : depuis un point un peu en arrière (un bout de courbe très court ne décide pas seul)
+    let mut back = None;
+    for q in line.iter().rev().skip(1) {
+        if (tip[0] - q[0]).hypot(tip[1] - q[1]) >= len * 0.5 {
+            back = Some(*q);
+            break;
+        }
+    }
+    let q = back.or_else(|| line.iter().rev().nth(1).copied())?;
+    let (dx, dy) = (tip[0] - q[0], tip[1] - q[1]);
+    let d = dx.hypot(dy);
+    if d < 1e-4 {
+        return None;
+    }
+    let (ux, uy) = (dx / d, dy / d);
+    let base = [tip[0] - ux * len, tip[1] - uy * len];
+    let half = width * 1.6;
+    Some([tip, [base[0] - uy * half, base[1] + ux * half], [base[0] + uy * half, base[1] - ux * half]])
+}
+
+/// Remplit un triangle (bords adoucis) dans l'image d'un calque
+fn fill_triangle(bm: &mut Bitmap, tri: [[f32; 2]; 3], color: [u8; 3]) {
+    let k = bm.k;
+    let (w, h) = (bm.img.width(), bm.img.height());
+    let x0 = ((tri.iter().map(|p| p[0]).fold(f32::MAX, f32::min) - bm.ox) * k).floor().max(0.0) as u32;
+    let x1 = ((tri.iter().map(|p| p[0]).fold(f32::MIN, f32::max) - bm.ox) * k).ceil().min(w as f32) as u32;
+    let y0 = ((tri.iter().map(|p| p[1]).fold(f32::MAX, f32::min) - bm.oy) * k).floor().max(0.0) as u32;
+    let y1 = ((tri.iter().map(|p| p[1]).fold(f32::MIN, f32::max) - bm.oy) * k).ceil().min(h as f32) as u32;
+    // Distance signée aux trois côtés (positive dedans), quel que soit le sens du triangle
+    let area = (tri[1][0] - tri[0][0]) * (tri[2][1] - tri[0][1]) - (tri[1][1] - tri[0][1]) * (tri[2][0] - tri[0][0]);
+    let sign = if area < 0.0 { -1.0 } else { 1.0 };
+    for y in y0..y1 {
+        for x in x0..x1 {
+            let (px, py) = (bm.ox + (x as f32 + 0.5) / k, bm.oy + (y as f32 + 0.5) / k);
+            let mut dmin = f32::MAX;
+            for e in 0..3 {
+                let (a, b) = (tri[e], tri[(e + 1) % 3]);
+                let (ex, ey) = (b[0] - a[0], b[1] - a[1]);
+                let l = ex.hypot(ey).max(1e-6);
+                dmin = dmin.min(sign * (ex * (py - a[1]) - ey * (px - a[0])) / l);
+            }
+            let cov = (dmin * k + 0.5).clamp(0.0, 1.0);
+            if cov > 0.0 {
+                let p = bm.img.get_pixel_mut(x, y);
+                let a = (cov * 255.0) as u8;
+                if a > p[3] {
+                    *p = image::Rgba([color[0], color[1], color[2], a]);
+                }
+            }
+        }
+    }
 }
 
 /// Un trait rond d'épaisseur `width` le long d'une ligne brisée, à la résolution `k`
@@ -1050,11 +1111,26 @@ fn bitmap(l: &Layer, t: f32, k: f32, cache: &mut Cache) -> Option<Bitmap> {
             let (w, h) = (img.width() as f32, img.height() as f32);
             Some(Bitmap { img: (*img).clone(), ox: -w / 2.0, oy: -h / 2.0, k: 1.0 })
         }
-        Kind::Path { points, closed, width, color } => {
+        Kind::Path { points, closed, width, color, arrow } => {
             let [w, h] = size(l, cache);
             let tr = l.value(&l.trim, t);
             let line = trim_path(&smooth_path(points, *closed), tr[1] / 100.0, tr[0] / 100.0);
-            Some(stroke_bitmap(&line, width.max(0.1), *color, k, [w / 2.0, h / 2.0]))
+            let tip = if *arrow { arrow_head(&line, width.max(0.1)) } else { None };
+            // Le trait s'arrête à la base de la pointe : le bout reste pointu
+            let body = match tip {
+                Some(tri) if line.len() >= 2 => {
+                    let mut b = line.clone();
+                    let n = b.len();
+                    b[n - 1] = [(tri[1][0] + tri[2][0]) / 2.0, (tri[1][1] + tri[2][1]) / 2.0];
+                    b
+                }
+                _ => line,
+            };
+            let mut bm = stroke_bitmap(&body, width.max(0.1), *color, k, [w / 2.0, h / 2.0]);
+            if let Some(tri) = tip {
+                fill_triangle(&mut bm, tri, *color);
+            }
+            Some(bm)
         }
         Kind::Compo { path } => {
             if cache.depth >= 4 {
@@ -1707,13 +1783,20 @@ mod tests {
         assert!(sm.iter().any(|p| (p[0] - 10.0).abs() < 1e-4 && (p[1] - 10.0).abs() < 1e-4));
         let mut c = Compo { layers: vec![], ..Compo::default() };
         (c.w, c.h, c.bg) = (120, 20, [0, 0, 0]);
-        let mut l = Layer::new("t", Kind::Path { points: line, closed: false, width: 6.0, color: [255, 255, 255] }, &c);
+        let mut l = Layer::new("t", Kind::Path { points: line, closed: false, width: 6.0, color: [255, 255, 255], arrow: false }, &c);
         l.pos.v = [60.0, 10.0];
         l.trim = Track::new(50.0, 0.0);
         c.layers = vec![l];
         let img = render(&c, 0.0, 1.0, &mut Cache::new(Path::new(".")));
         assert!(img.get_pixel(30, 10)[0] > 200);
         assert!(img.get_pixel(90, 10)[0] < 10);
+        // Avec une flèche : la pointe dépasse l'épaisseur du trait, juste avant le bout
+        if let Kind::Path { arrow, .. } = &mut c.layers[0].kind {
+            *arrow = true;
+        }
+        let img = render(&c, 0.0, 1.0, &mut Cache::new(Path::new(".")));
+        assert!(img.get_pixel(46, 4)[0] > 200, "{:?}", img.get_pixel(46, 4));
+        assert!(img.get_pixel(64, 10)[0] < 10);
     }
 
     #[test]

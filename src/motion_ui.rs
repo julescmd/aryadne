@@ -28,6 +28,8 @@ enum ViewDrag {
     Draw { a: [f32; 2], b: [f32; 2] },
     /// Tracé à main levée : les points du geste (composition)
     Pen(Vec<[f32; 2]>),
+    /// Un point d'un tracé, qu'on déplace
+    PathPt(usize),
 }
 
 /// Simplifie un geste (Ramer-Douglas-Peucker) : garde les points qui s'écartent de plus de `eps`
@@ -581,6 +583,7 @@ impl Editor {
 
         // Sélection : cadre, trajet de la position, poignées
         let mut handles: Vec<(Pos2, u8)> = vec![];
+        let mut path_pts: Vec<(Pos2, usize)> = vec![];
         if let Some(i) = self.sel.filter(|&i| i < self.compo.layers.len()) {
             let lay = &self.compo.layers[i];
             // Le trajet est dans le repère du parent : on le ramène dans la composition, instant par instant
@@ -639,6 +642,15 @@ impl Editor {
                 let rot = top + dir * 22.0;
                 painter.line_segment([top, rot], Stroke::new(1.0, p.accent));
                 handles.push((rot, 1));
+                // Tracé : ses points se déplacent à la souris
+                if let Kind::Path { points, .. } = &lay.kind {
+                    let x = self.compo.world(i, self.time);
+                    for (k, q) in points.iter().enumerate() {
+                        let sp = to_screen(x.apply(*q));
+                        path_pts.push((sp, k));
+                        painter.circle(sp, 4.0, Color32::WHITE, Stroke::new(1.5, p.accent));
+                    }
+                }
                 for (q, kind) in &handles {
                     if *kind == 0 {
                         painter.rect(Rect::from_center_size(*q, vec2(7.0, 7.0)), 0.0, p.accent, Stroke::new(1.0, p.code_bg), egui::StrokeKind::Outside);
@@ -652,7 +664,9 @@ impl Editor {
         // Souris
         let hover = resp.hover_pos();
         let near = |q: Pos2| hover.is_some_and(|h| h.distance(q) < 9.0);
-        if self.tool == Tool::Select {
+        if self.tool == Tool::Select && path_pts.iter().any(|(q, _)| near(*q)) {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
+        } else if self.tool == Tool::Select {
             if let Some((_, k)) = handles.iter().find(|(q, _)| near(*q)) {
                 ui.ctx().set_cursor_icon(if *k == 0 { egui::CursorIcon::ResizeNwSe } else { egui::CursorIcon::Alias });
             }
@@ -660,12 +674,17 @@ impl Editor {
             ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
         }
         if resp.drag_started() {
-            if let Some(m) = resp.interact_pointer_pos() {
+            // Là où le bouton a été enfoncé : le glissé démarre après quelques pixels, souvent déjà sur une autre poignée
+            if let Some(m) = ui.input(|i| i.pointer.press_origin()).or(resp.interact_pointer_pos()) {
                 let cp = to_comp(m);
                 match self.tool {
                     Tool::Rect | Tool::Ellipse => self.view_drag = Some(ViewDrag::Draw { a: cp, b: cp }),
                     Tool::Pen => self.view_drag = Some(ViewDrag::Pen(vec![cp])),
                     Tool::Text => {}
+                    Tool::Select if path_pts.iter().any(|(q, _)| q.distance(m) < 7.0) => {
+                        let k = path_pts.iter().filter(|(q, _)| q.distance(m) < 7.0).min_by(|a, b| a.0.distance(m).total_cmp(&b.0.distance(m))).map(|x| x.1).unwrap_or(0);
+                        self.view_drag = Some(ViewDrag::PathPt(k));
+                    }
                     Tool::Select => {
                         let handle = handles.iter().find(|(q, _)| q.distance(m) < 9.0).map(|(_, k)| *k);
                         if let (Some(k), Some(i)) = (handle, self.sel) {
@@ -694,6 +713,17 @@ impl Editor {
                 let t = self.time;
                 match d {
                     ViewDrag::Draw { b, .. } => *b = cp,
+                    ViewDrag::PathPt(k) => {
+                        if let Some(i) = self.sel {
+                            let x = self.compo.world(i, t);
+                            if let (Some(lp), Kind::Path { points, .. }) = (x.inverse(cp), &mut self.compo.layers[i].kind) {
+                                if let Some(q) = points.get_mut(*k) {
+                                    *q = lp;
+                                    self.rev += 1;
+                                }
+                            }
+                        }
+                    }
                     ViewDrag::Pen(pts) => {
                         if pts.last().is_none_or(|q| (q[0] - cp[0]).hypot(q[1] - cp[1]) > 1.5 / s) {
                             pts.push(cp);
@@ -758,7 +788,7 @@ impl Editor {
                     let (lo, hi) = pts.iter().fold(([f32::MAX; 2], [f32::MIN; 2]), |(lo, hi), q| ([lo[0].min(q[0]), lo[1].min(q[1])], [hi[0].max(q[0]), hi[1].max(q[1])]));
                     let c = [(lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0];
                     let points = pts.iter().map(|q| [q[0] - c[0], q[1] - c[1]]).collect();
-                    self.add_layer(Kind::Path { points, closed: false, width: 12.0, color: [0xf4, 0xee, 0xf1] }, Some(c));
+                    self.add_layer(Kind::Path { points, closed: false, width: 12.0, color: [0xf4, 0xee, 0xf1], arrow: false }, Some(c));
                 }
             }
         }
@@ -1035,12 +1065,13 @@ impl Editor {
                     section(ui, "Image");
                     ui.label(egui::RichText::new(path.as_str()).size(11.5).color(p.muted));
                 }
-                Kind::Path { closed, width, color, .. } => {
+                Kind::Path { closed, width, color, arrow, .. } => {
                     section(ui, "Tracé");
                     ui.horizontal(|ui| {
                         changed |= ui.add(egui::DragValue::new(width).speed(0.3).range(0.5..=400.0).max_decimals(1).prefix(format!("{} ", crate::i18n::t("épaisseur")))).changed();
                         changed |= ui.color_edit_button_srgb(color).changed();
                         changed |= ui.checkbox(closed, crate::i18n::t("fermé")).changed();
+                        changed |= ui.toggle_value(arrow, egui::RichText::new(l::MOVE_RIGHT).size(14.0)).on_hover_text(crate::i18n::t("Pointe de flèche au bout du tracé")).changed();
                     });
                 }
                 Kind::Compo { path } => {

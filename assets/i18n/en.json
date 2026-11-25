@@ -2486,5 +2486,6 @@
   "Tracé à main levée (P) : dessinez dans la composition": "Freehand path (P): draw in the composition",
   "valeurs séparées par des virgules": "values separated by commas",
   "propriété": "property",
-  "double-clic pour modifier": "double-click to edit"
+  "double-clic pour modifier": "double-click to edit",
+  "Pointe de flèche au bout du tracé": "Arrowhead at the end of the path"
 }
