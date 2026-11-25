@@ -2474,5 +2474,14 @@
   "Relit la précomposition après l'avoir modifiée": "Reads the precomp again after you've changed it",
   "Précomposition : une autre composition du coffre, jouée comme un calque": "Precomp: another composition from the vault, played as a layer",
   "LUT appliquée à ce clip": "LUT applied to this clip",
-  "Appliquer une LUT .cube (un look, le profil Log d'une caméra)": "Apply a .cube LUT (a look, a camera's Log profile)"
+  "Appliquer une LUT .cube (un look, le profil Log d'une caméra)": "Apply a .cube LUT (a look, a camera's Log profile)",
+  "tracé": "path",
+  "Tracé": "Path",
+  "fermé": "closed",
+  "Tracé progressif": "Trim path",
+  "Animer le dessin": "Animate drawing",
+  "Le tracé se dessine en une seconde à partir de la tête de lecture": "The path draws itself over one second from the playhead",
+  "Effacer à la fin": "Erase at the end",
+  "Le tracé s'efface pendant la dernière seconde du calque": "The path erases itself during the layer's last second",
+  "Tracé à main levée (P) : dessinez dans la composition": "Freehand path (P): draw in the composition"
 }

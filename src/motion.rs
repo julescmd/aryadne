@@ -178,6 +178,14 @@ pub enum Kind {
         /// Chemin dans le coffre
         path: String,
     },
+    /// Tracé : une ligne lissée qui passe par ces points (px, autour de l'origine du calque)
+    Path {
+        points: Vec<[f32; 2]>,
+        #[serde(default)]
+        closed: bool,
+        width: f32,
+        color: [u8; 3],
+    },
     /// Précomposition : une autre composition Motion du coffre, jouée depuis le début du calque
     Compo {
         /// Chemin dans le coffre
@@ -193,6 +201,7 @@ impl Kind {
             Kind::Ellipse { .. } => "ellipse",
             Kind::Image { .. } => "image",
             Kind::Compo { .. } => "composition",
+            Kind::Path { .. } => "tracé",
         }
     }
 }
@@ -236,6 +245,17 @@ pub struct Layer {
     /// Cache de piste (comme After Effects) : le calque n'apparaît qu'à travers celui du dessus
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub matte: Option<Matte>,
+    /// Tracé progressif (comme les « trim paths » d'After Effects) : fin et début de la partie visible, en %
+    #[serde(default = "full_trim", skip_serializing_if = "is_full_trim")]
+    pub trim: Track,
+}
+
+fn full_trim() -> Track {
+    Track::new(100.0, 0.0)
+}
+
+fn is_full_trim(t: &Track) -> bool {
+    t.keys.is_empty() && t.v == [100.0, 0.0]
 }
 
 /// Comment le calque du dessus sert de cache
@@ -429,12 +449,13 @@ impl Layer {
             wiggle: None,
             cycle: Default::default(),
             matte: None,
+            trim: full_trim(),
         }
     }
 
     /// Les bornes de l'animation du calque (première et dernière clé, toutes propriétés)
     pub fn key_span(&self) -> Option<(f32, f32)> {
-        let ts = [&self.pos, &self.scale, &self.rot, &self.opacity].into_iter().flat_map(|t| t.keys.iter().map(|k| k.t));
+        let ts = [&self.pos, &self.scale, &self.rot, &self.opacity, &self.trim].into_iter().flat_map(|t| t.keys.iter().map(|k| k.t));
         let (lo, hi) = ts.fold((f32::MAX, f32::MIN), |(a, b), t| (a.min(t), b.max(t)));
         (hi > lo).then_some((lo, hi))
     }
@@ -854,7 +875,109 @@ pub fn size(l: &Layer, cache: &mut Cache) -> [f32; 2] {
         Kind::Rect { w, h, .. } | Kind::Ellipse { w, h, .. } => [*w, *h],
         Kind::Image { path } => cache.image(path).map(|i| [i.width() as f32, i.height() as f32]).unwrap_or([200.0, 120.0]),
         Kind::Compo { path } => cache.compo(path).map(|c| [c.w as f32, c.h as f32]).unwrap_or([400.0, 225.0]),
+        Kind::Path { points, width, .. } => {
+            // Le cadre est centré sur l'origine du calque : il couvre les points les plus éloignés
+            let (mx, my) = points.iter().fold((0.0f32, 0.0f32), |(a, b), p| (a.max(p[0].abs()), b.max(p[1].abs())));
+            [2.0 * mx + width, 2.0 * my + width]
+        }
     }
+}
+
+/// Le tracé lissé (Catmull-Rom) : passe par chaque point, sans angle
+pub fn smooth_path(pts: &[[f32; 2]], closed: bool) -> Vec<[f32; 2]> {
+    let n = pts.len();
+    if n < 3 {
+        return pts.to_vec();
+    }
+    let get = |i: isize| -> [f32; 2] {
+        if closed {
+            pts[i.rem_euclid(n as isize) as usize]
+        } else {
+            pts[i.clamp(0, n as isize - 1) as usize]
+        }
+    };
+    let spans = if closed { n } else { n - 1 };
+    let mut out = Vec::with_capacity(spans * 8 + 1);
+    for i in 0..spans as isize {
+        let (p0, p1, p2, p3) = (get(i - 1), get(i), get(i + 1), get(i + 2));
+        for s in 0..8 {
+            let t = s as f32 / 8.0;
+            let (t2, t3) = (t * t, t * t * t);
+            let f = |a: f32, b: f32, c: f32, d: f32| 0.5 * (2.0 * b + (-a + c) * t + (2.0 * a - 5.0 * b + 4.0 * c - d) * t2 + (-a + 3.0 * b - 3.0 * c + d) * t3);
+            out.push([f(p0[0], p1[0], p2[0], p3[0]), f(p0[1], p1[1], p2[1], p3[1])]);
+        }
+    }
+    out.push(if closed { pts[0] } else { pts[n - 1] });
+    out
+}
+
+/// La partie [a, b] (fractions de la longueur) d'une ligne brisée
+pub fn trim_path(pts: &[[f32; 2]], a: f32, b: f32) -> Vec<[f32; 2]> {
+    let (a, b) = (a.clamp(0.0, 1.0).min(b.clamp(0.0, 1.0)), b.clamp(0.0, 1.0).max(a.clamp(0.0, 1.0)));
+    if pts.len() < 2 || b <= a {
+        return vec![];
+    }
+    let seg: Vec<f32> = pts.windows(2).map(|w| (w[1][0] - w[0][0]).hypot(w[1][1] - w[0][1])).collect();
+    let total: f32 = seg.iter().sum();
+    if total <= 0.0 {
+        return vec![];
+    }
+    let (la, lb) = (a * total, b * total);
+    let lerp = |p: [f32; 2], q: [f32; 2], t: f32| [p[0] + (q[0] - p[0]) * t, p[1] + (q[1] - p[1]) * t];
+    let mut out = vec![];
+    let mut acc = 0.0;
+    for (i, &l) in seg.iter().enumerate() {
+        let (s0, s1) = (acc, acc + l);
+        acc = s1;
+        if s1 < la || s0 > lb || l <= 0.0 {
+            continue;
+        }
+        let t0 = ((la - s0) / l).max(0.0);
+        let t1 = ((lb - s0) / l).min(1.0);
+        if out.is_empty() {
+            out.push(lerp(pts[i], pts[i + 1], t0));
+        }
+        out.push(lerp(pts[i], pts[i + 1], t1));
+    }
+    out
+}
+
+/// Un trait rond d'épaisseur `width` le long d'une ligne brisée, à la résolution `k`
+fn stroke_bitmap(pts: &[[f32; 2]], width: f32, color: [u8; 3], k: f32, half: [f32; 2]) -> Bitmap {
+    let pad = 2.0 / k;
+    let (ox, oy) = (-half[0] - pad, -half[1] - pad);
+    let (bw, bh) = (((2.0 * half[0] + 2.0 * pad) * k).ceil().clamp(1.0, 8192.0) as u32, ((2.0 * half[1] + 2.0 * pad) * k).ceil().clamp(1.0, 8192.0) as u32);
+    let mut cov = vec![0.0f32; (bw * bh) as usize];
+    let r = width / 2.0;
+    // Chaque segment ne touche que les pixels de son cadre : rapide même pour un long tracé
+    let segs: Vec<([f32; 2], [f32; 2])> = if pts.len() == 1 { vec![(pts[0], pts[0])] } else { pts.windows(2).map(|w| (w[0], w[1])).collect() };
+    for (p, q) in segs {
+        let x0 = (((p[0].min(q[0]) - r - ox) * k).floor().max(0.0)) as u32;
+        let x1 = (((p[0].max(q[0]) + r - ox) * k).ceil().min(bw as f32)) as u32;
+        let y0 = (((p[1].min(q[1]) - r - oy) * k).floor().max(0.0)) as u32;
+        let y1 = (((p[1].max(q[1]) + r - oy) * k).ceil().min(bh as f32)) as u32;
+        let (dx, dy) = (q[0] - p[0], q[1] - p[1]);
+        let ll = (dx * dx + dy * dy).max(1e-9);
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let (lx, ly) = (ox + (x as f32 + 0.5) / k, oy + (y as f32 + 0.5) / k);
+                let t = (((lx - p[0]) * dx + (ly - p[1]) * dy) / ll).clamp(0.0, 1.0);
+                let d = (lx - p[0] - t * dx).hypot(ly - p[1] - t * dy);
+                let a = (0.5 - (d - r) * k).clamp(0.0, 1.0);
+                let c = &mut cov[(y * bw + x) as usize];
+                if a > *c {
+                    *c = a;
+                }
+            }
+        }
+    }
+    let mut img = image::RgbaImage::new(bw, bh);
+    for (i, px) in img.pixels_mut().enumerate() {
+        if cov[i] > 0.0 {
+            *px = image::Rgba([color[0], color[1], color[2], (cov[i] * 255.0) as u8]);
+        }
+    }
+    Bitmap { img, ox, oy, k }
 }
 
 /// Les quatre coins du calque dans la composition, à l'instant `t`
@@ -926,6 +1049,12 @@ fn bitmap(l: &Layer, t: f32, k: f32, cache: &mut Cache) -> Option<Bitmap> {
             let img = cache.image(path)?;
             let (w, h) = (img.width() as f32, img.height() as f32);
             Some(Bitmap { img: (*img).clone(), ox: -w / 2.0, oy: -h / 2.0, k: 1.0 })
+        }
+        Kind::Path { points, closed, width, color } => {
+            let [w, h] = size(l, cache);
+            let tr = l.value(&l.trim, t);
+            let line = trim_path(&smooth_path(points, *closed), tr[1] / 100.0, tr[0] / 100.0);
+            Some(stroke_bitmap(&line, width.max(0.1), *color, k, [w / 2.0, h / 2.0]))
         }
         Kind::Compo { path } => {
             if cache.depth >= 4 {
@@ -1194,6 +1323,7 @@ fn prep_layer(c: &Compo, li: usize, t: f32, scale: f32, cache: &mut Cache, (w, h
     // Un contenu qui ne bouge pas à l'intérieur du calque se dessine une fois (l'export reste rapide)
     let still = match (&l.kind, &l.reveal) {
         (Kind::Compo { .. }, _) => false,
+        (Kind::Path { .. }, _) => !l.trim.animated() && l.cycle.is_none(),
         (Kind::Text { text, .. }, Some(r)) => t - l.start >= text.chars().count() as f32 * r.delay + r.dur,
         _ => true,
     };
@@ -1203,6 +1333,7 @@ fn prep_layer(c: &Compo, li: usize, t: f32, scale: f32, cache: &mut Cache, (w, h
         serde_json::to_string(&l.kind).unwrap_or_default().hash(&mut h);
         serde_json::to_string(&l.reveal).unwrap_or_default().hash(&mut h);
         serde_json::to_string(&l.style).unwrap_or_default().hash(&mut h);
+        serde_json::to_string(&l.trim).unwrap_or_default().hash(&mut h);
         (h.finish(), k.to_bits())
     });
     let cached = key.and_then(|k| cache.bitmaps.get(&k).cloned());
@@ -1562,6 +1693,27 @@ mod tests {
         assert!(lit(&sharp) <= 12, "{}", lit(&sharp));
         assert!(lit(&soft) > 12, "{}", lit(&soft));
         assert!(soft.get_pixel(100, 20)[0] < 255);
+    }
+
+    #[test]
+    fn trace_progressif() {
+        // Une ligne de 100 px : à moitié dessinée, elle s'arrête au milieu
+        let line = vec![[-50.0, 0.0], [50.0, 0.0]];
+        let half = trim_path(&line, 0.0, 0.5);
+        assert_eq!(half.last().unwrap(), &[0.0, 0.0]);
+        assert!(trim_path(&line, 0.3, 0.3).is_empty());
+        // Le lissage passe par les points donnés
+        let sm = smooth_path(&[[0.0, 0.0], [10.0, 10.0], [20.0, 0.0]], false);
+        assert!(sm.iter().any(|p| (p[0] - 10.0).abs() < 1e-4 && (p[1] - 10.0).abs() < 1e-4));
+        let mut c = Compo { layers: vec![], ..Compo::default() };
+        (c.w, c.h, c.bg) = (120, 20, [0, 0, 0]);
+        let mut l = Layer::new("t", Kind::Path { points: line, closed: false, width: 6.0, color: [255, 255, 255] }, &c);
+        l.pos.v = [60.0, 10.0];
+        l.trim = Track::new(50.0, 0.0);
+        c.layers = vec![l];
+        let img = render(&c, 0.0, 1.0, &mut Cache::new(Path::new(".")));
+        assert!(img.get_pixel(30, 10)[0] > 200);
+        assert!(img.get_pixel(90, 10)[0] < 10);
     }
 
     #[test]

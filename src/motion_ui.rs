@@ -16,6 +16,8 @@ enum Tool {
     Rect,
     Ellipse,
     Text,
+    /// Tracé à main levée
+    Pen,
 }
 
 /// Ce qu'on tire dans la composition
@@ -24,6 +26,32 @@ enum ViewDrag {
     Scale { from: [f32; 2], d0: f32 },
     Rotate { from: f32, a0: f32 },
     Draw { a: [f32; 2], b: [f32; 2] },
+    /// Tracé à main levée : les points du geste (composition)
+    Pen(Vec<[f32; 2]>),
+}
+
+/// Simplifie un geste (Ramer-Douglas-Peucker) : garde les points qui s'écartent de plus de `eps`
+fn simplify(pts: &[[f32; 2]], eps: f32) -> Vec<[f32; 2]> {
+    if pts.len() < 3 {
+        return pts.to_vec();
+    }
+    let (a, b) = (pts[0], pts[pts.len() - 1]);
+    let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+    let len = dx.hypot(dy).max(1e-6);
+    let (mut far, mut at) = (0.0, 0);
+    for (i, p) in pts.iter().enumerate().take(pts.len() - 1).skip(1) {
+        let d = ((p[0] - a[0]) * dy - (p[1] - a[1]) * dx).abs() / len;
+        if d > far {
+            (far, at) = (d, i);
+        }
+    }
+    if far <= eps {
+        return vec![a, b];
+    }
+    let mut left = simplify(&pts[..=at], eps);
+    left.pop();
+    left.extend(simplify(&pts[at..], eps));
+    left
 }
 
 /// Ce qu'on tire dans la timeline
@@ -107,6 +135,7 @@ fn layer_color(k: &Kind) -> Color32 {
         Kind::Rect { .. } | Kind::Ellipse { .. } => p.accent,
         Kind::Image { .. } => crate::theme::ws_color("3d").unwrap_or(p.info),
         Kind::Compo { .. } => crate::theme::ws_color("motion").unwrap_or(p.accent),
+        Kind::Path { .. } => p.accent,
     }
 }
 
@@ -117,6 +146,7 @@ fn layer_icon(k: &Kind) -> &'static str {
         Kind::Ellipse { .. } => l::CIRCLE,
         Kind::Image { .. } => l::IMAGE,
         Kind::Compo { .. } => l::FILM,
+        Kind::Path { .. } => l::PEN_TOOL,
     }
 }
 
@@ -237,6 +267,7 @@ impl Editor {
             Kind::Ellipse { .. } => "Ellipse",
             Kind::Image { .. } => "Image",
             Kind::Compo { path } => path.rsplit('/').next().unwrap_or("Composition").trim_end_matches(".arymotion"),
+            Kind::Path { .. } => "Tracé",
         };
         let name = self.compo.fresh_name(&crate::i18n::t(base));
         let mut layer = Layer::new(&name, kind, &self.compo);
@@ -286,7 +317,7 @@ impl Editor {
             }
             if !i.modifiers.command {
                 key = i.key_pressed(egui::Key::K);
-                for (k, t) in [(egui::Key::V, Tool::Select), (egui::Key::Q, Tool::Rect), (egui::Key::E, Tool::Ellipse), (egui::Key::T, Tool::Text)] {
+                for (k, t) in [(egui::Key::V, Tool::Select), (egui::Key::Q, Tool::Rect), (egui::Key::E, Tool::Ellipse), (egui::Key::T, Tool::Text), (egui::Key::P, Tool::Pen)] {
                     if i.key_pressed(k) {
                         tool = Some(t);
                     }
@@ -633,6 +664,7 @@ impl Editor {
                 let cp = to_comp(m);
                 match self.tool {
                     Tool::Rect | Tool::Ellipse => self.view_drag = Some(ViewDrag::Draw { a: cp, b: cp }),
+                    Tool::Pen => self.view_drag = Some(ViewDrag::Pen(vec![cp])),
                     Tool::Text => {}
                     Tool::Select => {
                         let handle = handles.iter().find(|(q, _)| q.distance(m) < 9.0).map(|(_, k)| *k);
@@ -662,6 +694,11 @@ impl Editor {
                 let t = self.time;
                 match d {
                     ViewDrag::Draw { b, .. } => *b = cp,
+                    ViewDrag::Pen(pts) => {
+                        if pts.last().is_none_or(|q| (q[0] - cp[0]).hypot(q[1] - cp[1]) > 1.5 / s) {
+                            pts.push(cp);
+                        }
+                    }
                     ViewDrag::Move { start, from } => {
                         if let Some(i) = self.sel {
                             let mut dv = [(m.x - start.x) / s, (m.y - start.y) / s];
@@ -701,12 +738,28 @@ impl Editor {
                 }
             }
         }
+        if let Some(ViewDrag::Pen(pts)) = &self.view_drag {
+            let line: Vec<Pos2> = pts.iter().map(|q| to_screen(*q)).collect();
+            painter.add(egui::Shape::line(line, Stroke::new(2.0, p.accent)));
+        }
         if let Some(ViewDrag::Draw { a, b }) = &self.view_drag {
             let r = Rect::from_two_pos(to_screen(*a), to_screen(*b));
             if self.tool == Tool::Ellipse {
                 painter.add(egui::Shape::ellipse_stroke(r.center(), r.size() / 2.0, Stroke::new(1.0, p.accent)));
             } else {
                 painter.rect_stroke(r, 0.0, Stroke::new(1.0, p.accent), egui::StrokeKind::Inside);
+            }
+        }
+        if resp.drag_stopped() && matches!(self.view_drag, Some(ViewDrag::Pen(_))) {
+            if let Some(ViewDrag::Pen(pts)) = self.view_drag.take() {
+                // Le geste simplifié, centré sur son cadre : le calque est posé au centre
+                let pts = simplify(&pts, 2.5 / s);
+                if pts.len() >= 2 {
+                    let (lo, hi) = pts.iter().fold(([f32::MAX; 2], [f32::MIN; 2]), |(lo, hi), q| ([lo[0].min(q[0]), lo[1].min(q[1])], [hi[0].max(q[0]), hi[1].max(q[1])]));
+                    let c = [(lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0];
+                    let points = pts.iter().map(|q| [q[0] - c[0], q[1] - c[1]]).collect();
+                    self.add_layer(Kind::Path { points, closed: false, width: 12.0, color: [0xf4, 0xee, 0xf1] }, Some(c));
+                }
             }
         }
         if resp.drag_stopped() {
@@ -744,7 +797,7 @@ impl Editor {
         }
 
         // Outils, à gauche
-        let tools = [(Tool::Select, l::MOUSE_POINTER_2, "Sélectionner (V)"), (Tool::Rect, l::SQUARE, "Rectangle (Q)"), (Tool::Ellipse, l::CIRCLE, "Ellipse (E)"), (Tool::Text, l::TYPE, "Texte (T)")];
+        let tools = [(Tool::Select, l::MOUSE_POINTER_2, "Sélectionner (V)"), (Tool::Rect, l::SQUARE, "Rectangle (Q)"), (Tool::Ellipse, l::CIRCLE, "Ellipse (E)"), (Tool::Text, l::TYPE, "Texte (T)"), (Tool::Pen, l::PEN_TOOL, "Tracé à main levée (P) : dessinez dans la composition")];
         let strip = Rect::from_min_size(pos2(full.left() + 12.0, full.top() + 56.0), vec2(38.0, 8.0 + 32.0 * tools.len() as f32));
         painter.rect(strip, 6.0, p.panel, Stroke::new(1.0, p.line), egui::StrokeKind::Inside);
         for (k, (t, icon, tip)) in tools.iter().enumerate() {
@@ -982,6 +1035,14 @@ impl Editor {
                     section(ui, "Image");
                     ui.label(egui::RichText::new(path.as_str()).size(11.5).color(p.muted));
                 }
+                Kind::Path { closed, width, color, .. } => {
+                    section(ui, "Tracé");
+                    ui.horizontal(|ui| {
+                        changed |= ui.add(egui::DragValue::new(width).speed(0.3).range(0.5..=400.0).max_decimals(1).prefix(format!("{} ", crate::i18n::t("épaisseur")))).changed();
+                        changed |= ui.color_edit_button_srgb(color).changed();
+                        changed |= ui.checkbox(closed, crate::i18n::t("fermé")).changed();
+                    });
+                }
                 Kind::Compo { path } => {
                     section(ui, "Précomposition");
                     ui.label(egui::RichText::new(path.as_str()).size(11.5).color(p.muted));
@@ -993,6 +1054,54 @@ impl Editor {
                         changed = true;
                     }
                 }
+            }
+            if matches!(lay.kind, Kind::Path { .. }) {
+                section(ui, "Tracé progressif");
+                // Fin et début de la partie visible ; une clé à cet instant si la propriété est animée
+                let tr = &mut lay.trim;
+                let mut v = tr.at(t);
+                let at = tr.key_at(t).is_some();
+                let anim = tr.animated();
+                ui.horizontal(|ui| {
+                    let (r, b) = ui.allocate_exact_size(vec2(16.0, 22.0), Sense::click());
+                    diamond(ui.painter(), r.center(), 4.5, if at { Some(p.accent) } else if anim { Some(p.accent.gamma_multiply(0.35)) } else { None }, if anim { p.accent } else { p.muted });
+                    if b.on_hover_text(crate::i18n::t(if at { "Retirer la clé à cet instant" } else { "Poser une clé à cet instant (anime la propriété)" })).clicked() {
+                        match tr.key_at(t) {
+                            Some(k) => {
+                                tr.keys.remove(k);
+                                if tr.keys.is_empty() {
+                                    tr.v = v;
+                                }
+                            }
+                            None => tr.insert(motion::Key { t, v, ease: motion::Ease::Smooth, tan: vec![] }),
+                        }
+                        changed = true;
+                    }
+                    let mut ch = ui.add(egui::DragValue::new(&mut v[0]).speed(0.5).range(0.0..=100.0).max_decimals(0).prefix(format!("{} ", crate::i18n::t("fin"))).suffix(" %")).changed();
+                    ch |= ui.add(egui::DragValue::new(&mut v[1]).speed(0.5).range(0.0..=100.0).max_decimals(0).prefix(format!("{} ", crate::i18n::t("début"))).suffix(" %")).changed();
+                    if ch {
+                        tr.set(t, v);
+                        changed = true;
+                    }
+                });
+                ui.horizontal(|ui| {
+                    // Le tracé se dessine en une seconde depuis la tête de lecture, ou s'efface jusqu'à la fin du calque
+                    let tr = &mut lay.trim;
+                    if ui.button(format!("{}  {}", l::PEN_TOOL, crate::i18n::t("Animer le dessin"))).on_hover_text(crate::i18n::t("Le tracé se dessine en une seconde à partir de la tête de lecture")).clicked() {
+                        tr.keys.retain(|k| k.t < t - 1e-3 || k.t > t + 1.0 + 1e-3);
+                        tr.insert(motion::Key { t, v: [0.0, 0.0], ease: motion::Ease::Smooth, tan: vec![] });
+                        tr.insert(motion::Key { t: t + 1.0, v: [100.0, 0.0], ease: motion::Ease::Smooth, tan: vec![] });
+                        changed = true;
+                    }
+                    if ui.button(format!("{}  {}", l::ERASER, crate::i18n::t("Effacer à la fin"))).on_hover_text(crate::i18n::t("Le tracé s'efface pendant la dernière seconde du calque")).clicked() {
+                        let e = lay.end;
+                        let tr = &mut lay.trim;
+                        tr.keys.retain(|k| k.t < e - 1.0 - 1e-3);
+                        tr.insert(motion::Key { t: e - 1.0, v: [100.0, 0.0], ease: motion::Ease::Smooth, tan: vec![] });
+                        tr.insert(motion::Key { t: e, v: [100.0, 100.0], ease: motion::Ease::Smooth, tan: vec![] });
+                        changed = true;
+                    }
+                });
             }
             if matches!(lay.kind, Kind::Text { .. }) {
                 section(ui, "Animateur de texte");
