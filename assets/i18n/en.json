@@ -2710,5 +2710,11 @@
   "clé à l'image actuelle (clic droit : retirer toutes les clés)": "key at the current frame (right-click: remove all keys)",
   "garder l'édition en cours comme forme : le maillage revient à son état de départ, la forme se règle avec son curseur": "keep the current edit as a shape: the mesh goes back to how it started, the shape is set with its slider",
   "retirer la forme (le fichier reste)": "remove the shape (the file stays)",
-  "rien à garder : modifiez d'abord le maillage, sans ajouter ni retirer de sommets": "nothing to keep: edit the mesh first, without adding or removing vertices"
+  "rien à garder : modifiez d'abord le maillage, sans ajouter ni retirer de sommets": "nothing to keep: edit the mesh first, without adding or removing vertices",
+  "renommer partout (F2)": "rename everywhere (F2)",
+  "rien à renommer ici": "nothing to rename here",
+  "aucune référence": "no references",
+  "occurrence renommée": "occurrence renamed",
+  "occurrences renommées": "occurrences renamed",
+  "Ctrl+F chercher · Ctrl+G aller à la ligne · Ctrl+Maj+O symboles · F12 définition · Maj+F12 références · F2 renommer le symbole · Alt+Maj+F formater · F5 exécuter · Ctrl+` terminal": "Ctrl+F find · Ctrl+G go to line · Ctrl+Shift+O symbols · F12 definition · Shift+F12 references · F2 rename symbol · Alt+Shift+F format · F5 run · Ctrl+` terminal"
 }

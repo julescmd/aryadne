@@ -48,6 +48,10 @@ pub struct Editor {
     hunk_open: Option<usize>,
     /// Texte complet à remettre dans l'éditeur (bloc restauré)
     pub revert: Option<String>,
+    /// Renommage en cours (F2) : position du symbole et nouveau nom
+    pub rename: Option<(usize, String)>,
+    /// Références trouvées (Maj+F12) : fichier, ligne, aperçu
+    pub refs: Option<Vec<(std::path::PathBuf, usize, String)>>,
 }
 
 // ---------- marques de modifications ----------
@@ -640,6 +644,19 @@ pub fn before(ui: &egui::Ui, ed: &mut Editor, text: &mut String, lang: &str, id:
                                 let ins = format!("\n{ind}");
                                 let pos = le + ins.len();
                                 c.set(le, le, &ins, (pos, pos));
+                            }
+                            eat[k] = true;
+                        }
+                        // F2 : renommer le symbole partout (serveur LSP)
+                        Key::F2 if ed.lsp.is_some() => {
+                            let (a, b) = word_at(c.text, c.b);
+                            ed.rename = Some((c.b, c.text[a..b].to_string()));
+                            eat[k] = true;
+                        }
+                        // Maj+F12 : toutes les références
+                        Key::F12 if m.shift => {
+                            if let Some(l) = &mut ed.lsp {
+                                l.ask_references(c.text, c.b);
                             }
                             eat[k] = true;
                         }

@@ -301,6 +301,84 @@ pub enum Wait {
     Completion(Receiver<Value>, usize),
     Definition(Receiver<Value>),
     Hover(Receiver<Value>, usize),
+    Rename(Receiver<Value>),
+    References(Receiver<Value>),
+}
+
+/// Un remplacement de texte : de (ligne, colonne UTF-16) à (ligne, colonne), par `text`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Edit {
+    pub start: (u32, u32),
+    pub end: (u32, u32),
+    pub text: String,
+}
+
+/// Index d'octet d'une position LSP (ligne, colonne en UTF-16).
+pub fn byte_of(text: &str, line: u32, col: u32) -> usize {
+    let mut start = 0;
+    for _ in 0..line {
+        match text[start..].find('\n') {
+            Some(i) => start += i + 1,
+            None => return text.len(),
+        }
+    }
+    let end = text[start..].find('\n').map(|i| start + i).unwrap_or(text.len());
+    let mut u = 0;
+    for (i, c) in text[start..end].char_indices() {
+        if u >= col {
+            return start + i;
+        }
+        u += c.len_utf16() as u32;
+    }
+    end
+}
+
+/// Applique des remplacements (dans n'importe quel ordre) à un texte.
+pub fn apply_edits(text: &str, edits: &[Edit]) -> String {
+    let mut list: Vec<(usize, usize, &str)> = edits.iter().map(|e| (byte_of(text, e.start.0, e.start.1), byte_of(text, e.end.0, e.end.1), e.text.as_str())).collect();
+    // De la fin vers le début : les positions plus haut restent justes
+    list.sort_by(|a, b| b.0.cmp(&a.0));
+    let mut out = text.to_string();
+    for (a, b, t) in list {
+        if a <= b && b <= out.len() {
+            out.replace_range(a..b, t);
+        }
+    }
+    out
+}
+
+fn parse_edits(list: &Value) -> Vec<Edit> {
+    list.as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|e| {
+                    let r = &e["range"];
+                    let p = |k: &str| Some((r[k]["line"].as_u64()? as u32, r[k]["character"].as_u64()? as u32));
+                    Some(Edit { start: p("start")?, end: p("end")?, text: e["newText"].as_str()?.to_string() })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Les changements d'un WorkspaceEdit, fichier par fichier.
+pub fn workspace_edits(v: &Value) -> Vec<(PathBuf, Vec<Edit>)> {
+    let mut out: Vec<(PathBuf, Vec<Edit>)> = vec![];
+    if let Some(m) = v["changes"].as_object() {
+        for (uri, list) in m {
+            if let Some(p) = from_uri(uri) {
+                out.push((p, parse_edits(list)));
+            }
+        }
+    }
+    if let Some(a) = v["documentChanges"].as_array() {
+        for d in a {
+            if let Some(p) = d["textDocument"]["uri"].as_str().and_then(from_uri) {
+                out.push((p, parse_edits(&d["edits"])));
+            }
+        }
+    }
+    out
 }
 
 pub struct Doc {
@@ -317,6 +395,12 @@ pub struct Doc {
     pub hover_asked: Option<usize>,
     /// Définition dans un autre fichier : (chemin, ligne).
     pub goto: Option<(PathBuf, usize)>,
+    /// Renommage reçu : les remplacements de chaque fichier
+    pub renamed: Option<Vec<(PathBuf, Vec<Edit>)>>,
+    /// Références reçues : (chemin, ligne)
+    pub refs: Option<Vec<(PathBuf, usize)>>,
+    /// Le serveur a répondu sans rien (renommage impossible, aucune référence)
+    pub nothing: Option<&'static str>,
 }
 
 fn hash(t: &str) -> u64 {
@@ -344,7 +428,7 @@ impl Doc {
         };
         let uri = to_uri(path);
         server.notify("textDocument/didOpen", json!({ "textDocument": { "uri": uri, "languageId": lang, "version": 1, "text": text } }));
-        Some(Doc { server, uri, version: 1, last: hash(text), seen_diags: 0, waits: vec![], completion: None, hover: None, hover_at: None, hover_asked: None, goto: None })
+        Some(Doc { server, uri, version: 1, last: hash(text), seen_diags: 0, waits: vec![], completion: None, hover: None, hover_at: None, hover_asked: None, goto: None, renamed: None, refs: None, nothing: None })
     }
 
     /// Envoie le texte s'il a changé (synchro complète, simple et robuste).
@@ -378,6 +462,22 @@ impl Doc {
         self.sync(text);
         let rx = self.server.request("textDocument/definition", self.pos(text, byte));
         self.waits.push(Wait::Definition(rx));
+    }
+
+    pub fn ask_rename(&mut self, text: &str, byte: usize, name: &str) {
+        self.sync(text);
+        let mut params = self.pos(text, byte);
+        params["newName"] = json!(name);
+        let rx = self.server.request("textDocument/rename", params);
+        self.waits.push(Wait::Rename(rx));
+    }
+
+    pub fn ask_references(&mut self, text: &str, byte: usize) {
+        self.sync(text);
+        let mut params = self.pos(text, byte);
+        params["context"] = json!({ "includeDeclaration": true });
+        let rx = self.server.request("textDocument/references", params);
+        self.waits.push(Wait::References(rx));
     }
 
     pub fn ask_hover(&mut self, text: &str, byte: usize) {
@@ -442,6 +542,30 @@ impl Doc {
                     }
                     Err(std::sync::mpsc::TryRecvError::Empty) => self.waits.push(Wait::Definition(rx)),
                     Err(_) => {}
+                },
+                Wait::Rename(rx) => match rx.try_recv() {
+                    Ok(v) => {
+                        let list = workspace_edits(&v);
+                        if list.iter().all(|x| x.1.is_empty()) {
+                            self.nothing = Some("rien à renommer ici");
+                        } else {
+                            self.renamed = Some(list);
+                        }
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => self.waits.push(Wait::Rename(rx)),
+                    Err(_) => self.nothing = Some("rien à renommer ici"),
+                },
+                Wait::References(rx) => match rx.try_recv() {
+                    Ok(v) => {
+                        let list: Vec<(PathBuf, usize)> = v.as_array().map(|a| a.iter().filter_map(|l| Some((from_uri(l["uri"].as_str()?)?, l["range"]["start"]["line"].as_u64()? as usize))).collect()).unwrap_or_default();
+                        if list.is_empty() {
+                            self.nothing = Some("aucune référence");
+                        } else {
+                            self.refs = Some(list);
+                        }
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => self.waits.push(Wait::References(rx)),
+                    Err(_) => self.nothing = Some("aucune référence"),
                 },
                 Wait::Hover(rx, at) => match rx.try_recv() {
                     Ok(v) => {
@@ -513,6 +637,20 @@ mod tests {
         assert_eq!(jump, Some(2));
         assert!(diags.unwrap().iter().any(|(l, _)| *l == 7));
         shutdown_all();
+    }
+
+    #[test]
+    fn renommage() {
+        let t = "let é = 1;\nprint(é + é)\n";
+        assert_eq!(byte_of(t, 1, 6), t.find("é + é").unwrap());
+        let v = json!({ "changes": { "file:///tmp/a.rs": [
+            { "range": { "start": { "line": 0, "character": 4 }, "end": { "line": 0, "character": 5 } }, "newText": "total" },
+            { "range": { "start": { "line": 1, "character": 6 }, "end": { "line": 1, "character": 7 } }, "newText": "total" },
+            { "range": { "start": { "line": 1, "character": 10 }, "end": { "line": 1, "character": 11 } }, "newText": "total" }
+        ] } });
+        let w = workspace_edits(&v);
+        assert_eq!(w.len(), 1);
+        assert_eq!(apply_edits(t, &w[0].1), "let total = 1;\nprint(total + total)\n");
     }
 
     #[test]

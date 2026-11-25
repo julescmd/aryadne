@@ -2496,7 +2496,7 @@ impl App {
             Some(Content::Image) => t("molette : zoom · glisser : déplacer · double-clic : 100 % / ajuster · F2 renommer le fichier"),
             Some(Content::Office(_)) => t("molette : défiler · Ctrl+molette : zoom · F2 renommer le fichier"),
             Some(Content::Text(_)) if self.current().is_some_and(|d| vault::is_md(&d.rel)) => t("Ctrl+E lire / éditer · [[ lien vers une note · Ctrl+F chercher · Ctrl+Z annuler · Ctrl+S enregistrer · F2 renommer"),
-            Some(Content::Text(_)) => t("Ctrl+F chercher · Ctrl+G aller à la ligne · Ctrl+Maj+O symboles · F12 définition · Alt+Maj+F formater · F5 exécuter · Ctrl+` terminal"),
+            Some(Content::Text(_)) => t("Ctrl+F chercher · Ctrl+G aller à la ligne · Ctrl+Maj+O symboles · F12 définition · Maj+F12 références · F2 renommer le symbole · Alt+Maj+F formater · F5 exécuter · Ctrl+` terminal"),
             Some(_) => t("F2 renommer le fichier · Ctrl+P ouvrir · Ctrl+K commandes"),
             None => t("Ctrl+N nouvelle note · Ctrl+P ouvrir un fichier · glisse des fichiers pour les importer · Ctrl+K commandes"),
         }
@@ -2515,7 +2515,14 @@ impl App {
         // (l'éditeur de nodes garde F2 pour renommer une node)
         let typing = ctx.egui_wants_keyboard_input();
         let in_nodes = !self.explorer_focus && matches!(self.current().map(|d| &d.content), Some(Content::Nodes(_)));
-        if !in_nodes && pressed(Modifiers::NONE, Key::F2) {
+        // Dans un code suivi par un serveur LSP, F2 renomme le symbole sous le curseur (Maj+F2 : le fichier)
+        let in_lsp = !self.explorer_focus && self.current().is_some_and(|d| d.code.lsp.is_some() && matches!(d.content, Content::Text(_)));
+        if in_lsp && pressed(Modifiers::SHIFT, Key::F2) {
+            if let Some(rel) = self.current().map(|d| d.rel.clone()) {
+                self.actions.push(Action::Rename(rel));
+            }
+        }
+        if !in_nodes && !in_lsp && pressed(Modifiers::NONE, Key::F2) {
             let target = if self.explorer_focus { self.selected.clone() } else { self.current().map(|d| d.rel.clone()).or(self.selected.clone()) };
             if let Some(rel) = target {
                 self.actions.push(Action::Rename(rel));
@@ -3216,6 +3223,7 @@ impl App {
     fn editor_inner(&mut self, ui: &mut egui::Ui, run_now: &mut bool) {
         let p = theme::pal();
         let mut lsp_goto: Option<(PathBuf, usize)> = None;
+        let mut lsp_note: Option<String> = None;
         let mut open_material: Option<PathBuf> = None;
         let mut open_tab: Option<PathBuf> = None;
         self.feed_project_words();
@@ -3646,8 +3654,110 @@ impl App {
                         if let Some(g) = l.goto.take() {
                             lsp_goto = Some(g);
                         }
+                        if let Some(n) = l.nothing.take() {
+                            lsp_note = Some(crate::i18n::t(n));
+                        }
+                        // Renommage reçu : ce fichier dans l'éditeur, les autres sur le disque
+                        if let Some(list) = l.renamed.take() {
+                            let here = vault::safe(&root, &rel).ok();
+                            let (mut files, mut count) = (0, 0);
+                            for (path, edits) in list {
+                                if edits.is_empty() {
+                                    continue;
+                                }
+                                count += edits.len();
+                                files += 1;
+                                if here.as_ref().is_some_and(|h| h == &path || h.canonicalize().ok() == path.canonicalize().ok()) {
+                                    ed.revert = Some(lsp::apply_edits(text, &edits));
+                                } else if let Ok(old) = std::fs::read_to_string(&path) {
+                                    let _ = vault::atomic_write(&path, lsp::apply_edits(&old, &edits));
+                                }
+                            }
+                            lsp_note = Some(format!("{count} {} · {files} {}", crate::i18n::t_mid(if count == 1 { "occurrence renommée" } else { "occurrences renommées" }), crate::i18n::t_mid(if files == 1 { "fichier" } else { "fichiers" })));
+                        }
+                        // Références reçues : une liste avec un aperçu de chaque ligne
+                        if let Some(list) = l.refs.take() {
+                            let here = vault::safe(&root, &rel).ok();
+                            ed.refs = Some(
+                                list.into_iter()
+                                    .map(|(path, line)| {
+                                        let same = here.as_ref().is_some_and(|h| h == &path);
+                                        let src = if same { Some(text.clone()) } else { std::fs::read_to_string(&path).ok() };
+                                        let preview = src.and_then(|t| t.lines().nth(line).map(|x| x.trim().chars().take(90).collect())).unwrap_or_default();
+                                        (path, line, preview)
+                                    })
+                                    .collect(),
+                            );
+                        }
                         if !l.waits.is_empty() {
                             ui.ctx().request_repaint_after(Duration::from_millis(60));
+                        }
+                    }
+                    // F2 : le nouveau nom, dans une petite barre en haut de l'éditeur
+                    let corner = ui.max_rect().right_top() + egui::vec2(-380.0, 8.0);
+                    if let Some((at, mut name)) = ed.rename.take() {
+                        let mut keep = true;
+                        egui::Area::new(egui::Id::new(("lsp-rename", &rel))).order(egui::Order::Foreground).fixed_pos(corner).show(ui.ctx(), |ui| {
+                            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    ui.label(RichText::new(crate::lucide::PENCIL).color(p.muted)).on_hover_text(crate::i18n::t("renommer partout (F2)"));
+                                    let r = ui.add(egui::TextEdit::singleline(&mut name).desired_width(220.0));
+                                    if !r.has_focus() && !r.lost_focus() {
+                                        r.request_focus();
+                                    }
+                                    let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
+                                    if enter && !name.trim().is_empty() {
+                                        if let Some(l) = &mut ed.lsp {
+                                            l.ask_rename(text, at, name.trim());
+                                        }
+                                        keep = false;
+                                    }
+                                    if ui.input(|i| i.key_pressed(egui::Key::Escape)) || ui.add(egui::Button::new(crate::lucide::X).frame(false)).on_hover_text(crate::i18n::t("annuler (Échap)")).clicked() {
+                                        keep = false;
+                                    }
+                                });
+                            });
+                        });
+                        if keep {
+                            ed.rename = Some((at, name));
+                        }
+                    }
+                    // Maj+F12 : la liste des références
+                    if let Some(list) = ed.refs.take() {
+                        let mut keep = true;
+                        let here = vault::safe(&root, &rel).ok();
+                        egui::Area::new(egui::Id::new(("lsp-refs", &rel))).order(egui::Order::Foreground).fixed_pos(corner).show(ui.ctx(), |ui| {
+                            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                                ui.set_width(360.0);
+                                ui.horizontal(|ui| {
+                                    ui.label(RichText::new(format!("{} {}", list.len(), crate::i18n::t_mid(if list.len() == 1 { "référence" } else { "références" }))).strong());
+                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                        if ui.add(egui::Button::new(crate::lucide::X).frame(false)).on_hover_text(crate::i18n::t("fermer (Échap)")).clicked() {
+                                            keep = false;
+                                        }
+                                    });
+                                });
+                                egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
+                                    for (path, line, preview) in &list {
+                                        let same = here.as_ref().is_some_and(|h| h == path);
+                                        let file = path.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default();
+                                        let r = ui.add(egui::Button::new(RichText::new(format!("{file}:{}   {preview}", line + 1)).monospace().size(11.0)).frame(false).truncate());
+                                        if r.clicked() {
+                                            if same {
+                                                ed.jump = Some(*line);
+                                            } else {
+                                                lsp_goto = Some((path.clone(), *line));
+                                            }
+                                        }
+                                    }
+                                });
+                            });
+                        });
+                        if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                            keep = false;
+                        }
+                        if keep {
+                            ed.refs = Some(list);
                         }
                     }
                     let folds = ed.folds.clone();
@@ -3735,6 +3845,9 @@ impl App {
                 self.split = Some(rel);
                 self.active = model;
             }
+        }
+        if let Some(n) = lsp_note {
+            self.toast = Some((n, Instant::now()));
         }
         if let Some((path, line)) = lsp_goto {
             match vault::inside(&self.root(), &path) {
