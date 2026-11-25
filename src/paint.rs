@@ -1276,6 +1276,132 @@ struct Xf {
     r: f32,
     /// Geste en cours : poignée (-1, 0, 1 en x et y ; (0, 0) : déplacer ; None : tourner), départ, état de départ
     drag: Option<(Option<[i8; 2]>, Pos2, [f32; 5])>,
+    /// Déformation en grille : les points (WARP_N × WARP_N, px du document, ligne par ligne) et celui qu'on tire
+    grid: Option<Vec<[f32; 2]>>,
+    grid_drag: Option<usize>,
+}
+
+/// Points par côté de la grille de déformation
+const WARP_N: usize = 4;
+
+/// Catmull-Rom sur quatre valeurs, t entre p1 et p2
+fn catmull(p0: f32, p1: f32, p2: f32, p3: f32, t: f32) -> f32 {
+    let t2 = t * t;
+    0.5 * (2.0 * p1 + (p2 - p0) * t + (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3) * t2 + (3.0 * p1 - p0 - 3.0 * p2 + p3) * t2 * t)
+}
+
+/// Point de la surface lisse qui passe par la grille ; u, v entre 0 et 1
+fn warp_point(g: &[[f32; 2]], n: usize, u: f32, v: f32) -> [f32; 2] {
+    let (fu, fv) = (u * (n - 1) as f32, v * (n - 1) as f32);
+    let (iu, iv) = ((fu.floor() as usize).min(n - 2), (fv.floor() as usize).min(n - 2));
+    let (tu, tv) = (fu - iu as f32, fv - iv as f32);
+    // Au bord, on prolonge la grille en ligne droite
+    let at = |i: isize, j: isize| -> [f32; 2] {
+        let ci = |k: isize| k.clamp(0, n as isize - 1) as usize;
+        let (a, b) = (ci(i), ci(j));
+        let base = g[b * n + a];
+        let (ei, ej) = (i - a as isize, j - b as isize);
+        if ei == 0 && ej == 0 {
+            return base;
+        }
+        // Reflet du voisin intérieur
+        let ni = ci(a as isize - ei);
+        let nj = ci(b as isize - ej);
+        let inner = g[nj * n + ni];
+        [2.0 * base[0] - inner[0], 2.0 * base[1] - inner[1]]
+    };
+    let mut rows = [[0.0f32; 2]; 4];
+    for (r, row) in rows.iter_mut().enumerate() {
+        let j = iv as isize - 1 + r as isize;
+        for c in 0..2 {
+            row[c] = catmull(at(iu as isize - 1, j)[c], at(iu as isize, j)[c], at(iu as isize + 1, j)[c], at(iu as isize + 2, j)[c], tu);
+        }
+    }
+    [0, 1].map(|c| catmull(rows[0][c], rows[1][c], rows[2][c], rows[3][c], tv))
+}
+
+/// Le calque déformé : le cadre `b` (x0, y0, x1, y1) du calque d'origine suit la grille
+pub fn warp_layer(orig: &Layer, b: [f32; 4], g: &[[f32; 2]], n: usize) -> Layer {
+    const SUB: usize = 12;
+    let m = (n - 1) * SUB;
+    let dst: Vec<[f32; 2]> = (0..=m).flat_map(|j| (0..=m).map(move |i| (i, j))).map(|(i, j)| warp_point(g, n, i as f32 / m as f32, j as f32 / m as f32)).collect();
+    let srcp = |i: usize, j: usize| [b[0] + (b[2] - b[0]) * i as f32 / m as f32, b[1] + (b[3] - b[1]) * j as f32 / m as f32];
+    let (mut x0, mut y0, mut x1, mut y1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+    for d in &dst {
+        x0 = x0.min(d[0]);
+        y0 = y0.min(d[1]);
+        x1 = x1.max(d[0]);
+        y1 = y1.max(d[1]);
+    }
+    let (ox, oy) = (x0.floor() as i32, y0.floor() as i32);
+    let (w, h) = (((x1.ceil() as i32 - ox).clamp(1, 16384)) as usize, ((y1.ceil() as i32 - oy).clamp(1, 16384)) as usize);
+    let mut out = Layer::blank(&orig.name, w, h);
+    out.off = [ox, oy];
+    let sample = |x: f32, y: f32| -> [f32; 4] {
+        let (fx, fy) = (x - orig.off[0] as f32 - 0.5, y - orig.off[1] as f32 - 0.5);
+        let (ix, iy) = (fx.floor() as i32, fy.floor() as i32);
+        let (ax, ay) = (fx - ix as f32, fy - iy as f32);
+        let px = |x: i32, y: i32| -> [f32; 4] {
+            if x < 0 || y < 0 || x as usize >= orig.w || y as usize >= orig.h {
+                return [0.0; 4];
+            }
+            let i = (y as usize * orig.w + x as usize) * 4;
+            let a = orig.px[i + 3] as f32 / 255.0;
+            [orig.px[i] as f32 * a, orig.px[i + 1] as f32 * a, orig.px[i + 2] as f32 * a, a]
+        };
+        let (p00, p10, p01, p11) = (px(ix, iy), px(ix + 1, iy), px(ix, iy + 1), px(ix + 1, iy + 1));
+        [0, 1, 2, 3].map(|k| (p00[k] * (1.0 - ax) + p10[k] * ax) * (1.0 - ay) + (p01[k] * (1.0 - ax) + p11[k] * ax) * ay)
+    };
+    // Chaque petit quadrilatère en deux triangles, remplis point par point (coordonnées barycentriques)
+    let mut tri = |a: ([f32; 2], [f32; 2]), bb: ([f32; 2], [f32; 2]), c: ([f32; 2], [f32; 2])| {
+        let (pa, pb, pc) = (a.0, bb.0, c.0);
+        let den = (pb[1] - pc[1]) * (pa[0] - pc[0]) + (pc[0] - pb[0]) * (pa[1] - pc[1]);
+        if den.abs() < 1e-6 {
+            return;
+        }
+        let xs = (pa[0].min(pb[0]).min(pc[0]).floor() as i32).max(ox);
+        let xe = (pa[0].max(pb[0]).max(pc[0]).ceil() as i32).min(ox + w as i32 - 1);
+        let ys = (pa[1].min(pb[1]).min(pc[1]).floor() as i32).max(oy);
+        let ye = (pa[1].max(pb[1]).max(pc[1]).ceil() as i32).min(oy + h as i32 - 1);
+        for y in ys..=ye {
+            for x in xs..=xe {
+                let (qx, qy) = (x as f32 + 0.5, y as f32 + 0.5);
+                let l1 = ((pb[1] - pc[1]) * (qx - pc[0]) + (pc[0] - pb[0]) * (qy - pc[1])) / den;
+                let l2 = ((pc[1] - pa[1]) * (qx - pc[0]) + (pa[0] - pc[0]) * (qy - pc[1])) / den;
+                let l3 = 1.0 - l1 - l2;
+                if l1 < -1e-4 || l2 < -1e-4 || l3 < -1e-4 {
+                    continue;
+                }
+                let sx = a.1[0] * l1 + bb.1[0] * l2 + c.1[0] * l3;
+                let sy = a.1[1] * l1 + bb.1[1] * l2 + c.1[1] * l3;
+                let v = sample(sx, sy);
+                if v[3] <= 1e-4 {
+                    continue;
+                }
+                let i = ((y - oy) as usize * w + (x - ox) as usize) * 4;
+                out.px[i] = (v[0] / v[3]).round().clamp(0.0, 255.0) as u8;
+                out.px[i + 1] = (v[1] / v[3]).round().clamp(0.0, 255.0) as u8;
+                out.px[i + 2] = (v[2] / v[3]).round().clamp(0.0, 255.0) as u8;
+                out.px[i + 3] = (v[3] * 255.0).round().clamp(0.0, 255.0) as u8;
+            }
+        }
+    };
+    for j in 0..m {
+        for i in 0..m {
+            let k = |i: usize, j: usize| (dst[j * (m + 1) + i], srcp(i, j));
+            tri(k(i, j), k(i + 1, j), k(i + 1, j + 1));
+            tri(k(i, j), k(i + 1, j + 1), k(i, j + 1));
+        }
+    }
+    out.visible = orig.visible;
+    out.opacity = orig.opacity;
+    out.blend = orig.blend;
+    out.fill = orig.fill;
+    out.clip = orig.clip;
+    out.group = orig.group;
+    out.fx = orig.fx.clone();
+    out.lock_alpha = orig.lock_alpha;
+    out
 }
 
 impl Xf {
@@ -1685,11 +1811,31 @@ impl Editor {
         self.checkpoint();
         let c0 = [(b[0] + b[2]) as f32 / 2.0, (b[1] + b[3]) as f32 / 2.0];
         let half = [(b[2] - b[0]) as f32 / 2.0, (b[3] - b[1]) as f32 / 2.0];
-        self.xf = Some(Xf { orig, c0, half, t: [0.0; 2], s: [1.0; 2], r: 0.0, drag: None });
+        self.xf = Some(Xf { orig, c0, half, t: [0.0; 2], s: [1.0; 2], r: 0.0, drag: None, grid: None, grid_drag: None });
+    }
+
+    /// Déformation en grille : la transformation, avec une grille de points à tirer
+    fn start_warp(&mut self) {
+        self.start_xf();
+        if let Some(x) = &mut self.xf {
+            let n = WARP_N;
+            let (x0, y0) = (x.c0[0] - x.half[0], x.c0[1] - x.half[1]);
+            let (w, h) = (x.half[0] * 2.0, x.half[1] * 2.0);
+            x.grid = Some((0..n * n).map(|k| [x0 + w * (k % n) as f32 / (n - 1) as f32, y0 + h * (k / n) as f32 / (n - 1) as f32]).collect());
+        }
     }
 
     fn apply_xf(&mut self) {
         if let Some(x) = &self.xf {
+            if let Some(g) = &x.grid {
+                let b = [x.c0[0] - x.half[0], x.c0[1] - x.half[1], x.c0[0] + x.half[0], x.c0[1] + x.half[1]];
+                let mut nl = warp_layer(&x.orig, b, g, WARP_N);
+                nl.mask = x.orig.mask.clone();
+                nl.mask_on = x.orig.mask_on;
+                self.doc.layers[self.doc.active] = nl;
+                self.all();
+                return;
+            }
             let mut nl = transform_layer(&x.orig, x.c0, x.t, x.s, x.r);
             // Le masque est lié au calque : il suit. Hors de sa zone, un masque montre tout (blanc)
             if let Some(m) = &x.orig.mask {
@@ -1718,9 +1864,61 @@ impl Editor {
         }
     }
 
+    /// La grille de déformation : courbes lisses à l'écran, points à tirer ; le calque suit au relâché
+    fn warp_ui(&mut self, ui: &egui::Ui, resp: &egui::Response, painter: &egui::Painter, to_doc: impl Fn(Pos2) -> Pos2, to_screen: impl Fn(f32, f32) -> Pos2) {
+        let p = theme::pal();
+        let Some(x) = self.xf.as_ref() else { return };
+        let Some(g) = x.grid.clone() else { return };
+        let n = WARP_N;
+        // Les lignes de la grille, en courbes
+        for k in 0..n {
+            let t = k as f32 / (n - 1) as f32;
+            let row: Vec<Pos2> = (0..=40).map(|i| warp_point(&g, n, i as f32 / 40.0, t)).map(|q| to_screen(q[0], q[1])).collect();
+            let col: Vec<Pos2> = (0..=40).map(|i| warp_point(&g, n, t, i as f32 / 40.0)).map(|q| to_screen(q[0], q[1])).collect();
+            painter.add(egui::Shape::line(row, Stroke::new(1.0, p.accent)));
+            painter.add(egui::Shape::line(col, Stroke::new(1.0, p.accent)));
+        }
+        let pts: Vec<Pos2> = g.iter().map(|q| to_screen(q[0], q[1])).collect();
+        for q in &pts {
+            painter.circle(*q, 4.5, Color32::WHITE, Stroke::new(1.0, p.accent));
+        }
+        let hover = ui.input(|i| i.pointer.hover_pos());
+        let near = |q: Pos2| pts.iter().position(|h| h.distance(q) < 9.0);
+        if hover.and_then(near).is_some() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
+        }
+        if resp.drag_started_by(egui::PointerButton::Primary) {
+            let hit = ui.input(|i| i.pointer.press_origin()).and_then(near);
+            if let Some(xx) = &mut self.xf {
+                xx.grid_drag = hit;
+            }
+        }
+        if resp.dragged_by(egui::PointerButton::Primary) {
+            if let (Some(at), Some(xx)) = (resp.interact_pointer_pos(), self.xf.as_mut()) {
+                if let (Some(k), Some(g)) = (xx.grid_drag, xx.grid.as_mut()) {
+                    let d = to_doc(at);
+                    g[k] = [d.x, d.y];
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+                }
+            }
+        }
+        if resp.drag_stopped() && self.xf.as_ref().is_some_and(|x| x.grid_drag.is_some()) {
+            if let Some(xx) = &mut self.xf {
+                xx.grid_drag = None;
+            }
+            self.apply_xf();
+        }
+        let tip = egui::Align2::CENTER_TOP;
+        let r = resp.rect;
+        painter.text(pos2(r.center().x, r.top() + 8.0), tip, crate::i18n::t("Déformation : tirer les points · Entrée : garder · Échap : annuler"), egui::FontId::proportional(12.0), p.text);
+    }
+
     /// Les gestes de la transformation : poignées (taille), dedans (déplacer), dehors (tourner)
     fn xf_ui(&mut self, ui: &egui::Ui, resp: &egui::Response, painter: &egui::Painter, to_doc: impl Fn(Pos2) -> Pos2, to_screen: impl Fn(f32, f32) -> Pos2) {
         let p = theme::pal();
+        if self.xf.as_ref().is_some_and(|x| x.grid.is_some()) {
+            return self.warp_ui(ui, resp, painter, to_doc, to_screen);
+        }
         let Some(x) = self.xf.clone() else { return };
         let corner = |hx: f32, hy: f32| {
             let d = x.map([hx * x.half[0], hy * x.half[1]]);
@@ -2760,6 +2958,10 @@ impl Editor {
                     self.start_xf();
                     ui.close();
                 }
+                if ui.button(format!("{}  {}", crate::lucide::GRID_3X3, crate::i18n::t("déformation en grille"))).on_hover_text(crate::i18n::t("Tirer les points d'une grille pour courber le calque (tissus, reflets, étiquettes sur un objet)")).clicked() {
+                    self.start_warp();
+                    ui.close();
+                }
                 if ui.button(format!("{}  {}", crate::lucide::SUN, crate::i18n::t("luminosité et contraste…"))).clicked() {
                     self.checkpoint();
                     self.adjust = Some((Adjust::BrightContrast, self.doc.layers[self.doc.active].clone(), [0.0, 0.0]));
@@ -2859,6 +3061,27 @@ impl Editor {
             });
             ui.separator();
             // Transformation libre : ses valeurs à la place des réglages de l'outil
+            if let Some(x) = self.xf.as_ref().filter(|x| x.grid.is_some()) {
+                let _ = x;
+                ui.label(egui::RichText::new(format!("{}  {}", crate::lucide::GRID_3X3, crate::i18n::t("déformation en grille"))).size(12.5));
+                if ui.button(egui::RichText::new(crate::lucide::ROTATE_CCW).size(14.0)).on_hover_text(crate::i18n::t("remettre la grille droite")).clicked() {
+                    let orig = self.xf.as_ref().map(|x| x.orig.clone());
+                    if let (Some(o), Some(xx)) = (orig, self.xf.as_mut()) {
+                        let n = WARP_N;
+                        let (x0, y0, w, h) = (xx.c0[0] - xx.half[0], xx.c0[1] - xx.half[1], xx.half[0] * 2.0, xx.half[1] * 2.0);
+                        xx.grid = Some((0..n * n).map(|k| [x0 + w * (k % n) as f32 / (n - 1) as f32, y0 + h * (k / n) as f32 / (n - 1) as f32]).collect());
+                        self.doc.layers[self.doc.active] = o;
+                        self.all();
+                    }
+                }
+                if ui.button(egui::RichText::new(crate::lucide::CHECK).size(14.0).color(p.accent)).on_hover_text(crate::i18n::t("valider (Entrée)")).clicked() {
+                    self.end_xf(true);
+                }
+                if ui.button(egui::RichText::new(crate::lucide::X).size(14.0)).on_hover_text(crate::i18n::t("annuler (Échap)")).clicked() {
+                    self.end_xf(false);
+                }
+                return;
+            }
             if let Some(mut x) = self.xf.clone() {
                 ui.label(egui::RichText::new(format!("{}  {}", crate::lucide::SCALE_3D_ICON, crate::i18n::t("transformation"))).size(12.5));
                 let mut w = x.s[0] * 100.0;
@@ -5479,6 +5702,30 @@ mod reglages_tests {
         assert_eq!(blend_if_k(0.3, 0.7, 0.1), 0.0);
         assert!(blend_if_k(0.3, 0.7, 0.26) > 0.0 && blend_if_k(0.3, 0.7, 0.26) < 1.0);
         assert_eq!(blend_if_k(0.0, 1.0, 0.0), 1.0);
+    }
+
+    #[test]
+    fn deformation_en_grille() {
+        let mut l = Layer::blank("l", 30, 20);
+        for (k, px) in l.px.chunks_mut(4).enumerate() {
+            px.copy_from_slice(&[(k % 30 * 8) as u8, (k / 30 * 12) as u8, 90, 255]);
+        }
+        let n = WARP_N;
+        let b = [0.0, 0.0, 30.0, 20.0];
+        let g: Vec<[f32; 2]> = (0..n * n).map(|k| [30.0 * (k % n) as f32 / (n - 1) as f32, 20.0 * (k / n) as f32 / (n - 1) as f32]).collect();
+        // Grille au repos : la surface est le cadre, l'image ne bouge pas
+        let p = warp_point(&g, n, 0.37, 0.81);
+        assert!((p[0] - 11.1).abs() < 0.01 && (p[1] - 16.2).abs() < 0.01, "{p:?}");
+        let o = warp_layer(&l, b, &g, n);
+        assert_eq!(o.off, [0, 0]);
+        assert_eq!(o.at(13, 7), l.at(13, 7));
+        // Un point tiré vers la droite : le pixel sous lui vient de plus à gauche
+        let mut g2 = g.clone();
+        g2[n + 1][0] += 6.0;
+        let o2 = warp_layer(&l, b, &g2, n);
+        let x = g2[n + 1][0] as i32;
+        let y = g2[n + 1][1] as i32;
+        assert!(o2.at(x, y)[0] < l.at(x, y)[0], "{:?} {:?}", o2.at(x, y), l.at(x, y));
     }
 
     #[test]

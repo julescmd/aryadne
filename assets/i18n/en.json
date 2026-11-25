@@ -3075,5 +3075,9 @@
   "profondeur ": "depth ",
   "lumière ": "light ",
   "Styles de calque : ombres, lueur, biseau, incrustations, contour": "Layer styles: shadows, glow, bevel, overlays, stroke",
-  "ombre interne, biseau ou dégradé": "inner shadow, bevel or gradient"
+  "ombre interne, biseau ou dégradé": "inner shadow, bevel or gradient",
+  "Déformation : tirer les points · Entrée : garder · Échap : annuler": "Warp: drag the points · Enter: keep · Esc: cancel",
+  "Tirer les points d'une grille pour courber le calque (tissus, reflets, étiquettes sur un objet)": "Drag grid points to bend the layer (fabric, reflections, labels on an object)",
+  "déformation en grille": "warp grid",
+  "remettre la grille droite": "reset the grid"
 }
