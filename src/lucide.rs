@@ -96,6 +96,7 @@ pub const ROTATE_3D: &str = "\u{f02ea}";
 pub const CONTRAST: &str = "\u{f009d}";
 pub const MERGE: &str = "\u{f043f}";
 pub const UNGROUP: &str = "\u{f0467}";
+pub const BANDAGE: &str = "\u{f061d}";
 pub const FLIP_HORIZONTAL_2: &str = "\u{f035e}";
 pub const GLOBE: &str = "\u{f00e8}";
 pub const UNDO_2: &str = "\u{f02a1}";

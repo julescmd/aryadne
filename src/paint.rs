@@ -890,6 +890,8 @@ pub enum Tool {
     Brush,
     /// Tampon de duplication : Alt+clic choisit la source, on peint ce qu'il y a là-bas
     Clone,
+    /// Correcteur localisé : la zone peinte est reconstruite à partir de ses bords
+    Heal,
     Eraser,
     Fill,
     Gradient,
@@ -897,7 +899,7 @@ pub enum Tool {
     Picker,
 }
 
-const TOOLS: [(Tool, &str, &str, &str); 13] = [
+const TOOLS: [(Tool, &str, &str, &str); 14] = [
     (Tool::Move, crate::lucide::MOVE, "déplacer le calque", "V"),
     (Tool::Select, crate::lucide::SQUARE_DASHED, "sélection rectangulaire", "M"),
     (Tool::Ellipse, crate::lucide::CIRCLE_DASHED, "sélection elliptique", "O"),
@@ -906,6 +908,7 @@ const TOOLS: [(Tool, &str, &str, &str); 13] = [
     (Tool::Crop, crate::lucide::CROP, "recadrage", "C"),
     (Tool::Brush, crate::lucide::PAINTBRUSH, "pinceau", "B"),
     (Tool::Clone, crate::lucide::STAMP, "tampon de duplication (Alt+clic : source)", "S"),
+    (Tool::Heal, crate::lucide::BANDAGE, "correcteur localisé : peindre sur une tache", "J"),
     (Tool::Eraser, crate::lucide::ERASER, "gomme", "E"),
     (Tool::Fill, crate::lucide::PAINT_BUCKET, "pot de peinture", "G"),
     (Tool::Gradient, crate::lucide::BLEND, "dégradé", "G"),
@@ -1197,6 +1200,8 @@ pub struct Editor {
     view_rot: f32,
     view_flip: bool,
     history_open: bool,
+    /// Trait du correcteur en cours (affiché en surimpression jusqu'au relâché)
+    heal_trail: Vec<Pos2>,
     pub save_due: Option<Instant>,
     pub message: Option<String>,
     adjust: Option<(Adjust, Layer, [f32; 2])>,
@@ -1362,6 +1367,7 @@ impl Editor {
             view_rot: 0.0,
             view_flip: false,
             history_open: false,
+            heal_trail: vec![],
             clone_src: None,
             clone_off: None,
         })
@@ -1573,6 +1579,95 @@ impl Editor {
         }
     }
 
+    /// Correcteur localisé : les pixels couverts par le trait sont refaits par diffusion depuis leurs bords
+    /// (moyenne des voisins, répétée), puis on y remet le grain d'un morceau voisin
+    fn heal_apply(&mut self) {
+        let Some((start, cover, _)) = self.stroke.take() else { return };
+        let (w, h) = (start.w, start.h);
+        let (mut x0, mut y0, mut x1, mut y1) = (usize::MAX, usize::MAX, 0, 0);
+        for (i, c) in cover.iter().enumerate() {
+            if *c > 0.0 {
+                let (x, y) = (i % w, i / w);
+                (x0, y0, x1, y1) = (x0.min(x), y0.min(y), x1.max(x), y1.max(y));
+            }
+        }
+        if x0 > x1 {
+            return;
+        }
+        let (bx0, by0) = (x0.saturating_sub(2), y0.saturating_sub(2));
+        let (bx1, by1) = ((x1 + 3).min(w), (y1 + 3).min(h));
+        let (bw, bh) = (bx1 - bx0, by1 - by0);
+        let at = |x: usize, y: usize| (y * w + x) * 4;
+        // Valeurs de départ : la moyenne du bord de la zone
+        let mut f: Vec<[f32; 4]> = vec![[0.0; 4]; bw * bh];
+        let mut sum = [0.0f32; 4];
+        let mut n = 0.0;
+        for y in by0..by1 {
+            for x in bx0..bx1 {
+                let i = at(x, y);
+                let v = [start.px[i] as f32, start.px[i + 1] as f32, start.px[i + 2] as f32, start.px[i + 3] as f32];
+                f[(y - by0) * bw + x - bx0] = v;
+                if cover[y * w + x] <= 0.0 {
+                    for k in 0..4 {
+                        sum[k] += v[k];
+                    }
+                    n += 1.0;
+                }
+            }
+        }
+        if n > 0.0 {
+            for y in by0..by1 {
+                for x in bx0..bx1 {
+                    if cover[y * w + x] > 0.0 {
+                        f[(y - by0) * bw + x - bx0] = sum.map(|s| s / n);
+                    }
+                }
+            }
+        }
+        // Diffusion : chaque pixel de la zone devient la moyenne de ses quatre voisins
+        let iters = (bw.max(bh) * 3).clamp(60, 600);
+        for _ in 0..iters {
+            for y in 1..bh - 1 {
+                for x in 1..bw - 1 {
+                    if cover[(y + by0) * w + x + bx0] > 0.0 {
+                        let k = y * bw + x;
+                        let (a, b, c, d) = (f[k - 1], f[k + 1], f[k - bw], f[k + bw]);
+                        f[k] = [0, 1, 2, 3].map(|j| (a[j] + b[j] + c[j] + d[j]) * 0.25);
+                    }
+                }
+            }
+        }
+        // Le grain : l'écart à la moyenne locale d'un morceau voisin, hors de la zone
+        let dx = (x1 - x0 + 4) as i64;
+        let side = if (x1 as i64 + dx) < w as i64 { dx } else { -dx };
+        let px = |x: i64, y: i64, c: usize| -> f32 {
+            let (x, y) = (x.clamp(0, w as i64 - 1) as usize, y.clamp(0, h as i64 - 1) as usize);
+            start.px[at(x, y) + c] as f32
+        };
+        self.heal_trail.clear();
+        let l = self.target();
+        for y in by0..by1 {
+            for x in bx0..bx1 {
+                let c = cover[y * w + x];
+                if c <= 0.0 {
+                    continue;
+                }
+                let (sx, sy) = (x as i64 + side, y as i64);
+                let i = at(x, y);
+                let v = f[(y - by0) * bw + x - bx0];
+                for k in 0..4 {
+                    let local = (px(sx - 1, sy, k) + px(sx + 1, sy, k) + px(sx, sy - 1, k) + px(sx, sy + 1, k)) * 0.25;
+                    let grain = if k < 3 { px(sx, sy, k) - local } else { 0.0 };
+                    let healed = (v[k] + grain).clamp(0.0, 255.0);
+                    l.px[i + k] = (start.px[i + k] as f32 * (1.0 - c) + healed * c).round() as u8;
+                }
+            }
+        }
+        let off = self.target_ref().off;
+        let r = [(bx0 as i32 + off[0]).max(0) as usize, (by0 as i32 + off[1]).max(0) as usize, (bx1 as i32 + off[0]).max(0) as usize, (by1 as i32 + off[1]).max(0) as usize];
+        self.touched(r);
+    }
+
     fn snap(&self, label: String) -> Snap {
         Snap { layers: self.doc.layers.clone(), active: self.doc.active, groups: self.doc.groups.clone(), w: self.doc.w, h: self.doc.h, label }
     }
@@ -1762,6 +1857,10 @@ impl Editor {
         let (x1, y1) = ((c.x + r).ceil() as i32, (c.y + r).ceil() as i32);
         let hard = self.hardness.clamp(0.0, 0.99);
         let erase = self.tool == Tool::Eraser;
+        let heal = self.tool == Tool::Heal;
+        if heal {
+            self.heal_trail.push(c);
+        }
         // Tampon : chaque pixel prend la couleur du calque d'avant le trait, à l'endroit décalé
         let clone_off = (self.tool == Tool::Clone).then_some(self.clone_off).flatten().map(|o| (o.x.round() as i32, o.y.round() as i32));
         let sel = self.sel.as_ref();
@@ -1788,6 +1887,9 @@ impl Editor {
                     continue;
                 }
                 cover[idx] = k;
+                if heal {
+                    continue;
+                }
                 let i = idx * 4;
                 let s = [start.px[i], start.px[i + 1], start.px[i + 2], start.px[i + 3]];
                 if erase && edit_mask {
@@ -2278,7 +2380,7 @@ impl Editor {
                 ui.label(egui::RichText::new(format!("{icon}  {}", crate::i18n::t(label))).size(12.5));
             }
             match self.tool {
-                Tool::Brush | Tool::Eraser | Tool::Clone => {
+                Tool::Brush | Tool::Eraser | Tool::Clone | Tool::Heal => {
                     ui.add(egui::DragValue::new(&mut self.size).range(0.1..=10000.0).speed(0.5).prefix(format!("{} ", crate::i18n::t("diamètre")))).on_hover_text("[ ]");
                     // Un curseur avec son nom ne passe pas à la ligne tout seul
                     if ui.max_rect().right() - ui.cursor().left() < 190.0 {
@@ -2356,7 +2458,7 @@ impl Editor {
                 ui.spacing_mut().item_spacing.y = 2.0;
                 for (k, (t, icon, label, key)) in TOOLS.into_iter().enumerate() {
                     // Petits séparateurs entre les familles : déplacer, sélections, peinture, texte et pipette
-                    if [1, 5, 6, 11].contains(&k) {
+                    if [1, 5, 6, 12].contains(&k) {
                         ui.add_space(4.0);
                         let (r, _) = ui.allocate_exact_size(vec2(26.0, 1.0), egui::Sense::hover());
                         ui.painter().rect_filled(r, 0.0, p.line);
@@ -2679,7 +2781,7 @@ impl Editor {
             if self.swallow_click || self.swatch_pick.is_some() {
                 // Fermer le sélecteur de couleur : rien d'autre
             } else if resp.drag_started_by(egui::PointerButton::Primary) {
-                if matches!(self.tool, Tool::Brush | Tool::Eraser | Tool::Clone | Tool::Move) {
+                if matches!(self.tool, Tool::Brush | Tool::Eraser | Tool::Clone | Tool::Heal | Tool::Move) {
                     self.locked();
                 }
                 if let Some(at) = ui.input(|i| i.pointer.press_origin()) {
@@ -2694,7 +2796,7 @@ impl Editor {
                         Tool::Clone if self.clone_src.is_none() => {
                             self.message = Some(crate::i18n::t("Alt+clic d'abord pour choisir où prendre les pixels"));
                         }
-                        Tool::Brush | Tool::Eraser | Tool::Clone if self.doc.layers[self.doc.active].visible && !self.doc.layers[self.doc.active].lock_all => {
+                        Tool::Brush | Tool::Eraser | Tool::Clone | Tool::Heal if self.doc.layers[self.doc.active].visible && !self.doc.layers[self.doc.active].lock_all => {
                             if self.tool == Tool::Clone && self.clone_off.is_none() {
                                 if let Some(src) = self.clone_src {
                                     self.clone_off = Some(src - d);
@@ -2739,7 +2841,7 @@ impl Editor {
                 if let Some(at) = resp.interact_pointer_pos() {
                     let d = to_doc(at);
                     match self.tool {
-                        Tool::Brush | Tool::Eraser | Tool::Clone => {
+                        Tool::Brush | Tool::Eraser | Tool::Clone | Tool::Heal => {
                             // Lissage : le point suivi rattrape la souris avec du retard
                             let d = match self.stab {
                                 Some(st) if self.smooth > 0.0 => {
@@ -2843,6 +2945,9 @@ impl Editor {
                     self.gradient(a, b);
                 }
                 self.sel_base = None;
+                if self.tool == Tool::Heal {
+                    self.heal_apply();
+                }
                 self.stroke = None;
                 self.stab = None;
                 self.drag_from = None;
@@ -2874,7 +2979,7 @@ impl Editor {
                         Tool::Clone if self.clone_src.is_none() => {
                             self.message = Some(crate::i18n::t("Alt+clic d'abord pour choisir où prendre les pixels"));
                         }
-                        Tool::Brush | Tool::Eraser | Tool::Clone if !self.doc.layers[self.doc.active].lock_all => {
+                        Tool::Brush | Tool::Eraser | Tool::Clone | Tool::Heal if !self.doc.layers[self.doc.active].lock_all => {
                             if self.tool == Tool::Clone && self.clone_off.is_none() {
                                 if let Some(src) = self.clone_src {
                                     self.clone_off = Some(src - d);
@@ -2886,6 +2991,9 @@ impl Editor {
                             let n = l.w * l.h;
                             self.stroke = Some((l, vec![0.0; n], d));
                             self.dab(d);
+                            if self.tool == Tool::Heal {
+                                self.heal_apply();
+                            }
                             self.stroke = None;
                         }
                         Tool::Select | Tool::Ellipse | Tool::Lasso => self.sel = None,
@@ -2901,7 +3009,7 @@ impl Editor {
                             self.commit_text(ui.ctx());
                             self.text = Some(TextDraft { at: [d.x, d.y], s: String::new(), preview: None, focus: true });
                         }
-                        Tool::Gradient | Tool::Move | Tool::Brush | Tool::Eraser | Tool::Clone | Tool::Crop => {}
+                        Tool::Gradient | Tool::Move | Tool::Brush | Tool::Eraser | Tool::Clone | Tool::Heal | Tool::Crop => {}
                     }
                 }
             }
@@ -3045,6 +3153,13 @@ impl Editor {
             let txt = format!("{} × {}", (c[2] - c[0]).round(), (c[3] - c[1]).round());
             painter.text(q[2] + vec2(6.0, 6.0), egui::Align2::LEFT_TOP, txt, egui::FontId::proportional(11.0), Color32::WHITE);
         }
+        // Trait du correcteur en cours
+        if !self.heal_trail.is_empty() {
+            let r = (self.size * self.zoom / 2.0).max(1.0);
+            for q in &self.heal_trail {
+                painter.circle_filled(to_screen(q.x, q.y), r, Color32::from_rgba_unmultiplied(230, 60, 90, 40));
+            }
+        }
         // Repères
         let guide_col = Color32::from_rgb(0, 200, 230);
         for g in &self.doc.guides {
@@ -3102,7 +3217,7 @@ impl Editor {
             painter.rect_filled(Rect::from_min_size(rect.min, vec2(ruler_w, ruler_w)), 0.0, bg);
         }
         // Rond du pinceau sous le pointeur
-        if let (Some(at), true) = (hover.filter(|q| rect.contains(*q)), matches!(self.tool, Tool::Brush | Tool::Eraser | Tool::Clone)) {
+        if let (Some(at), true) = (hover.filter(|q| rect.contains(*q)), matches!(self.tool, Tool::Brush | Tool::Eraser | Tool::Clone | Tool::Heal)) {
             painter.circle_stroke(at, (self.size * self.zoom / 2.0).max(1.0), Stroke::new(1.0, Color32::from_black_alpha(160)));
             painter.circle_stroke(at, (self.size * self.zoom / 2.0).max(1.0) + 1.0, Stroke::new(1.0, Color32::from_white_alpha(160)));
             // Le point lissé que suit le trait
