@@ -1615,6 +1615,10 @@ pub fn graph(p: &Project, project: &Path, from: f32, w: u32, h: u32, realtime: b
             text_file(c, p)
         } else {
             let m = resolve(project, &c.file);
+            // Animation Motion ou montage imbriqué pas encore rendu : le clip attend (vide) au lieu de casser l'aperçu
+            if (crate::motion::is_compo(&c.file) || is_project(&c.file)) && !m.exists() {
+                continue;
+            }
             // Aperçu de l'image seule : le proxy s'il est prêt (l'export et le son gardent l'original)
             match (realtime && !with_audio && p.proxies && c.kind == "video").then(|| proxy_ready(&m)).flatten() {
                 Some(px) => px,
