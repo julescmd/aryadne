@@ -3221,5 +3221,10 @@
   "Color script (vignettes et couleurs)": "Color script (thumbnails and colors)",
   "Une vignette par plan avec ses couleurs dominantes, pour juger les couleurs du film ; PNG à côté du montage": "One thumbnail per shot with its dominant colors, to judge the film's colors; PNG next to the edit",
   "fermer les trous (px)": "close gaps (px)",
-  "Le remplissage ne passe pas par les ouvertures du trait plus petites que cette taille, et va jusqu'au trait": "The fill does not leak through openings in the line smaller than this size, and reaches the line"
+  "Le remplissage ne passe pas par les ouvertures du trait plus petites que cette taille, et va jusqu'au trait": "The fill does not leak through openings in the line smaller than this size, and reaches the line",
+  " étapes": " steps",
+  "Des formes intermédiaires de l'une à l'autre : contour et couleur passent en douceur (comme la fusion d'Illustrator)": "In-between shapes from one to the other: outline and color change smoothly (like Illustrator blend)",
+  "Fusion": "Blend",
+  "Fusion impossible : il faut deux formes pleines.": "Can't blend: two filled shapes are needed.",
+  "fusion entre les deux": "blend between them"
 }

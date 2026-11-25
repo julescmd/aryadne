@@ -100,6 +100,8 @@ pub struct Editor {
     builder_tex: Option<(Vec<u32>, egui::TextureHandle)>,
     /// Décalage de tracé (unités)
     offset_by: f32,
+    /// Fusion entre deux objets : nombre d'étapes
+    blend_steps: u32,
     /// Bibliothèque d'icônes ouverte : la recherche
     icon_pick: Option<String>,
     /// Présentation du prototype : le plan affiché et son image (clé, texture)
@@ -150,6 +152,7 @@ impl Editor {
             picked: vec![],
             builder_tex: None,
             offset_by: 10.0,
+            blend_steps: 5,
             icon_pick: None,
             present: None,
             present_tex: None,
@@ -1348,6 +1351,20 @@ impl Editor {
                 ch = true;
             }
         });
+        // Fusion (blend) entre deux objets : des formes intermédiaires, forme et couleur
+        if self.sel.len() == 2 {
+            ui.horizontal(|ui| {
+                ui.add(egui::DragValue::new(&mut self.blend_steps).range(1..=200).suffix(crate::i18n::t_mid(" étapes")));
+                if ui.button(format!("{} {}", l::BLEND, crate::i18n::t("fusion entre les deux"))).on_hover_text(crate::i18n::t("Des formes intermédiaires de l'une à l'autre : contour et couleur passent en douceur (comme la fusion d'Illustrator)")).clicked() {
+                    self.doc = snapshot.clone();
+                    match self.blend_selection(self.blend_steps) {
+                        Some(ids) => self.sel = ids,
+                        None => self.message = Some(crate::i18n::t("Fusion impossible : il faut deux formes pleines.")),
+                    }
+                    ch = true;
+                }
+            });
+        }
         // Décaler le tracé (comme Illustrator) : une nouvelle forme, plus grande ou plus petite, sous la sélection
         if !self.sel.is_empty() {
             ui.horizontal(|ui| {
@@ -1639,6 +1656,13 @@ impl Editor {
     }
 
     /// Une forme décalée de `d` autour de la sélection, posée juste dessous ; rend son identifiant
+    /// Fusion : `steps` formes entre les deux choisies, contour rééchantillonné et couleurs mélangées.
+    /// Les formes s'insèrent entre les deux dans l'empilement ; rend les deux d'origine et la fusion.
+    fn blend_selection(&mut self, steps: u32) -> Option<Vec<u64>> {
+        let ids: Vec<u64> = self.sel.iter().map(|i| self.top_of(*i)).collect();
+        blend_doc(&mut self.doc, *ids.first()?, *ids.get(1)?, steps)
+    }
+
     fn offset_selection(&mut self, d: f32) -> Option<u64> {
         let ids: Vec<u64> = self.sel.iter().map(|i| self.top_of(*i)).collect();
         let g = crate::vgeom::Grid::around(&self.doc, &ids, d.max(0.0) + 4.0, 1200)?;
@@ -3182,3 +3206,92 @@ fn paint_ui(ui: &mut egui::Ui, p: &mut Paint, k: usize) -> bool {
     ch
 }
 
+
+/// `n` points répartis à égale distance le long d'un contour fermé
+fn blend_resample(pts: &[[f32; 2]], n: usize) -> Vec<[f32; 2]> {
+    let m = pts.len();
+    let seg: Vec<f32> = (0..m).map(|i| { let (a, b) = (pts[i], pts[(i + 1) % m]); (b[0] - a[0]).hypot(b[1] - a[1]) }).collect();
+    let total: f32 = seg.iter().sum::<f32>().max(1e-5);
+    let mut out = Vec::with_capacity(n);
+    let (mut i, mut acc) = (0usize, 0.0f32);
+    for k in 0..n {
+        let target = total * k as f32 / n as f32;
+        while i < m - 1 && acc + seg[i] < target {
+            acc += seg[i];
+            i += 1;
+        }
+        let t = ((target - acc) / seg[i].max(1e-6)).clamp(0.0, 1.0);
+        let (a, b) = (pts[i], pts[(i + 1) % m]);
+        out.push([a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t]);
+    }
+    out
+}
+
+/// Le contour `b` tourné (et retourné s'il le faut) pour que ses points suivent ceux de `a` au plus court
+fn blend_align(a: &[[f32; 2]], b: Vec<[f32; 2]>) -> Vec<[f32; 2]> {
+    let n = a.len();
+    let cost = |bb: &[[f32; 2]], off: usize| -> f32 { (0..n).step_by((n / 32).max(1)).map(|i| { let q = bb[(i + off) % n]; (a[i][0] - q[0]).powi(2) + (a[i][1] - q[1]).powi(2) }).sum() };
+    let rev: Vec<[f32; 2]> = b.iter().rev().copied().collect();
+    let mut best = (f32::MAX, false, 0usize);
+    for (r, cand) in [(false, &b), (true, &rev)] {
+        for off in 0..n {
+            let c = cost(cand, off);
+            if c < best.0 {
+                best = (c, r, off);
+            }
+        }
+    }
+    let src = if best.1 { rev } else { b };
+    (0..n).map(|i| src[(i + best.2) % n]).collect()
+}
+
+#[cfg(test)]
+mod blend_tests {
+    #[test]
+    fn reechantillonner_et_aligner() {
+        let sq = vec![[0.0, 0.0], [10.0, 0.0], [10.0, 10.0], [0.0, 10.0]];
+        let r = super::blend_resample(&sq, 8);
+        assert_eq!(r.len(), 8);
+        assert_eq!(r[2], [10.0, 0.0]);
+        // Le même carré décalé de deux points et parcouru à l'envers revient aligné
+        let mut b: Vec<[f32; 2]> = r.iter().rev().copied().collect();
+        b.rotate_left(3);
+        let al = super::blend_align(&r, b);
+        assert_eq!(al, r);
+    }
+}
+
+/// Fusion entre deux formes du document (voir `Editor::blend_selection`)
+pub(crate) fn blend_doc(doc: &mut crate::vector::Doc, a: u64, b: u64, steps: u32) -> Option<Vec<u64>> {
+    let g = crate::vgeom::Grid::around(&doc, &[a, b], 4.0, 900)?;
+    // Le plus grand contour de chaque forme, en coordonnées du document
+    let outline = |id: u64| -> Option<Vec<[f32; 2]>> {
+        let loops = g.trace(&g.mask(&doc, id));
+        let best = loops.into_iter().max_by_key(|l| l.len())?;
+        let pts: Vec<[f32; 2]> = crate::vgeom::flatten(&best, true).into_iter().map(|x| [g.org[0] + x.0[0], g.org[1] + x.0[1]]).collect();
+        (pts.len() >= 3).then_some(pts)
+    };
+    let (pa, pb) = (blend_resample(&outline(a)?, 128), blend_resample(&outline(b)?, 128));
+    let pb = blend_align(&pa, pb);
+    let (sa, sb) = (doc.get(a)?.clone(), doc.get(b)?.clone());
+    let ca = sa.fills.first().map(|f| f.first()).unwrap_or([128, 128, 128, 255]);
+    let cb = sb.fills.first().map(|f| f.first()).unwrap_or(ca);
+    let mut made = vec![];
+    let at = doc.index(a)?.max(doc.index(b)?);
+    for k in 1..=steps {
+        let t = k as f32 / (steps + 1) as f32;
+        let pts: Vec<[f32; 2]> = pa.iter().zip(&pb).map(|(p, q)| [p[0] + (q[0] - p[0]) * t, p[1] + (q[1] - p[1]) * t]).collect();
+        let nodes = crate::vector::fit_nodes(&pts, 0.6, true);
+        let col = [0, 1, 2, 3].map(|i| (ca[i] as f32 + (cb[i] as f32 - ca[i] as f32) * t).round() as u8);
+        let id = doc.new_id();
+        let mut s = Shape { id, kind: Kind::Path { nodes, closed: true }, x: 0.0, y: 0.0, ..Shape::base() };
+        s.name = format!("{} {k}", crate::i18n::t("Fusion"));
+        s.fills = vec![Paint::solid(col)];
+        s.opacity = sa.opacity + (sb.opacity - sa.opacity) * t;
+        doc.shapes.insert((at + made.len()).min(doc.shapes.len()), s);
+        made.push(id);
+    }
+    let mut out = vec![a, b];
+    out.extend(made);
+    Some(out)
+}
