@@ -931,8 +931,9 @@ pub fn solve(tracks: &[Track], frames: usize, w: usize, h: usize, fov: Option<f3
     let mut sol = match fov.filter(|f| f.is_finite() && *f > 1.0 && *f < 170.0) {
         Some(fov) => solve_focal(tracks, frames, w, h, wf * 0.5 / (fov as f64).to_radians().mul_add(0.5, 0.0).tan())?,
         None => {
-            // Le score : l'erreur, alourdie quand peu d'images ou de points sont résolus
-            let score = |s: &Solution| s.error * (frames as f64 / s.poses.iter().flatten().count().max(1) as f64).powi(2);
+            // Le score : l'erreur, alourdie quand peu d'images sont résolues. L'erreur seule distingue mal les
+            // focales (une longue focale colle toujours un peu mieux) : les objectifs courants sont un peu favorisés
+            let score = |s: &Solution| s.error * (frames as f64 / s.poses.iter().flatten().count().max(1) as f64).powi(2) * (1.0 + 0.35 * (s.focal / wf / 0.9).ln().abs());
             let mut best: Option<Solution> = None;
             let mut last_err = None;
             let mut try_k = |k: f64, best: &mut Option<Solution>| match solve_focal(tracks, frames, w, h, wf * k) {
@@ -1398,9 +1399,8 @@ mod tests {
         assert_eq!(backdrop_size((0, 0), 10).0 % 2, 0);
     }
 
-    #[test]
-    fn de_la_video_a_la_camera() {
-        // Des points lumineux dans l'espace, filmés par une caméra en travelling : images, suivi, résolution
+    /// Des points lumineux dans l'espace, filmés par une caméra en travelling : (images, poses vraies, focale)
+    fn blob_film() -> (Frames, Vec<Pose>, f64) {
         let (w, h, focal, n) = (320usize, 240usize, 300.0f64, 20usize);
         let mut seed = 99u64;
         let mut rnd = move || {
@@ -1426,7 +1426,14 @@ mod tests {
                 img.iter().map(|v| v.min(255.0) as u8).collect()
             })
             .collect();
-        let fr = Frames { w, h, px };
+        (Frames { w, h, px }, poses, focal)
+    }
+
+    #[test]
+    fn de_la_video_a_la_camera() {
+        // Images, suivi, résolution
+        let (fr, poses, focal) = blob_film();
+        let (w, h, n) = (fr.w, fr.h, fr.px.len());
         let tracks = track_features(&fr, 120, &|_| {});
         assert!(tracks.iter().filter(|t| t.pts.len() >= 10).count() > 25, "{} pistes", tracks.len());
         let fov = (2.0 * (w as f64 * 0.5 / focal).atan()).to_degrees() as f32;

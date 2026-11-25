@@ -2866,6 +2866,8 @@ pub struct Viewer {
     anim_job: Option<AnimJob>,
     /// Suivi de caméra : demandé depuis le menu, en cours, et les images de la vidéo de fond (avec leur clé)
     want_matchmove: bool,
+    /// Réglages avant de lancer : la vidéo, « estimer le champ », champ horizontal connu (degrés)
+    mm_dialog: Option<(std::path::PathBuf, bool, f32)>,
     mm_job: Option<crate::matchmove::Job>,
     backdrop: Option<(String, crate::matchmove::BackdropSlot)>,
     /// La vue de la frame précédente (l'en-tête et les outils flottent par-dessus)
@@ -3097,6 +3099,7 @@ impl Viewer {
             want_anim: false,
             anim_job: None,
             want_matchmove: false,
+            mm_dialog: None,
             mm_job: None,
             backdrop: None,
             vp_rect: None,
@@ -5797,8 +5800,30 @@ impl Viewer {
         // Suivi de caméra : choisir la vidéo, puis suivre son avancement ; à la fin, la caméra est posée dans la scène
         if std::mem::take(&mut self.want_matchmove) && self.mm_job.is_none() {
             if let Some(f) = rfd::FileDialog::new().add_filter(crate::i18n::t("vidéo"), &["mp4", "mov", "mkv", "webm", "avi", "m4v"]).pick_file() {
+                self.mm_dialog = Some((f, true, 60.0));
+            }
+        }
+        if let Some((file, auto, fov)) = self.mm_dialog.as_mut() {
+            let (mut go, mut open) = (false, true);
+            egui::Window::new(crate::i18n::t("Suivi de caméra")).collapsible(false).resizable(false).open(&mut open).anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]).show(ui.ctx(), |ui| {
+                ui.label(egui::RichText::new(format!("{}  {}", crate::lucide::VIDEO, file.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default())).strong());
+                ui.label(egui::RichText::new(crate::i18n::t("La caméra doit se déplacer dans le plan (un simple panoramique sur trépied ne donne pas de relief). Les premières secondes sont suivies.")).size(11.0).color(p.muted));
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.checkbox(auto, crate::i18n::t("estimer le champ de l'objectif"));
+                    ui.add_enabled(!*auto, egui::DragValue::new(fov).speed(0.2).range(5.0..=150.0).suffix("°")).on_hover_text(crate::i18n::t("Champ horizontal de l'objectif, s'il est connu : le résultat est plus juste"));
+                });
+                ui.add_space(4.0);
+                if ui.button(format!("{}  {}", crate::lucide::PLAY, crate::i18n::t("suivre"))).clicked() {
+                    go = true;
+                }
+            });
+            if go {
                 let ctx = ui.ctx().clone();
-                self.mm_job = Some(crate::matchmove::start(f, None, move || ctx.request_repaint()));
+                self.mm_job = Some(crate::matchmove::start(file.clone(), (!*auto).then_some(*fov), move || ctx.request_repaint()));
+            }
+            if go || !open {
+                self.mm_dialog = None;
             }
         }
         if let Some(job) = &self.mm_job {

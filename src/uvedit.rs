@@ -886,7 +886,7 @@ mod tests {
         // Cube déplié automatiquement, deux IDs, un matériau « métal peint usé » sur le second
         let t = cube();
         let n = t.polys.len();
-        let mut e = Edit { topo: t, ..Edit::open(&crate::modifiers::Mesh { pos: vec![], tris: vec![], colors: vec![], edges: vec![] }, std::env::temp_dir().join("aryadne-bake-test.json"), 1.0) };
+        let mut e = Edit { topo: t, ..Edit::open(&crate::modifiers::Mesh { pos: vec![], tris: vec![], colors: vec![], edges: vec![] }, std::env::temp_dir().join(format!("aryadne-bake-test-{}.json", std::process::id())), 1.0) };
         e.data = EditData::fresh(&e.topo);
         e.auto_now(true);
         assert!(e.data.has_uv());
@@ -894,7 +894,8 @@ mod tests {
         e.data.face_mat = (0..n).map(|f| (f % 2) as u16).collect();
         e.bake_size = 128;
         let prog = crate::nodes::Program::compile(&crate::nodes::material_preset("métal peint usé").unwrap(), "", 64).ok().unwrap();
-        let dir = std::env::temp_dir().join("aryadne-bake");
+        // Un dossier par processus : deux séries de tests lancées en même temps ne s'écrasent pas
+        let dir = std::env::temp_dir().join(format!("aryadne-bake-{}", std::process::id()));
         e.bake_rays = 8;
         let files = e.bake(&[None, Some(std::sync::Arc::new(prog))], &dir, "cube", None).unwrap();
         assert!(files.len() >= 7);
@@ -994,7 +995,7 @@ mod vrai {
         let Ok(p) = std::env::var("ARYADNE_BAKE_OBJ") else { return };
         let m = crate::model3d::load(std::path::Path::new(&p)).unwrap();
         let mesh = crate::modifiers::Mesh::from_model(&m, false);
-        let mut e = Edit::open(&mesh, std::env::temp_dir().join("aryadne-bake-reel.json"), 1.0);
+        let mut e = Edit::open(&mesh, std::env::temp_dir().join(format!("aryadne-bake-reel-{}.json", std::process::id())), 1.0);
         e.data = EditData::fresh(&e.topo);
         e.auto_now(true);
         e.bake_size = 1024;
@@ -1004,7 +1005,7 @@ mod vrai {
             (hm.pos, hm.tris)
         });
         let t0 = std::time::Instant::now();
-        let files = e.bake(&[None], &std::env::temp_dir().join("aryadne-bake-reel"), "m", high.as_ref()).unwrap();
+        let files = e.bake(&[None], &std::env::temp_dir().join(format!("aryadne-bake-reel-{}", std::process::id())), "m", high.as_ref()).unwrap();
         println!("{} cartes en {:?}", files.len(), t0.elapsed());
     }
     /// ARYADNE_UV_OBJ=chemin.obj cargo test uv_reel -- --nocapture
