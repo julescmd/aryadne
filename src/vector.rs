@@ -1328,6 +1328,64 @@ pub fn trace(img: &image::RgbaImage, threshold: f32, detail: f32) -> (Vec<Vec<No
     (out, color)
 }
 
+/// Les contours d'une icône Lucide, en nœuds (repère : coin haut-gauche, `size` unités de côté)
+pub fn icon_contours(ch: char, size: f32) -> Vec<Vec<Node>> {
+    use ab_glyph::Font;
+    let Ok(font) = ab_glyph::FontRef::try_from_slice(include_bytes!("../assets/fonts/Lucide.ttf")) else { return vec![] };
+    let gid = font.glyph_id(ch);
+    let Some(outline) = font.outline(gid) else { return vec![] };
+    let em = font.units_per_em().unwrap_or(1000.0);
+    let k = size / em;
+    // Y vers le bas ; l'icône occupe le carré de l'em (ascendant en haut)
+    let asc = font.ascent_unscaled();
+    let tp = |p: ab_glyph::Point| [p.x * k, (asc - p.y) * k];
+    let mut out: Vec<Vec<Node>> = vec![];
+    let mut cur: Vec<Node> = vec![];
+    let mut last: Option<[f32; 2]> = None;
+    let close = |cur: &mut Vec<Node>, out: &mut Vec<Vec<Node>>| {
+        if cur.len() > 2 {
+            // Le dernier point rejoint le premier : un seul nœud
+            let (f, l) = (cur[0].p, cur[cur.len() - 1].p);
+            if (f[0] - l[0]).abs() < 1e-3 && (f[1] - l[1]).abs() < 1e-3 {
+                let end = cur.pop().unwrap();
+                cur[0].i = end.i;
+            }
+            out.push(std::mem::take(cur));
+        } else {
+            cur.clear();
+        }
+    };
+    for c in &outline.curves {
+        let (p0, rest): ([f32; 2], Vec<[f32; 2]>) = match c {
+            ab_glyph::OutlineCurve::Line(a, b) => (tp(*a), vec![tp(*b)]),
+            ab_glyph::OutlineCurve::Quad(a, b, e) => {
+                let (a, b, e) = (tp(*a), tp(*b), tp(*e));
+                // Quadratique en cubique
+                let c1 = [a[0] + 2.0 / 3.0 * (b[0] - a[0]), a[1] + 2.0 / 3.0 * (b[1] - a[1])];
+                let c2 = [e[0] + 2.0 / 3.0 * (b[0] - e[0]), e[1] + 2.0 / 3.0 * (b[1] - e[1])];
+                (a, vec![c1, c2, e])
+            }
+            ab_glyph::OutlineCurve::Cubic(a, b, cc, e) => (tp(*a), vec![tp(*b), tp(*cc), tp(*e)]),
+        };
+        if last.is_none_or(|l| (l[0] - p0[0]).abs() > 1e-3 || (l[1] - p0[1]).abs() > 1e-3) {
+            close(&mut cur, &mut out);
+            cur.push(Node::corner(p0));
+        }
+        if rest.len() == 1 {
+            cur.push(Node::corner(rest[0]));
+            last = Some(rest[0]);
+        } else {
+            if let Some(n) = cur.last_mut() {
+                n.o = rest[0];
+            }
+            cur.push(Node { p: rest[2], i: rest[1], o: rest[2] });
+            last = Some(rest[2]);
+        }
+    }
+    close(&mut cur, &mut out);
+    out
+}
+
 /// Des points (un geste, un tracé aplati) deviennent peu de nœuds lisses : on garde les points
 /// qui s'écartent de plus de `eps`, et chaque angle doux reçoit des poignées
 pub fn fit_nodes(pts: &[[f32; 2]], eps: f32, closed: bool) -> Vec<Node> {
@@ -1591,6 +1649,16 @@ mod tests {
         }
         d.apply_layouts();
         assert_eq!(d.bounds(d.get(ids[1]).unwrap())[0], 180.0);
+    }
+
+    #[test]
+    fn icone_lucide() {
+        let ch = crate::lucide_all::ALL.iter().find(|x| x.0 == "circle").unwrap().1;
+        let c = icon_contours(ch, 96.0);
+        // Un cercle au trait : deux contours (dehors, dedans)
+        assert_eq!(c.len(), 2, "{}", c.len());
+        let xs: Vec<f32> = c[0].iter().map(|n| n.p[0]).collect();
+        assert!(xs.iter().cloned().fold(f32::MIN, f32::max) <= 96.5 && xs.iter().cloned().fold(f32::MAX, f32::min) >= -0.5);
     }
 
     #[test]

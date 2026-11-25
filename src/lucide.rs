@@ -142,6 +142,7 @@ pub const VIBRATE_OFF: &str = "\u{f029d}";
 pub const BOOK_PLUS: &str = "\u{f03f3}";
 pub const SCROLL_TEXT: &str = "\u{f045f}";
 pub const SPELL_CHECK: &str = "\u{f049a}";
+pub const SMILE_PLUS: &str = "\u{f0301}";
 pub const FLIP_HORIZONTAL_2: &str = "\u{f035e}";
 pub const GLOBE: &str = "\u{f00e8}";
 pub const UNDO_2: &str = "\u{f02a1}";

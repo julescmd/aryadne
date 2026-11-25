@@ -2997,5 +2997,8 @@
   "Nuance globale : la changer change toutes les formes qui l'utilisent (clic droit : retirer)": "Global swatch: changing it changes every shape that uses it (right-click: remove)",
   "Ajouter les couleurs du document comme nuances": "Add the document colors as swatches",
   "Recolorer": "Recolor",
-  "Change cette couleur dans toute la sélection": "Changes this color in the whole selection"
+  "Change cette couleur dans toute la sélection": "Changes this color in the whole selection",
+  "Bibliothèque d'icônes Lucide (plus de 1 500)": "Lucide icon library (over 1,500)",
+  "icônes Lucide": "Lucide icons",
+  "chercher (en anglais : heart, arrow, user…)": "search (heart, arrow, user…)"
 }

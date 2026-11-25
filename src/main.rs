@@ -19,6 +19,7 @@ mod spell;
 mod sendto;
 mod aitasks;
 mod related;
+mod lucide_all;
 mod vector_ui;
 mod keymap;
 mod lucide;

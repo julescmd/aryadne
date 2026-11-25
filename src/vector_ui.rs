@@ -100,6 +100,8 @@ pub struct Editor {
     builder_tex: Option<(Vec<u32>, egui::TextureHandle)>,
     /// Décalage de tracé (unités)
     offset_by: f32,
+    /// Bibliothèque d'icônes ouverte : la recherche
+    icon_pick: Option<String>,
 }
 
 fn c32(c: [u8; 4]) -> Color32 {
@@ -143,6 +145,7 @@ impl Editor {
             picked: vec![],
             builder_tex: None,
             offset_by: 10.0,
+            icon_pick: None,
         })
     }
 
@@ -349,6 +352,7 @@ impl Editor {
         // Calques à gauche de la toile
         egui::Panel::left(egui::Id::unique(("vec-layers", &key))).resizable(true).default_size(200.0).min_size(150.0).max_size(360.0).frame(egui::Frame::new().fill(p.panel).stroke(Stroke::new(1.0, p.line)).inner_margin(8)).show(ui, |ui| self.layers(ui));
         self.toolbar(ui);
+        self.icon_window(&ui.ctx().clone());
         self.canvas(ui);
         self.save_if_due(false);
         if self.save_due.is_some() {
@@ -375,6 +379,9 @@ impl Editor {
                 self.undo(true);
             }
             ui.separator();
+            if ib(ui, l::SMILE_PLUS, "Bibliothèque d'icônes Lucide (plus de 1 500)", true) {
+                self.icon_pick = if self.icon_pick.is_some() { None } else { Some(String::new()) };
+            }
             if ib(ui, l::FILE_UP, "Importer un SVG (aussi : coller un SVG avec Ctrl+V)", true) {
                 if let Some(f) = rfd::FileDialog::new().add_filter("SVG", &["svg"]).pick_file() {
                     match std::fs::read_to_string(&f) {
@@ -1087,6 +1094,58 @@ impl Editor {
         if let Some(bi) = self.board_of_selection() {
             self.export_ui(ui, bi);
         }
+    }
+
+    /// La bibliothèque d'icônes : recherche par nom (en anglais), un clic pose l'icône au centre de la vue
+    fn icon_window(&mut self, ctx: &egui::Context) {
+        let Some(q) = self.icon_pick.as_mut() else { return };
+        let mut open = true;
+        let mut pick = None;
+        egui::Window::new(crate::i18n::t("icônes Lucide")).open(&mut open).default_size([360.0, 420.0]).show(ctx, |ui| {
+            ui.add(egui::TextEdit::singleline(q).hint_text(crate::i18n::t("chercher (en anglais : heart, arrow, user…)")).desired_width(f32::INFINITY)).request_focus();
+            let ql = q.trim().to_lowercase();
+            let hits: Vec<&(&str, char)> = crate::lucide_all::ALL.iter().filter(|x| ql.is_empty() || x.0.contains(&ql)).take(240).collect();
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    for (name, ch) in hits {
+                        if ui.add(egui::Button::new(egui::RichText::new(ch.to_string()).size(22.0)).min_size(vec2(36.0, 36.0))).on_hover_text(*name).clicked() {
+                            pick = Some((name.to_string(), *ch));
+                        }
+                    }
+                });
+            });
+        });
+        if !open {
+            self.icon_pick = None;
+        }
+        if let Some((name, ch)) = pick {
+            self.insert_icon(&name, ch);
+        }
+    }
+
+    fn insert_icon(&mut self, name: &str, ch: char) {
+        let size = 96.0;
+        let contours = crate::vector::icon_contours(ch, size);
+        if contours.is_empty() {
+            return;
+        }
+        self.checkpoint();
+        let (x, y) = (self.center[0] - size / 2.0, self.center[1] - size / 2.0);
+        let mut ids = vec![];
+        for nodes in contours {
+            let id = self.doc.new_id();
+            self.doc.shapes.push(Shape { id, name: name.to_string(), kind: Kind::Path { nodes, closed: true }, x, y, fills: vec![crate::vector::Paint::solid([24, 24, 27, 255])], ..Shape::base() });
+            ids.push(id);
+        }
+        // Les trous (l'intérieur d'un cercle au trait) restent vides : groupe pair-impair
+        let g = if ids.len() > 1 { self.doc.group(&ids, 5) } else { ids.first().copied() };
+        if let Some(g) = g {
+            if let Some(s) = self.shape_mut(g) {
+                s.name = name.to_string();
+            }
+            self.sel = vec![g];
+        }
+        self.changed();
     }
 
     /// Une forme décalée de `d` autour de la sélection, posée juste dessous ; rend son identifiant
