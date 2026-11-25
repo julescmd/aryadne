@@ -207,7 +207,7 @@ impl App {
             Cmd::History => {
                 if let Some(rel) = self.current().map(|d| d.rel.clone()) {
                     self.flush_all();
-                    self.history_dlg = Some(HistoryDlg { versions: history_list(&self.root(), &rel), rel, sel: 0, diff: true, compare: false });
+                    self.history_dlg = Some(HistoryDlg::new(rel.clone(), history_list(&self.root(), &rel), false));
                 }
             }
             Cmd::TimeReport => self.time_report = Some(1),
@@ -229,7 +229,7 @@ impl App {
                         std::fs::write(&f, text).ok()?;
                         Some((format!("{h} · {label}"), f))
                     }).collect();
-                    self.history_dlg = Some(HistoryDlg { versions, rel, sel: 0, diff: true, compare: false });
+                    self.history_dlg = Some(HistoryDlg::new(rel, versions, false));
                 }
             }
             Cmd::Compare => {
@@ -237,7 +237,7 @@ impl App {
                     self.flush_all();
                     if let Some(f) = rfd::FileDialog::new().set_title(crate::i18n::t("comparer avec…")).pick_file() {
                         let label = f.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-                        self.history_dlg = Some(HistoryDlg { versions: vec![(label, f)], rel, sel: 0, diff: true, compare: true });
+                        self.history_dlg = Some(HistoryDlg::new(rel, vec![(label, f)], true));
                     }
                 }
             }
@@ -533,19 +533,39 @@ impl App {
         let Some(mut d) = self.history_dlg.take() else { return };
         let p = theme::pal();
         let root = self.root();
+        let t = |s: &str| crate::i18n::t(s);
         let mut close = false;
         let mut restore: Option<String> = None;
+        let mut relist = false;
+        let is_vec = crate::vector::is_vector(&d.rel);
+        // L'état actuel : le texte ouvert, sinon le fichier du coffre
+        let current = self.docs.iter().find(|x| x.rel == d.rel).and_then(|x| if let Content::Text(t) = &x.content { Some(t.clone()) } else { None }).or_else(|| vault::safe(&root, &d.rel).ok().and_then(|f| std::fs::read_to_string(f).ok())).unwrap_or_default();
         egui::Modal::new(egui::Id::unique("history")).frame(egui::Frame::new().fill(p.bg).stroke(egui::Stroke::new(1.0, p.text)).inner_margin(16)).show(ctx, |ui| {
-            ui.set_width(820.0);
-            ui.label(caps(&if d.compare { format!("{} · {} ↔ {}", crate::i18n::t("comparer"), vault::display_rel(&d.rel), d.versions.first().map(|v| v.0.as_str()).unwrap_or("")) } else { format!("historique · {}", vault::display_rel(&d.rel)) }));
+            ui.set_width(860.0);
+            ui.label(caps(&if d.compare { format!("{} · {} ↔ {}", t("comparer"), vault::display_rel(&d.rel), d.versions.first().map(|v| v.0.as_str()).unwrap_or("")) } else { format!("{} · {}", t("historique"), vault::display_rel(&d.rel)) }));
             ui.add_space(6.0);
+            if !d.compare {
+                // Garder l'état actuel sous un nom : il ne sera jamais effacé par le roulement
+                ui.horizontal(|ui| {
+                    ui.add(egui::TextEdit::singleline(&mut d.new_name).desired_width(220.0).hint_text(t("nom d'une version à garder (ex. avant retouches)")));
+                    let ok = !d.new_name.trim().is_empty();
+                    if ui.add_enabled(ok, egui::Button::new(RichText::new(crate::lucide::BOOKMARK).size(14.0)).min_size(egui::vec2(26.0, 22.0))).on_hover_text(t("Garder l'état actuel comme version nommée : elle reste tant que tu ne la supprimes pas")).clicked() {
+                        if snapshot_named(&root, &d.rel, &current, &d.new_name).is_some() {
+                            d.new_name.clear();
+                            relist = true;
+                        }
+                    }
+                });
+                ui.add_space(4.0);
+            }
             if d.versions.is_empty() {
-                ui.label(RichText::new(crate::i18n::t("Aucune version enregistrée pour l'instant. Aryadne en garde une à chaque enregistrement (au plus une toutes les 2 minutes, les 40 dernières).")).color(p.muted));
+                ui.label(RichText::new(t("Aucune version enregistrée pour l'instant. Aryadne en garde une à chaque enregistrement (au plus une toutes les 2 minutes, les 40 dernières).")).color(p.muted));
             } else {
+                d.sel = d.sel.min(d.versions.len() - 1);
                 ui.horizontal_top(|ui| {
                     ui.vertical(|ui| {
-                        ui.set_width(200.0);
-                        egui::ScrollArea::vertical().id_salt("hist-list").max_height(420.0).show(ui, |ui| {
+                        ui.set_width(220.0);
+                        egui::ScrollArea::vertical().id_salt("hist-list").max_height(440.0).show(ui, |ui| {
                             for (i, (label, _)) in d.versions.iter().enumerate() {
                                 ui.selectable_value(&mut d.sel, i, label.as_str());
                             }
@@ -553,41 +573,151 @@ impl App {
                     });
                     ui.separator();
                     ui.vertical(|ui| {
-                        let text = d.versions.get(d.sel).and_then(|(_, f)| std::fs::read_to_string(f).ok()).unwrap_or_default();
-                        let current = self.docs.iter().find(|x| x.rel == d.rel).and_then(|x| if let Content::Text(t) = &x.content { Some(t.clone()) } else { None }).unwrap_or_default();
-                        let (added, removed) = line_diff(&current, &text);
-                        ui.horizontal(|ui| {
-                            ui.label(RichText::new(if d.compare { format!("− {} · + {} : +{added} / −{removed} lignes", crate::i18n::t("seulement dans l'autre"), crate::i18n::t("seulement dans celui-ci")) } else { format!("par rapport à maintenant : +{added} / −{removed} lignes") }).color(p.muted).size(11.0));
-                            ui.checkbox(&mut d.diff, crate::i18n::t("voir les différences"));
-                        });
-                        egui::ScrollArea::both().id_salt("hist-view").max_height(400.0).show(ui, |ui| {
-                            if d.diff {
-                                // − : dans cette version seulement ; + : ajouté depuis
-                                for (k, l) in diff_lines(&text, &current) {
-                                    let (prefix, col, bg) = match k {
-                                        -1 => ("− ", p.missing, p.missing.gamma_multiply(0.12)),
-                                        1 => ("+ ", egui::Color32::from_rgb(0x22, 0xa0, 0x55), egui::Color32::from_rgba_unmultiplied(0x22, 0xa0, 0x55, 30)),
-                                        _ => ("  ", p.muted, egui::Color32::TRANSPARENT),
-                                    };
-                                    egui::Frame::new().fill(bg).show(ui, |ui| {
-                                        ui.add(egui::Label::new(RichText::new(format!("{prefix}{l}")).monospace().size(12.0).color(col)).wrap_mode(egui::TextWrapMode::Extend));
+                        let vt = d.versions.get(d.sel).and_then(|(_, f)| version_time(&root, &d.rel, f));
+                        // Nom de la version, suppression, et avec quoi la comparer
+                        if !d.compare {
+                            ui.horizontal(|ui| {
+                                if let Some(vt) = vt {
+                                    if d.name_edit.0 != d.sel {
+                                        let name = history_versions(&root, &d.rel).into_iter().find(|v| v.t == vt).map(|v| v.name).unwrap_or_default();
+                                        d.name_edit = (d.sel, name);
+                                    }
+                                    let r = ui.add(egui::TextEdit::singleline(&mut d.name_edit.1).desired_width(180.0).hint_text(t("nommer cette version")));
+                                    if r.lost_focus() {
+                                        history_rename(&root, &d.rel, vt, &d.name_edit.1);
+                                        relist = true;
+                                    }
+                                    if ui.add(egui::Button::new(RichText::new(crate::lucide::TRASH_2).size(14.0)).min_size(egui::vec2(26.0, 22.0))).on_hover_text(t("supprimer cette version de l'historique")).clicked() {
+                                        history_delete(&root, &d.rel, vt);
+                                        d.name_edit.0 = usize::MAX;
+                                        d.against = None;
+                                        relist = true;
+                                    }
+                                }
+                                if d.versions.len() > 1 {
+                                    ui.label(RichText::new(t("comparer avec")).size(11.0).color(p.muted));
+                                    let shown = d.against.and_then(|k| d.versions.get(k)).map(|v| v.0.clone()).unwrap_or_else(|| t("maintenant"));
+                                    egui::ComboBox::from_id_salt("hist-against").width(190.0).selected_text(shown).show_ui(ui, |ui| {
+                                        ui.selectable_value(&mut d.against, None, t("maintenant"));
+                                        for (k, (label, _)) in d.versions.iter().enumerate() {
+                                            if k != d.sel {
+                                                ui.selectable_value(&mut d.against, Some(k), label.as_str());
+                                            }
+                                        }
                                     });
                                 }
-                            } else {
-                                ui.add(egui::Label::new(RichText::new(&text).monospace().size(12.0)).wrap_mode(egui::TextWrapMode::Extend));
+                            });
+                        }
+                        if d.against == Some(d.sel) {
+                            d.against = None;
+                        }
+                        let text = d.versions.get(d.sel).and_then(|(_, f)| std::fs::read_to_string(f).ok()).unwrap_or_default();
+                        // L'autre côté de la comparaison : une autre version, ou l'état actuel
+                        let other = match d.against.and_then(|k| d.versions.get(k)) {
+                            Some((_, f)) => std::fs::read_to_string(f).unwrap_or_default(),
+                            None => current.clone(),
+                        };
+                        if is_vec {
+                            // Dessin vectoriel : les deux rendus côte à côte, ou l'image de ce qui a changé
+                            let key = (d.sel, d.against);
+                            if d.vec_view.as_ref().is_none_or(|v| v.0 != key) {
+                                let (a, b) = (crate::vector::render_text(&text, &root, 400), crate::vector::render_text(&other, &root, 400));
+                                d.vec_view = match (a, b) {
+                                    (Some((da, ia)), Some((db, ib))) => {
+                                        let tex = |name: &str, img: &image::RgbaImage| ui.ctx().load_texture(name, egui::ColorImage::from_rgba_unmultiplied([img.width() as usize, img.height() as usize], img.as_raw()), egui::TextureOptions::LINEAR);
+                                        let diff = crate::vector::image_diff(&ia, &ib);
+                                        Some((key, vec![tex("hist-a", &ia), tex("hist-b", &ib), tex("hist-d", &diff)], crate::vector::doc_diff(&da, &db)))
+                                    }
+                                    _ => None,
+                                };
                             }
-                        });
-                        if !d.compare && ui.button(format!("{}  {}", crate::lucide::HISTORY, crate::i18n::t("restaurer cette version"))).clicked() {
+                            match &d.vec_view {
+                                Some((_, tex, diff)) => {
+                                    ui.horizontal(|ui| {
+                                        let sum = if diff.is_empty() { t("aucune différence") } else { format!("+{} / −{} / ~{} {}", diff.added.len(), diff.removed.len(), diff.changed.len(), t("formes (ajoutées, retirées, modifiées)")) };
+                                        ui.label(RichText::new(sum).color(p.muted).size(11.0)).on_hover_ui(|ui| {
+                                            for (sign, names) in [("+", &diff.added), ("−", &diff.removed), ("~", &diff.changed)] {
+                                                for n in names.iter().take(12) {
+                                                    ui.label(RichText::new(format!("{sign} {n}")).size(11.0));
+                                                }
+                                            }
+                                        });
+                                        for (k, (icon, tip)) in [(crate::lucide::COLUMNS_2, "côte à côte : cette version à gauche, l'autre à droite"), (crate::lucide::SCAN_EYE, "différences : en rose, ce qui a changé")].into_iter().enumerate() {
+                                            if ui.add(egui::Button::new(RichText::new(icon).size(14.0)).selected(d.vec_mode == k).min_size(egui::vec2(26.0, 22.0))).on_hover_text(t(tip)).clicked() {
+                                                d.vec_mode = k;
+                                            }
+                                        }
+                                    });
+                                    egui::ScrollArea::both().id_salt("hist-vec").max_height(400.0).show(ui, |ui| {
+                                        ui.horizontal(|ui| {
+                                            let show = |ui: &mut egui::Ui, tx: &egui::TextureHandle, w: f32| {
+                                                let sz = tx.size_vec2();
+                                                let k = (w / sz.x).min(380.0 / sz.y).min(1.0);
+                                                egui::Frame::new().stroke(egui::Stroke::new(1.0, p.line)).show(ui, |ui| ui.image((tx.id(), sz * k)));
+                                            };
+                                            if d.vec_mode == 0 {
+                                                show(ui, &tex[0], 290.0);
+                                                show(ui, &tex[1], 290.0);
+                                            } else {
+                                                show(ui, &tex[2], 590.0);
+                                            }
+                                        });
+                                    });
+                                }
+                                None => {
+                                    ui.label(RichText::new(t("Cette version du dessin est illisible.")).color(p.muted));
+                                }
+                            }
+                        } else {
+                            let (added, removed) = line_diff(&other, &text);
+                            ui.horizontal(|ui| {
+                                let head = if d.compare { format!("− {} · + {}", t("seulement dans l'autre"), t("seulement dans celui-ci")) } else if d.against.is_some() { t("par rapport à l'autre version") } else { t("par rapport à maintenant") };
+                                ui.label(RichText::new(format!("{head} : +{added} / −{removed} {}", t("lignes"))).color(p.muted).size(11.0));
+                                ui.checkbox(&mut d.diff, t("voir les différences"));
+                            });
+                            egui::ScrollArea::both().id_salt("hist-view").max_height(400.0).show(ui, |ui| {
+                                if d.diff {
+                                    // − : dans cette version seulement ; + : ajouté depuis
+                                    for (k, l) in diff_lines(&text, &other) {
+                                        let (prefix, col, bg) = match k {
+                                            -1 => ("− ", p.missing, p.missing.gamma_multiply(0.12)),
+                                            1 => ("+ ", egui::Color32::from_rgb(0x22, 0xa0, 0x55), egui::Color32::from_rgba_unmultiplied(0x22, 0xa0, 0x55, 30)),
+                                            _ => ("  ", p.muted, egui::Color32::TRANSPARENT),
+                                        };
+                                        egui::Frame::new().fill(bg).show(ui, |ui| {
+                                            ui.add(egui::Label::new(RichText::new(format!("{prefix}{l}")).monospace().size(12.0).color(col)).wrap_mode(egui::TextWrapMode::Extend));
+                                        });
+                                    }
+                                } else {
+                                    ui.add(egui::Label::new(RichText::new(&text).monospace().size(12.0)).wrap_mode(egui::TextWrapMode::Extend));
+                                }
+                            });
+                        }
+                        if !d.compare && ui.button(format!("{}  {}", crate::lucide::HISTORY, t("restaurer cette version"))).on_hover_text(t("L'état actuel est d'abord gardé dans l'historique, sous le nom « avant restauration »")).clicked() {
                             restore = Some(text);
                         }
                     });
                 });
             }
             ui.add_space(8.0);
-            close = ui.button(format!("{}  {}", crate::lucide::X, crate::i18n::t("fermer"))).clicked() || ui.input(|i| i.key_pressed(Key::Escape));
+            // Échap ferme, sauf pendant la saisie d'un nom (il quitte alors le champ)
+            let typing = ctx.egui_wants_keyboard_input();
+            close = ui.button(format!("{}  {}", crate::lucide::X, t("fermer"))).clicked() || (!typing && ui.input(|i| i.key_pressed(Key::Escape)));
         });
+        if relist {
+            // Seulement pour l'historique d'Aryadne (pas celui de git) : la liste est relue avec les noms
+            if d.versions.iter().all(|(_, f)| version_time(&root, &d.rel, f).is_some()) {
+                d.versions = history_list(&root, &d.rel);
+                d.name_edit.0 = usize::MAX;
+                d.vec_view = None;
+            }
+        }
         if let Some(text) = restore {
-            if let Some(i) = self.docs.iter().position(|x| x.rel == d.rel) {
+            // L'état qu'on quitte reste retrouvable
+            if current != text {
+                snapshot_named(&root, &d.rel, &current, &t("avant restauration"));
+            }
+            if let Some(i) = self.docs.iter().position(|x| x.rel == d.rel && matches!(x.content, Content::Text(_))) {
                 if let Content::Text(t) = &mut self.docs[i].content {
                     *t = text;
                     self.docs[i].dirty_since = Some(Instant::now());
@@ -595,8 +725,12 @@ impl App {
             } else {
                 let r = vault::write(&root, &d.rel, &text);
                 self.report(r);
+                // Un dessin ouvert est relu depuis le fichier restauré
+                if self.docs.iter().any(|x| x.rel == d.rel) {
+                    self.actions.push(Action::Reload(d.rel.clone()));
+                }
             }
-            self.toast = Some(("version restaurée (l'ancienne reste dans l'historique)".into(), Instant::now()));
+            self.toast = Some((t("version restaurée (l'ancienne reste dans l'historique)"), Instant::now()));
             return;
         }
         if !close {
@@ -895,6 +1029,22 @@ pub struct HistoryDlg {
     pub diff: bool,
     /// Comparaison avec un autre fichier (pas une version) : pas de restauration
     pub compare: bool,
+    /// Avec quoi comparer la version choisie : None, l'état actuel ; sinon une autre version
+    pub against: Option<usize>,
+    /// Nom en cours de saisie pour la version choisie (et la version qu'il concerne)
+    name_edit: (usize, String),
+    /// Nom de la version à garder maintenant
+    new_name: String,
+    /// Dessin vectoriel : rendus de la version, de l'autre côté et de leurs différences, avec le résumé
+    vec_view: Option<((usize, Option<usize>), Vec<egui::TextureHandle>, crate::vector::DocDiff)>,
+    /// Dessin vectoriel : 0 côte à côte, 1 différences
+    vec_mode: usize,
+}
+
+impl HistoryDlg {
+    pub fn new(rel: String, versions: Vec<(String, PathBuf)>, compare: bool) -> HistoryDlg {
+        HistoryDlg { rel, versions, sel: 0, diff: true, compare, against: None, name_edit: (usize::MAX, String::new()), new_name: String::new(), vec_view: None, vec_mode: 0 }
+    }
 }
 
 /// Différence ligne par ligne (plus longue sous-séquence commune) : -1 retiré, 0 identique, 1 ajouté.
@@ -1045,47 +1195,139 @@ fn unix_now() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
+/// Une version gardée d'un fichier : son heure (secondes Unix), son nom (vide : sans nom) et sa copie
+#[derive(Clone, Debug, PartialEq)]
+pub struct Version {
+    pub t: u64,
+    pub name: String,
+    pub path: PathBuf,
+}
+
+impl Version {
+    /// « nom · date » ou la date seule
+    pub fn label(&self) -> String {
+        let date = chrono::DateTime::from_timestamp(self.t as i64, 0).map(|d| d.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M").to_string()).unwrap_or_default();
+        if self.name.is_empty() { date } else { format!("{} · {date}", self.name) }
+    }
+}
+
+fn history_files(dir: &std::path::Path) -> Vec<(u64, PathBuf)> {
+    let mut files: Vec<(u64, PathBuf)> = std::fs::read_dir(dir)
+        .map(|rd| rd.flatten().filter_map(|f| f.file_name().to_string_lossy().strip_suffix(".txt")?.parse::<u64>().ok().map(|t| (t, f.path()))).collect())
+        .unwrap_or_default();
+    files.sort();
+    files
+}
+
+/// Les noms donnés aux versions (fichier « noms.json » du dossier d'historique : heure → nom)
+fn history_names(dir: &std::path::Path) -> HashMap<u64, String> {
+    std::fs::read_to_string(dir.join("noms.json")).ok().and_then(|s| serde_json::from_str::<HashMap<String, String>>(&s).ok()).unwrap_or_default().into_iter().filter_map(|(k, v)| Some((k.parse().ok()?, v))).collect()
+}
+
+fn write_names(dir: &std::path::Path, names: &HashMap<u64, String>) {
+    let m: std::collections::BTreeMap<String, &String> = names.iter().map(|(k, v)| (k.to_string(), v)).collect();
+    let _ = crate::vault::atomic_write(dir.join("noms.json"), serde_json::to_string_pretty(&m).unwrap_or_default());
+}
+
 /// Garde une copie à chaque enregistrement (une par tranche de 2 minutes, 40 au plus).
+/// Une version qui porte un nom n'est jamais remplacée ni effacée par ce roulement.
 pub fn snapshot(root: &str, rel: &str, text: &str) {
     if text.len() > 2_000_000 {
         return;
     }
     let dir = history_dir(root, rel);
     let _ = std::fs::create_dir_all(&dir);
-    let mut files: Vec<(u64, PathBuf)> = std::fs::read_dir(&dir)
-        .map(|rd| rd.flatten().filter_map(|f| f.file_name().to_string_lossy().trim_end_matches(".txt").parse::<u64>().ok().map(|t| (t, f.path()))).collect())
-        .unwrap_or_default();
-    files.sort();
+    let mut files = history_files(&dir);
+    let names = history_names(&dir);
     let now = unix_now();
     if let Some((t, f)) = files.last() {
         if std::fs::read_to_string(f).is_ok_and(|old| old == text) {
             return;
         }
-        if now.saturating_sub(*t) < 120 {
+        if now.saturating_sub(*t) < 120 && !names.contains_key(t) {
             let _ = crate::vault::atomic_write(f, text);
             return;
         }
     }
-    let _ = crate::vault::atomic_write(dir.join(format!("{now}.txt")), text);
+    let mut t = now;
+    while files.iter().any(|f| f.0 == t) {
+        t += 1;
+    }
+    let _ = crate::vault::atomic_write(dir.join(format!("{t}.txt")), text);
+    files.retain(|f| !names.contains_key(&f.0));
     while files.len() >= 40 {
         let (_, f) = files.remove(0);
         let _ = std::fs::remove_file(f);
     }
 }
 
-pub fn history_list(root: &str, rel: &str) -> Vec<(String, PathBuf)> {
+/// Garde l'état donné comme une version nommée (elle reste tant qu'on ne la supprime pas). Rend son heure.
+pub fn snapshot_named(root: &str, rel: &str, text: &str, name: &str) -> Option<u64> {
+    let name = name.trim();
+    if name.is_empty() || text.len() > 20_000_000 {
+        return None;
+    }
     let dir = history_dir(root, rel);
-    let mut files: Vec<(u64, PathBuf)> = std::fs::read_dir(&dir)
-        .map(|rd| rd.flatten().filter_map(|f| f.file_name().to_string_lossy().trim_end_matches(".txt").parse::<u64>().ok().map(|t| (t, f.path()))).collect())
-        .unwrap_or_default();
-    files.sort_by(|a, b| b.0.cmp(&a.0));
-    files
-        .into_iter()
-        .map(|(t, f)| {
-            let label = chrono::DateTime::from_timestamp(t as i64, 0).map(|d| d.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M").to_string()).unwrap_or_default();
-            (label, f)
-        })
-        .collect()
+    std::fs::create_dir_all(&dir).ok()?;
+    let files = history_files(&dir);
+    let mut names = history_names(&dir);
+    // Le même contenu que la dernière version sans nom : c'est elle qui prend le nom
+    let t = match files.last() {
+        Some((t, f)) if !names.contains_key(t) && std::fs::read_to_string(f).is_ok_and(|old| old == text) => *t,
+        _ => {
+            let mut t = unix_now();
+            while files.iter().any(|f| f.0 == t) {
+                t += 1;
+            }
+            crate::vault::atomic_write(dir.join(format!("{t}.txt")), text).ok()?;
+            t
+        }
+    };
+    names.insert(t, name.to_string());
+    write_names(&dir, &names);
+    Some(t)
+}
+
+/// Nomme une version (nom vide : elle redevient une version ordinaire, que le roulement peut effacer)
+pub fn history_rename(root: &str, rel: &str, t: u64, name: &str) {
+    let dir = history_dir(root, rel);
+    let mut names = history_names(&dir);
+    if name.trim().is_empty() {
+        names.remove(&t);
+    } else {
+        names.insert(t, name.trim().to_string());
+    }
+    write_names(&dir, &names);
+}
+
+pub fn history_delete(root: &str, rel: &str, t: u64) {
+    let dir = history_dir(root, rel);
+    let _ = std::fs::remove_file(dir.join(format!("{t}.txt")));
+    let mut names = history_names(&dir);
+    if names.remove(&t).is_some() {
+        write_names(&dir, &names);
+    }
+}
+
+/// Les versions gardées d'un fichier, de la plus récente à la plus ancienne
+pub fn history_versions(root: &str, rel: &str) -> Vec<Version> {
+    let dir = history_dir(root, rel);
+    let mut names = history_names(&dir);
+    let mut files = history_files(&dir);
+    files.reverse();
+    files.into_iter().map(|(t, path)| Version { t, name: names.remove(&t).unwrap_or_default(), path }).collect()
+}
+
+pub fn history_list(root: &str, rel: &str) -> Vec<(String, PathBuf)> {
+    history_versions(root, rel).into_iter().map(|v| (v.label(), v.path)).collect()
+}
+
+/// L'heure d'une version d'après son fichier, si c'est bien une version de l'historique de `rel`
+pub fn version_time(root: &str, rel: &str, f: &std::path::Path) -> Option<u64> {
+    if f.parent()? != history_dir(root, rel) {
+        return None;
+    }
+    f.file_name()?.to_str()?.strip_suffix(".txt")?.parse().ok()
 }
 
 fn line_diff(a: &str, b: &str) -> (usize, usize) {
@@ -1273,6 +1515,35 @@ mod tests {
         let h = history_list(&root, "notes/a.md");
         assert_eq!(h.len(), 1, "deux enregistrements rapprochés = une seule version");
         assert_eq!(std::fs::read_to_string(&h[0].1).unwrap(), "v2");
+        // Une version nommée : gardée à part, jamais remplacée par l'enregistrement suivant
+        let t = snapshot_named(&root, "notes/a.md", "v2", "premier jet").unwrap();
+        assert_eq!(history_versions(&root, "notes/a.md").len(), 1, "même contenu : la version existante prend le nom");
+        snapshot(&root, "notes/a.md", "v3");
+        let v = history_versions(&root, "notes/a.md");
+        assert_eq!(v.len(), 2);
+        assert_eq!((v[1].t, v[1].name.as_str()), (t, "premier jet"));
+        assert!(v[1].label().starts_with("premier jet · ") && v[0].name.is_empty());
+        assert_eq!(std::fs::read_to_string(&v[1].path).unwrap(), "v2");
+        assert_eq!(version_time(&root, "notes/a.md", &v[1].path), Some(t));
+        assert_eq!(version_time(&root, "notes/b.md", &v[1].path), None);
+        // Le roulement des 40 dernières ne touche pas aux versions nommées
+        let hd = history_dir(&root, "notes/a.md");
+        for k in 0..45u64 {
+            std::fs::write(hd.join(format!("{}.txt", 1000 + k)), format!("vieux {k}")).unwrap();
+        }
+        history_rename(&root, "notes/a.md", 1000, "à garder");
+        history_rename(&root, "notes/a.md", v[0].t, "troisième");
+        snapshot(&root, "notes/a.md", "v4");
+        let v = history_versions(&root, "notes/a.md");
+        assert!(v.iter().any(|x| x.t == 1000 && x.name == "à garder") && v.iter().any(|x| x.t == t));
+        assert!(!v.iter().any(|x| x.t == 1001), "la plus vieille sans nom est partie");
+        assert!(v.iter().filter(|x| x.name.is_empty()).count() <= 40);
+        // Retirer le nom, supprimer
+        history_rename(&root, "notes/a.md", 1000, " ");
+        assert!(history_versions(&root, "notes/a.md").iter().all(|x| x.t != 1000 || x.name.is_empty()));
+        history_delete(&root, "notes/a.md", t);
+        assert!(history_versions(&root, "notes/a.md").iter().all(|x| x.t != t));
+        assert!(snapshot_named(&root, "notes/a.md", "x", "  ").is_none());
         assert_eq!(line_diff("a\nb\nc", "a\nc\nd\ne"), (2, 1));
         assert_eq!(diff_lines("a\nb\nc", "a\nc\nd"), vec![(0, "a"), (-1, "b"), (0, "c"), (1, "d")]);
         let z = make_backup(&root, &dir.join("_sauv")).unwrap();

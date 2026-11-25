@@ -86,6 +86,7 @@ pub const MOVE_RIGHT: &str = "\u{f0490}";
 pub const UNLINK: &str = "\u{f019c}";
 pub const WRENCH: &str = "\u{f01b1}";
 pub const SCAN_SEARCH: &str = "\u{f0537}";
+pub const SCAN_EYE: &str = "\u{f0536}";
 pub const CHECK_CHECK: &str = "\u{f038e}";
 pub const RULER: &str = "\u{f014b}";
 pub const BRING_TO_FRONT: &str = "\u{f04ef}";

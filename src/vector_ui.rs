@@ -201,8 +201,16 @@ impl Editor {
         if let Some(t) = self.save_due {
             if force || t.elapsed().as_millis() > 600 {
                 self.save_due = None;
-                if let Err(e) = self.doc.save(&self.path) {
-                    self.message = Some(e);
+                match self.doc.save(&self.path) {
+                    Err(e) => self.message = Some(e),
+                    Ok(()) => {
+                        // Historique des versions : le dessin enregistré y entre, comme une note
+                        if let Ok(rel) = self.path.strip_prefix(&self.root) {
+                            if let Ok(text) = std::fs::read_to_string(&self.path) {
+                                crate::extras::snapshot(&self.root, &rel.to_string_lossy().replace('\\', "/"), &text);
+                            }
+                        }
+                    }
                 }
             }
         }

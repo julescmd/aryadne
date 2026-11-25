@@ -3188,6 +3188,108 @@ mod print_tests {
         }
     }
 }
+/// Ce qui change entre deux états d'un dessin : noms des formes ajoutées, retirées, modifiées, et plans de travail
+#[derive(Debug, Default, PartialEq)]
+pub struct DocDiff {
+    pub added: Vec<String>,
+    pub removed: Vec<String>,
+    pub changed: Vec<String>,
+    /// Plans de travail : en plus, en moins, modifiés
+    pub boards: [usize; 3],
+}
+
+impl DocDiff {
+    pub fn is_empty(&self) -> bool {
+        self.added.is_empty() && self.removed.is_empty() && self.changed.is_empty() && self.boards == [0; 3]
+    }
+}
+
+/// Compare deux états d'un dessin, forme par forme (d'après leur identifiant)
+pub fn doc_diff(old: &Doc, new: &Doc) -> DocDiff {
+    let label = |s: &Shape| if s.name.is_empty() { format!("{} {}", crate::i18n::t(s.kind_label()), s.id) } else { s.name.clone() };
+    let mut d = DocDiff::default();
+    for s in &new.shapes {
+        match old.get(s.id) {
+            None => d.added.push(label(s)),
+            Some(o) if o != s => d.changed.push(label(s)),
+            _ => {}
+        }
+    }
+    for s in &old.shapes {
+        if new.get(s.id).is_none() {
+            d.removed.push(label(s));
+        }
+    }
+    let same = old.boards.iter().zip(&new.boards).filter(|(a, b)| a == b).count();
+    let common = old.boards.len().min(new.boards.len());
+    d.boards = [new.boards.len().saturating_sub(common), old.boards.len().saturating_sub(common), common - same];
+    d
+}
+
+/// Image des différences entre deux rendus de même taille : le rendu `b` pâli, et en rose ce qui a changé
+pub fn image_diff(a: &image::RgbaImage, b: &image::RgbaImage) -> image::RgbaImage {
+    let mut out = b.clone();
+    for (x, y, p) in out.enumerate_pixels_mut() {
+        let q = if x < a.width() && y < a.height() { a.get_pixel(x, y).0 } else { [0; 4] };
+        let diff = (0..4).map(|k| (p.0[k] as i32 - q[k] as i32).abs()).max().unwrap_or(0);
+        if diff > 24 {
+            p.0 = [236, 64, 122, 255];
+        } else {
+            // Pâli vers le blanc : le changement ressort
+            let al = p.0[3] as f32 / 255.0;
+            for k in 0..3 {
+                p.0[k] = (255.0 - (255.0 - p.0[k] as f32 * al - 255.0 * (1.0 - al)) * 0.35) as u8;
+            }
+            p.0[3] = 255;
+        }
+    }
+    out
+}
+
+/// Rendu du premier plan de travail d'un dessin donné en texte (une version de l'historique), `max` px de large au plus
+pub fn render_text(json: &str, root: &str, max: u32) -> Option<(Doc, image::RgbaImage)> {
+    let doc: Doc = serde_json::from_str(json).ok()?;
+    let b = doc.boards.first()?;
+    let scale = (max as f32 / b.w.max(b.h).max(1.0)).min(2.0);
+    let img = export_png(&doc, 0, root, scale)?;
+    Some((doc, img))
+}
+
+#[cfg(test)]
+mod diff_tests {
+    use super::*;
+    #[test]
+    fn comparer_deux_versions() {
+        let mut a = Doc::starter();
+        a.shapes.clear();
+        let (bx, by) = (a.boards[0].x, a.boards[0].y);
+        for (k, name) in ["soleil", "nuage", "colline"].iter().enumerate() {
+            let id = a.new_id();
+            a.shapes.push(Shape { id, name: name.to_string(), kind: Kind::Ellipse { w: 120.0, h: 120.0 }, x: bx + 60.0 + 200.0 * k as f32, y: by + 80.0, fills: vec![Paint::solid([240, 180, 60, 255])], ..Shape::base() });
+        }
+        let mut b = a.clone();
+        assert!(doc_diff(&a, &b).is_empty());
+        b.shapes[0].x += 300.0;
+        let gone = b.shapes[1].id;
+        b.remove(&[gone]);
+        let id = b.new_id();
+        b.shapes.push(Shape { id, name: "oiseau".into(), kind: Kind::Rect { w: 40.0, h: 20.0, r: [0.0; 4] }, x: bx + 500.0, y: by + 400.0, fills: vec![Paint::solid([40, 40, 48, 255])], ..Shape::base() });
+        b.boards.push(b.boards[0].clone());
+        let d = doc_diff(&a, &b);
+        assert_eq!((d.added, d.removed, d.changed, d.boards), (vec!["oiseau".to_string()], vec!["nuage".to_string()], vec!["soleil".to_string()], [1, 0, 0]));
+        // Les rendus des deux versions, et l'image de ce qui a changé
+        let ja = serde_json::to_string(&a).unwrap();
+        let (_, ia) = render_text(&ja, "/tmp", 300).unwrap();
+        let (_, ib) = render_text(&serde_json::to_string(&b).unwrap(), "/tmp", 300).unwrap();
+        assert_eq!(ia.dimensions(), ib.dimensions());
+        let di = image_diff(&ia, &ib);
+        let rose = di.pixels().filter(|p| p.0 == [236, 64, 122, 255]).count();
+        assert!(rose > 200, "le soleil déplacé, le nuage parti et l'oiseau se voient : {rose}");
+        assert_eq!(image_diff(&ia, &ia).pixels().filter(|p| p.0 == [236, 64, 122, 255]).count(), 0);
+        assert!(render_text("pas du json", "/tmp", 300).is_none());
+    }
+}
+
 #[cfg(test)]
 mod mesh_tests {
     use super::*;
