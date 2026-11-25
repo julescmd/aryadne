@@ -41,7 +41,7 @@ const TOOLS: [(Tool, &str, &str, &str); 15] = [
     (Tool::Width, l::SPLINE, "largeur : glisser sur un contour pour l'épaissir à cet endroit (Alt+clic : retirer le point)", "W"),
     (Tool::Builder, l::SHAPES, "concepteur de formes : glisser sur les zones des formes choisies pour les fusionner (Alt : effacer)", "M"),
     (Tool::Comment, l::MESSAGE_CIRCLE, "commentaire : clic pour épingler une note sur la toile, clic sur une bulle pour la lire", "C"),
-    (Tool::Paint, l::PAINT_BUCKET, "peinture dynamique : clic dans une zone fermée par des traits pour la remplir (Alt+clic : prendre la couleur)", "K"),
+    (Tool::Paint, l::PAINT_BUCKET, "peinture dynamique : clic dans une zone fermée par des traits pour la remplir ; la couleur suit les traits quand on les retouche (Alt+clic : prendre la couleur)", "K"),
 ];
 
 enum Drag {
@@ -104,6 +104,8 @@ pub struct Editor {
     picked: Vec<u32>,
     /// Peinture dynamique : la couleur du pot
     paint_color: [u8; 4],
+    /// Filet de dégradé : le nœud dont on règle la couleur (le dernier touché sur la toile)
+    mesh_pt: usize,
     /// Commentaire ouvert (indice)
     comment_open: Option<usize>,
     /// Où ouvrir la fenêtre du commentaire (près de sa bulle)
@@ -175,6 +177,7 @@ impl Editor {
             builder: None,
             picked: vec![],
             paint_color: [236, 108, 89, 255],
+            mesh_pt: 0,
             comment_open: None,
             comment_at: None,
             builder_tex: None,
@@ -213,7 +216,7 @@ impl Editor {
         let (sn, cs) = s.rot.to_radians().sin_cos();
         let mut out = vec![];
         for (fi, f) in s.fills.iter().enumerate() {
-            if let Paint::Freeform { pts } = f {
+            if let Paint::Freeform { pts } | Paint::Mesh { pts, .. } = f {
                 for (k, (uv, _)) in pts.iter().enumerate() {
                     let l = [lb[0] + uv[0] * (lb[2] - lb[0]), lb[1] + uv[1] * (lb[3] - lb[1])];
                     out.push((id, fi, k, to_screen([s.x + l[0] * cs - l[1] * sn, s.y + l[0] * sn + l[1] * cs])));
@@ -1024,6 +1027,7 @@ impl Editor {
         }
         let snapshot = self.doc.clone();
         let var_names: Vec<String> = self.doc.vars.iter().map(|v| v.name.clone()).collect();
+        let mesh_pt = self.mesh_pt;
         let mut ch = false;
         let mut outline_text: Option<u64> = None;
         let single = (self.sel.len() == 1).then(|| self.sel[0]);
@@ -1305,6 +1309,7 @@ impl Editor {
                 let mut rm = None;
                 for (k, f) in s.fills.iter_mut().enumerate() {
                     ui.horizontal(|ui| {
+                        ui.data_mut(|d| d.insert_temp(egui::Id::new("vec-mesh-pt"), mesh_pt));
                         let edited = paint_ui(ui, f, k);
                         // Changer la couleur à la main détache la variable
                         if edited && k == 0 && !s.fill_var.is_empty() {
@@ -2659,10 +2664,35 @@ impl Editor {
         if self.tool == Tool::Select {
             if let Some(s) = self.sel.first().and_then(|i| self.doc.get(*i)) {
                 let cols: Vec<[u8; 4]> = s.fills.iter().flat_map(|f| match f {
-                    Paint::Freeform { pts } => pts.iter().map(|p| p.1).collect::<Vec<_>>(),
+                    Paint::Freeform { pts } | Paint::Mesh { pts, .. } => pts.iter().map(|p| p.1).collect::<Vec<_>>(),
                     _ => vec![],
                 }).collect();
-                for ((_, _, _, q), c) in self.free_points(&to_screen).into_iter().zip(cols) {
+                let fp = self.free_points(&to_screen);
+                // Filet de dégradé : les mailles entre les nœuds, et un anneau sur le nœud dont on règle la couleur
+                let mut base = 0;
+                for f in &s.fills {
+                    match f {
+                        Paint::Mesh { cols, rows, pts } if crate::vector::mesh_ok(*cols, *rows, pts) => {
+                            let w = *cols as usize + 1;
+                            let line = Stroke::new(1.0, Color32::from_white_alpha(170));
+                            for k in 0..pts.len() {
+                                if (k + 1) % w != 0 {
+                                    painter.line_segment([fp[base + k].3, fp[base + k + 1].3], line);
+                                }
+                                if k + w < pts.len() {
+                                    painter.line_segment([fp[base + k].3, fp[base + k + w].3], line);
+                                }
+                            }
+                            if let Some(a) = fp.get(base + self.mesh_pt.min(pts.len() - 1)) {
+                                painter.circle_stroke(a.3, 11.0, Stroke::new(1.5, Color32::from_rgb(40, 140, 255)));
+                            }
+                            base += pts.len();
+                        }
+                        Paint::Freeform { pts } | Paint::Mesh { pts, .. } => base += pts.len(),
+                        _ => {}
+                    }
+                }
+                for ((_, _, _, q), c) in fp.into_iter().zip(cols) {
                     painter.circle(q, 7.0, Color32::from_rgb(c[0], c[1], c[2]), Stroke::new(2.0, Color32::WHITE));
                     painter.circle_stroke(q, 8.0, Stroke::new(1.0, Color32::from_black_alpha(120)));
                 }
@@ -3060,6 +3090,7 @@ impl Editor {
                 // Points d'un dégradé à points libres (forme seule choisie)
                 if let Some((id, fill, pt)) = self.free_points(to_screen).into_iter().find(|x| x.3.distance(o) < 9.0).map(|x| (x.0, x.1, x.2)) {
                     self.checkpoint();
+                    self.mesh_pt = pt;
                     return Some(Drag::FreePt { id, fill, pt });
                 }
                 // Poignées du cadre de sélection
@@ -3313,7 +3344,7 @@ impl Editor {
                     let (dx, dy) = (w[0] - s.x, w[1] - s.y);
                     let l = [dx * cs - dy * sn, dx * sn + dy * cs];
                     let uv = [((l[0] - lb[0]) / (lb[2] - lb[0]).max(1e-3)).clamp(0.0, 1.0), ((l[1] - lb[1]) / (lb[3] - lb[1]).max(1e-3)).clamp(0.0, 1.0)];
-                    if let Some(Paint::Freeform { pts }) = self.shape_mut(id).and_then(|s| s.fills.get_mut(fill)) {
+                    if let Some(Paint::Freeform { pts } | Paint::Mesh { pts, .. }) = self.shape_mut(id).and_then(|s| s.fills.get_mut(fill)) {
                         if let Some(p) = pts.get_mut(pt) {
                             p.0 = uv;
                         }
@@ -3523,7 +3554,18 @@ impl Editor {
                     self.changed();
                 }
             }
-            Some(Drag::PenHandle { .. }) | Some(Drag::Node { .. }) | Some(Drag::Move { .. }) | Some(Drag::Scale { .. }) | Some(Drag::Rotate { .. }) | Some(Drag::BoardMove { .. }) | Some(Drag::FreePt { .. }) => self.changed(),
+            Some(Drag::FreePt { .. }) => self.changed(),
+            Some(Drag::PenHandle { .. }) | Some(Drag::Node { .. }) | Some(Drag::Move { .. }) | Some(Drag::Scale { .. }) | Some(Drag::Rotate { .. }) | Some(Drag::BoardMove { .. }) => {
+                // La peinture dynamique suit les traits retouchés
+                if self.doc.shapes.iter().any(|s| s.seed.is_some()) {
+                    let before: Vec<u64> = self.doc.shapes.iter().map(|s| s.id).collect();
+                    repaint(&mut self.doc);
+                    if before.iter().any(|i| self.doc.get(*i).is_none()) {
+                        self.sel.retain(|i| self.doc.get(*i).is_some());
+                    }
+                }
+                self.changed()
+            }
             _ => {}
         }
     }
@@ -3856,9 +3898,10 @@ fn paint_ui(ui: &mut egui::Ui, p: &mut Paint, k: usize) -> bool {
         Paint::Radial { .. } => 2,
         Paint::Pattern { .. } => 3,
         Paint::Freeform { .. } => 4,
+        Paint::Mesh { .. } => 5,
     };
     let mut new_kind = kind;
-    let names = ["uni", "linéaire", "radial", "motif", "points libres"];
+    let names = ["uni", "linéaire", "radial", "motif", "points libres", "filet"];
     egui::ComboBox::from_id_salt(("vec-paint", k)).width(70.0).selected_text(crate::i18n::t(names[kind])).show_ui(ui, |ui| {
         for (v, name) in names.iter().enumerate() {
             ui.selectable_value(&mut new_kind, v, crate::i18n::t(name));
@@ -3872,6 +3915,7 @@ fn paint_ui(ui: &mut egui::Ui, p: &mut Paint, k: usize) -> bool {
             1 => Paint::Linear { stops, angle: 0.0 },
             2 => Paint::Radial { stops },
             3 => Paint::Pattern { motif: 0, fg: c, bg: [255, 255, 255, 0], size: 24.0, angle: 0.0 },
+            5 => crate::vector::mesh_new(2, 2, c, [255, 255, 255, 255]),
             // Quatre points de départ : la couleur actuelle et trois teintes voisines
             _ => Paint::Freeform { pts: vec![([0.2, 0.25], c), ([0.8, 0.2], [244, 191, 80, 255]), ([0.7, 0.8], [84, 128, 220, 255]), ([0.25, 0.75], [150, 110, 210, 255])] },
         };
@@ -3923,6 +3967,24 @@ fn paint_ui(ui: &mut egui::Ui, p: &mut Paint, k: usize) -> bool {
             }
             if ui.small_button(l::PLUS).on_hover_text(crate::i18n::t("un point de couleur de plus, au milieu")).clicked() {
                 pts.push(([0.5, 0.5], [255, 255, 255, 255]));
+                ch = true;
+            }
+        }
+        Paint::Mesh { cols, rows, pts } => {
+            // Le nœud touché en dernier sur la toile : sa couleur se règle ici
+            let active = ui.data(|d| d.get_temp::<usize>(egui::Id::new("vec-mesh-pt"))).unwrap_or(0).min(pts.len().saturating_sub(1));
+            if let Some(pt) = pts.get_mut(active) {
+                let mut col = c32(pt.1);
+                if ui.color_edit_button_srgba(&mut col).on_hover_text(crate::i18n::t("couleur du nœud choisi · clique un nœud sur la toile pour le choisir, tire-le pour plier le filet")).changed() {
+                    pt.1 = arr(col);
+                    ch = true;
+                }
+            }
+            let (mut nc, mut nr) = (*cols, *rows);
+            let a = ui.add(egui::DragValue::new(&mut nc).range(1..=6).speed(0.05)).on_hover_text(crate::i18n::t("colonnes du filet"));
+            let b = ui.add(egui::DragValue::new(&mut nr).range(1..=6).speed(0.05)).on_hover_text(crate::i18n::t("rangées du filet"));
+            if (a.changed() || b.changed()) && (nc, nr) != (*cols, *rows) {
+                *p = crate::vector::mesh_resize(*cols, *rows, pts, nc, nr);
                 ch = true;
             }
         }
@@ -4103,46 +4165,41 @@ pub(crate) fn blend_doc(doc: &mut crate::vector::Doc, a: u64, b: u64, steps: u32
 /// Nom des remplissages posés par la peinture dynamique (ils ne font pas mur, on peut les recolorer)
 const PAINT_NAME: &str = "Peinture";
 
-/// Peinture dynamique (comme Live Paint) : la zone fermée par les traits autour de `w` devient une forme
-/// pleine de couleur `c`, glissée sous le dessin. Un clic sur une zone déjà peinte la recolore.
-pub(crate) fn live_paint(doc: &mut crate::vector::Doc, w: [f32; 2], c: [u8; 4]) -> Result<u64, String> {
+/// La zone fermée par les traits autour de `w` : la grille, les cellules de la zone (un peu élargies pour passer
+/// sous les traits), la cellule du clic et les traits qui font mur
+fn paint_zone(doc: &crate::vector::Doc, w: [f32; 2]) -> Result<(crate::vgeom::Grid, Vec<bool>, usize, Vec<u64>), String> {
     let t = |s: &str| crate::i18n::t(s);
     // Le plan de travail sous le clic borne la recherche
     let board = doc.boards.iter().find(|b| w[0] >= b.x && w[0] <= b.x + b.w && w[1] >= b.y && w[1] <= b.y + b.h).cloned();
     let inside = |b: [f32; 4]| board.as_ref().is_none_or(|bd| b[2] >= bd.x && b[0] <= bd.x + bd.w && b[3] >= bd.y && b[1] <= bd.y + bd.h);
-    let walls: Vec<u64> = doc.shapes.iter().filter(|s| s.name != PAINT_NAME && s.parent == 0 && doc.bounds_of(&[s.id]).is_some_and(inside)).map(|s| s.id).collect();
+    let walls: Vec<u64> = doc.shapes.iter().filter(|s| s.name != PAINT_NAME && s.seed.is_none() && s.parent == 0 && doc.bounds_of(&[s.id]).is_some_and(inside)).map(|s| s.id).collect();
     if walls.is_empty() {
         return Err(t("Rien à peindre ici : dessine d'abord des traits qui ferment une zone."));
     }
     let g = crate::vgeom::Grid::around(doc, &walls, 6.0, 1100).ok_or(t("Rien à peindre ici."))?;
     let start = g.cell_of(w).ok_or(t("Clique à l'intérieur d'une zone fermée par des traits."))?;
     let n = g.w * g.h;
-    let mut wall = vec![false; n];
-    for id in &walls {
-        for (k, on) in g.mask(doc, *id).into_iter().enumerate() {
-            wall[k] |= on;
-        }
-    }
-    // Les petits trous d'un trait (1 cellule) se ferment
-    let thick: Vec<bool> = (0..n).map(|k| {
+    // Tous les traits d'un seul rendu (un rendu par trait coûtait autant de fois la grille)
+    let wall = g.mask_all(doc, &walls);
+    let near = |cells: &[bool], k: usize, r: i64| {
         let (x, y) = ((k % g.w) as i64, (k / g.w) as i64);
-        (-1..=1).any(|dy| (-1..=1).any(|dx| {
+        (-r..=r).any(|dy| (-r..=r).any(|dx| {
             let (xx, yy) = (x + dx, y + dy);
-            xx >= 0 && yy >= 0 && (xx as usize) < g.w && (yy as usize) < g.h && wall[yy as usize * g.w + xx as usize]
+            xx >= 0 && yy >= 0 && (xx as usize) < g.w && (yy as usize) < g.h && cells[yy as usize * g.w + xx as usize]
         }))
-    }).collect();
+    };
+    // Les petits trous d'un trait (1 cellule) se ferment
+    let thick: Vec<bool> = (0..n).map(|k| near(&wall, k, 1)).collect();
     if thick[start] {
         return Err(t("Clique dans le vide d'une zone, pas sur un trait."));
     }
     let mut region = vec![false; n];
     let mut stack = vec![start];
     region[start] = true;
-    let mut open = false;
     while let Some(k) = stack.pop() {
         let (x, y) = (k % g.w, k / g.w);
         if x == 0 || y == 0 || x + 1 == g.w || y + 1 == g.h {
-            open = true;
-            break;
+            return Err(t("Cette zone n'est pas fermée : le remplissage déborderait."));
         }
         for nk in [k - 1, k + 1, k - g.w, k + g.w] {
             if !region[nk] && !thick[nk] {
@@ -4151,34 +4208,90 @@ pub(crate) fn live_paint(doc: &mut crate::vector::Doc, w: [f32; 2], c: [u8; 4]) 
             }
         }
     }
-    if open {
-        return Err(t("Cette zone n'est pas fermée : le remplissage déborderait."));
-    }
     // Le remplissage passe un peu sous les traits (pas de liseré blanc)
-    let grown: Vec<bool> = (0..n).map(|k| {
-        let (x, y) = ((k % g.w) as i64, (k / g.w) as i64);
-        region[k] || (-2..=2).any(|dy| (-2..=2).any(|dx| {
-            let (xx, yy) = (x + dx, y + dy);
-            xx >= 0 && yy >= 0 && (xx as usize) < g.w && (yy as usize) < g.h && region[yy as usize * g.w + xx as usize]
-        }))
-    }).collect();
+    let grown: Vec<bool> = (0..n).map(|k| region[k] || (thick[k] && near(&region, k, 2))).collect();
+    Ok((g, grown, start, walls))
+}
+
+/// Le point de départ d'une zone peinte, dans le monde (il suit la forme quand on la déplace)
+fn seed_world(s: &Shape) -> Option<[f32; 2]> {
+    let p = s.seed?;
+    let (sn, cs) = s.rot.to_radians().sin_cos();
+    Some([s.x + p[0] * cs - p[1] * sn, s.y + p[0] * sn + p[1] * cs])
+}
+
+/// Peinture dynamique (comme Live Paint) : la zone fermée par les traits autour de `w` devient une forme
+/// pleine de couleur `c`, glissée sous le dessin. Un clic sur une zone déjà peinte la recolore.
+/// La forme retient son point de départ : `repaint` la refait quand les traits bougent.
+pub(crate) fn live_paint(doc: &mut crate::vector::Doc, w: [f32; 2], c: [u8; 4]) -> Result<u64, String> {
+    let (g, grown, start, walls) = paint_zone(doc, w)?;
     // Une zone déjà peinte au même endroit : on change sa couleur
-    let old: Vec<u64> = doc.shapes.iter().filter(|s| s.name == PAINT_NAME).map(|s| s.id).filter(|id| g.mask(doc, *id)[start]).collect();
+    let old: Vec<u64> = doc.shapes.iter().filter(|s| (s.name == PAINT_NAME || s.seed.is_some()) && s.parent == 0).map(|s| s.id).filter(|id| g.mask(doc, *id)[start]).collect();
     if let Some(&id) = old.last() {
         if let Some(s) = doc.shapes.iter_mut().find(|s| s.id == id) {
             s.fills = vec![Paint::solid(c)];
         }
+        // Le groupe d'une zone trouée : ses morceaux portent la couleur
+        for k in doc.descendants(id) {
+            if let Some(s) = doc.shapes.iter_mut().find(|s| s.id == k) {
+                if !matches!(s.kind, crate::vector::Kind::Group { .. }) {
+                    s.fills = vec![Paint::solid(c)];
+                }
+            }
+        }
         return Ok(id);
     }
     let like = Shape { fills: vec![Paint::solid(c)], strokes: vec![], ..Shape::base() };
-    let id = crate::vgeom::add_traced(doc, &g, g.trace(&grown), &like, PAINT_NAME).ok_or(t("Zone trop petite."))?;
+    let id = crate::vgeom::add_traced(doc, &g, g.trace(&grown), &like, PAINT_NAME).ok_or(crate::i18n::t("Zone trop petite."))?;
     // Sous le dessin : juste en dessous du trait le plus bas
     let lowest = walls.iter().filter_map(|w| doc.index(*w)).min().unwrap_or(0);
     if let Some(i) = doc.index(id) {
-        let s = doc.shapes.remove(i);
+        let mut s = doc.shapes.remove(i);
+        s.seed = Some([w[0] - s.x, w[1] - s.y]);
         doc.shapes.insert(lowest.min(doc.shapes.len()), s);
     }
     Ok(id)
+}
+
+/// Refait les zones de peinture dynamique après une retouche des traits : chaque zone repart de son point de départ
+/// et épouse les traits là où ils sont maintenant. Une zone qui s'est ouverte (ou dont le départ est passé sous un
+/// trait) reste telle quelle. Rend le nombre de zones refaites.
+pub(crate) fn repaint(doc: &mut crate::vector::Doc) -> usize {
+    use crate::vector::Kind;
+    let zones: Vec<(u64, [f32; 2])> = doc.shapes.iter().filter(|s| s.parent == 0).filter_map(|s| Some((s.id, seed_world(s)?))).collect();
+    let mut done = 0;
+    for (id, w) in zones {
+        let Ok((g, grown, _, _)) = paint_zone(doc, w) else { continue };
+        let Some(old) = doc.get(id).cloned() else { continue };
+        // La couleur : celle de la forme, ou de son premier morceau (zone trouée)
+        let fills = if old.fills.is_empty() { doc.descendants(id).iter().filter_map(|k| doc.get(*k)).find(|s| !s.fills.is_empty()).map(|s| s.fills.clone()).unwrap_or_default() } else { old.fills.clone() };
+        let like = Shape { fills, strokes: vec![], opacity: old.opacity, blend: old.blend.clone(), ..Shape::base() };
+        let loops = g.trace(&grown);
+        // Un seul contour avant et après : la forme garde son identité, seul son tracé change
+        if let ([nodes], Kind::Path { .. }) = (&loops[..], &old.kind) {
+            if let Some(s) = doc.shapes.iter_mut().find(|s| s.id == id) {
+                if s.kind != (Kind::Path { nodes: nodes.clone(), closed: true }) || [s.x, s.y] != g.org {
+                    done += 1;
+                }
+                s.kind = Kind::Path { nodes: nodes.clone(), closed: true };
+                (s.x, s.y, s.rot) = (g.org[0], g.org[1], 0.0);
+                s.seed = Some([w[0] - s.x, w[1] - s.y]);
+            }
+            continue;
+        }
+        let at = doc.index(id).unwrap_or(0);
+        let Some(nid) = crate::vgeom::add_traced(doc, &g, loops, &like, &old.name) else { continue };
+        doc.remove(&[id]);
+        if let Some(i) = doc.index(nid) {
+            let mut s = doc.shapes.remove(i);
+            s.seed = Some([w[0] - s.x, w[1] - s.y]);
+            s.visible = old.visible;
+            s.locked = old.locked;
+            doc.shapes.insert(at.min(doc.shapes.len()), s);
+        }
+        done += 1;
+    }
+    done
 }
 
 #[cfg(test)]
@@ -4206,6 +4319,28 @@ mod live_paint_tests {
         assert_eq!((id2, d.shapes.len()), (id, n));
         // Une zone ouverte refuse
         assert!(super::live_paint(&mut d, [bx + 400.0, by + 200.0], [0, 0, 0, 255]).is_err());
+        // La peinture reste éditable : le trait du bas descend, la zone le suit et garde son identité et sa couleur
+        assert_eq!(super::repaint(&mut d), 0, "rien n'a bougé : rien à refaire");
+        let b0 = d.bounds_of(&[id]).unwrap();
+        let line = d.shapes.iter().map(|s| s.id).filter(|k| *k != id).last().unwrap();
+        d.translate(line, 0.0, 60.0);
+        assert_eq!(super::repaint(&mut d), 1);
+        let b1 = d.bounds_of(&[id]).unwrap();
+        assert!(b1[3] > b0[3] + 45.0 && (b1[1] - b0[1]).abs() < 6.0, "{b0:?} -> {b1:?}");
+        assert_eq!(d.get(id).unwrap().fills, vec![Paint::solid([60, 140, 240, 255])]);
+        assert_eq!(d.shapes.len(), n);
+        // Tout le dessin déplacé d'un bloc : le point de départ suit la forme
+        let all: Vec<u64> = d.shapes.iter().map(|s| s.id).collect();
+        for k in all {
+            d.translate(k, 40.0, 0.0);
+        }
+        super::repaint(&mut d);
+        let b2 = d.bounds_of(&[id]).unwrap();
+        assert!((b2[0] - b1[0] - 40.0).abs() < 4.0 && (b2[2] - b2[0] - (b1[2] - b1[0])).abs() < 6.0, "{b1:?} -> {b2:?}");
+        // Le trait retiré : la zone s'ouvre, la peinture reste comme elle était
+        d.remove(&[line]);
+        assert_eq!(super::repaint(&mut d), 0);
+        assert!(d.get(id).is_some());
         if std::env::var("ARY_DEMO").is_ok() {
             super::live_paint(&mut d, [bx + 160.0, by + 450.0], [120, 200, 140, 255]).ok();
             export_png(&d, 0, "/tmp", 0.6).unwrap().save("/tmp/livepaint.png").unwrap();

@@ -1,4 +1,9 @@
 {
+  "peinture dynamique : clic dans une zone fermée par des traits pour la remplir ; la couleur suit les traits quand on les retouche (Alt+clic : prendre la couleur)": "live paint: click inside an area closed by strokes to fill it; the color follows the strokes when you edit them (Alt+click: pick the color)",
+  "filet": "mesh",
+  "couleur du nœud choisi · clique un nœud sur la toile pour le choisir, tire-le pour plier le filet": "color of the chosen node · click a node on the canvas to choose it, drag it to bend the mesh",
+  "colonnes du filet": "mesh columns",
+  "rangées du filet": "mesh rows",
   "   coffre vide : + pour créer, ou glisse des fichiers ici": "   vault is empty: + to create, or drop files here",
   "   dossier vide": "   empty folder",
   "   rien trouvé": "   nothing found",

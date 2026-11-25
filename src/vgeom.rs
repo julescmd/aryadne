@@ -44,6 +44,21 @@ impl Grid {
         }
     }
 
+    /// Les cellules couvertes par plusieurs formes, d'un seul rendu
+    pub fn mask_all(&self, doc: &Doc, ids: &[u64]) -> Vec<bool> {
+        let mut body = String::new();
+        for id in ids {
+            if let Some(s) = doc.get(*id) {
+                silhouette(doc, s, &mut body);
+            }
+        }
+        let svg = format!(r#"<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}" viewBox="{} {} {} {}">{body}</svg>"#, self.org[0], self.org[1], self.w as f32 / self.k, self.h as f32 / self.k, w = self.w, h = self.h);
+        match crate::vector::rasterize(&svg, self.w as u32, self.h as u32) {
+            Some(px) => px.chunks_exact(4).map(|c| c[3] > 127).collect(),
+            None => vec![false; self.w * self.h],
+        }
+    }
+
     /// Revectorise des cellules : un tracé par contour, en coordonnées du monde
     pub fn trace(&self, cells: &[bool]) -> Vec<Vec<Node>> {
         let mut img = image::RgbaImage::new(self.w as u32, self.h as u32);

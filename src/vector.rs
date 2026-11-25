@@ -125,6 +125,105 @@ pub enum Paint {
     Pattern { motif: u8, fg: [u8; 4], bg: [u8; 4], size: f32, angle: f32 },
     /// Dégradé à points libres : des couleurs posées n'importe où (0..1 dans le cadre de la forme), fondues entre elles
     Freeform { pts: Vec<([f32; 2], [u8; 4])> },
+    /// Filet de dégradé : une grille de `cols` × `rows` cases dont chaque nœud (rangée par rangée, (cols+1) × (rows+1))
+    /// porte une position (0..1 dans le cadre de la forme) et une couleur ; la couleur coule en courbe d'un nœud à l'autre
+    Mesh { cols: u8, rows: u8, pts: Vec<([f32; 2], [u8; 4])> },
+}
+
+/// Un filet de dégradé régulier : la couleur `a` en haut à gauche qui glisse vers `b` en bas à droite
+pub fn mesh_new(cols: u8, rows: u8, a: [u8; 4], b: [u8; 4]) -> Paint {
+    let (cols, rows) = (cols.clamp(1, 8), rows.clamp(1, 8));
+    let mut pts = vec![];
+    for j in 0..=rows {
+        for i in 0..=cols {
+            let (u, v) = (i as f32 / cols as f32, j as f32 / rows as f32);
+            let t = (u + v) / 2.0;
+            pts.push(([u, v], [0, 1, 2, 3].map(|k| (a[k] as f32 + (b[k] as f32 - a[k] as f32) * t).round() as u8)));
+        }
+    }
+    Paint::Mesh { cols, rows, pts }
+}
+
+/// Le filet est-il entier (autant de nœuds que la grille en demande) ?
+pub fn mesh_ok(cols: u8, rows: u8, pts: &[([f32; 2], [u8; 4])]) -> bool {
+    cols >= 1 && rows >= 1 && pts.len() == (cols as usize + 1) * (rows as usize + 1)
+}
+
+/// Le point du filet en (s, t), s de 0 à cols et t de 0 à rows : position (0..1) et couleur.
+/// Courbe de Catmull-Rom dans les deux sens ; au bord, le voisin manquant est le reflet du dernier.
+pub fn mesh_at(cols: u8, rows: u8, pts: &[([f32; 2], [u8; 4])], s: f32, t: f32) -> ([f32; 2], [f32; 4]) {
+    if !mesh_ok(cols, rows, pts) {
+        return ([0.0; 2], [0.0; 4]);
+    }
+    let (nc, nr) = (cols as i32, rows as i32);
+    let (s, t) = (s.clamp(0.0, nc as f32), t.clamp(0.0, nr as f32));
+    let (i, j) = ((s.floor() as i32).min(nc - 1), (t.floor() as i32).min(nr - 1));
+    let (fs, ft) = (s - i as f32, t - j as f32);
+    let w = |f: f32| {
+        let (f2, f3) = (f * f, f * f * f);
+        [(-f3 + 2.0 * f2 - f) * 0.5, (3.0 * f3 - 5.0 * f2 + 2.0) * 0.5, (-3.0 * f3 + 4.0 * f2 + f) * 0.5, (f3 - f2) * 0.5]
+    };
+    let raw = |i: i32, j: i32| -> [f32; 6] {
+        let (p, c) = pts[(j * (nc + 1) + i) as usize];
+        [p[0], p[1], c[0] as f32, c[1] as f32, c[2] as f32, c[3] as f32]
+    };
+    // Un nœud hors de la grille : le reflet à travers le bord (une grille régulière reste régulière)
+    let get = |i: i32, j: i32| -> [f32; 6] {
+        let (ci, cj) = (i.clamp(0, nc), j.clamp(0, nr));
+        if ci == i && cj == j {
+            return raw(i, j);
+        }
+        let (mi, mj) = ((2 * ci - i).clamp(0, nc), (2 * cj - j).clamp(0, nr));
+        let (e, m) = (raw(ci, cj), raw(mi, mj));
+        std::array::from_fn(|k| 2.0 * e[k] - m[k])
+    };
+    let (ws, wt) = (w(fs), w(ft));
+    let mut acc = [0.0f32; 6];
+    for (b, wb) in wt.iter().enumerate() {
+        for (a, wa) in ws.iter().enumerate() {
+            let v = get(i - 1 + a as i32, j - 1 + b as i32);
+            for k in 0..6 {
+                acc[k] += v[k] * wa * wb;
+            }
+        }
+    }
+    ([acc[0], acc[1]], [acc[2].clamp(0.0, 255.0), acc[3].clamp(0.0, 255.0), acc[4].clamp(0.0, 255.0), acc[5].clamp(0.0, 255.0)])
+}
+
+/// Le filet découpé en petits carreaux d'une seule couleur (coins en 0..1, couleur du milieu) : `n` carreaux par case
+pub fn mesh_quads(cols: u8, rows: u8, pts: &[([f32; 2], [u8; 4])], n: usize) -> Vec<([[f32; 2]; 4], [u8; 4])> {
+    if !mesh_ok(cols, rows, pts) {
+        return vec![];
+    }
+    let n = n.max(1);
+    let (w, h) = (cols as usize * n, rows as usize * n);
+    let at = |x: f32, y: f32| mesh_at(cols, rows, pts, x / n as f32, y / n as f32);
+    let grid: Vec<[f32; 2]> = (0..=h).flat_map(|y| (0..=w).map(move |x| (x, y))).map(|(x, y)| at(x as f32, y as f32).0).collect();
+    let mut out = Vec::with_capacity(w * h);
+    for y in 0..h {
+        for x in 0..w {
+            let c = at(x as f32 + 0.5, y as f32 + 0.5).1.map(|v| v.round() as u8);
+            let k = y * (w + 1) + x;
+            out.push(([grid[k], grid[k + 1], grid[k + w + 2], grid[k + w + 1]], c));
+        }
+    }
+    out
+}
+
+/// Le même filet avec une autre grille : les nœuds sont relus sur les courbes de l'ancien
+pub fn mesh_resize(cols: u8, rows: u8, pts: &[([f32; 2], [u8; 4])], ncols: u8, nrows: u8) -> Paint {
+    let (ncols, nrows) = (ncols.clamp(1, 8), nrows.clamp(1, 8));
+    if !mesh_ok(cols, rows, pts) {
+        return mesh_new(ncols, nrows, pts.first().map(|p| p.1).unwrap_or([0, 0, 0, 255]), [255, 255, 255, 255]);
+    }
+    let mut out = vec![];
+    for j in 0..=nrows {
+        for i in 0..=ncols {
+            let (p, c) = mesh_at(cols, rows, pts, i as f32 / ncols as f32 * cols as f32, j as f32 / nrows as f32 * rows as f32);
+            out.push((p, c.map(|v| v.round() as u8)));
+        }
+    }
+    Paint::Mesh { cols: ncols, rows: nrows, pts: out }
 }
 
 /// La couleur d'un dégradé à points libres au point (u, v) : moyenne pondérée par l'inverse du carré de la distance
@@ -173,7 +272,7 @@ impl Paint {
             Paint::Solid { c } => *c,
             Paint::Linear { stops, .. } | Paint::Radial { stops } => stops.first().map(|s| s.1).unwrap_or([0, 0, 0, 255]),
             Paint::Pattern { fg, .. } => *fg,
-            Paint::Freeform { pts } => pts.first().map(|p| p.1).unwrap_or([0, 0, 0, 255]),
+            Paint::Freeform { pts } | Paint::Mesh { pts, .. } => pts.first().map(|p| p.1).unwrap_or([0, 0, 0, 255]),
         }
     }
 }
@@ -276,6 +375,10 @@ pub struct Shape {
     /// Composant venu d'une bibliothèque partagée : « fichier du coffre#nom du composant »
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub lib: String,
+    /// Zone de peinture dynamique : son point de départ, dans le repère de la forme. Quand les traits autour
+    /// changent, la zone est refaite depuis ce point (la peinture reste éditable).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seed: Option<[f32; 2]>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -833,7 +936,7 @@ fn union(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {
 
 impl Shape {
     pub fn base() -> Shape {
-        Shape { id: 0, name: String::new(), kind: Kind::Rect { w: 100.0, h: 100.0, r: [0.0; 4] }, x: 0.0, y: 0.0, rot: 0.0, fills: vec![], strokes: vec![], opacity: 1.0, visible: true, locked: false, parent: 0, shadow: None, blur: 0.0, blend: String::new(), layout: None, component: false, instance_of: 0, widths: vec![], constraint: [0, 0], style: String::new(), link: String::new(), on_path: 0, fill_var: String::new(), hover: None, lib: String::new() }
+        Shape { id: 0, name: String::new(), kind: Kind::Rect { w: 100.0, h: 100.0, r: [0.0; 4] }, x: 0.0, y: 0.0, rot: 0.0, fills: vec![], strokes: vec![], opacity: 1.0, visible: true, locked: false, parent: 0, shadow: None, blur: 0.0, blend: String::new(), layout: None, component: false, instance_of: 0, widths: vec![], constraint: [0, 0], style: String::new(), link: String::new(), on_path: 0, fill_var: String::new(), hover: None, lib: String::new(), seed: None }
     }
 
     pub fn kind_label(&self) -> &'static str {
@@ -994,7 +1097,7 @@ pub fn css_of(d: &Doc, s: &Shape) -> String {
             Paint::Linear { stops, angle } => format!("linear-gradient({:.0}deg, {})", angle + 90.0, stops.iter().map(|(t, c)| format!("{} {:.0}%", rgba(*c), t * 100.0)).collect::<Vec<_>>().join(", ")),
             Paint::Radial { stops } => format!("radial-gradient({})", stops.iter().map(|(t, c)| format!("{} {:.0}%", rgba(*c), t * 100.0)).collect::<Vec<_>>().join(", ")),
             Paint::Pattern { bg, .. } => rgba(*bg),
-            Paint::Freeform { pts } => pts.first().map(|p| rgba(p.1)).unwrap_or_default(),
+            Paint::Freeform { pts } | Paint::Mesh { pts, .. } => pts.first().map(|p| rgba(p.1)).unwrap_or_default(),
         };
         out.push_str(&format!("{}: {v};\n", if is_text { "color" } else if matches!(f, Paint::Solid { .. }) { "background-color" } else { "background" }));
     }
@@ -1048,7 +1151,7 @@ pub fn swiftui_of(d: &Doc, s: &Shape) -> String {
         }
         Paint::Radial { stops } => format!("RadialGradient(stops: [{}], center: .center, startRadius: 0, endRadius: {:.0})", stops.iter().map(|(t, c)| format!(".init(color: {}, location: {:.2})", col(*c), t)).collect::<Vec<_>>().join(", "), (b[2] - b[0]).max(b[3] - b[1]) / 2.0),
         Paint::Pattern { bg, .. } => col(*bg),
-        Paint::Freeform { pts } => pts.first().map(|p| col(p.1)).unwrap_or_else(|| "Color.clear".into()),
+        Paint::Freeform { pts } | Paint::Mesh { pts, .. } => pts.first().map(|p| col(p.1)).unwrap_or_else(|| "Color.clear".into()),
     });
     let mut out = format!("// {}
 ", s.name);
@@ -1112,7 +1215,7 @@ pub fn egui_of(d: &Doc, s: &Shape) -> String {
         Paint::Solid { c } => *c,
         Paint::Linear { stops, .. } | Paint::Radial { stops } => stops.first().map(|x| x.1).unwrap_or([0, 0, 0, 0]),
         Paint::Pattern { bg, .. } => *bg,
-        Paint::Freeform { pts } => pts.first().map(|p| p.1).unwrap_or([0, 0, 0, 0]),
+        Paint::Freeform { pts } | Paint::Mesh { pts, .. } => pts.first().map(|p| p.1).unwrap_or([0, 0, 0, 0]),
     });
     let mut out = format!("// {}
 ", s.name);
@@ -1396,7 +1499,8 @@ pub fn to_svg(doc: &Doc, area: [f32; 4], px: [u32; 2], root: &str, with_boards: 
         }
         body.insert_str(0, &under);
     }
-    let mut cx = Gen { doc, root, defs: &mut defs, n: 0 };
+    let scale = if area[2] > 0.0 && area[3] > 0.0 { (px[0] as f32 / area[2]).max(px[1] as f32 / area[3]) } else { 1.0 };
+    let mut cx = Gen { doc, root, defs: &mut defs, n: 0, scale };
     for sh in doc.shapes.iter().filter(|s| s.parent == 0) {
         cx.shape(&mut body, sh);
     }
@@ -1418,6 +1522,8 @@ struct Gen<'a> {
     root: &'a str,
     defs: &'a mut String,
     n: usize,
+    /// Pixels rendus par unité du dessin (finesse du filet de dégradé)
+    scale: f32,
 }
 
 impl Gen<'_> {
@@ -1450,7 +1556,7 @@ impl Gen<'_> {
                 self.defs.push_str("</radialGradient>");
                 (format!("url(#{id})"), 1.0)
             }
-            Paint::Freeform { pts } => {
+            Paint::Freeform { pts } | Paint::Mesh { pts, .. } => {
                 // Ailleurs qu'un remplissage (contour, texte sur tracé) : la couleur moyenne
                 let n = pts.len().max(1) as u32;
                 let avg = [0, 1, 2, 3].map(|i| (pts.iter().map(|p| p.1[i] as u32).sum::<u32>() / n) as u8);
@@ -1655,6 +1761,32 @@ impl Gen<'_> {
                 for f in &sh.fills {
                     if !closed && !matches!(sh.kind, Kind::Path { .. }) {
                         continue;
+                    }
+                    // Filet de dégradé : des petits carreaux d'une couleur, découpés par la forme (reste vectoriel)
+                    if let Paint::Mesh { cols, rows, pts } = f {
+                        if mesh_ok(*cols, *rows, pts) {
+                            if pts.iter().all(|p| p.1[3] == 255) {
+                                let (p, o) = self.paint(f, bounds);
+                                let _ = write!(out, r#"<path d="{d}" fill="{p}" fill-opacity="{o}" fill-rule="nonzero"/>"#);
+                            }
+                            let id = self.id("c");
+                            let _ = write!(self.defs, r#"<clipPath id="{id}"><path d="{d}"/></clipPath>"#);
+                            let _ = write!(out, r#"<g clip-path="url(#{id})" shape-rendering="crispEdges">"#);
+                            let (bw, bh) = (bounds[2] - bounds[0], bounds[3] - bounds[1]);
+                            // Un carreau d'environ 4 px à l'écran : fondu à l'œil, sans multiplier les tracés pour une petite forme
+                            let across = (bw.abs().max(bh.abs()) * self.scale / 4.0).clamp(16.0, 96.0);
+                            let n = ((across / (*cols).max(*rows) as f32).ceil() as usize).clamp(2, 48);
+                            for (q, c) in mesh_quads(*cols, *rows, pts, n) {
+                                let q = q.map(|p| [bounds[0] + p[0] * bw, bounds[1] + p[1] * bh]);
+                                let _ = write!(out, r#"<path d="M{:.2} {:.2}L{:.2} {:.2}L{:.2} {:.2}L{:.2} {:.2}Z" fill="{}""#, q[0][0], q[0][1], q[1][0], q[1][1], q[2][0], q[2][1], q[3][0], q[3][1], hex(c));
+                                if c[3] < 255 {
+                                    let _ = write!(out, r#" fill-opacity="{:.3}""#, c[3] as f32 / 255.0);
+                                }
+                                out.push_str("/>");
+                            }
+                            out.push_str("</g>");
+                            continue;
+                        }
                     }
                     // Dégradé à points libres : la couleur moyenne, puis un halo par point qui s'efface
                     if let Paint::Freeform { pts } = f {
@@ -2199,7 +2331,7 @@ impl Doc {
                 add(*fg);
                 add(*bg);
             }
-            Paint::Freeform { pts } => pts.iter().for_each(|p| add(p.1)),
+            Paint::Freeform { pts } | Paint::Mesh { pts, .. } => pts.iter().for_each(|p| add(p.1)),
         };
         for s in self.shapes.iter().filter(|s| set.contains(&s.id)) {
             s.fills.iter().for_each(&mut paint);
@@ -2228,7 +2360,7 @@ impl Doc {
                         fix(fg);
                         fix(bg);
                     }
-                    Paint::Freeform { pts } => pts.iter_mut().for_each(|p| fix(&mut p.1)),
+                    Paint::Freeform { pts } | Paint::Mesh { pts, .. } => pts.iter_mut().for_each(|p| fix(&mut p.1)),
                 }
             }
         }
@@ -3056,6 +3188,56 @@ mod print_tests {
         }
     }
 }
+#[cfg(test)]
+mod mesh_tests {
+    use super::*;
+    #[test]
+    fn filet_de_degrade() {
+        let Paint::Mesh { cols, rows, mut pts } = mesh_new(2, 2, [255, 0, 0, 255], [0, 0, 255, 255]) else { panic!() };
+        assert!(mesh_ok(cols, rows, &pts));
+        // La courbe passe par chaque nœud, et une grille régulière reste régulière entre les nœuds
+        for j in 0..=2 {
+            for i in 0..=2 {
+                let (p, c) = mesh_at(cols, rows, &pts, i as f32, j as f32);
+                let (q, d) = pts[j * 3 + i];
+                assert!((p[0] - q[0]).abs() < 1e-5 && (p[1] - q[1]).abs() < 1e-5);
+                assert!((0..4).all(|k| (c[k] - d[k] as f32).abs() < 0.01));
+            }
+        }
+        let (p, _) = mesh_at(cols, rows, &pts, 0.25, 1.7);
+        assert!((p[0] - 0.125).abs() < 1e-4 && (p[1] - 0.85).abs() < 1e-4, "{p:?}");
+        // Un nœud du milieu déplacé et recoloré tire les carreaux voisins, sans sortir des couleurs possibles
+        pts[4] = ([0.7, 0.4], [255, 255, 255, 255]);
+        let q = mesh_quads(cols, rows, &pts, 8);
+        assert_eq!(q.len(), 16 * 16);
+        assert!(q.iter().any(|(_, c)| c[1] > 200), "le blanc du milieu se voit");
+        assert_eq!(q[0].1[3], 255);
+        // Une autre grille garde l'allure : mêmes coins, même milieu
+        let Paint::Mesh { cols: c2, rows: r2, pts: p2 } = mesh_resize(cols, rows, &pts, 4, 4) else { panic!() };
+        assert!(mesh_ok(c2, r2, &p2));
+        assert_eq!(p2[0], pts[0]);
+        assert_eq!(p2[24], pts[8]);
+        assert_eq!(p2[12], pts[4]);
+        // Un filet abîmé (fichier modifié à la main) ne fait rien paniquer
+        assert!(mesh_quads(3, 3, &pts, 4).is_empty());
+        assert_eq!(mesh_at(3, 3, &pts, 1.0, 1.0).1, [0.0; 4]);
+        // Rendu : la forme porte bien plusieurs couleurs, et le SVG reste lisible
+        let mut d = Doc::starter();
+        d.shapes.clear();
+        let (bx, by) = (d.boards[0].x, d.boards[0].y);
+        let id = d.new_id();
+        d.shapes.push(Shape { id, kind: Kind::Ellipse { w: 600.0, h: 420.0 }, x: bx + 100.0, y: by + 100.0, fills: vec![Paint::Mesh { cols, rows, pts }], ..Shape::base() });
+        let img = export_png(&d, 0, "/tmp", 0.5).unwrap();
+        let at = |x: f32, y: f32| img.get_pixel(((100.0 + x) * 0.5) as u32, ((100.0 + y) * 0.5) as u32).0;
+        assert!(at(420.0, 168.0)[1] > 200, "blanc au nœud déplacé : {:?}", at(420.0, 168.0));
+        assert!(at(80.0, 150.0)[0] > at(80.0, 150.0)[2], "rouge à gauche");
+        assert!(at(520.0, 300.0)[2] > at(520.0, 300.0)[0], "bleu à droite");
+        if let Ok(out) = std::env::var("ARY_OUT") {
+            img.save(out).unwrap();
+        }
+    }
+}
+
 #[cfg(test)]
 mod freeform_tests {
     use super::*;
