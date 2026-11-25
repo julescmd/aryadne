@@ -2575,5 +2575,11 @@
   "Arrêter la prise (R)": "Stop recording (R)",
   "Enregistrer au micro sur la piste choisie (R)": "Record from the microphone on the selected track (R)",
   "Enregistrement impossible :": "Can't record:",
-  "Prise ajoutée :": "Take added:"
+  "Prise ajoutée :": "Take added:",
+  "Répétiteur": "Repeater",
+  "Des copies du calque, décalées, tournées, réduites l'une après l'autre (comme dans After Effects)": "Copies of the layer, each offset, rotated and scaled from the previous one (like After Effects)",
+  "copies ": "copies ",
+  "opacité finale ": "end opacity ",
+  "Expression : time, value, wiggle(2, 10), linear(time, 0, 1, 0, 100), sin(time * 4) * 20…": "Expression: time, value, wiggle(2, 10), linear(time, 0, 1, 0, 100), sin(time * 4) * 20…",
+  "retirer l'expression": "remove expression"
 }

@@ -259,6 +259,42 @@ pub struct Layer {
     /// Tracé progressif (comme les « trim paths » d'After Effects) : fin et début de la partie visible, en %
     #[serde(default = "full_trim", skip_serializing_if = "is_full_trim")]
     pub trim: Track,
+    /// Répétiteur (comme celui des calques de forme d'After Effects) : des copies décalées, tournées, réduites
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repeat: Option<Repeater>,
+    /// Expressions par propriété (« pos », « scale », « rot », « opacity ») : une formule remplace la valeur
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub exprs: std::collections::BTreeMap<String, String>,
+}
+
+/// Copies d'un calque : chacune décalée de `pos`, tournée de `rot`, mise à l'échelle de `scale` % par rapport
+/// à la précédente ; l'opacité va de 100 % à `fade` % sur la dernière
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct Repeater {
+    pub copies: u32,
+    pub pos: [f32; 2],
+    pub rot: f32,
+    pub scale: f32,
+    pub fade: f32,
+}
+
+impl Default for Repeater {
+    fn default() -> Repeater {
+        Repeater { copies: 5, pos: [120.0, 0.0], rot: 0.0, scale: 100.0, fade: 100.0 }
+    }
+}
+
+impl Repeater {
+    /// La transformation de la copie `k` (repère du calque) et son opacité relative
+    pub fn copy(&self, k: u32) -> (Xform, f32) {
+        let kf = k as f32;
+        let sc = (self.scale / 100.0).powf(kf);
+        let r = (self.rot * kf).to_radians();
+        let (cs, sn) = (r.cos(), r.sin());
+        let n = self.copies.max(1);
+        let op = if n > 1 { 1.0 + (self.fade / 100.0 - 1.0) * kf / (n - 1) as f32 } else { 1.0 };
+        (Xform { a: cs * sc, b: sn * sc, c: -sn * sc, d: cs * sc, e: self.pos[0] * kf, f: self.pos[1] * kf }, op.clamp(0.0, 1.0))
+    }
 }
 
 fn unit_speed() -> f32 {
@@ -476,7 +512,47 @@ impl Layer {
             cycle: Default::default(),
             matte: None,
             trim: full_trim(),
+            exprs: Default::default(),
+            repeat: None,
         }
+    }
+
+    /// Nom court d'une propriété dans les expressions
+    pub fn prop_key(p: Prop) -> &'static str {
+        match p {
+            Prop::Pos => "pos",
+            Prop::Scale => "scale",
+            Prop::Rot => "rot",
+            Prop::Opacity => "opacity",
+        }
+    }
+
+    /// La valeur de la propriété à l'instant `t`, expression comprise (si elle est fausse, la valeur animée reste)
+    pub fn eval_prop(&self, p: Prop, t: f32) -> [f32; 2] {
+        let v = self.value(self.track(p), t);
+        self.apply_expr(p, v, t).unwrap_or(v)
+    }
+
+    /// Applique l'expression de la propriété ; None sans expression, Err si elle ne se calcule pas
+    pub fn try_expr(&self, p: Prop, v: [f32; 2], t: f32) -> Option<Result<[f32; 2], String>> {
+        let src = self.exprs.get(Self::prop_key(p)).filter(|s| !s.trim().is_empty())?;
+        let value = match p {
+            Prop::Rot | Prop::Opacity => crate::expr::Val::Num(v[0] as f64),
+            _ => crate::expr::Val::Vec(vec![v[0] as f64, v[1] as f64]),
+        };
+        let cx = crate::expr::Ctx { time: t as f64, value, index: 0.0, fps: 30.0, seed: self.id };
+        Some(crate::expr::eval(src, &cx).map(|r| {
+            let q = r.pair();
+            match (p, &r) {
+                // Un nombre pour l'échelle : les deux axes ensemble
+                (Prop::Rot | Prop::Opacity, _) => [q[0] as f32, v[1]],
+                _ => [q[0] as f32, q[1] as f32],
+            }
+        }))
+    }
+
+    fn apply_expr(&self, p: Prop, v: [f32; 2], t: f32) -> Option<[f32; 2]> {
+        self.try_expr(p, v, t).and_then(|r| r.ok())
     }
 
     /// Les bornes de l'animation du calque (première et dernière clé, toutes propriétés)
@@ -530,9 +606,9 @@ impl Layer {
 
     /// Passage du repère du calque (px, origine au centre) à celui de son parent (ou de la composition), à l'instant `t`
     pub fn xform(&self, t: f32) -> Xform {
-        let mut p = self.value(&self.pos, t);
-        let mut s = self.value(&self.scale, t);
-        let mut r = self.value(&self.rot, t)[0];
+        let mut p = self.eval_prop(Prop::Pos, t);
+        let mut s = self.eval_prop(Prop::Scale, t);
+        let mut r = self.eval_prop(Prop::Rot, t)[0];
         if let Some(w) = &self.wiggle {
             let x = t * w.freq.max(0.0);
             let seed = self.id ^ w.seed as u64;
@@ -562,6 +638,18 @@ pub struct Xform {
 
 impl Xform {
     pub const ID: Xform = Xform { a: 1.0, b: 0.0, c: 0.0, d: 1.0, e: 0.0, f: 0.0 };
+
+    /// `self` après `o` : d'abord `o`, puis `self`
+    pub fn after(&self, o: &Xform) -> Xform {
+        Xform {
+            a: self.a * o.a + self.c * o.b,
+            b: self.b * o.a + self.d * o.b,
+            c: self.a * o.c + self.c * o.d,
+            d: self.b * o.c + self.d * o.d,
+            e: self.a * o.e + self.c * o.f + self.e,
+            f: self.b * o.e + self.d * o.f + self.f,
+        }
+    }
 
     pub fn apply(&self, l: [f32; 2]) -> [f32; 2] {
         [self.a * l[0] + self.c * l[1] + self.e, self.b * l[0] + self.d * l[1] + self.f]
@@ -1412,7 +1500,7 @@ fn prep_layer(c: &Compo, li: usize, t: f32, scale: f32, cache: &mut Cache, (w, h
     if !alive {
         return None;
     }
-    let op = (l.value(&l.opacity, t)[0] / 100.0).clamp(0.0, 1.0);
+    let op = (l.eval_prop(Prop::Opacity, t)[0] / 100.0).clamp(0.0, 1.0);
     if op <= 0.0 {
         return None;
     }
@@ -1497,11 +1585,29 @@ fn render_one(c: &Compo, t: f32, scale: f32, cache: &mut Cache) -> image::RgbaIm
         if mattes.contains(&li) {
             continue;
         }
-        let Some((bm, x, op, [x0, y0, x1, y1])) = prep_layer(c, li, t, scale, cache, (w, h), false) else { continue };
+        let Some((bm, x0form, op0, bb0)) = prep_layer(c, li, t, scale, cache, (w, h), false) else { continue };
         let mask = match c.layers[li].matte {
             Some(m) if li > 0 => Some(matte_map(c, li - 1, t, scale, cache, (w, h), m)),
             _ => None,
         };
+        // Le calque, ou chacune de ses copies (répétiteur), de la première à la dernière
+        let copies: Vec<(Xform, f32, [u32; 4])> = match &c.layers[li].repeat {
+            Some(rp) if rp.copies > 1 => (0..rp.copies.min(200))
+                .filter_map(|k| {
+                    let (tk, ok) = rp.copy(k);
+                    let xk = x0form.after(&tk);
+                    let (bw, bh) = (bm.img.width() as f32 / bm.k, bm.img.height() as f32 / bm.k);
+                    let pts = [[bm.ox, bm.oy], [bm.ox + bw, bm.oy], [bm.ox + bw, bm.oy + bh], [bm.ox, bm.oy + bh]].map(|p| xk.apply(p));
+                    let x0 = (pts.iter().map(|p| p[0]).fold(f32::MAX, f32::min) * scale).floor().max(0.0) as u32;
+                    let x1 = (pts.iter().map(|p| p[0]).fold(f32::MIN, f32::max) * scale).ceil().min(w as f32) as u32;
+                    let y0 = (pts.iter().map(|p| p[1]).fold(f32::MAX, f32::min) * scale).floor().max(0.0) as u32;
+                    let y1 = (pts.iter().map(|p| p[1]).fold(f32::MIN, f32::max) * scale).ceil().min(h as f32) as u32;
+                    (x0 < x1 && y0 < y1 && ok > 0.0).then_some((xk, op0 * ok, [x0, y0, x1, y1]))
+                })
+                .collect(),
+            _ => vec![(x0form, op0, bb0)],
+        };
+        for (x, op, [x0, y0, x1, y1]) in copies {
         let row_len = w as usize * 4;
         let raw: &mut [u8] = &mut out;
         raw.par_chunks_mut(row_len).enumerate().filter(|(y, _)| (*y as u32) >= y0 && (*y as u32) < y1).for_each(|(py, row)| {
@@ -1524,6 +1630,7 @@ fn render_one(c: &Compo, t: f32, scale: f32, cache: &mut Cache) -> image::RgbaIm
                 row[i + 3] = (oa * 255.0).round().clamp(0.0, 255.0) as u8;
             }
         });
+        }
     }
     out
 }

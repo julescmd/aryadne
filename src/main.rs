@@ -2,6 +2,7 @@
 
 mod cloud;
 mod scopes;
+mod expr;
 mod keymap;
 mod lucide;
 mod hl;

@@ -109,6 +109,7 @@ pub const PIN_OFF: &str = "\u{f02b6}";
 pub const ACTIVITY: &str = "\u{f0038}";
 pub const MIC_OFF: &str = "\u{f0119}";
 pub const CIRCLE_STOP: &str = "\u{f0083}";
+pub const SQUARE_FUNCTION: &str = "\u{f022d}";
 pub const FLIP_HORIZONTAL_2: &str = "\u{f035e}";
 pub const GLOBE: &str = "\u{f00e8}";
 pub const UNDO_2: &str = "\u{f02a1}";

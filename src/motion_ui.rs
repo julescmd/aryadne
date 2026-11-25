@@ -67,6 +67,8 @@ enum TlDrag {
 pub struct Editor {
     pub path: PathBuf,
     pub compo: Compo,
+    /// Champs d'expression ouverts : (calque, propriété)
+    expr_open: std::collections::HashSet<(u64, &'static str)>,
     /// Compositions du coffre, données par la fenêtre à chaque image (panneau Projet)
     pub comps: Vec<String>,
     /// Composition à ouvrir (clic dans le panneau Projet)
@@ -213,6 +215,7 @@ impl Editor {
             export_rx: None,
             export_prog: Arc::new(AtomicU32::new(0)),
             curve: Prop::Pos,
+            expr_open: Default::default(),
             tl_scroll: 0.0,
             ctx_key: None,
             msg_seen: None,
@@ -976,7 +979,11 @@ impl Editor {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| ui.label(egui::RichText::new(crate::i18n::t(lay.kind.label())).size(11.5).color(p.muted)));
             });
             section(ui, "Transformer");
+            let lay_id = lay.id;
             for (prop, label) in PROPS {
+                let key = Layer::prop_key(prop);
+                let has_expr = lay.exprs.get(key).is_some_and(|e| !e.trim().is_empty());
+                let mut expr_toggle = false;
                 let tr = lay.track(prop);
                 let at = tr.key_at(t).is_some();
                 let anim = tr.animated();
@@ -1004,9 +1011,53 @@ impl Editor {
                         Prop::Rot => ch |= ui.add(egui::DragValue::new(&mut v[0]).speed(0.5).max_decimals(1).suffix("°")).changed(),
                         Prop::Opacity => ch |= ui.add(egui::DragValue::new(&mut v[0]).speed(0.5).range(0.0..=100.0).max_decimals(0).suffix(" %")).changed(),
                     }
+                    // Expression : une formule qui calcule la propriété (comme Alt+clic dans After Effects)
+                    let eb = egui::Button::new(egui::RichText::new(l::SQUARE_FUNCTION).size(13.0).color(if has_expr { p.accent } else { p.muted })).frame(false).min_size(vec2(20.0, 20.0));
+                    expr_toggle = ui.add(eb).on_hover_text(crate::i18n::t("Expression : time, value, wiggle(2, 10), linear(time, 0, 1, 0, 100), sin(time * 4) * 20…")).clicked();
                     (b.clicked(), ch)
                 });
                 let (toggle, ch) = row.inner;
+                if expr_toggle && !self.expr_open.remove(&(lay_id, key)) {
+                    self.expr_open.insert((lay_id, key));
+                }
+                if has_expr || self.expr_open.contains(&(lay_id, key)) {
+                    let base = lay.value(lay.track(prop), t);
+                    let res = lay.try_expr(prop, base, t);
+                    let src = lay.exprs.entry(key.to_string()).or_default();
+                    ui.horizontal(|ui| {
+                        ui.add_space(20.0);
+                        let col = if matches!(res, Some(Err(_))) { p.missing } else { p.accent };
+                        let te = egui::TextEdit::singleline(src).font(egui::FontId::monospace(12.0)).text_color(col).hint_text("wiggle(2, 10)").desired_width(ui.available_width() - 26.0);
+                        if ui.add(te).changed() {
+                            changed = true;
+                        }
+                        if ui.add(egui::Button::new(egui::RichText::new(l::X).size(12.0)).frame(false)).on_hover_text(crate::i18n::t("retirer l'expression")).clicked() {
+                            src.clear();
+                            self.expr_open.remove(&(lay_id, key));
+                            changed = true;
+                        }
+                    });
+                    match res {
+                        Some(Err(e)) => {
+                            ui.horizontal(|ui| {
+                                ui.add_space(20.0);
+                                ui.label(egui::RichText::new(e).size(11.0).color(p.missing));
+                            });
+                        }
+                        Some(Ok(v)) => {
+                            ui.horizontal(|ui| {
+                                ui.add_space(20.0);
+                                let txt = match prop {
+                                    Prop::Rot | Prop::Opacity => format!("= {:.1}", v[0]),
+                                    _ => format!("= {:.1}, {:.1}", v[0], v[1]),
+                                };
+                                ui.label(egui::RichText::new(txt).size(11.0).monospace().color(p.muted));
+                            });
+                        }
+                        None => {}
+                    }
+                    lay.exprs.retain(|k, v| !v.trim().is_empty() || self.expr_open.iter().any(|(id, kk)| *id == lay_id && *kk == k.as_str()));
+                }
                 if toggle {
                     lay.track_mut(prop).toggle_key(t);
                     changed = true;
@@ -1014,6 +1065,28 @@ impl Editor {
                 if ch {
                     lay.track_mut(prop).set(t, v);
                     changed = true;
+                }
+            }
+            // Répétiteur : des copies du calque, chacune décalée de la précédente
+            {
+                let mut on = lay.repeat.is_some();
+                if ui.checkbox(&mut on, crate::i18n::t("Répétiteur")).on_hover_text(crate::i18n::t("Des copies du calque, décalées, tournées, réduites l'une après l'autre (comme dans After Effects)")).changed() {
+                    lay.repeat = on.then(motion::Repeater::default);
+                    changed = true;
+                }
+                if let Some(rp) = &mut lay.repeat {
+                    ui.horizontal(|ui| {
+                        changed |= ui.add(egui::DragValue::new(&mut rp.copies).range(1..=200).prefix(crate::i18n::t("copies "))).changed();
+                        changed |= ui.add(egui::DragValue::new(&mut rp.rot).speed(0.5).suffix("°").prefix(crate::i18n::t("rotation "))).changed();
+                    });
+                    ui.horizontal(|ui| {
+                        changed |= ui.add(egui::DragValue::new(&mut rp.pos[0]).speed(1.0).prefix("x ")).changed();
+                        changed |= ui.add(egui::DragValue::new(&mut rp.pos[1]).speed(1.0).prefix("y ")).changed();
+                    });
+                    ui.horizontal(|ui| {
+                        changed |= ui.add(egui::DragValue::new(&mut rp.scale).speed(0.5).range(1.0..=400.0).suffix(" %").prefix(crate::i18n::t("échelle "))).changed();
+                        changed |= ui.add(egui::DragValue::new(&mut rp.fade).speed(0.5).range(0.0..=100.0).suffix(" %").prefix(crate::i18n::t("opacité finale "))).changed();
+                    });
                 }
             }
             match &mut lay.kind {
