@@ -3323,5 +3323,14 @@
   "Torsion": "Twist",
   "intensité (négatif : dans l'autre sens)": "strength (negative: the other way)",
   "Déforme la sélection dans une enveloppe (comme Effet › Déformation d'Illustrator) ; la forme devient un tracé": "Warps the selection in an envelope (like Illustrator's Effect › Warp); the shape becomes a path",
-  "Rien à déformer (les images et les groupes ne se déforment pas).": "Nothing to warp (images and groups can't be warped)."
+  "Rien à déformer (les images et les groupes ne se déforment pas).": "Nothing to warp (images and groups can't be warped).",
+  "grille de perspective": "perspective grid",
+  "Horizon et deux points de fuite, pour dessiner des décors ; « plaquer » pose une forme sur un mur ou le sol (jamais exportée)": "Horizon and two vanishing points for drawing sets; “stick” puts a shape on a wall or the floor (never exported)",
+  "horizon": "horizon",
+  "fuite gauche": "left vanishing",
+  "fuite droite": "right vanishing",
+  "plaquer": "stick",
+  "sur le mur de gauche": "on the left wall",
+  "sur le mur de droite": "on the right wall",
+  "sur le sol": "on the floor"
 }

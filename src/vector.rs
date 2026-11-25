@@ -26,6 +26,9 @@ pub struct Board {
     /// Grille de mise en page (colonnes), affichée et aimantée, jamais exportée
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grid: Option<LayoutGrid>,
+    /// Grille de perspective (deux points de fuite), affichée sur le plan, jamais exportée
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub persp: Option<Persp>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
@@ -354,7 +357,7 @@ impl Doc {
 impl Doc {
     pub fn starter() -> Doc {
         Doc {
-            boards: vec![Board { name: "Plan de travail 1".into(), x: 0.0, y: 0.0, w: 1080.0, h: 1080.0, bg: Some([255, 255, 255, 255]), grid: None }],
+            boards: vec![Board { name: "Plan de travail 1".into(), x: 0.0, y: 0.0, w: 1080.0, h: 1080.0, bg: Some([255, 255, 255, 255]), grid: None, persp: None }],
             shapes: vec![],
             next_id: 1,
             swatches: vec![[24, 24, 27, 255], [255, 255, 255, 255], [236, 108, 89, 255], [244, 191, 80, 255], [86, 166, 122, 255], [84, 128, 220, 255], [150, 110, 210, 255]],
@@ -2029,7 +2032,7 @@ mod tests {
         assert_eq!(constrain(2, 80.0, 90.0, 0.0, 100.0, 0.0, 200.0), (80.0, 190.0));
         assert_eq!(constrain(3, 45.0, 55.0, 0.0, 100.0, 0.0, 200.0), (95.0, 105.0));
         assert_eq!(constrain(4, 80.0, 90.0, 0.0, 100.0, 0.0, 200.0), (160.0, 180.0));
-        let b = Board { name: String::new(), x: 0.0, y: 0.0, w: 1000.0, h: 100.0, bg: None, grid: Some(LayoutGrid { cols: 4, gutter: 20.0, margin: 40.0 }) };
+        let b = Board { name: String::new(), x: 0.0, y: 0.0, w: 1000.0, h: 100.0, bg: None, grid: Some(LayoutGrid { cols: 4, gutter: 20.0, margin: 40.0 }), persp: None };
         let c = b.columns();
         assert_eq!(c.len(), 4);
         assert_eq!(c[0], (40.0, 255.0));
@@ -2303,12 +2306,69 @@ pub fn subdivide(nodes: &[Node], closed: bool, n: usize) -> Vec<Node> {
 /// Déforme une forme (devenue tracé) ; plusieurs contours (texte, trous) deviennent un groupe pair-impair.
 /// Rend la forme obtenue.
 pub fn warp_shape(doc: &mut Doc, id: u64, kind: usize, bend: f32) -> Option<u64> {
+    remap_shape(doc, id, false, &|b, p| warp_point(kind, b, p, bend))
+}
+
+/// Grille de perspective d'un plan de travail : ligne d'horizon et deux points de fuite (fractions du plan)
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+pub struct Persp {
+    pub horizon: f32,
+    pub vp: [f32; 2],
+}
+
+impl Default for Persp {
+    fn default() -> Persp {
+        Persp { horizon: 0.42, vp: [-0.35, 1.35] }
+    }
+}
+
+/// Plaque une forme sur la grille de perspective du plan `b` : 0 mur de gauche, 1 mur de droite, 2 sol.
+/// La forme devient un tracé dans le repère du monde.
+pub fn persp_shape(doc: &mut Doc, id: u64, b: &Board, plane: u8) -> Option<u64> {
+    let ps = b.persp.unwrap_or_default();
+    let hz = b.y + ps.horizon * b.h;
+    let (v1, v2) = (b.x + ps.vp[0] * b.w, b.x + ps.vp[1] * b.w);
+    remap_shape(doc, id, true, &move |r, p| {
+        match plane {
+            0 | 1 => {
+                // Le bord le plus loin du point de fuite garde sa taille, l'autre file vers lui
+                let v = if plane == 0 { v1 } else { v2 };
+                let near = if (r[0] - v).abs() > (r[2] - v).abs() { r[0] } else { r[2] };
+                let f = ((p[0] - v) / (near - v)).clamp(0.02, 50.0);
+                [p[0], hz + (p[1] - hz) * f]
+            }
+            _ => {
+                let vc = (v1 + v2) / 2.0;
+                let near = if (r[3] - hz).abs() > (r[1] - hz).abs() { r[3] } else { r[1] };
+                let f = ((p[1] - hz) / (near - hz)).clamp(0.02, 50.0);
+                [vc + (p[0] - vc) * f, p[1]]
+            }
+        }
+    })
+}
+
+/// Redessine une forme en tracés par une fonction de points `f(cadre, point)` ; `world` : dans le repère
+/// du monde (la forme perd sa position et sa rotation), sinon dans le sien
+pub fn remap_shape(doc: &mut Doc, id: u64, world: bool, f: &dyn Fn([f32; 4], [f32; 2]) -> [f32; 2]) -> Option<u64> {
     let i = doc.index(id)?;
-    let s = doc.shapes[i].clone();
+    let mut s = doc.shapes[i].clone();
     if matches!(s.kind, Kind::Group { .. } | Kind::Image { .. }) {
         return None;
     }
-    let subs = shape_subpaths(&s);
+    let mut subs = shape_subpaths(&s);
+    if world {
+        let (sn, cs) = s.rot.to_radians().sin_cos();
+        let t = |p: [f32; 2]| [s.x + p[0] * cs - p[1] * sn, s.y + p[0] * sn + p[1] * cs];
+        for (n, _) in subs.iter_mut() {
+            for x in n.iter_mut() {
+                *x = Node { p: t(x.p), i: t(x.i), o: t(x.o) };
+            }
+        }
+        (s.x, s.y, s.rot) = (0.0, 0.0, 0.0);
+        doc.shapes[i].x = 0.0;
+        doc.shapes[i].y = 0.0;
+        doc.shapes[i].rot = 0.0;
+    }
     let pts: Vec<[f32; 2]> = subs.iter().flat_map(|(n, _)| n.iter().map(|x| x.p)).collect();
     if pts.is_empty() {
         return None;
@@ -2318,7 +2378,7 @@ pub fn warp_shape(doc: &mut Doc, id: u64, kind: usize, bend: f32) -> Option<u64>
         .into_iter()
         .map(|(n, c)| {
             let fine = subdivide(&n, c, 4);
-            (fine.into_iter().map(|x| Node { p: warp_point(kind, b, x.p, bend), i: warp_point(kind, b, x.i, bend), o: warp_point(kind, b, x.o, bend) }).collect(), c)
+            (fine.into_iter().map(|x| Node { p: f(b, x.p), i: f(b, x.i), o: f(b, x.o) }).collect(), c)
         })
         .collect();
     let text_fill = matches!(s.kind, Kind::Text { .. }) && s.fills.is_empty();
@@ -2372,5 +2432,28 @@ mod warp_tests {
         let Kind::Path { nodes, closed } = &d.get(r).unwrap().kind else { panic!() };
         assert!(*closed && nodes.len() >= 16);
         assert!(nodes.iter().any(|n| n.p[1] < -5.0));
+    }
+}
+
+#[cfg(test)]
+mod persp_tests {
+    use super::*;
+    #[test]
+    fn perspective() {
+        let mut d = Doc::starter();
+        d.shapes.clear();
+        d.boards[0].persp = Some(Persp::default());
+        let b = d.boards[0].clone();
+        let id = d.new_id();
+        d.shapes.push(Shape { id, kind: Kind::Rect { w: 300.0, h: 300.0, r: [0.0; 4] }, x: 200.0, y: 200.0, fills: vec![Paint::solid([0, 0, 0, 255])], ..Shape::base() });
+        let r = persp_shape(&mut d, id, &b, 0).unwrap();
+        let Kind::Path { nodes, .. } = &d.get(r).unwrap().kind else { panic!() };
+        // Mur de gauche : le bord gauche (vers le point de fuite) rétrécit, le droit garde sa hauteur
+        let h_at = |x: f32| {
+            let ys: Vec<f32> = nodes.iter().filter(|n| (n.p[0] - x).abs() < 1.0).map(|n| n.p[1]).collect();
+            ys.iter().cloned().fold(f32::MIN, f32::max) - ys.iter().cloned().fold(f32::MAX, f32::min)
+        };
+        assert!((h_at(500.0) - 300.0).abs() < 1.0);
+        assert!(h_at(200.0) < 250.0);
     }
 }

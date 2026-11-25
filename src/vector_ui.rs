@@ -329,7 +329,7 @@ impl Editor {
     /// Une déclinaison du plan `src` au format w × h, posée à droite des plans existants
     fn decline_board(&mut self, src: &Board, name: &str, w: f32, h: f32) {
         let right = self.doc.boards.iter().map(|b| b.x + b.w).fold(f32::MIN, f32::max);
-        let nb = Board { name: format!("{} · {}", src.name, crate::i18n::t(name).split(" (").next().unwrap_or(name)), x: right + 120.0, y: src.y, w, h, bg: src.bg, grid: src.grid };
+        let nb = Board { name: format!("{} · {}", src.name, crate::i18n::t(name).split(" (").next().unwrap_or(name)), x: right + 120.0, y: src.y, w, h, bg: src.bg, grid: src.grid, persp: None };
         // Le contenu tient dans le nouveau format (contenu entier, centré)
         let k = (w / src.w).min(h / src.h);
         let (cw, ch) = (src.w * k, src.h * k);
@@ -684,6 +684,18 @@ impl Editor {
                         b.grid = on.then(crate::vector::LayoutGrid::default);
                     }
                 });
+                // Grille de perspective (deux points de fuite)
+                ui.horizontal(|ui| {
+                    let mut on = b.persp.is_some();
+                    if ui.checkbox(&mut on, crate::i18n::t("grille de perspective")).on_hover_text(crate::i18n::t("Horizon et deux points de fuite, pour dessiner des décors ; « plaquer » pose une forme sur un mur ou le sol (jamais exportée)")).changed() {
+                        b.persp = on.then(crate::vector::Persp::default);
+                    }
+                });
+                if let Some(ps) = &mut b.persp {
+                    crate::modifiers::row_slider(ui, "horizon", egui::Slider::new(&mut ps.horizon, 0.0..=1.0).show_value(false));
+                    crate::modifiers::row_slider(ui, "fuite gauche", egui::Slider::new(&mut ps.vp[0], -2.0..=0.9).show_value(false));
+                    crate::modifiers::row_slider(ui, "fuite droite", egui::Slider::new(&mut ps.vp[1], 0.1..=3.0).show_value(false));
+                }
                 if let Some(g) = &mut b.grid {
                     ui.horizontal(|ui| {
                         ui.add(egui::DragValue::new(&mut g.cols).range(1..=48).prefix(format!("{} ", l::COLUMNS_3))).on_hover_text(crate::i18n::t("colonnes"));
@@ -1403,6 +1415,24 @@ impl Editor {
                 }
             });
         }
+        // Plaquer en perspective : sur la grille du plan de travail de la sélection
+        let persp_board = self.selection_bounds().and_then(|bb| self.doc.boards.iter().find(|b| b.persp.is_some() && bb[0] < b.x + b.w && bb[2] > b.x && bb[1] < b.y + b.h && bb[3] > b.y).cloned());
+        if let (false, Some(board)) = (self.sel.is_empty(), persp_board) {
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new(crate::i18n::t("plaquer")).size(12.0).color(p.muted));
+                for (plane, icon, tip) in [(0u8, l::PANEL_LEFT, "sur le mur de gauche"), (1, l::PANEL_RIGHT, "sur le mur de droite"), (2, l::PANEL_BOTTOM, "sur le sol")] {
+                    if ui.button(egui::RichText::new(icon).size(14.0)).on_hover_text(crate::i18n::t(tip)).clicked() {
+                        self.doc = snapshot.clone();
+                        let ids: Vec<u64> = self.sel.iter().map(|i| self.top_of(*i)).collect();
+                        let out: Vec<u64> = ids.into_iter().filter_map(|id| crate::vector::persp_shape(&mut self.doc, id, &board, plane)).collect();
+                        if !out.is_empty() {
+                            self.sel = out;
+                        }
+                        ch = true;
+                    }
+                }
+            });
+        }
         // Déformer (enveloppe) : arc, drapeau, gonfler… sur chaque forme choisie, en tracés
         if !self.sel.is_empty() {
             ui.horizontal(|ui| {
@@ -2084,6 +2114,21 @@ impl Editor {
             // Grille de colonnes (comme Figma), en rouge translucide
             for (a, c) in b.columns() {
                 painter.rect_filled(Rect::from_two_pos(to_screen([a, b.y]), to_screen([c, b.y + b.h])), 0.0, Color32::from_rgba_unmultiplied(255, 70, 70, 26));
+            }
+            // Grille de perspective : horizon, fuyantes vers les deux points de fuite (gauche bleu, droite orange)
+            if let Some(ps) = b.persp {
+                let clip = painter.with_clip_rect(Rect::from_two_pos(to_screen([b.x, b.y]), to_screen([b.x + b.w, b.y + b.h])));
+                let hz = b.y + ps.horizon * b.h;
+                let (v1, v2) = ([b.x + ps.vp[0] * b.w, hz], [b.x + ps.vp[1] * b.w, hz]);
+                clip.line_segment([to_screen([b.x, hz]), to_screen([b.x + b.w, hz])], Stroke::new(1.5, Color32::from_rgba_unmultiplied(60, 60, 60, 160)));
+                for (v, col) in [(v1, Color32::from_rgba_unmultiplied(56, 132, 255, 90)), (v2, Color32::from_rgba_unmultiplied(255, 140, 40, 90))] {
+                    for k in 0..=16 {
+                        // Des fuyantes réparties sur le bord opposé du plan
+                        let far_x = if v[0] < b.x + b.w / 2.0 { b.x + b.w * 1.6 } else { b.x - b.w * 0.6 };
+                        let y = b.y - b.h * 0.6 + b.h * 2.2 * k as f32 / 16.0;
+                        clip.line_segment([to_screen(v), to_screen([far_x, y])], Stroke::new(1.0, col));
+                    }
+                }
             }
         }
         self.mouse(ui, &resp, rect, &to_world, &to_screen, label_hit);
@@ -2895,7 +2940,7 @@ impl Editor {
                     self.checkpoint();
                     let n = self.doc.boards.len() + 1;
                     let (bw, bh) = if x1 - x0 < 4.0 { (1080.0, 1080.0) } else { (x1 - x0, y1 - y0) };
-                    self.doc.boards.push(Board { name: format!("{} {n}", crate::i18n::t("Plan de travail")), x: x0, y: y0, w: bw, h: bh, bg: Some([255, 255, 255, 255]), grid: None });
+                    self.doc.boards.push(Board { name: format!("{} {n}", crate::i18n::t("Plan de travail")), x: x0, y: y0, w: bw, h: bh, bg: Some([255, 255, 255, 255]), grid: None, persp: None });
                     self.sel_board = Some(self.doc.boards.len() - 1);
                     self.sel.clear();
                     self.tool = Tool::Select;
