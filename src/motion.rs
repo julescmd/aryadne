@@ -343,6 +343,9 @@ pub struct Layer {
     /// Police variable d'un texte : valeur de chaque axe (wght, wdth, slnt…), animable (v[0])
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub font_axes: std::collections::BTreeMap<String, Track>,
+    /// Rig 2D : IK à deux os posée sur le premier os (ce calque), voir `Ik`
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ik: Option<Ik>,
     /// Calque 3D (2,5D) : sa profondeur (v[0], px ; plus grand = plus loin), vue par la caméra de la composition
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub depth: Option<Track>,
@@ -757,6 +760,7 @@ impl Layer {
             masks: vec![],
             auto_orient: false,
             font_axes: Default::default(),
+            ik: None,
             depth: None,
             fx: vec![],
             repeat: None,
@@ -852,9 +856,14 @@ impl Layer {
 
     /// Passage du repère du calque (px, origine au centre) à celui de son parent (ou de la composition), à l'instant `t`
     pub fn xform(&self, t: f32) -> Xform {
+        self.xform_rot(t, None)
+    }
+
+    /// Comme `xform`, avec une rotation imposée (degrés) : celle d'une IK
+    pub fn xform_rot(&self, t: f32, rot: Option<f32>) -> Xform {
         let mut p = self.eval_prop(Prop::Pos, t);
         let mut s = self.eval_prop(Prop::Scale, t);
-        let mut r = self.eval_prop(Prop::Rot, t)[0];
+        let mut r = rot.unwrap_or_else(|| self.eval_prop(Prop::Rot, t)[0]);
         if self.auto_orient {
             // La direction du mouvement autour de t (un pas d'image de part et d'autre)
             let dt = 1.0 / 60.0;
@@ -878,6 +887,33 @@ impl Layer {
         let (sx, sy) = (s[0] / 100.0, s[1] / 100.0);
         Xform { a: cs * sx, b: sn * sx, c: -sn * sy, d: cs * sy, e: p[0], f: p[1] }
     }
+}
+
+/// IK à deux os (comme Duik) : ce calque est le premier os, `lower` le second (son enfant), `end` le bout
+/// (enfant du second) ; les deux os tournent pour que le bout atteigne le calque `target`
+#[derive(Clone, PartialEq, Serialize, Deserialize, Debug)]
+pub struct Ik {
+    pub lower: u64,
+    pub end: u64,
+    pub target: u64,
+    /// Plier de l'autre côté (coude ou genou)
+    #[serde(default)]
+    pub flip: bool,
+}
+
+/// Les deux angles (degrés, chacun dans le repère de son parent) d'une IK à deux os : épaule en `s`,
+/// coude en `elbow` (dans le repère du premier os), bout en `tip` (dans le repère du second), cible `target`
+/// (tous dans le repère du parent du premier os)
+pub fn two_bone_ik(s: [f32; 2], elbow: [f32; 2], tip: [f32; 2], target: [f32; 2], flip: bool) -> (f32, f32) {
+    let (l1, l2) = (elbow[0].hypot(elbow[1]).max(1e-3), tip[0].hypot(tip[1]).max(1e-3));
+    let (a1, a2) = (elbow[1].atan2(elbow[0]), tip[1].atan2(tip[0]));
+    let (dx, dy) = (target[0] - s[0], target[1] - s[1]);
+    let d = dx.hypot(dy).clamp((l1 - l2).abs() + 1e-3, l1 + l2 - 1e-3);
+    let phi = dy.atan2(dx);
+    let a = ((l1 * l1 + d * d - l2 * l2) / (2.0 * l1 * d)).clamp(-1.0, 1.0).acos();
+    let b = ((l1 * l1 + l2 * l2 - d * d) / (2.0 * l1 * l2)).clamp(-1.0, 1.0).acos();
+    let (th1, rel) = if flip { (phi + a, -(std::f32::consts::PI - b)) } else { (phi - a, std::f32::consts::PI - b) };
+    ((th1 - a1).to_degrees(), (a1 + rel - a2).to_degrees())
 }
 
 /// Transformation affine : x' = a·x + c·y + e, y' = b·x + d·y + f
@@ -1146,10 +1182,47 @@ impl Compo {
         // Une chaîne de parents bornée : une boucle ne bloque rien
         for _ in 0..32 {
             let Some(j) = cur.and_then(|id| self.index_of(id)) else { break };
-            m = self.layers[j].xform(t).then_parent(&m);
+            m = self.local(j, t).then_parent(&m);
             cur = self.layers[j].parent;
         }
         m
+    }
+
+    /// Le repère d'un calque dans celui de son parent, IK comprise
+    pub fn local(&self, j: usize, t: f32) -> Xform {
+        let l = &self.layers[j];
+        match self.ik_angles(j, t) {
+            Some(r) => l.xform_rot(t, Some(r)),
+            None => l.xform(t),
+        }
+    }
+
+    /// La rotation imposée par une IK au calque `j` (premier ou second os), s'il y en a une
+    fn ik_angles(&self, j: usize, t: f32) -> Option<f32> {
+        let id = self.layers[j].id;
+        // Premier os : son IK ; second os : l'IK de son parent qui le nomme
+        let (upper, second) = if self.layers[j].ik.is_some() {
+            (j, false)
+        } else {
+            let p = self.index_of(self.layers[j].parent?)?;
+            if self.layers[p].ik.as_ref()?.lower != id {
+                return None;
+            }
+            (p, true)
+        };
+        let ik = self.layers[upper].ik.as_ref()?;
+        let (lo, en, tg) = (self.index_of(ik.lower)?, self.index_of(ik.end)?, self.index_of(ik.target)?);
+        // La cible ne doit pas dépendre de la chaîne (sinon elle se poursuit elle-même)
+        if [upper, lo, en].contains(&tg) || self.layers[tg].parent.is_some_and(|p| [self.layers[upper].id, ik.lower, ik.end].contains(&p)) {
+            return None;
+        }
+        let pw = self.parent_world(upper, t);
+        let target = pw.inverse(self.world(tg, t).apply([0.0, 0.0]))?;
+        let s = self.layers[upper].eval_prop(Prop::Pos, t);
+        let elbow = self.layers[lo].eval_prop(Prop::Pos, t);
+        let tip = self.layers[en].eval_prop(Prop::Pos, t);
+        let (r1, r2) = two_bone_ik(s, elbow, tip, target, ik.flip);
+        Some(if second { r2 } else { r1 })
     }
 
     /// Le repère d'un calque vu par la caméra (perspective des calques 3D) et son flou de profondeur de champ.
@@ -1187,9 +1260,29 @@ impl Compo {
         order
     }
 
+    /// Pose une IK sur le calque `i` : son premier enfant est le second os, l'enfant de celui-ci le bout ;
+    /// un objet nul « contrôleur » est créé là où est le bout. Rend l'indice du contrôleur.
+    pub fn make_ik(&mut self, i: usize, t: f32) -> Option<usize> {
+        let id = self.layers.get(i)?.id;
+        let lower = self.layers.iter().position(|l| l.parent == Some(id))?;
+        let lid = self.layers[lower].id;
+        let end = self.layers.iter().position(|l| l.parent == Some(lid))?;
+        let eid = self.layers[end].id;
+        let at = self.world(end, t).apply([0.0, 0.0]);
+        let mut ctl = Layer::new(&format!("{} · {}", crate::i18n::t("Contrôleur"), self.layers[end].name), Kind::Null, self);
+        ctl.pos = Track::new(at[0], at[1]);
+        ctl.start = self.layers[i].start;
+        ctl.end = self.layers[i].end;
+        let cid = ctl.id;
+        self.layers.insert(0, ctl);
+        let i = i + 1;
+        self.layers[i].ik = Some(Ik { lower: lid, end: eid, target: cid, flip: false });
+        Some(0)
+    }
+
     /// Le repère d'un calque dans la composition, parents compris
     pub fn world(&self, i: usize, t: f32) -> Xform {
-        self.parent_world(i, t).then_parent(&self.layers[i].xform(t))
+        self.parent_world(i, t).then_parent(&self.local(i, t))
     }
 
     /// Les calques qui descendent de `i` (enfants, petits-enfants…)
@@ -3257,5 +3350,37 @@ mod template_tests {
         assert!(!c.set_param(&pt, ParamVal::Color([0, 0, 0])));
         c.toggle_param(i, true);
         assert_eq!(c.params.len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod ik_tests {
+    use super::*;
+    #[test]
+    fn ik_deux_os() {
+        // Bras de 100 + 100 vers une cible à (100, 100) : le bout l'atteint
+        let (r1, r2) = two_bone_ik([0.0, 0.0], [100.0, 0.0], [100.0, 0.0], [100.0, 100.0], false);
+        let (a, b) = (r1.to_radians(), (r1 + r2).to_radians());
+        let tip = [100.0 * a.cos() + 100.0 * b.cos(), 100.0 * a.sin() + 100.0 * b.sin()];
+        assert!((tip[0] - 100.0).abs() < 0.5 && (tip[1] - 100.0).abs() < 0.5, "{tip:?}");
+        // Dans une composition : épaule, avant-bras, main, puis le contrôleur tire la main
+        let mut c = Compo { layers: vec![], ..Compo::default() };
+        let mut up = Layer::new("bras", Kind::Rect { w: 100.0, h: 20.0, radius: 10.0, color: [200; 3] }, &c);
+        up.pos = Track::new(500.0, 500.0);
+        let mut lo = Layer::new("avant-bras", Kind::Rect { w: 100.0, h: 20.0, radius: 10.0, color: [200; 3] }, &c);
+        lo.pos = Track::new(100.0, 0.0);
+        lo.parent = Some(up.id);
+        let mut en = Layer::new("main", Kind::Ellipse { w: 30.0, h: 30.0, color: [250; 3] }, &c);
+        en.pos = Track::new(100.0, 0.0);
+        en.parent = Some(lo.id);
+        c.layers = vec![en, lo, up];
+        let ctl = c.make_ik(2, 0.0).unwrap();
+        let hand = c.index_of(c.layers[3].ik.as_ref().unwrap().end).unwrap();
+        // Au départ la main est sur le contrôleur, et elle le suit
+        let w = c.world(hand, 0.0).apply([0.0, 0.0]);
+        assert!((w[0] - 700.0).abs() < 1.0 && (w[1] - 500.0).abs() < 1.0, "{w:?}");
+        c.layers[ctl].pos = Track::new(560.0, 620.0);
+        let w = c.world(hand, 0.0).apply([0.0, 0.0]);
+        assert!((w[0] - 560.0).abs() < 1.0 && (w[1] - 620.0).abs() < 1.0, "{w:?}");
     }
 }

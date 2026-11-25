@@ -1118,6 +1118,7 @@ impl Editor {
         let mut changed = false;
         let mut new_parent: Option<Option<u64>> = None;
         let mut expose: Option<bool> = None;
+        let mut make_ik = false;
         egui::Frame::new().inner_margin(12).show(ui, |ui| {
             if self.insp_tab == 1 {
                 changed |= self.compo_settings(ui);
@@ -1790,6 +1791,25 @@ impl Editor {
                     }
                 }
             });
+            // Rig 2D : une IK à deux os sur ce calque (son enfant, puis l'enfant de celui-ci)
+            section(ui, "Rig");
+            if let Some(ik) = &mut lay.ik {
+                let mut drop_ik = false;
+                ui.horizontal(|ui| {
+                    changed |= ui.checkbox(&mut ik.flip, crate::i18n::t("plier de l'autre côté")).changed();
+                    drop_ik = ui.add(egui::Button::new(egui::RichText::new(l::X).size(12.0)).frame(false)).on_hover_text(crate::i18n::t("retirer l'IK")).clicked();
+                });
+                if drop_ik {
+                    lay.ik = None;
+                    changed = true;
+                }
+                ui.label(egui::RichText::new(crate::i18n::t("Déplace le contrôleur (objet nul) : les deux os suivent.")).size(11.0).color(p.muted));
+            } else {
+                let b = egui::Button::new(egui::RichText::new(format!("{}  {}", l::BONE, crate::i18n::t("IK à deux os"))).size(12.0)).corner_radius(10);
+                if ui.add(b).on_hover_text(crate::i18n::t("Ce calque, son enfant et l'enfant de celui-ci forment un bras (ou une jambe) : un contrôleur tire le bout, l'épaule et le coude tournent tout seuls")).clicked() {
+                    make_ik = true;
+                }
+            }
             // Modèle : ce calque prête son texte ou sa couleur aux réglages qu'on change depuis la Vidéo
             section(ui, "Modèle");
             {
@@ -1867,6 +1887,15 @@ impl Editor {
                 });
             }
         });
+        if let (true, Some(i)) = (make_ik, self.sel) {
+            match self.compo.make_ik(i, self.time) {
+                Some(c) => {
+                    self.sel = Some(c);
+                    changed = true;
+                }
+                None => self.message = Some(crate::i18n::t("Il faut une chaîne : ce calque, un enfant, et un enfant de cet enfant (relie-les avec le parent).")),
+            }
+        }
         if let (Some(color), Some(i)) = (expose, self.sel) {
             self.compo.toggle_param(i, color);
             changed = true;

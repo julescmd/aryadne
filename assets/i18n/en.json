@@ -3288,5 +3288,13 @@
   "couleur réglable": "editable color",
   "Exposé dans le modèle : on le change depuis la Vidéo, sans ouvrir la composition": "Exposed in the template: change it from Video without opening the composition",
   "Le nom du réglage, comme on le verra dans la Vidéo": "The setting's name, as shown in Video",
-  "Variante du modèle : le modèle d'origine reste tel quel.": "Template variant: the original template stays as is."
+  "Variante du modèle : le modèle d'origine reste tel quel.": "Template variant: the original template stays as is.",
+  "Rig": "Rig",
+  "plier de l'autre côté": "bend the other way",
+  "retirer l'IK": "remove IK",
+  "Déplace le contrôleur (objet nul) : les deux os suivent.": "Move the controller (null object): both bones follow.",
+  "IK à deux os": "Two-bone IK",
+  "Ce calque, son enfant et l'enfant de celui-ci forment un bras (ou une jambe) : un contrôleur tire le bout, l'épaule et le coude tournent tout seuls": "This layer, its child and that child's child form an arm (or a leg): a controller pulls the tip, the shoulder and elbow turn on their own",
+  "Il faut une chaîne : ce calque, un enfant, et un enfant de cet enfant (relie-les avec le parent).": "A chain is needed: this layer, a child, and a child of that child (link them with parenting).",
+  "Contrôleur": "Controller"
 }
