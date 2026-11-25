@@ -230,6 +230,8 @@ pub enum Kind {
         arrow: bool,
     },
     /// Précomposition : une autre composition Motion du coffre, jouée depuis le début du calque
+    /// Objet nul : invisible, sert de parent et de poignée pour piloter d'autres calques
+    Null,
     Compo {
         /// Chemin dans le coffre
         path: String,
@@ -252,6 +254,7 @@ impl Kind {
             Kind::Ellipse { .. } => "ellipse",
             Kind::Image { .. } => "image",
             Kind::Compo { .. } => "composition",
+            Kind::Null => "nul",
             Kind::Path { .. } => "tracé",
         }
     }
@@ -750,6 +753,30 @@ pub struct Compo {
     /// Flou de mouvement (comme After Effects) : None, il est coupé
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blur: Option<MotionBlur>,
+    /// Contrôles : des curseurs nommés, lus par leur nom dans les expressions des calques
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub controls: Vec<Control>,
+}
+
+#[derive(Clone, PartialEq, Serialize, Deserialize, Debug)]
+pub struct Control {
+    pub name: String,
+    pub value: f32,
+    #[serde(default)]
+    pub min: f32,
+    #[serde(default = "hundred")]
+    pub max: f32,
+}
+
+fn hundred() -> f32 {
+    100.0
+}
+
+impl Compo {
+    /// Rend les contrôles lisibles par les expressions (à appeler avant d'évaluer les calques).
+    pub fn publish_controls(&self) {
+        crate::expr::set_controls(self.controls.iter().map(|c| (c.name.clone(), c.value as f64)).collect());
+    }
 }
 
 /// Flou de mouvement : l'image est la moyenne de plusieurs instants pendant que l'obturateur est ouvert
@@ -770,7 +797,7 @@ impl Default for MotionBlur {
 impl Default for Compo {
     /// Une composition neuve : un titre qui entre lettre par lettre, souligné d'un trait qui s'étire
     fn default() -> Compo {
-        let mut c = Compo { w: 1920, h: 1080, fps: 30.0, duration: 6.0, bg: [0x14, 0x10, 0x1a], layers: vec![], music: None, blur: None };
+        let mut c = Compo { w: 1920, h: 1080, fps: 30.0, duration: 6.0, bg: [0x14, 0x10, 0x1a], layers: vec![], music: None, blur: None, controls: vec![] };
         let mut title = Layer::new("Titre", Kind::Text { text: "Titre".into(), size: 140.0, color: [0xf4, 0xee, 0xf1], font: "inter-bold".into(), tracking: -2.0, align: 1 }, &c);
         title.reveal = Some(Reveal::default());
         title.pos.v = [960.0, 500.0];
@@ -1029,6 +1056,7 @@ pub fn size(l: &Layer, cache: &mut Cache) -> [f32; 2] {
         Kind::Rect { w, h, .. } | Kind::Ellipse { w, h, .. } => [*w, *h],
         Kind::Image { path } => cache.image(path).map(|i| [i.width() as f32, i.height() as f32]).unwrap_or([200.0, 120.0]),
         Kind::Compo { path, .. } => cache.compo(path).map(|c| [c.w as f32, c.h as f32]).unwrap_or([400.0, 225.0]),
+        Kind::Null => [100.0, 100.0],
         Kind::Path { points, width, arrow, .. } => {
             // Le cadre est centré sur l'origine du calque : il couvre les points les plus éloignés (et la flèche)
             let (mx, my) = points.iter().fold((0.0f32, 0.0f32), |(a, b), p| (a.max(p[0].abs()), b.max(p[1].abs())));
@@ -1283,6 +1311,7 @@ fn bitmap(l: &Layer, t: f32, k: f32, cache: &mut Cache) -> Option<Bitmap> {
             }
             Some(bm)
         }
+        Kind::Null => None,
         Kind::Compo { path, speed, offset, looped } => {
             if cache.depth >= 4 {
                 return None;
@@ -1506,6 +1535,7 @@ fn sample(img: &image::RgbaImage, x: f32, y: f32) -> [f32; 4] {
 
 /// L'image de la composition à l'instant `t`, à l'échelle `scale` (1 : taille réelle)
 pub fn render(c: &Compo, t: f32, scale: f32, cache: &mut Cache) -> image::RgbaImage {
+    c.publish_controls();
     // Flou de mouvement : seulement s'il y a quelque chose qui bouge
     if let Some(b) = c.blur.filter(|b| b.samples > 1 && b.angle > 0.0) {
         let moving = c.layers.iter().any(|l| l.live(t) && (l.pos.animated() || l.scale.animated() || l.rot.animated() || l.wiggle.is_some() || !l.cycle.is_none()));

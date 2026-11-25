@@ -2856,5 +2856,14 @@
   "copier rotation": "copy rotation",
   "L'objet se place toujours sur l'origine de la cible, même animée": "The object always sits on the target's origin, even animated",
   "L'objet prend toujours la rotation de la cible (objets sans parent)": "The object always takes the target's rotation (objects without a parent)",
-  "limiter la position": "limit location"
+  "limiter la position": "limit location",
+  "Contrôles": "Controls",
+  "Un curseur par réglage ; dans une expression, écris son nom (« force du vent » → force_du_vent).": "One slider per setting; in an expression, type its name (“wind strength” → wind_strength).",
+  "retirer le contrôle": "remove control",
+  "ajouter un contrôle": "add a control",
+  "contrôle": "control",
+  "Objet nul : invisible, sert de parent pour piloter plusieurs calques": "Null object: invisible, a parent to drive several layers",
+  "Invisible au rendu. Les calques dont il est le parent suivent ses mouvements.": "Invisible in the render. Layers it parents follow its moves.",
+  "Nul": "Null",
+  "nul": "null"
 }

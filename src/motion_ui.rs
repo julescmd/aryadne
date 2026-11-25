@@ -140,6 +140,7 @@ fn layer_color(k: &Kind) -> Color32 {
         Kind::Image { .. } => crate::theme::ws_color("3d").unwrap_or(p.info),
         Kind::Compo { .. } => crate::theme::ws_color("motion").unwrap_or(p.accent),
         Kind::Path { .. } => p.accent,
+        Kind::Null => p.muted,
     }
 }
 
@@ -151,6 +152,7 @@ fn layer_icon(k: &Kind) -> &'static str {
         Kind::Image { .. } => l::IMAGE,
         Kind::Compo { .. } => l::FILM,
         Kind::Path { .. } => l::PEN_TOOL,
+        Kind::Null => l::CIRCLE_DASHED,
     }
 }
 
@@ -273,6 +275,7 @@ impl Editor {
             Kind::Image { .. } => "Image",
             Kind::Compo { path, .. } => path.rsplit('/').next().unwrap_or("Composition").trim_end_matches(".arymotion"),
             Kind::Path { .. } => "Tracé",
+            Kind::Null => "Nul",
         };
         let name = self.compo.fresh_name(&crate::i18n::t(base));
         let mut layer = Layer::new(&name, kind, &self.compo);
@@ -434,6 +437,8 @@ impl Editor {
     }
 
     pub fn show(&mut self, ui: &mut egui::Ui) {
+        // Les expressions de l'inspecteur et de la vue lisent les contrôles de cette composition
+        self.compo.publish_controls();
         let p = crate::theme::pal();
         if let Some((t0, from)) = self.playing {
             let t = from + t0.elapsed().as_secs_f32();
@@ -516,6 +521,9 @@ impl Editor {
                 }
                 if ui.add(egui::Button::new(egui::RichText::new(l::IMAGE_PLUS).size(14.0)).min_size(egui::vec2(24.0, 20.0))).on_hover_text(crate::i18n::t("Image…")).clicked() {
                     self.add_image();
+                }
+                if ui.add(egui::Button::new(egui::RichText::new(l::CIRCLE_DASHED).size(14.0)).min_size(egui::vec2(24.0, 20.0))).on_hover_text(crate::i18n::t("Objet nul : invisible, sert de parent pour piloter plusieurs calques")).clicked() {
+                    self.add_layer(Kind::Null, Some([c.0, c.1]));
                 }
                 let me = self.path.clone();
                 let others: Vec<String> = self.comps.iter().filter(|r| !me.ends_with(r.as_str())).cloned().collect();
@@ -962,6 +970,34 @@ impl Editor {
         egui::Frame::new().inner_margin(12).show(ui, |ui| {
             if self.insp_tab == 1 {
                 changed |= self.compo_settings(ui);
+                // Contrôles : des curseurs nommés que les expressions lisent par leur nom
+                section(ui, "Contrôles");
+                ui.label(egui::RichText::new(crate::i18n::t("Un curseur par réglage ; dans une expression, écris son nom (« force du vent » → force_du_vent).")).size(11.0).color(p.muted));
+                let mut gone = None;
+                for (k, c) in self.compo.controls.iter_mut().enumerate() {
+                    ui.horizontal(|ui| {
+                        changed |= ui.add(egui::TextEdit::singleline(&mut c.name).desired_width(90.0)).changed();
+                        let (lo, hi) = (c.min.min(c.max), c.max.max(c.min + 0.001));
+                        changed |= ui.add(egui::Slider::new(&mut c.value, lo..=hi).clamping(egui::SliderClamping::Never)).changed();
+                        if ui.add(egui::Button::new(egui::RichText::new(l::X).size(11.0)).frame(false)).on_hover_text(crate::i18n::t("retirer le contrôle")).clicked() {
+                            gone = Some(k);
+                        }
+                    })
+                    .response
+                    .on_hover_text(crate::expr::control_id(&c.name));
+                }
+                if let Some(k) = gone {
+                    self.compo.controls.remove(k);
+                    changed = true;
+                }
+                if ui.button(format!("{}  {}", l::PLUS, crate::i18n::t("ajouter un contrôle"))).clicked() {
+                    let n = self.compo.controls.len() + 1;
+                    self.compo.controls.push(motion::Control { name: format!("{} {n}", crate::i18n::t_mid("contrôle")), value: 50.0, min: 0.0, max: 100.0 });
+                    changed = true;
+                }
+                if changed {
+                    self.compo.publish_controls();
+                }
                 return;
             }
             let Some(i) = self.sel.filter(|&i| i < self.compo.layers.len()) else {
@@ -1146,6 +1182,9 @@ impl Editor {
                         changed |= ui.checkbox(closed, crate::i18n::t("fermé")).changed();
                         changed |= ui.toggle_value(arrow, egui::RichText::new(l::MOVE_RIGHT).size(14.0)).on_hover_text(crate::i18n::t("Pointe de flèche au bout du tracé")).changed();
                     });
+                }
+                Kind::Null => {
+                    ui.label(egui::RichText::new(crate::i18n::t("Invisible au rendu. Les calques dont il est le parent suivent ses mouvements.")).size(11.0).color(p.muted));
                 }
                 Kind::Compo { path, speed, offset, looped } => {
                     section(ui, "Précomposition");

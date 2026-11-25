@@ -30,6 +30,25 @@ impl Val {
 }
 
 /// Ce que voit une expression
+thread_local! {
+    /// Contrôles de la composition en cours (nom → valeur), lisibles par leur nom dans les expressions
+    static CONTROLS: std::cell::RefCell<Vec<(String, f64)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Nom d'un contrôle tel qu'on l'écrit dans une expression : « Force du vent » → « force_du_vent »
+pub fn control_id(name: &str) -> String {
+    name.trim().to_lowercase().chars().map(|c| if c.is_alphanumeric() { c } else { '_' }).collect()
+}
+
+pub fn set_controls(list: Vec<(String, f64)>) {
+    CONTROLS.with(|c| *c.borrow_mut() = list.into_iter().map(|(n, v)| (control_id(&n), v)).collect());
+}
+
+fn control(name: &str) -> Option<f64> {
+    let id = control_id(name);
+    CONTROLS.with(|c| c.borrow().iter().find(|(n, _)| *n == id).map(|x| x.1))
+}
+
 pub struct Ctx {
     pub time: f64,
     pub value: Val,
@@ -247,7 +266,10 @@ impl P<'_> {
             "fps" => Val::Num(cx.fps),
             "frame" => Val::Num((cx.time * cx.fps).floor()),
             "pi" | "PI" => Val::Num(std::f64::consts::PI),
-            _ => return Err(format!("inconnu : {name}")),
+            _ => match control(name) {
+                Some(v) => Val::Num(v),
+                None => return Err(format!("inconnu : {name}")),
+            },
         })
     }
 
@@ -334,6 +356,15 @@ mod tests {
 
     fn cx(time: f64, value: Val) -> Ctx {
         Ctx { time, value, index: 2.0, fps: 24.0, seed: 7 }
+    }
+
+    #[test]
+    fn controles() {
+        set_controls(vec![("Force du vent".into(), 3.0)]);
+        let cx = Ctx { time: 0.0, value: Val::Num(0.0), index: 0.0, fps: 30.0, seed: 1 };
+        assert_eq!(eval("force_du_vent * 2", &cx).unwrap().num(), 6.0);
+        set_controls(vec![]);
+        assert!(eval("force_du_vent", &cx).is_err());
     }
 
     #[test]
