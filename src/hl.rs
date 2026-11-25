@@ -171,3 +171,78 @@ mod tests {
         assert!(supports("py") && !supports("md"));
     }
 }
+
+/// Paires de parenthèses colorées selon leur profondeur (comme VS Code) : seules celles de la couleur du
+/// texte ordinaire changent, donc jamais dans une chaîne ou un commentaire
+pub fn color_brackets(job: &mut eframe::egui::text::LayoutJob, plain: Color32, dark: bool) {
+    use eframe::egui::text::ByteIndex as BI;
+    let cols = if dark {
+        [Color32::from_rgb(0xe6, 0xc0, 0x7b), Color32::from_rgb(0xd0, 0x8f, 0xd6), Color32::from_rgb(0x7f, 0xb4, 0xe6)]
+    } else {
+        [Color32::from_rgb(0x9a, 0x6a, 0x00), Color32::from_rgb(0x9a, 0x3f, 0xa6), Color32::from_rgb(0x1f, 0x66, 0xb3)]
+    };
+    let text = job.text.clone();
+    let mut depth = 0usize;
+    let mut out = Vec::with_capacity(job.sections.len());
+    for sec in std::mem::take(&mut job.sections) {
+        let (s0, s1) = (sec.byte_range.start.0, sec.byte_range.end.0);
+        if sec.format.color != plain || !text[s0..s1].contains(['(', ')', '[', ']', '{', '}']) {
+            out.push(sec);
+            continue;
+        }
+        let mut start = s0;
+        for (i, c) in text[s0..s1].char_indices() {
+            let b = s0 + i;
+            let open = matches!(c, '(' | '[' | '{');
+            if !open && !matches!(c, ')' | ']' | '}') {
+                continue;
+            }
+            if !open {
+                depth = depth.saturating_sub(1);
+            }
+            let color = cols[depth % 3];
+            if open {
+                depth += 1;
+            }
+            if b > start {
+                let lead = if start == s0 { sec.leading_space } else { 0.0 };
+                out.push(eframe::egui::text::LayoutSection { leading_space: lead, byte_range: BI(start)..BI(b), format: sec.format.clone() });
+            }
+            let mut f = sec.format.clone();
+            f.color = color;
+            let lead = if b == s0 { sec.leading_space } else { 0.0 };
+            out.push(eframe::egui::text::LayoutSection { leading_space: lead, byte_range: BI(b)..BI(b + 1), format: f });
+            start = b + 1;
+        }
+        if start < s1 {
+            out.push(eframe::egui::text::LayoutSection { leading_space: 0.0, byte_range: BI(start)..BI(s1), format: sec.format.clone() });
+        }
+    }
+    job.sections = out;
+}
+
+#[cfg(test)]
+mod bracket_tests {
+    use super::*;
+
+    #[test]
+    fn paires_colorees() {
+        let c = colors(true);
+        let mut job = highlight("f(a[b], \"(x)\") // (c)", "rs", eframe::egui::FontId::monospace(12.0), &c);
+        color_brackets(&mut job, c.text, true);
+        let color_at = |b: usize| job.sections.iter().find(|s| s.byte_range.start.0 <= b && b < s.byte_range.end.0).unwrap().format.color;
+        let t = job.text.clone();
+        let (o1, o2) = (t.find('(').unwrap(), t.find('[').unwrap());
+        assert_ne!(color_at(o1), c.text);
+        assert_ne!(color_at(o1), color_at(o2));
+        // La fermante a la couleur de son ouvrante
+        assert_eq!(color_at(t.find(']').unwrap()), color_at(o2));
+        let close = t.find("\")").map(|i| i + 1).unwrap();
+        assert_eq!(color_at(close), color_at(o1));
+        // Dans la chaîne et le commentaire : inchangées
+        let in_str = t.find("\"(").unwrap() + 1;
+        assert_eq!(color_at(in_str), c.string);
+        let sections_ok = job.sections.windows(2).all(|w| w[0].byte_range.end == w[1].byte_range.start);
+        assert!(sections_ok);
+    }
+}

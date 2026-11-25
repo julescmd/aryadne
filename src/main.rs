@@ -3623,7 +3623,10 @@ impl App {
                             md_layout(buf.as_str(), fs)
                         } else if hl::supports(&lang) {
                             // Couleurs de la charte (maquette) pour les langages courants
-                            hl::highlight(buf.as_str(), &lang, egui::FontId::monospace(fs), &hl::colors(dark))
+                            let cols = hl::colors(dark);
+                            let mut j = hl::highlight(buf.as_str(), &lang, egui::FontId::monospace(fs), &cols);
+                            hl::color_brackets(&mut j, cols.text, dark);
+                            j
                         } else {
                             egui_extras::syntax_highlighting::highlight(ui.ctx(), ui.style(), &theme, buf.as_str(), &lang)
                         };
