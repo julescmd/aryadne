@@ -176,10 +176,18 @@ pub enum Adj {
     BlackWhite,
     Threshold { t: f32 },
     Posterize { levels: f32 },
+    /// Grain photo : quantité, taille des grains (pixels)
+    Grain { amount: f32, size: f32 },
+    /// Clarté : contraste des tons moyens (les noirs et blancs bougent peu)
+    Clarity { amount: f32 },
+    /// Voile : retire (ou ajoute) la brume claire qui délave l'image
+    Dehaze { amount: f32 },
+    /// Vibrance : sature surtout les couleurs ternes
+    Vibrance { amount: f32 },
 }
 
 impl Adj {
-    pub const NEW: [(&'static str, Adj); 8] = [
+    pub const NEW: [(&'static str, Adj); 12] = [
         ("Luminosité/Contraste", Adj::BrightContrast { b: 0.0, c: 0.0 }),
         ("Niveaux", Adj::Levels { black: 0.0, white: 1.0, gamma: 1.0 }),
         ("Exposition", Adj::Exposure { ev: 0.0 }),
@@ -188,6 +196,10 @@ impl Adj {
         ("Inverser", Adj::Invert),
         ("Seuil", Adj::Threshold { t: 0.5 }),
         ("Isohélie", Adj::Posterize { levels: 4.0 }),
+        ("Grain", Adj::Grain { amount: 0.25, size: 1.5 }),
+        ("Clarté", Adj::Clarity { amount: 0.4 }),
+        ("Voile", Adj::Dehaze { amount: 0.3 }),
+        ("Vibrance", Adj::Vibrance { amount: 0.4 }),
     ];
 
     pub fn name(&self) -> &'static str {
@@ -213,6 +225,46 @@ impl Adj {
                 let n = levels.round().max(2.0) - 1.0;
                 c.map(|x| (x * n).round() / n)
             }
+            Adj::Grain { .. } => c,
+            Adj::Clarity { amount } => {
+                // Courbe en S centrée sur la luminance, pesée vers les tons moyens
+                let l = lum(c);
+                let w = 4.0 * l * (1.0 - l);
+                let s = (l - 0.5) * amount * w;
+                c.map(|x| (x + s).clamp(0.0, 1.0))
+            }
+            Adj::Dehaze { amount } => {
+                // Modèle de brume : c = j·(1 - a) + a (a : épaisseur du voile clair)
+                let a = amount.clamp(-0.9, 0.9);
+                if a >= 0.0 {
+                    c.map(|x| ((x - a) / (1.0 - a)).clamp(0.0, 1.0))
+                } else {
+                    c.map(|x| (x * (1.0 + a) - a).clamp(0.0, 1.0))
+                }
+            }
+            Adj::Vibrance { amount } => {
+                let mut hsv = egui::ecolor::Hsva::from_rgb(c);
+                hsv.s = (hsv.s + amount * (1.0 - hsv.s) * hsv.s.max(0.15)).clamp(0.0, 1.0);
+                if amount < 0.0 {
+                    hsv.s = (hsv.s * (1.0 + amount)).max(0.0);
+                }
+                hsv.to_rgb()
+            }
+        }
+    }
+
+    /// Comme `apply`, pour un pixel précis du document (le grain dépend de la position)
+    pub fn apply_at(&self, c: [f32; 3], x: i32, y: i32) -> [f32; 3] {
+        match *self {
+            Adj::Grain { amount, size } => {
+                let s = size.max(0.5);
+                let n = grain_noise((x as f32 / s) as i32, (y as f32 / s) as i32) - 0.5;
+                // Plus visible dans les tons moyens, comme un film
+                let l = lum(c);
+                let w = 0.35 + 2.6 * l * (1.0 - l);
+                c.map(|v| (v + n * amount * w).clamp(0.0, 1.0))
+            }
+            _ => self.apply(c),
         }
     }
 }
@@ -226,6 +278,9 @@ pub struct Fx {
     pub glow: Option<FxGlow>,
     pub overlay: Option<FxOverlay>,
     pub stroke: Option<FxStroke>,
+    /// Fusion conditionnelle (Blend If) : luminance de dessous où le calque se montre [de, à]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blend_if: Option<[f32; 2]>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Debug)]
@@ -552,7 +607,7 @@ fn stack(d: &mut [f32; 4], layers: &[&Layer], x: i32, y: i32, mul: f32) {
                 continue;
             }
             let below = [d[0], d[1], d[2]];
-            let c = l.blend.mix(below, adj.apply(below));
+            let c = l.blend.mix(below, adj.apply_at(below, x, y));
             for ch in 0..3 {
                 d[ch] = below[ch] + (c[ch] - below[ch]) * k;
             }
@@ -573,6 +628,12 @@ fn stack(d: &mut [f32; 4], layers: &[&Layer], x: i32, y: i32, mul: f32) {
             continue;
         }
         let mut sc = [s[0] as f32 / 255.0, s[1] as f32 / 255.0, s[2] as f32 / 255.0];
+        // Fusion conditionnelle : le calque ne se montre que sur les tons de dessous choisis
+        if let Some([lo, hi]) = l.fx.blend_if {
+            if d[3] > 0.0 {
+                a *= blend_if_k(lo, hi, lum([d[0], d[1], d[2]]));
+            }
+        }
         if l.fx.active() {
             let maps = l.fx_maps.as_deref();
             let col = |c: [u8; 3]| c.map(|v| v as f32 / 255.0);
@@ -917,6 +978,10 @@ pub enum Tool {
     Clone,
     /// Correcteur localisé : la zone peinte est reconstruite à partir de ses bords
     Heal,
+    /// Doigt : étale la peinture dans le sens du trait
+    Smudge,
+    /// Fluidité : pousse les pixels dans le sens du trait (déformation)
+    Liquify,
     Eraser,
     Fill,
     Gradient,
@@ -936,6 +1001,22 @@ const BRUSH_PRESETS: [(&str, f32, f32, f32, f32, bool, bool, f32); 7] = [
 ];
 
 /// Texture du papier : un bruit de valeur fixe (entre 0 et 1), à grains de deux tailles.
+/// Part d'un calque en fusion conditionnelle : 1 entre `lo` et `hi`, fondu doux de part et d'autre
+pub fn blend_if_k(lo: f32, hi: f32, l: f32) -> f32 {
+    const SOFT: f32 = 0.08;
+    let a = if lo <= 0.0 { 1.0 } else { ((l - lo + SOFT) / SOFT).clamp(0.0, 1.0) };
+    let b = if hi >= 1.0 { 1.0 } else { ((hi + SOFT - l) / SOFT).clamp(0.0, 1.0) };
+    a * b
+}
+
+/// Bruit blanc fixe (grain de film)
+fn grain_noise(x: i32, y: i32) -> f32 {
+    let mut n = (x as u32).wrapping_mul(2246822519) ^ (y as u32).wrapping_mul(3266489917) ^ 0x9e37_79b9;
+    n = (n ^ (n >> 15)).wrapping_mul(2654435761);
+    n ^= n >> 13;
+    (n & 0xffff) as f32 / 65535.0
+}
+
 fn paper(x: i32, y: i32) -> f32 {
     fn h(x: i32, y: i32) -> f32 {
         let mut n = (x as u32).wrapping_mul(374761393) ^ (y as u32).wrapping_mul(668265263);
@@ -954,7 +1035,7 @@ fn paper(x: i32, y: i32) -> f32 {
     ((n - 0.35) * 1.8).clamp(0.0, 1.0)
 }
 
-const TOOLS: [(Tool, &str, &str, &str); 14] = [
+const TOOLS: [(Tool, &str, &str, &str); 16] = [
     (Tool::Move, crate::lucide::MOVE, "déplacer le calque", "V"),
     (Tool::Select, crate::lucide::SQUARE_DASHED, "sélection rectangulaire", "M"),
     (Tool::Ellipse, crate::lucide::CIRCLE_DASHED, "sélection elliptique", "O"),
@@ -964,6 +1045,8 @@ const TOOLS: [(Tool, &str, &str, &str); 14] = [
     (Tool::Brush, crate::lucide::PAINTBRUSH, "pinceau", "B"),
     (Tool::Clone, crate::lucide::STAMP, "tampon de duplication (Alt+clic : source)", "S"),
     (Tool::Heal, crate::lucide::BANDAGE, "correcteur localisé : peindre sur une tache", "J"),
+    (Tool::Smudge, crate::lucide::POINTER, "doigt : étaler la peinture (le flux règle la force)", "R"),
+    (Tool::Liquify, crate::lucide::WAVES, "fluidité : pousser les pixels (déformer)", "U"),
     (Tool::Eraser, crate::lucide::ERASER, "gomme", "E"),
     (Tool::Fill, crate::lucide::PAINT_BUCKET, "pot de peinture", "G"),
     (Tool::Gradient, crate::lucide::BLEND, "dégradé", "G"),
@@ -1266,6 +1349,9 @@ pub struct Editor {
     crop_drag: Option<(u8, Pos2)>,
     /// Règles visibles (Ctrl+R) et repère qu'on tire
     rulers: bool,
+    /// Avant / après : l'image à l'ouverture, et la séparation (part de la largeur de la toile à l'écran)
+    before: Option<(egui::ColorImage, Option<egui::TextureHandle>)>,
+    split: Option<f32>,
     guide_drag: Option<usize>,
     /// Vue tournée (radians) et en miroir : l'image ne change pas
     view_rot: f32,
@@ -1273,6 +1359,10 @@ pub struct Editor {
     history_open: bool,
     /// Trait du correcteur en cours (affiché en surimpression jusqu'au relâché)
     heal_trail: Vec<Pos2>,
+    /// Doigt : la peinture « sur le doigt » (RGBA, carré de côté 2R+1) ; fluidité : le tampon d'avant
+    smudge_buf: Vec<[f32; 4]>,
+    smudge_r: i32,
+    prev_dab: Option<Pos2>,
     pub save_due: Option<Instant>,
     pub message: Option<String>,
     adjust: Option<(Adjust, Layer, [f32; 2])>,
@@ -1378,7 +1468,13 @@ impl Editor {
     pub fn open(path: PathBuf) -> Result<Editor, String> {
         let doc = Doc::load(&path)?;
         let n = doc.w * doc.h * 4;
+        let before = {
+            let img = doc.flatten();
+            Some((egui::ColorImage::from_rgba_unmultiplied([img.width() as usize, img.height() as usize], img.as_raw()), None))
+        };
         Ok(Editor {
+            before,
+            split: None,
             path,
             comp: vec![0; n],
             dirty: Some([0, 0, doc.w, doc.h]),
@@ -1449,6 +1545,9 @@ impl Editor {
             view_flip: false,
             history_open: false,
             heal_trail: vec![],
+            smudge_buf: vec![],
+            smudge_r: 0,
+            prev_dab: None,
             clone_src: None,
             clone_off: None,
         })
@@ -1956,7 +2055,170 @@ impl Editor {
         }
     }
 
+    /// Le calque que touche le trait en cours (le calque, son masque ou celui de son groupe)
+    fn stroke_target(&mut self) -> &mut Layer {
+        let edit_mask = self.painting_mask();
+        match self.group_mask_target() {
+            Some(gi) => self.doc.groups[gi].mask.0.as_deref_mut().unwrap(),
+            None => {
+                let la = &mut self.doc.layers[self.doc.active];
+                if edit_mask && la.mask.is_some() {
+                    la.mask.as_deref_mut().unwrap()
+                } else {
+                    la
+                }
+            }
+        }
+    }
+
+    /// Doigt : dépose la peinture prise au tampon d'avant, puis en reprend là
+    fn smudge_one(&mut self, c: Pos2) {
+        let pr = self.pressure.clamp(0.02, 1.0);
+        let r = (self.size / 2.0 * if self.press_size { pr } else { 1.0 }).max(1.0);
+        let strength = (self.flow * 0.85 * if self.press_flow { pr } else { 1.0 }).clamp(0.0, 0.95);
+        let hard = self.hardness.clamp(0.0, 0.99);
+        let first = self.smudge_buf.is_empty();
+        if first {
+            self.smudge_r = (self.size / 2.0).ceil() as i32 + 1;
+            let n = (2 * self.smudge_r + 1) as usize;
+            self.smudge_buf = vec![[0.0; 4]; n * n];
+        }
+        let big = self.smudge_r;
+        let side = (2 * big + 1) as usize;
+        let sel: Vec<f32> = {
+            let (cx, cy) = (c.x.floor() as i32, c.y.floor() as i32);
+            (-big..=big).flat_map(|dy| (-big..=big).map(move |dx| (dx, dy))).map(|(dx, dy)| self.sel_k(cx + dx, cy + dy)).collect()
+        };
+        let lock_alpha = !self.painting_mask() && self.doc.layers[self.doc.active].lock_alpha;
+        let mut buf = std::mem::take(&mut self.smudge_buf);
+        let l = self.stroke_target();
+        let (cx, cy) = (c.x.floor() as i32, c.y.floor() as i32);
+        for dy in -big..=big {
+            for dx in -big..=big {
+                let bi = ((dy + big) as usize) * side + (dx + big) as usize;
+                let (lx, ly) = (cx + dx - l.off[0], cy + dy - l.off[1]);
+                if lx < 0 || ly < 0 || lx as usize >= l.w || ly as usize >= l.h {
+                    continue;
+                }
+                let i = (ly as usize * l.w + lx as usize) * 4;
+                let px = [l.px[i] as f32, l.px[i + 1] as f32, l.px[i + 2] as f32, l.px[i + 3] as f32];
+                if first {
+                    buf[bi] = px;
+                    continue;
+                }
+                let d = (((dx * dx + dy * dy) as f32).sqrt()) / r;
+                if d > 1.0 {
+                    buf[bi] = px;
+                    continue;
+                }
+                let k0 = if d <= hard { 1.0 } else { 1.0 - (d - hard) / (1.0 - hard) };
+                let k = k0 * k0 * (3.0 - 2.0 * k0) * strength * sel[bi];
+                let b = buf[bi];
+                // Mélange pondéré par la couverture (le vide ne salit pas la couleur)
+                let oa = px[3] + (b[3] - px[3]) * k;
+                let mut out = [0.0f32; 4];
+                for ch in 0..3 {
+                    let w0 = px[3] * (1.0 - k);
+                    let w1 = b[3] * k;
+                    out[ch] = if w0 + w1 > 0.0 { (px[ch] * w0 + b[ch] * w1) / (w0 + w1) } else { px[ch] };
+                }
+                out[3] = if lock_alpha { px[3] } else { oa };
+                for ch in 0..4 {
+                    l.px[i + ch] = out[ch].round().clamp(0.0, 255.0) as u8;
+                }
+                // Le doigt garde une part de sa peinture et prend un peu de la nouvelle
+                for ch in 0..4 {
+                    buf[bi][ch] = b[ch] * strength + out[ch] * (1.0 - strength);
+                }
+            }
+        }
+        self.smudge_buf = buf;
+        let (w, h) = (self.doc.w, self.doc.h);
+        let clamp = |v: i32, m: usize| v.clamp(0, m as i32) as usize;
+        self.touched([clamp(cx - big, w), clamp(cy - big, h), clamp(cx + big + 1, w), clamp(cy + big + 1, h)]);
+    }
+
+    /// Fluidité : les pixels du tampon suivent le mouvement depuis le tampon d'avant
+    fn liquify_one(&mut self, c: Pos2) {
+        let Some(prev) = self.prev_dab.replace(c) else { return };
+        let delta = c - prev;
+        if delta.length() < 0.01 {
+            return;
+        }
+        let pr = self.pressure.clamp(0.02, 1.0);
+        let r = (self.size / 2.0 * if self.press_size { pr } else { 1.0 }).max(1.0);
+        let strength = (self.flow * if self.press_flow { pr } else { 1.0 }).clamp(0.0, 1.0);
+        let (x0, y0, x1, y1) = ((c.x - r).floor() as i32, (c.y - r).floor() as i32, (c.x + r).ceil() as i32, (c.y + r).ceil() as i32);
+        let selk: Vec<f32> = (y0..=y1).flat_map(|y| (x0..=x1).map(move |x| (x, y))).map(|(x, y)| self.sel_k(x, y)).collect();
+        let l = self.stroke_target();
+        // Copie de la zone (élargie du déplacement) pour lire les pixels d'avant
+        let m = delta.length().ceil() as i32 + 2;
+        let (bx0, by0) = ((x0 - m - l.off[0]).max(0), (y0 - m - l.off[1]).max(0));
+        let (bx1, by1) = ((x1 + m - l.off[0]).min(l.w as i32 - 1), (y1 + m - l.off[1]).min(l.h as i32 - 1));
+        if bx1 < bx0 || by1 < by0 {
+            return;
+        }
+        let bw = (bx1 - bx0 + 1) as usize;
+        let mut copy = Vec::with_capacity(bw * (by1 - by0 + 1) as usize * 4);
+        for y in by0..=by1 {
+            let i = (y as usize * l.w + bx0 as usize) * 4;
+            copy.extend_from_slice(&l.px[i..i + bw * 4]);
+        }
+        let bh = (by1 - by0 + 1) as usize;
+        let sample = |fx: f32, fy: f32| -> [f32; 4] {
+            // Bilinéaire dans la copie (coordonnées du calque)
+            let (fx, fy) = ((fx - bx0 as f32 - 0.5).clamp(0.0, bw as f32 - 1.0), (fy - by0 as f32 - 0.5).clamp(0.0, bh as f32 - 1.0));
+            let (ix, iy) = (fx.floor() as usize, fy.floor() as usize);
+            let (tx, ty) = (fx - ix as f32, fy - iy as f32);
+            let (ix1, iy1) = ((ix + 1).min(bw - 1), (iy + 1).min(bh - 1));
+            let g = |x: usize, y: usize, ch: usize| copy[(y * bw + x) * 4 + ch] as f32;
+            let mut o = [0.0; 4];
+            for (ch, v) in o.iter_mut().enumerate() {
+                let a = g(ix, iy, ch) + (g(ix1, iy, ch) - g(ix, iy, ch)) * tx;
+                let b = g(ix, iy1, ch) + (g(ix1, iy1, ch) - g(ix, iy1, ch)) * tx;
+                *v = a + (b - a) * ty;
+            }
+            o
+        };
+        let row = (x1 - x0 + 1) as usize;
+        for y in y0..=y1 {
+            for x in x0..=x1 {
+                let d = ((x as f32 + 0.5 - c.x).powi(2) + (y as f32 + 0.5 - c.y).powi(2)).sqrt() / r;
+                if d > 1.0 {
+                    continue;
+                }
+                let k0 = 1.0 - d;
+                let k = k0 * k0 * (3.0 - 2.0 * k0) * strength * selk[(y - y0) as usize * row + (x - x0) as usize];
+                if k <= 0.0 {
+                    continue;
+                }
+                let (lx, ly) = (x - l.off[0], y - l.off[1]);
+                if lx < 0 || ly < 0 || lx as usize >= l.w || ly as usize >= l.h {
+                    continue;
+                }
+                let v = sample(lx as f32 + 0.5 - delta.x * k, ly as f32 + 0.5 - delta.y * k);
+                let i = (ly as usize * l.w + lx as usize) * 4;
+                for ch in 0..4 {
+                    l.px[i + ch] = v[ch].round().clamp(0.0, 255.0) as u8;
+                }
+            }
+        }
+        let (w, h) = (self.doc.w, self.doc.h);
+        let clamp = |v: i32, m: usize| v.clamp(0, m as i32) as usize;
+        self.touched([clamp(x0, w), clamp(y0, h), clamp(x1 + 1, w), clamp(y1 + 1, h)]);
+    }
+
     fn dab_one(&mut self, c: Pos2) {
+        match self.tool {
+            Tool::Smudge => return self.smudge_one(c),
+            Tool::Liquify => {
+                if self.prev_dab.is_none() {
+                    self.prev_dab = Some(c);
+                }
+                return self.liquify_one(c);
+            }
+            _ => {}
+        }
         let edit_mask = self.painting_mask();
         let lock_alpha = !edit_mask && self.doc.layers[self.doc.active].lock_alpha;
         let col = self.paint_color();
@@ -2534,7 +2796,7 @@ impl Editor {
                 ui.label(egui::RichText::new(format!("{icon}  {}", crate::i18n::t(label))).size(12.5));
             }
             match self.tool {
-                Tool::Brush | Tool::Eraser | Tool::Clone | Tool::Heal => {
+                Tool::Brush | Tool::Eraser | Tool::Clone | Tool::Heal | Tool::Smudge | Tool::Liquify => {
                     ui.add(egui::DragValue::new(&mut self.size).range(0.1..=10000.0).speed(0.5).prefix(format!("{} ", crate::i18n::t("diamètre")))).on_hover_text("[ ]");
                     // Un curseur avec son nom ne passe pas à la ligne tout seul
                     if ui.max_rect().right() - ui.cursor().left() < 190.0 {
@@ -2944,6 +3206,46 @@ impl Editor {
                 painter.add(egui::Shape::mesh(mesh));
             }
         }
+        // Avant / après : l'image d'ouverture à gauche de la séparation
+        if let Some(f) = self.split {
+            let same = self.before.as_ref().is_some_and(|b| b.0.size == [self.doc.w, self.doc.h]);
+            if same {
+                let bt = self.before.as_mut().unwrap();
+                let tex = bt.1.get_or_insert_with(|| ctx.load_texture("paint-before", bt.0.clone(), egui::TextureOptions::NEAREST)).clone();
+                let sx = rect.left() + rect.width() * f;
+                let clip = painter.with_clip_rect(Rect::from_min_max(rect.min, pos2(sx, rect.bottom())));
+                let mut mesh = egui::Mesh::with_texture(tex.id());
+                for (x, y, u, v) in [(0.0, 0.0, 0.0, 0.0), (dw, 0.0, 1.0, 0.0), (dw, dh, 1.0, 1.0), (0.0, dh, 0.0, 1.0)] {
+                    mesh.vertices.push(egui::epaint::Vertex { pos: to_screen(x, y), uv: pos2(u, v), color: Color32::WHITE });
+                }
+                mesh.add_triangle(0, 1, 2);
+                mesh.add_triangle(0, 2, 3);
+                clip.add(egui::Shape::mesh(mesh));
+                // La séparation, qu'on glisse
+                let handle = Rect::from_center_size(pos2(sx, rect.center().y), vec2(14.0, rect.height()));
+                let hr = ui.interact(handle, ui.id().with("split-handle"), egui::Sense::drag());
+                if hr.dragged() {
+                    if let Some(q) = hr.interact_pointer_pos() {
+                        self.split = Some(((q.x - rect.left()) / rect.width()).clamp(0.02, 0.98));
+                    }
+                }
+                if hr.hovered() || hr.dragged() {
+                    ctx.set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+                }
+                painter.line_segment([pos2(sx, rect.top()), pos2(sx, rect.bottom())], Stroke::new(2.0, Color32::WHITE));
+                painter.circle(pos2(sx, rect.center().y), 9.0, p.panel, Stroke::new(1.5, Color32::WHITE));
+                painter.text(pos2(sx, rect.center().y), egui::Align2::CENTER_CENTER, "↔", egui::FontId::proportional(11.0), p.text);
+                for (x, t, al) in [(sx - 10.0, crate::i18n::t("avant"), egui::Align2::RIGHT_TOP), (sx + 10.0, crate::i18n::t("après"), egui::Align2::LEFT_TOP)] {
+                    let g = painter.layout_no_wrap(t, egui::FontId::proportional(11.5), Color32::WHITE);
+                    let r = al.anchor_size(pos2(x, rect.top() + 10.0), g.size() + vec2(10.0, 4.0));
+                    painter.rect_filled(r, 3.0, Color32::from_black_alpha(150));
+                    painter.galley(r.min + vec2(5.0, 2.0), g, Color32::WHITE);
+                }
+            } else {
+                self.split = None;
+                self.message = Some(crate::i18n::t("avant / après : la taille de l'image a changé depuis l'ouverture"));
+            }
+        }
         if plain {
             painter.rect_stroke(canvas, 0.0, Stroke::new(1.0, p.line), egui::StrokeKind::Outside);
         } else {
@@ -3018,7 +3320,7 @@ impl Editor {
             if self.swallow_click || self.swatch_pick.is_some() {
                 // Fermer le sélecteur de couleur : rien d'autre
             } else if resp.drag_started_by(egui::PointerButton::Primary) {
-                if matches!(self.tool, Tool::Brush | Tool::Eraser | Tool::Clone | Tool::Heal | Tool::Move) {
+                if matches!(self.tool, Tool::Brush | Tool::Eraser | Tool::Clone | Tool::Heal | Tool::Smudge | Tool::Liquify | Tool::Move) {
                     self.locked();
                 }
                 if let Some(at) = ui.input(|i| i.pointer.press_origin()) {
@@ -3033,7 +3335,7 @@ impl Editor {
                         Tool::Clone if self.clone_src.is_none() => {
                             self.message = Some(crate::i18n::t("Alt+clic d'abord pour choisir où prendre les pixels"));
                         }
-                        Tool::Brush | Tool::Eraser | Tool::Clone | Tool::Heal if self.doc.layers[self.doc.active].visible && !self.doc.layers[self.doc.active].lock_all => {
+                        Tool::Brush | Tool::Eraser | Tool::Clone | Tool::Heal | Tool::Smudge | Tool::Liquify if self.doc.layers[self.doc.active].visible && !self.doc.layers[self.doc.active].lock_all => {
                             if self.tool == Tool::Clone && self.clone_off.is_none() {
                                 if let Some(src) = self.clone_src {
                                     self.clone_off = Some(src - d);
@@ -3044,6 +3346,8 @@ impl Editor {
                             let l = self.target_ref().clone();
                             let n = l.w * l.h;
                             self.stroke = Some((l, vec![0.0; n], d));
+                            self.smudge_buf.clear();
+                            self.prev_dab = None;
                             self.stab = Some(d);
                             self.stroke_from = Some(d);
                             self.dab(d);
@@ -3079,7 +3383,7 @@ impl Editor {
                 if let Some(at) = resp.interact_pointer_pos() {
                     let d = to_doc(at);
                     match self.tool {
-                        Tool::Brush | Tool::Eraser | Tool::Clone | Tool::Heal => {
+                        Tool::Brush | Tool::Eraser | Tool::Clone | Tool::Heal | Tool::Smudge | Tool::Liquify => {
                             let d = match self.stroke_from {
                                 Some(f) => self.persp_snap_pt(f, d),
                                 None => d,
@@ -3237,7 +3541,7 @@ impl Editor {
                         Tool::Clone if self.clone_src.is_none() => {
                             self.message = Some(crate::i18n::t("Alt+clic d'abord pour choisir où prendre les pixels"));
                         }
-                        Tool::Brush | Tool::Eraser | Tool::Clone | Tool::Heal if !self.doc.layers[self.doc.active].lock_all => {
+                        Tool::Brush | Tool::Eraser | Tool::Clone | Tool::Heal | Tool::Smudge | Tool::Liquify if !self.doc.layers[self.doc.active].lock_all => {
                             if self.tool == Tool::Clone && self.clone_off.is_none() {
                                 if let Some(src) = self.clone_src {
                                     self.clone_off = Some(src - d);
@@ -3267,7 +3571,7 @@ impl Editor {
                             self.commit_text(ui.ctx());
                             self.text = Some(TextDraft { at: [d.x, d.y], s: String::new(), preview: None, focus: true });
                         }
-                        Tool::Gradient | Tool::Move | Tool::Brush | Tool::Eraser | Tool::Clone | Tool::Heal | Tool::Crop => {}
+                        Tool::Gradient | Tool::Move | Tool::Brush | Tool::Eraser | Tool::Clone | Tool::Heal | Tool::Smudge | Tool::Liquify | Tool::Crop => {}
                     }
                 }
             }
@@ -3506,7 +3810,7 @@ impl Editor {
             painter.rect_filled(Rect::from_min_size(rect.min, vec2(ruler_w, ruler_w)), 0.0, bg);
         }
         // Rond du pinceau sous le pointeur
-        if let (Some(at), true) = (hover.filter(|q| rect.contains(*q)), matches!(self.tool, Tool::Brush | Tool::Eraser | Tool::Clone | Tool::Heal)) {
+        if let (Some(at), true) = (hover.filter(|q| rect.contains(*q)), matches!(self.tool, Tool::Brush | Tool::Eraser | Tool::Clone | Tool::Heal | Tool::Smudge | Tool::Liquify)) {
             painter.circle_stroke(at, (self.size * self.zoom / 2.0).max(1.0), Stroke::new(1.0, Color32::from_black_alpha(160)));
             painter.circle_stroke(at, (self.size * self.zoom / 2.0).max(1.0) + 1.0, Stroke::new(1.0, Color32::from_white_alpha(160)));
             // Le point lissé que suit le trait
@@ -3519,12 +3823,15 @@ impl Editor {
         }
         // Barre de vue en bas à droite de la toile : taille, zoom, ajuster, tourner, miroir, règles
         {
-            let bar = Rect::from_min_size(pos2(rect.right() - 286.0, rect.bottom() - 30.0), vec2(280.0, 24.0));
+            let bar = Rect::from_min_size(pos2(rect.right() - 312.0, rect.bottom() - 30.0), vec2(306.0, 24.0));
             painter.rect_filled(bar, 0.0, p.panel.gamma_multiply(0.92));
             painter.rect_stroke(bar, 0.0, Stroke::new(1.0, p.line), egui::StrokeKind::Inside);
             ui.scope_builder(egui::UiBuilder::new().max_rect(bar.shrink2(vec2(6.0, 2.0))).layout(egui::Layout::right_to_left(egui::Align::Center)), |ui| {
                 ui.spacing_mut().item_spacing.x = 2.0;
                 let vb = |ui: &mut egui::Ui, icon: &str, on: bool, tip: &str| ui.add(egui::Button::new(egui::RichText::new(icon).size(13.0)).selected(on).frame(on).min_size(egui::vec2(22.0, 20.0))).on_hover_text(crate::i18n::t(tip)).clicked();
+                if vb(ui, crate::lucide::COLUMNS_2, self.split.is_some(), "Avant / après : l'image à l'ouverture à gauche, glisser la séparation") {
+                    self.split = if self.split.is_some() { None } else { Some(0.5) };
+                }
                 if vb(ui, crate::lucide::RULER, self.rulers, "Règles et repères (Ctrl+R) : tirer depuis une règle pour poser un repère") {
                     self.rulers = !self.rulers;
                 }
@@ -4247,6 +4554,23 @@ impl Editor {
                     }
                 });
             });
+            // Fusion conditionnelle (pour les calques de pixels)
+            if l.adj.is_none() {
+                ui.horizontal(|ui| {
+                    let mut on = l.fx.blend_if.is_some();
+                    if ui.checkbox(&mut on, crate::i18n::t("fusion conditionnelle")).on_hover_text(crate::i18n::t("Montrer le calque seulement sur les tons de dessous choisis (Blend If) : sans masque, par la luminosité")).changed() {
+                        l.fx.blend_if = on.then_some([0.0, 1.0]);
+                        changed = true;
+                    }
+                });
+                if let Some(b) = l.fx.blend_if.as_mut() {
+                    changed |= ui.add(egui::Slider::new(&mut b[0], 0.0..=1.0).text(crate::i18n::t("à partir des tons"))).changed();
+                    changed |= ui.add(egui::Slider::new(&mut b[1], 0.0..=1.0).text(crate::i18n::t("jusqu'aux tons"))).changed();
+                    if b[0] > b[1] {
+                        b.swap(0, 1);
+                    }
+                }
+            }
         }
         // Propriétés du calque de réglage choisi
         if let Some(adj) = self.doc.layers[a].adj.as_mut() {
@@ -4260,6 +4584,10 @@ impl Editor {
                 Adj::Exposure { ev } => sl(ui, ev, -4.0..=4.0, "exposition (IL)"),
                 Adj::Threshold { t } => sl(ui, t, 0.0..=1.0, "seuil"),
                 Adj::Posterize { levels } => sl(ui, levels, 2.0..=32.0, "niveaux"),
+                Adj::Grain { amount, size } => sl(ui, amount, 0.0..=1.0, "quantité") | sl(ui, size, 0.5..=6.0, "taille du grain"),
+                Adj::Clarity { amount } => sl(ui, amount, -1.0..=1.0, "clarté"),
+                Adj::Dehaze { amount } => sl(ui, amount, -0.6..=0.6, "voile (− : ajouter de la brume)"),
+                Adj::Vibrance { amount } => sl(ui, amount, -1.0..=1.0, "vibrance"),
                 Adj::Invert | Adj::BlackWhite => false,
             };
         }
@@ -4967,6 +5295,36 @@ mod tests {
         ed.filter("pixelate", 8.0);
         assert_eq!(ed.doc.layers[0].px[0..4], ed.doc.layers[0].px[4..8]);
         let _ = std::fs::remove_file(&path);
+    }
+}
+
+#[cfg(test)]
+mod reglages_tests {
+    use super::*;
+
+    #[test]
+    fn nouveaux_reglages_et_fusion_conditionnelle() {
+        // Voile : un gris délavé redevient plus contrasté
+        let d = Adj::Dehaze { amount: 0.3 }.apply([0.4, 0.5, 0.9]);
+        assert!(d[0] < 0.4 && d[2] > 0.85);
+        // Clarté : les tons moyens s'écartent, le noir et le blanc restent
+        let c = Adj::Clarity { amount: 0.8 };
+        assert_eq!(c.apply([0.0; 3]), [0.0; 3]);
+        assert!(c.apply([0.7; 3])[0] > 0.7 && c.apply([0.3; 3])[0] < 0.3);
+        // Grain : varie d'un pixel à l'autre, mais toujours pareil au même endroit
+        let g = Adj::Grain { amount: 0.5, size: 1.0 };
+        let (a, b) = (g.apply_at([0.5; 3], 3, 4), g.apply_at([0.5; 3], 40, 9));
+        assert_ne!(a, b);
+        assert_eq!(a, g.apply_at([0.5; 3], 3, 4));
+        // Vibrance : une couleur terne gagne plus qu'une couleur vive
+        let v = Adj::Vibrance { amount: 0.6 };
+        let sat = |c: [f32; 3]| egui::ecolor::Hsva::from_rgb(c).s;
+        assert!(sat(v.apply([0.5, 0.45, 0.4])) - sat([0.5, 0.45, 0.4]) > sat(v.apply([0.9, 0.1, 0.1])) - sat([0.9, 0.1, 0.1]));
+        // Fusion conditionnelle : visible entre les bornes, fondu autour
+        assert_eq!(blend_if_k(0.3, 0.7, 0.5), 1.0);
+        assert_eq!(blend_if_k(0.3, 0.7, 0.1), 0.0);
+        assert!(blend_if_k(0.3, 0.7, 0.26) > 0.0 && blend_if_k(0.3, 0.7, 0.26) < 1.0);
+        assert_eq!(blend_if_k(0.0, 1.0, 0.0), 1.0);
     }
 }
 

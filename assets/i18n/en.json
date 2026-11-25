@@ -3051,5 +3051,21 @@
   "Les notes prennent la couleur de leur tag le plus courant (les six tags les plus portés)": "Notes take the color of their most common tag (the six most used tags)",
   "couleurs par tag": "colors by tag",
   "molette : zoom   glisser : déplacer   clic : ouvrir": "wheel: zoom   drag: pan   click: open",
-  "nœuds": "nodes"
+  "nœuds": "nodes",
+  "Montrer le calque seulement sur les tons de dessous choisis (Blend If) : sans masque, par la luminosité": "Show the layer only over the chosen underlying tones (Blend If): no mask needed, by brightness",
+  "après": "after",
+  "avant": "before",
+  "avant / après : la taille de l'image a changé depuis l'ouverture": "before / after: the image size changed since it was opened",
+  "fusion conditionnelle": "blend if",
+  "jusqu'aux tons": "up to tones",
+  "à partir des tons": "from tones",
+  "Clarté": "Clarity",
+  "Voile": "Dehaze",
+  "taille du grain": "grain size",
+  "clarté": "clarity",
+  "voile (− : ajouter de la brume)": "dehaze (−: add haze)",
+  "vibrance": "vibrance",
+  "doigt : étaler la peinture (le flux règle la force)": "smudge: spread the paint (flow sets the strength)",
+  "fluidité : pousser les pixels (déformer)": "liquify: push pixels (warp)",
+  "Avant / après : l'image à l'ouverture à gauche, glisser la séparation": "Before / after: the image as opened on the left, drag the divider"
 }

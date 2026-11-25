@@ -46,6 +46,8 @@ const HUE_RANGES: [[i16; 4]; 6] = [[315, 345, 15, 45], [15, 45, 75, 105], [75, 1
 fn adj_block(a: &Adj) -> Option<([u8; 4], Vec<u8>)> {
     let mut w = W(vec![]);
     let key = match *a {
+        // Pas d'équivalent Photoshop direct : le calque part sans réglage (signalé à l'export)
+        Adj::Grain { .. } | Adj::Clarity { .. } | Adj::Dehaze { .. } | Adj::Vibrance { .. } => return None,
         Adj::Invert => *b"nvrt",
         Adj::Threshold { t } => {
             w.u16((t * 255.0).round().clamp(1.0, 255.0) as u16);
@@ -738,6 +740,7 @@ mod tests {
             glow: Some(crate::paint::FxGlow { size: 9.0, color: [255, 236, 170], opacity: 0.75 }),
             overlay: Some(crate::paint::FxOverlay { color: [220, 60, 60], opacity: 0.5 }),
             stroke: Some(crate::paint::FxStroke { size: 2.0, color: [0, 0, 255], opacity: 1.0 }),
+            blend_if: None,
         };
         d.layers.push(top);
         d.groups.push(Group::new(3, "Dossier".into(), 0));
