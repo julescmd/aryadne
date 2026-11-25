@@ -5,7 +5,7 @@
 use crate::scene::{Key, Object};
 
 /// Une pose : position, rotation (degrés), taille
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Pose {
     pub pos: [f32; 3],
     pub rot: [f32; 3],
@@ -35,6 +35,43 @@ impl Pose {
 
     fn of_key(k: &Key) -> Pose {
         Pose { pos: k.pos, rot: k.rot, scale: k.scale }
+    }
+}
+
+/// Bibliothèque de poses : un fichier .arypose par pose (nom de l'objet → pose), dans « poses/ » du coffre
+pub mod library {
+    use super::Pose;
+
+    pub fn dir(root: &str) -> std::path::PathBuf {
+        std::path::Path::new(root).join("poses")
+    }
+
+    /// Les poses enregistrées : (nom, chemin), par nom
+    pub fn list(root: &str) -> Vec<(String, std::path::PathBuf)> {
+        let mut v: Vec<(String, std::path::PathBuf)> = std::fs::read_dir(dir(root))
+            .map(|rd| rd.flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|e| e == "arypose")).map(|p| (p.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default(), p)).collect())
+            .unwrap_or_default();
+        v.sort_by(|a, b| a.0.to_lowercase().cmp(&b.0.to_lowercase()));
+        v
+    }
+
+    pub fn save(root: &str, name: &str, poses: &[(String, Pose)]) -> Result<std::path::PathBuf, String> {
+        let clean: String = name.chars().filter(|c| !matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|')).collect();
+        let clean = if clean.trim().is_empty() { "pose".to_string() } else { clean.trim().to_string() };
+        std::fs::create_dir_all(dir(root)).map_err(|e| e.to_string())?;
+        let path = dir(root).join(format!("{clean}.arypose"));
+        let json = serde_json::to_string_pretty(&poses).map_err(|e| e.to_string())?;
+        crate::vault::atomic_write(&path, json).map_err(|e| e.to_string())?;
+        Ok(path)
+    }
+
+    pub fn load(path: &std::path::Path) -> Option<Vec<(String, Pose)>> {
+        serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()
+    }
+
+    /// La pose d'un objet dans la bibliothèque : même nom d'abord, sinon dans l'ordre
+    pub fn pick(poses: &[(String, Pose)], name: &str, n: usize) -> Option<Pose> {
+        poses.iter().find(|(nm, _)| nm == name).or(poses.get(n.min(poses.len().saturating_sub(1)))).map(|x| x.1)
     }
 }
 
@@ -363,5 +400,26 @@ pub mod motion {
             paste(&mut l, 4.0, &p);
             assert_eq!(l.pos.keys.last().unwrap().v, [0.0, 0.0]);
         }
+    }
+}
+
+#[cfg(test)]
+mod library_tests {
+    use super::*;
+
+    #[test]
+    fn bibliotheque_de_poses() {
+        let root = std::env::temp_dir().join(format!("ary-poses-{}", std::process::id()));
+        let r = root.to_string_lossy().to_string();
+        let p = Pose { pos: [1.0, 2.0, 3.0], rot: [0.0, 45.0, 0.0], scale: [1.0; 3] };
+        library::save(&r, "Salut / main", &[("bras".into(), p), ("tête".into(), rest(p, true))]).unwrap();
+        let l = library::list(&r);
+        assert_eq!(l.len(), 1);
+        assert_eq!(l[0].0, "Salut  main");
+        let poses = library::load(&l[0].1).unwrap();
+        assert_eq!(library::pick(&poses, "bras", 1), Some(p));
+        // Nom inconnu : dans l'ordre
+        assert_eq!(library::pick(&poses, "jambe", 0), Some(p));
+        let _ = std::fs::remove_dir_all(root);
     }
 }

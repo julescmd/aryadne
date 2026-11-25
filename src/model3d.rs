@@ -2625,6 +2625,9 @@ pub struct Viewer {
     tween_w: f32,
     /// Pose copiée, par nom d'objet
     pose_clip: Vec<(String, crate::animtools::Pose)>,
+    /// Bibliothèque de poses : nom à donner, force du mélange
+    pose_name: String,
+    pose_mix: f32,
     /// Clé choisie dans la timeline (objet, image), clé qu'on glisse (objet, image de départ, image actuelle)
     key_sel: Option<(usize, i32)>,
     key_drag: Option<(usize, i32, i32)>,
@@ -2821,6 +2824,8 @@ impl Viewer {
             ghosts: None,
             tween_w: 0.5,
             pose_clip: vec![],
+            pose_name: String::new(),
+            pose_mix: 1.0,
             key_sel: None,
             key_drag: None,
             key_menu: None,
@@ -6295,6 +6300,54 @@ impl Viewer {
                             changed = true;
                         }
                     }
+                    // Bibliothèque de poses (fichiers .arypose du coffre)
+                    egui::containers::menu::MenuButton::new(egui::RichText::new(crate::lucide::LIBRARY_BIG)).ui(ui, |ui| {
+                        ui.set_min_width(260.0);
+                        let root = crate::nodes::vault_root();
+                        ui.horizontal(|ui| {
+                            ui.add(egui::TextEdit::singleline(&mut self.pose_name).hint_text(crate::i18n::t("nom de la pose")).desired_width(170.0));
+                            if ui.add_enabled(!targets.is_empty(), egui::Button::new(crate::lucide::SAVE)).on_hover_text(crate::i18n::t("Enregistrer la pose des objets choisis")).clicked() {
+                                let poses: Vec<(String, at::Pose)> = targets.iter().map(|&k| (scene.objects[k].name.clone(), at::Pose::of(&scene.objects[k]))).collect();
+                                let name = if self.pose_name.trim().is_empty() { format!("pose {}", at::library::list(&root).len() + 1) } else { self.pose_name.clone() };
+                                match at::library::save(&root, &name, &poses) {
+                                    Ok(_) => crate::notify(format!("{} · {name}", crate::i18n::t("Pose enregistrée"))),
+                                    Err(e) => crate::notify(e),
+                                }
+                                self.pose_name.clear();
+                            }
+                        });
+                        ui.add(egui::Slider::new(&mut self.pose_mix, 0.0..=1.0).text(crate::i18n::t("force"))).on_hover_text(crate::i18n::t("Appliquer en partie : 1 remplace la pose, 0,5 va à mi-chemin"));
+                        ui.separator();
+                        let list = at::library::list(&root);
+                        if list.is_empty() {
+                            ui.label(egui::RichText::new(crate::i18n::t("Aucune pose enregistrée : choisis des objets, donne un nom, enregistre.")).size(11.5).color(crate::theme::pal().muted));
+                        }
+                        for (name, path) in list {
+                            ui.horizontal(|ui| {
+                                let apply = ui.button(&name).on_hover_text(crate::i18n::t("Appliquer aux objets choisis (et poser une clé)")).clicked();
+                                let mirror = ui.small_button(crate::lucide::FLIP_HORIZONTAL_2).on_hover_text(crate::i18n::t("Appliquer en miroir")).clicked();
+                                if (apply || mirror) && !targets.is_empty() {
+                                    if let Some(poses) = at::library::load(&path) {
+                                        for (n, &k) in targets.iter().enumerate() {
+                                            let nm = scene.objects[k].name.clone();
+                                            if let Some(pz) = at::library::pick(&poses, &nm, n) {
+                                                let pz = if mirror { at::mirror(pz) } else { pz };
+                                                at::blend_to(&mut scene.objects[k], here, pz, self.pose_mix);
+                                            }
+                                        }
+                                        changed = true;
+                                    }
+                                    ui.close();
+                                }
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    if ui.small_button(crate::lucide::TRASH_2).on_hover_text(crate::i18n::t("Supprimer la pose")).clicked() {
+                                        // À la corbeille du coffre, pas effacée
+                                        let _ = crate::vault::trash(&root, &format!("poses/{name}.arypose"));
+                                    }
+                                });
+                            });
+                        }
+                    }).0.on_hover_text(crate::i18n::t("Bibliothèque de poses"));
                     if ui.small_button(crate::lucide::FLIP_HORIZONTAL).on_hover_text(crate::i18n::t("Miroir gauche-droite de la pose (et clé)")).clicked() {
                         for &k in &targets {
                             let pz = at::mirror(at::Pose::of(&scene.objects[k]));

@@ -3113,5 +3113,14 @@
   "union": "union",
   "intersection": "intersection",
   "demi-taille": "half size",
-  "Le résultat est remaillé en voxels : les arêtes vives s'adoucissent un peu.": "The result is voxel-remeshed: sharp edges soften a little."
+  "Le résultat est remaillé en voxels : les arêtes vives s'adoucissent un peu.": "The result is voxel-remeshed: sharp edges soften a little.",
+  "nom de la pose": "pose name",
+  "Enregistrer la pose des objets choisis": "Save the pose of the selected objects",
+  "Pose enregistrée": "Pose saved",
+  "Appliquer en partie : 1 remplace la pose, 0,5 va à mi-chemin": "Apply partially: 1 replaces the pose, 0.5 goes halfway",
+  "Aucune pose enregistrée : choisis des objets, donne un nom, enregistre.": "No saved pose: select objects, give a name, save.",
+  "Appliquer aux objets choisis (et poser une clé)": "Apply to the selected objects (and set a key)",
+  "Appliquer en miroir": "Apply mirrored",
+  "Supprimer la pose": "Delete the pose",
+  "Bibliothèque de poses": "Pose library"
 }
