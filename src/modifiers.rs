@@ -78,6 +78,10 @@ pub enum Kind {
     Remesh { voxel: f32, smooth: u32 },
     /// Booléen (par voxels) avec une forme : op 0 union, 1 différence, 2 intersection ; forme 0 cube, 1 sphère, 2 cylindre
     Boolean { op: u8, shape: u8, center: V3, size: V3, voxel: f32, smooth: u32 },
+    /// Disperser des copies d'une petite forme sur la surface (cailloux, herbe, rivets…), comme les nœuds
+    /// de géométrie « distribuer des points » + « instancier » de Blender. Forme 0 caillou, 1 brin d'herbe,
+    /// 2 cube, 3 sphère, 4 cône. Pente : 0 partout, 1 seulement sur le dessus.
+    Scatter { shape: u8, count: u32, size: f32, jitter: f32, seed: f32, align: bool, slope: f32 },
 }
 
 fn one() -> f32 {
@@ -189,6 +193,7 @@ pub const ALL: &[(&str, &str, &str)] = &[
     ("organique", "Froisser (crumple)", "plis aléatoires"),
     ("topologie", "Remailler (voxels)", "refait la surface en quads réguliers, pour sculpter"),
     ("générer", "Booléen (forme)", "ajoute, creuse ou garde l'intersection avec un cube, une sphère ou un cylindre"),
+    ("générer", "Disperser (instances)", "sème des copies d'une petite forme sur la surface : cailloux, herbe, rivets"),
 ];
 
 impl Kind {
@@ -228,7 +233,8 @@ impl Kind {
             31 => Kind::Melt { amount: 0.3, axis: 1 },
             32 => Kind::Crumple { amount: 0.03, scale: 6.0, seed: 0.0 },
             33 => Kind::Remesh { voxel: 0.015, smooth: 1 },
-            _ => Kind::Boolean { op: 1, shape: 1, center: [0.0, 0.5, 0.25], size: [0.25, 0.25, 0.25], voxel: 0.012, smooth: 1 },
+            34 => Kind::Boolean { op: 1, shape: 1, center: [0.0, 0.5, 0.25], size: [0.25, 0.25, 0.25], voxel: 0.012, smooth: 1 },
+            _ => Kind::Scatter { shape: 0, count: 200, size: 0.04, jitter: 0.5, seed: 1.0, align: true, slope: 0.0 },
         }
     }
     pub fn index(&self) -> usize {
@@ -268,6 +274,7 @@ impl Kind {
             Kind::Crumple { .. } => 32,
             Kind::Remesh { .. } => 33,
             Kind::Boolean { .. } => 34,
+            Kind::Scatter { .. } => 35,
         }
     }
     pub fn name(&self) -> &'static str {
@@ -512,7 +519,118 @@ fn apply_one(k: Kind, mut m: Mesh, origin: V3) -> Mesh {
                 m.edges = o.edges;
             }
         }
+        Kind::Scatter { shape, count, size: sz, jitter, seed, align, slope } => {
+            m = scatter(m, shape, count, sz * len(size).max(1e-6), jitter, seed, align, slope);
+        }
         _ => m = apply_more(k, m, origin, lo, hi),
+    }
+    m
+}
+
+/// Sème `count` copies d'une forme sur la surface, au hasard (selon l'aire des faces, toujours le même tirage
+/// pour une même graine), tournées et un peu variées en taille ; ajoutées au maillage.
+#[allow(clippy::too_many_arguments)]
+pub fn scatter(mut m: Mesh, shape: u8, count: u32, size: f32, jitter: f32, seed: f32, align: bool, slope: f32) -> Mesh {
+    if m.tris.is_empty() || count == 0 {
+        return m;
+    }
+    // Petit générateur déterministe
+    let mut st = (seed.to_bits() as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+    let mut rnd = move || {
+        st ^= st << 13;
+        st ^= st >> 7;
+        st ^= st << 17;
+        (st >> 11) as f32 / (1u64 << 53) as f32
+    };
+    // Les faces candidates (pente) et leur aire cumulée
+    let mut cum = vec![];
+    let mut faces = vec![];
+    let mut total = 0.0f32;
+    for (ti, t) in m.tris.iter().enumerate() {
+        let (a, b, c) = (m.pos[t[0] as usize], m.pos[t[1] as usize], m.pos[t[2] as usize]);
+        let n = cross(sub(b, a), sub(c, a));
+        let area = len(n) * 0.5;
+        if area <= 1e-12 {
+            continue;
+        }
+        let up = n[1] / (2.0 * area);
+        if slope > 0.0 && up < slope {
+            continue;
+        }
+        total += area;
+        cum.push(total);
+        faces.push(ti);
+    }
+    if faces.is_empty() {
+        return m;
+    }
+    // La forme de base : unité, posée sur y = 0, pointant vers +Y
+    let (bp, bt, be, col): (Vec<V3>, Vec<[u32; 3]>, Vec<u8>, Color32) = {
+        let id = match shape {
+            2 => "@cube",
+            3 | 0 => "@sphere",
+            _ => "@cone",
+        };
+        let pm = crate::scene::primitive(id).unwrap_or_else(|| crate::scene::primitive("@cube").unwrap());
+        let (lo, hi) = (pm.min, pm.max);
+        let c = [(lo[0] + hi[0]) / 2.0, lo[1], (lo[2] + hi[2]) / 2.0];
+        let ext = (hi[0] - lo[0]).max(hi[1] - lo[1]).max(hi[2] - lo[2]).max(1e-6);
+        let (sx, sy) = match shape {
+            1 => (0.12, 2.5),
+            0 => (1.0, 0.6),
+            _ => (1.0, 1.0),
+        };
+        let pos: Vec<V3> = pm.positions.iter().enumerate().map(|(i, p)| {
+            let mut q = [(p[0] - c[0]) / ext * sx, (p[1] - c[1]) / ext * sy, (p[2] - c[2]) / ext * sx];
+            if shape == 0 {
+                // Caillou : la sphère bosselée
+                let h = ((i as f32 * 12.9898).sin() * 43758.547).fract().abs();
+                let k = 0.8 + 0.35 * h;
+                q = [q[0] * k, q[1] * k, q[2] * k];
+            }
+            q
+        }).collect();
+        let col = match shape {
+            1 => Color32::from_rgb(92, 150, 70),
+            0 => Color32::from_rgb(128, 122, 114),
+            _ => m.colors.first().copied().unwrap_or(Color32::from_gray(200)),
+        };
+        (pos, pm.tris.clone(), pm.edges.clone(), col)
+    };
+    for _ in 0..count {
+        let r = rnd() * total;
+        let fi = faces[cum.partition_point(|&x| x < r).min(faces.len() - 1)];
+        let t = m.tris[fi];
+        let (a, b, c) = (m.pos[t[0] as usize], m.pos[t[1] as usize], m.pos[t[2] as usize]);
+        let (mut u, mut v) = (rnd(), rnd());
+        if u + v > 1.0 {
+            (u, v) = (1.0 - u, 1.0 - v);
+        }
+        let p = [a[0] + (b[0] - a[0]) * u + (c[0] - a[0]) * v, a[1] + (b[1] - a[1]) * u + (c[1] - a[1]) * v, a[2] + (b[2] - a[2]) * u + (c[2] - a[2]) * v];
+        let n = norm(cross(sub(b, a), sub(c, a)));
+        let up = if align { n } else { [0.0, 1.0, 0.0] };
+        // Repère : `up` et deux axes tournés au hasard autour de lui
+        let helper = if up[1].abs() < 0.9 { [0.0, 1.0, 0.0] } else { [1.0, 0.0, 0.0] };
+        let x0 = norm(cross(helper, up));
+        let z0 = cross(up, x0);
+        let ang = rnd() * std::f32::consts::TAU;
+        let (sa, ca) = ang.sin_cos();
+        let x = [x0[0] * ca + z0[0] * sa, x0[1] * ca + z0[1] * sa, x0[2] * ca + z0[2] * sa];
+        let z = cross(x, up);
+        let s = size * (1.0 + jitter * (rnd() * 2.0 - 1.0)).max(0.05);
+        // L'herbe penche un peu
+        let lean = if shape == 1 { (rnd() - 0.5) * 0.5 } else { 0.0 };
+        let base = m.pos.len() as u32;
+        for q in &bp {
+            let qy = q[1];
+            let (qx, qz) = (q[0] + lean * qy, q[2]);
+            m.pos.push([p[0] + (x[0] * qx + up[0] * qy + z[0] * qz) * s, p[1] + (x[1] * qx + up[1] * qy + z[1] * qz) * s, p[2] + (x[2] * qx + up[2] * qy + z[2] * qz) * s]);
+        }
+        for (k, tr) in bt.iter().enumerate() {
+            m.tris.push([tr[0] + base, tr[1] + base, tr[2] + base]);
+            m.edges.push(be.get(k).copied().unwrap_or(7));
+            m.colors.push(col);
+        }
     }
     m
 }
@@ -1763,6 +1881,23 @@ fn params(ui: &mut egui::Ui, k: &mut Kind) -> bool {
             c |= row_slider(ui, "lissage", egui::Slider::new(smooth, 0..=6));
             ui.label(egui::RichText::new(crate::i18n::t("Le résultat est remaillé en voxels : les arêtes vives s'adoucissent un peu.")).size(11.0).color(crate::theme::pal().muted));
         }
+        Kind::Scatter { shape, count, size, jitter, seed, align, slope } => {
+            row(ui, "forme", |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    for (v, l) in [(0u8, "cailloux"), (1, "herbe"), (2, "cubes"), (3, "sphères"), (4, "cônes")] {
+                        c |= ui.selectable_value(shape, v, crate::i18n::t(l)).changed();
+                    }
+                });
+            });
+            c |= row_slider(ui, "nombre", egui::Slider::new(count, 1..=5000).logarithmic(true));
+            c |= row_slider(ui, "taille", egui::Slider::new(size, 0.002..=0.3).logarithmic(true));
+            c |= row_slider(ui, "variation de taille", egui::Slider::new(jitter, 0.0..=1.0));
+            c |= row_slider(ui, "seulement le dessus", egui::Slider::new(slope, 0.0..=1.0));
+            c |= row_slider(ui, "graine", egui::Slider::new(seed, 0.0..=100.0));
+            row(ui, "suivre la surface", |ui| {
+                c |= ui.checkbox(align, "").on_hover_text(crate::i18n::t("Les copies se dressent selon la surface (sinon toutes droites)")).changed();
+            });
+        }
     }
     c
 }
@@ -1792,6 +1927,26 @@ mod tests {
         let obj = std::fs::read_to_string(dir.join("x.obj")).unwrap();
         assert_eq!(obj.lines().filter(|l| l.starts_with("f ")).count(), 6, "quads gardés");
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn disperser_des_instances() {
+        let plane = Mesh::from_model(&crate::scene::primitive("@plane").unwrap(), false);
+        let (n0, t0) = (plane.pos.len(), plane.tris.len());
+        let m = scatter(plane.clone(), 1, 50, 0.05, 0.3, 3.0, true, 0.0);
+        assert!(m.tris.len() > t0 + 50 && m.pos.len() > n0);
+        // Même graine, même résultat
+        let m2 = scatter(plane.clone(), 1, 50, 0.05, 0.3, 3.0, true, 0.0);
+        assert_eq!(m.pos, m2.pos);
+        // Les brins sont posés sur le plan et montent au-dessus
+        let (lo, hi) = m.bbox();
+        assert!(hi[1] > plane.bbox().1[1] + 0.01 && lo[1] >= plane.bbox().0[1] - 0.05);
+        // Pente : un plan tourné vers le bas ne reçoit rien
+        let mut down = plane.clone();
+        for t in &mut down.tris {
+            t.swap(1, 2);
+        }
+        assert_eq!(scatter(down, 1, 50, 0.05, 0.3, 3.0, true, 0.5).tris.len(), t0);
     }
 
     #[test]
