@@ -2911,5 +2911,18 @@
   "contour progressif": "feather",
   "Opacité du masque": "Mask opacity",
   "Nouveau masque rectangulaire (glisse ses points dans la vue)": "New rectangular mask (drag its points in the view)",
-  "Nouveau masque elliptique": "New elliptical mask"
+  "Nouveau masque elliptique": "New elliptical mask",
+  "Point suivi sur": "Point tracked over",
+  "Stabiliser : l'image tremble moins (un léger agrandissement cache les bords)": "Stabilize: less shake (a slight zoom hides the edges)",
+  "Suivi de mouvement : ce clip (un titre, une image) suit un point de la vidéo de la piste du dessous": "Motion tracking: this clip (a title, an image) follows a point of the video on the track below",
+  "Suivi de mouvement : clique ensuite dans le moniteur le point de la vidéo dessous que ce clip doit suivre": "Motion tracking: then click in the monitor the point of the video below that this clip should follow",
+  "Suivi du point…": "Tracking the point…",
+  "Taille de la vidéo inconnue.": "Unknown video size.",
+  "clique le point dans le moniteur…": "click the point in the monitor…",
+  "suivre un point de la vidéo dessous": "track a point of the video below",
+  "Clique dans le moniteur le point de la vidéo dessous que ce clip doit suivre.": "Click in the monitor the point of the video below that this clip should follow.",
+  "Aucune vidéo sous ce clip à cet instant.": "No video under this clip at this time.",
+  "Stabilisation": "Stabilization",
+  "Suivi de mouvement": "Motion tracking",
+  "Agrandissement": "Zoom"
 }

@@ -38,11 +38,13 @@ pub const TOOLS: [(Tool, &str, &str); 10] = [
 ];
 
 /// Les effets du panneau Effets : identifiant, nom, catégorie.
-pub const EFFECTS: [(&str, &str, &str); 5] = [
+pub const EFFECTS: [(&str, &str, &str); 7] = [
     ("xfade", "Fondu enchaîné", "Transitions vidéo"),
     ("dip", "Fondu au noir", "Transitions vidéo"),
     ("lumetri", "Couleur Lumetri", "Effets vidéo"),
     ("nodes", "Étalonnage en nodes", "Effets vidéo"),
+    ("stab", "Stabilisation", "Effets vidéo"),
+    ("track", "Suivi de mouvement", "Effets vidéo"),
     ("afade", "Fondu audio", "Transitions audio"),
 ];
 
@@ -179,6 +181,8 @@ pub struct Editor {
     fx_search: String,
     /// Déplacement d'un clip dans le moniteur Programme : clip, souris et position de départ
     monitor_drag: Option<(u64, Pos2, f32, f32)>,
+    /// Suivi de mouvement : le clip qui suivra le point cliqué dans le moniteur
+    track_pick: Option<u64>,
     /// Poignée de coin tirée dans le moniteur : (clip, distance au centre au départ, taille au départ)
     monitor_scale: Option<(u64, f32, f32)>,
     /// Panneau de gauche : 0 médias, 1 source
@@ -203,6 +207,8 @@ enum Smart {
     Beats(Vec<f32>),
     /// Répliques transcrites, en temps de la timeline
     Subtitles(Vec<crate::transcribe::Cue>),
+    /// Suivi de mouvement : les clés de placement du clip (son identifiant)
+    Track(u64, Vec<crate::montage::PoseKey>),
 }
 
 impl Drop for Editor {
@@ -277,6 +283,7 @@ impl Editor {
             bin_grid: true,
             fx_search: String::new(),
             monitor_drag: None,
+            track_pick: None,
             monitor_scale: None,
             left_tab: 0,
             card_trim: Default::default(),
@@ -689,6 +696,15 @@ impl Editor {
             }
             "nodes" => {
                 self.new_grade(i);
+            }
+            "stab" => {
+                if self.project.clips[i].kind == "video" && self.project.clips[i].stab == 0.0 {
+                    self.project.clips[i].stab = 6.0;
+                }
+            }
+            "track" => {
+                self.track_pick = Some(self.project.clips[i].id);
+                self.message = Some(crate::i18n::t("Clique dans le moniteur le point de la vidéo dessous que ce clip doit suivre."));
             }
             _ => {}
         }

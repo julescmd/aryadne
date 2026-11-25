@@ -12,6 +12,7 @@ mod expr;
 mod bases;
 mod vector;
 mod vgeom;
+mod track2d;
 mod vector_ui;
 mod keymap;
 mod lucide;

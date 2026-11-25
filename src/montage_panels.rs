@@ -641,6 +641,31 @@ impl Editor {
                     }
                 }
             }
+            // Stabilisation et suivi de mouvement
+            if self.project.clips[s].stab > 0.0 {
+                let mut reset = false;
+                if self.section(ui, "stab", "Stabilisation", Some(&mut reset)) {
+                    let c = &mut self.project.clips[s];
+                    ch |= row(ui, "Agrandissement", &mut |ui| scrub(ui, &mut c.stab, 0.2, 1.0..=40.0, " %", 1));
+                    if reset {
+                        c.stab = 0.0;
+                        ch = true;
+                    }
+                }
+            }
+            if self.project.clips[s].visual() {
+                let c = &self.project.clips[s];
+                let id = c.id;
+                let picking = self.track_pick == Some(id);
+                let busy = self.smart_rx.is_some();
+                ui.horizontal(|ui| {
+                    ui.add_space(10.0);
+                    let label = if picking { crate::i18n::t("clique le point dans le moniteur…") } else { crate::i18n::t("suivre un point de la vidéo dessous") };
+                    if ui.add_enabled(!busy, egui::Button::new(format!("{}  {label}", crate::lucide::CROSSHAIR)).selected(picking)).on_hover_text(crate::i18n::t("Suivi de mouvement : ce clip (un titre, une image) suit un point de la vidéo de la piste du dessous")).clicked() {
+                        self.track_pick = if picking { None } else { Some(id) };
+                    }
+                });
+            }
             if audio {
                 let mut reset = false;
                 if self.section(ui, "volume", "Volume", Some(&mut reset)) {
@@ -1045,7 +1070,20 @@ impl Editor {
                 }
             }
         }
-        if resp.drag_started() && self.tool != Tool::Type && self.monitor_scale.is_none() && !corner_hit {
+        // Suivi de mouvement : un clic choisit le point à suivre
+        if let Some(id) = self.track_pick {
+            if resp.hovered() {
+                ctx.set_cursor_icon(egui::CursorIcon::Crosshair);
+            }
+            if resp.clicked() {
+                if let Some(at) = resp.interact_pointer_pos() {
+                    let p = (at - img.center()) / k.max(1e-3);
+                    self.track_pick = None;
+                    self.start_track(id, [p.x, p.y], &ctx);
+                }
+            }
+        }
+        if resp.drag_started() && self.tool != Tool::Type && self.monitor_scale.is_none() && !corner_hit && self.track_pick.is_none() {
             if let (Some(i), Some(at)) = (sel, resp.interact_pointer_pos()) {
                 let c = &self.project.clips[i];
                 self.monitor_drag = Some((c.id, at, c.x, c.y));
@@ -1210,6 +1248,8 @@ impl Editor {
             changed
         };
         let is_visual = self.project.clips[i].visual();
+        let picking = self.track_pick == Some(self.project.clips[i].id);
+        let mut want_track = false;
         if is_visual {
             card(ui, "Cadre", &mut |ui| {
                 let c = &mut self.project.clips[i];
@@ -1226,8 +1266,28 @@ impl Editor {
                         (c.x, c.y, c.scale) = (0.0, 0.0, 1.0);
                         ch = true;
                     }
+                    // Suivi de mouvement : le clip suit un point de la vidéo dessous
+                    if ui.add(egui::Button::new(RichText::new(crate::lucide::CROSSHAIR).size(14.0)).selected(picking)).on_hover_text(crate::i18n::t("Suivi de mouvement : clique ensuite dans le moniteur le point de la vidéo dessous que ce clip doit suivre")).clicked() {
+                        want_track = true;
+                    }
+                    // Stabilisation (vidéo)
+                    if c.kind == "video" {
+                        let mut on = c.stab > 0.0;
+                        if ui.add(egui::Button::new(RichText::new(crate::lucide::VIBRATE_OFF).size(14.0)).selected(on)).on_hover_text(crate::i18n::t("Stabiliser : l'image tremble moins (un léger agrandissement cache les bords)")).clicked() {
+                            on = !on;
+                            c.stab = if on { 6.0 } else { 0.0 };
+                            ch = true;
+                        }
+                    }
                 });
             });
+        }
+        if want_track {
+            let id = self.project.clips[i].id;
+            self.track_pick = if picking { None } else { Some(id) };
+            if !picking {
+                self.message = Some(crate::i18n::t("Clique dans le moniteur le point de la vidéo dessous que ce clip doit suivre."));
+            }
         }
         card(ui, "Vitesse", &mut |ui| {
             let c = &mut self.project.clips[i];
@@ -2679,6 +2739,70 @@ impl Editor {
         self.message = Some(crate::i18n::t("Transcription de la parole…"));
     }
 
+    /// Suit le point `p` (pixels du projet, depuis le centre) dans la vidéo sous le clip `id`, pendant toute la durée du clip
+    fn start_track(&mut self, id: u64, p: [f32; 2], ctx: &egui::Context) {
+        let Some(i) = self.project.index(id) else { return };
+        let c = self.project.clips[i].clone();
+        // La vidéo dessous : sur une piste plus basse, présente au début du clip, la plus haute
+        // Le suivi part de la tête de lecture (l'image visible dans le moniteur), dans le clip
+        let ts = self.playhead.clamp(c.start, (c.end() - 0.05).max(c.start));
+        let base = (0..self.project.clips.len())
+            .filter(|&k| k != i)
+            .map(|k| &self.project.clips[k])
+            .filter(|b| b.kind == "video" && b.track < c.track.max(1) && b.start <= ts + 0.01 && b.end() > ts)
+            .max_by_key(|b| b.track)
+            .cloned();
+        let base = match base {
+            Some(b) => b,
+            None => match (0..self.project.clips.len()).map(|k| &self.project.clips[k]).find(|b| b.kind == "video" && b.id == c.id) {
+                // Le clip est lui-même une vidéo : on suit un point de son image (pour y accrocher autre chose ensuite)
+                Some(b) => b.clone(),
+                None => {
+                    self.message = Some(crate::i18n::t("Aucune vidéo sous ce clip à cet instant."));
+                    return;
+                }
+            },
+        };
+        let Some((mw, mh)) = crate::montage::media_dims(&self.path, &base) else {
+            self.message = Some(crate::i18n::t("Taille de la vidéo inconnue."));
+            return;
+        };
+        let (pw, ph) = (self.project.width as f32, self.project.height as f32);
+        let fit = (pw / mw).min(ph / mh) * base.scale.max(1e-3);
+        // Le point dans l'image de la source
+        let m = [(p[0] - base.x) / fit + mw / 2.0, (p[1] - base.y) / fit + mh / 2.0];
+        let path = resolve(&self.path, &base.file);
+        let from = base.src_in + (ts - base.start).max(0.0) * base.speed;
+        let len = (c.end() - ts).min(base.end() - ts) * base.speed;
+        let t0 = ts - c.start;
+        let (x0, y0, s0, o0) = (c.x, c.y, c.scale, c.opacity);
+        let same = base.id == c.id;
+        let (tx, rx) = std::sync::mpsc::channel();
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            const FPS: f32 = 15.0;
+            let tw = (mw as usize).min(640);
+            let r = crate::track2d::decode(&path, from, len, FPS, tw, (mw, mh)).map(|f| {
+                let ks = f.w as f32 / mw;
+                let pts = crate::track2d::track(&f, [m[0] * ks, m[1] * ks], 10, 12);
+                let p0 = pts[0];
+                pts.iter()
+                    .enumerate()
+                    .map(|(k, q)| {
+                        let d = [(q[0] - p0[0]) / ks * fit, (q[1] - p0[1]) / ks * fit];
+                        // Une vidéo qui se suit elle-même se recale (le point reste immobile à l'écran)
+                        let (x, y) = if same { (x0 - d[0], y0 - d[1]) } else { (x0 + d[0], y0 + d[1]) };
+                        crate::montage::PoseKey { t: ((t0 + k as f32 / FPS) * 100.0).round() / 100.0, x: x.round(), y: y.round(), scale: s0, opacity: o0, ease: crate::keys::Ease::Linear, tan: [None; 4] }
+                    })
+                    .collect::<Vec<_>>()
+            });
+            let _ = tx.send(r.map(|k| Smart::Track(id, k)));
+            ctx.request_repaint();
+        });
+        self.smart_rx = Some(rx);
+        self.message = Some(crate::i18n::t("Suivi du point…"));
+    }
+
     fn poll_smart(&mut self) {
         let Some(rx) = &self.smart_rx else { return };
         let Ok(r) = rx.try_recv() else { return };
@@ -2698,6 +2822,27 @@ impl Editor {
                 }
                 let n = self.project.set_subtitles(&cues);
                 self.message = Some(format!("{n} {}", crate::i18n::t_mid("sous-titres posés")));
+                self.changed();
+            }
+            Ok(Smart::Track(id, keys)) => {
+                let Some(i) = self.project.index(id) else { return };
+                let n = keys.len();
+                // Les clés qui ne bougent presque pas se retirent : la courbe reste légère
+                let mut kept: Vec<crate::montage::PoseKey> = vec![];
+                for (k, key) in keys.iter().enumerate() {
+                    let keep = k == 0 || k + 1 == n || {
+                        let (a, b) = (kept.last().unwrap(), &keys[k + 1]);
+                        let f = (key.t - a.t) / (b.t - a.t).max(1e-6);
+                        let (ex, ey) = (a.x + (b.x - a.x) * f, a.y + (b.y - a.y) * f);
+                        (key.x - ex).abs() > 1.0 || (key.y - ey).abs() > 1.0
+                    };
+                    if keep {
+                        kept.push(key.clone());
+                    }
+                }
+                let c = &mut self.project.clips[i];
+                c.keys = kept;
+                self.message = Some(format!("{} {n} {}", crate::i18n::t("Point suivi sur"), crate::i18n::t_mid("images")));
                 self.changed();
             }
             Ok(Smart::Beats(beats)) => {

@@ -93,6 +93,9 @@ pub struct Clip {
     /// Effets ajoutés depuis le panneau Effets (sections affichées dans les options d'effet)
     #[serde(default)]
     pub fx: Vec<String>,
+    /// Stabilisation (0 : aucune) : agrandissement en % qui cache les bords qui bougent
+    #[serde(default, skip_serializing_if = "is_zero_f")]
+    pub stab: f32,
     /// Identifiant stable dans le montage (la sélection survit aux suppressions et aux coupes)
     #[serde(default)]
     pub id: u64,
@@ -245,6 +248,10 @@ pub struct PoseKey {
     /// Tangentes posées dans l'éditeur de courbes, par réglage (x, y, taille, opacité)
     #[serde(default, skip_serializing_if = "no_tan")]
     pub tan: [Option<[f32; 4]>; 4],
+}
+
+fn is_zero_f(v: &f32) -> bool {
+    *v == 0.0
 }
 
 fn no_tan(t: &[Option<[f32; 4]>; 4]) -> bool {
@@ -421,7 +428,7 @@ impl Clip {
     /// Clip vide pour les tests
     #[cfg(test)]
     pub fn test() -> Clip {
-        Clip { name: "c".into(), file: "c.mp4".into(), kind: "video".into(), track: 0, start: 0.0, src_in: 0.0, src_out: 1.0, media: 10.0, has_audio: false, speed: 1.0, opacity: 1.0, volume: 1.0, fade_in: 0.0, fade_out: 0.0, brightness: 0.0, contrast: 1.0, saturation: 1.0, wheels: [[0.0; 3]; 3], x: 0.0, y: 0.0, scale: 1.0, grade: String::new(), keys: vec![], text: String::new(), text_size: 72.0, text_color: [255; 3], font: String::new(), outline: false, xfade: 0.0, audio: false, link: 0, fx: vec![], id: 0 }
+        Clip { name: "c".into(), file: "c.mp4".into(), kind: "video".into(), track: 0, start: 0.0, src_in: 0.0, src_out: 1.0, media: 10.0, has_audio: false, speed: 1.0, opacity: 1.0, volume: 1.0, fade_in: 0.0, fade_out: 0.0, brightness: 0.0, contrast: 1.0, saturation: 1.0, wheels: [[0.0; 3]; 3], x: 0.0, y: 0.0, scale: 1.0, grade: String::new(), keys: vec![], text: String::new(), text_size: 72.0, text_color: [255; 3], font: String::new(), outline: false, xfade: 0.0, audio: false, link: 0, fx: vec![], stab: 0.0, id: 0 }
     }
 
     /// Placement, taille et opacité à l'instant `t` de la timeline, d'après les clés (None sans clé).
@@ -809,6 +816,7 @@ impl Project {
             audio: false,
             link: 0,
             fx: vec![],
+            stab: 0.0,
             id: 0,
         });
         self.ensure_ids();
@@ -1118,6 +1126,7 @@ pub fn import(project: &Path, media: &Path, track: usize, start: f32) -> Result<
         audio: false,
         link: 0,
         fx: vec![],
+        stab: 0.0,
         id: 0,
     })
 }
@@ -1164,6 +1173,11 @@ pub fn graph(p: &Project, project: &Path, from: f32, w: u32, h: u32, realtime: b
             let pts = |f: &dyn Fn(&PoseKey) -> f32| -> Vec<(f32, f32)> { eased_points(&c.keys, c.start - from, f) };
             let animated = c.keys.len() > 1;
             filter += &format!("[{n}:v]fps={},setpts=(PTS-STARTPTS)/{:.4}+{st:.3}/TB", p.fps, c.speed.max(0.01));
+            // Stabilisation : l'image tremble moins, un léger agrandissement cache les bords
+            if c.stab > 0.0 && c.kind == "video" {
+                let z = 1.0 + c.stab.clamp(0.0, 40.0) / 100.0;
+                filter += &format!(",deshake=rx=48:ry=48:edge=mirror,scale=w='trunc(iw*{z:.3}/2)*2':h='trunc(ih*{z:.3}/2)*2',crop=w='trunc(iw/{z:.3}/2)*2':h='trunc(ih/{z:.3}/2)*2'");
+            }
             if !c.grade.is_empty() {
                 let lut = grade_lut(project, &c.grade);
                 if lut.exists() {
@@ -1561,7 +1575,7 @@ mod tests {
     #[test]
     fn coupe_et_durees() {
         let mut p = Project::default();
-        let c = Clip { name: "a".into(), file: "a.mp4".into(), kind: "video".into(), track: 1, start: 2.0, src_in: 1.0, src_out: 9.0, media: 10.0, has_audio: true, speed: 2.0, opacity: 1.0, volume: 1.0, fade_in: 0.5, fade_out: 0.5, brightness: 0.0, contrast: 1.0, saturation: 1.0, wheels: [[0.0; 3]; 3], x: 0.0, y: 0.0, scale: 1.0, grade: String::new(), keys: vec![], text: String::new(), text_size: 72.0, text_color: [255; 3], font: String::new(), outline: false, xfade: 0.0, audio: false, link: 0, fx: vec![], id: 0 };
+        let c = Clip { name: "a".into(), file: "a.mp4".into(), kind: "video".into(), track: 1, start: 2.0, src_in: 1.0, src_out: 9.0, media: 10.0, has_audio: true, speed: 2.0, opacity: 1.0, volume: 1.0, fade_in: 0.5, fade_out: 0.5, brightness: 0.0, contrast: 1.0, saturation: 1.0, wheels: [[0.0; 3]; 3], x: 0.0, y: 0.0, scale: 1.0, grade: String::new(), keys: vec![], text: String::new(), text_size: 72.0, text_color: [255; 3], font: String::new(), outline: false, xfade: 0.0, audio: false, link: 0, fx: vec![], stab: 0.0, id: 0 };
         p.clips.push(c);
         // 8 s de source à vitesse 2 : 4 s sur la timeline
         assert_eq!(p.clips[0].len(), 4.0);
