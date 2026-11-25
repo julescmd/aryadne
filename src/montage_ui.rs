@@ -215,6 +215,8 @@ enum Smart {
     Subtitles(Vec<crate::transcribe::Cue>),
     /// Suivi de mouvement : les clés de placement du clip (son identifiant)
     Track(u64, Vec<crate::montage::PoseKey>),
+    /// Version 9:16 recadrée, enregistrée : à ouvrir
+    Vertical(std::path::PathBuf),
 }
 
 impl Drop for Editor {

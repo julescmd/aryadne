@@ -1695,7 +1695,7 @@ impl Editor {
             "Retire les passages sans voix du clip choisi (et de son son lié) ; la suite de ces pistes se resserre",
             "Choisis la musique : les plans de V1 sont mis bout à bout et chaque coupe tombe sur un temps fort",
             "",
-            "Crée une copie verticale du montage pour Reels, TikTok et Shorts : chaque plan remplit le cadre 9:16",
+            "Crée une copie verticale du montage pour Reels, TikTok et Shorts : chaque plan remplit le cadre 9:16 et le cadre suit son sujet (ce qui bouge, ce qui ressort)",
         ];
         let mut run: Option<usize> = None;
         if hui.available_width() > 640.0 {
@@ -2749,7 +2749,7 @@ impl Editor {
                 sizes.insert(c.file.clone(), crate::montage::media_dims(&self.path, c));
             }
         }
-        let v = crate::montage::vertical_version(&self.project, |c| sizes.get(&c.file).copied().flatten());
+        let mut v = crate::montage::vertical_version(&self.project, |c| sizes.get(&c.file).copied().flatten());
         let stem = self.path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "montage".into());
         let ext = self.path.extension().map(|e| e.to_string_lossy().to_string()).unwrap_or_else(|| "aryav".into());
         let dir = self.path.parent().map(|d| d.to_path_buf()).unwrap_or_default();
@@ -2759,10 +2759,26 @@ impl Editor {
             out = dir.join(format!("{stem} 9x16 ({n}).{ext}"));
             n += 1;
         }
-        match v.write(&out) {
-            Ok(()) => self.open_tab = Some(out),
-            Err(e) => self.message = Some(e),
-        }
+        // Recadrage auto : chaque plan vidéo sans clés suit son sujet (en arrière-plan, puis on ouvre)
+        let project = self.path.clone();
+        let ff = crate::ffmpeg::find("ffmpeg");
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            if let Some(ff) = ff {
+                let (nw, nh) = (v.width as f32, v.height as f32);
+                for c in v.clips.iter_mut().filter(|c| c.kind == "video" && c.keys.is_empty()) {
+                    let Some(dims) = sizes.get(&c.file).copied().flatten() else { continue };
+                    let media = crate::montage::resolve(&project, &c.file);
+                    let step = (c.src_out - c.src_in).clamp(0.5, 600.0) / 40.0;
+                    if let Ok(centers) = crate::montage::interest_track(&ff, &media, c.src_in, c.src_out, step.clamp(0.25, 2.0)) {
+                        c.keys = crate::montage::reframe_keys(c, dims, (nw, nh), &centers);
+                    }
+                }
+            }
+            let _ = tx.send(v.write(&out).map(|_| Smart::Vertical(out)));
+        });
+        self.smart_rx = Some(rx);
+        self.message = Some(crate::i18n::t("Version 9:16 : recadrage sur le sujet de chaque plan…"));
     }
 
     fn start_smart(&mut self, beats: bool, ctx: &egui::Context) {
@@ -3026,6 +3042,10 @@ impl Editor {
                 c.keys = kept;
                 self.message = Some(format!("{} {n} {}", crate::i18n::t("Point suivi sur"), crate::i18n::t_mid("images")));
                 self.changed();
+            }
+            Ok(Smart::Vertical(path)) => {
+                self.message = None;
+                self.open_tab = Some(path);
             }
             Ok(Smart::Beats(beats)) => {
                 if beats.len() < 2 {

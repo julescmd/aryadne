@@ -1196,6 +1196,84 @@ pub fn vertical_version(p: &Project, dims: impl Fn(&Clip) -> Option<(f32, f32)>)
     v
 }
 
+/// Recadrage auto : le centre d'intérêt de chaque image (0..1), d'après les contours et ce qui bouge,
+/// lissé dans le temps pour que le cadre glisse au lieu de sauter. `frames` : images en gris `w × h`.
+pub fn interest_centers(frames: &[Vec<u8>], w: usize, h: usize) -> Vec<[f32; 2]> {
+    let mut raw = vec![];
+    for (k, f) in frames.iter().enumerate() {
+        let prev = if k > 0 { Some(&frames[k - 1]) } else { frames.get(1) };
+        let (mut sx, mut sy, mut sw) = (0.0f64, 0.0f64, 0.0f64);
+        for y in 1..h.saturating_sub(1) {
+            for x in 1..w.saturating_sub(1) {
+                let i = y * w + x;
+                let g = (f[i + 1] as f32 - f[i - 1] as f32).abs() + (f[i + w] as f32 - f[i - w] as f32).abs();
+                let m = prev.map(|p| (f[i] as f32 - p[i] as f32).abs()).unwrap_or(0.0);
+                // Un léger penchant pour le centre, et les points forts comptent beaucoup plus que le fond
+                let (cx, cy) = (x as f32 / w as f32 - 0.5, y as f32 / h as f32 - 0.5);
+                let s = ((g + 3.0 * m) as f64).powi(2) * (1.0 - 0.3 * (cx * cx + cy * cy)) as f64;
+                sx += s * x as f64;
+                sy += s * y as f64;
+                sw += s;
+            }
+        }
+        raw.push(if sw > 1e-6 { [(sx / sw) as f32 / (w - 1).max(1) as f32, (sy / sw) as f32 / (h - 1).max(1) as f32] } else { [0.5, 0.5] });
+    }
+    // Lissage aller-retour (pas de retard)
+    let a = 0.5;
+    let mut out = raw.clone();
+    for k in 1..out.len() {
+        for j in 0..2 {
+            out[k][j] = out[k - 1][j] + (raw[k][j] - out[k - 1][j]) * a;
+        }
+    }
+    for k in (0..out.len().saturating_sub(1)).rev() {
+        for j in 0..2 {
+            out[k][j] = out[k + 1][j] + (out[k][j] - out[k + 1][j]) * a;
+        }
+    }
+    out
+}
+
+/// Les clés de placement qui gardent le centre d'intérêt au milieu d'un cadre `nw × nh`, pour un clip
+/// dont le média fait `mw × mh` (sans sortir du cadre : pas de bord noir). `centers` : (instant dans le
+/// média, centre 0..1).
+pub fn reframe_keys(c: &Clip, (mw, mh): (f32, f32), (nw, nh): (f32, f32), centers: &[(f32, [f32; 2])]) -> Vec<PoseKey> {
+    let fit = (nw / mw).min(nh / mh);
+    let (dw, dh) = (mw * fit * c.scale, mh * fit * c.scale);
+    let (lx, ly) = (((dw - nw) / 2.0).max(0.0), ((dh - nh) / 2.0).max(0.0));
+    let mut keys: Vec<PoseKey> = vec![];
+    for (k, &(ts, u)) in centers.iter().enumerate() {
+        let t = (((ts - c.src_in) / c.speed.max(1e-3)).clamp(0.0, c.len()) * 100.0).round() / 100.0;
+        let x = (-(u[0] - 0.5) * dw).clamp(-lx, lx).round();
+        let y = (-(u[1] - 0.5) * dh).clamp(-ly, ly).round();
+        // On ne garde que les clés qui changent vraiment le cadre
+        let last = k + 1 == centers.len();
+        if !last && keys.last().is_some_and(|p| (p.x - x).abs() < nw * 0.02 && (p.y - y).abs() < nh * 0.02) {
+            continue;
+        }
+        keys.push(PoseKey { t, x, y, scale: c.scale, opacity: c.opacity, ease: crate::keys::Ease::Smooth, tan: [None; 4] });
+    }
+    keys
+}
+
+/// Les centres d'intérêt d'un plan vidéo, une image toutes les `step` secondes du média
+pub fn interest_track(ff: &Path, media: &Path, src_in: f32, src_out: f32, step: f32) -> Result<Vec<(f32, [f32; 2])>, String> {
+    const W: usize = 96;
+    const H: usize = 54;
+    let o = crate::ffmpeg::command(ff.to_path_buf())
+        .args(["-v", "error", "-ss", &format!("{src_in:.3}"), "-to", &format!("{src_out:.3}"), "-i"])
+        .arg(media)
+        .args(["-an", "-vf", &format!("fps=1/{step:.3},scale={W}:{H},format=gray"), "-f", "rawvideo", "-"])
+        .output()
+        .map_err(|e| e.to_string())?;
+    let frames: Vec<Vec<u8>> = o.stdout.chunks_exact(W * H).map(|c| c.to_vec()).collect();
+    if frames.is_empty() {
+        return Err(crate::i18n::t("Aucune image lue dans ce plan."));
+    }
+    let centers = interest_centers(&frames, W, H);
+    Ok(centers.into_iter().enumerate().map(|(k, c)| (src_in + k as f32 * step, c)).collect())
+}
+
 pub fn resolve(project: &Path, file: &str) -> PathBuf {
     let p = Path::new(file);
     let p = if p.is_absolute() { p.to_path_buf() } else { project.parent().unwrap_or(Path::new("")).join(p) };
@@ -2165,3 +2243,38 @@ pub fn color_script(p: &Project, project: &Path) -> Result<PathBuf, String> {
     Ok(path)
 }
 
+#[cfg(test)]
+mod reframe_tests {
+    use super::*;
+    #[test]
+    fn recadrage_suit_le_sujet() {
+        // Un carré clair qui traverse l'image de gauche à droite
+        let (w, h) = (48usize, 27usize);
+        let frames: Vec<Vec<u8>> = (0..10)
+            .map(|k| {
+                let mut f = vec![20u8; w * h];
+                let x0 = 4 + k * 4;
+                for y in 10..17 {
+                    for x in x0..x0 + 6 {
+                        f[y * w + x] = 230;
+                    }
+                }
+                f
+            })
+            .collect();
+        let c = interest_centers(&frames, w, h);
+        assert!(c[1][0] < 0.35 && c[8][0] > 0.6, "{c:?}");
+        assert!(c.windows(2).all(|p| p[1][0] >= p[0][0] - 0.01));
+        // 16:9 en 9:16 : le cadre suit vers la droite (x décroît), sans dépasser le bord
+        let mut clip = Clip::test();
+        (clip.src_in, clip.src_out, clip.speed) = (0.0, 5.0, 1.0);
+        clip.scale = 1080.0 / 1920.0 * (1920.0 / 1080.0) * (1920.0 / 1080.0);
+        let centers: Vec<(f32, [f32; 2])> = c.iter().enumerate().map(|(k, u)| (k as f32 * 0.5, *u)).collect();
+        let keys = reframe_keys(&clip, (1920.0, 1080.0), (1080.0, 1920.0), &centers);
+        assert!(keys.len() >= 3);
+        assert!(keys.first().unwrap().x > keys.last().unwrap().x);
+        let fit = 1080.0f32 / 1920.0;
+        let lim = (1920.0 * fit * clip.scale - 1080.0) / 2.0;
+        assert!(keys.iter().all(|k| k.x.abs() <= lim + 0.5));
+    }
+}
