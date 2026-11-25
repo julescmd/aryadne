@@ -7395,7 +7395,9 @@ impl Viewer {
                         // Moteur de rendu de la vue
                         let traced = self.engine == 1;
                         egui::containers::menu::MenuButton::from_button(egui::Button::new(egui::RichText::new(crate::i18n::t("rendu ▾")).size(11.0).color(if traced { p.on_accent } else { p.text })).fill(if traced { p.accent } else { p.panel })).config(stay.clone()).ui(ui, |ui| {
-                            ui.set_min_width(260.0);
+                            // Largeur fixe : les curseurs remplissent la ligne sans élargir le menu
+                            ui.set_width(320.0);
+                            ui.spacing_mut().item_spacing.y = 7.0;
                             ui.label(egui::RichText::new(crate::i18n::t("moteur de la vue")).color(p.muted).size(11.0));
                             if ui.radio(self.engine == 0, crate::i18n::t("aperçu (rapide)")).on_hover_text(crate::i18n::t("Comme Workbench / Eevee : instantané, ombres et reflets approchés")).clicked() {
                                 self.engine = 0;
@@ -7420,26 +7422,26 @@ impl Viewer {
                                 });
                                 ch |= ui.checkbox(&mut self.trace_set.backdrop, crate::i18n::t("fond de studio (le sol se fond au loin)")).changed();
                                 if self.trace_set.backdrop && self.trace_set.rig == 1 {
-                                    ch |= ui.add(egui::Slider::new(&mut self.trace_set.backdrop_gray, 0.0..=0.6).text(crate::i18n::t("clarté du fond"))).changed();
+                                    ch |= crate::modifiers::row_slider(ui, "clarté du fond", egui::Slider::new(&mut self.trace_set.backdrop_gray, 0.0..=0.6));
                                 }
-                                ch |= ui.add(egui::Slider::new(&mut self.trace_set.contrast, -0.5..=1.0).text(crate::i18n::t("contraste"))).changed();
-                                ch |= ui.add(egui::Slider::new(&mut self.trace_set.saturation, 0.0..=2.0).text(crate::i18n::t("saturation"))).changed();
-                                ui.horizontal(|ui| {
-                                    ch |= ui.add(egui::Slider::new(&mut self.trace_set.outline, 0.0..=6.0).step_by(0.5).text(crate::i18n::t("contours (line art)"))).on_hover_text(crate::i18n::t("Line art : la silhouette et les plis tracés, en pixels (0 : aucun)")).changed();
-                                    ch |= ui.color_edit_button_srgb(&mut self.trace_set.outline_color).changed();
-                                });
+                                ch |= crate::modifiers::row_slider(ui, "contraste", egui::Slider::new(&mut self.trace_set.contrast, -0.5..=1.0));
+                                ch |= crate::modifiers::row_slider(ui, "saturation", egui::Slider::new(&mut self.trace_set.saturation, 0.0..=2.0));
+                                ch |= crate::modifiers::row_slider(ui, "contours (line art)", egui::Slider::new(&mut self.trace_set.outline, 0.0..=6.0).step_by(0.5));
+                                if self.trace_set.outline > 0.0 {
+                                    ch |= crate::modifiers::row(ui, "couleur des contours", |ui| ui.color_edit_button_srgb(&mut self.trace_set.outline_color).changed());
+                                }
                                 ui.separator();
-                                ch |= ui.add(egui::Slider::new(&mut self.trace_set.bounces, 1..=16).clamping(egui::SliderClamping::Never).text(crate::i18n::t("rebonds"))).changed();
-                                ch |= ui.add(egui::Slider::new(&mut self.trace_max, 16..=4096).clamping(egui::SliderClamping::Never).logarithmic(true).text(crate::i18n::t("échantillons"))).changed();
+                                ch |= crate::modifiers::row_slider(ui, "rebonds", egui::Slider::new(&mut self.trace_set.bounces, 1..=16).clamping(egui::SliderClamping::Never));
+                                ch |= crate::modifiers::row_slider(ui, "échantillons", egui::Slider::new(&mut self.trace_max, 16..=4096).clamping(egui::SliderClamping::Never).logarithmic(true));
                                 ch |= ui.checkbox(&mut self.trace_set.floor, crate::i18n::t("sol (ombres et rebonds)")).changed();
                                 ch |= ui.add_enabled(self.trace_set.floor, egui::Checkbox::new(&mut self.trace_set.floor_visible, crate::i18n::t("sol visible"))).changed();
-                                ch |= ui.add(egui::Slider::new(&mut self.trace_set.clamp, 1.0..=100.0).clamping(egui::SliderClamping::Never).logarithmic(true).text(crate::i18n::t("limite des points brillants"))).changed();
+                                ch |= crate::modifiers::row_slider(ui, "limite des points brillants", egui::Slider::new(&mut self.trace_set.clamp, 1.0..=100.0).clamping(egui::SliderClamping::Never).logarithmic(true));
                                 ch |= ui.checkbox(&mut self.trace_set.denoise, crate::i18n::t("débruitage")).changed();
                                 ui.checkbox(&mut self.trace_set.live, crate::i18n::t("tracé de chemins pendant le mouvement")).on_hover_text(crate::i18n::t("Décoché : l'aperçu rapide prend le relais quand on tourne autour de la scène."));
-                                ch |= ui.add(egui::Slider::new(&mut self.trace_set.aperture, 0.0..=0.2).text(crate::i18n::t("flou de profondeur"))).on_hover_text(crate::i18n::t("Ouverture de l'objectif : 0 tout est net")).changed();
+                                ch |= crate::modifiers::row_slider(ui, "flou de profondeur", egui::Slider::new(&mut self.trace_set.aperture, 0.0..=0.2));
                                 if self.trace_set.aperture > 0.0 {
                                     let mut f = if self.trace_set.focus > 0.0 { self.trace_set.focus } else { self.cam.dist };
-                                    if ui.add(egui::Slider::new(&mut f, 0.05..=10.0).clamping(egui::SliderClamping::Never).logarithmic(true).text(crate::i18n::t("distance nette"))).changed() {
+                                    if crate::modifiers::row_slider(ui, "distance nette", egui::Slider::new(&mut f, 0.05..=10.0).clamping(egui::SliderClamping::Never).logarithmic(true)) {
                                         self.trace_set.focus = f;
                                         ch = true;
                                     }

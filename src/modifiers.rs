@@ -1497,7 +1497,7 @@ struct ModDrag(usize);
 const LABEL_W: f32 = 84.0;
 
 /// Une ligne de réglage : le nom (discret) à gauche, le contrôle qui remplit le reste
-fn row<R>(ui: &mut egui::Ui, label: &str, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+pub(crate) fn row<R>(ui: &mut egui::Ui, label: &str, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
     ui.horizontal(|ui| {
         let (r, _) = ui.allocate_exact_size(egui::vec2(LABEL_W, 20.0), egui::Sense::hover());
         let g = ui.painter().layout(crate::i18n::t(label), egui::FontId::proportional(12.0), crate::theme::pal().muted, LABEL_W);
@@ -1508,7 +1508,7 @@ fn row<R>(ui: &mut egui::Ui, label: &str, add: impl FnOnce(&mut egui::Ui) -> R) 
 }
 
 /// Un curseur sur une ligne : nom, curseur qui s'étire, valeur
-fn row_slider(ui: &mut egui::Ui, label: &str, s: egui::Slider) -> bool {
+pub(crate) fn row_slider(ui: &mut egui::Ui, label: &str, s: egui::Slider) -> bool {
     row(ui, label, |ui| {
         // La valeur prend environ 60 px à droite ; on laisse une marge pour ne jamais élargir le panneau
         ui.spacing_mut().slider_width = (ui.available_width() - 84.0).max(40.0);
