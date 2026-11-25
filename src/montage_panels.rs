@@ -1312,6 +1312,48 @@ impl Editor {
                 }
             });
         }
+        // Modèle Motion : ses réglages exposés (texte, couleurs) se changent ici ; la première retouche
+        // crée une variante à côté du modèle, le modèle d'origine ne bouge pas
+        let file = self.project.clips[i].file.clone();
+        if crate::motion::is_compo(&file) {
+            if self.tpl.as_ref().is_none_or(|t| t.0 != file) {
+                self.tpl = crate::motion::Compo::read(&crate::montage::source_file(&self.path, &file)).ok().map(|c| (file.clone(), c));
+            }
+            let mut edit: Option<(usize, crate::motion::ParamVal)> = None;
+            if let Some((_, comp)) = self.tpl.as_ref().filter(|t| !t.1.params.is_empty()) {
+                card(ui, "Modèle", &mut |ui| {
+                    for (k, prm) in comp.params.iter().enumerate() {
+                        match comp.param(prm) {
+                            Some(crate::motion::ParamVal::Text(mut s)) => {
+                                ui.horizontal(|ui| {
+                                    let (lr, _) = ui.allocate_exact_size(vec2(112.0, 20.0), Sense::hover());
+                                    ui.painter().text(lr.left_center(), egui::Align2::LEFT_CENTER, &prm.name, egui::FontId::proportional(12.0), p.muted);
+                                    if ui.add(egui::TextEdit::singleline(&mut s).desired_width(ui.available_width())).changed() {
+                                        edit = Some((k, crate::motion::ParamVal::Text(s)));
+                                    }
+                                });
+                            }
+                            Some(crate::motion::ParamVal::Color(mut c)) => {
+                                ui.horizontal(|ui| {
+                                    let (lr, _) = ui.allocate_exact_size(vec2(112.0, 20.0), Sense::hover());
+                                    ui.painter().text(lr.left_center(), egui::Align2::LEFT_CENTER, &prm.name, egui::FontId::proportional(12.0), p.muted);
+                                    if ui.color_edit_button_srgb(&mut c).changed() {
+                                        edit = Some((k, crate::motion::ParamVal::Color(c)));
+                                    }
+                                });
+                            }
+                            None => {}
+                        }
+                    }
+                    if comp.template.is_some() {
+                        ui.label(RichText::new(crate::i18n::t("Variante du modèle : le modèle d'origine reste tel quel.")).size(11.0).color(p.muted));
+                    }
+                });
+            }
+            if let Some((k, v)) = edit {
+                self.apply_template_edit(i, k, v);
+            }
+        }
         if let Some(k) = want_angle {
             self.project.switch_angle(self.playhead, k);
         }
@@ -3090,6 +3132,38 @@ impl Editor {
         });
         self.smart_rx = Some(rx);
         self.message = Some(crate::i18n::t("Suivi du point…"));
+    }
+
+    /// Change un réglage du modèle Motion du clip `i` ; la première fois, une variante est créée à côté
+    fn apply_template_edit(&mut self, i: usize, k: usize, v: crate::motion::ParamVal) {
+        let Some((file, mut comp)) = self.tpl.clone() else { return };
+        let Some(prm) = comp.params.get(k).cloned() else { return };
+        comp.set_param(&prm, v);
+        let mut file = file;
+        if comp.template.is_none() {
+            let src = crate::montage::source_file(&self.path, &file);
+            let stem = src.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "modèle".into());
+            let dir = src.parent().map(|d| d.to_path_buf()).unwrap_or_default();
+            let mut n = 1;
+            let mut out = dir.join(format!("{stem} (variante {n}).arymotion"));
+            while out.exists() {
+                n += 1;
+                out = dir.join(format!("{stem} (variante {n}).arymotion"));
+            }
+            comp.template = Some(file.rsplit('/').next().unwrap_or(&file).to_string());
+            let name = out.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+            file = match file.rsplit_once('/') {
+                Some((d, _)) => format!("{d}/{name}"),
+                None => name,
+            };
+        }
+        if let Err(e) = comp.write(&crate::montage::source_file(&self.path, &file)) {
+            self.message = Some(e);
+            return;
+        }
+        self.project.clips[i].file = file.clone();
+        self.tpl = Some((file, comp));
+        self.changed();
     }
 
     /// Multicam : décode le son de chaque prise (10 premières minutes) et mesure leurs décalages

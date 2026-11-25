@@ -1500,7 +1500,7 @@ pub fn nested_cached(seq: &Path, wait: bool) -> PathBuf {
 }
 
 /// Le fichier d'un clip tel qu'il est sur le disque (la composition elle-même, pas sa vidéo)
-fn source_file(project: &Path, file: &str) -> PathBuf {
+pub(crate) fn source_file(project: &Path, file: &str) -> PathBuf {
     let p = Path::new(file);
     if p.is_absolute() { p.to_path_buf() } else { project.parent().unwrap_or(Path::new("")).join(p) }
 }

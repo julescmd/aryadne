@@ -3282,5 +3282,11 @@
   "épingle(s)": "pin(s)",
   "Remettre les épingles au repos": "Reset pins to rest",
   "Retirer toutes les épingles": "Remove all pins",
-  "Glisser une épingle pose une clé à cet instant ; Alt+clic sur une épingle la retire.": "Dragging a pin sets a key at this time; Alt+click a pin to remove it."
+  "Glisser une épingle pose une clé à cet instant ; Alt+clic sur une épingle la retire.": "Dragging a pin sets a key at this time; Alt+click a pin to remove it.",
+  "Modèle": "Template",
+  "texte réglable": "editable text",
+  "couleur réglable": "editable color",
+  "Exposé dans le modèle : on le change depuis la Vidéo, sans ouvrir la composition": "Exposed in the template: change it from Video without opening the composition",
+  "Le nom du réglage, comme on le verra dans la Vidéo": "The setting's name, as shown in Video",
+  "Variante du modèle : le modèle d'origine reste tel quel.": "Template variant: the original template stays as is."
 }

@@ -126,6 +126,8 @@ pub struct Editor {
     pub(crate) words_mode: bool,
     /// Fenêtre « montage par le texte »
     pub(crate) text_edit: bool,
+    /// Modèle Motion du clip choisi (fichier, composition), relu quand le clip change
+    pub(crate) tpl: Option<(String, crate::motion::Compo)>,
     zoom: f32,
     scroll: f32,
     drag: Option<DragState>,
@@ -249,6 +251,7 @@ impl Editor {
             grade_clip: None,
             words_mode: false,
             text_edit: false,
+            tpl: None,
             zoom: 60.0,
             scroll: 0.0,
             drag: None,

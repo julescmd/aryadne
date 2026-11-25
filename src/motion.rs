@@ -971,6 +971,75 @@ pub struct Compo {
     /// Caméra (2,5D) : elle voit les calques 3D en perspective ; les calques 2D ne bougent pas
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub camera: Option<Camera>,
+    /// Modèle : les réglages exposés (texte, couleur d'un calque), modifiables depuis la Vidéo
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub params: Vec<Param>,
+    /// Variante d'un modèle : le modèle d'origine (chemin du coffre)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub template: Option<String>,
+}
+
+/// Un réglage exposé d'un modèle
+#[derive(Clone, PartialEq, Serialize, Deserialize, Debug)]
+pub struct Param {
+    pub name: String,
+    /// Le calque (identifiant)
+    pub layer: u64,
+    /// true : la couleur du calque ; false : son texte
+    pub color: bool,
+}
+
+/// La valeur d'un réglage exposé
+#[derive(Clone, PartialEq, Debug)]
+pub enum ParamVal {
+    Text(String),
+    Color([u8; 3]),
+}
+
+fn kind_color(k: &mut Kind) -> Option<&mut [u8; 3]> {
+    match k {
+        Kind::Text { color, .. } | Kind::Rect { color, .. } | Kind::Ellipse { color, .. } | Kind::Path { color, .. } | Kind::Noise { color, .. } => Some(color),
+        _ => None,
+    }
+}
+
+impl Compo {
+    /// La valeur actuelle d'un réglage exposé
+    pub fn param(&self, p: &Param) -> Option<ParamVal> {
+        let l = self.layers.iter().find(|l| l.id == p.layer)?;
+        let mut k = l.kind.clone();
+        if p.color {
+            kind_color(&mut k).map(|c| ParamVal::Color(*c))
+        } else if let Kind::Text { text, .. } = k {
+            Some(ParamVal::Text(text))
+        } else {
+            None
+        }
+    }
+
+    pub fn set_param(&mut self, p: &Param, v: ParamVal) -> bool {
+        let Some(l) = self.layers.iter_mut().find(|l| l.id == p.layer) else { return false };
+        match (v, &mut l.kind) {
+            (ParamVal::Text(t), Kind::Text { text, .. }) if !p.color => {
+                *text = t;
+                true
+            }
+            (ParamVal::Color(c), k) if p.color => kind_color(k).map(|x| *x = c).is_some(),
+            _ => false,
+        }
+    }
+
+    /// Expose (ou retire) le texte ou la couleur du calque `i` dans le modèle
+    pub fn toggle_param(&mut self, i: usize, color: bool) {
+        let Some(l) = self.layers.get(i) else { return };
+        let id = l.id;
+        if let Some(k) = self.params.iter().position(|p| p.layer == id && p.color == color) {
+            self.params.remove(k);
+        } else {
+            let name = if color { format!("{} · {}", l.name, crate::i18n::t("couleur")) } else { l.name.clone() };
+            self.params.push(Param { name, layer: id, color });
+        }
+    }
 }
 
 /// Caméra d'une composition : un panoramique, un travelling avant (dolly) et la profondeur de champ
@@ -1044,7 +1113,7 @@ impl Default for MotionBlur {
 impl Default for Compo {
     /// Une composition neuve : un titre qui entre lettre par lettre, souligné d'un trait qui s'étire
     fn default() -> Compo {
-        let mut c = Compo { w: 1920, h: 1080, fps: 30.0, duration: 6.0, bg: [0x14, 0x10, 0x1a], layers: vec![], music: None, blur: None, camera: None, controls: vec![] };
+        let mut c = Compo { w: 1920, h: 1080, fps: 30.0, duration: 6.0, bg: [0x14, 0x10, 0x1a], layers: vec![], music: None, blur: None, camera: None, controls: vec![], params: vec![], template: None };
         let mut title = Layer::new("Titre", Kind::Text { text: "Titre".into(), size: 140.0, color: [0xf4, 0xee, 0xf1], font: "inter-bold".into(), tracking: -2.0, align: 1 }, &c);
         title.reveal = Some(Reveal::default());
         title.pos.v = [960.0, 500.0];
@@ -3167,5 +3236,26 @@ mod puppet_tests {
             image::imageops::overlay(&mut out, &b, a.width() as i64 + 10, 0);
             out.save("/tmp/puppet.png").unwrap();
         }
+    }
+}
+
+#[cfg(test)]
+mod template_tests {
+    use super::*;
+    #[test]
+    fn modele_et_variante() {
+        let mut c = Compo::default();
+        let i = c.layers.iter().position(|l| matches!(l.kind, Kind::Text { .. })).unwrap();
+        c.toggle_param(i, false);
+        c.toggle_param(i, true);
+        assert_eq!(c.params.len(), 2);
+        let (pt, pc) = (c.params[0].clone(), c.params[1].clone());
+        assert!(c.set_param(&pt, ParamVal::Text("Bonjour".into())));
+        assert!(c.set_param(&pc, ParamVal::Color([255, 0, 0])));
+        assert_eq!(c.param(&pt), Some(ParamVal::Text("Bonjour".into())));
+        assert_eq!(c.param(&pc), Some(ParamVal::Color([255, 0, 0])));
+        assert!(!c.set_param(&pt, ParamVal::Color([0, 0, 0])));
+        c.toggle_param(i, true);
+        assert_eq!(c.params.len(), 1);
     }
 }

@@ -1117,6 +1117,7 @@ impl Editor {
         }
         let mut changed = false;
         let mut new_parent: Option<Option<u64>> = None;
+        let mut expose: Option<bool> = None;
         egui::Frame::new().inner_margin(12).show(ui, |ui| {
             if self.insp_tab == 1 {
                 changed |= self.compo_settings(ui);
@@ -1789,6 +1790,39 @@ impl Editor {
                     }
                 }
             });
+            // Modèle : ce calque prête son texte ou sa couleur aux réglages qu'on change depuis la Vidéo
+            section(ui, "Modèle");
+            {
+                let id = lay.id;
+                let has_color = !matches!(lay.kind, Kind::Image { .. } | Kind::Compo { .. });
+                let is_text = matches!(lay.kind, Kind::Text { .. });
+                ui.horizontal(|ui| {
+                    for (color, ok, label) in [(false, is_text, "texte réglable"), (true, has_color, "couleur réglable")] {
+                        if !ok {
+                            continue;
+                        }
+                        let on = self.compo.params.iter().any(|p| p.layer == id && p.color == color);
+                        let b = egui::Button::new(egui::RichText::new(format!("{}  {}", if color { l::PALETTE } else { l::TYPE }, crate::i18n::t(label))).size(12.0)).selected(on).corner_radius(10);
+                        if ui.add(b).on_hover_text(crate::i18n::t("Exposé dans le modèle : on le change depuis la Vidéo, sans ouvrir la composition")).clicked() {
+                            expose = Some(color);
+                        }
+                    }
+                });
+                let mut drop = None;
+                for (k, prm) in self.compo.params.iter_mut().enumerate() {
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new(if prm.color { l::PALETTE } else { l::TYPE }).size(12.0).color(p.muted));
+                        changed |= ui.add(egui::TextEdit::singleline(&mut prm.name).desired_width(ui.available_width() - 30.0)).on_hover_text(crate::i18n::t("Le nom du réglage, comme on le verra dans la Vidéo")).changed();
+                        if ui.add(egui::Button::new(egui::RichText::new(l::X).size(12.0)).frame(false)).on_hover_text(crate::i18n::t("retirer")).clicked() {
+                            drop = Some(k);
+                        }
+                    });
+                }
+                if let Some(k) = drop {
+                    self.compo.params.remove(k);
+                    changed = true;
+                }
+            }
             section(ui, "Profondeur (2,5D)");
             let mut on = lay.depth.is_some();
             if ui.checkbox(&mut on, crate::i18n::t("Calque 3D")).on_hover_text(crate::i18n::t("Le calque a une profondeur : la caméra de la composition le voit en perspective (parallaxe, flou de profondeur de champ)")).changed() {
@@ -1833,6 +1867,10 @@ impl Editor {
                 });
             }
         });
+        if let (Some(color), Some(i)) = (expose, self.sel) {
+            self.compo.toggle_param(i, color);
+            changed = true;
+        }
         if let (Some(np), Some(i)) = (new_parent, self.sel) {
             let t = self.time;
             self.compo.set_parent(i, np, t);
