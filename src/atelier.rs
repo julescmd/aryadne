@@ -46,16 +46,44 @@ pub struct Mask {
     pub scale: f32,
     #[serde(default)]
     pub invert: bool,
+    /// Masque intelligent : un second générateur qui casse le premier (comme un « breakup » de Substance)
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub breakup: String,
+    #[serde(default = "half")]
+    pub breakup_amount: f32,
+    #[serde(default = "eight")]
+    pub breakup_scale: f32,
+}
+
+fn half() -> f32 {
+    0.5
+}
+fn eight() -> f32 {
+    8.0
 }
 
 impl Default for Mask {
     fn default() -> Self {
-        Mask { kind: "plein".into(), amount: 0.5, contrast: 0.5, scale: 8.0, invert: false }
+        Mask { kind: "plein".into(), amount: 0.5, contrast: 0.5, scale: 8.0, invert: false, breakup: String::new(), breakup_amount: 0.5, breakup_scale: 8.0 }
     }
 }
 
+/// Masques intelligents tout prêts : nom, puis le masque (générateur, réglages, cassure)
+pub fn smart_masks() -> Vec<(&'static str, Mask)> {
+    let m = |kind: &str, amount: f32, contrast: f32, scale: f32, invert: bool, breakup: &str, ba: f32, bs: f32| Mask { kind: kind.into(), amount, contrast, scale, invert, breakup: breakup.into(), breakup_amount: ba, breakup_scale: bs };
+    vec![
+        ("peinture écaillée sur les arêtes", m("arêtes", 0.55, 0.75, 14.0, false, "grunge", 0.7, 6.0)),
+        ("rouille dans les creux", m("creux", 0.6, 0.6, 8.0, false, "taches", 0.6, 10.0)),
+        ("poussière et saleté", m("dessus", 0.5, 0.4, 8.0, false, "bruit", 0.5, 12.0)),
+        ("bords légèrement usés", m("arêtes", 0.3, 0.9, 20.0, false, "", 0.5, 8.0)),
+        ("coulures de pluie", m("coulures", 0.5, 0.6, 6.0, false, "grunge", 0.4, 4.0)),
+        ("métal rayé", m("rayures", 0.5, 0.7, 10.0, false, "bruit", 0.5, 3.0)),
+        ("sol craquelé", m("fissures", 0.5, 0.5, 6.0, false, "grunge", 0.3, 5.0)),
+    ]
+}
+
 /// Les masques proposés : identifiant, nom affiché, node générateur.
-pub const MASKS: [(&str, &str, &str); 8] = [
+pub const MASKS: [(&str, &str, &str); 10] = [
     ("plein", "partout", ""),
     ("arêtes", "usure des arêtes", "edgewear"),
     ("creux", "saleté des creux", "cavdirt"),
@@ -64,7 +92,60 @@ pub const MASKS: [(&str, &str, &str); 8] = [
     ("rayures", "rayures d'usure", "scratches"),
     ("grunge", "saleté (grunge)", "grunge"),
     ("bruit", "bruit", "noise"),
+    ("fissures", "fissures", "cracks"),
+    ("taches", "taches", "voronoi"),
 ];
+
+/// Un matériau intelligent : une pile de calques enregistrée, à reposer sur un autre objet
+pub const SMART_DIR: &str = "matériaux intelligents";
+
+pub fn smart_materials(root: &str) -> Vec<String> {
+    let dir = std::path::Path::new(root).join(SMART_DIR);
+    let mut out: Vec<String> = std::fs::read_dir(&dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| e.file_name().to_str().filter(|n| n.ends_with(".arysmart")).map(|n| n.trim_end_matches(".arysmart").to_string()))
+        .collect();
+    out.sort();
+    out
+}
+
+pub fn save_smart(root: &str, name: &str, stack: &Stack) -> Result<std::path::PathBuf, String> {
+    let dir = std::path::Path::new(root).join(SMART_DIR);
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let clean: String = name.chars().map(|c| if "/\\:*?\"<>|".contains(c) { '-' } else { c }).collect();
+    let path = dir.join(format!("{}.arysmart", clean.trim()));
+    crate::vault::atomic_write(&path, serde_json::to_string_pretty(stack).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+    Ok(path)
+}
+
+pub fn load_smart(root: &str, name: &str) -> Option<Stack> {
+    let t = std::fs::read_to_string(std::path::Path::new(root).join(SMART_DIR).join(format!("{name}.arysmart"))).ok()?;
+    serde_json::from_str(&t).ok()
+}
+
+/// Ajoute un générateur de masque au graphe ; rend sa sortie
+fn generator(g: &mut Graph, kind: &str, amount: f32, contrast: f32, scale: f32, at: [f32; 2]) -> Option<Src> {
+    let (_, _, op) = MASKS.iter().find(|m| m.0 == kind).filter(|m| !m.2.is_empty())?;
+    let mk = g.add(op, at);
+    set_named(g, mk, "quantité", amount);
+    set_named(g, mk, "contraste", contrast);
+    set_named(g, mk, "échelle du bruit", scale);
+    set_named(g, mk, "échelle", scale);
+    let mut m = Src::Link(mk, 0);
+    // Les motifs (bruit, taches, fissures) passent par un seuil doux réglé par la quantité
+    if matches!(*op, "noise" | "voronoi" | "cracks") {
+        let th = g.add("levels", [at[0] + 120.0, at[1]]);
+        let lo = (1.0 - amount).clamp(0.0, 0.98) * 0.8;
+        let hi = (lo + 0.05 + (1.0 - contrast) * 0.5).min(1.0);
+        set_named(g, th, "noir", lo);
+        set_named(g, th, "blanc", hi);
+        wire(g, m, th, 0);
+        m = Src::Link(th, 0);
+    }
+    Some(m)
+}
 
 /// Un paramètre exposé par un matériau maître (node « Paramètre exposé ») : nom, valeur par défaut, couleur ou nombre.
 #[derive(Clone, Debug, PartialEq)]
@@ -157,13 +238,20 @@ pub fn flatten(stack: &Stack, root: &str) -> Graph {
         // Facteur du calque : masque × opacité
         let x0 = -400.0;
         let mut factor = Src::Const([layer.opacity; 4]);
-        if let Some((_, _, op)) = MASKS.iter().find(|m| m.0 == layer.mask.kind).filter(|m| !m.2.is_empty()) {
-            let mk = g.add(op, [x0, dy]);
-            set_named(&mut g, mk, "quantité", layer.mask.amount);
-            set_named(&mut g, mk, "contraste", layer.mask.contrast);
-            set_named(&mut g, mk, "échelle du bruit", layer.mask.scale);
-            set_named(&mut g, mk, "échelle", layer.mask.scale);
-            let mut m = Src::Link(mk, 0);
+        let lm = &layer.mask;
+        if let Some(mut m) = generator(&mut g, &lm.kind, lm.amount, lm.contrast, lm.scale, [x0 - 400.0, dy]) {
+            // Masque intelligent : le second générateur casse le premier (m × mélange(1, cassure, force))
+            if let Some(b) = generator(&mut g, &lm.breakup, 0.5, 0.5, lm.breakup_scale, [x0 - 400.0, dy + 160.0]) {
+                let mx = g.add("mixf", [x0 - 150.0, dy + 120.0]);
+                set_value(&mut g, mx, 0, [lm.breakup_amount; 4]);
+                set_value(&mut g, mx, 1, [1.0; 4]);
+                wire(&mut g, b, mx, 2);
+                let mul = g.add("math", [x0, dy + 60.0]);
+                set_choice(&mut g, mul, "opération", "multiplier");
+                wire(&mut g, m, mul, 0);
+                wire(&mut g, Src::Link(mx, 0), mul, 1);
+                m = Src::Link(mul, 0);
+            }
             if layer.mask.invert {
                 let inv = g.add("math", [x0 + 150.0, dy]);
                 set_choice(&mut g, inv, "opération", "soustraire");
@@ -260,7 +348,7 @@ mod tests {
         let stack = Stack {
             layers: vec![
                 Layer { name: "métal".into(), master: "metal.arymat".into(), params, mask: Mask::default(), opacity: 1.0, visible: true },
-                Layer { name: "peinture".into(), master: "paint.arymat".into(), params: BTreeMap::new(), mask: Mask { kind: "arêtes".into(), invert: true, ..Mask::default() }, opacity: 0.8, visible: true },
+                Layer { name: "peinture".into(), master: "paint.arymat".into(), params: BTreeMap::new(), mask: Mask { kind: "arêtes".into(), invert: true, breakup: "taches".into(), ..Mask::default() }, opacity: 0.8, visible: true },
             ],
         };
         let g = flatten(&stack, &root);

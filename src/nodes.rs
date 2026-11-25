@@ -4402,6 +4402,22 @@ impl Editor {
                         }
                     }
                 });
+                // Matériaux intelligents : des piles entières enregistrées, posées d'un coup
+                let smart = crate::atelier::smart_materials(&self.root);
+                if !smart.is_empty() {
+                    ui.separator();
+                    ui.label(RichText::new(crate::i18n::t("matériaux intelligents")).color(p.muted).size(11.0));
+                    for name in smart {
+                        if ui.button(format!("{}  {name}", crate::lucide::SPARKLES)).on_hover_text(crate::i18n::t("Ajoute tous ses calques, avec leurs masques")).clicked() {
+                            if let Some(st) = crate::atelier::load_smart(&self.root, &name) {
+                                stack.layers.extend(st.layers);
+                                self.layer_sel = Some(stack.layers.len().saturating_sub(1));
+                                changed = true;
+                            }
+                            ui.close();
+                        }
+                    }
+                }
                 ui.separator();
                 if ui.button(crate::i18n::t("nouveau matériau maître…")).on_hover_text(crate::i18n::t("Crée un .arymat à côté, l'ajoute comme calque et l'ouvre en nodes")).clicked() {
                     // Un atelier pas encore enregistré : le maître va dans « nodes/ » du coffre (pas dans le dossier caché)
@@ -4426,6 +4442,14 @@ impl Editor {
                     ui.close();
                 }
             });
+            // Enregistrer la pile comme matériau intelligent (réutilisable sur d'autres objets)
+            if !stack.layers.is_empty() && ui.button(crate::lucide::SPARKLES).on_hover_text(crate::i18n::t("Enregistrer la pile comme matériau intelligent (dans « matériaux intelligents » du coffre)")).clicked() {
+                let name = self.path.file_stem().map(|s| crate::formats::strip(&s.to_string_lossy()).to_string()).unwrap_or_else(|| "matériau".into());
+                self.message = Some(match crate::atelier::save_smart(&self.root, &name, &stack) {
+                    Ok(_) => format!("{} « {name} »", crate::i18n::t("Matériau intelligent enregistré :")),
+                    Err(e) => e,
+                });
+            }
             if let Some(m) = &self.message {
                 ui.label(RichText::new(m).color(p.muted).size(11.0));
             }
@@ -4549,7 +4573,20 @@ impl Editor {
                     });
                 }
                 ui.add_space(4.0);
-                ui.label(theme::section(&crate::i18n::t("masque")));
+                ui.horizontal(|ui| {
+                    ui.label(theme::section(&crate::i18n::t("masque")));
+                    // Masques intelligents tout prêts
+                    egui::containers::menu::MenuButton::new(format!("{} {}", crate::lucide::WAND_SPARKLES, crate::i18n::t("intelligent ▾"))).ui(ui, |ui| {
+                        ui.set_min_width(240.0);
+                        for (name, m) in crate::atelier::smart_masks() {
+                            if ui.button(crate::i18n::t(name)).clicked() {
+                                l.mask = m;
+                                changed = true;
+                                ui.close();
+                            }
+                        }
+                    });
+                });
                 egui::ComboBox::from_id_salt("atelier-mask").selected_text(crate::i18n::t(crate::atelier::MASKS.iter().find(|m| m.0 == l.mask.kind).map(|m| m.1).unwrap_or("partout"))).show_ui(ui, |ui| {
                     for (id, label, _) in crate::atelier::MASKS {
                         if ui.selectable_label(l.mask.kind == id, crate::i18n::t(label)).clicked() {
@@ -4563,6 +4600,27 @@ impl Editor {
                     changed |= ui.add(egui::Slider::new(&mut l.mask.contrast, 0.0..=1.0).text(crate::i18n::t("contraste"))).changed();
                     changed |= ui.add(egui::Slider::new(&mut l.mask.scale, 0.5..=40.0).clamping(egui::SliderClamping::Never).logarithmic(true).text(crate::i18n::t("échelle"))).changed();
                     changed |= ui.checkbox(&mut l.mask.invert, crate::i18n::t("inverser")).changed();
+                    // Cassure : un second motif découpe le masque, pour un résultat moins régulier
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(crate::i18n::t("cassure")).color(p.muted)).on_hover_text(crate::i18n::t("Un second motif découpe le masque : l'usure devient irrégulière"));
+                        let cur = if l.mask.breakup.is_empty() { "aucune" } else { crate::atelier::MASKS.iter().find(|m| m.0 == l.mask.breakup).map(|m| m.1).unwrap_or("aucune") };
+                        egui::ComboBox::from_id_salt("atelier-breakup").selected_text(crate::i18n::t(cur)).show_ui(ui, |ui| {
+                            if ui.selectable_label(l.mask.breakup.is_empty(), crate::i18n::t("aucune")).clicked() {
+                                l.mask.breakup.clear();
+                                changed = true;
+                            }
+                            for (id, label, op) in crate::atelier::MASKS {
+                                if !op.is_empty() && ui.selectable_label(l.mask.breakup == id, crate::i18n::t(label)).clicked() {
+                                    l.mask.breakup = id.to_string();
+                                    changed = true;
+                                }
+                            }
+                        });
+                    });
+                    if !l.mask.breakup.is_empty() {
+                        changed |= ui.add(egui::Slider::new(&mut l.mask.breakup_amount, 0.0..=1.0).text(crate::i18n::t("force"))).changed();
+                        changed |= ui.add(egui::Slider::new(&mut l.mask.breakup_scale, 0.5..=40.0).logarithmic(true).text(crate::i18n::t("échelle de la cassure"))).changed();
+                    }
                 }
             });
         }

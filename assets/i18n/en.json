@@ -2928,5 +2928,21 @@
   "modèles liés": "skinned models",
   "glTF binaire : Blender, Unity, Unreal, web (une scène garde ses os, ses poids et l'animation)": "Binary glTF: Blender, Unity, Unreal, web (a scene keeps its bones, weights and animation)",
   "FBX : Maya, 3ds Max, Blender, Unity, Unreal (quads, UV, matériaux ; une scène garde ses os et l'animation)": "FBX: Maya, 3ds Max, Blender, Unity, Unreal (quads, UVs, materials; a scene keeps its bones and animation)",
-  "export impossible :": "export failed:"
+  "export impossible :": "export failed:",
+  "matériaux intelligents": "smart materials",
+  "Ajoute tous ses calques, avec leurs masques": "Adds all its layers, with their masks",
+  "Enregistrer la pile comme matériau intelligent (dans « matériaux intelligents » du coffre)": "Save the stack as a smart material (in the vault’s “matériaux intelligents” folder)",
+  "Matériau intelligent enregistré :": "Smart material saved:",
+  "intelligent ▾": "smart ▾",
+  "cassure": "breakup",
+  "Un second motif découpe le masque : l'usure devient irrégulière": "A second pattern breaks up the mask: wear becomes irregular",
+  "échelle de la cassure": "breakup scale",
+  "peinture écaillée sur les arêtes": "chipped paint on edges",
+  "rouille dans les creux": "rust in cavities",
+  "poussière et saleté": "dust and dirt",
+  "bords légèrement usés": "lightly worn edges",
+  "coulures de pluie": "rain streaks",
+  "métal rayé": "scratched metal",
+  "sol craquelé": "cracked ground",
+  "taches": "spots"
 }
