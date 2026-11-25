@@ -3124,5 +3124,13 @@
   "Supprimer la pose": "Delete the pose",
   "Bibliothèque de poses": "Pose library",
   "contours (line art)": "outlines (line art)",
-  "Line art : la silhouette et les plis tracés, en pixels (0 : aucun)": "Line art: silhouette and creases drawn, in pixels (0: none)"
+  "Line art : la silhouette et les plis tracés, en pixels (0 : aucun)": "Line art: silhouette and creases drawn, in pixels (0: none)",
+  "texte 3D…": "3D text…",
+  "Texte 3D": "3D Text",
+  "le texte (Entrée : nouvelle ligne)": "the text (Enter: new line)",
+  "hauteur d'une ligne": "line height",
+  "arrondi des bords": "edge rounding",
+  "créer le texte 3D": "create the 3D text",
+  "Extrudé en volume, enregistré en .obj à côté de la scène": "Extruded into a volume, saved as .obj next to the scene",
+  "Texte 3D impossible": "3D text failed"
 }

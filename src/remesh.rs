@@ -133,6 +133,43 @@ pub fn boolean(pos: &[V3], tris: &[[u32; 3]], shape: &Shape, op: u8, cell: f32, 
     extract(&field, &g, smooth)
 }
 
+/// Extrusion d'une image de couverture (0..1, ligne par ligne, y vers le bas) : un volume d'épaisseur
+/// `depth`, un pixel faisant `px` unités. X vers la droite, Y vers le haut, Z l'épaisseur (centrée).
+pub fn extrude(cov: &[f32], w: usize, h: usize, px: f32, depth: f32, smooth: u32) -> Option<Out> {
+    if w == 0 || h == 0 || cov.len() != w * h {
+        return None;
+    }
+    let half = depth / 2.0;
+    let g = Grid::new([0.0, 0.0, -half], [w as f32 * px, h as f32 * px, half], px);
+    let n = g.n;
+    let mut field = vec![0.0f32; n[0] * n[1] * n[2]];
+    let sample = |x: f32, y: f32| -> f32 {
+        // Bilinéaire dans l'image (hors de l'image : vide)
+        let (fx, fy) = (x / px - 0.5, (h as f32 * px - y) / px - 0.5);
+        let (ix, iy) = (fx.floor() as i64, fy.floor() as i64);
+        let (tx, ty) = (fx - ix as f32, fy - iy as f32);
+        let at = |x: i64, y: i64| if x < 0 || y < 0 || x >= w as i64 || y >= h as i64 { 0.0 } else { cov[y as usize * w + x as usize] };
+        let a = at(ix, iy) + (at(ix + 1, iy) - at(ix, iy)) * tx;
+        let b = at(ix, iy + 1) + (at(ix + 1, iy + 1) - at(ix, iy + 1)) * tx;
+        a + (b - a) * ty
+    };
+    for k in 0..n[2] {
+        for j in 0..n[1] {
+            for i in 0..n[0] {
+                let p = g.point(i, j, k);
+                let inside2d = (sample(p[0], p[1]) - 0.5) * px * 2.0;
+                let slab = half - p[2].abs();
+                let mut f = inside2d.min(slab);
+                if f.abs() < px * 1e-3 {
+                    f = -px * 1e-3;
+                }
+                field[(k * n[1] + j) * n[0] + i] = f;
+            }
+        }
+    }
+    extract(&field, &g, smooth)
+}
+
 /// Le champ signé du maillage dans la grille (positif dedans) ; None s'il n'enferme rien
 fn mesh_field(pos: &[V3], tris: &[[u32; 3]], g: &Grid) -> Option<Vec<f32>> {
     let (n, origin, cell) = (g.n, g.origin, g.cell);

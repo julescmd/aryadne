@@ -2628,6 +2628,8 @@ pub struct Viewer {
     /// Bibliothèque de poses : nom à donner, force du mélange
     pose_name: String,
     pose_mix: f32,
+    /// Texte 3D à créer (fenêtre ouverte, texte, hauteur, épaisseur, biseau)
+    text3d: Option<(String, f32, f32, u32)>,
     /// Clé choisie dans la timeline (objet, image), clé qu'on glisse (objet, image de départ, image actuelle)
     key_sel: Option<(usize, i32)>,
     key_drag: Option<(usize, i32, i32)>,
@@ -2826,6 +2828,7 @@ impl Viewer {
             pose_clip: vec![],
             pose_name: String::new(),
             pose_mix: 1.0,
+            text3d: None,
             key_sel: None,
             key_drag: None,
             key_menu: None,
@@ -5426,6 +5429,10 @@ impl Viewer {
                                 }
                             }
                         });
+                        if ui.button(format!("{}  {}", crate::lucide::TYPE, crate::i18n::t("texte 3D…"))).clicked() {
+                            self.text3d = Some((String::new(), 1.0, 0.25, 1));
+                            ui.close();
+                        }
                         if ui.button(format!("{}  {}", crate::lucide::FOLDER_OPEN, crate::i18n::t("choisir un fichier…"))).clicked() {
                             if let Some(files) = rfd::FileDialog::new().add_filter(crate::i18n::t("modèles et images"), &["obj", "fbx", "glb", "gltf", "stl", "3ds", "ply", "ma", "png", "jpg", "jpeg", "webp"]).pick_files() {
                                 for f in files {
@@ -5480,6 +5487,46 @@ impl Viewer {
                         reframe = true;
                     }
             });
+            // Fenêtre du texte 3D
+            if let Some((text, height, depth, bevel)) = self.text3d.as_mut() {
+                let mut open = true;
+                let mut make = false;
+                egui::Window::new(crate::i18n::t("Texte 3D")).id(egui::Id::new("text3d-win")).collapsible(false).resizable(false).open(&mut open).show(ui.ctx(), |ui| {
+                    ui.add(egui::TextEdit::multiline(text).hint_text(crate::i18n::t("le texte (Entrée : nouvelle ligne)")).desired_rows(2).desired_width(260.0));
+                    ui.add(egui::Slider::new(height, 0.1..=10.0).logarithmic(true).text(crate::i18n::t("hauteur d'une ligne")));
+                    ui.add(egui::Slider::new(depth, 0.01..=2.0).logarithmic(true).text(crate::i18n::t("épaisseur")));
+                    ui.add(egui::Slider::new(bevel, 0..=6).text(crate::i18n::t("arrondi des bords")));
+                    make = ui.add_enabled(!text.trim().is_empty(), egui::Button::new(format!("{}  {}", crate::lucide::PLUS, crate::i18n::t("créer le texte 3D")))).on_hover_text(crate::i18n::t("Extrudé en volume, enregistré en .obj à côté de la scène")).clicked();
+                });
+                if make {
+                    let (t, hgt, dep, bev) = (text.clone(), *height, *depth, *bevel);
+                    match crate::text3d::mesh(&t, hgt, dep, bev) {
+                        Some(o) => {
+                            let stem: String = t.lines().next().unwrap_or("texte").chars().filter(|c| c.is_alphanumeric() || *c == ' ' || *c == '-').take(30).collect();
+                            let dir = path.parent().map(|d| d.to_path_buf()).unwrap_or_default();
+                            let mut f = dir.join(format!("texte - {}.obj", stem.trim()));
+                            let mut n = 2;
+                            while f.exists() {
+                                f = dir.join(format!("texte - {} {n}.obj", stem.trim()));
+                                n += 1;
+                            }
+                            match crate::text3d::write_obj(&o, &f) {
+                                Ok(()) => {
+                                    scene.add(&path, &f);
+                                    self.scene_sel = scene.objects.len().checked_sub(1);
+                                    changed = true;
+                                    open = false;
+                                }
+                                Err(e) => self.capture_msg = Some(e),
+                            }
+                        }
+                        None => self.capture_msg = Some(crate::i18n::t("Texte 3D impossible")),
+                    }
+                }
+                if !open {
+                    self.text3d = None;
+                }
+            }
             ui.add_space(6.0);
             if scene.objects.is_empty() {
                 ui.add_space(6.0);

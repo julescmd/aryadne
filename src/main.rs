@@ -24,6 +24,7 @@ mod mdexport;
 mod canvas;
 mod mdextra;
 mod sources;
+mod text3d;
 mod vector_ui;
 mod keymap;
 mod lucide;
