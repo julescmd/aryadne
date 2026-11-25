@@ -3165,5 +3165,7 @@
   "Couper aux changements de plan": "Split at scene cuts",
   "Détecte les coupes d'une vidéo déjà montée et sépare chaque plan": "Detects the cuts in an already edited video and separates each shot",
   "Aucun changement de plan trouvé": "No scene cut found",
-  "plans séparés": "shots separated"
+  "plans séparés": "shots separated",
+  "Imbriquer en sous-séquence": "Nest into a sub-sequence",
+  "Les plans choisis partent dans un nouveau montage, qui revient ici comme un seul plan (double-clic dans les fichiers pour l'ouvrir)": "The selected clips move into a new edit that comes back here as a single clip (double-click it in the files to open it)"
 }

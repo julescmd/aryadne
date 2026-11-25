@@ -2100,12 +2100,17 @@ pub fn is_cache_file(p: &Path) -> bool {
     s.contains("/cache/motion/")
 }
 
-fn running() -> &'static std::sync::Mutex<std::collections::HashSet<PathBuf>> {
+pub(crate) fn running() -> &'static std::sync::Mutex<std::collections::HashSet<PathBuf>> {
     static R: OnceLock<std::sync::Mutex<std::collections::HashSet<PathBuf>>> = OnceLock::new();
     R.get_or_init(Default::default)
 }
 
-fn stale(comp: &Path, out: &Path) -> bool {
+/// Signale un rendu terminé (le montage relit les vidéos)
+pub(crate) fn bump_generation() {
+    GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub(crate) fn stale(comp: &Path, out: &Path) -> bool {
     let m = |p: &Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
     match (m(comp), m(out)) {
         (Some(a), Some(b)) => a > b,

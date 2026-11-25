@@ -1206,6 +1206,7 @@ impl Editor {
         let mut ch = false;
         let mut freeze = false;
         let mut detect = false;
+        let mut nest = false;
         // ---- En-tête : vignette, nom, chapitre et durée
         {
             let c = self.project.clips[i].clone();
@@ -1434,11 +1435,56 @@ impl Editor {
         if ch {
             self.changed();
         }
+        // Imbriquer les plans choisis dans une sous-séquence
+        let n = self.sel.len().max(1);
+        if ui.button(format!("{}  {}", crate::lucide::LAYERS, if n > 1 { format!("{} ({n})", crate::i18n::t("Imbriquer en sous-séquence")) } else { crate::i18n::t("Imbriquer en sous-séquence") })).on_hover_text(crate::i18n::t("Les plans choisis partent dans un nouveau montage, qui revient ici comme un seul plan (double-clic dans les fichiers pour l'ouvrir)")).clicked() {
+            nest = true;
+        }
         if freeze {
             self.freeze_frame(i);
         }
         if detect {
             self.cut_scenes(i);
+        }
+        if nest {
+            self.nest_selection(i);
+        }
+    }
+
+    /// Les plans choisis (ou ce plan) deviennent un montage à côté de celui-ci, posé à leur place
+    fn nest_selection(&mut self, i: usize) {
+        let mut ids = if self.sel.is_empty() { vec![self.project.clips[i].id] } else { self.sel.clone() };
+        // Le son lié suit son image
+        for id in ids.clone() {
+            if let Some(k) = self.project.index(id) {
+                ids.extend(self.project.linked(k).iter().map(|&j| self.project.clips[j].id));
+            }
+        }
+        ids.sort();
+        ids.dedup();
+        let Some((sub, track, t0)) = self.project.nest(&ids) else { return };
+        let dir = self.path.parent().map(|d| d.to_path_buf()).unwrap_or_default();
+        let stem = self.path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "montage".into());
+        let ext = self.path.extension().map(|e| e.to_string_lossy().to_string()).unwrap_or_else(|| "aryav".into());
+        let mut k = 1;
+        let mut file = dir.join(format!("{stem} - imbrication {k}.{ext}"));
+        while file.exists() {
+            k += 1;
+            file = dir.join(format!("{stem} - imbrication {k}.{ext}"));
+        }
+        if let Err(e) = sub.write(&file) {
+            self.message = Some(e);
+            return;
+        }
+        match crate::montage::import(&self.path, &file, track, t0) {
+            Ok(mut c) => {
+                c.id = 0;
+                self.project.clips.push(c);
+                self.project.ensure_ids();
+                self.sel = vec![self.project.clips.last().map(|c| c.id).unwrap_or(0)];
+                self.changed();
+            }
+            Err(e) => self.message = Some(e),
         }
     }
 

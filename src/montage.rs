@@ -889,6 +889,32 @@ impl Project {
         cuts
     }
 
+    /// Imbrication : les clips `ids` partent dans un nouveau montage (mêmes réglages, ramenés au début) ;
+    /// rend ce montage et la place (piste, début) où poser son clip
+    pub fn nest(&mut self, ids: &[u64]) -> Option<(Project, usize, f32)> {
+        let picked: Vec<Clip> = self.clips.iter().filter(|c| ids.contains(&c.id)).cloned().collect();
+        if picked.is_empty() {
+            return None;
+        }
+        let t0 = picked.iter().map(|c| c.start).fold(f32::MAX, f32::min);
+        let vtracks: Vec<usize> = picked.iter().filter(|c| c.kind != "audio").map(|c| c.track).collect();
+        let track = vtracks.iter().copied().min().unwrap_or(0);
+        let mut sub = Project { clips: vec![], ..self.clone() };
+        sub.markers.clear();
+        sub.chapters.clear();
+        sub.mark_in = None;
+        sub.mark_out = None;
+        for mut c in picked {
+            c.start -= t0;
+            if c.kind != "audio" {
+                c.track -= track;
+            }
+            sub.clips.push(c);
+        }
+        self.clips.retain(|c| !ids.contains(&c.id));
+        Some((sub, track, t0))
+    }
+
     /// Coupe à `t` les clips d'identifiants `ids` ; les moitiés droites de clips liés restent liées entre elles
     pub fn split_linked(&mut self, ids: &[u64], t: f32) {
         let mut new_links: HashMap<u32, u32> = HashMap::new();
@@ -1068,7 +1094,48 @@ pub fn resolve(project: &Path, file: &str) -> PathBuf {
     if crate::motion::is_compo(file) {
         return crate::motion::render_cached(&p, false);
     }
+    // Une sous-séquence (montage imbriqué) aussi
+    if is_project(file) && p != project {
+        return nested_cached(&p, false);
+    }
     p
+}
+
+/// La vidéo d'un montage imbriqué, rendue en cache (refaite quand le montage change)
+pub fn nested_cached(seq: &Path, wait: bool) -> PathBuf {
+    let out = crate::motion::cache_path(seq).with_extension("seq.mp4");
+    if !crate::motion::stale(seq, &out) {
+        return out;
+    }
+    let busy = !crate::motion::running().lock().unwrap().insert(out.clone());
+    if busy {
+        if wait {
+            while crate::motion::running().lock().unwrap().contains(&out) {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        }
+        return out;
+    }
+    let (s2, o2) = (seq.to_path_buf(), out.clone());
+    let job = move || {
+        let r = Project::read(&s2).and_then(|p| {
+            if let Some(d) = o2.parent() {
+                std::fs::create_dir_all(d).map_err(|e| e.to_string())?;
+            }
+            export_as(&p, &s2, &o2, 0)
+        });
+        if let Err(e) = r {
+            eprintln!("rendu de {} : {e}", s2.display());
+        }
+        crate::motion::running().lock().unwrap().remove(&o2);
+        crate::motion::bump_generation();
+    };
+    if wait {
+        job();
+    } else {
+        std::thread::spawn(job);
+    }
+    out
 }
 
 /// Le fichier d'un clip tel qu'il est sur le disque (la composition elle-même, pas sa vidéo)
@@ -1090,7 +1157,12 @@ pub(crate) fn kind_of(path: &Path) -> &'static str {
 pub fn import(project: &Path, media: &Path, track: usize, start: f32) -> Result<Clip, String> {
     let kind = kind_of(media);
     let (mut dur, mut has_audio) = (5.0f32, false);
-    if crate::motion::is_compo(&media.to_string_lossy()) {
+    if is_project(&media.to_string_lossy()) {
+        let p = Project::read(media)?;
+        dur = p.duration().max(0.1);
+        has_audio = p.clips.iter().any(|c| c.sounds());
+        nested_cached(media, false);
+    } else if crate::motion::is_compo(&media.to_string_lossy()) {
         // Sa vidéo est rendue maintenant, pour que l'aperçu la trouve
         let c = crate::motion::Compo::read(media)?;
         dur = c.duration;
@@ -1294,6 +1366,13 @@ pub fn export_as(p: &Project, project: &Path, out: &Path, preset: usize) -> Resu
     // Les compositions Motion du montage sont rendues à jour avant l'export
     for c in p.clips.iter().filter(|c| crate::motion::is_compo(&c.file)) {
         crate::motion::render_cached(&source_file(project, &c.file), true);
+    }
+    // Les sous-séquences aussi
+    for c in p.clips.iter().filter(|c| is_project(&c.file)) {
+        let f = source_file(project, &c.file);
+        if f != project {
+            nested_cached(&f, true);
+        }
     }
     bake_texts(p);
     let (inputs, mut filter, has_audio, total) = graph(p, project, 0.0, w, h, false, true);
@@ -1840,5 +1919,41 @@ mod scene_tests {
         let _ = std::fs::remove_file(&path);
         assert_eq!(cuts.len(), 2, "{cuts:?}");
         assert!((cuts[0] - 1.5).abs() < 0.1 && (cuts[1] - 3.0).abs() < 0.1, "{cuts:?}");
+    }
+}
+
+#[cfg(test)]
+mod nest_tests {
+    use super::*;
+
+    #[test]
+    fn imbrication() {
+        if crate::ffmpeg::find("ffmpeg").is_none() {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("ary-nest-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        image::RgbaImage::from_pixel(64, 36, image::Rgba([200, 40, 40, 255])).save(dir.join("rouge.png")).unwrap();
+        let main = dir.join("principal.aryav");
+        let mut p = Project::default();
+        let mut a = import(&main, &dir.join("rouge.png"), 0, 1.0).unwrap();
+        a.src_out = 2.0;
+        p.clips.push(a);
+        p.ensure_ids();
+        let id = p.clips[0].id;
+        let (sub, track, t0) = p.nest(&[id]).unwrap();
+        assert!(p.clips.is_empty() && track == 0 && (t0 - 1.0).abs() < 1e-4);
+        assert!((sub.clips[0].start).abs() < 1e-4);
+        let subf = dir.join("principal - imbrication 1.aryav");
+        sub.write(&subf).unwrap();
+        let c = import(&main, &subf, track, t0).unwrap();
+        assert!((c.media - sub.duration()).abs() < 0.05 || (c.src_out - sub.duration()).abs() < 0.05);
+        p.clips.push(c);
+        p.ensure_ids();
+        p.write(&main).unwrap();
+        let out = dir.join("sortie.mp4");
+        export_as(&p, &main, &out, 0).unwrap();
+        assert!(out.exists() && std::fs::metadata(&out).unwrap().len() > 1000);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
