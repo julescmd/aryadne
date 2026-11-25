@@ -875,11 +875,8 @@ impl Project {
         if i >= self.clips.len() || !self.collides(i, self.clips[i].track) {
             return false;
         }
-        let (from, audio) = (self.clips[i].track, self.clips[i].audio);
-        let mut t = from + 1;
-        while t < self.lanes(audio) && self.collides(i, t) {
-            t += 1;
-        }
+        let t = self.free_lane(i);
+        let audio = self.clips[i].audio;
         if audio {
             self.atracks = self.atracks.max(t + 1);
         } else {
@@ -887,6 +884,22 @@ impl Project {
         }
         self.clips[i].track = t;
         true
+    }
+
+    /// La piste libre la plus proche de celle du clip `i` (au-dessus puis en dessous, en alternant) ; une
+    /// nouvelle piste seulement si aucune ne convient. En timeline magnétique, V1 reste à l'histoire.
+    pub fn free_lane(&self, i: usize) -> usize {
+        let (from, audio) = (self.clips[i].track, self.clips[i].audio);
+        let n = self.lanes(audio);
+        let low = if !audio && self.magnetic { 1 } else { 0 };
+        for d in 1..n.max(1) + 1 {
+            for t in [from as i64 + d as i64, from as i64 - d as i64] {
+                if t >= low as i64 && (t as usize) < n && !self.collides(i, t as usize) {
+                    return t as usize;
+                }
+            }
+        }
+        n.max(low)
     }
 
     /// Range tous les clips qui se recouvrent (projets plus anciens).

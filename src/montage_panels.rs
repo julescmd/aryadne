@@ -2702,9 +2702,17 @@ impl Editor {
                         self.split_at(at, &crossing);
                         self.shift_after(at, len, None, &keep);
                     } else {
-                        // Recouvrir : ce qui était dessous laisse la place
-                        for c in &moved {
+                        // Recouvrir : sous le clip attrapé (et ceux de son genre), ce qui était dessous laisse la
+                        // place ; ses clips liés de l'autre genre (le son d'une vidéo…) ne détruisent rien :
+                        // ils prennent la piste libre la plus proche
+                        let grabbed_audio = d.orig.iter().find(|o| o.id == d.id).map(|o| o.audio).unwrap_or(false);
+                        for c in moved.iter().filter(|c| c.audio == grabbed_audio) {
                             self.clear_range(c.audio, c.track, c.start, c.end(), &keep);
+                        }
+                        for c in moved.iter().filter(|c| c.audio != grabbed_audio) {
+                            if let Some(i) = self.project.index(c.id) {
+                                self.project.settle(i);
+                            }
                         }
                     }
                     self.changed();

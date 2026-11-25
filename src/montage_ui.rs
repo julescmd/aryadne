@@ -464,7 +464,21 @@ impl Editor {
     }
 
     /// Libère l'intervalle [a, b] d'une piste : ce qui s'y trouve est raccourci, coupé ou retiré (recouvrir).
+    /// Fait place entre `a` et `b` sur une piste ; les clips liés de ceux qu'on recouvre (le son d'une
+    /// vidéo…) perdent la même portion, pour rester synchrones
     fn clear_range(&mut self, audio: bool, track: usize, a: f32, b: f32, keep: &HashSet<u64>) {
+        let eps = 1e-3;
+        let links: HashSet<u32> = self.project.clips.iter().filter(|c| c.audio == audio && c.track == track && c.link != 0 && !keep.contains(&c.id) && c.end() > a + eps && c.start < b - eps).map(|c| c.link).collect();
+        let partners: HashSet<(bool, usize)> = self.project.clips.iter().filter(|c| links.contains(&c.link) && !keep.contains(&c.id) && !(c.audio == audio && c.track == track)).map(|c| (c.audio, c.track)).collect();
+        self.clear_range_one(audio, track, a, b, keep);
+        for (pa, pt) in partners {
+            // Seulement les clips de ces liens, pas leurs voisins de piste
+            let others: HashSet<u64> = self.project.clips.iter().filter(|c| c.audio == pa && c.track == pt && !links.contains(&c.link)).map(|c| c.id).chain(keep.iter().copied()).collect();
+            self.clear_range_one(pa, pt, a, b, &others);
+        }
+    }
+
+    fn clear_range_one(&mut self, audio: bool, track: usize, a: f32, b: f32, keep: &HashSet<u64>) {
         let eps = 1e-3;
         // Un clip qui déborde des deux côtés : coupé d'abord en b
         let wide: Vec<usize> = (0..self.project.clips.len()).filter(|&i| {
@@ -618,13 +632,24 @@ impl Editor {
             self.split_at(at, &crossing);
             self.shift_after(at, len, None, &HashSet::new());
         } else {
-            for c in &clips {
+            // Un média avec image et son : l'image recouvre là où on la pose ; son son ne détruit rien,
+            // il prend la piste son libre la plus proche (un son seul, lui, recouvre)
+            let both = clips.iter().any(|c| c.audio) && clips.iter().any(|c| !c.audio);
+            for c in clips.iter().filter(|c| !(both && c.audio)) {
                 self.clear_range(c.audio, c.track, c.start, c.end(), &HashSet::new());
             }
         }
         let n0 = self.project.clips.len();
+        let both = clips.iter().any(|c| c.audio) && clips.iter().any(|c| !c.audio);
         self.project.clips.extend(clips);
         self.project.ensure_ids();
+        if both && !insert {
+            for i in n0..self.project.clips.len() {
+                if self.project.clips[i].audio {
+                    self.project.settle(i);
+                }
+            }
+        }
         self.project.clips[n0..].iter().map(|c| c.id).collect()
     }
 
