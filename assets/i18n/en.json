@@ -3067,5 +3067,6 @@
   "vibrance": "vibrance",
   "doigt : étaler la peinture (le flux règle la force)": "smudge: spread the paint (flow sets the strength)",
   "fluidité : pousser les pixels (déformer)": "liquify: push pixels (warp)",
-  "Avant / après : l'image à l'ouverture à gauche, glisser la séparation": "Before / after: the image as opened on the left, drag the divider"
+  "Avant / après : l'image à l'ouverture à gauche, glisser la séparation": "Before / after: the image as opened on the left, drag the divider",
+  "Enroulé : l'image se répète autour, le trait passe d'un bord à l'autre (textures qui se raccordent)": "Wrap around: the image repeats around it, strokes cross from one edge to the other (seamless textures)"
 }

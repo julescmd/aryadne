@@ -1331,6 +1331,8 @@ pub struct Editor {
     grain: f32,
     /// Symétrie du pinceau : sur l'axe vertical, l'axe horizontal (autour du centre du document)
     sym_x: bool,
+    /// Enroulé : le document se répète tout autour, le trait passe d'un bord à l'autre (textures sans raccord)
+    wrap: bool,
     sym_y: bool,
     /// Perspective : points de fuite (dans le document), affichage, aimantation du trait, point qu'on déplace
     persp: Vec<Pos2>,
@@ -1504,6 +1506,7 @@ impl Editor {
             flow: 1.0,
             grain: 0.0,
             sym_x: false,
+            wrap: false,
             sym_y: false,
             persp: vec![],
             persp_on: false,
@@ -2014,18 +2017,37 @@ impl Editor {
     /// Un tampon du pinceau (ou de la gomme) centré en `c` (coordonnées du document).
     /// Un tampon, et ses reflets si la symétrie est allumée (pinceau et gomme).
     fn dab(&mut self, c: Pos2) {
-        self.dab_one(c);
+        let (w, h) = (self.doc.w as f32, self.doc.h as f32);
+        let mut at = vec![c];
         if matches!(self.tool, Tool::Brush | Tool::Eraser) {
-            let (w, h) = (self.doc.w as f32, self.doc.h as f32);
             if self.sym_x {
-                self.dab_one(pos2(w - c.x, c.y));
+                at.push(pos2(w - c.x, c.y));
             }
             if self.sym_y {
-                self.dab_one(pos2(c.x, h - c.y));
+                at.push(pos2(c.x, h - c.y));
             }
             if self.sym_x && self.sym_y {
-                self.dab_one(pos2(w - c.x, h - c.y));
+                at.push(pos2(w - c.x, h - c.y));
             }
+        }
+        // Enroulé : ce qui dépasse d'un bord revient par l'autre
+        if self.wrap && matches!(self.tool, Tool::Brush | Tool::Eraser | Tool::Clone) {
+            let r = self.size / 2.0 + 1.0;
+            let base = at.clone();
+            for orig in base {
+                let q = pos2(orig.x.rem_euclid(w), orig.y.rem_euclid(h));
+                for ox in [-w, 0.0, w] {
+                    for oy in [-h, 0.0, h] {
+                        let p = q + vec2(ox, oy);
+                        if (p - orig).length() > 0.5 && p.x > -r && p.x < w + r && p.y > -r && p.y < h + r {
+                            at.push(p);
+                        }
+                    }
+                }
+            }
+        }
+        for q in at {
+            self.dab_one(q);
         }
     }
 
@@ -2838,6 +2860,7 @@ impl Editor {
                         .on_hover_text(crate::i18n::t("Pinceaux prêts : crayon, encre, craie, aérographe…"));
                         tog(ui, &mut self.sym_x, crate::lucide::FLIP_HORIZONTAL_2, "Symétrie : le trait se reflète de l'autre côté de l'axe vertical");
                         tog(ui, &mut self.sym_y, crate::lucide::FLIP_VERTICAL_2, "Symétrie : le trait se reflète de l'autre côté de l'axe horizontal");
+                        tog(ui, &mut self.wrap, crate::lucide::REPEAT, "Enroulé : l'image se répète autour, le trait passe d'un bord à l'autre (textures qui se raccordent)");
                     }
                     let was = self.persp_on;
                     tog(ui, &mut self.persp_on, crate::lucide::RULER_DIMENSION_LINE, "Perspective : points de fuite (à déplacer à la souris) ; le trait suit leurs lignes");
@@ -3193,6 +3216,18 @@ impl Editor {
             }
         }
         let (dw, dh) = (self.doc.w as f32, self.doc.h as f32);
+        // Enroulé : les copies autour, un peu assombries
+        if let (true, true, Some(t)) = (self.wrap, plain, &self.tex) {
+            let clip = painter.with_clip_rect(rect);
+            for ox in [-1.0f32, 0.0, 1.0] {
+                for oy in [-1.0f32, 0.0, 1.0] {
+                    if ox != 0.0 || oy != 0.0 {
+                        let r = canvas.translate(vec2(ox * canvas.width(), oy * canvas.height()));
+                        clip.image(t.id(), r, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::from_gray(190));
+                    }
+                }
+            }
+        }
         if let Some(t) = &self.tex {
             if plain {
                 painter.image(t.id(), canvas, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
