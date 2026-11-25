@@ -3177,5 +3177,14 @@
   "Montage par le texte": "Text-based editing",
   "Clic sur une ligne : la tête de lecture y va. La poubelle retire le passage de toutes les pistes, et la suite se rapproche.": "Click a line: the playhead goes there. The trash removes the passage from every track, and what follows moves up.",
   "couper ce passage du montage": "cut this passage from the edit",
-  "Extraire : retire le passage entre l'entrée et la sortie, la suite se rapproche": "Extract: removes the passage between in and out, what follows moves up"
+  "Extraire : retire le passage entre l'entrée et la sortie, la suite se rapproche": "Extract: removes the passage between in and out, what follows moves up",
+  "nom de la chaîne": "chain name",
+  "Enregistrer ces effets comme chaîne réutilisable": "Save these effects as a reusable chain",
+  "Chaîne enregistrée": "Chain saved",
+  "chaînes": "chains",
+  "Aucune chaîne : règle les effets d'un clip, donne un nom, enregistre.": "No chain: set up a clip's effects, give a name, save.",
+  "Remplace les effets des clips choisis par cette chaîne": "Replaces the effects of the selected clips with this chain",
+  "Mesurer : crête vraie, corrélation": "Measure: true peak, correlation",
+  "Crête vraie (dBTP, à garder sous -1 pour les plateformes) et corrélation stéréo (proche de 1 : passe bien en mono)": "True peak (dBTP, keep under -1 for platforms) and stereo correlation (close to 1: folds well to mono)",
+  "corrélation": "correlation"
 }

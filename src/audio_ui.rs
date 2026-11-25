@@ -1294,6 +1294,23 @@ impl Editor {
                     }
                 }
             });
+            // Mesures du clip choisi : crête vraie et corrélation stéréo
+            if ui.add_enabled(has, egui::Button::new(format!("{}  {}", crate::lucide::GAUGE, crate::i18n::t("Mesurer : crête vraie, corrélation")))).on_hover_text(crate::i18n::t("Crête vraie (dBTP, à garder sous -1 pour les plateformes) et corrélation stéréo (proche de 1 : passe bien en mono)")).clicked() {
+                let mut notes = vec![];
+                for (ti, ci) in self.fx_targets() {
+                    let c = self.session.tracks[ti].clips[ci].clone();
+                    if let Some(b) = self.sounds.ready(&c) {
+                        let (i, j) = (((c.offset * audio::RATE as f64) as usize * 2).min(b.data.len()), (((c.offset + c.len) * audio::RATE as f64) as usize * 2).min(b.data.len()));
+                        let part = &b.data[i..j.max(i)];
+                        let tp = audio::true_peak_db(part) + c.gain;
+                        let corr = audio::correlation(part);
+                        notes.push(format!("{tp:.1} dBTP{} · {} {corr:.2}", if tp > -1.0 { " ⚠" } else { "" }, crate::i18n::t("corrélation")));
+                    }
+                }
+                if !notes.is_empty() {
+                    self.message = Some((notes.join("  |  "), Instant::now()));
+                }
+            }
             if fx_btn(ui, "Fondu entrant et sortant", "une demi-seconde de chaque côté") {
                 for (ti, ci) in self.fx_targets() {
                     let c = &mut self.session.tracks[ti].clips[ci];
@@ -1531,6 +1548,45 @@ impl Editor {
         }
         if let Some(k) = drop_fx {
             self.session.tracks[ti].clips[ci].fx.remove(k);
+            changed = true;
+        }
+        // Chaînes d'effets : enregistrer celle de ce clip, en poser une sur les clips choisis
+        let mut apply_chain: Option<Vec<Fx>> = None;
+        ui.horizontal(|ui| {
+            let fx = self.session.tracks[ti].clips[ci].fx.clone();
+            let id = egui::Id::unique("chain-name");
+            let mut name: String = ui.data_mut(|d| d.get_temp(id).unwrap_or_default());
+            if !fx.is_empty() {
+                ui.add(egui::TextEdit::singleline(&mut name).hint_text(crate::i18n::t("nom de la chaîne")).desired_width(130.0));
+                if ui.add(egui::Button::new(egui::RichText::new(l::SAVE).size(13.0))).on_hover_text(crate::i18n::t("Enregistrer ces effets comme chaîne réutilisable")).clicked() {
+                    let n = if name.trim().is_empty() { format!("chaîne {}", audio::chains::list(&self.root).len() + 1) } else { name.clone() };
+                    match audio::chains::save(&self.root, &n, &fx) {
+                        Ok(()) => self.say(format!("{} · {n}", crate::i18n::t("Chaîne enregistrée"))),
+                        Err(e) => self.say(e),
+                    }
+                    name.clear();
+                }
+            }
+            ui.data_mut(|d| d.insert_temp(id, name));
+            egui::containers::menu::MenuButton::new(format!("{}  {}", l::LINK, crate::i18n::t("chaînes"))).ui(ui, |ui| {
+                let list = audio::chains::list(&self.root);
+                if list.is_empty() {
+                    ui.label(egui::RichText::new(crate::i18n::t("Aucune chaîne : règle les effets d'un clip, donne un nom, enregistre.")).size(11.5).color(p.muted));
+                }
+                for (n, path) in list {
+                    if ui.button(&n).on_hover_text(crate::i18n::t("Remplace les effets des clips choisis par cette chaîne")).clicked() {
+                        apply_chain = audio::chains::load(&path);
+                        ui.close();
+                    }
+                }
+            });
+        });
+        if let Some(chain) = apply_chain {
+            let targets = self.fx_targets();
+            let targets = if targets.is_empty() { vec![(ti, ci)] } else { targets };
+            for (t, c) in targets {
+                self.session.tracks[t].clips[c].fx = chain.clone();
+            }
             changed = true;
         }
         changed |= fx_edit;

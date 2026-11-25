@@ -777,6 +777,41 @@ pub const LOUDNESS: [(f32, &str); 4] = [(-14.0, "YouTube, Spotify"), (-16.0, "Ap
 
 /// Le gain qui amène la sonie du clip à `target` LUFS, sans que sa crête dépasse -1 dB.
 /// Retourne aussi la sonie mesurée, et si la crête a limité le gain.
+/// Crête vraie (dBTP) d'un son stéréo entrelacé : les échantillons suréchantillonnés 4× (interpolation
+/// cubique), pour attraper les crêtes qui tombent entre deux échantillons
+pub fn true_peak_db(data: &[f32]) -> f32 {
+    let mut pk = 0.0f32;
+    for ch in 0..2 {
+        let x: Vec<f32> = data.iter().skip(ch).step_by(2).copied().collect();
+        for i in 1..x.len().saturating_sub(2) {
+            let (p0, p1, p2, p3) = (x[i - 1], x[i], x[i + 1], x[i + 2]);
+            pk = pk.max(p1.abs());
+            for k in 1..4 {
+                let t = k as f32 / 4.0;
+                // Catmull-Rom
+                let v = 0.5 * (2.0 * p1 + (p2 - p0) * t + (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3) * t * t + (3.0 * p1 - p0 - 3.0 * p2 + p3) * t * t * t);
+                pk = pk.max(v.abs());
+            }
+        }
+    }
+    to_db(pk)
+}
+
+/// Corrélation stéréo de -1 (opposition de phase) à 1 (mono) ; 0 : très large
+pub fn correlation(data: &[f32]) -> f32 {
+    let (mut lr, mut ll, mut rr) = (0.0f64, 0.0f64, 0.0f64);
+    for f in data.chunks_exact(2) {
+        let (l, r) = (f[0] as f64, f[1] as f64);
+        lr += l * r;
+        ll += l * l;
+        rr += r * r;
+    }
+    if ll * rr <= 1e-12 {
+        return 1.0;
+    }
+    (lr / (ll * rr).sqrt()) as f32
+}
+
 pub fn loudness_gain(c: &Clip, buf: &Buffer, target: f32) -> Option<(f32, f32, bool)> {
     let (i, j) = (((c.offset * RATE as f64) as usize * 2).min(buf.data.len()), (((c.offset + c.len) * RATE as f64) as usize * 2).min(buf.data.len()));
     let l = lufs(&buf.data[i..j.max(i)])?;
@@ -932,5 +967,68 @@ mod tests {
         let back: Session = serde_json::from_str(&serde_json::to_string(&s2).unwrap()).unwrap();
         assert_eq!(back, s2);
         assert_eq!(&wav_bytes(&[0.0, 0.0])[..4], b"RIFF");
+    }
+}
+
+/// Chaînes d'effets réutilisables : un fichier .arychain par chaîne, dans « sons/chaînes/ » du coffre
+pub mod chains {
+    use super::Fx;
+
+    pub fn dir(root: &str) -> std::path::PathBuf {
+        std::path::Path::new(root).join("sons").join("chaînes")
+    }
+
+    pub fn list(root: &str) -> Vec<(String, std::path::PathBuf)> {
+        let mut v: Vec<(String, std::path::PathBuf)> = std::fs::read_dir(dir(root))
+            .map(|rd| rd.flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|e| e == "arychain")).map(|p| (p.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default(), p)).collect())
+            .unwrap_or_default();
+        v.sort_by(|a, b| a.0.to_lowercase().cmp(&b.0.to_lowercase()));
+        v
+    }
+
+    pub fn save(root: &str, name: &str, fx: &[Fx]) -> Result<(), String> {
+        let clean: String = name.chars().filter(|c| !"/\\:*?\"<>|".contains(*c)).collect();
+        let clean = if clean.trim().is_empty() { "chaîne".to_string() } else { clean.trim().to_string() };
+        std::fs::create_dir_all(dir(root)).map_err(|e| e.to_string())?;
+        let json = serde_json::to_string_pretty(fx).map_err(|e| e.to_string())?;
+        crate::vault::atomic_write(&dir(root).join(format!("{clean}.arychain")), json).map_err(|e| e.to_string())
+    }
+
+    pub fn load(path: &std::path::Path) -> Option<Vec<Fx>> {
+        serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()
+    }
+
+    #[cfg(test)]
+    mod tests {
+        #[test]
+        fn chaines() {
+            let root = std::env::temp_dir().join(format!("ary-chains-{}", std::process::id()));
+            let r = root.to_string_lossy().to_string();
+            let fx = vec![super::Fx::Highpass { hz: 90.0 }, super::Fx::Compress, super::Fx::Limiter { ceiling: -1.0 }];
+            super::save(&r, "Voix podcast", &fx).unwrap();
+            let l = super::list(&r);
+            assert_eq!(l[0].0, "Voix podcast");
+            assert_eq!(super::load(&l[0].1).unwrap(), fx);
+            let _ = std::fs::remove_dir_all(root);
+        }
+    }
+}
+
+#[cfg(test)]
+mod meter_tests {
+    #[test]
+    fn crete_vraie_et_correlation() {
+        // Un sinus à fs/4 décalé de 45° : les échantillons valent ±0,707, la vraie crête est 1
+        let n = 4800;
+        let data: Vec<f32> = (0..n).flat_map(|i| {
+            let v = (std::f32::consts::FRAC_PI_2 * i as f32 + std::f32::consts::FRAC_PI_4).sin();
+            [v, v]
+        }).collect();
+        let sample_peak = data.iter().fold(0.0f32, |a, b| a.max(b.abs()));
+        assert!(sample_peak < 0.75);
+        assert!(super::true_peak_db(&data) > -1.5, "{}", super::true_peak_db(&data));
+        assert!((super::correlation(&data) - 1.0).abs() < 1e-4);
+        let anti: Vec<f32> = data.chunks(2).flat_map(|f| [f[0], -f[1]]).collect();
+        assert!((super::correlation(&anti) + 1.0).abs() < 1e-4);
     }
 }
