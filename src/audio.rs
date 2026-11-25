@@ -748,7 +748,16 @@ pub fn spectrum(buf: &Buffer, a: f64, b: f64, bands: usize) -> Vec<f32> {
 
 /// FFT en place (Cooley-Tukey, taille puissance de deux)
 fn fft(re: &mut [f64], im: &mut [f64]) {
+    fft_dir(re, im, false);
+}
+
+/// FFT en place, directe ou inverse (l'inverse est normalisée par 1/n). Les cosinus et sinus sont calculés
+/// une seule fois pour toute la transformée, pas à chaque papillon.
+pub(crate) fn fft_dir(re: &mut [f64], im: &mut [f64], inverse: bool) {
     let n = re.len();
+    if n < 2 || !n.is_power_of_two() || im.len() != n {
+        return;
+    }
     let mut j = 0;
     for i in 1..n {
         let mut bit = n >> 1;
@@ -762,14 +771,16 @@ fn fft(re: &mut [f64], im: &mut [f64]) {
             im.swap(i, j);
         }
     }
+    let sign = if inverse { 1.0 } else { -1.0 };
+    let (wr, wi): (Vec<f64>, Vec<f64>) = (0..n / 2).map(|k| { let a = sign * std::f64::consts::TAU * k as f64 / n as f64; (a.cos(), a.sin()) }).unzip();
     let mut len = 2;
     while len <= n {
-        let ang = -std::f64::consts::TAU / len as f64;
+        let (half, stride) = (len / 2, n / len);
         for s in (0..n).step_by(len) {
-            for k in 0..len / 2 {
-                let (wr, wi) = ((ang * k as f64).cos(), (ang * k as f64).sin());
-                let (a, b) = (s + k, s + k + len / 2);
-                let (xr, xi) = (re[b] * wr - im[b] * wi, re[b] * wi + im[b] * wr);
+            for k in 0..half {
+                let (c, d) = (wr[k * stride], wi[k * stride]);
+                let (a, b) = (s + k, s + k + half);
+                let (xr, xi) = (re[b] * c - im[b] * d, re[b] * d + im[b] * c);
                 re[b] = re[a] - xr;
                 im[b] = im[a] - xi;
                 re[a] += xr;
@@ -777,6 +788,10 @@ fn fft(re: &mut [f64], im: &mut [f64]) {
             }
         }
         len <<= 1;
+    }
+    if inverse {
+        let k = 1.0 / n as f64;
+        re.iter_mut().chain(im.iter_mut()).for_each(|v| *v *= k);
     }
 }
 
@@ -1012,6 +1027,20 @@ mod tests {
             d.push(v);
         }
         Buffer::from_samples(d)
+    }
+
+    #[test]
+    fn fft_aller_retour() {
+        let src: Vec<f64> = (0..1024).map(|i| ((i * 37 % 101) as f64 / 50.0 - 1.0)).collect();
+        let (mut re, mut im) = (src.clone(), vec![0.0; 1024]);
+        fft_dir(&mut re, &mut im, false);
+        fft_dir(&mut re, &mut im, true);
+        assert!(re.iter().zip(&src).all(|(a, b)| (a - b).abs() < 1e-9));
+        assert!(im.iter().all(|v| v.abs() < 1e-9));
+        // Taille qui n'est pas une puissance de deux : rien ne bouge, pas de panique
+        let (mut r3, mut i3) = (vec![1.0, 2.0, 3.0], vec![0.0; 3]);
+        fft_dir(&mut r3, &mut i3, false);
+        assert_eq!(r3, vec![1.0, 2.0, 3.0]);
     }
 
     #[test]
