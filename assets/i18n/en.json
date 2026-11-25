@@ -3219,5 +3219,7 @@
   "cartes créées": "maps created",
   "Aucun plan à montrer.": "No shot to show.",
   "Color script (vignettes et couleurs)": "Color script (thumbnails and colors)",
-  "Une vignette par plan avec ses couleurs dominantes, pour juger les couleurs du film ; PNG à côté du montage": "One thumbnail per shot with its dominant colors, to judge the film's colors; PNG next to the edit"
+  "Une vignette par plan avec ses couleurs dominantes, pour juger les couleurs du film ; PNG à côté du montage": "One thumbnail per shot with its dominant colors, to judge the film's colors; PNG next to the edit",
+  "fermer les trous (px)": "close gaps (px)",
+  "Le remplissage ne passe pas par les ouvertures du trait plus petites que cette taille, et va jusqu'au trait": "The fill does not leak through openings in the line smaller than this size, and reaches the line"
 }

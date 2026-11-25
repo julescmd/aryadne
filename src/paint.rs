@@ -1086,6 +1086,68 @@ pub fn blend_if_k(lo: f32, hi: f32, l: f32) -> f32 {
     a * b
 }
 
+/// Remplissage qui ne passe pas par les trous plus petits que `gap` : la zone `open` (où l'on peut peindre)
+/// est rétrécie de `gap`, remplie depuis la graine, puis regagne `gap` + 1 pixels sans sortir de `open`.
+/// None si la graine tombe dans le trait épaissi (on remplit alors normalement).
+pub fn gap_fill(open: &[bool], w: usize, h: usize, sx: usize, sy: usize, gap: usize) -> Option<Vec<bool>> {
+    // Distance au premier pixel fermé (carrés successifs : passes de dilatation en croix et diagonales)
+    let mut blocked: Vec<bool> = open.iter().map(|o| !o).collect();
+    for _ in 0..gap {
+        let prev = blocked.clone();
+        for y in 0..h {
+            for x in 0..w {
+                if prev[y * w + x] {
+                    continue;
+                }
+                let n = (x > 0 && prev[y * w + x - 1]) || (x + 1 < w && prev[y * w + x + 1]) || (y > 0 && prev[(y - 1) * w + x]) || (y + 1 < h && prev[(y + 1) * w + x]);
+                if n {
+                    blocked[y * w + x] = true;
+                }
+            }
+        }
+    }
+    if blocked[sy * w + sx] {
+        return None;
+    }
+    let mut region = vec![false; w * h];
+    let mut stack = vec![(sx, sy)];
+    while let Some((x, y)) = stack.pop() {
+        let i = y * w + x;
+        if region[i] || blocked[i] {
+            continue;
+        }
+        region[i] = true;
+        if x > 0 {
+            stack.push((x - 1, y));
+        }
+        if x + 1 < w {
+            stack.push((x + 1, y));
+        }
+        if y > 0 {
+            stack.push((x, y - 1));
+        }
+        if y + 1 < h {
+            stack.push((x, y + 1));
+        }
+    }
+    // La zone regagne le terrain perdu, jusqu'au trait
+    for _ in 0..=gap {
+        let prev = region.clone();
+        for y in 0..h {
+            for x in 0..w {
+                let i = y * w + x;
+                if prev[i] || !open[i] {
+                    continue;
+                }
+                if (x > 0 && prev[i - 1]) || (x + 1 < w && prev[i + 1]) || (y > 0 && prev[i - w]) || (y + 1 < h && prev[i + w]) {
+                    region[i] = true;
+                }
+            }
+        }
+    }
+    Some(region)
+}
+
 /// Bruit blanc fixe (grain de film)
 fn grain_noise(x: i32, y: i32) -> f32 {
     let mut n = (x as u32).wrapping_mul(2246822519) ^ (y as u32).wrapping_mul(3266489917) ^ 0x9e37_79b9;
@@ -1501,6 +1563,8 @@ pub struct Editor {
     pub hardness: f32,
     pub flow: f32,
     pub tolerance: f32,
+    /// Pot de peinture : trous du trait refermés jusqu'à cette taille (px), 0 : aucun
+    pub fill_gap: f32,
     sel: Option<Sel>,
     /// Points du lasso en cours
     lasso: Vec<[f32; 2]>,
@@ -1719,6 +1783,7 @@ impl Editor {
             anim_play: None,
             anim_thumbs: vec![],
             tolerance: 0.12,
+            fill_gap: 0.0,
             sel: None,
             lasso: vec![],
             grad: None,
@@ -2627,6 +2692,7 @@ impl Editor {
 
     fn fill(&mut self, at: [i32; 2]) {
         let tol = self.tolerance;
+        let gap = self.fill_gap.round() as usize;
         if self.locked() {
             return;
         }
@@ -2647,6 +2713,22 @@ impl Editor {
         let i0 = (ly as usize * w + lx as usize) * 4;
         let target = [l.px[i0], l.px[i0 + 1], l.px[i0 + 2], l.px[i0 + 3]];
         let near = |p: &[u8]| (0..4).map(|k| (p[k] as f32 - target[k] as f32).abs() / 255.0).fold(0.0f32, f32::max) <= tol;
+        // Fermer les trous : le trait est épaissi le temps de trouver la zone, puis la zone revient jusqu'au trait
+        if gap > 0 {
+            let open: Vec<bool> = (0..w * h).map(|idx| {
+                let (dx, dy) = ((idx % w) as i32 + off[0], (idx / w) as i32 + off[1]);
+                sel.as_ref().is_none_or(|s| s.at(dw, dx, dy) >= 0.5) && near(&l.px[idx * 4..idx * 4 + 4])
+            }).collect();
+            if let Some(region) = gap_fill(&open, w, h, lx as usize, ly as usize, gap) {
+                for (idx, on) in region.iter().enumerate() {
+                    if *on {
+                        l.px[idx * 4..idx * 4 + 4].copy_from_slice(&col);
+                    }
+                }
+                self.all();
+                return;
+            }
+        }
         let mut seen = vec![false; w * h];
         let mut stack = vec![(lx as usize, ly as usize)];
         while let Some((x, y)) = stack.pop() {
@@ -3202,6 +3284,9 @@ impl Editor {
                         ui.end_row();
                     }
                     ui.add(egui::Slider::new(&mut self.tolerance, 0.0..=1.0).text(crate::i18n::t("tolérance")));
+                    if self.tool == Tool::Fill {
+                        ui.add(egui::Slider::new(&mut self.fill_gap, 0.0..=24.0).step_by(1.0).text(crate::i18n::t("fermer les trous (px)"))).on_hover_text(crate::i18n::t("Le remplissage ne passe pas par les ouvertures du trait plus petites que cette taille, et va jusqu'au trait"));
+                    }
                 }
                 Tool::Gradient => {
                     ui.label(egui::RichText::new(crate::i18n::t("glisser : de la couleur vers le transparent")).size(11.0).color(p.muted));
@@ -5702,6 +5787,24 @@ mod reglages_tests {
         assert_eq!(blend_if_k(0.3, 0.7, 0.1), 0.0);
         assert!(blend_if_k(0.3, 0.7, 0.26) > 0.0 && blend_if_k(0.3, 0.7, 0.26) < 1.0);
         assert_eq!(blend_if_k(0.0, 1.0, 0.0), 1.0);
+    }
+
+    #[test]
+    fn remplissage_qui_ferme_les_trous() {
+        // Un carré dessiné avec une ouverture de 2 px sur le côté droit, dans une image de 30 px
+        let (w, h) = (30usize, 30usize);
+        let mut open = vec![true; w * h];
+        for k in 5..25 {
+            for (x, y) in [(5, k), (24, k), (k, 5), (k, 24)] {
+                open[y * w + x] = false;
+            }
+        }
+        open[14 * w + 24] = true;
+        open[15 * w + 24] = true;
+        // Sans fermeture, le remplissage du dedans s'échappe ; avec 2 px, il reste dedans et touche le trait
+        let r = gap_fill(&open, w, h, 15, 15, 2).unwrap();
+        assert!(r[15 * w + 15] && r[15 * w + 6] && r[6 * w + 15]);
+        assert!(!r[15 * w + 28] && !r[2 * w + 2]);
     }
 
     #[test]
