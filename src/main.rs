@@ -389,6 +389,8 @@ struct App {
     home_ask: String,
     /// Nom tapé dans le menu Disposition
     disp_new: String,
+    /// Raccourcis à jouer au début de l'image suivante (les entrées de la barre de menus passent par là)
+    inject: Vec<(egui::Modifiers, egui::Key)>,
     /// Le prochain affichage de l'Assistant envoie le message déjà écrit (venu de l'accueil)
     chat_autosend: bool,
     /// Inspecteur du board : réglages du générateur de palettes, onglet (0 couleurs, 1 propriétés)
@@ -661,11 +663,19 @@ impl App {
         let mut go: Option<String> = None;
         let mut act: u8 = 0;
         egui::containers::menu::MenuButton::new(RichText::new(format!("{cur} {}", lucide::CHEVRON_DOWN)).size(12.5).color(p.text)).ui(ui, |ui| {
+            self.disp_items(ui, &names, &cur, &mut go, &mut act);
+        });
+        self.disp_apply(go, act, &cur, &ctx);
+    }
+
+    /// Le contenu du menu des dispositions (aussi dans la barre de menus)
+    fn disp_items(&mut self, ui: &mut egui::Ui, names: &[String], cur: &str, go: &mut Option<String>, act: &mut u8) {
+        let p = theme::pal();
             ui.set_min_width(240.0);
             ui.label(RichText::new(crate::i18n::t("Dispositions de l'étape")).size(11.0).color(p.muted));
-            for n in &names {
-                if ui.selectable_label(*n == cur, n).clicked() && *n != cur {
-                    go = Some(n.clone());
+            for n in names {
+                if ui.selectable_label(*n == *cur, n).clicked() && *n != *cur {
+                    *go = Some(n.clone());
                     ui.close();
                 }
             }
@@ -673,20 +683,20 @@ impl App {
             ui.horizontal(|ui| {
                 ui.add(egui::TextEdit::singleline(&mut self.disp_new).hint_text(crate::i18n::t("Modelage, Animation…")).desired_width(150.0));
                 if ui.add_enabled(!self.disp_new.trim().is_empty(), egui::Button::new(format!("{}  {}", crate::lucide::SAVE, crate::i18n::t("Enregistrer")))).on_hover_text(crate::i18n::t("Garde l'arrangement actuel des panneaux sous ce nom")).clicked() {
-                    act = 1;
+                    *act = 1;
                     ui.close();
                 }
             });
             if ui.button(format!("{}  {}", crate::lucide::PENCIL, crate::i18n::t("Renommer en ce nom"))).on_hover_text(crate::i18n::t("Donne le nom tapé ci-dessus à la disposition en cours")).clicked() && !self.disp_new.trim().is_empty() {
-                act = 2;
+                *act = 2;
                 ui.close();
             }
             if ui.button(format!("{}  {}", crate::lucide::ROTATE_CCW, crate::i18n::t("Réinitialiser cette disposition"))).clicked() {
-                act = 3;
+                *act = 3;
                 ui.close();
             }
             if names.len() > 1 && ui.button(RichText::new(crate::i18n::t("Supprimer cette disposition")).color(p.missing)).clicked() {
-                act = 4;
+                *act = 4;
                 ui.close();
             }
             ui.separator();
@@ -696,7 +706,11 @@ impl App {
                 }
                 ui.close();
             }
-        });
+    }
+
+    fn disp_apply(&mut self, go: Option<String>, act: u8, cur: &str, ctx: &egui::Context) {
+        let ctx = ctx.clone();
+        let cur = cur.to_string();
         if let Some(n) = go {
             self.disp_switch(&n, &ctx);
         }
@@ -2836,6 +2850,183 @@ impl App {
 
     // ---------- barres ----------
 
+    /// Barre de menus, tout en haut (comme Maya ou Blender) : Fichier, Édition, Affichage, Disposition, Fenêtre, Aide
+    fn menubar(&mut self, ui: &mut egui::Ui) {
+        use egui::{Key, Modifiers};
+        let p = theme::pal();
+        let ctx = ui.ctx().clone();
+        let mut cmd: Option<extras::Cmd> = None;
+        let mut keys: Option<(Modifiers, Key)> = None;
+        let (mut go, mut act) = (None, 0u8);
+        let cur = self.disp_name();
+        let names: Vec<String> = {
+            let w = self.ws.cur();
+            let mut v: Vec<String> = w.dispositions.iter().map(|d| d.name.clone()).collect();
+            if !v.contains(&cur) {
+                v.insert(0, cur.clone());
+            }
+            v
+        };
+        let cs = Modifiers::COMMAND | Modifiers::SHIFT;
+        egui::Panel::top("menubar")
+            .exact_size(24.0)
+            .frame(egui::Frame::new().fill(p.bg).inner_margin(egui::Margin::symmetric(8, 0)))
+            .show(ui, |ui| {
+                ui.horizontal_centered(|ui| {
+                    ui.spacing_mut().item_spacing.x = 2.0;
+                    theme::mark(ui, 14.0);
+                    ui.add_space(6.0);
+                    let item = |ui: &mut egui::Ui, label: &str, short: &str| ui.add(egui::Button::new(crate::i18n::t(label)).shortcut_text(short)).clicked();
+                    let top = |t: &str| RichText::new(crate::i18n::t(t)).size(12.5);
+                    ui.menu_button(top("Fichier"), |ui| {
+                        ui.set_min_width(240.0);
+                        ui.menu_button(crate::i18n::t("Nouveau"), |ui| {
+                            for (label, c) in [
+                                ("note", extras::Cmd::NewNote),
+                                ("note du jour", extras::Cmd::Daily),
+                                ("depuis un modèle…", extras::Cmd::FromTemplate),
+                                ("board", extras::Cmd::NewBoard),
+                                ("scène 3D", extras::Cmd::NewScene),
+                                ("matériau en nodes", extras::Cmd::NewMaterial),
+                                ("matériau à calques (atelier)", extras::Cmd::NewLayered),
+                                ("dessin vectoriel", extras::Cmd::NewVector),
+                                ("compositing en nodes", extras::Cmd::NewCompositor),
+                                ("composition animée (motion)", extras::Cmd::NewMotion),
+                                ("storyboard", extras::Cmd::NewStory),
+                                ("montage vidéo", extras::Cmd::NewMontage),
+                                ("session audio", extras::Cmd::NewAudio),
+                                ("morceau (séquenceur)", extras::Cmd::NewMusic),
+                                ("scénario (Fountain)", extras::Cmd::NewScript),
+                                ("suivi de production", extras::Cmd::NewProduction),
+                            ] {
+                                if ui.button(crate::i18n::t(label)).clicked() {
+                                    cmd = Some(c);
+                                }
+                            }
+                            ui.separator();
+                            if ui.button(crate::i18n::t("autre… (choisir le genre)")).clicked() {
+                                cmd = Some(extras::Cmd::NewFile);
+                            }
+                        });
+                        if item(ui, "Ouvrir un fichier…", &keymap::text("switcher")) {
+                            self.switcher = Some((String::new(), 0));
+                        }
+                        if item(ui, "Importer des fichiers…", "") {
+                            cmd = Some(extras::Cmd::Import);
+                        }
+                        ui.separator();
+                        if item(ui, "Enregistrer une copie sous…", &keymap::text("save_copy")) {
+                            keys = Some((cs, Key::S));
+                        }
+                        if item(ui, "Historique des versions", "") {
+                            cmd = Some(extras::Cmd::History);
+                        }
+                        if item(ui, "Convertir, compresser…", "") {
+                            cmd = Some(extras::Cmd::Convert);
+                        }
+                        if item(ui, "Fermer l'onglet", &keymap::text("close_tab")) {
+                            cmd = Some(extras::Cmd::CloseTab);
+                        }
+                        ui.separator();
+                        ui.menu_button(crate::i18n::t("Coffre"), |ui| {
+                            let path = self.root();
+                            ui.label(RichText::new(&path).color(p.muted).size(10.5));
+                            for (label, c) in [("statistiques", extras::Cmd::Stats), ("sauvegarder maintenant (zip)", extras::Cmd::Backup), ("synchroniser avec le cloud", extras::Cmd::Sync), ("ouvrir le dossier", extras::Cmd::OpenVaultFolder), ("recharger les fichiers", extras::Cmd::Reload), ("changer de coffre…", extras::Cmd::ChangeVault)] {
+                                if ui.button(crate::i18n::t(label)).clicked() {
+                                    cmd = Some(c);
+                                }
+                            }
+                        });
+                        if item(ui, "Réglages", &keymap::text("settings")) {
+                            cmd = Some(extras::Cmd::Settings(settings::Tab::Appearance));
+                        }
+                        ui.separator();
+                        if item(ui, "Quitter", "") {
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                        }
+                    });
+                    ui.menu_button(top("Édition"), |ui| {
+                        ui.set_min_width(220.0);
+                        for (label, short, k) in [("Annuler", "Ctrl+Z", (Modifiers::COMMAND, Key::Z)), ("Rétablir", "Ctrl+Maj+Z", (cs, Key::Z))] {
+                            if item(ui, label, short) {
+                                keys = Some(k);
+                            }
+                        }
+                        ui.separator();
+                        for (label, short, k) in [("Couper", "Ctrl+X", Key::X), ("Copier", "Ctrl+C", Key::C), ("Coller", "Ctrl+V", Key::V), ("Dupliquer", "Ctrl+D", Key::D), ("Tout choisir", "Ctrl+A", Key::A)] {
+                            if item(ui, label, short) {
+                                keys = Some((Modifiers::COMMAND, k));
+                            }
+                        }
+                        ui.separator();
+                        if item(ui, "Rechercher dans le coffre", &keymap::text("search")) {
+                            self.view = Some(View::Search);
+                        }
+                        if item(ui, "Palette de commandes", &keymap::text("palette")) {
+                            self.palette = Some((String::new(), 0));
+                        }
+                        if item(ui, "Raccourcis clavier…", "") {
+                            cmd = Some(extras::Cmd::Settings(settings::Tab::Shortcuts));
+                        }
+                    });
+                    ui.menu_button(top("Affichage"), |ui| {
+                        ui.set_min_width(240.0);
+                        ui.checkbox(&mut self.explorer_open, format!("{}   {}", crate::i18n::t("Fichiers"), keymap::text("explorer")));
+                        ui.checkbox(&mut self.assistant_open, format!("{}   {}", crate::i18n::t("Assistant"), keymap::text("assistant")));
+                        if item(ui, "Terminal", &keymap::text("terminal")) {
+                            keys = Some((Modifiers::COMMAND, Key::Backtick));
+                        }
+                        ui.separator();
+                        if item(ui, "Vue côte à côte", &keymap::text("split")) {
+                            cmd = Some(extras::Cmd::Split);
+                        }
+                        if item(ui, "Mode compact", &keymap::text("compact")) {
+                            cmd = Some(extras::Cmd::Compact);
+                        }
+                        if item(ui, "Plein écran", "F11") {
+                            let full = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(!full));
+                        }
+                        ui.separator();
+                        if item(ui, if theme::is_dark() { "Thème clair" } else { "Thème sombre" }, "") {
+                            cmd = Some(extras::Cmd::Theme);
+                        }
+                        if ui.add(egui::Button::new(crate::i18n::t("Épingler au-dessus")).selected(self.pinned)).clicked() {
+                            cmd = Some(extras::Cmd::Pin);
+                        }
+                    });
+                    ui.menu_button(top("Disposition"), |ui| {
+                        self.disp_items(ui, &names, &cur, &mut go, &mut act);
+                    });
+                    ui.menu_button(top("Fenêtre"), |ui| self.window_menu(ui, &mut cmd, &ctx));
+                    ui.menu_button(top("Aide"), |ui| {
+                        ui.set_min_width(220.0);
+                        if item(ui, "Accueil", "") {
+                            self.home_open = true;
+                        }
+                        if item(ui, "Raccourcis clavier", "") {
+                            cmd = Some(extras::Cmd::Settings(settings::Tab::Shortcuts));
+                        }
+                        if item(ui, "Temps passé par projet", "") {
+                            cmd = Some(extras::Cmd::TimeReport);
+                        }
+                        if item(ui, "Vérifier les mises à jour", "") {
+                            cmd = Some(extras::Cmd::Updates);
+                        }
+                        ui.separator();
+                        ui.label(RichText::new(format!("Aryadne {}", env!("CARGO_PKG_VERSION"))).size(11.0).color(p.muted));
+                    });
+                });
+            });
+        self.disp_apply(go, act, &cur, &ctx);
+        if let Some(k) = keys {
+            self.inject.push(k);
+        }
+        if let Some(c) = cmd {
+            self.run_cmd(c, &ctx);
+        }
+    }
+
     fn topbar(&mut self, ui: &mut egui::Ui) {
         let p = theme::pal();
         let ctx = ui.ctx().clone();
@@ -2849,10 +3040,9 @@ impl App {
                     // Menu ◆ Aryadne : le coffre (nouveau, importer, sauvegarder…), la fenêtre et les réglages
                     let path = self.root();
                     let short = path.split(['/', '\\']).filter(|s| !s.is_empty()).last().unwrap_or("").to_string();
-                    theme::mark(ui, 18.0);
+                    // Le logo et le nom sont passés dans la barre de menus : ici, le coffre seul
                     let mut job = egui::text::LayoutJob::default();
-                    job.append(&crate::i18n::t("aryadne"), 0.0, egui::TextFormat { font_id: egui::FontId::new(13.0, theme::bold()), color: p.text, ..Default::default() });
-                    job.append(&format!("{short}  {}", lucide::CHEVRON_DOWN), 8.0, egui::TextFormat { font_id: egui::FontId::proportional(11.5), color: p.muted, ..Default::default() });
+                    job.append(&format!("{}  {short}  {}", lucide::VAULT, lucide::CHEVRON_DOWN), 0.0, egui::TextFormat { font_id: egui::FontId::proportional(12.5), color: p.text, ..Default::default() });
                     let (r, _) = egui::containers::menu::MenuButton::from_button(egui::Button::new(job).frame(false)).ui(ui, |ui| {
                         ui.set_min_width(240.0);
                         ui.label(RichText::new(&path).color(p.muted).size(10.5));
@@ -7342,6 +7532,18 @@ pub fn drop_of<T: std::any::Any + Send + Sync>(r: &egui::Response) -> Option<std
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        // Les entrées de menu qui reviennent à un raccourci : on le rejoue, chaque éditeur réagit comme au clavier
+        for (m, k) in std::mem::take(&mut self.inject) {
+            ctx.input_mut(|i| {
+                i.modifiers = m;
+                i.events.push(egui::Event::Key { key: k, physical_key: None, pressed: true, repeat: false, modifiers: m });
+                match (m.command, k) {
+                    (true, egui::Key::C) => i.events.push(egui::Event::Copy),
+                    (true, egui::Key::X) => i.events.push(egui::Event::Cut),
+                    _ => {}
+                }
+            });
+        }
         settings::set_unit(&self.prefs.unit);
         // Couleur de l'espace courant d'après le thème (il peut changer dans les réglages)
         theme::set_workspace_accent(workspace::accent_of(self.ws.cur()));
@@ -7425,6 +7627,7 @@ impl eframe::App for App {
             } else {
                 self.zones_last = std::mem::take(&mut self.zones_next);
                 self.ws_start(ui);
+                self.menubar(ui);
                 let a = ui.available_rect_before_wrap();
                 self.topbar(ui);
                 let b = ui.available_rect_before_wrap();
