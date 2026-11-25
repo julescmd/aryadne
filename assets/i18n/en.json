@@ -2891,5 +2891,13 @@
   "maître": "main",
   "n'est plus un composant": "no longer a component",
   "nouvelle instance (Alt+glisser marche aussi)": "new instance (Alt+drag works too)",
-  "Composant": "Component"
+  "Composant": "Component",
+  "choisis d'abord les formes à combiner (outil sélection), puis glisse sur leurs zones": "first select the shapes to combine (selection tool), then drag across their regions",
+  "distance du décalage (négatif : vers l'intérieur)": "offset distance (negative: inward)",
+  "décaler le tracé": "offset path",
+  "une copie agrandie ou rétrécie de la sélection, en tracé": "a grown or shrunk copy of the selection, as a path",
+  "vectoriser le contour : il devient une forme pleine": "outline stroke: it becomes a filled shape",
+  "largeur : glisser sur un contour pour l'épaissir à cet endroit (Alt+clic : retirer le point)": "width: drag on a stroke to thicken it at that spot (Alt+click: remove the point)",
+  "concepteur de formes : glisser sur les zones des formes choisies pour les fusionner (Alt : effacer)": "shape builder: drag across regions of the selected shapes to merge them (Alt: erase)",
+  "Décalage": "Offset"
 }

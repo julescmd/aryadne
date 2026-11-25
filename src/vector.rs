@@ -163,6 +163,9 @@ pub struct Shape {
     /// Instance du composant `instance_of` (0 : aucun)
     #[serde(default, skip_serializing_if = "is_zero")]
     pub instance_of: u64,
+    /// Points de largeur du contour (outil Largeur, comme Illustrator) : position relative, largeur
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub widths: Vec<[f32; 2]>,
 }
 
 fn is_zero(v: &u64) -> bool {
@@ -503,7 +506,7 @@ fn union(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {
 
 impl Shape {
     pub fn base() -> Shape {
-        Shape { id: 0, name: String::new(), kind: Kind::Rect { w: 100.0, h: 100.0, r: [0.0; 4] }, x: 0.0, y: 0.0, rot: 0.0, fills: vec![], strokes: vec![], opacity: 1.0, visible: true, locked: false, parent: 0, shadow: None, blur: 0.0, blend: String::new(), layout: None, component: false, instance_of: 0 }
+        Shape { id: 0, name: String::new(), kind: Kind::Rect { w: 100.0, h: 100.0, r: [0.0; 4] }, x: 0.0, y: 0.0, rot: 0.0, fills: vec![], strokes: vec![], opacity: 1.0, visible: true, locked: false, parent: 0, shadow: None, blur: 0.0, blend: String::new(), layout: None, component: false, instance_of: 0, widths: vec![] }
     }
 
     pub fn kind_label(&self) -> &'static str {
@@ -942,6 +945,15 @@ impl Gen<'_> {
                     }
                     let (p, o) = self.paint(f, bounds);
                     let _ = write!(out, r#"<path d="{d}" fill="{p}" fill-opacity="{o}" fill-rule="nonzero"/>"#);
+                }
+                // Contour à largeur variable : un tracé plein, peint comme le contour
+                if !sh.widths.is_empty() {
+                    if let (Some(k), Some(wd)) = (sh.strokes.first(), crate::vgeom::width_outline(sh)) {
+                        let (p, o) = self.paint(&k.paint, bounds);
+                        let _ = write!(out, r#"<path d="{wd}" fill="{p}" fill-opacity="{o}" fill-rule="nonzero"/>"#);
+                        out.push_str("</g>");
+                        return;
+                    }
                 }
                 for k in &sh.strokes {
                     let (p, o) = self.paint(&k.paint, bounds);

@@ -11,6 +11,7 @@ mod transcribe;
 mod expr;
 mod bases;
 mod vector;
+mod vgeom;
 mod vector_ui;
 mod keymap;
 mod lucide;

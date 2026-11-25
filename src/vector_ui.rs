@@ -19,9 +19,11 @@ pub enum Tool {
     Line,
     Text,
     Board,
+    Width,
+    Builder,
 }
 
-const TOOLS: [(Tool, &str, &str, &str); 10] = [
+const TOOLS: [(Tool, &str, &str, &str); 12] = [
     (Tool::Select, l::MOUSE_POINTER_2, "sélection", "V"),
     (Tool::Direct, l::MOUSE_POINTER, "sélection directe : les points d'un tracé", "A"),
     (Tool::Pen, l::PEN_TOOL, "plume : clic pour un point, glisser pour une courbe", "P"),
@@ -32,6 +34,8 @@ const TOOLS: [(Tool, &str, &str, &str); 10] = [
     (Tool::Line, l::MINUS, "ligne (Maj : angles de 45°)", "L"),
     (Tool::Text, l::TYPE, "texte : clic pour un texte, glisser pour une zone", "T"),
     (Tool::Board, l::FRAME, "plan de travail", "F"),
+    (Tool::Width, l::SPLINE, "largeur : glisser sur un contour pour l'épaissir à cet endroit (Alt+clic : retirer le point)", "W"),
+    (Tool::Builder, l::SHAPES, "concepteur de formes : glisser sur les zones des formes choisies pour les fusionner (Alt : effacer)", "M"),
 ];
 
 enum Drag {
@@ -83,6 +87,15 @@ pub struct Editor {
     /// Vectorisation d'une image : seuil (0 à 1) et tolérance (px)
     trace_thr: f32,
     trace_detail: f32,
+    /// Outil Largeur : forme et point de largeur qu'on tire
+    width_edit: Option<(u64, usize)>,
+    /// Concepteur de formes : zones des formes choisies (avec leur empreinte) et zones balayées
+    builder: Option<(u64, crate::vgeom::Regions)>,
+    picked: Vec<u32>,
+    /// Surbrillance des zones (zones affichées, texture)
+    builder_tex: Option<(Vec<u32>, egui::TextureHandle)>,
+    /// Décalage de tracé (unités)
+    offset_by: f32,
 }
 
 fn c32(c: [u8; 4]) -> Color32 {
@@ -121,6 +134,11 @@ impl Editor {
             export_scale: 2.0,
             trace_thr: 0.5,
             trace_detail: 1.5,
+            width_edit: None,
+            builder: None,
+            picked: vec![],
+            builder_tex: None,
+            offset_by: 10.0,
         })
     }
 
@@ -961,6 +979,25 @@ impl Editor {
                 ch = true;
             }
         });
+        // Décaler le tracé (comme Illustrator) : une nouvelle forme, plus grande ou plus petite, sous la sélection
+        if !self.sel.is_empty() {
+            ui.horizontal(|ui| {
+                ui.add(egui::DragValue::new(&mut self.offset_by).speed(0.5).range(-500.0..=500.0)).on_hover_text(crate::i18n::t("distance du décalage (négatif : vers l'intérieur)"));
+                if ui.button(format!("{} {}", l::SQUARE_SQUARE, crate::i18n::t("décaler le tracé"))).on_hover_text(crate::i18n::t("une copie agrandie ou rétrécie de la sélection, en tracé")).clicked() {
+                    self.doc = snapshot.clone();
+                    if let Some(id) = self.offset_selection(self.offset_by) {
+                        self.sel = vec![id];
+                    }
+                    ch = true;
+                }
+                let strokes = self.sel.iter().any(|i| self.doc.get(*i).is_some_and(|s| !s.strokes.is_empty()));
+                if ui.add_enabled(strokes, egui::Button::new(l::PEN_LINE)).on_hover_text(crate::i18n::t("vectoriser le contour : il devient une forme pleine")).clicked() {
+                    self.doc = snapshot.clone();
+                    self.outline_strokes();
+                    ch = true;
+                }
+            });
+        }
         if let Some(id) = outline_text {
             self.outline_text(id);
             ch = true;
@@ -973,6 +1010,68 @@ impl Editor {
         if let Some(bi) = self.board_of_selection() {
             self.export_ui(ui, bi);
         }
+    }
+
+    /// Une forme décalée de `d` autour de la sélection, posée juste dessous ; rend son identifiant
+    fn offset_selection(&mut self, d: f32) -> Option<u64> {
+        let ids: Vec<u64> = self.sel.iter().map(|i| self.top_of(*i)).collect();
+        let g = crate::vgeom::Grid::around(&self.doc, &ids, d.max(0.0) + 4.0, 1200)?;
+        let mut cells = vec![false; g.w * g.h];
+        for id in &ids {
+            for (c, m) in cells.iter_mut().zip(g.mask(&self.doc, *id)) {
+                *c |= m;
+            }
+        }
+        let cells = crate::vgeom::offset(&cells, &g, d);
+        let like = self.doc.get(ids[0])?.clone();
+        let mut like = like;
+        if like.fills.is_empty() {
+            like.fills = crate::vgeom::stroke_as_fill(&like);
+            like.strokes.clear();
+        }
+        let id = crate::vgeom::add_traced(&mut self.doc, &g, g.trace(&cells), &like, &crate::i18n::t("Décalage"))?;
+        // Sous la sélection, comme Illustrator
+        let at = ids.iter().filter_map(|i| self.doc.index(*i)).min().unwrap_or(0);
+        if let Some(i) = self.doc.index(id) {
+            let s = self.doc.shapes.remove(i);
+            self.doc.shapes.insert(at, s);
+        }
+        Some(id)
+    }
+
+    /// Les contours choisis deviennent des formes pleines (largeur variable comprise)
+    fn outline_strokes(&mut self) {
+        let mut out = vec![];
+        for id in self.sel.clone() {
+            let Some(s) = self.doc.get(id).cloned() else { continue };
+            if s.strokes.is_empty() || matches!(s.kind, Kind::Group { .. }) {
+                out.push(id);
+                continue;
+            }
+            let mut only = s.clone();
+            only.fills.clear();
+            let tmp = self.doc.new_id();
+            only.id = tmp;
+            self.doc.shapes.push(only);
+            let Some(g) = crate::vgeom::Grid::around(&self.doc, &[tmp], s.strokes[0].width + 4.0, 1200) else { continue };
+            let cells = g.mask(&self.doc, tmp);
+            self.doc.remove(&[tmp]);
+            let mut like = s.clone();
+            like.fills = crate::vgeom::stroke_as_fill(&s);
+            like.strokes.clear();
+            if let Some(n) = crate::vgeom::add_traced(&mut self.doc, &g, g.trace(&cells), &like, &s.name) {
+                // Le fond d'origine reste dessous, sans contour
+                if let Some(x) = self.shape_mut(id) {
+                    x.strokes.clear();
+                    x.widths.clear();
+                }
+                if s.fills.is_empty() || matches!(s.kind, Kind::Line { .. } | Kind::Path { closed: false, .. }) {
+                    self.doc.remove(&[id]);
+                }
+                out.push(n);
+            }
+        }
+        self.sel = out;
     }
 
     /// Met la sélection dans un groupe en mise en page automatique, rangé dans l'ordre de lecture.
@@ -1312,7 +1411,197 @@ impl Editor {
                 painter.rect_stroke(r, 0.0, Stroke::new(1.0, sel_col), egui::StrokeKind::Middle);
             }
         }
+        self.tool_overlay(&painter, &to_screen, resp.hover_pos().map(&to_world));
         self.keys(ui, &resp);
+    }
+
+    /// Le contour (tracé ou ligne) le plus proche du point, et le point le plus proche dessus
+    fn width_target(&self, w: [f32; 2], tol: f32) -> Option<(u64, f32, [f32; 2], [f32; 2], f32)> {
+        let mut best: Option<(u64, f32, [f32; 2], [f32; 2], f32)> = None;
+        for s in self.doc.shapes.iter().filter(|s| s.visible && !s.locked && !s.strokes.is_empty()) {
+            let (sn, cs) = (-s.rot.to_radians()).sin_cos();
+            let q = [w[0] - s.x, w[1] - s.y];
+            let local = [q[0] * cs - q[1] * sn, q[0] * sn + q[1] * cs];
+            let Some((t, p, n, d)) = crate::vgeom::nearest(s, local) else { continue };
+            let half = crate::vgeom::width_at(&s.widths, s.strokes[0].width, t) / 2.0;
+            if d <= half + tol * 3.0 && best.as_ref().is_none_or(|b| d < b.4) {
+                best = Some((s.id, t, p, n, d));
+            }
+        }
+        best
+    }
+
+    fn width_mouse(&mut self, ui: &egui::Ui, resp: &egui::Response, to_world: &dyn Fn(Pos2) -> [f32; 2], tol: f32, alt: bool) {
+        if resp.drag_started_by(egui::PointerButton::Primary) || (alt && resp.clicked()) {
+            let o = ui.input(|i| i.pointer.press_origin()).unwrap_or_default();
+            if let Some((id, t, ..)) = self.width_target(to_world(o), tol) {
+                self.checkpoint();
+                let Some(s) = self.shape_mut(id) else { return };
+                let near = s.widths.iter().position(|p| (p[0] - t).abs() < 0.04);
+                if alt {
+                    if let Some(k) = near {
+                        s.widths.remove(k);
+                    }
+                    self.changed();
+                    return;
+                }
+                let k = match near {
+                    Some(k) => k,
+                    None => {
+                        let base = s.strokes[0].width;
+                        let cur = crate::vgeom::width_at(&s.widths, base, t);
+                        s.widths.push([t, cur]);
+                        s.widths.len() - 1
+                    }
+                };
+                self.width_edit = Some((id, k));
+                self.sel = vec![self.top_of(id)];
+            }
+        }
+        if let (Some((id, k)), Some(h)) = (self.width_edit, resp.interact_pointer_pos()) {
+            if resp.dragged() {
+                let w = to_world(h);
+                if let Some(s) = self.shape_mut(id) {
+                    let t = s.widths.get(k).map(|p| p[0]).unwrap_or(0.0);
+                    let (sn, cs) = (-s.rot.to_radians()).sin_cos();
+                    let q = [w[0] - s.x, w[1] - s.y];
+                    let local = [q[0] * cs - q[1] * sn, q[0] * sn + q[1] * cs];
+                    // La distance au tracé, à l'endroit du point de largeur
+                    if let Some((_, p, ..)) = crate::vgeom::spine(s).and_then(|(pts, _)| {
+                        let total = pts.last()?.1.max(1e-6);
+                        pts.iter().min_by(|a, b| (a.1 / total - t).abs().total_cmp(&(b.1 / total - t).abs())).map(|x| (0.0, x.0))
+                    }) {
+                        let d = ((local[0] - p[0]).powi(2) + (local[1] - p[1]).powi(2)).sqrt();
+                        if let Some(wp) = s.widths.get_mut(k) {
+                            wp[1] = (d * 2.0).max(0.2);
+                        }
+                    }
+                }
+                ui.ctx().request_repaint();
+            }
+        }
+        if resp.drag_stopped() && self.width_edit.take().is_some() {
+            self.changed();
+        }
+    }
+
+    fn builder_mouse(&mut self, ui: &egui::Ui, resp: &egui::Response, to_world: &dyn Fn(Pos2) -> [f32; 2], alt: bool) {
+        let ids: Vec<u64> = self.sel.clone();
+        if ids.is_empty() {
+            if resp.clicked() || resp.drag_started() {
+                self.message = Some(crate::i18n::t("choisis d'abord les formes à combiner (outil sélection), puis glisse sur leurs zones"));
+            }
+            return;
+        }
+        // Les zones se recalculent quand la sélection ou les formes changent
+        let key = {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            for id in &ids {
+                for d in std::iter::once(*id).chain(self.doc.descendants(*id)) {
+                    serde_json::to_string(&self.doc.get(d)).unwrap_or_default().hash(&mut h);
+                }
+            }
+            h.finish()
+        };
+        if self.builder.as_ref().is_none_or(|b| b.0 != key) {
+            self.builder = crate::vgeom::Regions::build(&self.doc, &ids).map(|r| (key, r));
+            self.picked.clear();
+        }
+        let Some((_, reg)) = &self.builder else { return };
+        if let Some(h) = resp.interact_pointer_pos() {
+            if resp.dragged() || resp.drag_started() || resp.clicked() {
+                let z = reg.at(to_world(h));
+                if z != 0 && !self.picked.contains(&z) {
+                    self.picked.push(z);
+                }
+                ui.ctx().request_repaint();
+            }
+        }
+        if (resp.drag_stopped() || resp.clicked()) && !self.picked.is_empty() {
+            self.checkpoint();
+            let picked = std::mem::take(&mut self.picked);
+            let (made, gone) = self.builder.take().map(|(_, r)| r.apply(&mut self.doc, &picked, alt)).unwrap_or_default();
+            // Les morceaux restent choisis : on peut continuer à les combiner
+            let mut sel: Vec<u64> = ids.into_iter().filter(|i| !gone.contains(i) && self.doc.get(*i).is_some()).collect();
+            sel.extend(made);
+            self.sel = sel;
+            self.changed();
+        }
+    }
+
+    /// Surbrillances des outils Largeur et Concepteur de formes
+    fn tool_overlay(&mut self, painter: &egui::Painter, to_screen: &dyn Fn([f32; 2]) -> Pos2, hover: Option<[f32; 2]>) {
+        let p = crate::theme::pal();
+        match self.tool {
+            Tool::Width => {
+                let target = self.width_edit.map(|(id, _)| id).or_else(|| hover.and_then(|w| self.width_target(w, 4.0 / self.zoom)).map(|t| t.0));
+                let Some(s) = target.and_then(|id| self.doc.get(id)) else { return };
+                let (sn, cs) = s.rot.to_radians().sin_cos();
+                let tw = |q: [f32; 2]| to_screen([s.x + q[0] * cs - q[1] * sn, s.y + q[0] * sn + q[1] * cs]);
+                let Some((pts, _)) = crate::vgeom::spine(s) else { return };
+                let line: Vec<Pos2> = pts.iter().map(|(q, _)| tw(*q)).collect();
+                painter.add(egui::Shape::line(line, Stroke::new(1.0, p.accent)));
+                let total = pts.last().map(|x| x.1).unwrap_or(1.0).max(1e-6);
+                let base = s.strokes.first().map(|k| k.width).unwrap_or(2.0);
+                let mut marks: Vec<f32> = s.widths.iter().map(|w| w[0]).collect();
+                if self.width_edit.is_none() {
+                    if let Some((_, t, ..)) = hover.and_then(|w| self.width_target(w, 4.0 / self.zoom)) {
+                        marks.push(t);
+                    }
+                }
+                for t in marks {
+                    let Some(i) = pts.iter().position(|x| x.1 / total >= t) else { continue };
+                    let (a, b) = (pts[i.saturating_sub(1)].0, pts[(i + 1).min(pts.len() - 1)].0);
+                    let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+                    let l = (dx * dx + dy * dy).sqrt().max(1e-6);
+                    let n = [-dy / l, dx / l];
+                    let half = crate::vgeom::width_at(&s.widths, base, t) / 2.0;
+                    let c = pts[i].0;
+                    let (e1, e2) = (tw([c[0] + n[0] * half, c[1] + n[1] * half]), tw([c[0] - n[0] * half, c[1] - n[1] * half]));
+                    painter.line_segment([e1, e2], Stroke::new(1.0, p.accent));
+                    for e in [e1, e2] {
+                        painter.circle(e, 3.5, Color32::WHITE, Stroke::new(1.0, p.accent));
+                    }
+                    painter.circle_filled(tw(c), 3.0, p.accent);
+                }
+            }
+            Tool::Builder => {
+                let Some((_, reg)) = &self.builder else { return };
+                let g = reg.grid.clone();
+                let blue = Color32::from_rgb(56, 132, 255);
+                // Le contour de chaque zone, fin
+                for lp in reg.outlines.iter().flatten() {
+                    let pts: Vec<Pos2> = lp.iter().map(|n| to_screen([g.org[0] + n.p[0], g.org[1] + n.p[1]])).collect();
+                    if pts.len() > 2 {
+                        painter.add(egui::Shape::closed_line(pts, Stroke::new(1.0, blue.gamma_multiply(0.7))));
+                    }
+                }
+                // Les zones balayées et celle sous le pointeur, teintées (une texture de la grille)
+                let hov = hover.map(|w| reg.at(w)).unwrap_or(0);
+                let mut shown: Vec<u32> = self.picked.clone();
+                if hov != 0 && !shown.contains(&hov) {
+                    shown.push(hov);
+                }
+                if shown.is_empty() {
+                    return;
+                }
+                if self.builder_tex.as_ref().is_none_or(|t| t.0 != shown) {
+                    let (fill, erase) = (Color32::from_rgba_unmultiplied(56, 132, 255, 90), Color32::from_rgba_unmultiplied(220, 60, 60, 110));
+                    let alt = painter.ctx().input(|i| i.modifiers.alt);
+                    let px: Vec<Color32> = reg.label.iter().map(|l| if *l != 0 && shown.contains(l) { if alt { erase } else { fill } } else { Color32::TRANSPARENT }).collect();
+                    let img = egui::ColorImage { size: [g.w, g.h], pixels: px, source_size: egui::vec2(g.w as f32, g.h as f32) };
+                    let tex = painter.ctx().load_texture("concepteur", img, egui::TextureOptions::NEAREST);
+                    self.builder_tex = Some((shown.clone(), tex));
+                }
+                if let Some((_, t)) = &self.builder_tex {
+                    let r = Rect::from_two_pos(to_screen(g.org), to_screen([g.org[0] + g.w as f32 / g.k, g.org[1] + g.h as f32 / g.k]));
+                    painter.image(t.id(), r, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+                }
+                let _ = p;
+            }
+            _ => {}
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1333,6 +1622,14 @@ impl Editor {
             }
         }
         let tol = 4.0 / self.zoom;
+        if !space && matches!(self.tool, Tool::Width | Tool::Builder) && !resp.drag_started_by(egui::PointerButton::Middle) && !matches!(self.drag, Some(Drag::Pan)) {
+            if self.tool == Tool::Width {
+                self.width_mouse(ui, resp, to_world, tol, alt);
+            } else {
+                self.builder_mouse(ui, resp, to_world, alt);
+            }
+            return;
+        }
         if resp.drag_started_by(egui::PointerButton::Middle) || (space && resp.drag_started_by(egui::PointerButton::Primary)) {
             self.drag = Some(Drag::Pan);
         } else if resp.drag_started_by(egui::PointerButton::Primary) {
@@ -1484,6 +1781,7 @@ impl Editor {
                 Some(Drag::Create { from: w, id })
             }
             Tool::Board => Some(Drag::BoardCreate { from: self.snap_point(w) }),
+            Tool::Width | Tool::Builder => None,
         }
     }
 
