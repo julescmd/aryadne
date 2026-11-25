@@ -4895,6 +4895,7 @@ impl Viewer {
                 }
                 "camera" => scene.add_role("caméra", "camera"),
                 "empty" => scene.add_role("groupe", ""),
+                "bone" => crate::rig::add_bone(scene, self.scene_sel),
                 prim => scene.add_primitive(prim),
             };
             self.scene_sel = Some(k);
@@ -4916,9 +4917,9 @@ impl Viewer {
                         }
                     }
                     ui.separator();
-                    for (label, base, role) in [("lumière", "soleil", "light"), ("caméra (point de vue)", "caméra", "camera"), ("groupe vide", "groupe", "")] {
+                    for (label, base, role) in [("lumière", "soleil", "light"), ("caméra (point de vue)", "caméra", "camera"), ("groupe vide", "groupe", ""), ("os", "os", "bone")] {
                         if ui.button(crate::i18n::t(label)).clicked() {
-                            let k = scene.add_role(base, role);
+                            let k = if role == "bone" { crate::rig::add_bone(scene, self.scene_sel) } else { scene.add_role(base, role) };
                             if role == "light" {
                                 (scene.objects[k].pos, scene.objects[k].rot) = ([0.0, 3.0, 0.0], [35.0, 0.0, -35.0]);
                             }
@@ -5087,6 +5088,10 @@ impl Viewer {
         if scene.objects.iter().any(|o| !o.aim.is_empty()) && scene.apply_aims() {
             self.scene_dirty = true;
         }
+        // La cinématique inverse aussi : déplacer la cible plie la chaîne
+        if scene.objects.iter().any(|o| !o.ik.is_empty()) && crate::rig::solve_ik(scene) {
+            self.scene_dirty = true;
+        }
         if let Some(f) = seek {
             if f != self.anim_frame {
                 self.anim_frame = f;
@@ -5128,6 +5133,9 @@ impl Viewer {
         // Caméra à poser sur la vue actuelle, ou vue à aligner sur une caméra
         let mut set_camera: Option<usize> = None;
         let mut look_through: Option<usize> = None;
+        // Squelette : 1 lier (pose de repos prise), 2 définir le repos, 3 revenir au repos, 4 ajouter un os enfant
+        let mut rig_op: Option<(u8, usize)> = None;
+        let bone_roots: Vec<String> = (0..scene.objects.len()).filter(|&k| crate::rig::is_bone(scene, k) && crate::rig::root_of(scene, k) == k).map(|k| scene.objects[k].name.clone()).collect();
         for f in std::mem::take(&mut self.scene_add) {
             let image = crate::scene::kind(&crate::scene::Object::new(String::new(), f.to_string_lossy().to_string())) == crate::scene::Kind::Image;
             if (is_model(&f.to_string_lossy()) || image) && !crate::scene::is_scene(&f) {
@@ -5186,6 +5194,11 @@ impl Viewer {
                                 ui.close();
                             }
                         }
+                        if ui.button(format!("{}  {}", crate::lucide::BONE, crate::i18n::t("os"))).on_hover_text(crate::i18n::t("Un os de squelette ; ajouté au bout de l'os choisi")).clicked() {
+                            self.scene_sel = Some(crate::rig::add_bone(scene, self.scene_sel));
+                            changed = true;
+                            ui.close();
+                        }
                         if ui.button(crate::i18n::t("groupe vide")).on_hover_text(crate::i18n::t("Un objet sans forme, pour déplacer plusieurs objets ensemble")).clicked() {
                             self.scene_sel = Some(scene.add_empty());
                             changed = true;
@@ -5243,6 +5256,7 @@ impl Viewer {
                             crate::scene::Kind::Empty => crate::lucide::SQUARE,
                             crate::scene::Kind::Light => crate::lucide::SUN,
                             crate::scene::Kind::Camera => crate::lucide::CAMERA,
+                            crate::scene::Kind::Bone => crate::lucide::BONE,
                         };
                         let on = self.scene_sel == Some(i);
                         let also = self.scene_multi.contains(&i);
@@ -5347,7 +5361,7 @@ impl Viewer {
             };
             // ---- Propriétés, comme la maquette : un en-tête de 34 px, une rangée d'onglets, puis le contenu
             let sel_kind = self.scene_sel.and_then(|i| scene.objects.get(i)).map(crate::scene::kind);
-            let has_data = matches!(sel_kind, Some(crate::scene::Kind::Light | crate::scene::Kind::Camera));
+            let has_data = matches!(sel_kind, Some(crate::scene::Kind::Light | crate::scene::Kind::Camera | crate::scene::Kind::Bone));
             let mut tab = self.prop_tab;
             if tab == PropTab::Data && !has_data {
                 tab = PropTab::Object;
@@ -5365,7 +5379,11 @@ impl Viewer {
                 let mut tui = ui.new_child(egui::UiBuilder::new().max_rect(tr.shrink(6.0)).layout(egui::Layout::left_to_right(egui::Align::Center)));
                 tui.spacing_mut().item_spacing.x = 1.0;
                 tui.spacing_mut().button_padding = egui::vec2(6.0, 0.0);
-                let data_name = if sel_kind == Some(crate::scene::Kind::Camera) { "Caméra" } else { "Lumière" };
+                let data_name = match sel_kind {
+                    Some(crate::scene::Kind::Camera) => "Caméra",
+                    Some(crate::scene::Kind::Bone) => "Os",
+                    _ => "Lumière",
+                };
                 for (t, name) in [(PropTab::Object, "Objet"), (PropTab::Modifiers, "Modificateurs"), (PropTab::Material, "Matériau"), (PropTab::Data, data_name), (PropTab::World, "Monde"), (PropTab::Scene, "Scène")] {
                     if t == PropTab::Data && !has_data {
                         continue;
@@ -5419,6 +5437,7 @@ impl Viewer {
                                                 crate::scene::Kind::Empty => (crate::lucide::SQUARE, "groupe vide"),
                                                 crate::scene::Kind::Light => (crate::lucide::SUN, "lumière"),
                                                 crate::scene::Kind::Camera => (crate::lucide::CAMERA, "caméra"),
+                                                crate::scene::Kind::Bone => (crate::lucide::BONE, "os"),
                                             };
                                             ui.label(egui::RichText::new(icon).size(16.0).color(crate::theme::ws_color("3d").unwrap_or(p.accent)));
                                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -5569,6 +5588,30 @@ impl Viewer {
                                                 changed |= ui.color_edit_button_srgb(c).changed();
                                             }
                                         });
+                                        if crate::scene::kind(o) == crate::scene::Kind::Model && !bone_roots.is_empty() {
+                                            ui.horizontal(|ui| {
+                                                ui.label(egui::RichText::new(format!("{} {}", crate::lucide::BONE, crate::i18n::t("squelette"))).size(11.0).color(p.muted));
+                                                let cur = if o.skin.is_empty() { crate::i18n::t("aucun") } else { o.skin.clone() };
+                                                egui::ComboBox::from_id_salt("scene-object-skin").selected_text(egui::RichText::new(cur).size(11.0)).width(110.0).show_ui(ui, |ui| {
+                                                    if ui.selectable_label(o.skin.is_empty(), crate::i18n::t("aucun")).clicked() {
+                                                        o.skin.clear();
+                                                        changed = true;
+                                                    }
+                                                    for n in &bone_roots {
+                                                        if ui.selectable_label(&o.skin == n, n).on_hover_text(crate::i18n::t("Lier avec des poids automatiques : la pose actuelle du squelette devient sa pose de repos")).clicked() {
+                                                            o.skin = n.clone();
+                                                            rig_op = self.scene_sel.map(|k| (1, k));
+                                                        }
+                                                    }
+                                                });
+                                            });
+                                            if !o.skin.is_empty() {
+                                                ui.horizontal(|ui| {
+                                                    ui.label(egui::RichText::new(crate::i18n::t("portée des os")).size(11.0).color(p.muted));
+                                                    changed |= ui.add(egui::Slider::new(&mut o.reach, 0.2..=4.0).logarithmic(true)).on_hover_text(crate::i18n::t("Plus grand : chaque os entraîne la peau plus loin, les plis sont plus doux")).changed();
+                                                });
+                                            }
+                                        }
 
                                     }
                                     PropTab::Data => {
@@ -5629,10 +5672,58 @@ impl Viewer {
                                                     }
                                                 });
                                             }
+                                            crate::scene::Kind::Bone => {
+                                                ui.horizontal(|ui| {
+                                                    ui.label(egui::RichText::new(crate::i18n::t("longueur")).size(11.0).color(p.muted));
+                                                    changed |= ui.add(egui::DragValue::new(&mut o.length).speed(0.01).range(0.001..=f32::MAX)).changed();
+                                                });
+                                                ui.add_space(4.0);
+                                                ui.label(crate::theme::section(&crate::i18n::t("CINÉMATIQUE INVERSE")));
+                                                ui.horizontal(|ui| {
+                                                    ui.label(egui::RichText::new(crate::i18n::t("cible")).size(11.0).color(p.muted));
+                                                    let cur = if o.ik.is_empty() { crate::i18n::t("aucune") } else { o.ik.clone() };
+                                                    egui::ComboBox::from_id_salt("scene-bone-ik").selected_text(egui::RichText::new(cur).size(11.0)).width(120.0).show_ui(ui, |ui| {
+                                                        if ui.selectable_label(o.ik.is_empty(), crate::i18n::t("aucune")).clicked() {
+                                                            o.ik.clear();
+                                                            changed = true;
+                                                        }
+                                                        for n in &parents {
+                                                            if ui.selectable_label(&o.ik == n, n).clicked() {
+                                                                o.ik = n.clone();
+                                                                changed = true;
+                                                            }
+                                                        }
+                                                    });
+                                                })
+                                                .response
+                                                .on_hover_text(crate::i18n::t("Le bout de l'os cherche à toucher cet objet : déplacez la cible, la chaîne se plie toute seule"));
+                                                if !o.ik.is_empty() {
+                                                    ui.horizontal(|ui| {
+                                                        ui.label(egui::RichText::new(crate::i18n::t("os dans la chaîne")).size(11.0).color(p.muted));
+                                                        changed |= ui.add(egui::DragValue::new(&mut o.ik_chain).range(1..=16)).changed();
+                                                    });
+                                                }
+                                                ui.add_space(4.0);
+                                                ui.label(crate::theme::section(&crate::i18n::t("SQUELETTE")));
+                                                ui.horizontal(|ui| {
+                                                    if ui.button(crate::lucide::PLUS).on_hover_text(crate::i18n::t("Ajouter un os au bout de celui-ci")).clicked() {
+                                                        rig_op = self.scene_sel.map(|k| (4, k));
+                                                    }
+                                                    if ui.button(crate::lucide::BOOKMARK).on_hover_text(crate::i18n::t("Enregistrer la pose actuelle comme pose de repos du squelette")).clicked() {
+                                                        rig_op = self.scene_sel.map(|k| (2, k));
+                                                    }
+                                                    if ui.button(crate::lucide::ROTATE_CCW).on_hover_text(crate::i18n::t("Revenir à la pose de repos")).clicked() {
+                                                        rig_op = self.scene_sel.map(|k| (3, k));
+                                                    }
+                                                });
+                                                if o.rest.is_none() {
+                                                    ui.label(egui::RichText::new(crate::i18n::t("Pas encore de pose de repos : liez un modèle à ce squelette (onglet objet du modèle).")).size(10.0).color(p.muted));
+                                                }
+                                            }
                                             _ => {}
                                         }
 
-                                        if !matches!(crate::scene::kind(o), crate::scene::Kind::Light | crate::scene::Kind::Camera) {
+                                        if !matches!(crate::scene::kind(o), crate::scene::Kind::Light | crate::scene::Kind::Camera | crate::scene::Kind::Bone) {
                                             ui.label(egui::RichText::new(&o.file).size(10.5).color(p.muted));
                                         }
                                     }
@@ -6117,6 +6208,29 @@ impl Viewer {
                 o.pos = [eye[0] * longest + c[0], eye[1] * longest + c[1], eye[2] * longest + c[2]];
                 o.rot = [-self.cam.pitch.to_degrees(), -self.cam.yaw.to_degrees(), 0.0];
                 o.parent.clear();
+                changed = true;
+            }
+            if let Some((op, k)) = rig_op.filter(|x| x.1 < scene.objects.len()) {
+                match op {
+                    1 => {
+                        if let Some(r) = scene.objects.iter().position(|o| o.name == scene.objects[k].skin) {
+                            crate::rig::bind(scene, k, r);
+                        }
+                    }
+                    2 => {
+                        let r = crate::rig::root_of(scene, k);
+                        crate::rig::set_rest(scene, r);
+                    }
+                    3 => {
+                        let r = crate::rig::root_of(scene, k);
+                        crate::rig::to_rest(scene, r);
+                    }
+                    _ => {
+                        let b = crate::rig::add_bone(scene, Some(k));
+                        self.scene_sel = Some(b);
+                        self.scene_multi.clear();
+                    }
+                }
                 changed = true;
             }
             if let Some(k) = look_through.filter(|&k| k < scene.objects.len()) {
@@ -6714,7 +6828,7 @@ impl Viewer {
                                 }
                             }
                             ui.separator();
-                            for (label, id) in [("lumière soleil", "light"), ("lumière ponctuelle", "light-point"), ("spot", "light-spot"), ("lumière rectangle", "light-area"), ("caméra", "camera"), ("groupe vide", "empty")] {
+                            for (label, id) in [("lumière soleil", "light"), ("lumière ponctuelle", "light-point"), ("spot", "light-spot"), ("lumière rectangle", "light-area"), ("caméra", "camera"), ("groupe vide", "empty"), ("os", "bone")] {
                                 if ui.button(crate::i18n::t(label)).clicked() {
                                     self.hdr_add = Some(id);
                                     ui.close();
@@ -8298,6 +8412,42 @@ impl Viewer {
                 // L'origine de chaque objet choisi : un point plein pour l'actif, un anneau pour les autres
                 if self.scene_multi.contains(&k) && self.scene_sel != Some(k) {
                     over.circle_stroke(at, 4.0, Stroke::new(2.0, p.accent));
+                }
+                if kind == crate::scene::Kind::Bone {
+                    // Un os : un losange allongé de la tête au bout, comme dans Blender
+                    let on = self.scene_sel == Some(k) || self.scene_multi.contains(&k);
+                    let col = if on { p.accent } else if !o.ik.is_empty() { Color32::from_rgb(230, 170, 60) } else { Color32::from_rgb(200, 205, 215) };
+                    let l = o.length;
+                    let r = l * 0.1;
+                    let tip = project(scene.world(k, [0.0, l, 0.0]));
+                    let ring: Vec<Option<Pos2>> = [[r, r, 0.0], [0.0, r, r], [-r, r, 0.0], [0.0, r, -r]].iter().map(|v| project(scene.world(k, *v))).collect();
+                    let st = Stroke::new(if on { 2.0 } else { 1.3 }, col);
+                    for i in 0..4 {
+                        if let Some(q) = ring[i] {
+                            over.line_segment([at, q], st);
+                            if let Some(t) = tip {
+                                over.line_segment([q, t], st);
+                            }
+                            if let Some(q2) = ring[(i + 1) % 4] {
+                                over.line_segment([q, q2], st);
+                            }
+                        }
+                    }
+                    over.circle_stroke(at, 3.0, st);
+                    if let Some(t) = tip {
+                        over.circle_stroke(t, 2.5, st);
+                        // Un clic près de l'os le choisit
+                        if resp.clicked() {
+                            if let Some(m) = resp.interact_pointer_pos() {
+                                let ab = t - at;
+                                let u = ((m - at).dot(ab) / ab.length_sq().max(1e-6)).clamp(0.0, 1.0);
+                                if (m - (at + ab * u)).length() < 7.0 {
+                                    marker_pick = Some(k);
+                                }
+                            }
+                        }
+                    }
+                    continue;
                 }
                 if !matches!(kind, crate::scene::Kind::Light | crate::scene::Kind::Camera) {
                     continue;

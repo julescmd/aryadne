@@ -2673,5 +2673,22 @@
   "iPhone (393 × 852)": "iPhone (393 × 852)",
   "Bureau (1440 × 1024)": "Desktop (1440 × 1024)",
   "Lettre US (816 × 1056)": "US Letter (816 × 1056)",
-  "A4 (794 × 1123)": "A4 (794 × 1123)"
+  "A4 (794 × 1123)": "A4 (794 × 1123)",
+  "Ajouter un os au bout de celui-ci": "Add a bone at the tip of this one",
+  "CINÉMATIQUE INVERSE": "INVERSE KINEMATICS",
+  "Enregistrer la pose actuelle comme pose de repos du squelette": "Save the current pose as the skeleton's rest pose",
+  "Le bout de l'os cherche à toucher cet objet : déplacez la cible, la chaîne se plie toute seule": "The bone's tip reaches for this object: move the target and the chain bends on its own",
+  "Lier avec des poids automatiques : la pose actuelle du squelette devient sa pose de repos": "Bind with automatic weights: the skeleton's current pose becomes its rest pose",
+  "Pas encore de pose de repos : liez un modèle à ce squelette (onglet objet du modèle).": "No rest pose yet: bind a model to this skeleton (the model's Object tab).",
+  "Plus grand : chaque os entraîne la peau plus loin, les plis sont plus doux": "Higher: each bone pulls the skin further, folds are softer",
+  "Revenir à la pose de repos": "Back to the rest pose",
+  "SQUELETTE": "SKELETON",
+  "Un os de squelette ; ajouté au bout de l'os choisi": "A skeleton bone, added at the tip of the selected bone",
+  "aucune": "none",
+  "cible": "target",
+  "os": "bone",
+  "os dans la chaîne": "bones in chain",
+  "portée des os": "bone reach",
+  "squelette": "skeleton",
+  "Os": "Bone"
 }

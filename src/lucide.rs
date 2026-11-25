@@ -124,6 +124,7 @@ pub const SQUARES_EXCLUDE: &str = "\u{f0657}";
 pub const GROUP: &str = "\u{f0464}";
 pub const FILE_UP: &str = "\u{f032a}";
 pub const MINUS: &str = "\u{f011c}";
+pub const BONE: &str = "\u{f0358}";
 pub const FLIP_HORIZONTAL_2: &str = "\u{f035e}";
 pub const GLOBE: &str = "\u{f00e8}";
 pub const UNDO_2: &str = "\u{f02a1}";

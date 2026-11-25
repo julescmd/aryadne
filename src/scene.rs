@@ -94,6 +94,40 @@ pub struct Object {
     /// Contrainte « viser » : le nom de l'objet vers lequel celui-ci se tourne toujours (son avant : -Z)
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub aim: String,
+    /// Os : longueur, le long de son axe Y
+    #[serde(default = "bone_len", skip_serializing_if = "is_bone_len")]
+    pub length: f32,
+    /// Os : pose de repos (position, rotation, taille) enregistrée à la liaison du squelette
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rest: Option<[[f32; 3]; 3]>,
+    /// Modèle : nom de l'os racine du squelette qui le déforme (vide = aucun)
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub skin: String,
+    /// Os : cinématique inverse, le bout de la chaîne cherche à atteindre cet objet
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub ik: String,
+    /// Os : nombre d'os de la chaîne de cinématique inverse (cet os compris)
+    #[serde(default = "ik_chain")]
+    pub ik_chain: u8,
+    /// Modèle lié : portée de l'influence des os (1 = normale)
+    #[serde(default = "one", skip_serializing_if = "is_one")]
+    pub reach: f32,
+}
+
+fn bone_len() -> f32 {
+    1.0
+}
+fn is_bone_len(v: &f32) -> bool {
+    (*v - 1.0).abs() < 1e-6
+}
+fn ik_chain() -> u8 {
+    2
+}
+fn one() -> f32 {
+    1.0
+}
+fn is_one(v: &f32) -> bool {
+    (*v - 1.0).abs() < 1e-6
 }
 
 /// Une clé : la pose complète de l'objet à une image donnée.
@@ -283,7 +317,7 @@ impl Object {
     }
 
     pub fn new(name: String, file: String) -> Object {
-        Object { name, file, pos: [0.0; 3], rot: [0.0; 3], scale: [1.0; 3], visible: true, color: None, mods: vec![], material: String::new(), parent: String::new(), opacity: 0.5, role: String::new(), energy: 1.2, point: false, range: 8.0, shape: 0, spot: spot_deg(), blend: spot_blend(), size: area_size(), keys: vec![], cycle: Default::default(), aim: String::new() }
+        Object { name, file, pos: [0.0; 3], rot: [0.0; 3], scale: [1.0; 3], visible: true, color: None, mods: vec![], material: String::new(), parent: String::new(), opacity: 0.5, role: String::new(), energy: 1.2, point: false, range: 8.0, shape: 0, spot: spot_deg(), blend: spot_blend(), size: area_size(), keys: vec![], cycle: Default::default(), aim: String::new(), length: 1.0, rest: None, skin: String::new(), ik: String::new(), ik_chain: 2, reach: 1.0 }
     }
 }
 
@@ -320,6 +354,8 @@ pub enum Kind {
     Light,
     /// Point de vue enregistré
     Camera,
+    /// Os d'un squelette
+    Bone,
 }
 
 pub fn kind(o: &Object) -> Kind {
@@ -328,6 +364,8 @@ pub fn kind(o: &Object) -> Kind {
         Kind::Light
     } else if o.role == "camera" {
         Kind::Camera
+    } else if o.role == "bone" {
+        Kind::Bone
     } else if o.file.trim().is_empty() {
         Kind::Empty
     } else if matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "webp" | "bmp" | "gif" | "tga" | "tif" | "tiff") {
@@ -394,7 +432,8 @@ impl Scene {
                 }
             }
         }
-        moved | self.apply_aims()
+        let aimed = self.apply_aims();
+        moved | aimed | crate::rig::solve_ik(self)
     }
 
     /// Les contraintes « viser » : chaque objet qui en a une se tourne vers sa cible (le roulis reste le sien).
@@ -902,10 +941,12 @@ pub fn build_ranges(scene: &Scene, scene_path: &Path) -> (Result<crate::model3d:
                         None => colors.extend(mesh.colors.iter().copied()),
                     }
                     edges.extend(mesh.edges.iter().copied());
+                    crate::rig::deform(scene, k, &mut pos[base as usize..]);
                     continue;
                 }
                 ranges.push((k, tris.len(), tris.len() + m.tris.len()));
                 pos.extend(m.positions.iter().map(|p| scene.world(k, if m.z_up { [p[0], p[2], -p[1]] } else { *p })));
+                crate::rig::deform(scene, k, &mut pos[base as usize..]);
                 tris.extend(m.tris.iter().map(|t| [t[0] + base, t[1] + base, t[2] + base]));
                 match o.color {
                     Some(c) => colors.extend(std::iter::repeat_n(eframe::egui::Color32::from_rgb(c[0], c[1], c[2]), m.tris.len())),
