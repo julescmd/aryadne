@@ -128,6 +128,9 @@ pub struct Object {
     /// Calques d'animation : des clés de décalage par calque, ajoutées à l'animation de base
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub layer_keys: Vec<LayerKeys>,
+    /// Calques de peinture (couleur, rugosité, métal, masques peints), du bas vers le haut. Vide : `paint` seul
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub paint_layers: Vec<crate::paint3d::PaintLayer>,
     /// Caméra : champ de vision sur le petit côté de l'image, en degrés (0 : celui de la vue)
     #[serde(default, skip_serializing_if = "zero_f32")]
     pub fov: f32,
@@ -491,7 +494,7 @@ impl Object {
     }
 
     pub fn new(name: String, file: String) -> Object {
-        Object { name, file, pos: [0.0; 3], rot: [0.0; 3], scale: [1.0; 3], visible: true, color: None, mods: vec![], material: String::new(), paint: String::new(), parent: String::new(), opacity: 0.5, role: String::new(), energy: 1.2, point: false, range: 8.0, shape: 0, spot: spot_deg(), blend: spot_blend(), size: area_size(), keys: vec![], cycle: Default::default(), aim: String::new(), length: 1.0, rest: None, skin: String::new(), ik: String::new(), ik_chain: 2, reach: 1.0, morphs: vec![], copy_loc: String::new(), copy_rot: String::new(), limit: None, layer_keys: vec![], fov: 0.0 }
+        Object { name, file, pos: [0.0; 3], rot: [0.0; 3], scale: [1.0; 3], visible: true, color: None, mods: vec![], material: String::new(), paint: String::new(), parent: String::new(), opacity: 0.5, role: String::new(), energy: 1.2, point: false, range: 8.0, shape: 0, spot: spot_deg(), blend: spot_blend(), size: area_size(), keys: vec![], cycle: Default::default(), aim: String::new(), length: 1.0, rest: None, skin: String::new(), ik: String::new(), ik_chain: 2, reach: 1.0, morphs: vec![], copy_loc: String::new(), copy_rot: String::new(), limit: None, layer_keys: vec![], fov: 0.0, paint_layers: vec![] }
     }
 }
 

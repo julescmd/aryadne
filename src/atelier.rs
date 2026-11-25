@@ -53,6 +53,13 @@ pub struct Mask {
     pub breakup_amount: f32,
     #[serde(default = "eight")]
     pub breakup_scale: f32,
+    /// Masque « peint » : le canal de masque peint à la main sur l'objet (0 à 3, « masque 1 » à « masque 4 »)
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub paint: u8,
+}
+
+fn is_zero(v: &u8) -> bool {
+    *v == 0
 }
 
 fn half() -> f32 {
@@ -64,13 +71,13 @@ fn eight() -> f32 {
 
 impl Default for Mask {
     fn default() -> Self {
-        Mask { kind: "plein".into(), amount: 0.5, contrast: 0.5, scale: 8.0, invert: false, breakup: String::new(), breakup_amount: 0.5, breakup_scale: 8.0 }
+        Mask { kind: "plein".into(), amount: 0.5, contrast: 0.5, scale: 8.0, invert: false, breakup: String::new(), breakup_amount: 0.5, breakup_scale: 8.0, paint: 0 }
     }
 }
 
 /// Masques intelligents tout prêts : nom, puis le masque (générateur, réglages, cassure)
 pub fn smart_masks() -> Vec<(&'static str, Mask)> {
-    let m = |kind: &str, amount: f32, contrast: f32, scale: f32, invert: bool, breakup: &str, ba: f32, bs: f32| Mask { kind: kind.into(), amount, contrast, scale, invert, breakup: breakup.into(), breakup_amount: ba, breakup_scale: bs };
+    let m = |kind: &str, amount: f32, contrast: f32, scale: f32, invert: bool, breakup: &str, ba: f32, bs: f32| Mask { kind: kind.into(), amount, contrast, scale, invert, breakup: breakup.into(), breakup_amount: ba, breakup_scale: bs, paint: 0 };
     vec![
         ("peinture écaillée sur les arêtes", m("arêtes", 0.55, 0.75, 14.0, false, "grunge", 0.7, 6.0)),
         ("rouille dans les creux", m("creux", 0.6, 0.6, 8.0, false, "taches", 0.6, 10.0)),
@@ -83,7 +90,7 @@ pub fn smart_masks() -> Vec<(&'static str, Mask)> {
 }
 
 /// Les masques proposés : identifiant, nom affiché, node générateur.
-pub const MASKS: [(&str, &str, &str); 10] = [
+pub const MASKS: [(&str, &str, &str); 11] = [
     ("plein", "partout", ""),
     ("arêtes", "usure des arêtes", "edgewear"),
     ("creux", "saleté des creux", "cavdirt"),
@@ -94,6 +101,8 @@ pub const MASKS: [(&str, &str, &str); 10] = [
     ("bruit", "bruit", "noise"),
     ("fissures", "fissures", "cracks"),
     ("taches", "taches", "voronoi"),
+    // Peint à la main sur l'objet de la scène, dans un calque de peinture « masque 1 » à « masque 4 »
+    ("peint", "peint à la main", "paintmask"),
 ];
 
 /// Un matériau intelligent : une pile de calques enregistrée, à reposer sur un autre objet
@@ -126,13 +135,16 @@ pub fn load_smart(root: &str, name: &str) -> Option<Stack> {
 }
 
 /// Ajoute un générateur de masque au graphe ; rend sa sortie
-fn generator(g: &mut Graph, kind: &str, amount: f32, contrast: f32, scale: f32, at: [f32; 2]) -> Option<Src> {
+fn generator(g: &mut Graph, kind: &str, amount: f32, contrast: f32, scale: f32, canal: u8, at: [f32; 2]) -> Option<Src> {
     let (_, _, op) = MASKS.iter().find(|m| m.0 == kind).filter(|m| !m.2.is_empty())?;
     let mk = g.add(op, at);
     set_named(g, mk, "quantité", amount);
     set_named(g, mk, "contraste", contrast);
     set_named(g, mk, "échelle du bruit", scale);
     set_named(g, mk, "échelle", scale);
+    if *op == "paintmask" {
+        set_choice(g, mk, "canal", &(canal.min(3) + 1).to_string());
+    }
     let mut m = Src::Link(mk, 0);
     // Les motifs (bruit, taches, fissures) passent par un seuil doux réglé par la quantité
     if matches!(*op, "noise" | "voronoi" | "cracks") {
@@ -239,9 +251,9 @@ pub fn flatten(stack: &Stack, root: &str) -> Graph {
         let x0 = -400.0;
         let mut factor = Src::Const([layer.opacity; 4]);
         let lm = &layer.mask;
-        if let Some(mut m) = generator(&mut g, &lm.kind, lm.amount, lm.contrast, lm.scale, [x0 - 400.0, dy]) {
+        if let Some(mut m) = generator(&mut g, &lm.kind, lm.amount, lm.contrast, lm.scale, lm.paint, [x0 - 400.0, dy]) {
             // Masque intelligent : le second générateur casse le premier (m × mélange(1, cassure, force))
-            if let Some(b) = generator(&mut g, &lm.breakup, 0.5, 0.5, lm.breakup_scale, [x0 - 400.0, dy + 160.0]) {
+            if let Some(b) = generator(&mut g, &lm.breakup, 0.5, 0.5, lm.breakup_scale, lm.paint, [x0 - 400.0, dy + 160.0]) {
                 let mx = g.add("mixf", [x0 - 150.0, dy + 120.0]);
                 set_value(&mut g, mx, 0, [lm.breakup_amount; 4]);
                 set_value(&mut g, mx, 1, [1.0; 4]);
@@ -354,7 +366,7 @@ mod tests {
         let g = flatten(&stack, &root);
         // Le graphe se compile, et la couleur du calque du dessous vient du paramètre redéfini
         let prog = crate::nodes::Program::compile(&g, &root, 64).map_err(|e| e.1).unwrap();
-        let c = crate::nodes::Ctx { curv: 0.0, uv: [0.5, 0.5], pos: [0.0; 3], nrm: [0.0, 1.0, 0.0], view: [0.0, 0.0, 1.0], vcol: [1.0; 4], res: [64.0, 64.0] };
+        let c = crate::nodes::Ctx { masks: [0.0; 4], curv: 0.0, uv: [0.5, 0.5], pos: [0.0; 3], nrm: [0.0, 1.0, 0.0], view: [0.0, 0.0, 1.0], vcol: [1.0; 4], res: [64.0, 64.0] };
         let s = prog.material(&c, &mut vec![]);
         assert!(s.color[0] > 0.05 || s.color[1] > 0.05, "{:?}", s.color);
         assert!(g.nodes.iter().any(|n| n.op == "edgewear") && g.nodes.iter().any(|n| n.op == "mix"));
@@ -363,5 +375,22 @@ mod tests {
         let prog = crate::nodes::Program::compile(&flatten(&only, &root), &root, 64).map_err(|e| e.1).unwrap();
         let s = prog.material(&c, &mut vec![]);
         assert!(s.color[0] > 0.8 && s.color[1] < 0.2, "{:?}", s.color);
+        // Masque peint à la main : la peinture verte n'apparaît que là où le canal 3 de l'objet est peint
+        let mut hand = stack.clone();
+        hand.layers[1].mask = Mask { kind: "peint".into(), paint: 2, ..Mask::default() };
+        hand.layers[1].opacity = 1.0;
+        let g = flatten(&hand, &root);
+        assert!(g.nodes.iter().any(|n| n.op == "paintmask" && matches!(n.params.get("canal"), Some(Param::S(s)) if s == "3")));
+        let prog = crate::nodes::Program::compile(&g, &root, 64).map_err(|e| e.1).unwrap();
+        let at = |masks: [f32; 4]| prog.material(&crate::nodes::Ctx { masks, ..c }, &mut vec![]).color;
+        let (bare, painted, half, other) = (at([0.0; 4]), at([0.0, 0.0, 1.0, 0.0]), at([0.0, 0.0, 0.5, 0.0]), at([1.0, 1.0, 0.0, 1.0]));
+        assert!(bare[0] > 0.8 && bare[1] < 0.2, "{bare:?}");
+        assert!(painted[0] < 0.2 && painted[1] > 0.7, "{painted:?}");
+        assert!(half[0] > 0.3 && half[0] < 0.7 && half[1] > 0.3, "{half:?}");
+        assert_eq!(other, bare, "les autres canaux ne comptent pas");
+        // Le réglage s'enregistre avec la pile, et une pile d'avant se relit (canal 1 par défaut)
+        let json = serde_json::to_string(&hand).unwrap();
+        assert_eq!(serde_json::from_str::<Stack>(&json).unwrap(), hand);
+        assert_eq!(serde_json::from_str::<Mask>(r#"{"kind":"peint","amount":0.5,"contrast":0.5,"scale":8.0}"#).unwrap().paint, 0);
     }
 }

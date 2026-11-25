@@ -479,7 +479,7 @@ pub(super) fn surface(m: &Prepared, look: &Look, ti: usize, w0: f32, w1: f32, vi
         } else {
             0.0
         };
-        let c = crate::nodes::Ctx { curv, uv: tuv.map(|u| [u[0], 1.0 - u[1]]).unwrap_or([pos[0] + 0.5, 0.5 - pos[1]]), pos, nrm: n, view, vcol: [g(vc[0]), g(vc[1]), g(vc[2]), 1.0], res };
+        let c = crate::nodes::Ctx { masks: [0.0; 4], curv, uv: tuv.map(|u| [u[0], 1.0 - u[1]]).unwrap_or([pos[0] + 0.5, 0.5 - pos[1]]), pos, nrm: n, view, vcol: [g(vc[0]), g(vc[1]), g(vc[2]), 1.0], res };
         let sf = NODE_REGS.with(|regs| prog.material(&c, &mut regs.borrow_mut()));
         let l = |x: f32| x.clamp(0.0, 1.0).powf(2.2);
         s.albedo = [l(sf.color[0]), l(sf.color[1]), l(sf.color[2])];

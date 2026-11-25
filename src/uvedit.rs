@@ -2411,7 +2411,7 @@ impl Edit {
                 let slot = data.face_mat.get(rec[ti as usize].0).copied().unwrap_or(0) as usize;
                 let (col, rough, metal, emit) = match progs.get(slot).and_then(|p| p.as_ref()) {
                     Some(prog) => {
-                        let ctx = crate::nodes::Ctx { uv: [(i % n) as f32 / n as f32, (i / n) as f32 / n as f32], pos: p, nrm: nn, view: nn, vcol: [1.0; 4], res: [n as f32, n as f32], curv: cv };
+                        let ctx = crate::nodes::Ctx { masks: [0.0; 4], uv: [(i % n) as f32 / n as f32, (i / n) as f32 / n as f32], pos: p, nrm: nn, view: nn, vcol: [1.0; 4], res: [n as f32, n as f32], curv: cv };
                         let sf = prog.material(&ctx, regs);
                         ([sf.color[0], sf.color[1], sf.color[2]], sf.rough, sf.metal, [sf.emit[0], sf.emit[1], sf.emit[2]])
                     }

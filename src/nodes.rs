@@ -78,6 +78,7 @@ pub const DEFS: &[Def] = &[
     Def { op: "geometry", label: "Géométrie", cat: "entrée", inputs: &[], outputs: &[("normale", Sock::Color), ("position", Sock::Color), ("hauteur", Sock::Float), ("pente", Sock::Float)], params: &[], mat: true, comp: false },
     Def { op: "video", label: "Texture vidéo", cat: "entrée", inputs: &[("échelle", Sock::Float, f(1.0))], outputs: &[("couleur", Sock::Color), ("alpha", Sock::Float)], params: &[ParamDef::File("fichier"), ParamDef::Float("temps (s)", 0.0, 600.0, 0.0), ParamDef::Choice("projection", &["triplanaire", "dessus (XZ)", "face (XY)", "côté (YZ)", "sphérique"])], mat: true, comp: true },
     Def { op: "texture", label: "Texture image", cat: "entrée", inputs: &[("échelle", Sock::Float, f(1.0))], outputs: &[("couleur", Sock::Color), ("alpha", Sock::Float)], params: &[ParamDef::File("fichier"), ParamDef::Choice("projection", &["triplanaire", "dessus (XZ)", "face (XY)", "côté (YZ)", "sphérique"])], mat: true, comp: true },
+    Def { op: "paintmask", label: "Masque peint", cat: "entrée", inputs: &[], outputs: &[("masque", Sock::Float)], params: &[ParamDef::Choice("canal", &["1", "2", "3", "4"])], mat: true, comp: false },
     Def { op: "curvature", label: "Courbure", cat: "entrée", inputs: &[("intensité", Sock::Float, f(1.0))], outputs: &[("arêtes", Sock::Float), ("creux", Sock::Float), ("brute", Sock::Float)], params: &[], mat: true, comp: false },
     Def { op: "fresnel", label: "Fresnel", cat: "entrée", inputs: &[("puissance", Sock::Float, f(3.0))], outputs: &[("fresnel", Sock::Float)], params: &[], mat: true, comp: false },
     Def { op: "vcolor", label: "Couleur du fichier", cat: "entrée", inputs: &[], outputs: &[("couleur", Sock::Color)], params: &[], mat: true, comp: false },
@@ -1266,6 +1267,8 @@ pub struct Ctx {
     pub res: [f32; 2],
     /// Courbure de la surface en ce point (arêtes > 0, creux < 0)
     pub curv: f32,
+    /// Masques peints à la main sur l'objet (quatre canaux, 0 quand rien n'est peint)
+    pub masks: [f32; 4],
 }
 
 /// Graphe compilé : nodes dans l'ordre d'exécution, entrées résolues.
@@ -2221,6 +2224,10 @@ fn pixel(s: &Step, i: &[V], c: &Ctx) -> [V; 4] {
         "geometry" => {
             let n = c.nrm;
             [[n[0] * 0.5 + 0.5, n[1] * 0.5 + 0.5, n[2] * 0.5 + 0.5, 1.0], [c.pos[0] + 0.5, c.pos[1] + 0.5, c.pos[2] + 0.5, 1.0], one(c.pos[1] + 0.5), one(1.0 - n[1].abs())]
+        }
+        "paintmask" => {
+            let k = pstr(&s.params, "canal").parse::<usize>().unwrap_or(1).clamp(1, 4) - 1;
+            [one(c.masks[k].clamp(0.0, 1.0)), z, z, z]
         }
         "curvature" => {
             // Sur un modèle ramené à une taille de 1 : une arête nette donne quelques dixièmes
@@ -4828,10 +4835,26 @@ impl Editor {
                             }
                         }
                     });
+                    if l.mask.kind == "peint" {
+                        // Peint à la main sur l'objet : on choisit le canal, la peinture se fait dans la scène
+                        crate::modifiers::row(ui, &crate::i18n::t("canal"), |ui| {
+                            for k in 0..4u8 {
+                                let on = l.mask.paint == k;
+                                let b = egui::Button::new(RichText::new(format!("{}", k + 1)).size(11.5).color(if on { p.on_accent } else { p.text })).fill(if on { p.accent } else { Color32::TRANSPARENT }).min_size(vec2(26.0, 20.0));
+                                if ui.add(b).on_hover_text(format!("{} {}", crate::i18n::t("calque de peinture « masque »"), k + 1)).clicked() {
+                                    l.mask.paint = k;
+                                    changed = true;
+                                }
+                            }
+                        });
+                        ui.label(RichText::new(crate::i18n::t("Dans la scène, en mode peinture : ajoute à l'objet un calque « masque » de ce canal, et peins où ce calque doit apparaître.")).size(10.5).color(p.muted));
+                    }
                     if l.mask.kind != "plein" {
-                        changed |= crate::modifiers::row_slider(ui, "quantité", egui::Slider::new(&mut l.mask.amount, 0.0..=1.0));
-                        changed |= crate::modifiers::row_slider(ui, "contraste", egui::Slider::new(&mut l.mask.contrast, 0.0..=1.0));
-                        changed |= crate::modifiers::row_slider(ui, "échelle", egui::Slider::new(&mut l.mask.scale, 0.5..=40.0).clamping(egui::SliderClamping::Never).logarithmic(true));
+                        if l.mask.kind != "peint" {
+                            changed |= crate::modifiers::row_slider(ui, "quantité", egui::Slider::new(&mut l.mask.amount, 0.0..=1.0));
+                            changed |= crate::modifiers::row_slider(ui, "contraste", egui::Slider::new(&mut l.mask.contrast, 0.0..=1.0));
+                            changed |= crate::modifiers::row_slider(ui, "échelle", egui::Slider::new(&mut l.mask.scale, 0.5..=40.0).clamping(egui::SliderClamping::Never).logarithmic(true));
+                        }
                         changed |= ui.checkbox(&mut l.mask.invert, crate::i18n::t("inverser")).changed();
                         // Cassure : un second motif découpe le masque, pour un résultat moins régulier
                         crate::modifiers::row(ui, &crate::i18n::t("cassure"), |ui| {
