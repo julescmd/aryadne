@@ -3347,5 +3347,10 @@
   "interne": "inner",
   "Ombre interne : elle entre dans la forme par ses bords (bouton enfoncé, creux)": "Inner shadow: it comes into the shape from its edges (pressed button, hollow)",
   "Masque d'opacité : la clarté de la forme du dessous (un dégradé blanc vers noir) rend le dessus plus ou moins visible": "Opacity mask: the lightness of the bottom shape (a white to black gradient) makes the top more or less visible",
-  "Masque d'opacité": "Opacity mask"
+  "Masque d'opacité": "Opacity mask",
+  "appareil": "device",
+  "iPhone": "iPhone",
+  "Android": "Android",
+  "écran": "screen",
+  "Le plan dans un cadre d'appareil, barre d'état comprise (affiché et exporté en SVG)": "The artboard in a device frame, status bar included (shown and exported to SVG)"
 }

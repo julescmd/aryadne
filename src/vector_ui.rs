@@ -352,7 +352,7 @@ impl Editor {
     /// Une déclinaison du plan `src` au format w × h, posée à droite des plans existants
     fn decline_board(&mut self, src: &Board, name: &str, w: f32, h: f32) {
         let right = self.doc.boards.iter().map(|b| b.x + b.w).fold(f32::MIN, f32::max);
-        let nb = Board { name: format!("{} · {}", src.name, crate::i18n::t(name).split(" (").next().unwrap_or(name)), x: right + 120.0, y: src.y, w, h, bg: src.bg, grid: src.grid, persp: None };
+        let nb = Board { name: format!("{} · {}", src.name, crate::i18n::t(name).split(" (").next().unwrap_or(name)), x: right + 120.0, y: src.y, w, h, bg: src.bg, grid: src.grid, persp: None, device: 0 };
         // Le contenu tient dans le nouveau format (contenu entier, centré)
         let k = (w / src.w).min(h / src.h);
         let (cw, ch) = (src.w * k, src.h * k);
@@ -705,6 +705,17 @@ impl Editor {
                     let mut on = b.grid.is_some();
                     if ui.checkbox(&mut on, crate::i18n::t("grille de colonnes")).on_hover_text(crate::i18n::t("Des colonnes qui guident et aimantent la mise en page (jamais exportées)")).changed() {
                         b.grid = on.then(crate::vector::LayoutGrid::default);
+                    }
+                });
+                // Cadre d'appareil : la maquette dans un téléphone ou un écran, avec la barre d'état
+                crate::modifiers::row(ui, &crate::i18n::t("appareil"), |ui| {
+                    if ui.selectable_label(b.device == 0, crate::i18n::t("aucun")).clicked() {
+                        b.device = 0;
+                    }
+                    for (k, name) in crate::vector::DEVICES.iter().enumerate() {
+                        if ui.selectable_label(b.device == k as u8 + 1, crate::i18n::t(name)).on_hover_text(crate::i18n::t("Le plan dans un cadre d'appareil, barre d'état comprise (affiché et exporté en SVG)")).clicked() {
+                            b.device = k as u8 + 1;
+                        }
                     }
                 });
                 // Grille de perspective (deux points de fuite)
@@ -3034,7 +3045,7 @@ impl Editor {
                     self.checkpoint();
                     let n = self.doc.boards.len() + 1;
                     let (bw, bh) = if x1 - x0 < 4.0 { (1080.0, 1080.0) } else { (x1 - x0, y1 - y0) };
-                    self.doc.boards.push(Board { name: format!("{} {n}", crate::i18n::t("Plan de travail")), x: x0, y: y0, w: bw, h: bh, bg: Some([255, 255, 255, 255]), grid: None, persp: None });
+                    self.doc.boards.push(Board { name: format!("{} {n}", crate::i18n::t("Plan de travail")), x: x0, y: y0, w: bw, h: bh, bg: Some([255, 255, 255, 255]), grid: None, persp: None, device: 0 });
                     self.sel_board = Some(self.doc.boards.len() - 1);
                     self.sel.clear();
                     self.tool = Tool::Select;

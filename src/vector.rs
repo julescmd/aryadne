@@ -29,6 +29,9 @@ pub struct Board {
     /// Grille de perspective (deux points de fuite), affichée sur le plan, jamais exportée
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub persp: Option<Persp>,
+    /// Cadre d'appareil autour du plan (0 aucun, 1 iPhone, 2 Android, 3 écran), avec barre d'état
+    #[serde(default, skip_serializing_if = "is_zero_u8")]
+    pub device: u8,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
@@ -394,7 +397,7 @@ impl Doc {
 impl Doc {
     pub fn starter() -> Doc {
         Doc {
-            boards: vec![Board { name: "Plan de travail 1".into(), x: 0.0, y: 0.0, w: 1080.0, h: 1080.0, bg: Some([255, 255, 255, 255]), grid: None, persp: None }],
+            boards: vec![Board { name: "Plan de travail 1".into(), x: 0.0, y: 0.0, w: 1080.0, h: 1080.0, bg: Some([255, 255, 255, 255]), grid: None, persp: None, device: 0 }],
             shapes: vec![],
             next_id: 1,
             swatches: vec![[24, 24, 27, 255], [255, 255, 255, 255], [236, 108, 89, 255], [244, 191, 80, 255], [86, 166, 122, 255], [84, 128, 220, 255], [150, 110, 210, 255]],
@@ -1106,13 +1109,33 @@ pub fn to_svg(doc: &Doc, area: [f32; 4], px: [u32; 2], root: &str, with_boards: 
     if with_boards {
         for b in &doc.boards {
             if let Some(c) = b.bg {
-                let _ = write!(body, r#"<rect x="{}" y="{}" width="{}" height="{}" fill="{}" fill-opacity="{}"/>"#, b.x, b.y, b.w, b.h, hex(c), c[3] as f32 / 255.0);
+                // Un écran de téléphone a les coins arrondis
+                let rx = match b.device {
+                    1 => 48.0,
+                    2 => 30.0,
+                    _ => 0.0,
+                };
+                let _ = write!(body, r#"<rect x="{}" y="{}" width="{}" height="{}" rx="{rx}" fill="{}" fill-opacity="{}"/>"#, b.x, b.y, b.w, b.h, hex(c), c[3] as f32 / 255.0);
             }
         }
+    }
+    // Cadres d'appareils : la coque passe sous le plan (dessinée avant tout)
+    if with_boards {
+        let mut under = String::new();
+        for b in doc.boards.iter().filter(|b| b.device != 0) {
+            under.push_str(&device_frame(b));
+        }
+        body.insert_str(0, &under);
     }
     let mut cx = Gen { doc, root, defs: &mut defs, n: 0 };
     for sh in doc.shapes.iter().filter(|s| s.parent == 0) {
         cx.shape(&mut body, sh);
+    }
+    // Puis la barre d'état et l'encoche, par-dessus le contenu
+    if with_boards {
+        for b in doc.boards.iter().filter(|b| b.device != 0) {
+            body.push_str(&device_overlay(b));
+        }
     }
     s.push_str(&defs);
     s.push_str("</defs>");
@@ -2115,7 +2138,7 @@ mod tests {
         assert_eq!(constrain(2, 80.0, 90.0, 0.0, 100.0, 0.0, 200.0), (80.0, 190.0));
         assert_eq!(constrain(3, 45.0, 55.0, 0.0, 100.0, 0.0, 200.0), (95.0, 105.0));
         assert_eq!(constrain(4, 80.0, 90.0, 0.0, 100.0, 0.0, 200.0), (160.0, 180.0));
-        let b = Board { name: String::new(), x: 0.0, y: 0.0, w: 1000.0, h: 100.0, bg: None, grid: Some(LayoutGrid { cols: 4, gutter: 20.0, margin: 40.0 }), persp: None };
+        let b = Board { name: String::new(), x: 0.0, y: 0.0, w: 1000.0, h: 100.0, bg: None, grid: Some(LayoutGrid { cols: 4, gutter: 20.0, margin: 40.0 }), persp: None, device: 0 };
         let c = b.columns();
         assert_eq!(c.len(), 4);
         assert_eq!(c[0], (40.0, 255.0));
@@ -2738,6 +2761,77 @@ mod fx_tests2 {
         assert!(l[1] < 150 && r[1] > 220, "{l:?} {r:?}");
         if std::env::var("ARY_DEMO").is_ok() {
             img.save("/tmp/fx2.png").unwrap();
+        }
+    }
+}
+
+/// Les cadres d'appareils proposés (dans l'ordre de `Board::device`, à partir de 1)
+pub const DEVICES: [&str; 3] = ["iPhone", "Android", "écran"];
+
+/// La coque d'un appareil autour d'un plan (SVG, sous le plan)
+pub fn device_frame(b: &Board) -> String {
+    let (x, y, w, h) = (b.x, b.y, b.w, b.h);
+    match b.device {
+        1 | 2 => {
+            let (e, r) = if b.device == 1 { (14.0, 62.0) } else { (10.0, 40.0) };
+            format!(r##"<rect x="{}" y="{}" width="{}" height="{}" rx="{r}" fill="#1b1b1f"/><rect x="{}" y="{}" width="{}" height="{}" rx="{}" fill="none" stroke="#3a3a40" stroke-width="2"/>"##, x - e, y - e, w + 2.0 * e, h + 2.0 * e, x - e + 1.0, y - e + 1.0, w + 2.0 * e - 2.0, h + 2.0 * e - 2.0, r - 1.0)
+        }
+        _ => {
+            let e = (w * 0.012).max(10.0);
+            let (sw, sh) = (w * 0.18, h * 0.12);
+            format!(r##"<rect x="{}" y="{}" width="{}" height="{}" fill="#2a2a2e"/><rect x="{}" y="{}" width="{}" height="{}" rx="6" fill="#1b1b1f"/><rect x="{}" y="{}" width="{}" height="{}" fill="#2a2a2e"/>"##, x + w / 2.0 - sw / 6.0, y + h + e, sw / 3.0, sh, x - e, y - e, w + 2.0 * e, h + 3.0 * e, x + w / 2.0 - sw / 2.0, y + h + e + sh, sw, e)
+        }
+    }
+}
+
+/// La barre d'état et l'encoche d'un téléphone (SVG, par-dessus le contenu du plan)
+pub fn device_overlay(b: &Board) -> String {
+    if b.device != 1 && b.device != 2 {
+        return String::new();
+    }
+    let (x, y, w) = (b.x, b.y, b.w);
+    let k = (w / 393.0).clamp(0.5, 3.0);
+    let bar = 47.0 * k;
+    let ink = b.bg.map(|c| if (c[0] as u32 + c[1] as u32 + c[2] as u32) < 380 { "#ffffff" } else { "#111111" }).unwrap_or("#111111");
+    let mut s = String::new();
+    // L'heure, à gauche
+    // (en tracés, comme tous les textes : le rendu n'a pas besoin des polices du système)
+    let clock = Shape { kind: Kind::Text { text: "9:41".into(), size: 17.0 * k, font: "inter-semibold".into(), align: 0, width: None, spacing: 0.0, leading: 1.2 }, ..Shape::base() };
+    let (d, tb) = text_outline(&clock);
+    let _ = write!(s, r#"<path transform="translate({} {})" d="{d}" fill="{ink}"/>"#, x + w * 0.16 - (tb[2] - tb[0]) / 2.0 - tb[0], y + bar * 0.5 - (tb[3] - tb[1]) / 2.0 - tb[1]);
+    // Réseau, wifi et batterie, à droite
+    let (rx, cy) = (x + w - 22.0 * k, y + bar * 0.5);
+    let _ = write!(s, r#"<rect x="{}" y="{}" width="{}" height="{}" rx="{}" fill="none" stroke="{ink}" stroke-opacity="0.45" stroke-width="{}"/><rect x="{}" y="{}" width="{}" height="{}" rx="{}" fill="{ink}"/>"#, rx - 25.0 * k, cy - 6.5 * k, 25.0 * k, 13.0 * k, 4.0 * k, k, rx - 23.0 * k, cy - 4.5 * k, 19.0 * k, 9.0 * k, 2.5 * k);
+    for i in 0..4 {
+        let hh = (4.0 + i as f32 * 2.5) * k;
+        let _ = write!(s, r#"<rect x="{}" y="{}" width="{}" height="{hh}" rx="{}" fill="{ink}"/>"#, rx - 70.0 * k + i as f32 * 5.0 * k, cy + 5.0 * k - hh, 3.2 * k, k);
+    }
+    let _ = write!(s, r#"<path d="M{} {}a{r} {r} 0 0 1 {} 0" fill="none" stroke="{ink}" stroke-width="{}" stroke-linecap="round"/><circle cx="{}" cy="{}" r="{}" fill="{ink}"/>"#, rx - 44.0 * k, cy + 1.0 * k, 12.0 * k, 2.2 * k, rx - 38.0 * k, cy + 3.5 * k, 1.8 * k, r = 6.0 * k);
+    // L'encoche (îlot sur iPhone, poinçon sur Android)
+    if b.device == 1 {
+        let _ = write!(s, r#"<rect x="{}" y="{}" width="{}" height="{}" rx="{}" fill="black"/>"#, x + w / 2.0 - 63.0 * k, y + 11.0 * k, 126.0 * k, 37.0 * k, 18.5 * k);
+        // La barre d'accueil, en bas
+        let _ = write!(s, r#"<rect x="{}" y="{}" width="{}" height="{}" rx="{}" fill="{ink}"/>"#, x + w / 2.0 - 67.0 * k, y + b.h - 13.0 * k, 134.0 * k, 5.0 * k, 2.5 * k);
+    } else {
+        let _ = write!(s, r#"<circle cx="{}" cy="{}" r="{}" fill="black"/>"#, x + w / 2.0, y + 22.0 * k, 9.0 * k);
+    }
+    s
+}
+#[cfg(test)]
+mod device_tests {
+    use super::*;
+    #[test]
+    fn cadres_d_appareil() {
+        let mut d = Doc::starter();
+        d.shapes.clear();
+        d.boards[0] = Board { name: "Écran".into(), x: 0.0, y: 0.0, w: 393.0, h: 852.0, bg: Some([246, 242, 238, 255]), grid: None, persp: None, device: 1 };
+        let id = d.new_id();
+        d.shapes.push(Shape { id, kind: Kind::Rect { w: 345.0, h: 220.0, r: [24.0; 4] }, x: 24.0, y: 120.0, fills: vec![Paint::solid([236, 108, 89, 255])], ..Shape::base() });
+        let svg = to_svg(&d, [-40.0, -40.0, 473.0, 932.0], [473, 932], "/tmp", true);
+        assert!(svg.contains("#1b1b1f") && svg.contains(r#"fill="black""#));
+        if std::env::var("ARY_DEMO").is_ok() {
+            let px = rasterize(&svg, 473, 932).unwrap();
+            image::RgbaImage::from_raw(473, 932, px).unwrap().save("/tmp/device.png").unwrap();
         }
     }
 }
