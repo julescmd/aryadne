@@ -695,6 +695,8 @@ pub fn graph(root: &str, entries: &[Entry], with_folders: bool, with_files: bool
     }
     let notes = md_index(entries);
     let mut edges = Vec::new();
+    // Paires déjà reliées (chercher dans la liste des liens coûtait le carré du nombre de liens)
+    let mut seen: std::collections::HashSet<(usize, usize)> = std::collections::HashSet::new();
     for (i, n) in nodes.iter().enumerate() {
         if with_folders {
             let par = parent(&n.rel);
@@ -707,7 +709,8 @@ pub fn graph(root: &str, entries: &[Entry], with_folders: bool, with_files: bool
             let text = read(root, &n.rel).unwrap_or_default();
             for t in links(&text) {
                 if let Some(&j) = notes.get(&t.to_lowercase()).and_then(|r| idx.get(r)) {
-                    if i != j && !edges.iter().any(|&(a, b, _)| (a, b) == (i, j) || (a, b) == (j, i)) {
+                    // Une paire de notes n'est reliée qu'une fois, dans un sens ou dans l'autre
+                    if i != j && seen.insert((i.min(j), i.max(j))) {
                         edges.push((i, j, false));
                     }
                 }
@@ -756,6 +759,11 @@ mod tests {
         assert_eq!(bl[0].name, "Bienvenue");
         let g = graph(&v, &entries, true, false, "");
         assert!(g.edges.iter().any(|e| !e.2));
+        // Deux notes qui se citent l'une l'autre, plusieurs fois : un seul lien entre elles
+        write(&v, "notes/Idées.md", "Retour vers [[Bienvenue]], encore [[Bienvenue]].").unwrap();
+        let g2 = graph(&v, &entries, false, false, "");
+        assert_eq!(g2.edges.iter().filter(|e| !e.2).count(), 1);
+        write(&v, "notes/Idées.md", "").unwrap();
         assert!(safe(&v, "../evil").is_err());
         assert!(safe(&v, "/etc/passwd").unwrap().starts_with(&dir));
         assert!(safe(&v, "C:\\Windows").is_err());

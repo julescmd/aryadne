@@ -1027,15 +1027,26 @@ impl Doc {
         let [x0, y0, x1, y1] = r;
         let chains: Vec<Vec<u32>> = self.layers.iter().map(|l| self.chain(l.group)).collect();
         let idx: Vec<usize> = (0..self.layers.len()).collect();
-        for y in y0..y1.min(self.h) {
-            for x in x0..x1.min(self.w) {
+        let (w, y1, x1) = (self.w, y1.min(self.h), x1.min(self.w));
+        if w == 0 || y0 >= y1 || x0 >= x1 || out.len() < w * y1 * 4 {
+            return;
+        }
+        let row = |y: usize, line: &mut [u8]| {
+            for x in x0..x1 {
                 let mut d = [0.0f32; 4];
                 self.comp_level(&mut d, &idx, &chains, 0, x as i32, y as i32, 1.0);
-                let i = (y * self.w + x) * 4;
                 for k in 0..4 {
-                    out[i + k] = (d[k].clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
+                    line[x * 4 + k] = (d[k].clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
                 }
             }
+        };
+        let lines = out[y0 * w * 4..y1 * w * 4].chunks_mut(w * 4);
+        // Une grande zone se partage entre les cœurs, ligne par ligne ; un coup de pinceau reste sur un seul
+        if (y1 - y0) * (x1 - x0) >= 64 * 64 {
+            use rayon::prelude::*;
+            lines.collect::<Vec<_>>().into_par_iter().enumerate().for_each(|(k, line)| row(y0 + k, line));
+        } else {
+            lines.enumerate().for_each(|(k, line)| row(y0 + k, line));
         }
     }
 
