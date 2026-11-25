@@ -3068,5 +3068,12 @@
   "doigt : étaler la peinture (le flux règle la force)": "smudge: spread the paint (flow sets the strength)",
   "fluidité : pousser les pixels (déformer)": "liquify: push pixels (warp)",
   "Avant / après : l'image à l'ouverture à gauche, glisser la séparation": "Before / after: the image as opened on the left, drag the divider",
-  "Enroulé : l'image se répète autour, le trait passe d'un bord à l'autre (textures qui se raccordent)": "Wrap around: the image repeats around it, strokes cross from one edge to the other (seamless textures)"
+  "Enroulé : l'image se répète autour, le trait passe d'un bord à l'autre (textures qui se raccordent)": "Wrap around: the image repeats around it, strokes cross from one edge to the other (seamless textures)",
+  "Incrustation de dégradé": "Gradient Overlay",
+  "Ombre interne": "Inner Shadow",
+  "Biseau et estampage": "Bevel and Emboss",
+  "profondeur ": "depth ",
+  "lumière ": "light ",
+  "Styles de calque : ombres, lueur, biseau, incrustations, contour": "Layer styles: shadows, glow, bevel, overlays, stroke",
+  "ombre interne, biseau ou dégradé": "inner shadow, bevel or gradient"
 }

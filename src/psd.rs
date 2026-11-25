@@ -670,6 +670,13 @@ pub fn write(doc: &Doc) -> (Vec<u8>, Vec<String>) {
                 None => lost.push(format!("{} ({})", l.name, crate::i18n::t("calque de réglage"))),
             }
         } else {
+            // Styles et réglages propres à Aryadne, pas encore écrits dans le PSD
+            if l.fx.on && (l.fx.inner.is_some() || l.fx.bevel.is_some() || l.fx.gradient.is_some()) {
+                lost.push(format!("{} ({})", l.name, crate::i18n::t("ombre interne, biseau ou dégradé")));
+            }
+            if l.fx.blend_if.is_some() {
+                lost.push(format!("{} ({})", l.name, crate::i18n::t("fusion conditionnelle")));
+            }
             outs.push(to_out(l));
         }
         i += 1;
@@ -741,6 +748,7 @@ mod tests {
             overlay: Some(crate::paint::FxOverlay { color: [220, 60, 60], opacity: 0.5 }),
             stroke: Some(crate::paint::FxStroke { size: 2.0, color: [0, 0, 255], opacity: 1.0 }),
             blend_if: None,
+            ..Default::default()
         };
         d.layers.push(top);
         d.groups.push(Group::new(3, "Dossier".into(), 0));

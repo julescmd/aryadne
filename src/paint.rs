@@ -278,6 +278,15 @@ pub struct Fx {
     pub glow: Option<FxGlow>,
     pub overlay: Option<FxOverlay>,
     pub stroke: Option<FxStroke>,
+    /// Ombre interne (mêmes réglages que l'ombre portée)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inner: Option<FxShadow>,
+    /// Biseau et estampage : taille, profondeur, angle de la lumière (degrés)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bevel: Option<FxBevel>,
+    /// Incrustation de dégradé : de `a` à `b`, angle (degrés)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gradient: Option<FxGradient>,
     /// Fusion conditionnelle (Blend If) : luminance de dessous où le calque se montre [de, à]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blend_if: Option<[f32; 2]>,
@@ -289,6 +298,21 @@ pub struct FxShadow {
     pub dy: f32,
     pub blur: f32,
     pub color: [u8; 3],
+    pub opacity: f32,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Debug)]
+pub struct FxBevel {
+    pub size: f32,
+    pub depth: f32,
+    pub angle: f32,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Debug)]
+pub struct FxGradient {
+    pub a: [u8; 3],
+    pub b: [u8; 3],
+    pub angle: f32,
     pub opacity: f32,
 }
 
@@ -318,12 +342,12 @@ impl Fx {
     }
 
     pub fn active(&self) -> bool {
-        self.on && (self.shadow.is_some() || self.glow.is_some() || self.overlay.is_some() || self.stroke.is_some())
+        self.on && (self.shadow.is_some() || self.glow.is_some() || self.overlay.is_some() || self.stroke.is_some() || self.inner.is_some() || self.bevel.is_some() || self.gradient.is_some())
     }
 
     /// Ce qui demande les pixels voisins (à précalculer)
     fn needs_maps(&self) -> bool {
-        self.on && (self.shadow.is_some() || self.glow.is_some() || self.stroke.is_some())
+        self.on && (self.shadow.is_some() || self.glow.is_some() || self.stroke.is_some() || self.inner.is_some() || self.bevel.is_some())
     }
 }
 
@@ -334,6 +358,9 @@ pub struct FxMaps {
     shadow: Vec<u8>,
     glow: Vec<u8>,
     stroke: Vec<u8>,
+    inner: Vec<u8>,
+    /// Biseau : éclairage (128 = neutre, plus clair au-dessus, plus sombre en dessous)
+    bevel: Vec<u8>,
 }
 
 impl FxMaps {
@@ -567,6 +594,35 @@ impl Layer {
             let d = dilate(&a, w, h, st.size.round().max(1.0) as usize);
             m.stroke = q(d.iter().zip(a.iter()).map(|(d, a)| (d - a).max(0.0)).collect());
         }
+        if let Some(sh) = self.fx.inner {
+            // L'intérieur que le bord décalé et flou ne couvre pas
+            let (dx, dy) = (sh.dx.round() as i32, sh.dy.round() as i32);
+            let mut moved = vec![0.0f32; w * h];
+            for y in 0..h as i32 {
+                for x in 0..w as i32 {
+                    let (sx, sy) = (x - dx, y - dy);
+                    moved[y as usize * w + x as usize] = if sx >= 0 && sy >= 0 && (sx as usize) < w && (sy as usize) < h { a[sy as usize * w + sx as usize] } else { 0.0 };
+                }
+            }
+            let b = blur(&moved, w, h, sh.blur);
+            m.inner = q(a.iter().zip(b.iter()).map(|(a, b)| a * (1.0 - b)).collect());
+        }
+        if let Some(bv) = self.fx.bevel {
+            // Relief : la couverture floue sert de hauteur, éclairée selon l'angle
+            let hgt = blur(&a, w, h, bv.size.max(1.0));
+            let (lx, ly) = (bv.angle.to_radians().cos(), -bv.angle.to_radians().sin());
+            let mut out = vec![0.5f32; w * h];
+            for y in 1..h.saturating_sub(1) {
+                for x in 1..w.saturating_sub(1) {
+                    let gx = hgt[y * w + x + 1] - hgt[y * w + x - 1];
+                    let gy = hgt[(y + 1) * w + x] - hgt[(y - 1) * w + x];
+                    // Pente tournée vers la lumière : plus clair
+                    let shade = -(gx * lx + gy * ly) * bv.depth * bv.size.max(1.0) * 1.5;
+                    out[y * w + x] = 0.5 + shade.clamp(-0.5, 0.5) * a[y * w + x];
+                }
+            }
+            m.bevel = q(out);
+        }
         self.fx_maps = Some(std::sync::Arc::new(m));
     }
 
@@ -644,9 +700,30 @@ fn stack(d: &mut [f32; 4], layers: &[&Layer], x: i32, y: i32, mul: f32) {
             if let (Some(g), Some(m)) = (l.fx.glow, maps) {
                 over(d, col(g.color), FxMaps::get(&m.glow, m.w, x, y) * g.opacity * op, Blend::Screen);
             }
+            if let Some(g) = l.fx.gradient {
+                // Le long de l'angle, sur le cadre du calque
+                let (cx, cy) = (l.off[0] as f32 + l.w as f32 / 2.0, l.off[1] as f32 + l.h as f32 / 2.0);
+                let (ux, uy) = (g.angle.to_radians().cos(), -g.angle.to_radians().sin());
+                let half = (l.w as f32 * ux.abs() + l.h as f32 * uy.abs()) / 2.0;
+                let t = (((x as f32 - cx) * ux + (y as f32 - cy) * uy) / half.max(1.0) * 0.5 + 0.5).clamp(0.0, 1.0);
+                let (ca, cb) = (col(g.a), col(g.b));
+                let gc = [0, 1, 2].map(|k| ca[k] + (cb[k] - ca[k]) * t);
+                sc = [0, 1, 2].map(|k| sc[k] + (gc[k] - sc[k]) * g.opacity);
+            }
             if let Some(o) = l.fx.overlay {
                 let oc = col(o.color);
                 sc = [0, 1, 2].map(|k| sc[k] + (oc[k] - sc[k]) * o.opacity);
+            }
+            if let (Some(sh), Some(m)) = (l.fx.inner, maps) {
+                let k = FxMaps::get(&m.inner, m.w, x, y) * sh.opacity;
+                let c = col(sh.color);
+                sc = [0, 1, 2].map(|i| sc[i] * (1.0 - k) + sc[i] * c[i] * k);
+            }
+            if let (Some(_), Some(m)) = (l.fx.bevel, maps) {
+                if !m.bevel.is_empty() {
+                    let v = FxMaps::get(&m.bevel, m.w, x, y) - 0.5;
+                    sc = if v >= 0.0 { sc.map(|c| c + (1.0 - c) * v * 2.0) } else { sc.map(|c| c * (1.0 + v * 2.0)) };
+                }
             }
             over(d, sc, a * l.opacity * l.fill * mul, l.blend);
             if let (Some(st), Some(m)) = (l.fx.stroke, maps) {
@@ -5101,6 +5178,48 @@ impl Editor {
                         ch |= pct(ui, &mut o.opacity);
                     });
                 }
+                let mut on = fx.gradient.is_some();
+                if ui.checkbox(&mut on, crate::i18n::t("Incrustation de dégradé")).changed() {
+                    fx.gradient = on.then_some(FxGradient { a: [40, 30, 60], b: [240, 180, 120], angle: 90.0, opacity: 1.0 });
+                    fx.on = true;
+                    ch = true;
+                }
+                if let Some(g) = &mut fx.gradient {
+                    ui.horizontal(|ui| {
+                        ch |= rgb(ui, &mut g.a);
+                        ch |= rgb(ui, &mut g.b);
+                        ch |= pct(ui, &mut g.opacity);
+                        ch |= ui.add(egui::DragValue::new(&mut g.angle).speed(1.0).range(-180.0..=180.0).suffix("°")).changed();
+                    });
+                }
+                let mut on = fx.inner.is_some();
+                if ui.checkbox(&mut on, crate::i18n::t("Ombre interne")).changed() {
+                    fx.inner = on.then_some(FxShadow { dx: 4.0, dy: 5.0, blur: 8.0, color: [0, 0, 0], opacity: 0.6 });
+                    fx.on = true;
+                    ch = true;
+                }
+                if let Some(sh) = &mut fx.inner {
+                    ui.horizontal(|ui| {
+                        ch |= rgb(ui, &mut sh.color);
+                        ch |= pct(ui, &mut sh.opacity);
+                        ch |= ui.add(egui::DragValue::new(&mut sh.dx).speed(0.5).prefix("x ")).changed();
+                        ch |= ui.add(egui::DragValue::new(&mut sh.dy).speed(0.5).prefix("y ")).changed();
+                        ch |= ui.add(egui::DragValue::new(&mut sh.blur).speed(0.3).range(0.0..=200.0).prefix(crate::i18n::t("taille ")).suffix(" px")).changed();
+                    });
+                }
+                let mut on = fx.bevel.is_some();
+                if ui.checkbox(&mut on, crate::i18n::t("Biseau et estampage")).changed() {
+                    fx.bevel = on.then_some(FxBevel { size: 8.0, depth: 1.0, angle: 120.0 });
+                    fx.on = true;
+                    ch = true;
+                }
+                if let Some(b) = &mut fx.bevel {
+                    ui.horizontal(|ui| {
+                        ch |= ui.add(egui::DragValue::new(&mut b.size).speed(0.2).range(1.0..=100.0).prefix(crate::i18n::t("taille ")).suffix(" px")).changed();
+                        ch |= ui.add(egui::DragValue::new(&mut b.depth).speed(0.02).range(0.1..=5.0).prefix(crate::i18n::t("profondeur "))).changed();
+                        ch |= ui.add(egui::DragValue::new(&mut b.angle).speed(1.0).range(-180.0..=180.0).prefix(crate::i18n::t("lumière ")).suffix("°")).changed();
+                    });
+                }
                 let mut on = fx.stroke.is_some();
                 if ui.checkbox(&mut on, crate::i18n::t("Contour")).changed() {
                     fx.stroke = on.then_some(FxStroke { size: 3.0, color: [0, 0, 0], opacity: 1.0 });
@@ -5130,7 +5249,7 @@ impl Editor {
                 if b(ui, crate::lucide::TRASH_2, "Supprimer le calque").clicked() {
                     self.delete_layer();
                 }
-                if ui.add(egui::Button::new(egui::RichText::new("fx").size(12.0).italics().strong()).frame(false).min_size(vec2(24.0, 22.0))).on_hover_text(crate::i18n::t("Styles de calque : ombre portée, lueur, incrustation, contour")).clicked() && self.doc.layers[self.doc.active].adj.is_none() {
+                if ui.add(egui::Button::new(egui::RichText::new("fx").size(12.0).italics().strong()).frame(false).min_size(vec2(24.0, 22.0))).on_hover_text(crate::i18n::t("Styles de calque : ombres, lueur, biseau, incrustations, contour")).clicked() && self.doc.layers[self.doc.active].adj.is_none() {
                     self.fx_window = Some(self.doc.active);
                 }
                 if b(ui, crate::lucide::FOLDER, "Grouper le calque (Ctrl+G)").clicked() {
@@ -5360,6 +5479,35 @@ mod reglages_tests {
         assert_eq!(blend_if_k(0.3, 0.7, 0.1), 0.0);
         assert!(blend_if_k(0.3, 0.7, 0.26) > 0.0 && blend_if_k(0.3, 0.7, 0.26) < 1.0);
         assert_eq!(blend_if_k(0.0, 1.0, 0.0), 1.0);
+    }
+
+    #[test]
+    fn biseau_ombre_interne_degrade() {
+        // Un carré blanc de 20 px au milieu d'un calque de 40 px
+        let mut l = Layer::blank("carré", 40, 40);
+        for y in 10..30 {
+            for x in 10..30 {
+                let i = (y * 40 + x) * 4;
+                l.px[i..i + 4].copy_from_slice(&[128, 128, 128, 255]);
+            }
+        }
+        l.fx = Fx { on: true, bevel: Some(FxBevel { size: 6.0, depth: 1.0, angle: 135.0 }), inner: Some(FxShadow { dx: 3.0, dy: 3.0, blur: 3.0, color: [0, 0, 0], opacity: 1.0 }), ..Default::default() };
+        l.bake_fx(40, 40);
+        let m = l.fx_maps.clone().unwrap();
+        // Lumière en haut à gauche : le bord haut-gauche s'éclaire, le bas-droit s'assombrit
+        assert!(FxMaps::get(&m.bevel, 40, 11, 11) > 0.55, "{}", FxMaps::get(&m.bevel, 40, 11, 11));
+        assert!(FxMaps::get(&m.bevel, 40, 28, 28) < 0.45);
+        // Ombre interne : sous le bord haut-gauche, rien au centre
+        assert!(FxMaps::get(&m.inner, 40, 11, 11) > 0.3);
+        assert!(FxMaps::get(&m.inner, 40, 20, 20) < 0.05);
+        // Dégradé : du noir au blanc de gauche à droite
+        let mut g = Layer::blank("g", 40, 40);
+        g.px.chunks_mut(4).for_each(|p| p.copy_from_slice(&[128, 128, 128, 255]));
+        g.fx = Fx { on: true, gradient: Some(FxGradient { a: [0, 0, 0], b: [255, 255, 255], angle: 0.0, opacity: 1.0 }), ..Default::default() };
+        let (mut left, mut right) = ([0.0f32; 4], [0.0f32; 4]);
+        stack(&mut left, &[&g], 1, 20, 1.0);
+        stack(&mut right, &[&g], 38, 20, 1.0);
+        assert!(left[0] < 0.1 && right[0] > 0.9, "{left:?} {right:?}");
     }
 }
 
