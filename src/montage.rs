@@ -876,6 +876,19 @@ impl Project {
         Some(self.clips.len() - 1)
     }
 
+    /// Les changements de plan d'un média entre `src_in` et `src_out` (secondes de la source), détectés par
+    /// ffmpeg sur une image réduite ; `threshold` entre 0 (tout) et 1 (rien), 0,3 convient d'habitude
+    pub fn scene_cuts(ff: &std::path::Path, media: &std::path::Path, src_in: f32, src_out: f32, threshold: f32) -> Vec<f32> {
+        let filter = format!("scale=160:-2,select='gt(scene,{threshold:.3})',showinfo");
+        let o = crate::ffmpeg::command(ff.to_path_buf()).args(["-hide_banner", "-nostats", "-ss", &format!("{src_in:.3}"), "-to", &format!("{src_out:.3}"), "-i"]).arg(media).args(["-an", "-vf", &filter, "-f", "null", "-"]).output();
+        let Ok(o) = o else { return vec![] };
+        let err = String::from_utf8_lossy(&o.stderr);
+        let mut cuts: Vec<f32> = err.lines().filter(|l| l.contains("showinfo") && l.contains("pts_time:")).filter_map(|l| l.split("pts_time:").nth(1)?.split_whitespace().next()?.parse::<f32>().ok()).map(|t| src_in + t).filter(|t| *t > src_in + 0.2 && *t < src_out - 0.2).collect();
+        cuts.sort_by(f32::total_cmp);
+        cuts.dedup_by(|a, b| (*a - *b).abs() < 0.2);
+        cuts
+    }
+
     /// Coupe à `t` les clips d'identifiants `ids` ; les moitiés droites de clips liés restent liées entre elles
     pub fn split_linked(&mut self, ids: &[u64], t: f32) {
         let mut new_links: HashMap<u32, u32> = HashMap::new();
@@ -1806,5 +1819,26 @@ mod tests {
         assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
         let secs = (o.stdout.len() as f32 - 44.0) / (48000.0 * 4.0);
         assert!((secs - 4.0).abs() < 0.4, "{secs}");
+    }
+}
+
+#[cfg(test)]
+mod scene_tests {
+    #[test]
+    fn changements_de_plan() {
+        let Some(ff) = crate::ffmpeg::find("ffmpeg") else { return };
+        let path = std::env::temp_dir().join(format!("ary-cuts-{}.mp4", std::process::id()));
+        let ok = crate::ffmpeg::command(ff.clone())
+            .args(["-v", "error", "-y", "-f", "lavfi", "-i", "color=c=red:s=160x90:d=1.5:r=25", "-f", "lavfi", "-i", "color=c=blue:s=160x90:d=1.5:r=25", "-f", "lavfi", "-i", "color=c=green:s=160x90:d=1:r=25", "-filter_complex", "[0][1][2]concat=n=3:v=1:a=0", "-pix_fmt", "yuv420p"])
+            .arg(&path)
+            .status()
+            .is_ok_and(|s| s.success());
+        if !ok {
+            return;
+        }
+        let cuts = super::Project::scene_cuts(&ff, &path, 0.0, 4.0, 0.3);
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(cuts.len(), 2, "{cuts:?}");
+        assert!((cuts[0] - 1.5).abs() < 0.1 && (cuts[1] - 3.0).abs() < 0.1, "{cuts:?}");
     }
 }

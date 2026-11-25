@@ -119,7 +119,9 @@ pub struct Editor {
     pub project: Project,
     error: Option<String>,
     playhead: f32,
-    sel: Vec<u64>,
+    pub(crate) sel: Vec<u64>,
+    /// Étalonnage copié (luminosité, contraste, saturation, roues, étalonnage en nodes)
+    pub(crate) grade_clip: Option<(f32, f32, f32, [[f32; 3]; 3], String)>,
     zoom: f32,
     scroll: f32,
     drag: Option<DragState>,
@@ -236,6 +238,7 @@ impl Editor {
             error,
             playhead: 0.0,
             sel: vec![],
+            grade_clip: None,
             zoom: 60.0,
             scroll: 0.0,
             drag: None,

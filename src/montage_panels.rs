@@ -1205,6 +1205,7 @@ impl Editor {
         };
         let mut ch = false;
         let mut freeze = false;
+        let mut detect = false;
         // ---- En-tête : vignette, nom, chapitre et durée
         {
             let c = self.project.clips[i].clone();
@@ -1311,10 +1312,16 @@ impl Editor {
                 ch = true;
             }
             if c.kind == "video" {
-                let b = egui::Button::new(RichText::new(format!("{}  {}", crate::lucide::PAUSE, crate::i18n::t("Arrêt sur image"))).size(12.0));
-                if ui.add(b).on_hover_text(crate::i18n::t("Fige l'image de la tête de lecture pendant 2 secondes ; la suite du montage recule d'autant")).clicked() {
-                    freeze = true;
-                }
+                ui.horizontal(|ui| {
+                    let b = egui::Button::new(RichText::new(format!("{}  {}", crate::lucide::PAUSE, crate::i18n::t("Arrêt sur image"))).size(12.0));
+                    if ui.add(b).on_hover_text(crate::i18n::t("Fige l'image de la tête de lecture pendant 2 secondes ; la suite du montage recule d'autant")).clicked() {
+                        freeze = true;
+                    }
+                    let b = egui::Button::new(RichText::new(format!("{}  {}", crate::lucide::SCISSORS, crate::i18n::t("Couper aux changements de plan"))).size(12.0));
+                    if ui.add(b).on_hover_text(crate::i18n::t("Détecte les coupes d'une vidéo déjà montée et sépare chaque plan")).clicked() {
+                        detect = true;
+                    }
+                });
             }
         });
         if is_visual {
@@ -1349,6 +1356,24 @@ impl Editor {
                         });
                     }
                 });
+            });
+            // Copier l'étalonnage de ce plan, le coller sur les plans choisis
+            ui.horizontal(|ui| {
+                let c = &self.project.clips[i];
+                if ui.button(format!("{}  {}", crate::lucide::COPY, crate::i18n::t("Copier l'étalonnage"))).clicked() {
+                    self.grade_clip = Some((c.brightness, c.contrast, c.saturation, c.wheels, c.grade.clone()));
+                }
+                let n = self.sel.len().max(1);
+                if let Some(g) = self.grade_clip.clone() {
+                    let label = if n > 1 { format!("{}  {} ({n})", crate::lucide::CLIPBOARD_PASTE, crate::i18n::t("Coller")) } else { format!("{}  {}", crate::lucide::CLIPBOARD_PASTE, crate::i18n::t("Coller")) };
+                    if ui.button(label).on_hover_text(crate::i18n::t("Sur tous les plans choisis (Maj+clic pour en choisir plusieurs)")).clicked() {
+                        let ids = if self.sel.is_empty() { vec![self.project.clips[i].id] } else { self.sel.clone() };
+                        for c in self.project.clips.iter_mut().filter(|c| ids.contains(&c.id) && c.kind != "audio") {
+                            (c.brightness, c.contrast, c.saturation, c.wheels, c.grade) = (g.0, g.1, g.2, g.3, g.4.clone());
+                        }
+                        ch = true;
+                    }
+                }
             });
         }
         if self.project.clips[i].sounds() || self.project.linked(i).iter().any(|&k| self.project.clips[k].sounds()) {
@@ -1412,6 +1437,30 @@ impl Editor {
         if freeze {
             self.freeze_frame(i);
         }
+        if detect {
+            self.cut_scenes(i);
+        }
+    }
+
+    /// Coupe le plan `i` (et ce qui lui est lié) à chaque changement de plan détecté
+    fn cut_scenes(&mut self, i: usize) {
+        let c = self.project.clips[i].clone();
+        let Some(ff) = crate::ffmpeg::find("ffmpeg") else {
+            self.message = Some(crate::i18n::t("ffmpeg n'est pas installé."));
+            return;
+        };
+        let cuts = crate::montage::Project::scene_cuts(&ff, &self.media_path(&c.file), c.src_in, c.src_out, 0.3);
+        if cuts.is_empty() {
+            self.message = Some(crate::i18n::t("Aucun changement de plan trouvé"));
+            return;
+        }
+        let ids: Vec<u64> = std::iter::once(c.id).chain(self.project.linked(i).iter().map(|&k| self.project.clips[k].id)).collect();
+        for &cut in cuts.iter().rev() {
+            let t = c.start + (cut - c.src_in) / c.speed.max(1e-3);
+            self.project.split_linked(&ids, t);
+        }
+        self.message = Some(format!("{} {}", cuts.len() + 1, crate::i18n::t_mid("plans séparés")));
+        self.changed();
     }
 
     /// Arrêt sur image du plan `i` à la tête de lecture : l'image est extraite par ffmpeg dans « arrêts/ »

@@ -3158,5 +3158,12 @@
   "taille des remous": "eddy size",
   "x par seconde": "x per second",
   "y par seconde": "y per second",
-  "ajouter un effet": "add an effect"
+  "ajouter un effet": "add an effect",
+  "Copier l'étalonnage": "Copy grade",
+  "Coller": "Paste",
+  "Sur tous les plans choisis (Maj+clic pour en choisir plusieurs)": "On all selected clips (Shift+click to pick several)",
+  "Couper aux changements de plan": "Split at scene cuts",
+  "Détecte les coupes d'une vidéo déjà montée et sépare chaque plan": "Detects the cuts in an already edited video and separates each shot",
+  "Aucun changement de plan trouvé": "No scene cut found",
+  "plans séparés": "shots separated"
 }
