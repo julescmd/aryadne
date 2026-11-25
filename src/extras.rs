@@ -672,7 +672,7 @@ impl App {
                             let (added, removed) = line_diff(&other, &text);
                             ui.horizontal(|ui| {
                                 let head = if d.compare { format!("− {} · + {}", t("seulement dans l'autre"), t("seulement dans celui-ci")) } else if d.against.is_some() { t("par rapport à l'autre version") } else { t("par rapport à maintenant") };
-                                ui.label(RichText::new(format!("{head} : +{added} / −{removed} {}", t("lignes"))).color(p.muted).size(11.0));
+                                ui.label(RichText::new(format!("{head}{} +{added} / −{removed} {}", crate::i18n::t_mid(" :"), crate::i18n::t_mid("lignes"))).color(p.muted).size(11.0));
                                 ui.checkbox(&mut d.diff, t("voir les différences"));
                             });
                             egui::ScrollArea::both().id_salt("hist-view").max_height(400.0).show(ui, |ui| {

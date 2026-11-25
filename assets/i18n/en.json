@@ -3644,5 +3644,6 @@
   "supprimer le calque et ses clés": "delete the layer and its keys",
   "affiché :": "shown:",
   "sélectionnée(s)": "selected",
-  "densité :": "density:"
+  "densité :": "density:",
+  " :": ":"
 }
