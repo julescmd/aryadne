@@ -1055,6 +1055,9 @@ impl Editor {
         let k = img.width() / self.project.width.max(1) as f32;
         let sel = self.first_selected().filter(|&i| self.project.clips[i].visual());
         let mut corner_hit = false;
+        // Poignée de masque glissée : (étalonnage ou découpe, sommet ou centre, déplacement en fraction de l'image)
+        let mut mask_drag: Option<(u8, usize, [f32; 2])> = None;
+        let mut mask_drop = false;
         if let Some(i) = sel {
             let c = &self.project.clips[i];
             if self.playhead >= c.start && self.playhead <= c.end() {
@@ -1063,18 +1066,39 @@ impl Editor {
                 let bx = Rect::from_center_size(center, half * 2.0);
                 let pt = ui.painter().with_clip_rect(img.expand(6.0));
                 pt.rect_stroke(bx, 0.0, Stroke::new(1.0, p.text), egui::StrokeKind::Middle);
-                // Masque d'étalonnage : l'ellipse, et l'intérieur du dégradé en plus discret
-                if let Some(m) = c.mask {
-                    let o = bx.min + vec2(m.cx * bx.width(), m.cy * bx.height());
-                    for (f, col) in [(1.0, p.accent), ((1.0 - m.feather).max(0.0), p.accent.gamma_multiply(0.45))] {
+                // Masques (étalonnage et découpe) : le contour là où il est à cet instant, et l'intérieur du dégradé
+                // en plus discret ; le centre se glisse, et les sommets d'une forme libre aussi
+                let ts = c.src_in + (self.playhead - c.start).max(0.0) * c.speed;
+                for (which, m, col) in [(0u8, &c.mask, p.accent), (1u8, &c.cut, p.text)] {
+                    let Some(m) = m else { continue };
+                    let to_px = |q: [f32; 2]| bx.min + vec2(q[0] * bx.width(), q[1] * bx.height());
+                    for (f, col) in [(1.0, col), ((1.0 - m.feather).max(0.0), col.gamma_multiply(0.45))] {
                         if f <= 0.01 {
                             continue;
                         }
-                        let ring: Vec<egui::Pos2> = (0..=64).map(|j| {
-                            let a = j as f32 / 64.0 * std::f32::consts::TAU;
-                            o + vec2(a.cos() * m.rx * bx.width() * f, a.sin() * m.ry * bx.height() * f)
-                        }).collect();
+                        let mut ring: Vec<egui::Pos2> = m.outline(ts, f).into_iter().map(to_px).collect();
+                        if let Some(first) = ring.first().copied() {
+                            ring.push(first);
+                        }
                         pt.add(egui::Shape::dashed_line(&ring, Stroke::new(1.5, col), 6.0, 4.0));
+                    }
+                    let (cx, cy, sc) = m.pose(ts);
+                    let mut handles = vec![(usize::MAX, to_px([cx, cy]))];
+                    if m.shape == 2 {
+                        handles.extend(m.points.iter().enumerate().map(|(k, q)| (k, to_px([cx + q[0] * m.rx * sc, cy + q[1] * m.ry * sc]))));
+                    }
+                    for (k, h) in handles {
+                        let hr = Rect::from_center_size(h, vec2(11.0, 11.0));
+                        let r = ui.interact(hr.expand(3.0), ui.id().with(("masque", c.id, which, k)), Sense::drag());
+                        pt.circle(h, if k == usize::MAX { 4.5 } else { 3.5 }, if r.hovered() || r.dragged() { col } else { Color32::BLACK }, Stroke::new(1.5, col));
+                        if r.dragged() {
+                            let d = r.drag_delta();
+                            mask_drag = Some((which, k, [d.x / bx.width().max(1.0), d.y / bx.height().max(1.0)]));
+                            corner_hit = true;
+                        }
+                        if r.drag_stopped() {
+                            mask_drop = true;
+                        }
                     }
                 }
                 let pts = [bx.left_top(), bx.right_top(), bx.left_bottom(), bx.right_bottom(), bx.center_top(), bx.center_bottom(), bx.left_center(), bx.right_center()];
@@ -1096,6 +1120,20 @@ impl Editor {
                     }
                 }
             }
+        }
+        if let (Some(i), Some((which, k, d))) = (sel, mask_drag) {
+            let c = &mut self.project.clips[i];
+            if let Some(m) = if which == 0 { c.mask.as_mut() } else { c.cut.as_mut() } {
+                match m.points.get_mut(k) {
+                    // Un sommet : dans le cadre du masque
+                    Some(q) => *q = [(q[0] + d[0] / m.rx.max(1e-3)).clamp(-1.5, 1.5), (q[1] + d[1] / m.ry.max(1e-3)).clamp(-1.5, 1.5)],
+                    // Le centre : tout le masque, et son suivi avec lui
+                    None => (m.cx, m.cy) = ((m.cx + d[0]).clamp(-0.5, 1.5), (m.cy + d[1]).clamp(-0.5, 1.5)),
+                }
+            }
+        }
+        if mask_drop {
+            self.changed();
         }
         // Suivi de mouvement : un clic choisit le point à suivre
         if let Some(id) = self.track_pick {
@@ -1440,6 +1478,8 @@ impl Editor {
                 });
             }
         });
+        let busy_smart = self.smart_rx.is_some();
+        let mut want_mask: Option<bool> = None;
         if is_visual {
             card(ui, "Look", &mut |ui| {
                 let c = &mut self.project.clips[i];
@@ -1472,37 +1512,12 @@ impl Editor {
                         });
                     }
                 });
-                // Zone : toute l'image, ou un masque en ellipse (comme une fenêtre de Resolve)
+                // Zone : toute l'image, ou un masque (comme une fenêtre de Resolve) qui peut suivre le plan
                 ui.add_space(4.0);
-                ui.horizontal(|ui| {
-                    let (lr, _) = ui.allocate_exact_size(vec2(72.0, 20.0), Sense::hover());
-                    ui.painter().text(lr.left_center(), egui::Align2::LEFT_CENTER, crate::i18n::t("Zone"), egui::FontId::proportional(12.0), p.muted);
-                    ui.spacing_mut().item_spacing.x = 4.0;
-                    if chip(ui, &crate::i18n::t("Toute l'image"), c.mask.is_none()) {
-                        c.mask = None;
-                        ch = true;
-                    }
-                    if chip(ui, &format!("{} {}", crate::lucide::CIRCLE_DASHED, crate::i18n::t("Ellipse")), c.mask.is_some()) && c.mask.is_none() {
-                        c.mask = Some(crate::montage::GradeMask::default());
-                        ch = true;
-                    }
-                    if let Some(m) = c.mask.as_mut() {
-                        let b = egui::Button::new(RichText::new(crate::lucide::FLIP_HORIZONTAL_2).size(13.0)).selected(m.invert).min_size(vec2(24.0, 22.0));
-                        if ui.add(b).on_hover_text(crate::i18n::t("Inverser : corriger autour de l'ellipse plutôt que dedans")).clicked() {
-                            m.invert ^= true;
-                            ch = true;
-                        }
-                    }
-                });
-                if let Some(m) = c.mask.as_mut() {
-                    for (label, v, r) in [("Centre X", &mut m.cx, 0.0..=1.0), ("Centre Y", &mut m.cy, 0.0..=1.0), ("Largeur", &mut m.rx, 0.02..=1.0), ("Hauteur", &mut m.ry, 0.02..=1.0), ("Adoucir", &mut m.feather, 0.0..=1.0)] {
-                        ui.horizontal(|ui| {
-                            let (lr, _) = ui.allocate_exact_size(vec2(72.0, 20.0), Sense::hover());
-                            ui.painter().text(lr.left_center(), egui::Align2::LEFT_CENTER, crate::i18n::t(label), egui::FontId::proportional(12.0), p.muted);
-                            ui.spacing_mut().slider_width = (ui.available_width() - 56.0).max(60.0);
-                            ch |= ui.add(egui::Slider::new(v, r).max_decimals(2)).changed();
-                        });
-                    }
+                let (mch, want) = mask_controls(ui, &mut c.mask, "Toute l'image", "Inverser : corriger autour de la forme plutôt que dedans", busy_smart);
+                ch |= mch;
+                if want {
+                    want_mask = Some(false);
                 }
             });
             // Copier l'étalonnage de ce plan, le coller sur les plans choisis
@@ -1523,6 +1538,19 @@ impl Editor {
                     }
                 }
             });
+            // Découpe : le clip ne se voit qu'à travers une forme, qui peut suivre ce qui bouge dans le plan
+            card(ui, "Découpe", &mut |ui| {
+                let c = &mut self.project.clips[i];
+                let (mch, want) = mask_controls(ui, &mut c.cut, "Tout le clip", "Inverser : cacher la forme plutôt que la garder", busy_smart);
+                ch |= mch;
+                if want {
+                    want_mask = Some(true);
+                }
+            });
+        }
+        if let Some(cut) = want_mask {
+            let ctx = ui.ctx().clone();
+            self.start_mask_track(i, cut, &ctx);
         }
         if self.project.clips[i].sounds() || self.project.linked(i).iter().any(|&k| self.project.clips[k].sounds()) {
             card(ui, "Son", &mut |ui| {
@@ -3096,6 +3124,51 @@ impl Editor {
         self.message = Some(crate::i18n::t("Transcription de la parole…"));
     }
 
+    /// Fait suivre au masque du clip `i` (découpe si `cut`, sinon zone d'étalonnage) ce qui bouge sous lui, sur
+    /// toute la durée du clip : vers l'avant et vers l'arrière depuis la tête de lecture
+    fn start_mask_track(&mut self, i: usize, cut: bool, ctx: &egui::Context) {
+        let c = self.project.clips[i].clone();
+        let Some(m) = (if cut { c.cut.clone() } else { c.mask.clone() }) else { return };
+        if c.kind != "video" {
+            self.message = Some(crate::i18n::t("Le suivi de masque demande un clip vidéo."));
+            return;
+        }
+        let Some((mw, mh)) = crate::montage::media_dims(&self.path, &c) else {
+            self.message = Some(crate::i18n::t("Taille de la vidéo inconnue."));
+            return;
+        };
+        let path = resolve(&self.path, &c.file);
+        // L'instant de la source sous la tête de lecture : le masque y est là où on le voit
+        let ts0 = c.src_in + (self.playhead.clamp(c.start, c.end()) - c.start) * c.speed;
+        let (cx, cy, sc) = m.pose(ts0);
+        let (from, len) = (c.src_in, (c.src_out - c.src_in).clamp(0.05, 120.0));
+        let id = c.id;
+        let (tx, rx) = std::sync::mpsc::channel();
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            const FPS: f32 = 15.0;
+            let tw = (mw as usize).min(480);
+            let r = crate::track2d::decode(&path, from, len, FPS, tw, (mw, mh)).map(|mut f| {
+                let (w, h) = (f.w as f32, f.h as f32);
+                let k0 = (((ts0 - from) * FPS).round().max(0.0) as usize).min(f.px.len() - 1);
+                let (center, hw, hh) = ([cx * w, cy * h], m.rx * sc * w, m.ry * sc * h);
+                let fwd = crate::track2d::track_region(&crate::track2d::Frames { w: f.w, h: f.h, px: f.px[k0..].to_vec() }, center, hw, hh);
+                // Vers l'arrière : les mêmes images, à l'envers
+                f.px.truncate(k0 + 1);
+                f.px.reverse();
+                let back = crate::track2d::track_region(&f, center, hw, hh);
+                let sample = |k: usize, (q, s): ([f32; 2], f32)| (from + k as f32 / FPS, [q[0] / w, q[1] / h], sc * s);
+                let mut out: Vec<(f32, [f32; 2], f32)> = back.iter().enumerate().skip(1).rev().map(|(j, v)| sample(k0 - j, *v)).collect();
+                out.extend(fwd.iter().enumerate().map(|(j, v)| sample(k0 + j, *v)));
+                out
+            });
+            let _ = tx.send(r.map(|k| Smart::MaskTrack(id, cut, k)));
+            ctx.request_repaint();
+        });
+        self.smart_rx = Some(rx);
+        self.message = Some(crate::i18n::t("Suivi du masque…"));
+    }
+
     /// Suit le point `p` (pixels du projet, depuis le centre) dans la vidéo sous le clip `id`, pendant toute la durée du clip
     fn start_track(&mut self, id: u64, p: [f32; 2], ctx: &egui::Context) {
         let Some(i) = self.project.index(id) else { return };
@@ -3250,6 +3323,16 @@ impl Editor {
                 self.message = Some(format!("{} {n} {}", crate::i18n::t("Point suivi sur"), crate::i18n::t_mid("images")));
                 self.changed();
             }
+            Ok(Smart::MaskTrack(id, cut, samples)) => {
+                let Some(i) = self.project.index(id) else { return };
+                let c = &mut self.project.clips[i];
+                if let Some(m) = if cut { c.cut.as_mut() } else { c.mask.as_mut() } {
+                    // Le masque garde sa place à la tête de lecture : le suivi est exprimé autour de son centre
+                    m.set_track(&samples);
+                    self.message = Some(format!("{} {} {}", crate::i18n::t("Masque suivi sur"), samples.len(), crate::i18n::t_mid("images")));
+                    self.changed();
+                }
+            }
             Ok(Smart::Synced(ids, lags)) => {
                 let n = self.project.sync_clips(&ids, &lags);
                 self.message = Some(format!("{n} {}", crate::i18n::t_mid("prises calées au son")));
@@ -3270,4 +3353,68 @@ impl Editor {
             }
         }
     }
+}
+
+/// Les réglages d'un masque de clip (zone d'étalonnage ou découpe) : forme, inversion, suivi, place et bord.
+/// Rend (changé, suivi demandé).
+fn mask_controls(ui: &mut egui::Ui, mask: &mut Option<crate::montage::GradeMask>, all: &str, invert_tip: &str, busy: bool) -> (bool, bool) {
+    use crate::montage::GradeMask;
+    let p = crate::theme::pal();
+    let (mut ch, mut want) = (false, false);
+    let chip = |ui: &mut egui::Ui, label: &str, on: bool| ui.add(egui::Button::new(RichText::new(label).size(12.0).color(if on { p.text } else { p.muted })).fill(if on { p.selection } else { Color32::TRANSPARENT }).stroke(Stroke::new(1.0, p.line)).corner_radius(12).min_size(vec2(0.0, 24.0))).clicked();
+    ui.horizontal(|ui| {
+        let (lr, _) = ui.allocate_exact_size(vec2(72.0, 20.0), Sense::hover());
+        ui.painter().text(lr.left_center(), egui::Align2::LEFT_CENTER, crate::i18n::t("Zone"), egui::FontId::proportional(12.0), p.muted);
+        ui.spacing_mut().item_spacing.x = 4.0;
+        if chip(ui, &crate::i18n::t(all), mask.is_none()) && mask.is_some() {
+            *mask = None;
+            ch = true;
+        }
+        for (shape, icon, tip) in [(0u8, crate::lucide::CIRCLE_DASHED, "Ellipse"), (1, crate::lucide::SQUARE_DASHED, "Rectangle"), (2, crate::lucide::HEXAGON, "Forme libre : glisse ses sommets sur le moniteur")] {
+            let on = mask.as_ref().is_some_and(|m| m.shape == shape);
+            let b = egui::Button::new(RichText::new(icon).size(13.0)).selected(on).min_size(vec2(24.0, 22.0));
+            if ui.add(b).on_hover_text(crate::i18n::t(tip)).clicked() && !on {
+                let m = mask.get_or_insert_with(GradeMask::default);
+                m.shape = shape;
+                if shape == 2 && m.points.len() < 3 {
+                    m.points = GradeMask::starter_points();
+                }
+                ch = true;
+            }
+        }
+    });
+    let Some(m) = mask.as_mut() else { return (ch, want) };
+    ui.horizontal(|ui| {
+        let (lr, _) = ui.allocate_exact_size(vec2(72.0, 20.0), Sense::hover());
+        ui.painter().text(lr.left_center(), egui::Align2::LEFT_CENTER, crate::i18n::t("Suivi"), egui::FontId::proportional(12.0), p.muted);
+        ui.spacing_mut().item_spacing.x = 4.0;
+        let b = egui::Button::new(RichText::new(crate::lucide::CROSSHAIR).size(13.0)).min_size(vec2(24.0, 22.0));
+        if ui.add_enabled(!busy, b).on_hover_text(crate::i18n::t("Suivre : le masque suit ce qui bouge sous lui dans le plan, sur toute la durée du clip (place-le d'abord à la tête de lecture)")).clicked() {
+            want = true;
+        }
+        if busy {
+            ui.spinner();
+        }
+        if !m.track.is_empty() {
+            ui.label(RichText::new(format!("{} {}", m.track.len(), crate::i18n::t_mid("clés"))).size(11.5).color(p.muted));
+            if ui.add(egui::Button::new(RichText::new(crate::lucide::X).size(12.0)).min_size(vec2(22.0, 22.0))).on_hover_text(crate::i18n::t("Retirer le suivi : le masque redevient immobile")).clicked() {
+                m.track.clear();
+                ch = true;
+            }
+        }
+        let b = egui::Button::new(RichText::new(crate::lucide::FLIP_HORIZONTAL_2).size(13.0)).selected(m.invert).min_size(vec2(24.0, 22.0));
+        if ui.add(b).on_hover_text(crate::i18n::t(invert_tip)).clicked() {
+            m.invert ^= true;
+            ch = true;
+        }
+    });
+    for (label, v, r) in [("Centre X", &mut m.cx, 0.0..=1.0), ("Centre Y", &mut m.cy, 0.0..=1.0), ("Largeur", &mut m.rx, 0.02..=1.0), ("Hauteur", &mut m.ry, 0.02..=1.0), ("Adoucir", &mut m.feather, 0.0..=1.0)] {
+        ui.horizontal(|ui| {
+            let (lr, _) = ui.allocate_exact_size(vec2(72.0, 20.0), Sense::hover());
+            ui.painter().text(lr.left_center(), egui::Align2::LEFT_CENTER, crate::i18n::t(label), egui::FontId::proportional(12.0), p.muted);
+            ui.spacing_mut().slider_width = (ui.available_width() - 56.0).max(60.0);
+            ch |= ui.add(egui::Slider::new(v, r).max_decimals(2)).changed();
+        });
+    }
+    (ch, want)
 }

@@ -220,6 +220,8 @@ enum Smart {
     Subtitles(Vec<crate::transcribe::Cue>),
     /// Suivi de mouvement : les clés de placement du clip (son identifiant)
     Track(u64, Vec<crate::montage::PoseKey>),
+    /// Suivi d'un masque du clip (découpe si vrai) : instant de la source, centre (fraction de l'image), échelle
+    MaskTrack(u64, bool, Vec<(f32, [f32; 2], f32)>),
     /// Version 9:16 recadrée, enregistrée : à ouvrir
     Vertical(std::path::PathBuf),
     /// Multicam : décalages des prises par rapport à la première

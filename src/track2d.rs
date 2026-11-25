@@ -110,9 +110,100 @@ pub fn track(f: &Frames, p0: [f32; 2], r: i32, s: i32) -> Vec<[f32; 2]> {
     out
 }
 
+/// Suit une zone (centre `c`, demi-largeur `hw`, demi-hauteur `hh`, en pixels de la première image) : pour
+/// chaque image, son centre et son échelle (1 au départ). Plusieurs motifs de la zone sont suivis, les mieux
+/// texturés ; leur déplacement médian donne le centre, leur écartement l'échelle : un motif perdu ne fausse rien.
+pub fn track_region(f: &Frames, c: [f32; 2], hw: f32, hh: f32) -> Vec<([f32; 2], f32)> {
+    let Some(first) = f.px.first() else { return vec![] };
+    let r = ((hw.min(hh) * 0.35) as i32).clamp(4, 10);
+    // Neuf candidats sur une grille dans la zone ; on garde les cinq qui ont le plus de relief
+    let mut cands: Vec<([f32; 2], f32)> = vec![];
+    for gy in -1..=1 {
+        for gx in -1..=1 {
+            let q = [c[0] + gx as f32 * hw * 0.55, c[1] + gy as f32 * hh * 0.55];
+            if q[0] < r as f32 || q[1] < r as f32 || q[0] > f.w as f32 - r as f32 - 1.0 || q[1] > f.h as f32 - r as f32 - 1.0 {
+                continue;
+            }
+            let mut v = vec![];
+            for dy in -r..=r {
+                for dx in -r..=r {
+                    v.push(at(first, f.w, f.h, q[0] + dx as f32, q[1] + dy as f32));
+                }
+            }
+            let m = v.iter().sum::<f32>() / v.len() as f32;
+            cands.push((q, v.iter().map(|x| (x - m) * (x - m)).sum::<f32>() / v.len() as f32));
+        }
+    }
+    cands.sort_by(|a, b| b.1.total_cmp(&a.1));
+    cands.truncate(5);
+    if cands.is_empty() {
+        cands.push((c, 0.0));
+    }
+    let tracks: Vec<Vec<[f32; 2]>> = {
+        use rayon::prelude::*;
+        cands.par_iter().map(|(q, _)| track(f, *q, r, 12)).collect()
+    };
+    let median = |v: &mut Vec<f32>| -> f32 {
+        v.sort_by(|a, b| a.total_cmp(b));
+        if v.is_empty() { 0.0 } else { v[v.len() / 2] }
+    };
+    (0..f.px.len())
+        .map(|k| {
+            // Échelle : le rapport des distances entre motifs, maintenant et au départ
+            let mut ratios = vec![];
+            for a in 0..tracks.len() {
+                for b in a + 1..tracks.len() {
+                    let d0 = (tracks[a][0][0] - tracks[b][0][0]).hypot(tracks[a][0][1] - tracks[b][0][1]);
+                    let d1 = (tracks[a][k][0] - tracks[b][k][0]).hypot(tracks[a][k][1] - tracks[b][k][1]);
+                    if d0 > 4.0 {
+                        ratios.push(d1 / d0);
+                    }
+                }
+            }
+            let s = if ratios.is_empty() { 1.0 } else { median(&mut ratios).clamp(0.25, 4.0) };
+            // Centre : chaque motif dit où il le voit (son décalage au centre grandit avec l'échelle)
+            let mut xs: Vec<f32> = tracks.iter().map(|t| t[k][0] - (t[0][0] - c[0]) * s).collect();
+            let mut ys: Vec<f32> = tracks.iter().map(|t| t[k][1] - (t[0][1] - c[1]) * s).collect();
+            ([median(&mut xs), median(&mut ys)], s)
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn suit_une_zone_qui_grandit() {
+        // Un motif texturé qui glisse de (1,5 ; 1) px par image et grandit de 1 % par image, sur un fond uni
+        let (w, h) = (200usize, 150usize);
+        let tex = |u: f32, v: f32| -> f32 {
+            // Taches lisses, sans répétition proche
+            128.0 + 60.0 * (u * 0.31).sin() * (v * 0.27).cos() + 50.0 * ((u * 0.11 + v * 0.17).sin()) + 30.0 * ((u * 0.07 - v * 0.19).cos())
+        };
+        let mut px = vec![];
+        for k in 0..16 {
+            let (cx, cy, s) = (70.0 + 1.5 * k as f32, 60.0 + k as f32, 1.0 + 0.01 * k as f32);
+            let mut img = vec![40u8; w * h];
+            for y in 0..h {
+                for x in 0..w {
+                    let (u, v) = ((x as f32 - cx) / s, (y as f32 - cy) / s);
+                    if u.abs() < 34.0 && v.abs() < 28.0 {
+                        img[y * w + x] = tex(u, v).clamp(0.0, 255.0) as u8;
+                    }
+                }
+            }
+            px.push(img);
+        }
+        let f = Frames { w, h, px };
+        let out = track_region(&f, [70.0, 60.0], 26.0, 22.0);
+        assert_eq!(out.len(), 16);
+        assert_eq!(out[0], ([70.0, 60.0], 1.0));
+        let (c, s) = out[15];
+        assert!((c[0] - 92.5).abs() < 1.5 && (c[1] - 75.0).abs() < 1.5, "{c:?}");
+        assert!((s - 1.15).abs() < 0.04, "{s}");
+        assert!(track_region(&Frames { w, h, px: vec![] }, [10.0, 10.0], 5.0, 5.0).is_empty());
+    }
 
     #[test]
     fn suit_un_carre() {

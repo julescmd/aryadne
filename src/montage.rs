@@ -99,6 +99,9 @@ pub struct Clip {
     /// Masque d'étalonnage : la correction (roues, lumière, contraste, saturation) seulement dans une ellipse
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mask: Option<GradeMask>,
+    /// Découpe : le clip ne se voit qu'à travers ce masque (ellipse, rectangle, forme), qui peut suivre le plan
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cut: Option<GradeMask>,
     /// Identifiant stable dans le montage (la sélection survit aux suppressions et aux coupes)
     #[serde(default)]
     pub id: u64,
@@ -187,8 +190,18 @@ pub fn sync_lag(a: &[f32], b: &[f32], max_s: f32) -> f32 {
     best as f32 / 100.0
 }
 
-/// Zone d'un masque d'étalonnage, en fraction de l'image du clip
+/// Une position suivie d'un masque : instant dans la source (s), décalage du centre (fraction de l'image), échelle
 #[derive(Clone, Copy, PartialEq, Serialize, Deserialize, Debug)]
+pub struct MaskKey {
+    pub t: f32,
+    pub dx: f32,
+    pub dy: f32,
+    pub s: f32,
+}
+
+/// Un masque sur l'image d'un clip, en fraction de cette image : zone d'étalonnage (la correction seulement
+/// dedans) ou découpe du clip. Il peut suivre ce qui bouge dans le plan (`track`).
+#[derive(Clone, PartialEq, Serialize, Deserialize, Debug)]
 pub struct GradeMask {
     pub cx: f32,
     pub cy: f32,
@@ -196,30 +209,166 @@ pub struct GradeMask {
     pub ry: f32,
     /// Adoucissement du bord (0 : net, 1 : tout en dégradé)
     pub feather: f32,
-    /// Corriger hors de l'ellipse plutôt que dedans
+    /// Agir hors de la forme plutôt que dedans
     #[serde(default)]
     pub invert: bool,
+    /// 0 ellipse, 1 rectangle, 2 forme libre (`points`)
+    #[serde(default, skip_serializing_if = "is_zero_u8")]
+    pub shape: u8,
+    /// Forme libre : ses sommets dans le cadre du masque (-1..1 sur chaque axe)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub points: Vec<[f32; 2]>,
+    /// Suivi : où est le masque au fil de la source (vide : immobile)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub track: Vec<MaskKey>,
+}
+
+fn is_zero_u8(v: &u8) -> bool {
+    *v == 0
 }
 
 impl Default for GradeMask {
     fn default() -> GradeMask {
-        GradeMask { cx: 0.5, cy: 0.5, rx: 0.3, ry: 0.35, feather: 0.4, invert: false }
+        GradeMask { cx: 0.5, cy: 0.5, rx: 0.3, ry: 0.35, feather: 0.4, invert: false, shape: 0, points: vec![], track: vec![] }
     }
 }
 
 impl GradeMask {
-    /// L'opacité du masque (0..1) au point (u, v) de l'image
-    pub fn at(&self, u: f32, v: f32) -> f32 {
-        let d = (((u - self.cx) / self.rx.max(1e-3)).powi(2) + ((v - self.cy) / self.ry.max(1e-3)).powi(2)).sqrt();
-        let a = ((1.0 - d) / self.feather.max(1e-3)).clamp(0.0, 1.0);
+    /// Les sommets d'une forme libre neuve : un octogone, à déformer
+    pub fn starter_points() -> Vec<[f32; 2]> {
+        (0..8).map(|k| { let a = k as f32 / 8.0 * std::f32::consts::TAU; [a.cos(), a.sin()] }).collect()
+    }
+
+    /// Centre et échelle du masque à l'instant `ts` de la source
+    pub fn pose(&self, ts: f32) -> (f32, f32, f32) {
+        let k = &self.track;
+        let (dx, dy, s) = match k.len() {
+            0 => (0.0, 0.0, 1.0),
+            _ if ts <= k[0].t => (k[0].dx, k[0].dy, k[0].s),
+            n if ts >= k[n - 1].t => (k[n - 1].dx, k[n - 1].dy, k[n - 1].s),
+            _ => {
+                let i = k.partition_point(|a| a.t <= ts).clamp(1, k.len() - 1);
+                let (a, b) = (k[i - 1], k[i]);
+                let f = (ts - a.t) / (b.t - a.t).max(1e-6);
+                (a.dx + (b.dx - a.dx) * f, a.dy + (b.dy - a.dy) * f, a.s + (b.s - a.s) * f)
+            }
+        };
+        (self.cx + dx, self.cy + dy, s)
+    }
+
+    /// L'opacité (0..1) de la forme au point (x, y) de son cadre (-1..1), sans l'inversion
+    pub fn unit(&self, x: f32, y: f32) -> f32 {
+        let f = self.feather.max(1e-3);
+        match self.shape {
+            1 => ((1.0 - x.abs().max(y.abs())) / f).clamp(0.0, 1.0),
+            2 if self.points.len() >= 3 => {
+                // Dedans (règle pair-impair), et à quelle distance du bord
+                let n = self.points.len();
+                let (mut inside, mut d) = (false, f32::MAX);
+                for i in 0..n {
+                    let (a, b) = (self.points[i], self.points[(i + 1) % n]);
+                    if (a[1] > y) != (b[1] > y) && x < a[0] + (y - a[1]) / (b[1] - a[1]) * (b[0] - a[0]) {
+                        inside = !inside;
+                    }
+                    let (ex, ey) = (b[0] - a[0], b[1] - a[1]);
+                    let t = (((x - a[0]) * ex + (y - a[1]) * ey) / (ex * ex + ey * ey).max(1e-9)).clamp(0.0, 1.0);
+                    d = d.min((x - a[0] - ex * t).hypot(y - a[1] - ey * t));
+                }
+                if inside { (d / f).clamp(0.0, 1.0) } else { 0.0 }
+            }
+            _ => ((1.0 - x.hypot(y)) / f).clamp(0.0, 1.0),
+        }
+    }
+
+    /// L'opacité du masque (0..1) au point (u, v) de l'image, à l'instant `ts` de la source
+    pub fn at_time(&self, u: f32, v: f32, ts: f32) -> f32 {
+        let (cx, cy, s) = self.pose(ts);
+        let a = self.unit((u - cx) / (self.rx * s).max(1e-3), (v - cy) / (self.ry * s).max(1e-3));
         if self.invert { 1.0 - a } else { a }
     }
 
-    /// L'expression `geq` de l'alpha (0..255)
+    /// L'opacité du masque à sa place de départ
+    pub fn at(&self, u: f32, v: f32) -> f32 {
+        let a = self.unit((u - self.cx) / self.rx.max(1e-3), (v - self.cy) / self.ry.max(1e-3));
+        if self.invert { 1.0 - a } else { a }
+    }
+
+    /// Le contour du masque à l'instant `ts`, en fraction de l'image (pour le dessiner sur le moniteur)
+    pub fn outline(&self, ts: f32, inset: f32) -> Vec<[f32; 2]> {
+        let (cx, cy, s) = self.pose(ts);
+        let unit: Vec<[f32; 2]> = match self.shape {
+            1 => vec![[-1.0, -1.0], [1.0, -1.0], [1.0, 1.0], [-1.0, 1.0]],
+            2 if self.points.len() >= 3 => self.points.clone(),
+            _ => (0..64).map(|j| { let a = j as f32 / 64.0 * std::f32::consts::TAU; [a.cos(), a.sin()] }).collect(),
+        };
+        unit.iter().map(|q| [cx + q[0] * inset * self.rx * s, cy + q[1] * inset * self.ry * s]).collect()
+    }
+
+    /// La forme dessinée dans son cadre (blanc dedans, bord adouci), que ffmpeg déplace et agrandit
+    pub fn tile(&self) -> image::GrayImage {
+        const S: u32 = 128;
+        image::GrayImage::from_fn(S, S, |x, y| image::Luma([(self.unit((x as f32 + 0.5) / S as f32 * 2.0 - 1.0, (y as f32 + 0.5) / S as f32 * 2.0 - 1.0) * 255.0).round() as u8]))
+    }
+
+    /// Le fichier de la forme (écrit une fois, retrouvé par son contenu)
+    pub fn tile_file(&self) -> Option<PathBuf> {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        (self.shape, self.feather.to_bits(), self.points.iter().flat_map(|q| [q[0].to_bits(), q[1].to_bits()]).collect::<Vec<_>>()).hash(&mut h);
+        let out = dirs::cache_dir().unwrap_or_else(std::env::temp_dir).join("aryadne").join("masques").join(format!("{:016x}.png", h.finish()));
+        if !out.exists() {
+            std::fs::create_dir_all(out.parent()?).ok()?;
+            let tmp = out.with_extension(format!("{}.tmp.png", std::process::id()));
+            self.tile().save(&tmp).ok()?;
+            std::fs::rename(&tmp, &out).ok()?;
+        }
+        Some(out)
+    }
+
+    /// Pose le suivi : des positions (instant de la source, centre en fraction de l'image, échelle), allégées
+    /// des clés qu'une ligne droite entre leurs voisines donne déjà
+    pub fn set_track(&mut self, samples: &[(f32, [f32; 2], f32)]) {
+        let rows: Vec<Vec<f32>> = samples.iter().map(|(_, c, s)| vec![c[0], c[1], *s]).collect();
+        self.track = crate::lottie::simplify(&rows, &[0.004, 0.004, 0.02]).into_iter().map(|k| { let (t, c, s) = samples[k]; MaskKey { t, dx: c[0] - self.cx, dy: c[1] - self.cy, s } }).collect();
+        if self.track.len() < 2 {
+            self.track.clear();
+        }
+    }
+
+    /// L'expression `geq` de l'alpha (0..255) d'une ellipse immobile (quand ffmpeg n'a pas `scale2ref`)
     pub fn geq_alpha(&self) -> String {
         let a = format!("clip((1-hypot((X/W-{:.4})/{:.4},(Y/H-{:.4})/{:.4}))/{:.4},0,1)", self.cx, self.rx.max(1e-3), self.cy, self.ry.max(1e-3), self.feather.max(1e-3));
         if self.invert { format!("255*(1-{a})") } else { format!("255*{a}") }
     }
+
+    /// Les filtres ffmpeg qui fabriquent le masque en petit (256 × 256, gris), sous l'étiquette `[tag]` :
+    /// la forme est déplacée et agrandie image par image, pas pixel par pixel. `tl` change un instant de la
+    /// source en instant du rendu ; `fps` et `dur` : cadence et durée du rendu. None sans `scale2ref`.
+    pub fn chain(&self, tag: &str, tl: &dyn Fn(f32) -> f32, fps: f32, dur: f32) -> Option<String> {
+        if !has_scale2ref() {
+            return None;
+        }
+        let tile = self.tile_file()?.to_string_lossy().replace('\\', "/").replace(':', "\\:").replace('\'', "\\'");
+        let key = |f: &dyn Fn(&MaskKey) -> f32, base: f32| -> String {
+            if self.track.is_empty() { format!("{base:.4}") } else { expr(&self.track.iter().map(|k| (tl(k.t), f(k))).collect::<Vec<_>>(), "t") }
+        };
+        let (cx, cy, sc) = (key(&|k| self.cx + k.dx, self.cx), key(&|k| self.cy + k.dy, self.cy), key(&|k| k.s, 1.0));
+        let (bw, bh) = (512.0 * self.rx.max(1e-3), 512.0 * self.ry.max(1e-3));
+        let neg = if self.invert { ",negate" } else { "" };
+        Some(format!(
+            "movie='{tile}':loop=0,setpts=N/({fps}*TB),format=gray,scale=w='max(2,{bw:.2}*({sc}))':h='max(2,{bh:.2}*({sc}))':eval=frame[{tag}t];color=c=black:s=256x256:r={fps}:d={dur:.3},format=gray,lut=y=0[{tag}b];[{tag}b][{tag}t]overlay=x='256*({cx})-w/2':y='256*({cy})-h/2':eval=frame:shortest=1,format=gray{neg}[{tag}];"
+        ))
+    }
+}
+
+/// ffmpeg a-t-il le filtre `scale2ref` (qui met le masque à la taille du clip) ? Demandé une seule fois.
+pub fn has_scale2ref() -> bool {
+    static HAS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *HAS.get_or_init(|| {
+        ffmpeg::find("ffmpeg")
+            .and_then(|ff| ffmpeg::command(ff).args(["-hide_banner", "-filters"]).output().ok())
+            .is_some_and(|o| String::from_utf8_lossy(&o.stdout).contains(" scale2ref "))
+    })
 }
 
 pub fn colorbalance(w: &[[f32; 3]; 3]) -> String {
@@ -542,7 +691,8 @@ impl Clip {
     /// Clip vide pour les tests
     #[cfg(test)]
     pub fn test() -> Clip {
-        Clip { name: "c".into(), file: "c.mp4".into(), kind: "video".into(), track: 0, start: 0.0, src_in: 0.0, src_out: 1.0, media: 10.0, has_audio: false, speed: 1.0, opacity: 1.0, volume: 1.0, fade_in: 0.0, fade_out: 0.0, brightness: 0.0, contrast: 1.0, saturation: 1.0, wheels: [[0.0; 3]; 3], x: 0.0, y: 0.0, scale: 1.0, grade: String::new(), keys: vec![], text: String::new(), text_size: 72.0, text_color: [255; 3], font: String::new(), outline: false, xfade: 0.0, audio: false, link: 0, fx: vec![], stab: 0.0, mask: None, id: 0 }
+        Clip { name: "c".into(), file: "c.mp4".into(), kind: "video".into(), track: 0, start: 0.0, src_in: 0.0, src_out: 1.0, media: 10.0, has_audio: false, speed: 1.0, opacity: 1.0, volume: 1.0, fade_in: 0.0, fade_out: 0.0, brightness: 0.0, contrast: 1.0, saturation: 1.0, wheels: [[0.0; 3]; 3], x: 0.0, y: 0.0, scale: 1.0, grade: String::new(), keys: vec![], text: String::new(), text_size: 72.0, text_color: [255; 3], font: String::new(), outline: false, xfade: 0.0, audio: false, link: 0, fx: vec![], stab: 0.0, mask: None,
+            cut: None, id: 0 }
     }
 
     /// Placement, taille et opacité à l'instant `t` de la timeline, d'après les clés (None sans clé).
@@ -948,6 +1098,7 @@ impl Project {
             fx: vec![],
             stab: 0.0,
             mask: None,
+            cut: None,
             id: 0,
         });
         self.ensure_ids();
@@ -1587,6 +1738,7 @@ pub fn import(project: &Path, media: &Path, track: usize, start: f32) -> Result<
         fx: vec![],
         stab: 0.0,
         mask: None,
+            cut: None,
         id: 0,
     })
 }
@@ -1663,12 +1815,19 @@ pub fn graph(p: &Project, project: &Path, from: f32, w: u32, h: u32, realtime: b
             if c.brightness != 0.0 || c.contrast != 1.0 || c.saturation != 1.0 {
                 grade += &format!(",eq=brightness={:.3}:contrast={:.3}:saturation={:.3}", c.brightness.clamp(-1.0, 1.0), c.contrast.clamp(0.0, 4.0), c.saturation.clamp(0.0, 3.0));
             }
-            match c.mask {
-                // Masque : une copie corrigée, découpée en ellipse, posée sur l'image d'origine
-                Some(m) if !grade.is_empty() => {
-                    filter += &format!(",format=rgba,split=2[gm{n}a][gm{n}b];[gm{n}b]null{grade},format=rgba,geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='{}'[gm{n}c];[gm{n}a][gm{n}c]overlay=format=auto", m.geq_alpha());
-                }
+            // Un instant de la source du clip, en instant du rendu (pour les masques qui suivent le plan)
+            let tl = |ts: f32| st + (ts - src_in) / c.speed.max(0.01);
+            match &c.mask {
+                // Masque : une copie corrigée, découpée selon la forme, posée sur l'image d'origine
+                Some(m) if !grade.is_empty() => match m.chain(&format!("gm{n}k"), &tl, p.fps, en) {
+                    Some(mk) => filter += &format!(",format=rgba,split=2[gm{n}a][gm{n}b];{mk}[gm{n}b]null{grade},format=rgba[gm{n}g];[gm{n}k][gm{n}g]scale2ref[gm{n}k2][gm{n}g2];[gm{n}g2][gm{n}k2]alphamerge[gm{n}c];[gm{n}a][gm{n}c]overlay=format=auto"),
+                    None => filter += &format!(",format=rgba,split=2[gm{n}a][gm{n}b];[gm{n}b]null{grade},format=rgba,geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='{}'[gm{n}c];[gm{n}a][gm{n}c]overlay=format=auto", m.geq_alpha()),
+                },
                 _ => filter += &grade,
+            }
+            // Découpe : le clip ne garde que ce que son masque laisse voir
+            if let Some(mk) = c.cut.as_ref().and_then(|m| m.chain(&format!("ct{n}k"), &tl, p.fps, en)) {
+                filter += &format!(",format=rgba[ct{n}a];{mk}[ct{n}k][ct{n}a]scale2ref[ct{n}k2][ct{n}a2];[ct{n}a2][ct{n}k2]alphamerge");
             }
             filter += ",format=rgba";
             if animated {
@@ -2054,7 +2213,8 @@ mod tests {
     #[test]
     fn coupe_et_durees() {
         let mut p = Project::default();
-        let c = Clip { name: "a".into(), file: "a.mp4".into(), kind: "video".into(), track: 1, start: 2.0, src_in: 1.0, src_out: 9.0, media: 10.0, has_audio: true, speed: 2.0, opacity: 1.0, volume: 1.0, fade_in: 0.5, fade_out: 0.5, brightness: 0.0, contrast: 1.0, saturation: 1.0, wheels: [[0.0; 3]; 3], x: 0.0, y: 0.0, scale: 1.0, grade: String::new(), keys: vec![], text: String::new(), text_size: 72.0, text_color: [255; 3], font: String::new(), outline: false, xfade: 0.0, audio: false, link: 0, fx: vec![], stab: 0.0, mask: None, id: 0 };
+        let c = Clip { name: "a".into(), file: "a.mp4".into(), kind: "video".into(), track: 1, start: 2.0, src_in: 1.0, src_out: 9.0, media: 10.0, has_audio: true, speed: 2.0, opacity: 1.0, volume: 1.0, fade_in: 0.5, fade_out: 0.5, brightness: 0.0, contrast: 1.0, saturation: 1.0, wheels: [[0.0; 3]; 3], x: 0.0, y: 0.0, scale: 1.0, grade: String::new(), keys: vec![], text: String::new(), text_size: 72.0, text_color: [255; 3], font: String::new(), outline: false, xfade: 0.0, audio: false, link: 0, fx: vec![], stab: 0.0, mask: None,
+            cut: None, id: 0 };
         p.clips.push(c);
         // 8 s de source à vitesse 2 : 4 s sur la timeline
         assert_eq!(p.clips[0].len(), 4.0);
@@ -2489,8 +2649,79 @@ mod mask_tests {
         assert_eq!(m.at(0.0, 0.0), 0.0);
         let edge = m.at(0.5 + 0.3 * 0.75, 0.5);
         assert!(edge > 0.3 && edge < 0.7, "{edge}");
-        assert_eq!(GradeMask { invert: true, ..m }.at(0.5, 0.5), 0.0);
+        assert_eq!(GradeMask { invert: true, ..m.clone() }.at(0.5, 0.5), 0.0);
         assert!(m.geq_alpha().starts_with("255*clip("));
+    }
+
+    #[test]
+    fn formes_et_suivi_du_masque() {
+        // Rectangle : le coin est dedans (pas dans l'ellipse) ; forme libre : un triangle
+        let r = GradeMask { shape: 1, feather: 0.01, ..GradeMask::default() };
+        assert_eq!(r.at(0.5 + 0.28, 0.5 + 0.33), 1.0);
+        assert_eq!(GradeMask { shape: 0, ..r.clone() }.at(0.5 + 0.28, 0.5 + 0.33), 0.0);
+        let t = GradeMask { shape: 2, points: vec![[-1.0, 1.0], [1.0, 1.0], [0.0, -1.0]], feather: 0.01, ..GradeMask::default() };
+        assert_eq!(t.at(0.5, 0.6), 1.0);
+        assert_eq!(t.at(0.5 - 0.25, 0.5 - 0.3), 0.0, "hors du triangle, mais dans son cadre");
+        assert_eq!(GradeMask::starter_points().len(), 8);
+        // Suivi : le masque glisse vers la droite et grossit ; les clés en ligne droite se retirent
+        let mut m = GradeMask { feather: 0.01, rx: 0.1, ry: 0.1, cx: 0.3, cy: 0.5, ..GradeMask::default() };
+        let samples: Vec<(f32, [f32; 2], f32)> = (0..=20).map(|k| (2.0 + k as f32 * 0.1, [0.3 + 0.02 * k as f32, 0.5], 1.0 + 0.025 * k as f32)).collect();
+        m.set_track(&samples);
+        assert_eq!(m.track.len(), 2);
+        assert_eq!(m.pose(0.0), (0.3, 0.5, 1.0));
+        let (cx, _, s) = m.pose(3.0);
+        assert!((cx - 0.5).abs() < 1e-4 && (s - 1.25).abs() < 1e-4);
+        assert_eq!(m.at_time(0.7, 0.5, 4.0), 1.0);
+        assert_eq!(m.at_time(0.7, 0.5, 2.0), 0.0);
+        assert_eq!(m.outline(4.0, 1.0).len(), 64);
+        // La forme dessinée : pleine au centre, vide au coin (ellipse)
+        let tile = m.tile();
+        assert_eq!((tile.get_pixel(64, 64).0[0], tile.get_pixel(2, 2).0[0]), (255, 0));
+        // Un vieux fichier (ellipse seule) se relit, et une ellipse simple s'écrit comme avant
+        let old: GradeMask = serde_json::from_str(r#"{"cx":0.5,"cy":0.5,"rx":0.3,"ry":0.35,"feather":0.4}"#).unwrap();
+        assert_eq!(old, GradeMask::default());
+        assert!(!serde_json::to_string(&old).unwrap().contains("track"));
+    }
+
+    /// Une image du rendu, si ffmpeg est là
+    fn shot(p: &Project, t: f32) -> Option<image::RgbaImage> {
+        ffmpeg::find("ffmpeg")?;
+        Some(frame(p, std::path::Path::new("/tmp/essai.arymontage"), t, 160).unwrap())
+    }
+
+    #[test]
+    fn masque_suivi_dans_le_rendu() {
+        if !has_scale2ref() {
+            return;
+        }
+        // Une image blanche de 2 s ; l'étalonnage (noir) n'agit que dans un disque qui va de gauche à droite
+        let dir = std::env::temp_dir().join(format!("aryadne-masque-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let png = dir.join("blanc.png");
+        image::RgbaImage::from_pixel(320, 180, image::Rgba([255, 255, 255, 255])).save(&png).unwrap();
+        let mut p = Project::default();
+        (p.width, p.height, p.fps) = (320, 180, 10.0);
+        let mut m = GradeMask { cx: 0.25, cy: 0.5, rx: 0.12, ry: 0.2, feather: 0.05, ..GradeMask::default() };
+        m.set_track(&[(0.0, [0.25, 0.5], 1.0), (2.0, [0.75, 0.5], 1.0)]);
+        let mut c = Clip::test();
+        (c.file, c.kind, c.src_out, c.media) = (png.to_string_lossy().to_string(), "image".into(), 2.0, 2.0);
+        c.brightness = -1.0;
+        c.mask = Some(m.clone());
+        p.clips = vec![c];
+        let lum = |img: &image::RgbaImage, u: f32| img.get_pixel((u * img.width() as f32) as u32, img.height() / 2).0[0];
+        let Some(a) = shot(&p, 0.05) else { return };
+        // Au début le disque sombre est à gauche, à la fin il est à droite
+        assert!(lum(&a, 0.25) < 60 && lum(&a, 0.75) > 200, "{} {}", lum(&a, 0.25), lum(&a, 0.75));
+        let b = shot(&p, 1.9).unwrap();
+        assert!(lum(&b, 0.25) > 200 && lum(&b, 0.74) < 60, "{} {}", lum(&b, 0.25), lum(&b, 0.74));
+        // Découpe en rectangle : le clip ne se voit que dans la moitié gauche, le reste laisse le fond noir
+        let c = &mut p.clips[0];
+        c.brightness = 0.0;
+        c.mask = None;
+        c.cut = Some(GradeMask { cx: 0.25, cy: 0.5, rx: 0.25, ry: 0.5, feather: 0.01, shape: 1, ..GradeMask::default() });
+        let d = shot(&p, 1.0).unwrap();
+        assert!(lum(&d, 0.2) > 250 && lum(&d, 0.8) < 4, "{} {}", lum(&d, 0.2), lum(&d, 0.8));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 
