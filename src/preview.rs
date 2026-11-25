@@ -282,6 +282,32 @@ fn table(ui: &mut egui::Ui, rows: &[Vec<String>], ctx: &Ctx, out: &mut Option<Ou
 fn quote(ui: &mut egui::Ui, body: &[&str], ctx: &Ctx, out: &mut Option<Out>) {
     let p = theme::pal();
     let callout = body.first().and_then(|l| CALLOUT.captures(l));
+    // « > [!columns] » : des colonnes côte à côte, séparées par des lignes « --- »
+    if callout.as_ref().is_some_and(|c| matches!(c[1].to_lowercase().as_str(), "columns" | "colonnes" | "multi-column")) {
+        let mut cols: Vec<Vec<&str>> = vec![vec![]];
+        for l in &body[1..] {
+            if l.trim() == "---" {
+                cols.push(vec![]);
+            } else {
+                cols.last_mut().unwrap().push(l);
+            }
+        }
+        cols.retain(|c| c.iter().any(|l| !l.trim().is_empty()));
+        if cols.is_empty() {
+            return;
+        }
+        ui.add_space(4.0);
+        ui.columns(cols.len(), |uis| {
+            for (k, c) in cols.iter().enumerate() {
+                // Seuls les liens passent (les numéros de ligne d'une colonne ne sont pas ceux de la note)
+                if let Some(o @ Out::Open(_)) = show_doc(&mut uis[k], &c.join("\n"), ctx.existing, ctx.paths) {
+                    *out = Some(o);
+                }
+            }
+        });
+        ui.add_space(4.0);
+        return;
+    }
     // « [!note]- » : replié au départ ; « [!note]+ » : repliable, ouvert au départ
     let fold = callout.as_ref().map(|c| c[2].to_string()).filter(|m| !m.is_empty());
     let (color, icon, title, rest) = match &callout {
