@@ -3275,5 +3275,12 @@
   "graisse": "weight",
   "inclinaison": "slant",
   "italique": "italic",
-  "taille optique": "optical size"
+  "taille optique": "optical size",
+  "Marionnette": "Puppet",
+  "Clique sur le calque dans le moniteur pour poser des épingles, puis tire-les : l'image se plie autour": "Click the layer in the viewer to place pins, then drag them: the image bends around them",
+  "poser des épingles": "place pins",
+  "épingle(s)": "pin(s)",
+  "Remettre les épingles au repos": "Reset pins to rest",
+  "Retirer toutes les épingles": "Remove all pins",
+  "Glisser une épingle pose une clé à cet instant ; Alt+clic sur une épingle la retire.": "Dragging a pin sets a key at this time; Alt+click a pin to remove it."
 }

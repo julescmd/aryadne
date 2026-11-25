@@ -2882,15 +2882,107 @@ pub enum Effect {
     Turbulence { amount: f32, size: f32, speed: f32 },
     /// Décalage : l'image glisse et revient par l'autre bord (px par seconde en x et y)
     Offset { x: f32, y: f32 },
+    /// Marionnette : des épingles qu'on déplace, l'image se plie autour (sans se déchirer)
+    Puppet { pins: Vec<Pin> },
+}
+
+/// Une épingle de marionnette : sa place sur l'image au repos, et où elle est tirée (animable, px du calque)
+#[derive(Clone, PartialEq, Serialize, Deserialize, Debug)]
+pub struct Pin {
+    pub rest: [f32; 2],
+    pub at: Track,
+}
+
+/// Déformation rigide par moindres carrés mobiles : où va le point `v` quand les points `from` vont en `to`
+pub fn mls_rigid(v: [f32; 2], from: &[[f32; 2]], to: &[[f32; 2]]) -> [f32; 2] {
+    if from.is_empty() {
+        return v;
+    }
+    let mut ws = Vec::with_capacity(from.len());
+    for p in from {
+        let d2 = (p[0] - v[0]).powi(2) + (p[1] - v[1]).powi(2);
+        if d2 < 1e-8 {
+            let i = ws.len();
+            return to[i];
+        }
+        ws.push(1.0 / d2);
+    }
+    let sw: f32 = ws.iter().sum();
+    let pc = [from.iter().zip(&ws).map(|(p, w)| p[0] * w).sum::<f32>() / sw, from.iter().zip(&ws).map(|(p, w)| p[1] * w).sum::<f32>() / sw];
+    let qc = [to.iter().zip(&ws).map(|(q, w)| q[0] * w).sum::<f32>() / sw, to.iter().zip(&ws).map(|(q, w)| q[1] * w).sum::<f32>() / sw];
+    let (mut a, mut b) = (0.0f32, 0.0f32);
+    for ((p, q), w) in from.iter().zip(to).zip(&ws) {
+        let (ph, qh) = ([p[0] - pc[0], p[1] - pc[1]], [q[0] - qc[0], q[1] - qc[1]]);
+        a += w * (ph[0] * qh[0] + ph[1] * qh[1]);
+        b += w * (ph[0] * qh[1] - ph[1] * qh[0]);
+    }
+    let th = if a.abs() + b.abs() > 1e-9 { b.atan2(a) } else { 0.0 };
+    let (c, s) = (th.cos(), th.sin());
+    let d = [v[0] - pc[0], v[1] - pc[1]];
+    [c * d[0] - s * d[1] + qc[0], s * d[0] + c * d[1] + qc[1]]
+}
+
+/// La marionnette appliquée à une image de calque (épingles à l'instant `t`)
+fn puppet(b: Bitmap, pins: &[Pin], t: f32) -> Bitmap {
+    if pins.is_empty() {
+        return b;
+    }
+    let rest: Vec<[f32; 2]> = pins.iter().map(|p| p.rest).collect();
+    let now: Vec<[f32; 2]> = pins.iter().map(|p| p.at.at(t)).collect();
+    if rest == now {
+        return b;
+    }
+    let (w, h) = (b.img.width() as usize, b.img.height() as usize);
+    // L'image grandit de ce que les épingles se déplacent (un bras levé sort du cadre d'origine)
+    let reach = rest.iter().zip(&now).map(|(a, c)| (a[0] - c[0]).hypot(a[1] - c[1])).fold(0.0f32, f32::max);
+    let pad = ((reach * b.k).ceil() as usize).min(2000);
+    let (ow, oh) = (w + pad * 2, h + pad * 2);
+    let (ox, oy) = (b.ox - pad as f32 / b.k, b.oy - pad as f32 / b.k);
+    // Carte inverse (image déformée → image au repos) calculée sur une grille, puis interpolée
+    const G: usize = 6;
+    let (gw, gh) = (ow / G + 2, oh / G + 2);
+    let grid: Vec<[f32; 2]> = (0..gw * gh)
+        .into_par_iter()
+        .map(|i| {
+            let (gx, gy) = ((i % gw * G) as f32, (i / gw * G) as f32);
+            let v = [ox + gx / b.k, oy + gy / b.k];
+            let r = mls_rigid(v, &now, &rest);
+            [(r[0] - b.ox) * b.k, (r[1] - b.oy) * b.k]
+        })
+        .collect();
+    let src = &b.img;
+    let mut out = vec![0u8; ow * oh * 4];
+    out.par_chunks_mut(ow * 4).enumerate().for_each(|(y, row)| {
+        for x in 0..ow {
+            let (gx, gy) = (x as f32 / G as f32, y as f32 / G as f32);
+            let (x0, y0) = (gx.floor() as usize, gy.floor() as usize);
+            let (fx, fy) = (gx - x0 as f32, gy - y0 as f32);
+            let g = |i: usize, j: usize| grid[(j.min(gh - 1)) * gw + i.min(gw - 1)];
+            let (a, bb, c, d) = (g(x0, y0), g(x0 + 1, y0), g(x0, y0 + 1), g(x0 + 1, y0 + 1));
+            let sx = (a[0] * (1.0 - fx) + bb[0] * fx) * (1.0 - fy) + (c[0] * (1.0 - fx) + d[0] * fx) * fy;
+            let sy = (a[1] * (1.0 - fx) + bb[1] * fx) * (1.0 - fy) + (c[1] * (1.0 - fx) + d[1] * fx) * fy;
+            let s = sample(src, sx, sy);
+            // `sample` rend des couleurs prémultipliées
+            let al = s[3];
+            if al > 0.002 {
+                for ch in 0..3 {
+                    row[x * 4 + ch] = (s[ch] / al).round().clamp(0.0, 255.0) as u8;
+                }
+                row[x * 4 + 3] = (al * 255.0).round().clamp(0.0, 255.0) as u8;
+            }
+        }
+    });
+    Bitmap { img: image::RgbaImage::from_raw(ow as u32, oh as u32, out).unwrap_or_default(), ox, oy, k: b.k }
 }
 
 impl Effect {
-    pub const ALL: [&'static str; 3] = ["Ondulation", "Turbulence", "Décalage"];
+    pub const ALL: [&'static str; 4] = ["Ondulation", "Turbulence", "Décalage", "Marionnette"];
 
     pub fn new(i: usize) -> Effect {
         match i {
             0 => Effect::Wave { amp: 12.0, length: 120.0, speed: 1.0, vertical: false },
             1 => Effect::Turbulence { amount: 20.0, size: 80.0, speed: 0.5 },
+            3 => Effect::Puppet { pins: vec![] },
             _ => Effect::Offset { x: 60.0, y: 0.0 },
         }
     }
@@ -2900,6 +2992,7 @@ impl Effect {
             Effect::Wave { .. } => Self::ALL[0],
             Effect::Turbulence { .. } => Self::ALL[1],
             Effect::Offset { .. } => Self::ALL[2],
+            Effect::Puppet { .. } => Self::ALL[3],
         }
     }
 
@@ -2908,11 +3001,15 @@ impl Effect {
         match self {
             Effect::Wave { speed, .. } | Effect::Turbulence { speed, .. } => *speed != 0.0,
             Effect::Offset { x, y } => *x != 0.0 || *y != 0.0,
+            Effect::Puppet { pins } => pins.iter().any(|p| p.at.animated()),
         }
     }
 
     /// Applique l'effet à l'image du calque (t : temps depuis le début du calque)
     fn apply(&self, b: Bitmap, t: f32) -> Bitmap {
+        if let Effect::Puppet { pins } = self {
+            return puppet(b, pins, t);
+        }
         let (w, h) = (b.img.width() as usize, b.img.height() as usize);
         if w == 0 || h == 0 {
             return b;
@@ -2947,6 +3044,7 @@ impl Effect {
                         sample(fx + dx, fy + dy, false)
                     }
                     Effect::Offset { x: vx, y: vy } => sample(fx - vx * t * k, fy - vy * t * k, true),
+                    Effect::Puppet { .. } => sample(fx, fy, false),
                 };
                 row[x * 4..x * 4 + 4].copy_from_slice(&c);
             }
@@ -3036,6 +3134,38 @@ mod varfont_tests {
         assert!(out[0] < out[1] && out[1] < out[2], "{out:?}");
         if std::env::var("ARY_DEMO").is_ok() {
             render(&c, 0.5, 0.5, &mut Cache::new(Path::new("/tmp"))).save("/tmp/varfont.png").unwrap();
+        }
+    }
+}
+#[cfg(test)]
+mod puppet_tests {
+    use super::*;
+    #[test]
+    fn marionnette() {
+        // Une épingle : translation pure ; deux épingles tournées : rotation rigide
+        assert_eq!(mls_rigid([5.0, 5.0], &[[0.0, 0.0]], &[[10.0, 0.0]]), [15.0, 5.0]);
+        let r = mls_rigid([5.0, 0.0], &[[0.0, 0.0], [10.0, 0.0]], &[[0.0, 0.0], [0.0, 10.0]]);
+        assert!((r[0]).abs() < 1e-3 && (r[1] - 5.0).abs() < 1e-3, "{r:?}");
+        // Une barre plie quand on tire son bout vers le haut
+        let mut c = Compo { layers: vec![], w: 1000, h: 600, ..Compo::default() };
+        let mut l = Layer::new("bras", Kind::Rect { w: 600.0, h: 80.0, radius: 40.0, color: [230, 160, 90] }, &c);
+        l.pos = Track::new(500.0, 400.0);
+        let mut end = Track::new(280.0, 0.0);
+        end.insert(Key { t: 0.0, v: [280.0, 0.0], ease: Ease::Smooth, tan: vec![] });
+        end.insert(Key { t: 1.0, v: [180.0, -260.0], ease: Ease::Smooth, tan: vec![] });
+        l.fx.push(Effect::Puppet { pins: vec![Pin { rest: [-280.0, 0.0], at: Track::new(-280.0, 0.0) }, Pin { rest: [0.0, 0.0], at: Track::new(0.0, 0.0) }, Pin { rest: [280.0, 0.0], at: end }] });
+        c.layers.push(l);
+        let mut cache = Cache::new(Path::new("/tmp"));
+        let a = render(&c, 0.0, 0.5, &mut cache);
+        let b = render(&c, 1.0, 0.5, &mut cache);
+        // Au repos, rien au-dessus de la barre ; plié, le bout monte
+        let lit = |im: &image::RgbaImage, x: u32, y: u32| im.get_pixel(x, y)[0] > 150;
+        assert!(!lit(&a, 335, 75) && lit(&b, 335, 75));
+        if std::env::var("ARY_DEMO").is_ok() {
+            let mut out = image::RgbaImage::new(a.width() * 2 + 10, a.height());
+            image::imageops::overlay(&mut out, &a, 0, 0);
+            image::imageops::overlay(&mut out, &b, a.width() as i64 + 10, 0);
+            out.save("/tmp/puppet.png").unwrap();
         }
     }
 }

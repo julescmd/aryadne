@@ -34,6 +34,8 @@ enum ViewDrag {
 
 /// Les points de masque sont numérotés à part de ceux d'un tracé
 const MASK_PT: usize = 1_000_000;
+/// Une épingle de marionnette : PIN_PT + effet × 10 000 + épingle
+const PIN_PT: usize = 2_000_000;
 
 /// Simplifie un geste (Ramer-Douglas-Peucker) : garde les points qui s'écartent de plus de `eps`
 fn simplify(pts: &[[f32; 2]], eps: f32) -> Vec<[f32; 2]> {
@@ -86,6 +88,8 @@ pub struct Editor {
     anim_tools: bool,
     /// Pelure d'oignon : le calque choisi aux images d'avant (rouge) et d'après (vert)
     onion: bool,
+    /// Marionnette : un clic dans le moniteur pose une épingle sur le calque choisi
+    pin_mode: bool,
     /// Éditeur de courbes (fenêtre, comme le Graph Editor de Maya)
     curves_open: bool,
     curve_ed: crate::curves::Editor,
@@ -194,6 +198,7 @@ impl Editor {
             sel: if compo.layers.is_empty() { None } else { Some(0) },
             anim_tools: false,
             onion: false,
+            pin_mode: false,
             curves_open: false,
             curve_ed: Default::default(),
             tween_w: 0.5,
@@ -720,6 +725,17 @@ impl Editor {
                         painter.rect(Rect::from_center_size(sp, vec2(7.0, 7.0)), 0.0, Color32::WHITE, Stroke::new(1.5, mcol), egui::StrokeKind::Middle);
                     }
                 }
+                // Marionnette : les épingles, là où elles sont tirées
+                let local = self.time - lay.start;
+                for (fi, e) in lay.fx.iter().enumerate() {
+                    if let motion::Effect::Puppet { pins } = e {
+                        for (k, pin) in pins.iter().enumerate() {
+                            let sp = to_screen(x.apply(pin.at.at(local)));
+                            path_pts.push((sp, PIN_PT + fi * 10_000 + k));
+                            painter.circle(sp, 5.0, Color32::from_rgb(250, 210, 70), Stroke::new(1.5, Color32::from_gray(20)));
+                        }
+                    }
+                }
                 for (q, kind) in &handles {
                     if *kind == 0 {
                         painter.rect(Rect::from_center_size(*q, vec2(7.0, 7.0)), 0.0, p.accent, Stroke::new(1.0, p.code_bg), egui::StrokeKind::Outside);
@@ -741,6 +757,38 @@ impl Editor {
             }
         } else if resp.hovered() {
             ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
+        }
+        // Marionnette : poser une épingle (clic), en retirer une (Alt+clic)
+        if self.pin_mode && self.tool == Tool::Select && resp.clicked() {
+            if let (Some(m), Some(i)) = (resp.interact_pointer_pos(), self.sel) {
+                let cp = to_comp(m);
+                let alt = ui.input(|i| i.modifiers.alt);
+                let x = self.compo.world(i, self.time);
+                let lay = &mut self.compo.layers[i];
+                let local = self.time - lay.start;
+                let hit = path_pts.iter().find(|(q, k)| *k >= PIN_PT && q.distance(m) < 8.0).map(|(_, k)| *k);
+                if let Some(motion::Effect::Puppet { pins }) = lay.fx.iter_mut().find(|e| matches!(e, motion::Effect::Puppet { .. })) {
+                    match (alt, hit) {
+                        (true, Some(k)) => {
+                            let k = (k - PIN_PT) % 10_000;
+                            if k < pins.len() {
+                                pins.remove(k);
+                            }
+                        }
+                        (false, None) => {
+                            if let Some(lp) = x.inverse(cp) {
+                                // Sur une image déjà pliée, l'épingle retrouve sa place au repos
+                                let now: Vec<[f32; 2]> = pins.iter().map(|p| p.at.at(local)).collect();
+                                let rest: Vec<[f32; 2]> = pins.iter().map(|p| p.rest).collect();
+                                let r = motion::mls_rigid(lp, &now, &rest);
+                                pins.push(motion::Pin { rest: r, at: motion::Track::new(lp[0], lp[1]) });
+                            }
+                        }
+                        _ => {}
+                    }
+                    self.changed();
+                }
+            }
         }
         if resp.drag_started() {
             // Là où le bouton a été enfoncé : le glissé démarre après quelques pixels, souvent déjà sur une autre poignée
@@ -788,6 +836,21 @@ impl Editor {
                             let k = *k;
                             if let Some(lp) = x.inverse(cp) {
                                 let lay = &mut self.compo.layers[i];
+                                if k >= PIN_PT {
+                                    let (fi, pk) = ((k - PIN_PT) / 10_000, (k - PIN_PT) % 10_000);
+                                    let local = t - lay.start;
+                                    if let Some(motion::Effect::Puppet { pins }) = lay.fx.get_mut(fi) {
+                                        if let Some(pin) = pins.get_mut(pk) {
+                                            // Plus tard que le début : on anime (la pose d'avant devient la première clé)
+                                            if pin.at.keys.is_empty() && local > 0.01 {
+                                                let before = pin.at.at(local);
+                                                pin.at.insert(motion::Key { t: 0.0, v: before, ease: crate::keys::Ease::Smooth, tan: vec![] });
+                                            }
+                                            pin.at.set(local, lp);
+                                            self.rev += 1;
+                                        }
+                                    }
+                                } else {
                                 // Un point d'une forme animée : la clé de cet instant change (créée au besoin)
                                 let target = if k >= MASK_PT {
                                     let (mi, pk) = ((k - MASK_PT) / 10_000, (k - MASK_PT) % 10_000);
@@ -804,6 +867,7 @@ impl Editor {
                                         motion::set_points_at(pts, keys, t, now);
                                         self.rev += 1;
                                     }
+                                }
                                 }
                             }
                         }
@@ -1680,6 +1744,26 @@ impl Editor {
                         changed |= crate::modifiers::row_slider(ui, "quantité", egui::Slider::new(amount, 0.0..=300.0).suffix(" px"));
                         changed |= crate::modifiers::row_slider(ui, "taille des remous", egui::Slider::new(size, 4.0..=2000.0).logarithmic(true).suffix(" px"));
                         changed |= crate::modifiers::row_slider(ui, "évolution", egui::Slider::new(speed, 0.0..=5.0));
+                    }
+                    motion::Effect::Puppet { pins } => {
+                        ui.horizontal(|ui| {
+                            let tip = crate::i18n::t("Clique sur le calque dans le moniteur pour poser des épingles, puis tire-les : l'image se plie autour");
+                            if ui.add(egui::Button::new(egui::RichText::new(format!("{}  {}", l::PIN, crate::i18n::t("poser des épingles"))).size(12.0)).selected(self.pin_mode)).on_hover_text(tip).clicked() {
+                                self.pin_mode = !self.pin_mode;
+                            }
+                            ui.label(egui::RichText::new(format!("{} {}", pins.len(), crate::i18n::t_mid("épingle(s)"))).size(11.5).color(crate::theme::pal().muted));
+                            if !pins.is_empty() && ui.add(egui::Button::new(egui::RichText::new(l::ROTATE_CCW).size(13.0)).frame(false)).on_hover_text(crate::i18n::t("Remettre les épingles au repos")).clicked() {
+                                for p in pins.iter_mut() {
+                                    p.at = motion::Track::new(p.rest[0], p.rest[1]);
+                                }
+                                changed = true;
+                            }
+                            if !pins.is_empty() && ui.add(egui::Button::new(egui::RichText::new(l::TRASH_2).size(13.0)).frame(false)).on_hover_text(crate::i18n::t("Retirer toutes les épingles")).clicked() {
+                                pins.clear();
+                                changed = true;
+                            }
+                        });
+                        ui.label(egui::RichText::new(crate::i18n::t("Glisser une épingle pose une clé à cet instant ; Alt+clic sur une épingle la retire.")).size(11.0).color(crate::theme::pal().muted));
                     }
                     motion::Effect::Offset { x, y } => {
                         changed |= crate::modifiers::row_slider(ui, "x par seconde", egui::Slider::new(x, -2000.0..=2000.0).suffix(" px"));
