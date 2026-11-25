@@ -25,6 +25,7 @@ mod canvas;
 mod mdextra;
 mod sources;
 mod text3d;
+mod timetrack;
 mod vector_ui;
 mod keymap;
 mod lucide;
@@ -436,6 +437,9 @@ struct App {
     insp_tab: u8,
     /// Cerveau : les notes colorées par tag
     brain_tags: bool,
+    /// Temps passé par fichier (et sa fenêtre de bilan : 0 aujourd'hui, 1 7 jours, 2 30 jours, 3 tout)
+    time: timetrack::Tracker,
+    time_report: Option<u8>,
     view_panels: Vec<String>,
     /// Zones de l'interface (image précédente) : la barre du bas montre les raccourcis de celle sous la souris
     zones_last: Vec<(&'static str, egui::Rect)>,
@@ -4679,6 +4683,56 @@ impl App {
         }
     }
 
+    /// Bilan du temps passé : par projet (dossier) puis par fichier, sur une période ; copie en CSV
+    fn time_report_ui(&mut self, ctx: &egui::Context) {
+        let Some(mut period) = self.time_report else { return };
+        let p = theme::pal();
+        let mut open = true;
+        egui::Window::new(crate::i18n::t("Temps passé")).id(egui::Id::unique("time-report")).default_size(egui::vec2(460.0, 520.0)).open(&mut open).show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                for (k, l) in [(0u8, "aujourd'hui"), (1, "7 jours"), (2, "30 jours"), (3, "tout")] {
+                    ui.selectable_value(&mut period, k, crate::i18n::t(l));
+                }
+            });
+            let from = match period {
+                0 => Some(timetrack::days_ago(0)),
+                1 => Some(timetrack::days_ago(6)),
+                2 => Some(timetrack::days_ago(29)),
+                _ => None,
+            };
+            let rows = self.time.totals(from.as_deref());
+            let total: f64 = rows.iter().map(|r| r.1).sum();
+            ui.label(RichText::new(format!("{} {}", crate::i18n::t("Total :"), timetrack::fmt(total))).size(15.0).family(theme::bold()));
+            ui.label(RichText::new(crate::i18n::t("Compté quand la fenêtre a le focus et qu'il y a eu une action dans les deux dernières minutes.")).size(11.0).color(p.muted));
+            ui.add_space(6.0);
+            egui::ScrollArea::vertical().auto_shrink(false).max_height(380.0).show(ui, |ui| {
+                for (proj, secs, files) in &rows {
+                    egui::CollapsingHeader::new(RichText::new(format!("{proj}   {}", timetrack::fmt(*secs))).strong()).id_salt(("time-proj", proj)).show(ui, |ui| {
+                        for (rel, s) in files.iter().take(40) {
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new(vault::display_rel(rel)).size(12.0));
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    ui.label(RichText::new(timetrack::fmt(*s)).monospace().size(11.5).color(p.muted));
+                                });
+                            });
+                        }
+                    });
+                }
+            });
+            if ui.button(format!("{}  {}", lucide::COPY, crate::i18n::t("copier en CSV"))).on_hover_text(crate::i18n::t("Projet, fichier, heures : à coller dans un tableur ou une facture")).clicked() {
+                let mut csv = String::from("projet,fichier,heures\n");
+                for (proj, _, files) in &rows {
+                    for (rel, s) in files {
+                        csv.push_str(&format!("\"{proj}\",\"{rel}\",{:.2}\n", s / 3600.0));
+                    }
+                }
+                ui.ctx().copy_text(csv);
+                self.toast("bilan copié");
+            }
+        });
+        self.time_report = open.then_some(period);
+    }
+
     /// Convertit un .canvas du coffre en board (à côté, même nom) et l'ouvre
     fn import_canvas(&mut self, rel: &str) {
         let root = self.root();
@@ -7292,6 +7346,16 @@ impl eframe::App for App {
         theme::set_workspace_accent(workspace::accent_of(self.ws.cur()));
         self.shortcuts(&ctx);
         self.cloud_tick();
+        // Temps passé : le fichier ouvert compte tant qu'on travaille
+        {
+            let (input, focused) = ctx.input(|i| (!i.events.is_empty() || i.pointer.is_moving(), i.viewport().focused.unwrap_or(true)));
+            let rel = self.current().map(|d| d.rel.clone()).or_else(|| self.board.rel.clone().filter(|_| self.view() == View::Boards));
+            let root = self.root();
+            self.time.tick(&root, rel.as_deref(), input, focused);
+            if ctx.input(|i| i.viewport().close_requested()) {
+                self.time.save();
+            }
+        }
 
         // Sauvegarde auto 500 ms après la dernière frappe, et à la fermeture.
         let closing = ctx.input(|i| i.viewport().close_requested());
@@ -7409,6 +7473,7 @@ impl eframe::App for App {
             self.palette_ui(&ctx);
             self.template_ui(&ctx);
             self.history_ui(&ctx);
+            self.time_report_ui(&ctx);
             if let Some(d) = &mut self.convert {
                 if !d.ui(&ctx) {
                     self.convert = None;

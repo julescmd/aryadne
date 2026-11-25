@@ -58,6 +58,7 @@ pub enum Cmd {
     View(View),
     Compare,
     GitHistory,
+    TimeReport,
     NewNote,
     Daily,
     FromTemplate,
@@ -143,6 +144,7 @@ impl App {
             ("changer le thème clair / sombre", "", Cmd::Theme),
             ("épingler au-dessus des autres fenêtres", "", Cmd::Pin),
             ("mode compact", "Ctrl+Maj+M", Cmd::Compact),
+            ("temps passé par projet", "", Cmd::TimeReport),
             ("minuteur : 25 min de concentration", "", Cmd::Timer(25)),
             ("minuteur : 50 min", "", Cmd::Timer(50)),
             ("minuteur : pause 5 min", "", Cmd::Timer(5)),
@@ -208,6 +210,7 @@ impl App {
                     self.history_dlg = Some(HistoryDlg { versions: history_list(&self.root(), &rel), rel, sel: 0, diff: true, compare: false });
                 }
             }
+            Cmd::TimeReport => self.time_report = Some(1),
             Cmd::GitHistory => {
                 if let Some(rel) = self.current().map(|d| d.rel.clone()) {
                     self.flush_all();
