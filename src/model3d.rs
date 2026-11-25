@@ -2933,6 +2933,10 @@ pub struct Viewer {
     key_sel: Option<(usize, i32)>,
     key_drag: Option<(usize, i32, i32)>,
     key_menu: Option<(usize, i32)>,
+    /// Montage d'animation : bande choisie, bande qu'on glisse (indice, par son bord droit, début et répétitions au départ, souris au départ), bande du menu
+    strip_sel: Option<usize>,
+    strip_drag: Option<(usize, bool, i32, f32, f32)>,
+    strip_menu: Option<usize>,
     curve_ed: crate::curves::Editor,
     /// Action d'un menu de l'en-tête, rejouée comme sa touche à l'image suivante (une seule logique pour les deux)
     hdr_key: Option<(Key, egui::Modifiers)>,
@@ -3149,6 +3153,9 @@ impl Viewer {
             key_sel: None,
             key_drag: None,
             key_menu: None,
+            strip_sel: None,
+            strip_drag: None,
+            strip_menu: None,
             curve_ed: Default::default(),
             hdr_key: None,
             hdr_add: None,
@@ -5856,7 +5863,7 @@ impl Viewer {
         }
         // Les clés posées cette image vont dans le calque d'animation actif
         if let Some(sc) = &self.scene {
-            crate::scene::set_layer_context(&sc.layers, &sc.active_layer);
+            sc.set_anim_context();
         }
         // Résultat d'une reconstruction lancée après un changement
         if let Some(rx) = &self.scene_rx {
@@ -7129,6 +7136,8 @@ impl Viewer {
         let tl_frame = egui::Frame::new().fill(p.panel).stroke(Stroke::new(1.0, p.line));
         let tl_panel = if self.anim_graph && !self.graph_window { egui::Panel::bottom("scene-graph").resizable(true).default_size(300.0).min_size(160.0).max_size((ui.available_height() * 0.7).max(180.0)) } else { egui::Panel::bottom("scene-timeline").resizable(true).default_size(120.0).min_size(70.0).max_size(320.0) };
         let sub_body = |ui: &mut egui::Ui| {
+            // Les clés montrées et éditées dans la timeline : celles du calque d'animation actif, sinon la base
+            let tl_layer: String = if scene.layers.iter().any(|l| l.name == scene.active_layer) { scene.active_layer.clone() } else { String::new() };
             // Comme la maquette : une barre de 30 px (lecture, temps, image), puis la règle et les pistes
             let (hr, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 30.0), egui::Sense::hover());
             ui.painter().hline(hr.x_range(), hr.bottom() - 0.5, Stroke::new(1.0, p.line));
@@ -7162,7 +7171,7 @@ impl Viewer {
                 ui.add_space(8.0);
                 let sel = self.scene_sel.filter(|&k| k < scene.objects.len());
                 let here = self.anim_frame.round() as i32;
-                let on_key = sel.is_some_and(|k| scene.objects[k].keys.iter().any(|x| x.frame == here));
+                let on_key = sel.is_some_and(|k| scene.objects[k].keys_in(&tl_layer).iter().any(|x| x.frame == here));
                 if ui.add_enabled(sel.is_some(), egui::Button::new(egui::RichText::new(if on_key { "◆" } else { "◇" }).color(if on_key { p.accent } else { p.text }))).on_hover_text(crate::i18n::t("Poser une clé pour l'objet choisi à cette image (K)")).clicked() {
                     if let Some(k) = sel {
                         scene.objects[k].set_key(here);
@@ -7170,12 +7179,12 @@ impl Viewer {
                     }
                 }
                 if ui.add_enabled(on_key, egui::Button::new("✕")).on_hover_text(crate::i18n::t("Retirer la clé de cette image")).clicked() {
-                    if let Some(k) = sel {
-                        scene.objects[k].keys.retain(|x| x.frame != here);
+                    if let Some(ks) = sel.and_then(|k| scene.objects[k].keys_in_mut(&tl_layer)) {
+                        ks.retain(|x| x.frame != here);
                         changed = true;
                     }
                 }
-                if let Some(key) = sel.and_then(|k| scene.objects[k].keys.iter_mut().find(|x| x.frame == here)) {
+                if let Some(key) = sel.and_then(|k| scene.objects[k].keys_in_mut(&tl_layer)).and_then(|ks| ks.iter_mut().find(|x| x.frame == here)) {
                     // Passage vers la clé suivante : le même menu que partout dans l'app
                     let cur = key.ease();
                     let label = if key.mode() == "bezier" { crate::i18n::t("Bézier") } else { crate::i18n::t(cur.map(|e| e.name()).unwrap_or("Bézier")) };
@@ -7197,6 +7206,43 @@ impl Viewer {
                 if self.anim_graph {
                     ui.toggle_value(&mut self.graph_window, egui::RichText::new(crate::lucide::APP_WINDOW).size(14.0)).on_hover_text(crate::i18n::t("Éditeur de courbes dans sa propre fenêtre, qu'on peut sortir de l'application (sur un autre écran)"));
                 }
+                // Montage d'animation : ranger les clés de la sélection dans une action, poser une action en bande
+                egui::containers::menu::MenuButton::new(egui::RichText::new(crate::lucide::CLAPPERBOARD).size(14.0)).ui(ui, |ui| {
+                    ui.set_min_width(280.0);
+                    ui.label(crate::theme::section(&crate::i18n::t("MONTAGE D'ANIMATION")));
+                    // La sélection et tout ce qui en descend (un squelette entier part d'un coup)
+                    let picked: Vec<usize> = self.scene_multi.iter().cloned().chain(self.scene_sel).filter(|&k| k < scene.objects.len()).collect();
+                    let targets: Vec<usize> = (0..scene.objects.len()).filter(|&k| picked.iter().any(|&a| a == k || scene.descends(k, a))).collect();
+                    let can = targets.iter().any(|&k| scene.objects[k].keys.len() >= 2);
+                    if ui.add_enabled(can, egui::Button::new(format!("{}  {}", crate::lucide::SQUARE_PLUS, crate::i18n::t("faire une action des clés de la sélection")))).on_hover_text(crate::i18n::t("Les clés de la sélection (et de ses enfants) deviennent une action réutilisable, posée en bande au même endroit : on peut ensuite la répéter, l'étirer, la fondre ou la reposer ailleurs")).clicked() {
+                        let base = sel.map(|k| scene.objects[k].name.clone()).unwrap_or_else(|| "action".into());
+                        if let Some(i) = crate::nla::make_action(scene, &targets, &base) {
+                            self.strip_sel = Some(i);
+                            changed = true;
+                        }
+                        ui.close();
+                    }
+                    if !scene.actions.is_empty() {
+                        ui.separator();
+                        ui.label(egui::RichText::new(crate::i18n::t("poser une bande à l'image courante")).size(11.0).color(p.muted));
+                        let mut add = None;
+                        for a in &scene.actions {
+                            if ui.button(format!("{}  {}", crate::lucide::FILM, a.name)).clicked() {
+                                add = Some(a.name.clone());
+                                ui.close();
+                            }
+                        }
+                        if let Some(name) = add {
+                            let len = scene.actions.iter().find(|a| a.name == name).map(|a| a.len()).unwrap_or(1.0);
+                            let row = crate::nla::free_row(scene, here as f32, here as f32 + len);
+                            scene.strips.push(crate::nla::Strip::new(&name, here, row));
+                            self.strip_sel = Some(scene.strips.len() - 1);
+                            changed = true;
+                        }
+                    }
+                })
+                .0
+                .on_hover_text(crate::i18n::t("Montage d'animation : actions réutilisables posées en bandes (cycles, fondus, empilement)"));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     changed |= ui.add(egui::DragValue::new(&mut scene.fps).range(1.0..=1000.0).suffix(" i/s")).changed();
                     changed |= ui.add(egui::DragValue::new(&mut scene.end).prefix(format!("{} ", crate::i18n::t("fin")))).changed();
@@ -7469,8 +7515,8 @@ impl Viewer {
                 }
                 if k.jump != 0 {
                     let mut ks: Vec<i32> = match self.scene_sel.and_then(|i| scene.objects.get(i)) {
-                        Some(o) => o.keys.iter().map(|x| x.frame).collect(),
-                        None => scene.objects.iter().flat_map(|o| o.keys.iter().map(|x| x.frame)).collect(),
+                        Some(o) => o.keys_in(&tl_layer).iter().map(|x| x.frame).collect(),
+                        None => scene.objects.iter().flat_map(|o| o.keys_in(&tl_layer).iter().map(|x| x.frame)).collect(),
                     };
                     ks.sort();
                     let now = self.anim_frame.round() as i32;
@@ -7502,15 +7548,57 @@ impl Viewer {
                 f += step;
             }
             let mut y = r.top() + 26.0;
+            // Montage d'animation : les bandes, la rangée 0 en bas (celles du dessus passent après)
+            let mut strip_hits: Vec<(usize, egui::Rect)> = vec![];
+            let rows = scene.strips.iter().map(|s| s.row as usize + 1).max().unwrap_or(0);
+            if rows > 0 {
+                painter.text(egui::pos2(r.left() - 8.0, y + (rows as f32 - 1.0) * 10.0), egui::Align2::RIGHT_CENTER, crate::i18n::t("montage"), egui::FontId::proportional(11.0), p.muted);
+                for (i, s) in scene.strips.iter().enumerate() {
+                    let Some(act) = scene.actions.iter().find(|x| x.name == s.action) else { continue };
+                    let yy = y + (rows - 1 - s.row as usize) as f32 * 20.0;
+                    let rc = egui::Rect::from_min_max(egui::pos2(x_of(s.start as f32), yy - 8.0), egui::pos2(x_of(s.start as f32 + s.len(act)).max(x_of(s.start as f32) + 6.0), yy + 8.0));
+                    let on = self.strip_sel == Some(i);
+                    let col = if s.additive { Color32::from_rgb(120, 190, 140) } else { p.accent };
+                    painter.rect_filled(rc, 4.0, col.gamma_multiply(if s.mute { 0.12 } else if on { 0.6 } else { 0.32 }));
+                    painter.rect_stroke(rc, 4.0, Stroke::new(1.0, if on { p.text } else { col.gamma_multiply(0.7) }), egui::StrokeKind::Inside);
+                    // Un trait à chaque cycle, et les fondus en pente
+                    let cyc = act.len() * s.scale.max(0.01);
+                    let mut c = 1.0;
+                    while c < s.repeat && c < 200.0 {
+                        let x = x_of(s.start as f32 + c * cyc);
+                        painter.line_segment([egui::pos2(x, rc.top() + 2.0), egui::pos2(x, rc.bottom() - 2.0)], Stroke::new(1.0, p.text.gamma_multiply(0.45)));
+                        c += 1.0;
+                    }
+                    if s.blend_in > 0 {
+                        painter.line_segment([rc.left_bottom(), egui::pos2(x_of((s.start + s.blend_in) as f32).min(rc.right()), rc.top())], Stroke::new(1.0, p.text.gamma_multiply(0.6)));
+                    }
+                    if s.blend_out > 0 {
+                        painter.line_segment([egui::pos2(x_of(s.start as f32 + s.len(act) - s.blend_out as f32).max(rc.left()), rc.top()), rc.right_bottom()], Stroke::new(1.0, p.text.gamma_multiply(0.6)));
+                    }
+                    let label = if (s.repeat - 1.0).abs() > 1e-3 { format!("{} ×{}", s.action, (s.repeat * 100.0).round() / 100.0) } else { s.action.clone() };
+                    painter.with_clip_rect(rc.intersect(full)).text(egui::pos2(rc.left() + 5.0, yy), egui::Align2::LEFT_CENTER, label, egui::FontId::proportional(10.5), if s.mute { p.muted } else { p.text });
+                    strip_hits.push((i, rc));
+                }
+                y += rows as f32 * 20.0 + 4.0;
+            }
+            let strip_under = |pt: egui::Pos2| strip_hits.iter().rev().find(|h| h.1.expand(2.0).contains(pt)).map(|h| (h.0, h.1));
             // Les clés : forme selon le lissage, clic pour choisir, glisser pour déplacer, clic droit pour le lissage
             let mut hits: Vec<(usize, i32, egui::Pos2)> = vec![];
             for (k, o) in scene.objects.iter().enumerate() {
-                if o.keys.is_empty() || y + 10.0 > full.bottom() {
+                let shown = o.keys_in(&tl_layer);
+                if shown.is_empty() || y + 10.0 > full.bottom() {
                     continue;
                 }
                 let on = self.scene_sel == Some(k);
                 painter.text(egui::pos2(r.left() - 8.0, y), egui::Align2::RIGHT_CENTER, &o.name, egui::FontId::proportional(11.0), if on { p.text } else { p.muted });
-                for key in &o.keys {
+                // Calque actif : ses clés en couleur de calque, celles de la base en petits repères derrière
+                let layer_col = Color32::from_rgb(235, 170, 70);
+                if !tl_layer.is_empty() {
+                    for key in &o.keys {
+                        painter.circle_filled(egui::pos2(x_of(key.frame as f32), y), 1.8, p.muted.gamma_multiply(0.7));
+                    }
+                }
+                for key in shown {
                     let frame = match self.key_drag {
                         Some((dk, from, cur)) if dk == k && from == key.frame => cur,
                         _ => key.frame,
@@ -7518,7 +7606,7 @@ impl Viewer {
                     let c = egui::pos2(x_of(frame as f32), y);
                     let chosen = self.key_sel == Some((k, key.frame));
                     let ease = if key.mode() == "bezier" { None } else { key.ease() };
-                    crate::keys::draw(&painter, c, 5.0, ease, if on { p.accent } else { p.muted }, true, chosen);
+                    crate::keys::draw(&painter, c, 5.0, ease, if !tl_layer.is_empty() { layer_col.gamma_multiply(if on { 1.0 } else { 0.6 }) } else if on { p.accent } else { p.muted }, true, chosen);
                     hits.push((k, key.frame, c));
                 }
                 y += 22.0;
@@ -7527,19 +7615,49 @@ impl Viewer {
             painter.line_segment([egui::pos2(x, full.top()), egui::pos2(x, full.bottom())], Stroke::new(1.0, p.accent));
             let frame_at = |px: f32| (a + (b - a) * ((px - r.left() - 6.0) / (r.width() - 12.0)).clamp(0.0, 1.0)).round().clamp(sa, sb);
             let key_under = |pt: egui::Pos2| hits.iter().filter(|h| (h.2 - pt).length() < 8.0).min_by(|u, v| (u.2 - pt).length().total_cmp(&(v.2 - pt).length())).map(|h| (h.0, h.1));
+            // Une bande se glisse (début) ou s'allonge par son bord droit (répétitions)
+            let origin = ui.input(|i| i.pointer.press_origin());
             if resp.drag_started() {
-                if let Some((k, f)) = ui.input(|i| i.pointer.press_origin()).and_then(key_under) {
+                if let Some((i, rc)) = origin.and_then(strip_under) {
+                    let edge = origin.is_some_and(|o| rc.right() - o.x < 7.0 && rc.width() > 16.0);
+                    if let Some(s) = scene.strips.get(i) {
+                        self.strip_drag = Some((i, edge, s.start, s.repeat, origin.map(|o| o.x).unwrap_or(0.0)));
+                        self.strip_sel = Some(i);
+                    }
+                } else if let Some((k, f)) = origin.and_then(key_under) {
                     self.key_drag = Some((k, f, f));
                     self.key_sel = Some((k, f));
                     self.scene_sel = Some(k);
                 }
             }
+            if let Some((i, edge, start0, rep0, x0)) = self.strip_drag {
+                if resp.dragged() {
+                    if let (Some(at), true) = (resp.interact_pointer_pos(), i < scene.strips.len()) {
+                        let df = (at.x - x0) / ((r.width() - 12.0) / (b - a)).max(1e-6);
+                        let cyc = scene.actions.iter().find(|x| x.name == scene.strips[i].action).map(|x| x.len()).unwrap_or(1.0) * scene.strips[i].scale.max(0.01);
+                        let s = &mut scene.strips[i];
+                        if edge {
+                            // Par quarts de cycle ; Maj : librement
+                            let rep = (rep0 + df / cyc).max(0.25);
+                            s.repeat = if ui.input(|i| i.modifiers.shift) { rep } else { (rep * 4.0).round() / 4.0 };
+                        } else {
+                            s.start = start0 + df.round() as i32;
+                        }
+                        changed = true;
+                    }
+                } else {
+                    self.strip_drag = None;
+                    changed = true;
+                }
+            }
+            let on_strip = resp.clicked() && resp.interact_pointer_pos().and_then(strip_under).map(|h| self.strip_sel = Some(h.0)).is_some();
+            if self.strip_drag.is_none() && !on_strip {
             match self.key_drag {
                 Some((k, from, _)) if resp.dragged() => {
                     if let Some(at) = resp.interact_pointer_pos() {
                         let to = frame_at(at.x) as i32;
                         // Pas deux clés sur la même image
-                        let free = scene.objects.get(k).is_some_and(|o| to == from || !o.keys.iter().any(|x| x.frame == to));
+                        let free = scene.objects.get(k).is_some_and(|o| to == from || !o.keys_in(&tl_layer).iter().any(|x| x.frame == to));
                         if free {
                             self.key_drag = Some((k, from, to));
                         }
@@ -7548,11 +7666,11 @@ impl Viewer {
                 Some((k, from, to)) if !resp.dragged() => {
                     self.key_drag = None;
                     if from != to {
-                        if let Some(key) = scene.objects.get_mut(k).and_then(|o| o.keys.iter_mut().find(|x| x.frame == from)) {
-                            key.frame = to;
-                        }
-                        if let Some(o) = scene.objects.get_mut(k) {
-                            o.keys.sort_by_key(|x| x.frame);
+                        if let Some(ks) = scene.objects.get_mut(k).and_then(|o| o.keys_in_mut(&tl_layer)) {
+                            if let Some(key) = ks.iter_mut().find(|x| x.frame == from) {
+                                key.frame = to;
+                            }
+                            ks.sort_by_key(|x| x.frame);
                         }
                         self.key_sel = Some((k, to));
                         seek = Some(to as f32);
@@ -7569,20 +7687,76 @@ impl Viewer {
                             }
                             None => {
                                 self.key_sel = None;
+                                self.strip_sel = None;
                                 seek = Some(frame_at(at.x));
                             }
                         }
                     }
                 }
             }
+            }
             if resp.secondary_clicked() {
-                self.key_menu = resp.interact_pointer_pos().and_then(key_under);
+                self.strip_menu = resp.interact_pointer_pos().and_then(strip_under).map(|h| h.0);
+                self.strip_sel = self.strip_menu.or(self.strip_sel);
+                self.key_menu = if self.strip_menu.is_some() { None } else { resp.interact_pointer_pos().and_then(key_under) };
                 if let Some(km) = self.key_menu {
                     self.key_sel = Some(km);
                 }
             }
+            // Réglages d'une bande : clic droit dessus
+            if let Some(i) = self.strip_menu.filter(|&i| i < scene.strips.len()) {
+                let (mut dup, mut del, mut del_action) = (false, false, false);
+                resp.context_menu(|ui| {
+                    ui.set_min_width(250.0);
+                    let s = &mut scene.strips[i];
+                    ui.label(egui::RichText::new(format!("{}  {}", crate::lucide::FILM, s.action)).strong());
+                    changed |= crate::modifiers::row(ui, &crate::i18n::t("répétitions"), |ui| ui.add(egui::DragValue::new(&mut s.repeat).speed(0.05).range(0.1..=1000.0)).changed());
+                    changed |= crate::modifiers::row(ui, &crate::i18n::t("durée ×"), |ui| ui.add(egui::DragValue::new(&mut s.scale).speed(0.01).range(0.05..=50.0)).on_hover_text(crate::i18n::t("Étire l'action dans le temps (2 : deux fois plus lente)")).changed());
+                    changed |= crate::modifiers::row_slider(ui, "poids", egui::Slider::new(&mut s.weight, 0.0..=1.0));
+                    changed |= crate::modifiers::row(ui, &crate::i18n::t("fondu d'entrée"), |ui| ui.add(egui::DragValue::new(&mut s.blend_in).range(0..=10000).suffix(" im.")).changed());
+                    changed |= crate::modifiers::row(ui, &crate::i18n::t("fondu de sortie"), |ui| ui.add(egui::DragValue::new(&mut s.blend_out).range(0..=10000).suffix(" im.")).changed());
+                    changed |= ui.checkbox(&mut s.additive, crate::i18n::t("additive")).on_hover_text(crate::i18n::t("Ajoute le mouvement de l'action à ce qu'il y a dessous, au lieu de le remplacer")).changed();
+                    changed |= ui.checkbox(&mut s.travel, crate::i18n::t("avance à chaque cycle")).on_hover_text(crate::i18n::t("Chaque répétition repart d'où la précédente est arrivée (un cycle de marche qui avance)")).changed();
+                    changed |= ui.checkbox(&mut s.hold, crate::i18n::t("tenir la dernière pose")).changed();
+                    changed |= ui.checkbox(&mut s.mute, crate::i18n::t("muette")).changed();
+                    ui.separator();
+                    if ui.button(format!("{}  {}", crate::lucide::COPY_PLUS, crate::i18n::t("dupliquer à la suite"))).clicked() {
+                        dup = true;
+                        ui.close();
+                    }
+                    if ui.button(format!("{}  {}", crate::lucide::TRASH_2, crate::i18n::t("retirer la bande"))).clicked() {
+                        del = true;
+                        ui.close();
+                    }
+                    if ui.button(format!("{}  {}", crate::lucide::TRASH_2, crate::i18n::t("retirer l'action et toutes ses bandes"))).clicked() {
+                        del_action = true;
+                        ui.close();
+                    }
+                });
+                if dup {
+                    let mut s = scene.strips[i].clone();
+                    let len = scene.actions.iter().find(|x| x.name == s.action).map(|x| s.len(x)).unwrap_or(1.0);
+                    s.start += len.round() as i32;
+                    s.row = crate::nla::free_row(scene, s.start as f32, s.start as f32 + len);
+                    scene.strips.push(s);
+                    self.strip_sel = Some(scene.strips.len() - 1);
+                    changed = true;
+                }
+                if del {
+                    scene.strips.remove(i);
+                    changed = true;
+                }
+                if del_action {
+                    let name = scene.strips[i].action.clone();
+                    crate::nla::remove_action(scene, &name);
+                    changed = true;
+                }
+                if del || del_action {
+                    (self.strip_menu, self.strip_sel) = (None, None);
+                }
+            }
             if let Some((k, f)) = self.key_menu {
-                let cur = scene.objects.get(k).and_then(|o| o.keys.iter().find(|x| x.frame == f)).map(|x| if x.mode() == "bezier" { None } else { x.ease() });
+                let cur = scene.objects.get(k).and_then(|o| o.keys_in(&tl_layer).iter().find(|x| x.frame == f)).map(|x| if x.mode() == "bezier" { None } else { x.ease() });
                 let mut picked = None;
                 let mut remove = false;
                 if let Some(cur) = cur {
@@ -7598,28 +7772,32 @@ impl Viewer {
                     });
                 }
                 if let Some(c) = picked {
-                    if let Some(key) = scene.objects.get_mut(k).and_then(|o| o.keys.iter_mut().find(|x| x.frame == f)) {
+                    if let Some(key) = scene.objects.get_mut(k).and_then(|o| o.keys_in_mut(&tl_layer)).and_then(|ks| ks.iter_mut().find(|x| x.frame == f)) {
                         key.interp = c.map(|e| e.word()).unwrap_or("bezier").to_string();
                         changed = true;
                     }
                     self.key_menu = None;
                 }
                 if remove {
-                    if let Some(o) = scene.objects.get_mut(k) {
-                        o.keys.retain(|x| x.frame != f);
+                    if let Some(ks) = scene.objects.get_mut(k).and_then(|o| o.keys_in_mut(&tl_layer)) {
+                        ks.retain(|x| x.frame != f);
                         changed = true;
                     }
                     self.key_menu = None;
                     self.key_sel = None;
                 }
             }
-            // Suppr : retire la clé choisie (la souris sur la timeline)
+            // Suppr : retire la clé choisie, sinon la bande choisie (la souris sur la timeline)
             if resp.hovered() && ui.input(|i| i.key_pressed(Key::Delete) || i.key_pressed(Key::Backspace)) {
                 if let Some((k, f)) = self.key_sel.take() {
-                    if let Some(o) = scene.objects.get_mut(k) {
-                        o.keys.retain(|x| x.frame != f);
+                    if let Some(ks) = scene.objects.get_mut(k).and_then(|o| o.keys_in_mut(&tl_layer)) {
+                        ks.retain(|x| x.frame != f);
                         changed = true;
                     }
+                } else if let Some(i) = self.strip_sel.take().filter(|&i| i < scene.strips.len()) {
+                    scene.strips.remove(i);
+                    self.strip_menu = None;
+                    changed = true;
                 }
             }
         };

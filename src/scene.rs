@@ -186,6 +186,18 @@ pub struct LayerKeys {
 thread_local! {
     /// Les calques de la scène en cours d'édition et celui où vont les nouvelles clés (vide : la base)
     static LAYER_CTX: std::cell::RefCell<(Vec<AnimLayer>, String)> = const { std::cell::RefCell::new((Vec::new(), String::new())) };
+    /// Les actions et les bandes de la scène en cours d'édition : une clé posée dans un calque doit savoir ce qu'il y a dessous
+    static NLA_CTX: std::cell::RefCell<std::sync::Arc<(Vec<crate::nla::Action>, Vec<crate::nla::Strip>)>> = std::cell::RefCell::new(Default::default());
+}
+
+/// Ce que les nouvelles clés doivent savoir du montage d'animation (rien n'est copié tant qu'il ne change pas)
+pub fn set_nla_context(actions: &[crate::nla::Action], strips: &[crate::nla::Strip]) {
+    NLA_CTX.with(|c| {
+        let mut c = c.borrow_mut();
+        if c.0 != actions || c.1 != strips {
+            *c = std::sync::Arc::new((actions.to_vec(), strips.to_vec()));
+        }
+    });
 }
 
 /// Ce que les nouvelles clés doivent savoir des calques (appelé quand la scène s'affiche)
@@ -425,9 +437,30 @@ impl Object {
         Some(([ch(0), ch(1), ch(2)], [ch(3), ch(4), ch(5)], [ch(6), ch(7), ch(8)]))
     }
 
-    /// Pose complète à l'image `f` : la base, plus les décalages des calques actifs selon leur poids
+    /// Les clés qu'on édite dans la timeline : celles du calque d'animation `layer`, ou la base s'il est vide
+    pub fn keys_in(&self, layer: &str) -> &[Key] {
+        if layer.is_empty() {
+            return &self.keys;
+        }
+        self.layer_keys.iter().find(|l| l.layer == layer).map(|l| l.keys.as_slice()).unwrap_or(&[])
+    }
+
+    /// Comme `keys_in`, pour les changer (None si l'objet n'a pas de clés dans ce calque)
+    pub fn keys_in_mut(&mut self, layer: &str) -> Option<&mut Vec<Key>> {
+        if layer.is_empty() {
+            return Some(&mut self.keys);
+        }
+        self.layer_keys.iter_mut().find(|l| l.layer == layer).map(|l| &mut l.keys)
+    }
+
+    /// Pose à l'image `f` : la base, plus les décalages des calques actifs selon leur poids
     pub fn layered_pose(&self, f: f32, layers: &[AnimLayer], skip: Option<&str>) -> Option<([f32; 3], [f32; 3], [f32; 3])> {
-        let (mut p, mut r, mut s) = self.pose_at(f)?;
+        self.add_layers(self.pose_at(f), f, layers, skip)
+    }
+
+    /// Ajoute à une pose les décalages des calques actifs, selon leur poids (sauf le calque `skip`)
+    pub fn add_layers(&self, pose: Option<([f32; 3], [f32; 3], [f32; 3])>, f: f32, layers: &[AnimLayer], skip: Option<&str>) -> Option<([f32; 3], [f32; 3], [f32; 3])> {
+        let (mut p, mut r, mut s) = pose?;
         for lk in &self.layer_keys {
             let Some(l) = layers.iter().find(|l| l.name == lk.layer) else { continue };
             if l.mute || Some(l.name.as_str()) == skip {
@@ -453,7 +486,9 @@ impl Object {
                 self.set_base_key(frame);
             }
             let f = frame as f32;
-            let (bp, br, bs) = self.layered_pose(f, &layers, Some(&l.name)).unwrap_or((self.pos, self.rot, self.scale));
+            // Ce qu'il y a sous ce calque : la base, les bandes du montage, les autres calques
+            let nla = NLA_CTX.with(|c| c.borrow().clone());
+            let (bp, br, bs) = crate::nla::full_pose(self, f, &layers, &nla.0, &nla.1, Some(&l.name)).unwrap_or((self.pos, self.rot, self.scale));
             let w = if l.weight.abs() < 1e-3 { 1.0 } else { l.weight };
             let d = |a: [f32; 3], b: [f32; 3]| [(a[0] - b[0]) / w, (a[1] - b[1]) / w, (a[2] - b[2]) / w];
             let key = Key { frame, pos: d(self.pos, bp), rot: d(self.rot, br), scale: d(self.scale, bs), ease: true, interp: String::new(), handle: 0, handles: vec![] };
@@ -554,7 +589,7 @@ pub fn kind(o: &Object) -> Kind {
 
 impl Default for Scene {
     fn default() -> Scene {
-        Scene { version: 1, objects: vec![], fps: 24.0, start: 0, end: 120, layers: vec![], active_layer: String::new(), backdrop: None, camera: String::new() }
+        Scene { version: 1, objects: vec![], fps: 24.0, start: 0, end: 120, layers: vec![], active_layer: String::new(), backdrop: None, camera: String::new(), actions: vec![], strips: vec![] }
     }
 }
 
@@ -581,6 +616,11 @@ pub struct Scene {
     /// Nom de la caméra par laquelle on regarde et on rend (vide : la première de la scène)
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub camera: String,
+    /// Montage d'animation : actions réutilisables, et leurs bandes sur la timeline (voir `nla`)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub actions: Vec<crate::nla::Action>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub strips: Vec<crate::nla::Strip>,
 }
 
 fn fps() -> f32 {
@@ -620,7 +660,7 @@ impl Scene {
                     }
                 }
             }
-            if let Some((p, r, s)) = o.layered_pose(f, &self.layers, None) {
+            if let Some((p, r, s)) = crate::nla::full_pose(o, f, &self.layers, &self.actions, &self.strips, None) {
                 if (o.pos, o.rot, o.scale) != (p, r, s) {
                     (o.pos, o.rot, o.scale) = (p, r, s);
                     moved = true;
@@ -718,6 +758,12 @@ impl Scene {
             }
         }
         moved
+    }
+
+    /// Dit aux nouvelles clés où elles vont (calque actif) et ce qu'il y a dessous (calques, montage d'animation)
+    pub fn set_anim_context(&self) {
+        set_layer_context(&self.layers, &self.active_layer);
+        set_nla_context(&self.actions, &self.strips);
     }
 
     /// La caméra par laquelle on regarde : celle qu'on a choisie, sinon la première
@@ -914,6 +960,7 @@ impl Scene {
     /// Renomme un objet sans perdre ses enfants.
     pub fn rename(&mut self, k: usize, name: &str) {
         let old = std::mem::replace(&mut self.objects[k].name, name.to_string());
+        crate::nla::rename_object(self, &old, name);
         if self.camera == old && !old.is_empty() {
             self.camera = name.to_string();
         }

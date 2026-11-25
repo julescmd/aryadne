@@ -9,6 +9,7 @@ mod fountain;
 mod sculpt;
 mod multires;
 mod matchmove;
+mod nla;
 mod transcribe;
 mod expr;
 mod bases;
