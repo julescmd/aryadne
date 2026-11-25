@@ -91,6 +91,9 @@ pub struct Object {
     /// Avant la première clé et après la dernière : constante, en boucle, en va-et-vient
     #[serde(default, skip_serializing_if = "crate::curves::Loop::is_none")]
     pub cycle: crate::curves::Loop,
+    /// Contrainte « viser » : le nom de l'objet vers lequel celui-ci se tourne toujours (son avant : -Z)
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub aim: String,
 }
 
 /// Une clé : la pose complète de l'objet à une image donnée.
@@ -280,7 +283,7 @@ impl Object {
     }
 
     pub fn new(name: String, file: String) -> Object {
-        Object { name, file, pos: [0.0; 3], rot: [0.0; 3], scale: [1.0; 3], visible: true, color: None, mods: vec![], material: String::new(), parent: String::new(), opacity: 0.5, role: String::new(), energy: 1.2, point: false, range: 8.0, shape: 0, spot: spot_deg(), blend: spot_blend(), size: area_size(), keys: vec![], cycle: Default::default() }
+        Object { name, file, pos: [0.0; 3], rot: [0.0; 3], scale: [1.0; 3], visible: true, color: None, mods: vec![], material: String::new(), parent: String::new(), opacity: 0.5, role: String::new(), energy: 1.2, point: false, range: 8.0, shape: 0, spot: spot_deg(), blend: spot_blend(), size: area_size(), keys: vec![], cycle: Default::default(), aim: String::new() }
     }
 }
 
@@ -387,6 +390,27 @@ impl Scene {
             if let Some((p, r, s)) = o.pose_at(f) {
                 if (o.pos, o.rot, o.scale) != (p, r, s) {
                     (o.pos, o.rot, o.scale) = (p, r, s);
+                    moved = true;
+                }
+            }
+        }
+        moved | self.apply_aims()
+    }
+
+    /// Les contraintes « viser » : chaque objet qui en a une se tourne vers sa cible (le roulis reste le sien).
+    /// Les rotations de ses parents ne sont pas compensées.
+    pub fn apply_aims(&mut self) -> bool {
+        let mut moved = false;
+        for k in 0..self.objects.len() {
+            if self.objects[k].aim.is_empty() {
+                continue;
+            }
+            let Some(t) = self.objects.iter().position(|o| o.name == self.objects[k].aim).filter(|&t| t != k) else { continue };
+            let (p, q) = (self.world(k, [0.0; 3]), self.world(t, [0.0; 3]));
+            let rot = aim_rotation([q[0] - p[0], q[1] - p[1], q[2] - p[2]], self.objects[k].rot[2]);
+            if let Some(r) = rot {
+                if (0..3).any(|i| (r[i] - self.objects[k].rot[i]).abs() > 1e-4) {
+                    self.objects[k].rot = r;
                     moved = true;
                 }
             }
@@ -698,6 +722,19 @@ pub fn primitive(id: &str) -> Option<crate::model3d::Model> {
 pub fn resolve(scene_path: &Path, file: &str) -> PathBuf {
     let p = Path::new(file);
     if p.is_absolute() { p.to_path_buf() } else { scene_path.parent().unwrap_or(Path::new("")).join(p) }
+}
+
+/// Rotation (degrés) qui tourne l'avant d'un objet (-Z) vers la direction `d`, la tête vers le haut (+Y)
+pub fn aim_rotation(d: [f32; 3], roll: f32) -> Option<[f32; 3]> {
+    let l = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+    if l < 1e-6 {
+        return None;
+    }
+    let d = [d[0] / l, d[1] / l, d[2] / l];
+    // -Z tourné de a autour de X puis de b autour de Y : (-cos a sin b, sin a, -cos a cos b)
+    let a = d[1].clamp(-1.0, 1.0).asin();
+    let b = (-d[0]).atan2(-d[2]);
+    Some([a.to_degrees(), b.to_degrees(), roll])
 }
 
 /// Matrice de rotation d'un objet (X, puis Y, puis Z, en degrés), lignes par lignes.
@@ -1120,6 +1157,27 @@ pub fn apply_object_curves(keys: &mut Vec<Key>, curves: &[crate::curves::Curve],
 #[cfg(test)]
 mod curve_tests {
     use super::*;
+
+    #[test]
+    fn viser() {
+        let mut sc = Scene::default();
+        let mut cam = Object::new("cam".into(), "@camera".into());
+        cam.pos = [0.0, 2.0, 10.0];
+        cam.aim = "cible".into();
+        let mut cible = Object::new("cible".into(), "x.obj".into());
+        cible.pos = [3.0, 0.0, 0.0];
+        sc.objects = vec![cam, cible];
+        assert!(sc.apply_aims());
+        // L'avant (-Z) de la caméra pointe vers la cible
+        let o = &sc.objects[0];
+        let f = transform(&Object { pos: [0.0; 3], scale: [1.0; 3], ..o.clone() }, [0.0, 0.0, -1.0]);
+        let d = [3.0, -2.0, -10.0];
+        let l = (9.0f32 + 4.0 + 100.0).sqrt();
+        for i in 0..3 {
+            assert!((f[i] - d[i] / l).abs() < 1e-4, "{f:?}");
+        }
+        assert!(!sc.apply_aims());
+    }
 
     #[test]
     fn courbes_de_scene_aller_retour() {

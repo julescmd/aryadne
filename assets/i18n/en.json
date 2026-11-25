@@ -2462,5 +2462,7 @@
   "Fige l'image de la tête de lecture pendant 2 secondes ; la suite du montage recule d'autant": "Holds the frame at the playhead for 2 seconds; the rest of the edit moves back by as much",
   "L'image n'a pas pu être extraite du plan.": "The frame couldn't be extracted from the shot.",
   "tampon de duplication (Alt+clic : source)": "clone stamp (Alt+click: source)",
-  "Alt+clic d'abord pour choisir où prendre les pixels": "Alt+click first to pick where to take pixels from"
+  "Alt+clic d'abord pour choisir où prendre les pixels": "Alt+click first to pick where to take pixels from",
+  "viser": "aim at",
+  "Contrainte « viser » : l'objet se tourne toujours vers la cible, même animée. Sa rotation X et Y ne se règle plus à la main.": "Aim constraint: the object always turns toward the target, even animated. Its X and Y rotation can no longer be set by hand."
 }

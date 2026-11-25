@@ -5083,6 +5083,10 @@ impl Viewer {
                 }
             }
         }
+        // Les contraintes « viser » suivent leurs cibles même quand on déplace les objets à la main
+        if scene.objects.iter().any(|o| !o.aim.is_empty()) && scene.apply_aims() {
+            self.scene_dirty = true;
+        }
         if let Some(f) = seek {
             if f != self.anim_frame {
                 self.anim_frame = f;
@@ -5514,6 +5518,25 @@ impl Viewer {
                                                 }
                                             });
                                         });
+                                        // Contrainte « viser » : l'objet se tourne toujours vers sa cible (une caméra qui suit un personnage)
+                                        ui.horizontal(|ui| {
+                                            ui.label(egui::RichText::new(format!("{}  {}", crate::lucide::CROSSHAIR, crate::i18n::t("viser"))).size(11.0).color(if o.aim.is_empty() { p.muted } else { p.accent }));
+                                            let cur = if o.aim.is_empty() { crate::i18n::t("rien") } else { o.aim.clone() };
+                                            egui::ComboBox::from_id_salt("scene-object-aim").selected_text(egui::RichText::new(cur).size(11.0)).width(130.0).show_ui(ui, |ui| {
+                                                if ui.selectable_label(o.aim.is_empty(), crate::i18n::t("rien")).clicked() {
+                                                    o.aim.clear();
+                                                    changed = true;
+                                                }
+                                                for name in &parents {
+                                                    if ui.selectable_label(&o.aim == name, name).clicked() {
+                                                        o.aim = name.clone();
+                                                        changed = true;
+                                                    }
+                                                }
+                                            });
+                                        })
+                                        .response
+                                        .on_hover_text(crate::i18n::t("Contrainte « viser » : l'objet se tourne toujours vers la cible, même animée. Sa rotation X et Y ne se règle plus à la main."));
 
                                         if crate::scene::kind(o) == crate::scene::Kind::Image {
                                             ui.horizontal(|ui| {
