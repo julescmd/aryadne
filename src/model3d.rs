@@ -1967,7 +1967,7 @@ fn lighting_ui(look: &mut Look, hdr_files: &[(String, std::path::PathBuf)], load
                             *pending = Some(path);
                         }
                     }
-                    if ui.button(crate::i18n::t("charger un .hdr / .exr…")).clicked() {
+                    if ui.button(format!("{}  {}", crate::lucide::UPLOAD, crate::i18n::t("charger un .hdr / .exr…"))).clicked() {
                         *pending = rfd::FileDialog::new().add_filter("HDRI", &["hdr", "exr"]).pick_file();
                     }
                     if loading {
@@ -1996,7 +1996,7 @@ fn lighting_ui(look: &mut Look, hdr_files: &[(String, std::path::PathBuf)], load
                             look.light.color = c;
                         }
                     });
-                    if ui.button(crate::i18n::t("réinitialiser l'éclairage")).clicked() {
+                    if ui.button(format!("{}  {}", crate::lucide::ROTATE_CCW, crate::i18n::t("réinitialiser l'éclairage"))).clicked() {
                         let mat = look.material;
                         let (wire, wc) = (look.wire, look.wire_color);
                         *look = Look { material: mat, wire, wire_color: wc, ..Default::default() };
@@ -4651,7 +4651,7 @@ impl Viewer {
                     if ui.add(egui::Button::new(egui::RichText::new(crate::i18n::t("rendre")).color(p.on_accent)).fill(p.accent)).clicked() {
                         go = true;
                     }
-                    if ui.button(crate::i18n::t("annuler")).clicked() {
+                    if ui.button(format!("{}  {}", crate::lucide::X, crate::i18n::t("annuler"))).clicked() {
                         close = true;
                     }
                 });
@@ -4683,10 +4683,10 @@ impl Viewer {
                     job.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
                     job.target = job.spp;
                 }
-                if ui.add_enabled(job.image.is_some(), egui::Button::new(crate::i18n::t("enregistrer…"))).clicked() {
+                if ui.add_enabled(job.image.is_some(), egui::Button::new(format!("{}  {}", crate::lucide::SAVE, crate::i18n::t("enregistrer…")))).clicked() {
                     save = true;
                 }
-                if ui.button(crate::i18n::t("fermer")).clicked() {
+                if ui.button(format!("{}  {}", crate::lucide::X, crate::i18n::t("fermer"))).clicked() {
                     close = true;
                 }
             });
@@ -5161,7 +5161,7 @@ impl Viewer {
                                 }
                             }
                         });
-                        if ui.button(crate::i18n::t("choisir un fichier…")).clicked() {
+                        if ui.button(format!("{}  {}", crate::lucide::FOLDER_OPEN, crate::i18n::t("choisir un fichier…"))).clicked() {
                             if let Some(files) = rfd::FileDialog::new().add_filter(crate::i18n::t("modèles et images"), &["obj", "fbx", "glb", "gltf", "stl", "3ds", "ply", "ma", "png", "jpg", "jpeg", "webp"]).pick_files() {
                                 for f in files {
                                     scene.add(&path, &f);
@@ -5291,7 +5291,7 @@ impl Viewer {
                             self.multi_follow = None;
                         }
                         r.context_menu(|ui| {
-                            if ui.button(crate::i18n::t("dupliquer")).clicked() {
+                            if ui.button(format!("{}  {}", crate::lucide::COPY, crate::i18n::t("dupliquer"))).clicked() {
                                 action = Some((i, 1));
                                 ui.close();
                             }
@@ -5621,10 +5621,10 @@ impl Viewer {
                                             }
                                             crate::scene::Kind::Camera => {
                                                 ui.horizontal(|ui| {
-                                                    if ui.button(crate::i18n::t("regarder par ici")).on_hover_text(crate::i18n::t("Aligne la vue sur cette caméra")).clicked() {
+                                                    if ui.button(format!("{}  {}", crate::lucide::EYE, crate::i18n::t("regarder par ici"))).on_hover_text(crate::i18n::t("Aligne la vue sur cette caméra")).clicked() {
                                                         look_through = self.scene_sel;
                                                     }
-                                                    if ui.button(crate::i18n::t("poser sur la vue")).on_hover_text(crate::i18n::t("Enregistre la vue actuelle dans cette caméra")).clicked() {
+                                                    if ui.button(format!("{}  {}", crate::lucide::CAMERA, crate::i18n::t("poser sur la vue"))).on_hover_text(crate::i18n::t("Enregistre la vue actuelle dans cette caméra")).clicked() {
                                                         set_camera = self.scene_sel;
                                                     }
                                                 });
@@ -6058,7 +6058,7 @@ impl Viewer {
                             picked = Some(c);
                         }
                         ui.separator();
-                        if ui.button(crate::i18n::t("retirer la clé")).clicked() {
+                        if ui.button(format!("{}  {}", crate::lucide::TRASH_2, crate::i18n::t("retirer la clé"))).clicked() {
                             remove = true;
                             ui.close();
                         }
@@ -6676,10 +6676,10 @@ impl Viewer {
                                 }
                             }
                             ui.separator();
-                            if ui.button(crate::i18n::t("tout cadrer (Origine)")).clicked() {
+                            if ui.button(format!("{}  {}", crate::lucide::SCAN, crate::i18n::t("tout cadrer (Origine)"))).clicked() {
                                 self.cam = Camera { ortho: self.cam.ortho, ..Default::default() };
                             }
-                            if ui.button(crate::i18n::t("cadrer la sélection (Maj+F)")).clicked() {
+                            if ui.button(format!("{}  {}", crate::lucide::SCAN, crate::i18n::t("cadrer la sélection (Maj+F)"))).clicked() {
                                 self.frame_selection();
                             }
                             ui.checkbox(&mut self.orbit_sel, crate::i18n::t("tourner autour de la sélection"));
@@ -6728,41 +6728,42 @@ impl Viewer {
                         egui::containers::menu::MenuButton::new(crate::i18n::t("objet")).ui(ui, |ui| {
                             ui.set_min_width(230.0);
                             if is_scene {
-                                for (label, key, m) in [
-                                    ("dupliquer   Maj+D", Key::D, egui::Modifiers::SHIFT),
-                                    ("supprimer   X", Key::X, egui::Modifiers::NONE),
-                                    ("cacher   H", Key::H, egui::Modifiers::NONE),
-                                    ("tout afficher   Alt+H", Key::H, egui::Modifiers::ALT),
-                                    ("lier au parent actif   P", Key::P, egui::Modifiers::NONE),
-                                    ("retirer le parent   Alt+P", Key::P, egui::Modifiers::ALT),
-                                    ("poser une clé   I", Key::I, egui::Modifiers::NONE),
+                                use crate::lucide as lc;
+                                for (icon, label, key, m) in [
+                                    (lc::COPY, "dupliquer   Maj+D", Key::D, egui::Modifiers::SHIFT),
+                                    (lc::TRASH_2, "supprimer   X", Key::X, egui::Modifiers::NONE),
+                                    (lc::EYE_OFF, "cacher   H", Key::H, egui::Modifiers::NONE),
+                                    (lc::EYE, "tout afficher   Alt+H", Key::H, egui::Modifiers::ALT),
+                                    (lc::LINK, "lier au parent actif   P", Key::P, egui::Modifiers::NONE),
+                                    (lc::UNLINK, "retirer le parent   Alt+P", Key::P, egui::Modifiers::ALT),
+                                    (lc::DIAMOND_PLUS, "poser une clé   I", Key::I, egui::Modifiers::NONE),
                                 ] {
-                                    if ui.button(crate::i18n::t(label)).clicked() {
+                                    if ui.button(format!("{icon}  {}", crate::i18n::t(label))).clicked() {
                                         self.hdr_key = Some((key, m));
                                         ui.close();
                                     }
                                 }
                                 ui.separator();
                             }
-                            if (is_scene || self.can_edit()) && ui.button(crate::i18n::t("modificateurs…")).clicked() {
+                            if (is_scene || self.can_edit()) && ui.button(format!("{}  {}", crate::lucide::WRENCH, crate::i18n::t("modificateurs…"))).clicked() {
                                 self.show_mods = true;
                                 self.edit = None;
                                 self.prepared = None;
                                 ui.close();
                             }
-                            ui.menu_button(crate::i18n::t("capture"), |ui| {
-                                if ui.button(crate::i18n::t("image PNG (2400 px)")).clicked() {
+                            ui.menu_button(format!("{}  {}", crate::lucide::CAMERA, crate::i18n::t("capture")), |ui| {
+                                if ui.button(format!("{}  {}", crate::lucide::IMAGE, crate::i18n::t("image PNG (2400 px)"))).clicked() {
                                     do_capture = true;
                                 }
-                                if is_scene && ui.button(crate::i18n::t("animation en vidéo (MP4)…")).on_hover_text(crate::i18n::t("Chaque image de la scène, du début à la fin, vue par sa caméra (ou par la vue actuelle s'il n'y en a pas)")).clicked() {
+                                if is_scene && ui.button(format!("{}  {}", crate::lucide::FILM, crate::i18n::t("animation en vidéo (MP4)…"))).on_hover_text(crate::i18n::t("Chaque image de la scène, du début à la fin, vue par sa caméra (ou par la vue actuelle s'il n'y en a pas)")).clicked() {
                                     self.want_anim = true;
                                 }
-                                if ui.button(crate::i18n::t("turntable GIF (48 images)")).clicked() {
+                                if ui.button(format!("{}  {}", crate::lucide::ROTATE_3D, crate::i18n::t("turntable GIF (48 images)"))).clicked() {
                                     do_gif = true;
                                 }
                                 ui.label(egui::RichText::new(crate::i18n::t("enregistré à côté du modèle")).color(p.muted).size(10.5));
                             });
-                            if ui.button(crate::i18n::t("exporter…")).clicked() {
+                            if ui.button(format!("{}  {}", crate::lucide::DOWNLOAD, crate::i18n::t("exporter…"))).clicked() {
                                 ask_export = Some("obj");
                                 ui.close();
                             }
@@ -6862,7 +6863,7 @@ impl Viewer {
                                 } else {
                                     match &self.oidn_install {
                                         None => {
-                                            if ui.button(crate::i18n::t("installer le débruiteur IA (~65 Mo)")).on_hover_text(crate::i18n::t("Intel Open Image Denoise, le débruiteur de Cycles, Arnold et V-Ray. Sans droits admin.")).clicked() {
+                                            if ui.button(format!("{}  {}", crate::lucide::DOWNLOAD, crate::i18n::t("installer le débruiteur IA (~65 Mo)"))).on_hover_text(crate::i18n::t("Intel Open Image Denoise, le débruiteur de Cycles, Arnold et V-Ray. Sans droits admin.")).clicked() {
                                                 self.oidn_install = Some(crate::oidn::install(ui.ctx().clone()));
                                             }
                                         }
@@ -6887,7 +6888,7 @@ impl Viewer {
                                 }
                             }
                             ui.separator();
-                            if ui.button(crate::i18n::t("rendre l'image…   F12")).on_hover_text(crate::i18n::t("Rendu final en tracé de chemins, à la taille choisie, puis enregistrement en PNG")).clicked() {
+                            if ui.button(format!("{}  {}", crate::lucide::CAMERA, crate::i18n::t("rendre l'image…   F12"))).on_hover_text(crate::i18n::t("Rendu final en tracé de chemins, à la taille choisie, puis enregistrement en PNG")).clicked() {
                                 self.render_dialog = Some((1920, 1080, 256));
                                 ui.close();
                             }
@@ -6910,7 +6911,7 @@ impl Viewer {
                                     }
                                 });
                             }
-                            if ui.button(crate::i18n::t("＋ nouveau matériau…")).on_hover_text(crate::i18n::t("crée un matériau en nodes, l'applique et l'ouvre à côté")).clicked() && !self.root.is_empty() {
+                            if ui.button(format!("{}  {}", crate::lucide::PLUS, crate::i18n::t("nouveau matériau…"))).on_hover_text(crate::i18n::t("crée un matériau en nodes, l'applique et l'ouvre à côté")).clicked() && !self.root.is_empty() {
                                 let dir = std::path::Path::new(&self.root).join("nodes");
                                 let _ = std::fs::create_dir_all(&dir);
                                 let stem = self.path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "Matériau".into());
@@ -7196,7 +7197,7 @@ impl Viewer {
                 ui.label(crate::theme::section(&crate::i18n::t("EMPLACEMENT")));
                 ui.horizontal(|ui| {
                     ui.add(egui::TextEdit::singleline(path).desired_width(350.0));
-                    if ui.button(crate::i18n::t("parcourir…")).clicked() {
+                    if ui.button(format!("{}  {}", crate::lucide::FOLDER_OPEN, crate::i18n::t("parcourir…"))).clicked() {
                         let cur = std::path::PathBuf::from(path.as_str());
                         let mut d = rfd::FileDialog::new().add_filter(fmt.to_uppercase(), &[*fmt]);
                         if let Some(dir) = cur.parent().filter(|d| d.is_dir()) {
@@ -7219,7 +7220,7 @@ impl Viewer {
                     if ui.add(egui::Button::new(egui::RichText::new(crate::i18n::t("exporter")).color(p.on_accent)).fill(p.accent)).clicked() && !path.trim().is_empty() {
                         go = true;
                     }
-                    if ui.button(crate::i18n::t("annuler")).clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                    if ui.button(format!("{}  {}", crate::lucide::X, crate::i18n::t("annuler"))).clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
                         close = true;
                     }
                 });

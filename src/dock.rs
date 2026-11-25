@@ -280,11 +280,11 @@ fn header(ui: &mut Ui, id: &str, title: &str, mut pl: Place, closable: bool, pan
             }
         }
         ui.separator();
-        if closable && ui.button(crate::i18n::t("fermer ce panneau")).clicked() {
+        if closable && ui.button(format!("{}  {}", crate::lucide::X, crate::i18n::t("fermer ce panneau"))).clicked() {
             CLOSED.lock().unwrap_or_else(|e| e.into_inner()).push(id.to_string());
             ui.close();
         }
-        if ui.button(crate::i18n::t("réinitialiser la disposition")).clicked() {
+        if ui.button(format!("{}  {}", crate::lucide::ROTATE_CCW, crate::i18n::t("réinitialiser la disposition"))).clicked() {
             reset();
             ui.close();
         }

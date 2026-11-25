@@ -2962,7 +2962,7 @@ impl Editor {
                 });
             }
             egui::containers::menu::MenuButton::new(crate::i18n::t("Vue")).ui(ui, |ui| {
-                if ui.button(crate::i18n::t("Tout cadrer   Origine")).clicked() {
+                if ui.button(format!("{}  {}", crate::lucide::SCAN, crate::i18n::t("Tout cadrer   Origine"))).clicked() {
                     self.scene = Rect::ZERO;
                 }
                 let all_on = self.graph.nodes.iter().filter(|n| n.op != "mat_out" && n.op != "comp_out").all(|n| n.preview);
@@ -2973,10 +2973,10 @@ impl Editor {
                     self.changed();
                 }
                 ui.separator();
-                if ui.add_enabled(!self.undo.is_empty(), egui::Button::new(crate::i18n::t("Annuler   Ctrl+Z"))).clicked() {
+                if ui.add_enabled(!self.undo.is_empty(), egui::Button::new(format!("{}  {}", crate::lucide::UNDO_2, crate::i18n::t("Annuler   Ctrl+Z")))).clicked() {
                     self.undo();
                 }
-                if ui.add_enabled(!self.redo.is_empty(), egui::Button::new(crate::i18n::t("Rétablir   Ctrl+Maj+Z"))).clicked() {
+                if ui.add_enabled(!self.redo.is_empty(), egui::Button::new(format!("{}  {}", crate::lucide::REDO_2, crate::i18n::t("Rétablir   Ctrl+Maj+Z")))).clicked() {
                     self.redo();
                 }
             });
@@ -2984,7 +2984,7 @@ impl Editor {
                 ui.label(RichText::new(crate::i18n::t("Maj+A ou clic droit : ajouter\nglisser dans le vide : sélection en rectangle (Maj : ajouter)\nclic molette ou clic droit glissé : se déplacer · molette : zoom\nglisser une sortie dans le vide : ajouter un node déjà relié\nCtrl+clic sur un lien : le couper\nA : tout · Alt+A : rien · X / Suppr : effacer\nMaj+D : dupliquer · Ctrl+C / Ctrl+V : copier, coller\nM : muet · H : réduire · P : miniature · F2 : renommer\nF : cadrer la sélection · Origine : tout cadrer\nCtrl+Z / Ctrl+Maj+Z : annuler, rétablir\nGlisser des images depuis l'ordinateur : nodes texture")).size(11.0));
             });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if kind == GraphKind::Compositor && ui.button(crate::i18n::t("Exporter PNG")).clicked() {
+                if kind == GraphKind::Compositor && ui.button(format!("{}  {}", crate::lucide::DOWNLOAD, crate::i18n::t("Exporter PNG"))).clicked() {
                     self.export();
                 }
                 let name = self.path.file_name().map(|n| crate::formats::strip(&n.to_string_lossy()).to_string()).unwrap_or_default();
@@ -3512,13 +3512,13 @@ impl Editor {
             actions.push(Act::Clear);
         }
         bg.context_menu(|ui| {
-            if ui.button(crate::i18n::t("ajouter un node…   Maj+A")).clicked() {
+            if ui.button(format!("{}  {}", crate::lucide::PLUS, crate::i18n::t("ajouter un node…   Maj+A"))).clicked() {
                 if let Some(pt) = pointer {
                     actions.push(Act::OpenAdd(pt, None));
                 }
                 ui.close();
             }
-            if ui.add_enabled(self.clipboard.is_some(), egui::Button::new(crate::i18n::t("coller   Ctrl+V"))).clicked() {
+            if ui.add_enabled(self.clipboard.is_some(), egui::Button::new(format!("{}  {}", crate::lucide::CLIPBOARD_PASTE, crate::i18n::t("coller   Ctrl+V")))).clicked() {
                 if let (Some((nodes, links)), Some(pt)) = (self.clipboard.clone(), pointer) {
                     let min = nodes.iter().fold([f32::MAX; 2], |m, n| [m[0].min(n.pos[0]), m[1].min(n.pos[1])]);
                     let new = self.paste(nodes, links, [pt.x - min[0], pt.y - min[1]]);
@@ -3527,15 +3527,15 @@ impl Editor {
                 }
                 ui.close();
             }
-            if ui.button(crate::i18n::t("tout sélectionner   A")).clicked() {
+            if ui.button(format!("{}  {}", crate::lucide::CHECK_CHECK, crate::i18n::t("tout sélectionner   A"))).clicked() {
                 self.selected = self.graph.nodes.iter().map(|n| n.id).collect();
                 ui.close();
             }
-            if !self.selected.is_empty() && ui.button(crate::i18n::t("cadre autour de la sélection   Ctrl+J")).clicked() {
+            if !self.selected.is_empty() && ui.button(format!("{}  {}", crate::lucide::FRAME, crate::i18n::t("cadre autour de la sélection   Ctrl+J"))).clicked() {
                 self.frame_sel_request = true;
                 ui.close();
             }
-            if ui.button(crate::i18n::t("tout cadrer   Origine")).clicked() {
+            if ui.button(format!("{}  {}", crate::lucide::SCAN, crate::i18n::t("tout cadrer   Origine"))).clicked() {
                 self.scene = Rect::ZERO;
                 ui.close();
             }
@@ -3586,7 +3586,7 @@ impl Editor {
                 self.frame_rename = Some((k, fr.label.clone()));
             }
             tr.context_menu(|ui| {
-                if ui.button(crate::i18n::t("renommer le cadre")).clicked() {
+                if ui.button(format!("{}  {}", crate::lucide::PENCIL, crate::i18n::t("renommer le cadre"))).clicked() {
                     self.frame_rename = Some((k, fr.label.clone()));
                     ui.close();
                 }
@@ -3600,7 +3600,7 @@ impl Editor {
                         }
                     }
                 });
-                if ui.button(crate::i18n::t("supprimer le cadre")).clicked() {
+                if ui.button(format!("{}  {}", crate::lucide::TRASH_2, crate::i18n::t("supprimer le cadre"))).clicked() {
                     frame_del = Some(k);
                     ui.close();
                 }
@@ -4317,15 +4317,15 @@ impl Editor {
                     self.open_request = Some(std::path::Path::new(&self.root).join(&l.master));
                 }
                 resp.on_hover_text(crate::i18n::t("double-clic : ouvrir le matériau maître en nodes")).context_menu(|ui| {
-                    if ui.button(crate::i18n::t("monter")).clicked() {
+                    if ui.button(format!("{}  {}", crate::lucide::ARROW_UP, crate::i18n::t("monter"))).clicked() {
                         up = Some(i);
                         ui.close();
                     }
-                    if ui.button(crate::i18n::t("descendre")).clicked() {
+                    if ui.button(format!("{}  {}", crate::lucide::ARROW_DOWN, crate::i18n::t("descendre"))).clicked() {
                         down = Some(i);
                         ui.close();
                     }
-                    if ui.button(crate::i18n::t("ouvrir le maître en nodes")).clicked() {
+                    if ui.button(format!("{}  {}", crate::lucide::FOLDER_OPEN, crate::i18n::t("ouvrir le maître en nodes"))).clicked() {
                         self.open_request = Some(std::path::Path::new(&self.root).join(&l.master));
                         ui.close();
                     }

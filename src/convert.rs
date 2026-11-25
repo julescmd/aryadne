@@ -166,7 +166,7 @@ impl Dlg {
             ui.horizontal(|ui| {
                 ui.label(crate::caps(&crate::i18n::t("convertir et compresser")));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button(crate::i18n::t("fermer")).clicked() {
+                    if ui.button(format!("{}  {}", crate::lucide::X, crate::i18n::t("fermer"))).clicked() {
                         open = false;
                     }
                 });
@@ -279,7 +279,7 @@ impl Dlg {
                 match &self.ffmpeg_install {
                     None => {
                         ui.label(RichText::new(crate::i18n::t("Les vidéos et les sons passent par ffmpeg (gratuit, installé sans admin).")).color(p.muted).size(11.5));
-                        if ui.button(crate::i18n::t("installer ffmpeg")).clicked() {
+                        if ui.button(format!("{}  {}", crate::lucide::DOWNLOAD, crate::i18n::t("installer ffmpeg"))).clicked() {
                             self.ffmpeg_install = Some(ffmpeg::install(ctx.clone()));
                         }
                     }

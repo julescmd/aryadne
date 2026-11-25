@@ -819,7 +819,7 @@ impl Viewer {
                             Err(e) => self.message = Some(e),
                         }
                     }
-                    if ui.button(crate::i18n::t("annuler")).clicked() {
+                    if ui.button(format!("{}  {}", crate::lucide::X, crate::i18n::t("annuler"))).clicked() {
                         self.edits.clear();
                         self.editing = None;
                         self.deck = load(&self.path);

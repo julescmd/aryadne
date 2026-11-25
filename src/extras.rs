@@ -446,8 +446,8 @@ impl App {
             }
             ui.add_space(8.0);
             ui.horizontal(|ui| {
-                create |= ui.button(crate::i18n::t("créer")).clicked();
-                close = ui.button(crate::i18n::t("annuler")).clicked() || ui.input(|i| i.key_pressed(Key::Escape));
+                create |= ui.button(format!("{}  {}", crate::lucide::PLUS, crate::i18n::t("créer"))).clicked();
+                close = ui.button(format!("{}  {}", crate::lucide::X, crate::i18n::t("annuler"))).clicked() || ui.input(|i| i.key_pressed(Key::Escape));
             });
         });
         if create && !d.name.trim().is_empty() {
@@ -521,14 +521,14 @@ impl App {
                                 ui.add(egui::Label::new(RichText::new(&text).monospace().size(12.0)).wrap_mode(egui::TextWrapMode::Extend));
                             }
                         });
-                        if ui.button(crate::i18n::t("restaurer cette version")).clicked() {
+                        if ui.button(format!("{}  {}", crate::lucide::HISTORY, crate::i18n::t("restaurer cette version"))).clicked() {
                             restore = Some(text);
                         }
                     });
                 });
             }
             ui.add_space(8.0);
-            close = ui.button(crate::i18n::t("fermer")).clicked() || ui.input(|i| i.key_pressed(Key::Escape));
+            close = ui.button(format!("{}  {}", crate::lucide::X, crate::i18n::t("fermer"))).clicked() || ui.input(|i| i.key_pressed(Key::Escape));
         });
         if let Some(text) = restore {
             if let Some(i) = self.docs.iter().position(|x| x.rel == d.rel) {
@@ -639,8 +639,8 @@ impl App {
             ui.label(RichText::new(crate::i18n::t("L'image est enregistrée dans refs/ (Ctrl+V d'une URL dans les refs fait la même chose).")).color(p.muted).size(11.0));
             ui.add_space(8.0);
             ui.horizontal(|ui| {
-                go |= ui.button(crate::i18n::t("importer")).clicked();
-                close = ui.button(crate::i18n::t("annuler")).clicked() || ui.input(|i| i.key_pressed(Key::Escape));
+                go |= ui.button(format!("{}  {}", crate::lucide::UPLOAD, crate::i18n::t("importer"))).clicked();
+                close = ui.button(format!("{}  {}", crate::lucide::X, crate::i18n::t("annuler"))).clicked() || ui.input(|i| i.key_pressed(Key::Escape));
             });
         });
         if go && !url.trim().is_empty() {
@@ -1326,7 +1326,7 @@ pub fn chat_bar(ui: &mut egui::Ui, chat: &mut chat::Chat, local: &ollama::Local,
                     }
                 });
                 ui.separator();
-                if ui.button(crate::i18n::t("ajouter Claude, ChatGPT, DeepSeek…")).clicked() {
+                if ui.button(format!("{}  {}", crate::lucide::PLUS, crate::i18n::t("ajouter Claude, ChatGPT, DeepSeek…"))).clicked() {
                     out.manage_models = true;
                     ui.close();
                 }
@@ -1528,7 +1528,7 @@ impl App {
                 });
             }
             ui.add_space(8.0);
-            close = ui.button(crate::i18n::t("fermer")).clicked() || ui.input(|i| i.key_pressed(Key::Escape));
+            close = ui.button(format!("{}  {}", crate::lucide::X, crate::i18n::t("fermer"))).clicked() || ui.input(|i| i.key_pressed(Key::Escape));
         });
         if let Some(r) = open {
             self.stats = None;

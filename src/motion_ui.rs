@@ -859,15 +859,15 @@ impl Editor {
             if ui.button(crate::i18n::t("nouveau rectangle")).clicked() {
                 self.add_layer(Kind::Rect { w: 400.0, h: 240.0, radius: 12.0, color: [0xcc, 0xac, 0xb9] }, Some(c));
             }
-            if ui.button(crate::i18n::t("nouvelle ellipse")).clicked() {
+            if ui.button(format!("{}  {}", crate::lucide::CIRCLE, crate::i18n::t("nouvelle ellipse"))).clicked() {
                 self.add_layer(Kind::Ellipse { w: 260.0, h: 260.0, color: [0x8b, 0xa8, 0xc6] }, Some(c));
             }
-            if ui.button(crate::i18n::t("image…")).clicked() {
+            if ui.button(format!("{}  {}", crate::lucide::IMAGE, crate::i18n::t("image…"))).clicked() {
                 self.add_image();
             }
             ui.separator();
             let sel = self.sel;
-            if ui.add_enabled(sel.is_some(), egui::Button::new(crate::i18n::t("dupliquer"))).clicked() {
+            if ui.add_enabled(sel.is_some(), egui::Button::new(format!("{}  {}", crate::lucide::COPY, crate::i18n::t("dupliquer")))).clicked() {
                 if let Some(i) = sel {
                     let mut d = self.compo.layers[i].clone();
                     d.name = self.compo.fresh_name(&d.name);
@@ -876,21 +876,21 @@ impl Editor {
                     self.changed();
                 }
             }
-            if ui.add_enabled(sel.is_some_and(|i| i > 0), egui::Button::new(crate::i18n::t("monter"))).clicked() {
+            if ui.add_enabled(sel.is_some_and(|i| i > 0), egui::Button::new(format!("{}  {}", crate::lucide::ARROW_UP, crate::i18n::t("monter")))).clicked() {
                 if let Some(i) = sel {
                     self.compo.layers.swap(i, i - 1);
                     self.sel = Some(i - 1);
                     self.changed();
                 }
             }
-            if ui.add_enabled(sel.is_some_and(|i| i + 1 < self.compo.layers.len()), egui::Button::new(crate::i18n::t("descendre"))).clicked() {
+            if ui.add_enabled(sel.is_some_and(|i| i + 1 < self.compo.layers.len()), egui::Button::new(format!("{}  {}", crate::lucide::ARROW_DOWN, crate::i18n::t("descendre")))).clicked() {
                 if let Some(i) = sel {
                     self.compo.layers.swap(i, i + 1);
                     self.sel = Some(i + 1);
                     self.changed();
                 }
             }
-            if ui.add_enabled(sel.is_some(), egui::Button::new(crate::i18n::t("supprimer"))).clicked() {
+            if ui.add_enabled(sel.is_some(), egui::Button::new(format!("{}  {}", crate::lucide::TRASH_2, crate::i18n::t("supprimer")))).clicked() {
                 if let Some(i) = sel {
                     self.compo.layers.remove(i);
                     self.sel = None;

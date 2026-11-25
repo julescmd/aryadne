@@ -483,14 +483,14 @@ impl Viewer {
                             self.save_marks();
                         }
                     });
-                    if ui.button(crate::i18n::t("enlever le signet")).clicked() {
+                    if ui.button(format!("{}  {}", crate::lucide::TRASH_2, crate::i18n::t("enlever le signet"))).clicked() {
                         self.toggle_mark(f);
                         ui.close();
                     }
-                } else if ui.button(crate::i18n::t("ajouter un signet (M)")).clicked() {
+                } else if ui.button(format!("{}  {}", crate::lucide::PLUS, crate::i18n::t("ajouter un signet (M)"))).clicked() {
                     self.toggle_mark(f);
                 }
-                if ui.button(crate::i18n::t("aller à cette image")).clicked() {
+                if ui.button(format!("{}  {}", crate::lucide::ARROW_RIGHT, crate::i18n::t("aller à cette image"))).clicked() {
                     self.cur = f;
                     self.playing = false;
                     ui.close();
@@ -527,7 +527,7 @@ impl Viewer {
         let send = r.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter) && i.modifiers.command);
         ui.horizontal(|ui| {
             let ok = !self.comment_input.trim().is_empty();
-            if (ui.add_enabled(ok, egui::Button::new(crate::i18n::t("Ajouter"))).on_hover_text("Ctrl+Entrée").clicked() || send) && ok {
+            if (ui.add_enabled(ok, egui::Button::new(format!("{}  {}", crate::lucide::PLUS, crate::i18n::t("Ajouter")))).on_hover_text("Ctrl+Entrée").clicked() || send) && ok {
                 let at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs().to_string()).unwrap_or_default();
                 self.comments.push(Comment { frame: self.cur, text: self.comment_input.trim().to_string(), done: false, at });
                 self.comment_input.clear();
@@ -1226,10 +1226,10 @@ impl Viewer {
             ui.label(RichText::new(what).color(p.muted).size(11.0));
             ui.horizontal(|ui| {
                 let running = ex.job.as_ref().is_some_and(|j| !j.lock().unwrap().finished);
-                if ui.add_enabled(!running, egui::Button::new(crate::i18n::t("exporter"))).clicked() {
+                if ui.add_enabled(!running, egui::Button::new(format!("{}  {}", crate::lucide::DOWNLOAD, crate::i18n::t("exporter")))).clicked() {
                     start = true;
                 }
-                if ui.button(crate::i18n::t("fermer")).clicked() {
+                if ui.button(format!("{}  {}", crate::lucide::X, crate::i18n::t("fermer"))).clicked() {
                     close = true;
                 }
                 if let Some(j) = &ex.job {

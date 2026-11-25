@@ -628,16 +628,16 @@ impl App {
             ui.separator();
             ui.horizontal(|ui| {
                 ui.add(egui::TextEdit::singleline(&mut self.disp_new).hint_text(crate::i18n::t("Modelage, Animation…")).desired_width(150.0));
-                if ui.add_enabled(!self.disp_new.trim().is_empty(), egui::Button::new(crate::i18n::t("Enregistrer"))).on_hover_text(crate::i18n::t("Garde l'arrangement actuel des panneaux sous ce nom")).clicked() {
+                if ui.add_enabled(!self.disp_new.trim().is_empty(), egui::Button::new(format!("{}  {}", crate::lucide::SAVE, crate::i18n::t("Enregistrer")))).on_hover_text(crate::i18n::t("Garde l'arrangement actuel des panneaux sous ce nom")).clicked() {
                     act = 1;
                     ui.close();
                 }
             });
-            if ui.button(crate::i18n::t("Renommer en ce nom")).on_hover_text(crate::i18n::t("Donne le nom tapé ci-dessus à la disposition en cours")).clicked() && !self.disp_new.trim().is_empty() {
+            if ui.button(format!("{}  {}", crate::lucide::PENCIL, crate::i18n::t("Renommer en ce nom"))).on_hover_text(crate::i18n::t("Donne le nom tapé ci-dessus à la disposition en cours")).clicked() && !self.disp_new.trim().is_empty() {
                 act = 2;
                 ui.close();
             }
-            if ui.button(crate::i18n::t("Réinitialiser cette disposition")).clicked() {
+            if ui.button(format!("{}  {}", crate::lucide::ROTATE_CCW, crate::i18n::t("Réinitialiser cette disposition"))).clicked() {
                 act = 3;
                 ui.close();
             }
@@ -646,7 +646,7 @@ impl App {
                 ui.close();
             }
             ui.separator();
-            if ui.button(crate::i18n::t("Ouvrir l'étape dans une nouvelle fenêtre")).on_hover_text(crate::i18n::t("Par exemple les matériaux sur un écran et la scène sur l'autre")).clicked() {
+            if ui.button(format!("{}  {}", crate::lucide::FOLDER_OPEN, crate::i18n::t("Ouvrir l'étape dans une nouvelle fenêtre"))).on_hover_text(crate::i18n::t("Par exemple les matériaux sur un écran et la scène sur l'autre")).clicked() {
                 if let Err(e) = workspace::open_in_window(&self.root(), self.ws.current) {
                     self.error = Some(e);
                 }
@@ -820,7 +820,7 @@ impl App {
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
                         go |= ui.add(egui::Button::new(RichText::new(crate::i18n::t("créer")).color(p.on_accent)).fill(p.accent)).clicked();
-                        if ui.button(crate::i18n::t("annuler")).clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                        if ui.button(format!("{}  {}", crate::lucide::X, crate::i18n::t("annuler"))).clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
                             keep = false;
                         }
                     });
@@ -1005,10 +1005,10 @@ impl App {
                     if ui.add(egui::Button::new(RichText::new(crate::i18n::t("enregistrer…")).color(p.on_accent)).fill(p.accent)).clicked() {
                         choice = 1;
                     }
-                    if ui.button(crate::i18n::t("ne pas enregistrer")).clicked() {
+                    if ui.button(format!("{}  {}", crate::lucide::X, crate::i18n::t("ne pas enregistrer"))).clicked() {
                         choice = 2;
                     }
-                    if ui.button(crate::i18n::t("annuler")).clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                    if ui.button(format!("{}  {}", crate::lucide::X, crate::i18n::t("annuler"))).clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
                         choice = 3;
                     }
                 });
@@ -1049,7 +1049,7 @@ impl App {
                     if ui.add(egui::Button::new(RichText::new(crate::i18n::t("les rouvrir")).color(p.on_accent)).fill(p.accent)).clicked() {
                         choice = 1;
                     }
-                    if ui.button(crate::i18n::t("les supprimer")).clicked() {
+                    if ui.button(format!("{}  {}", crate::lucide::TRASH_2, crate::i18n::t("les supprimer"))).clicked() {
                         choice = 2;
                     }
                 });
@@ -1240,7 +1240,7 @@ impl App {
                             if tabs_n > 0 && ui.add(egui::Button::new(RichText::new(format!("{} {tabs_n} {}", crate::i18n::t("Rouvrir les"), crate::i18n::t_mid("onglets"))).color(p.on_accent).family(theme::bold())).fill(p.accent).min_size(egui::vec2(0.0, 32.0))).clicked() {
                                 reopen = true;
                             }
-                            if ui.add(egui::Button::new(crate::i18n::t("Ouvrir un autre coffre")).min_size(egui::vec2(0.0, 32.0))).clicked() {
+                            if ui.add(egui::Button::new(format!("{}  {}", crate::lucide::FOLDER_OPEN, crate::i18n::t("Ouvrir un autre coffre"))).min_size(egui::vec2(0.0, 32.0))).clicked() {
                                 run = Some(extras::Cmd::ChangeVault);
                             }
                         });
@@ -2724,7 +2724,7 @@ impl App {
                             self.home_open = true;
                             ui.close();
                         }
-                        if ui.add(egui::Button::new(crate::i18n::t("réglages")).shortcut_text(keymap::text("settings"))).clicked() {
+                        if ui.add(egui::Button::new(format!("{}  {}", crate::lucide::SETTINGS, crate::i18n::t("réglages"))).shortcut_text(keymap::text("settings"))).clicked() {
                             cmd = Some(extras::Cmd::Settings(settings::Tab::Appearance));
                         }
                     });
@@ -3007,7 +3007,7 @@ impl App {
                         }
                         resp.context_menu(|ui| {
                             if self.panes.contains(&d.rel) {
-                                if ui.button(crate::i18n::t("remettre parmi les onglets")).clicked() {
+                                if ui.button(format!("{}  {}", crate::lucide::ROTATE_CCW, crate::i18n::t("remettre parmi les onglets"))).clicked() {
                                     untear = Some(d.rel.clone());
                                     ui.close();
                                 }
@@ -3020,7 +3020,7 @@ impl App {
                                 }
                             }
                             ui.separator();
-                            if ui.button(crate::i18n::t("fermer")).clicked() {
+                            if ui.button(format!("{}  {}", crate::lucide::X, crate::i18n::t("fermer"))).clicked() {
                                 self.actions.push(Action::Close(i));
                                 ui.close();
                             }
@@ -3258,7 +3258,7 @@ impl App {
                             if ui.button(ext_label).clicked() {
                                 which = 1;
                             }
-                            if ui.button(crate::i18n::t("avec…")).on_hover_text(crate::i18n::t("Choisir l'application")).clicked() {
+                            if ui.button(format!("{}  {}", crate::lucide::EXTERNAL_LINK, crate::i18n::t("avec…"))).on_hover_text(crate::i18n::t("Choisir l'application")).clicked() {
                                 which = 2;
                             }
                             if ui.add(egui::Button::new(format!("{}  {}", crate::lucide::FOLDER_OPEN, crate::i18n::t("afficher dans le dossier")))).clicked() {
@@ -3399,7 +3399,7 @@ impl App {
                     ui.vertical_centered(|ui| {
                         ui.label(RichText::new(msg.as_str()).color(p.muted));
                         ui.add_space(10.0);
-                        open = ui.button(crate::i18n::t("ouvrir avec l'app par défaut")).clicked();
+                        open = ui.button(format!("{}  {}", crate::lucide::FOLDER_OPEN, crate::i18n::t("ouvrir avec l'app par défaut"))).clicked();
                     });
                     if open {
                         let r = vault::safe(&root, &rel).and_then(|p| settings::open_external(&p));
@@ -3841,7 +3841,7 @@ impl App {
                         Some((rel, Summary::Failed(e))) => {
                             ui.label(RichText::new(rel).color(p.muted).size(11.0));
                             ui.label(RichText::new(e).color(p.missing).size(12.0));
-                            if ui.button(crate::i18n::t("réglages ia")).clicked() {
+                            if ui.button(format!("{}  {}", crate::lucide::SETTINGS, crate::i18n::t("réglages ia"))).clicked() {
                                 self.open_settings(ui.ctx());
                             }
                         }
@@ -3926,13 +3926,13 @@ impl App {
                         self.brain.dirty = true;
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.button(crate::i18n::t("recentrer")).clicked() {
+                        if ui.button(format!("{}  {}", crate::lucide::SCAN, crate::i18n::t("recentrer"))).clicked() {
                             self.brain.recenter();
                         }
                         let busy = self.organize.as_ref().is_some_and(|o| o.rx.is_some());
                         if busy {
                             ui.spinner();
-                        } else if ui.button(crate::i18n::t("ranger avec l'IA")).on_hover_text(crate::i18n::t("L'IA propose un rangement de ce dossier ; tu choisis quoi appliquer")).clicked() {
+                        } else if ui.button(format!("{}  {}", crate::lucide::SPARKLES, crate::i18n::t("ranger avec l'IA"))).on_hover_text(crate::i18n::t("L'IA propose un rangement de ce dossier ; tu choisis quoi appliquer")).clicked() {
                             self.start_organize(ui.ctx());
                         }
                     });
@@ -4046,7 +4046,7 @@ impl App {
                     let b = egui::Button::new(RichText::new(format!("appliquer ({n})")).color(p.on_accent).family(theme::bold())).fill(p.accent).stroke(egui::Stroke::NONE);
                     apply = ui.add(b).clicked();
                 }
-                close = ui.button(crate::i18n::t("fermer")).clicked();
+                close = ui.button(format!("{}  {}", crate::lucide::X, crate::i18n::t("fermer"))).clicked();
             });
         });
         let moves: Vec<OrganizeMove> = o.moves.iter().filter(|m| m.0).map(|m| m.1.clone()).collect();
@@ -4348,45 +4348,45 @@ impl App {
             if ui.add(egui::Button::new(format!("{}  {}", crate::lucide::SCAN, crate::i18n::t("Tout cadrer")))).clicked() {
                 self.board.fit();
             }
-            if ui.button(crate::i18n::t("Taille réelle (100 %)")).clicked() {
+            if ui.button(format!("{}  {}", crate::lucide::SCAN_SEARCH, crate::i18n::t("Taille réelle (100 %)"))).clicked() {
                 self.board.data.zoom = 1.0;
             }
             ui.separator();
-            if ui.add_enabled(self.board.can_undo(), egui::Button::new(crate::i18n::t("Annuler   Ctrl+Z"))).clicked() {
+            if ui.add_enabled(self.board.can_undo(), egui::Button::new(format!("{}  {}", crate::lucide::UNDO_2, crate::i18n::t("Annuler   Ctrl+Z")))).clicked() {
                 self.board.undo();
             }
-            if ui.add_enabled(self.board.can_redo(), egui::Button::new(crate::i18n::t("Rétablir   Ctrl+Y"))).clicked() {
+            if ui.add_enabled(self.board.can_redo(), egui::Button::new(format!("{}  {}", crate::lucide::REDO_2, crate::i18n::t("Rétablir   Ctrl+Y")))).clicked() {
                 self.board.redo();
             }
         });
         egui::containers::menu::MenuButton::new(crate::i18n::t("Sélection")).ui(&mut hui, |ui| {
-            if ui.button(crate::i18n::t("Tout choisir")).clicked() {
+            if ui.button(format!("{}  {}", crate::lucide::CHECK_CHECK, crate::i18n::t("Tout choisir"))).clicked() {
                 self.board.selection = (0..self.board.data.items.len()).collect();
             }
-            if ui.button(crate::i18n::t("Toutes les images")).clicked() {
+            if ui.button(format!("{}  {}", crate::lucide::IMAGES, crate::i18n::t("Toutes les images"))).clicked() {
                 self.board.selection = (0..self.board.data.items.len()).filter(|&i| matches!(self.board.data.items[i].kind, board::Kind::Image { .. })).collect();
             }
-            if ui.button(crate::i18n::t("Rien")).clicked() {
+            if ui.button(format!("{}  {}", crate::lucide::SQUARE_DASHED, crate::i18n::t("Rien"))).clicked() {
                 self.board.selection.clear();
             }
             ui.separator();
-            if ui.add_enabled(!self.board.selection.is_empty(), egui::Button::new(crate::i18n::t("Supprimer   Suppr"))).clicked() {
+            if ui.add_enabled(!self.board.selection.is_empty(), egui::Button::new(format!("{}  {}", crate::lucide::TRASH_2, crate::i18n::t("Supprimer   Suppr")))).clicked() {
                 self.board.delete_selection();
             }
         });
         egui::containers::menu::MenuButton::new(crate::i18n::t("Ajouter")).ui(&mut hui, |ui| {
             ui.set_min_width(260.0);
-            if ui.button(crate::i18n::t("Texte   T")).clicked() {
+            if ui.button(format!("{}  {}", crate::lucide::TYPE, crate::i18n::t("Texte   T"))).clicked() {
                 self.board.tool = board::Tool::Text;
             }
-            if ui.button(crate::i18n::t("Palette depuis la sélection")).clicked() {
+            if ui.button(format!("{}  {}", crate::lucide::PALETTE, crate::i18n::t("Palette depuis la sélection"))).clicked() {
                 self.board_tab = 0;
                 self.palette_to_board();
             }
             ui.separator();
             ui.label(RichText::new(crate::i18n::t("Moodboard automatique")).size(11.0).color(p.muted));
             ui.add(egui::TextEdit::singleline(&mut self.auto_query).hint_text(crate::i18n::t("mots-clés : forêt brume…")).desired_width(240.0));
-            if ui.button(crate::i18n::t("Images par mots-clés")).on_hover_text(crate::i18n::t("Ajoute les images dont le nom, le dossier ou les notes qui les citent correspondent")).clicked() {
+            if ui.button(format!("{}  {}", crate::lucide::SEARCH, crate::i18n::t("Images par mots-clés"))).on_hover_text(crate::i18n::t("Ajoute les images dont le nom, le dossier ou les notes qui les citent correspondent")).clicked() {
                 let q = self.auto_query.clone();
                 let n = self.auto_board_keywords(&q);
                 self.toast(if n == 0 { "aucune image ne correspond".to_string() } else { format!("{n} images ajoutées") });
@@ -4395,7 +4395,7 @@ impl App {
                 .then(|| self.board.selection[0])
                 .and_then(|i| self.board.data.items.get(i))
                 .and_then(|it| if let board::Kind::Image { rel, .. } = &it.kind { Some(rel.clone()) } else { None });
-            if ui.add_enabled(seed.is_some(), egui::Button::new(crate::i18n::t("Images aux couleurs proches"))).on_disabled_hover_text(crate::i18n::t("sélectionne d'abord une seule image du board")).clicked() {
+            if ui.add_enabled(seed.is_some(), egui::Button::new(format!("{}  {}", crate::lucide::PIPETTE, crate::i18n::t("Images aux couleurs proches")))).on_disabled_hover_text(crate::i18n::t("sélectionne d'abord une seule image du board")).clicked() {
                 if let Some(seed) = seed {
                     match self.auto_board_colors(&seed) {
                         Ok(n) => self.toast(format!("{} images aux couleurs proches", n.saturating_sub(1))),
@@ -4405,10 +4405,10 @@ impl App {
             }
         });
         egui::containers::menu::MenuButton::new(crate::i18n::t("Disposer")).ui(&mut hui, |ui| {
-            if ui.button(crate::i18n::t("En rangées serrées")).on_hover_text(crate::i18n::t("La sélection, ou tout le board")).clicked() {
+            if ui.button(format!("{}  {}", crate::lucide::LAYOUT_GRID, crate::i18n::t("En rangées serrées"))).on_hover_text(crate::i18n::t("La sélection, ou tout le board")).clicked() {
                 self.board.arrange_grid();
             }
-            if ui.add_enabled(self.board.selection.len() > 1, egui::Button::new(crate::i18n::t("Même hauteur"))).clicked() {
+            if ui.add_enabled(self.board.selection.len() > 1, egui::Button::new(format!("{}  {}", crate::lucide::RULER, crate::i18n::t("Même hauteur")))).clicked() {
                 self.board.same_height();
             }
         });
@@ -4631,7 +4631,7 @@ impl App {
                     });
                 }
                 if let Some(rel) = path {
-                    if ui.button(crate::i18n::t("Ouvrir")).clicked() {
+                    if ui.button(format!("{}  {}", crate::lucide::FOLDER_OPEN, crate::i18n::t("Ouvrir"))).clicked() {
                         self.actions.push(Action::Open(rel));
                     }
                 }
@@ -4679,11 +4679,11 @@ impl App {
             });
             ui.horizontal(|ui| {
                 let w = (ui.available_width() - 8.0) / 3.0;
-                if ui.add_sized([w, 24.0], egui::Button::new(crate::i18n::t("Copier"))).on_hover_text(crate::i18n::t("Les codes hexadécimaux, une ligne chacun")).clicked() {
+                if ui.add_sized([w, 24.0], egui::Button::new(format!("{}  {}", crate::lucide::COPY, crate::i18n::t("Copier")))).on_hover_text(crate::i18n::t("Les codes hexadécimaux, une ligne chacun")).clicked() {
                     ui.ctx().copy_text(cols.iter().map(|c| format!("#{}", palette::hex(*c))).collect::<Vec<_>>().join("\n"));
                     self.toast("palette copiée");
                 }
-                if ui.add_sized([w, 24.0], egui::Button::new(crate::i18n::t("Exporter"))).on_hover_text(crate::i18n::t("Fichier .gpl (GIMP, Krita, Inkscape, Blender) dans le dossier palettes du coffre")).clicked() {
+                if ui.add_sized([w, 24.0], egui::Button::new(format!("{}  {}", crate::lucide::DOWNLOAD, crate::i18n::t("Exporter")))).on_hover_text(crate::i18n::t("Fichier .gpl (GIMP, Krita, Inkscape, Blender) dans le dossier palettes du coffre")).clicked() {
                     let name = self.board.rel.as_deref().map(board::board_name).unwrap_or_else(|| "palette".into());
                     let mut text = format!("GIMP Palette\nName: {name}\nColumns: {}\n#\n", cols.len());
                     for c in &cols {
@@ -4847,13 +4847,13 @@ impl App {
                         if ui.add(egui::Button::new(egui::RichText::new(crate::lucide::FOLDER_OPEN).size(14.0)).min_size(egui::vec2(24.0, 20.0))).on_hover_text(crate::i18n::t("ouvrir")).clicked() {
                             self.actions.push(Action::Open(sel.clone()));
                         }
-                        if ui.button(crate::i18n::t("ajouter au board")).clicked() {
+                        if ui.button(format!("{}  {}", crate::lucide::PLUS, crate::i18n::t("ajouter au board"))).clicked() {
                             self.ensure_board();
                             let c = self.board.view_center;
                             self.board.drop_file(&sel, c, &mut self.images);
                             self.toast(format!("ajouté à « {} »", board::board_name(self.board.rel.as_deref().unwrap_or(""))));
                         }
-                        if ui.button(crate::i18n::t("board auto (couleurs)")).on_hover_text(crate::i18n::t("Ajoute cette image et les refs aux couleurs proches au board")).clicked() {
+                        if ui.button(format!("{}  {}", crate::lucide::PALETTE, crate::i18n::t("board auto (couleurs)"))).on_hover_text(crate::i18n::t("Ajoute cette image et les refs aux couleurs proches au board")).clicked() {
                             self.ensure_board();
                             match self.auto_board_colors(&sel) {
                                 Ok(n) => {
@@ -5195,7 +5195,7 @@ impl App {
                                 self.chat.saved_len = 0;
                             }
                         }
-                        if ui.add_enabled(!self.chat.msgs.is_empty(), egui::Button::new(crate::i18n::t("enregistrer en note"))).clicked() {
+                        if ui.add_enabled(!self.chat.msgs.is_empty(), egui::Button::new(format!("{}  {}", crate::lucide::SAVE, crate::i18n::t("enregistrer en note")))).clicked() {
                             save = true;
                         }
                         let model = self.ai.clone().unwrap_or_default().model;
@@ -5432,7 +5432,7 @@ impl App {
             ui.horizontal(|ui| {
                 ui.label(caps(&crate::i18n::t("transfert entre ordinateurs")));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button(crate::i18n::t("fermer")).clicked() {
+                    if ui.button(format!("{}  {}", crate::lucide::X, crate::i18n::t("fermer"))).clicked() {
                         keep = false;
                     }
                 });
@@ -5496,7 +5496,7 @@ impl App {
                             if ui.add(egui::Button::new(egui::RichText::new(crate::lucide::SQUARE).size(14.0)).min_size(egui::vec2(24.0, 20.0))).on_hover_text(crate::i18n::t("arrêter")).clicked() {
                                 self.receiver = None;
                             }
-                            if ui.button(crate::i18n::t("ouvrir reçus/")).clicked() {
+                            if ui.button(format!("{}  {}", crate::lucide::FOLDER_OPEN, crate::i18n::t("ouvrir reçus/"))).clicked() {
                                 if let Ok(path) = vault::safe(&self.root(), "reçus") {
                                     let _ = std::fs::create_dir_all(&path);
                                     settings::reveal(&path, false);
@@ -5883,7 +5883,7 @@ impl App {
                     if ui.button(crate::i18n::t("ok")).clicked() {
                         ok = true;
                     }
-                    if ui.button(crate::i18n::t("annuler")).clicked() {
+                    if ui.button(format!("{}  {}", crate::lucide::X, crate::i18n::t("annuler"))).clicked() {
                         keep = false;
                     }
                 });
@@ -5917,7 +5917,7 @@ impl App {
                         if ui.button(RichText::new(crate::i18n::t("supprimer")).color(p.missing)).clicked() {
                             ok = true;
                         }
-                        if ui.button(crate::i18n::t("annuler")).clicked() {
+                        if ui.button(format!("{}  {}", crate::lucide::X, crate::i18n::t("annuler"))).clicked() {
                             keep = false;
                         }
                     });
@@ -5951,7 +5951,7 @@ impl App {
                         }
                     }
                     ui.add_space(8.0);
-                    if ui.button(crate::i18n::t("annuler")).clicked() {
+                    if ui.button(format!("{}  {}", crate::lucide::X, crate::i18n::t("annuler"))).clicked() {
                         keep = false;
                     }
                 });
@@ -6012,7 +6012,7 @@ impl App {
                     ui.label(RichText::new(crate::i18n::t("L'original reste en place : le fichier prend deux fois la place.")).color(p.muted).size(11.0));
                     ui.add_space(8.0);
                     ui.checkbox(&mut remember, crate::i18n::t("retenir ce choix (modifiable dans les réglages)"));
-                    if ui.button(crate::i18n::t("annuler")).clicked() {
+                    if ui.button(format!("{}  {}", crate::lucide::X, crate::i18n::t("annuler"))).clicked() {
                         keep = false;
                     }
                 });
@@ -6086,7 +6086,7 @@ impl App {
                         if !st.checking && st.progress.is_none() && ui.add(egui::Button::new(egui::RichText::new(crate::lucide::CHECK).size(14.0)).min_size(egui::vec2(24.0, 20.0))).on_hover_text(crate::i18n::t("vérifier")).clicked() {
                             up.check(self.github_token.clone(), ctx);
                         }
-                        if ui.button(crate::i18n::t("fermer")).clicked() {
+                        if ui.button(format!("{}  {}", crate::lucide::X, crate::i18n::t("fermer"))).clicked() {
                             keep = false;
                         }
                     });
@@ -6620,11 +6620,11 @@ fn ollama_panel(ui: &mut egui::Ui, local: &ollama::Local, s: &mut ai::Settings, 
     }
     ui.horizontal(|ui| {
         if st.checked && st.binary.is_none() && !st.running {
-            if ui.button(crate::i18n::t("installer ollama (sans admin)")).clicked() {
+            if ui.button(format!("{}  {}", crate::lucide::DOWNLOAD, crate::i18n::t("installer ollama (sans admin)"))).clicked() {
                 local.install(&s.url, ctx);
             }
         }
-        if st.binary.is_some() && !st.running && ui.button(crate::i18n::t("démarrer")).clicked() {
+        if st.binary.is_some() && !st.running && ui.button(format!("{}  {}", crate::lucide::PLAY, crate::i18n::t("démarrer"))).clicked() {
             let l = local.clone();
             let (url, c) = (s.url.clone(), ctx.clone());
             std::thread::spawn(move || {
@@ -6800,11 +6800,11 @@ impl egui_tiles::Behavior<String> for Panes<'_> {
                 // Le fond de l'en-tête d'abord : les onglets et la croix, enregistrés après, passent au-dessus
                 let hr = ui.interact(h, ui.scope_id().with(("pane-head", &id)), egui::Sense::click());
                 hr.context_menu(|ui| {
-                    if ui.button(crate::i18n::t("sortir dans sa propre fenêtre")).clicked() {
+                    if ui.button(format!("{}  {}", crate::lucide::EXTERNAL_LINK, crate::i18n::t("sortir dans sa propre fenêtre"))).clicked() {
                         dock::set_side(&id, dock::Side::Window);
                         ui.close();
                     }
-                    if ui.button(crate::i18n::t("réinitialiser la disposition")).clicked() {
+                    if ui.button(format!("{}  {}", crate::lucide::ROTATE_CCW, crate::i18n::t("réinitialiser la disposition"))).clicked() {
                         self.app.reset_layout = true;
                         ui.close();
                     }
@@ -6889,11 +6889,11 @@ impl egui_tiles::Behavior<String> for Panes<'_> {
     fn on_tab_button(&mut self, tiles: &mut egui_tiles::Tiles<String>, tile: egui_tiles::TileId, button: egui::Response) -> egui::Response {
         if let Some(p) = tiles.get_pane(&tile).cloned() {
             button.context_menu(|ui| {
-                if p != layout::MAIN && ui.button(crate::i18n::t("sortir dans sa propre fenêtre")).clicked() {
+                if p != layout::MAIN && ui.button(format!("{}  {}", crate::lucide::EXTERNAL_LINK, crate::i18n::t("sortir dans sa propre fenêtre"))).clicked() {
                     dock::set_side(&p, dock::Side::Window);
                     ui.close();
                 }
-                if ui.button(crate::i18n::t("réinitialiser la disposition")).clicked() {
+                if ui.button(format!("{}  {}", crate::lucide::ROTATE_CCW, crate::i18n::t("réinitialiser la disposition"))).clicked() {
                     self.app.reset_layout = true;
                     ui.close();
                 }

@@ -494,7 +494,7 @@ impl Editor {
                 goto = Some(m.t);
             }
             resp.context_menu(|ui| {
-                if ui.button(crate::i18n::t("retirer le repère")).clicked() {
+                if ui.button(format!("{}  {}", crate::lucide::TRASH_2, crate::i18n::t("retirer le repère"))).clicked() {
                     remove = Some(k);
                 }
             });

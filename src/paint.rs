@@ -1873,37 +1873,37 @@ impl Editor {
                     self.start_xf();
                     ui.close();
                 }
-                if ui.button(crate::i18n::t("luminosité et contraste…")).clicked() {
+                if ui.button(format!("{}  {}", crate::lucide::SUN, crate::i18n::t("luminosité et contraste…"))).clicked() {
                     self.checkpoint();
                     self.adjust = Some((Adjust::BrightContrast, self.doc.layers[self.doc.active].clone(), [0.0, 0.0]));
                     ui.close();
                 }
-                if ui.button(crate::i18n::t("teinte et saturation…")).clicked() {
+                if ui.button(format!("{}  {}", crate::lucide::PALETTE, crate::i18n::t("teinte et saturation…"))).clicked() {
                     self.checkpoint();
                     self.adjust = Some((Adjust::HueSat, self.doc.layers[self.doc.active].clone(), [0.0, 0.0]));
                     ui.close();
                 }
-                if ui.button(crate::i18n::t("inverser les couleurs   Ctrl+I")).clicked() {
+                if ui.button(format!("{}  {}", crate::lucide::BLEND, crate::i18n::t("inverser les couleurs   Ctrl+I"))).clicked() {
                     self.checkpoint();
                     let base = self.doc.layers[self.doc.active].clone();
                     self.map_active(&base, |c| c.map(|x| 1.0 - x));
                     ui.close();
                 }
-                if ui.button(crate::i18n::t("noir et blanc")).clicked() {
+                if ui.button(format!("{}  {}", crate::lucide::CONTRAST, crate::i18n::t("noir et blanc"))).clicked() {
                     self.checkpoint();
                     let base = self.doc.layers[self.doc.active].clone();
                     self.map_active(&base, |c| [c[0] * 0.2126 + c[1] * 0.7152 + c[2] * 0.0722; 3]);
                     ui.close();
                 }
                 ui.separator();
-                if ui.button(crate::i18n::t("exporter en PNG, JPG, WebP ou PSD…")).clicked() {
+                if ui.button(format!("{}  {}", crate::lucide::DOWNLOAD, crate::i18n::t("exporter en PNG, JPG, WebP ou PSD…"))).clicked() {
                     self.export();
                     ui.close();
                 }
             });
             egui::containers::menu::MenuButton::new(crate::i18n::t("sélection ▾")).ui(ui, |ui| {
                 ui.set_min_width(230.0);
-                if ui.button(crate::i18n::t("tout sélectionner   Ctrl+A")).clicked() {
+                if ui.button(format!("{}  {}", crate::lucide::CHECK_CHECK, crate::i18n::t("tout sélectionner   Ctrl+A"))).clicked() {
                     self.sel = Some(Sel::all(self.doc.w, self.doc.h));
                     ui.close();
                 }
@@ -1929,23 +1929,23 @@ impl Editor {
             });
             egui::containers::menu::MenuButton::new(crate::i18n::t("calque ▾")).ui(ui, |ui| {
                 ui.set_min_width(230.0);
-                if ui.button(crate::i18n::t("nouveau calque   Ctrl+Maj+N")).clicked() {
+                if ui.button(format!("{}  {}", crate::lucide::PLUS, crate::i18n::t("nouveau calque   Ctrl+Maj+N"))).clicked() {
                     self.new_layer();
                     ui.close();
                 }
-                if ui.button(crate::i18n::t("calque depuis une image…")).clicked() {
+                if ui.button(format!("{}  {}", crate::lucide::IMAGE_PLUS, crate::i18n::t("calque depuis une image…"))).clicked() {
                     self.add_image_layer();
                     ui.close();
                 }
-                if ui.button(crate::i18n::t("dupliquer le calque   Ctrl+J")).clicked() {
+                if ui.button(format!("{}  {}", crate::lucide::COPY, crate::i18n::t("dupliquer le calque   Ctrl+J"))).clicked() {
                     self.duplicate_layer();
                     ui.close();
                 }
-                if ui.button(crate::i18n::t("fusionner avec le dessous   Ctrl+E")).clicked() {
+                if ui.button(format!("{}  {}", crate::lucide::MERGE, crate::i18n::t("fusionner avec le dessous   Ctrl+E"))).clicked() {
                     self.merge_down();
                     ui.close();
                 }
-                if ui.button(crate::i18n::t("supprimer le calque")).clicked() {
+                if ui.button(format!("{}  {}", crate::lucide::TRASH_2, crate::i18n::t("supprimer le calque"))).clicked() {
                     self.delete_layer();
                     ui.close();
                 }
@@ -2121,10 +2121,10 @@ impl Editor {
                     self.apply_adjust();
                 }
                 ui.horizontal(|ui| {
-                    if ui.button(crate::i18n::t("appliquer")).clicked() {
+                    if ui.button(format!("{}  {}", crate::lucide::CHECK, crate::i18n::t("appliquer"))).clicked() {
                         close = Some(true);
                     }
-                    if ui.button(crate::i18n::t("annuler")).clicked() {
+                    if ui.button(format!("{}  {}", crate::lucide::X, crate::i18n::t("annuler"))).clicked() {
                         close = Some(false);
                     }
                 });
@@ -2513,10 +2513,10 @@ impl Editor {
                         t.focus = false;
                     }
                     ui.horizontal(|ui| {
-                        if ui.button(crate::i18n::t("poser le texte")).on_hover_text("Ctrl+Entrée").clicked() {
+                        if ui.button(format!("{}  {}", crate::lucide::CHECK, crate::i18n::t("poser le texte"))).on_hover_text("Ctrl+Entrée").clicked() {
                             text_done = Some(true);
                         }
-                        if ui.button(crate::i18n::t("annuler")).on_hover_text(crate::i18n::t("Échap")).clicked() {
+                        if ui.button(format!("{}  {}", crate::lucide::X, crate::i18n::t("annuler"))).on_hover_text(crate::i18n::t("Échap")).clicked() {
                             text_done = Some(false);
                         }
                     });
@@ -3050,11 +3050,11 @@ impl Editor {
                             group_act = Some((gid, "pick"));
                         }
                         gresp.context_menu(|ui| {
-                            if ui.button(crate::i18n::t("Dissocier le groupe")).clicked() {
+                            if ui.button(format!("{}  {}", crate::lucide::UNGROUP, crate::i18n::t("Dissocier le groupe"))).clicked() {
                                 group_act = Some((gid, "ungroup"));
                                 ui.close();
                             }
-                            if ui.button(crate::i18n::t("Supprimer le groupe et ses calques")).clicked() {
+                            if ui.button(format!("{}  {}", crate::lucide::TRASH_2, crate::i18n::t("Supprimer le groupe et ses calques"))).clicked() {
                                 group_act = Some((gid, "delete"));
                                 ui.close();
                             }

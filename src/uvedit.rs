@@ -1989,7 +1989,7 @@ impl Edit {
             }
             self.changed();
         }
-        if ui.button(crate::i18n::t("＋ matériau")).clicked() {
+        if ui.button(format!("{}  {}", crate::lucide::PLUS, crate::i18n::t("matériau"))).clicked() {
             let n = self.data.slots.len();
             self.data.slots.push(Slot { name: format!("matériau {}", n + 1), color: PALETTE[n % PALETTE.len()], material: String::new() });
             if !self.sel.is_empty() {
@@ -2041,18 +2041,18 @@ impl Edit {
         ui.add_space(4.0);
         ui.add(egui::Slider::new(&mut self.seam_angle, 5.0..=150.0).clamping(egui::SliderClamping::Never).text(crate::i18n::t("angle vif")));
         ui.horizontal(|ui| {
-            if ui.button(crate::i18n::t("sur les arêtes vives")).clicked() {
+            if ui.button(format!("{}  {}", crate::lucide::SCISSORS, crate::i18n::t("sur les arêtes vives"))).clicked() {
                 self.data.seams = seams_by_angle(&self.topo, self.seam_angle);
                 self.changed();
             }
-            if ui.button(crate::i18n::t("ajouter les vives")).clicked() {
+            if ui.button(format!("{}  {}", crate::lucide::PLUS, crate::i18n::t("ajouter les vives"))).clicked() {
                 self.data.seams.extend(seams_by_angle(&self.topo, self.seam_angle));
                 self.changed();
             }
         });
         ui.add_space(4.0);
         ui.horizontal(|ui| {
-            if ui.button(crate::i18n::t("contour de la sélection")).on_hover_text(crate::i18n::t("couture tout autour des faces sélectionnées")).clicked() {
+            if ui.button(format!("{}  {}", crate::lucide::SCISSORS, crate::i18n::t("contour de la sélection"))).on_hover_text(crate::i18n::t("couture tout autour des faces sélectionnées")).clicked() {
                 for (e, fs) in &self.topo.edge_faces {
                     let inside = fs.iter().filter(|f| self.sel.contains(f)).count();
                     if inside == 1 && fs.len() == 2 {
@@ -2285,7 +2285,7 @@ impl Edit {
             ui.label(RichText::new(format!("{} quads · {} pôles · {} sommets", r.quads(), r.stats.poles, r.pos.len())).color(p.muted).size(11.0));
             ui.horizontal(|ui| {
                 ui.checkbox(&mut self.retopo_show, crate::i18n::t("afficher"));
-                if ui.button(crate::i18n::t("exporter en OBJ")).clicked() {
+                if ui.button(format!("{}  {}", crate::lucide::DOWNLOAD, crate::i18n::t("exporter en OBJ"))).clicked() {
                     self.retopo_export = true;
                 }
             });

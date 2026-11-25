@@ -199,7 +199,7 @@ impl App {
                                 self.files.expanded = self.entries.iter().filter(|e| e.is_dir).map(|e| e.rel.clone()).collect();
                                 self.files.save();
                             }
-                            if ui.button(crate::i18n::t("montrer le fichier ouvert")).clicked() {
+                            if ui.button(format!("{}  {}", crate::lucide::LOCATE, crate::i18n::t("montrer le fichier ouvert"))).clicked() {
                                 if let Some(d) = self.current().map(|d| d.rel.clone()) {
                                     self.files.reveal(&d);
                                     self.selected = Some(d);
@@ -213,13 +213,13 @@ impl App {
                         egui::containers::menu::MenuButton::from_button(egui::Button::new(RichText::new(crate::lucide::PLUS).size(15.0).color(p.muted)).frame(false).min_size(egui::vec2(24.0, 24.0))).ui(ui, |ui| {
                             ui.set_min_width(210.0);
                             let dir = self.target_dir(&self.notes_dir());
-                            if ui.button(crate::i18n::t("note")).clicked() {
+                            if ui.button(format!("{}  {}", crate::lucide::FILE_TEXT, crate::i18n::t("note"))).clicked() {
                                 self.new_note();
                             }
                             if ui.add(egui::Button::new(format!("{}  {}", crate::lucide::FILE, crate::i18n::t("fichier…")))).clicked() {
                                 self.actions.push(Action::NewFile(dir.clone()));
                             }
-                            if ui.button(crate::i18n::t("dossier…")).clicked() {
+                            if ui.button(format!("{}  {}", crate::lucide::FOLDER_PLUS, crate::i18n::t("dossier…"))).clicked() {
                                 self.actions.push(Action::NewDir(self.target_dir("")));
                             }
                             ui.separator();
@@ -704,7 +704,7 @@ impl App {
             }
             ui.separator();
             let link_root = vault::is_link_root(&e.rel) || e.rel == vault::LINKED_FILES;
-            if !link_root && ui.button(crate::i18n::t("renommer / déplacer")).clicked() {
+            if !link_root && ui.button(format!("{}  {}", crate::lucide::PENCIL, crate::i18n::t("renommer / déplacer"))).clicked() {
                 self.actions.push(Action::Rename(e.rel.clone()));
             }
             if vault::is_external(&e.rel) && !e.is_dir {
@@ -721,20 +721,20 @@ impl App {
                     self.error = Some(err);
                 }
             }
-            if !e.is_dir && ui.button(crate::i18n::t("ouvrir avec…")).clicked() {
+            if !e.is_dir && ui.button(format!("{}  {}", crate::lucide::FOLDER_OPEN, crate::i18n::t("ouvrir avec…"))).clicked() {
                 let r = vault::safe(&self.root(), &e.rel).and_then(|p| settings::open_with(&p));
                 if let Err(err) = r {
                     self.error = Some(err);
                 }
             }
             ui.separator();
-            if ui.button(crate::i18n::t("exporter en zip…")).clicked() {
+            if ui.button(format!("{}  {}", crate::lucide::DOWNLOAD, crate::i18n::t("exporter en zip…"))).clicked() {
                 self.export_zip(vec![e.rel.clone()], false);
             }
-            if (vault::is_md(&e.rel) || board::is_board(&e.rel)) && ui.button(crate::i18n::t("exporter avec ses liens en zip…")).on_hover_text(crate::i18n::t("Ajoute les notes liées, les images citées et le contenu du board")).clicked() {
+            if (vault::is_md(&e.rel) || board::is_board(&e.rel)) && ui.button(format!("{}  {}", crate::lucide::DOWNLOAD, crate::i18n::t("exporter avec ses liens en zip…"))).on_hover_text(crate::i18n::t("Ajoute les notes liées, les images citées et le contenu du board")).clicked() {
                 self.export_zip(vec![e.rel.clone()], true);
             }
-            if ui.button(crate::i18n::t("envoyer à un autre ordi…")).clicked() {
+            if ui.button(format!("{}  {}", crate::lucide::SEND, crate::i18n::t("envoyer à un autre ordi…"))).clicked() {
                 let root = self.root();
                 self.send_files = transfer::collect(&root, &self.entries, &[e.rel.clone()], false);
                 self.dialog = Some(Dialog::Transfer { send: true });
@@ -745,7 +745,7 @@ impl App {
                     settings::reveal(&path, !e.is_dir);
                 }
             }
-            if ui.button(crate::i18n::t("copier le chemin")).clicked() {
+            if ui.button(format!("{}  {}", crate::lucide::COPY, crate::i18n::t("copier le chemin"))).clicked() {
                 let full = vault::safe(&self.root(), &e.rel).map(|p| p.to_string_lossy().to_string()).unwrap_or(e.rel.clone());
                 ui.ctx().copy_text(full);
             }

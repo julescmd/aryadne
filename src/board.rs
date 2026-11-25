@@ -1251,16 +1251,16 @@ impl Board {
                 ui.label(egui::RichText::new(format!("{n} élément(s)")).color(p.muted).size(11.0));
                 let first = self.data.items.get(self.selection[0]).cloned();
                 if let Some(Item { kind: Kind::Image { rel, .. } | Kind::Note { rel }, .. }) = &first {
-                    if ui.button(crate::i18n::t("ouvrir")).clicked() {
+                    if ui.button(format!("{}  {}", crate::lucide::FOLDER_OPEN, crate::i18n::t("ouvrir"))).clicked() {
                         event = Some(Event::Open(rel.clone()));
                         ui.close();
                     }
                 }
-                if ui.button(crate::i18n::t("premier plan")).clicked() {
+                if ui.button(format!("{}  {}", crate::lucide::BRING_TO_FRONT, crate::i18n::t("premier plan"))).clicked() {
                     self.reorder(true);
                     ui.close();
                 }
-                if ui.button(crate::i18n::t("arrière-plan")).clicked() {
+                if ui.button(format!("{}  {}", crate::lucide::SEND_TO_BACK, crate::i18n::t("arrière-plan"))).clicked() {
                     self.reorder(false);
                     ui.close();
                 }
@@ -1307,7 +1307,7 @@ impl Board {
                         }
                     });
                 }
-                if ui.button(crate::i18n::t("dupliquer  ^D")).clicked() {
+                if ui.button(format!("{}  {}", crate::lucide::COPY, crate::i18n::t("dupliquer  ^D"))).clicked() {
                     self.duplicate_selection();
                     ui.close();
                 }
@@ -1317,20 +1317,20 @@ impl Board {
                 }
                 ui.separator();
             }
-            if ui.button(crate::i18n::t("coller une image  ^V")).clicked() {
+            if ui.button(format!("{}  {}", crate::lucide::CLIPBOARD_PASTE, crate::i18n::t("coller une image  ^V"))).clicked() {
                 event = Some(Event::PasteImage(menu_at));
                 ui.close();
             }
-            if ui.button(crate::i18n::t("ajouter du texte")).clicked() {
+            if ui.button(format!("{}  {}", crate::lucide::PLUS, crate::i18n::t("ajouter du texte"))).clicked() {
                 self.add(Kind::Text { text: String::new(), size: text_size(), look: TextLook::default() }, menu_at.to_vec2() + vec2(140.0, 20.0), vec2(280.0, 40.0));
                 self.editing = self.selection.last().copied();
                 ui.close();
             }
-            if ui.button(crate::i18n::t("tout sélectionner  ^A")).clicked() {
+            if ui.button(format!("{}  {}", crate::lucide::CHECK_CHECK, crate::i18n::t("tout sélectionner  ^A"))).clicked() {
                 self.selection = (0..self.data.items.len()).collect();
                 ui.close();
             }
-            if ui.button(crate::i18n::t("cadrer")).clicked() {
+            if ui.button(format!("{}  {}", crate::lucide::SCAN, crate::i18n::t("cadrer"))).clicked() {
                 self.fit();
                 ui.close();
             }

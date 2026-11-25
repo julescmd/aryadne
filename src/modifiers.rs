@@ -1298,7 +1298,7 @@ pub fn panel_with(ui: &mut egui::Ui, stack: &mut Vec<Modifier>, applied: bool, r
                     return;
                 }
                 ui.separator();
-                if ui.add_enabled(stack.iter().any(|m| m.on), egui::Button::new(crate::i18n::t("tout appliquer"))).on_hover_text(crate::i18n::t("Le résultat devient le maillage de base et la pile se vide")).clicked() {
+                if ui.add_enabled(stack.iter().any(|m| m.on), egui::Button::new(format!("{}  {}", crate::lucide::CHECK, crate::i18n::t("tout appliquer")))).on_hover_text(crate::i18n::t("Le résultat devient le maillage de base et la pile se vide")).clicked() {
                     *request = Some(Request::ApplyAll);
                     ui.close();
                 }

@@ -265,23 +265,23 @@ impl Editor {
                             open = Some(file.clone());
                         }
                         resp.context_menu(|ui| {
-                            if ui.button(crate::i18n::t("Ajouter à la fin   E")).clicked() {
+                            if ui.button(format!("{}  {}", crate::lucide::PLUS, crate::i18n::t("Ajouter à la fin   E"))).clicked() {
                                 add = Some((file.clone(), true));
                                 ui.close();
                             }
-                            if ui.button(crate::i18n::t("Insérer à la tête de lecture   Maj+E")).clicked() {
+                            if ui.button(format!("{}  {}", crate::lucide::PLUS, crate::i18n::t("Insérer à la tête de lecture   Maj+E"))).clicked() {
                                 add = Some((file.clone(), false));
                                 ui.close();
                             }
-                            if self.card_trim.contains_key(file) && ui.button(crate::i18n::t("Tout le média")).clicked() {
+                            if self.card_trim.contains_key(file) && ui.button(format!("{}  {}", crate::lucide::FILM, crate::i18n::t("Tout le média"))).clicked() {
                                 self.card_trim.remove(file);
                                 ui.close();
                             }
-                            if ui.button(crate::i18n::t("Ouvrir dans la source")).clicked() {
+                            if ui.button(format!("{}  {}", crate::lucide::FOLDER_OPEN, crate::i18n::t("Ouvrir dans la source"))).clicked() {
                                 open = Some(file.clone());
                                 ui.close();
                             }
-                            if self.project.bin.contains(file) && !self.project.clips.iter().any(|c| &c.file == file) && ui.button(crate::i18n::t("retirer du projet")).clicked() {
+                            if self.project.bin.contains(file) && !self.project.clips.iter().any(|c| &c.file == file) && ui.button(format!("{}  {}", crate::lucide::TRASH_2, crate::i18n::t("retirer du projet"))).clicked() {
                                 remove = Some(file.clone());
                                 ui.close();
                             }
@@ -912,7 +912,7 @@ impl Editor {
                 if self.no_ffplay && !self.mute {
                     match &self.sound_install {
                         None => {
-                            if ui.button(crate::i18n::t("installer le son (ffplay)")).on_hover_text(crate::i18n::t("La lecture est muette : ffplay manque. Aryadne le télécharge avec ffmpeg.")).clicked() {
+                            if ui.button(format!("{}  {}", crate::lucide::DOWNLOAD, crate::i18n::t("installer le son (ffplay)"))).on_hover_text(crate::i18n::t("La lecture est muette : ffplay manque. Aryadne le télécharge avec ffmpeg.")).clicked() {
                                 self.sound_install = Some(ffmpeg::install(ui.ctx().clone()));
                             }
                         }
@@ -1548,12 +1548,12 @@ impl Editor {
                     header_menu = Some((audio, k));
                 }
                 hr.context_menu(|ui| {
-                    if ui.button(crate::i18n::t("ajouter une piste")).clicked() {
+                    if ui.button(format!("{}  {}", crate::lucide::PLUS, crate::i18n::t("ajouter une piste"))).clicked() {
                         header_menu = Some((audio, usize::MAX));
                         ui.close();
                     }
                     let empty = !self.project.clips.iter().any(|c| c.audio == audio && c.track == k);
-                    if ui.add_enabled(empty && self.project.lanes(audio) > 1, egui::Button::new(crate::i18n::t("supprimer la piste (vide)"))).clicked() {
+                    if ui.add_enabled(empty && self.project.lanes(audio) > 1, egui::Button::new(format!("{}  {}", crate::lucide::TRASH_2, crate::i18n::t("supprimer la piste (vide)")))).clicked() {
                         header_menu = Some((audio, usize::MAX - 1 - k));
                         ui.close();
                     }
@@ -1648,11 +1648,11 @@ impl Editor {
                 }
                 cr.context_menu(|ui| {
                     ui.add(egui::TextEdit::singleline(&mut self.project.chapters[k].name).desired_width(180.0));
-                    if ui.button(crate::i18n::t("enregistrer le nom")).clicked() {
+                    if ui.button(format!("{}  {}", crate::lucide::SAVE, crate::i18n::t("enregistrer le nom"))).clicked() {
                         menu = Some((k, 0));
                         ui.close();
                     }
-                    if ui.button(crate::i18n::t("supprimer le chapitre")).clicked() {
+                    if ui.button(format!("{}  {}", crate::lucide::TRASH_2, crate::i18n::t("supprimer le chapitre"))).clicked() {
                         menu = Some((k, 1));
                         ui.close();
                     }
