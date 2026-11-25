@@ -822,7 +822,7 @@ impl Editor {
         let mut outline_text: Option<u64> = None;
         let single = (self.sel.len() == 1).then(|| self.sel[0]);
         let mut path_act: Option<&'static str> = None;
-        let mut css_copy = false;
+        let mut css_copy: Option<usize> = None;
         // Contraste d'un texte avec ce qu'il y a derrière (accessibilité)
         let text_contrast = single.and_then(|id| {
             let t = self.doc.get(id)?;
@@ -846,9 +846,16 @@ impl Editor {
             ui.horizontal(|ui| {
                 ui.label(egui::RichText::new(crate::i18n::t(s.kind_label())).size(11.0).color(p.muted));
                 // Mode Dev : la forme en CSS, copiée
-                if ui.small_button(l::CODE_XML).on_hover_text(crate::i18n::t("Copier en CSS (taille, position dans le plan, couleurs, coins, ombre, police)")).clicked() {
-                    css_copy = true;
-                }
+                ui.menu_button(l::CODE_XML, |ui| {
+                    for (k, name) in crate::vector::CODE_STYLES.iter().enumerate() {
+                        if ui.button(format!("{} {name}", crate::i18n::t("Copier en"))).clicked() {
+                            css_copy = Some(k);
+                            ui.close();
+                        }
+                    }
+                })
+                .response
+                .on_hover_text(crate::i18n::t("Mode Dev : copier la forme en CSS, SwiftUI ou egui (taille, position dans le plan, couleurs, coins, ombre, police)"));
                 ch |= ui.add(egui::TextEdit::singleline(&mut s.name).desired_width(f32::INFINITY)).changed();
             });
             head(ui, "Position");
@@ -1526,10 +1533,10 @@ impl Editor {
             self.outline_text(id);
             ch = true;
         }
-        if css_copy {
+        if let Some(style) = css_copy {
             if let Some(s) = single.and_then(|i| self.doc.get(i)) {
-                ui.ctx().copy_text(crate::vector::css_of(&self.doc, s));
-                self.message = Some(crate::i18n::t("CSS copié."));
+                ui.ctx().copy_text(crate::vector::code_of(&self.doc, s, style));
+                self.message = Some(format!("{} {}", crate::vector::CODE_STYLES[style.min(2)], crate::i18n::t("copié dans le presse-papiers.")));
             }
         }
         // Outils de tracé : simplifier, couper au point choisi

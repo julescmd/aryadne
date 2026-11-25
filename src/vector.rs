@@ -911,6 +911,142 @@ pub fn css_of(d: &Doc, s: &Shape) -> String {
     out
 }
 
+/// Ce que le mode Dev sait écrire pour une forme
+pub const CODE_STYLES: [&str; 3] = ["CSS", "SwiftUI", "egui"];
+
+/// La forme en SwiftUI (mode Dev) : forme, remplissage, bordure, coins, ombre, taille et place dans le plan
+pub fn swiftui_of(d: &Doc, s: &Shape) -> String {
+    let b = d.bounds(s);
+    let board = d.boards.iter().find(|bd| b[0] >= bd.x && b[1] >= bd.y && b[0] <= bd.x + bd.w && b[1] <= bd.y + bd.h);
+    let (ox, oy) = board.map(|bd| (bd.x, bd.y)).unwrap_or((0.0, 0.0));
+    let col = |c: [u8; 4]| format!("Color(red: {:.3}, green: {:.3}, blue: {:.3}, opacity: {:.2})", c[0] as f32 / 255.0, c[1] as f32 / 255.0, c[2] as f32 / 255.0, c[3] as f32 / 255.0);
+    let fill = s.fills.first().map(|f| match f {
+        Paint::Solid { c } => col(*c),
+        Paint::Linear { stops, angle } => {
+            let a = (angle + 90.0).to_radians();
+            format!("LinearGradient(stops: [{}], startPoint: UnitPoint(x: {:.2}, y: {:.2}), endPoint: UnitPoint(x: {:.2}, y: {:.2}))", stops.iter().map(|(t, c)| format!(".init(color: {}, location: {:.2})", col(*c), t)).collect::<Vec<_>>().join(", "), 0.5 - a.sin() * 0.5, 0.5 + a.cos() * 0.5, 0.5 + a.sin() * 0.5, 0.5 - a.cos() * 0.5)
+        }
+        Paint::Radial { stops } => format!("RadialGradient(stops: [{}], center: .center, startRadius: 0, endRadius: {:.0})", stops.iter().map(|(t, c)| format!(".init(color: {}, location: {:.2})", col(*c), t)).collect::<Vec<_>>().join(", "), (b[2] - b[0]).max(b[3] - b[1]) / 2.0),
+        Paint::Pattern { bg, .. } => col(*bg),
+        Paint::Freeform { pts } => pts.first().map(|p| col(p.1)).unwrap_or_else(|| "Color.clear".into()),
+    });
+    let mut out = format!("// {}
+", s.name);
+    match &s.kind {
+        Kind::Text { text, size, font, align, .. } => {
+            out.push_str(&format!("Text({:?})
+    .font(.custom({font:?}, size: {size:.0}))
+    .multilineTextAlignment(.{})
+", text, ["leading", "center", "trailing"][(*align).min(2) as usize]));
+            if let Some(f) = &fill {
+                out.push_str(&format!("    .foregroundStyle({f})
+"));
+            }
+        }
+        k => {
+            let shape = match k {
+                Kind::Ellipse { .. } => "Ellipse()".to_string(),
+                Kind::Rect { r, .. } if r.iter().all(|x| *x == r[0]) && r[0] > 0.0 => format!("RoundedRectangle(cornerRadius: {:.0})", r[0]),
+                Kind::Rect { r, .. } if r.iter().any(|x| *x > 0.0) => format!("UnevenRoundedRectangle(topLeadingRadius: {:.0}, bottomLeadingRadius: {:.0}, bottomTrailingRadius: {:.0}, topTrailingRadius: {:.0})", r[0], r[3], r[2], r[1]),
+                _ => "Rectangle()".to_string(),
+            };
+            out.push_str(&shape);
+            out.push('\n');
+            out.push_str(&format!("    .fill({})
+", fill.clone().unwrap_or_else(|| "Color.clear".into())));
+            if let Some(k) = s.strokes.first() {
+                let c = k.paint.first();
+                out.push_str(&format!("    .overlay({}.stroke({}, lineWidth: {:.0}))
+", shape, col(c), k.width));
+            }
+        }
+    }
+    out.push_str(&format!("    .frame(width: {:.0}, height: {:.0})
+", b[2] - b[0], b[3] - b[1]));
+    if let Some(sh) = &s.shadow {
+        out.push_str(&format!("    .shadow(color: {}, radius: {:.0}, x: {:.0}, y: {:.0})
+", col(sh.c), sh.blur / 2.0, sh.dx, sh.dy));
+    }
+    if s.opacity < 1.0 {
+        out.push_str(&format!("    .opacity({:.2})
+", s.opacity));
+    }
+    if s.blur > 0.0 {
+        out.push_str(&format!("    .blur(radius: {:.0})
+", s.blur / 2.0));
+    }
+    if s.rot != 0.0 {
+        out.push_str(&format!("    .rotationEffect(.degrees({:.1}))
+", s.rot));
+    }
+    out.push_str(&format!("    .position(x: {:.0}, y: {:.0})
+", (b[0] + b[2]) / 2.0 - ox, (b[1] + b[3]) / 2.0 - oy));
+    out
+}
+
+/// La forme en egui (Rust, mode Dev) : un Frame aux mêmes couleurs, bordure, coins et ombre, ou un texte
+pub fn egui_of(d: &Doc, s: &Shape) -> String {
+    let b = d.bounds(s);
+    let c32 = |c: [u8; 4]| if c[3] == 255 { format!("egui::Color32::from_rgb({}, {}, {})", c[0], c[1], c[2]) } else { format!("egui::Color32::from_rgba_unmultiplied({}, {}, {}, {})", c[0], c[1], c[2], c[3]) };
+    let fill = s.fills.first().map(|f| match f {
+        Paint::Solid { c } => *c,
+        Paint::Linear { stops, .. } | Paint::Radial { stops } => stops.first().map(|x| x.1).unwrap_or([0, 0, 0, 0]),
+        Paint::Pattern { bg, .. } => *bg,
+        Paint::Freeform { pts } => pts.first().map(|p| p.1).unwrap_or([0, 0, 0, 0]),
+    });
+    let mut out = format!("// {}
+", s.name);
+    if let Kind::Text { text, size, .. } = &s.kind {
+        out.push_str(&format!("ui.label(egui::RichText::new({:?}).size({size:.1})", text));
+        if let Some(c) = fill {
+            out.push_str(&format!(".color({})", c32(c)));
+        }
+        out.push_str(");
+");
+        return out;
+    }
+    out.push_str("egui::Frame::new()
+");
+    if let Some(c) = fill {
+        out.push_str(&format!("    .fill({})
+", c32(c)));
+    }
+    if let Some(k) = s.strokes.first() {
+        out.push_str(&format!("    .stroke(egui::Stroke::new({:.1}, {}))
+", k.width, c32(k.paint.first())));
+    }
+    match &s.kind {
+        Kind::Rect { r, .. } if r.iter().any(|x| *x > 0.0) => out.push_str(&if r.iter().all(|x| *x == r[0]) { format!("    .corner_radius({:.0})
+", r[0]) } else { format!("    .corner_radius(egui::CornerRadius {{ nw: {:.0}, ne: {:.0}, se: {:.0}, sw: {:.0} }})
+", r[0], r[1], r[2], r[3]) }),
+        Kind::Ellipse { .. } => out.push_str(&format!("    .corner_radius({:.0})
+", (b[2] - b[0]).min(b[3] - b[1]) / 2.0)),
+        _ => {}
+    }
+    if let Some(sh) = &s.shadow {
+        out.push_str(&format!("    .shadow(egui::Shadow {{ offset: [{:.0}, {:.0}], blur: {:.0}, spread: 0, color: {} }})
+", sh.dx, sh.dy, sh.blur, c32(sh.c)));
+    }
+    out.push_str(&format!("    .show(ui, |ui| {{
+        ui.set_min_size(egui::vec2({:.0}.0, {:.0}.0));
+    }});
+", b[2] - b[0], b[3] - b[1]));
+    if s.opacity < 1.0 {
+        out.push_str(&format!("// opacité {:.0} % : ui.multiply_opacity({:.2}) avant
+", s.opacity * 100.0, s.opacity));
+    }
+    out
+}
+
+/// Le code de la forme dans le style choisi (0 CSS, 1 SwiftUI, 2 egui)
+pub fn code_of(d: &Doc, s: &Shape, style: usize) -> String {
+    match style {
+        1 => swiftui_of(d, s),
+        2 => egui_of(d, s),
+        _ => css_of(d, s),
+    }
+}
+
 /// La ligne que suit un texte sur un tracé : ses points (monde) et leur abscisse curviligne
 pub fn guide_line(p: &Shape) -> Option<Vec<([f32; 2], f32)>> {
     let (nodes, closed) = match &p.kind {
@@ -2090,6 +2226,24 @@ impl Doc {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mode_dev_trois_styles() {
+        let mut d = Doc::default();
+        let mut sh = Shape { x: 10.0, y: 20.0, kind: Kind::Rect { w: 100.0, h: 40.0, r: [0.0; 4] }, ..Shape::base() };
+        sh.fills = vec![Paint::Solid { c: [255, 0, 0, 255] }];
+        if let Kind::Rect { r, .. } = &mut sh.kind {
+            *r = [8.0; 4];
+        }
+        d.shapes.push(sh.clone());
+        let s = d.shapes.last().unwrap();
+        assert!(code_of(&d, s, 0).contains("border-radius: 8px"));
+        let sw = code_of(&d, s, 1);
+        assert!(sw.contains("RoundedRectangle(cornerRadius: 8)") && sw.contains(".frame(width: 100, height: 40)"), "{sw}");
+        let eg = code_of(&d, s, 2);
+        assert!(eg.contains("from_rgb(255, 0, 0)") && eg.contains(".corner_radius(8)"), "{eg}");
+    }
+
 
     #[test]
     fn images_rendues() {

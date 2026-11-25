@@ -3414,5 +3414,8 @@
   "effacer la peinture de l'objet choisi": "clear the selected object's paint",
   "quitter la peinture": "leave painting",
   "peinture": "paint",
-  "glisser : peindre · Alt+glisser : tourner · molette enfoncée : tourner (Maj : déplacer) · [ ] : taille du pinceau · E : gomme · Ctrl+Z annuler": "drag: paint · Alt+drag: orbit · middle drag: orbit (Shift: pan) · [ ]: brush size · E: eraser · Ctrl+Z undo"
+  "glisser : peindre · Alt+glisser : tourner · molette enfoncée : tourner (Maj : déplacer) · [ ] : taille du pinceau · E : gomme · Ctrl+Z annuler": "drag: paint · Alt+drag: orbit · middle drag: orbit (Shift: pan) · [ ]: brush size · E: eraser · Ctrl+Z undo",
+  "Copier en": "Copy as",
+  "Mode Dev : copier la forme en CSS, SwiftUI ou egui (taille, position dans le plan, couleurs, coins, ombre, police)": "Dev mode: copy the shape as CSS, SwiftUI or egui (size, position in the board, colors, corners, shadow, font)",
+  "copié dans le presse-papiers.": "copied to the clipboard."
 }
