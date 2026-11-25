@@ -83,22 +83,30 @@ impl Bvh {
             return None;
         }
         let inv = [1.0 / d[0], 1.0 / d[1], 1.0 / d[2]];
-        let mut stack = [0u32; 64];
-        let mut sp = 1;
-        let mut best = None;
-        while sp > 0 {
-            sp -= 1;
-            let node = &self.nodes[stack[sp] as usize];
-            // Test rayon / boîte
+        // Entrée du rayon dans une boîte (None : il la manque)
+        let enter = |node: &Node, tmax: f32| -> Option<f32> {
             let (mut t0, mut t1) = (tmin, tmax);
             for k in 0..3 {
                 let (a, b) = ((node.lo[k] - o[k]) * inv[k], (node.hi[k] - o[k]) * inv[k]);
                 t0 = t0.max(a.min(b));
                 t1 = t1.min(a.max(b));
             }
-            if t0 > t1 {
+            (t0 <= t1).then_some(t0)
+        };
+        let t_root = enter(&self.nodes[0], tmax)?;
+        // Pile de (nœud, entrée) : le fils le plus proche est visité d'abord, et un nœud dont l'entrée
+        // est plus loin que le meilleur impact déjà trouvé est sauté sans être relu
+        let mut stack = [(0u32, 0.0f32); 64];
+        stack[0] = (0, t_root);
+        let mut sp = 1;
+        let mut best = None;
+        while sp > 0 {
+            sp -= 1;
+            let (ni, t_in) = stack[sp];
+            if t_in > tmax {
                 continue;
             }
+            let node = &self.nodes[ni as usize];
             if node.count > 0 {
                 for tr in &self.tris[node.start as usize..(node.start + node.count) as usize] {
                     // Möller-Trumbore
@@ -128,9 +136,25 @@ impl Bvh {
                     }
                 }
             } else if sp + 2 <= stack.len() {
-                stack[sp] = node.start;
-                stack[sp + 1] = node.start + 1;
-                sp += 2;
+                let (l, r) = (node.start, node.start + 1);
+                match (enter(&self.nodes[l as usize], tmax), enter(&self.nodes[r as usize], tmax)) {
+                    (Some(a), Some(b)) => {
+                        // Le plus proche en haut de la pile
+                        let (near, far) = if a <= b { ((l, a), (r, b)) } else { ((r, b), (l, a)) };
+                        stack[sp] = far;
+                        stack[sp + 1] = near;
+                        sp += 2;
+                    }
+                    (Some(a), None) => {
+                        stack[sp] = (l, a);
+                        sp += 1;
+                    }
+                    (None, Some(b)) => {
+                        stack[sp] = (r, b);
+                        sp += 1;
+                    }
+                    (None, None) => {}
+                }
             }
         }
         best

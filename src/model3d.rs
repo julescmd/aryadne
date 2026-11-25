@@ -502,6 +502,52 @@ impl Camera {
     }
 }
 
+/// Projection d'une caméra, préparée une fois : la rotation est une matrice (pas de sinus par sommet).
+#[derive(Clone, Copy)]
+pub(crate) struct Proj {
+    r: [V3; 3],
+    pan: [f32; 2],
+    dist: f32,
+    ortho: bool,
+    cx: f32,
+    cy: f32,
+    focal: f32,
+    scale: f32,
+}
+
+impl Proj {
+    pub(crate) fn new(cam: &Camera, w: f32, h: f32) -> Proj {
+        let (sy, cy) = cam.yaw.sin_cos();
+        let (sp, cp) = cam.pitch.sin_cos();
+        let focal = w.min(h) * 1.2;
+        Proj { r: [[cy, 0.0, sy], [sy * sp, cp, -cy * sp], [-sy * cp, sp, cy * cp]], pan: cam.pan, dist: cam.dist, ortho: cam.ortho, cx: w / 2.0, cy: h / 2.0, focal, scale: focal / cam.dist }
+    }
+    /// Espace caméra (la caméra regarde vers -Z)
+    #[inline]
+    pub(crate) fn view(&self, v: V3) -> V3 {
+        [dot(self.r[0], v) + self.pan[0], dot(self.r[1], v) + self.pan[1], dot(self.r[2], v) - self.dist]
+    }
+    /// De l'espace caméra vers le monde (rotation seule)
+    #[inline]
+    pub(crate) fn unrotate(&self, v: V3) -> V3 {
+        let r = &self.r;
+        [r[0][0] * v[0] + r[1][0] * v[1] + r[2][0] * v[2], r[0][1] * v[0] + r[1][1] * v[1] + r[2][1] * v[2], r[0][2] * v[0] + r[1][2] * v[1] + r[2][2] * v[2]]
+    }
+    /// Pixel et profondeur de vue ; x et y valent NaN derrière la caméra
+    #[inline]
+    pub(crate) fn screen(&self, v: V3) -> [f32; 3] {
+        let c = self.view(v);
+        if self.ortho {
+            [self.cx + c[0] * self.scale, self.cy - c[1] * self.scale, c[2]]
+        } else if c[2] < -0.02 {
+            let k = self.focal / -c[2];
+            [self.cx + c[0] * k, self.cy - c[1] * k, c[2]]
+        } else {
+            [f32::NAN, f32::NAN, c[2]]
+        }
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct Light {
     /// Angle horizontal et hauteur, en radians.
@@ -1417,12 +1463,17 @@ fn rot_y(d: V3, a: f32) -> V3 {
 }
 
 /// Courbe de tons « filmique » (ACES approchée) puis sRGB.
+/// Le gamma passe par une table (indexée par la racine, pour garder la précision dans les ombres) :
+/// trois `powf` par pixel pesaient lourd dans le rendu.
 fn tone(c: [f32; 3], exposure: f32) -> [u8; 3] {
+    static LUT: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+    let lut = LUT.get_or_init(|| (0..4096).map(|i| ((i as f32 / 4095.0).powi(2).powf(1.0 / 2.2) * 255.0 + 0.5) as u8).collect());
     let k = exposure;
     let f = |x: f32| {
         let x = (x * k).max(0.0);
         let y = (x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14);
-        (y.clamp(0.0, 1.0).powf(1.0 / 2.2) * 255.0 + 0.5) as u8
+        // NaN : `clamp` le laisse passer, la conversion en entier le ramène à 0
+        lut[((y.clamp(0.0, 1.0).sqrt() * 4095.0 + 0.5) as usize).min(4095)]
     };
     [f(c[0]), f(c[1]), f(c[2])]
 }
@@ -1465,23 +1516,42 @@ pub fn project_point(cam: &Camera, w: f32, h: f32, v: V3) -> Option<[f32; 2]> {
 }
 
 pub fn pick(m: &Prepared, cam: &Camera, w: f32, h: f32, px: f32, py: f32) -> Option<(usize, [f32; 3])> {
-    let focal = w.min(h) * 1.2;
-    let ortho_scale = focal / cam.dist;
-    let (cx, cy) = (w / 2.0, h / 2.0);
-    let proj = |v: V3| -> Option<[f32; 3]> {
-        let c = cam.view(v);
-        if cam.ortho {
-            Some([cx + c[0] * ortho_scale, cy - c[1] * ortho_scale, c[2]])
-        } else if c[2] < -0.02 {
-            Some([cx + c[0] / -c[2] * focal, cy - c[1] / -c[2] * focal, c[2]])
-        } else {
-            None
+    let pr = Proj::new(cam, w, h);
+    // Maillage dense (ou arbre déjà construit pour les ombres) : un rayon dans l'arbre, quelques
+    // dizaines de tests au lieu de tous les triangles. La peinture pointe plusieurs fois par touche.
+    if m.tris.len() >= PICK_TREE_MIN || m.bvh.get().is_some() {
+        let b = m.bvh.get_or_init(|| crate::bvh::Bvh::new(&m.pos, &m.tris));
+        // Un rayon pile sur une arête peut glisser entre deux triangles : on réessaie à un centième de pixel
+        for (dx, dy) in [(0.0, 0.0), (0.011, 0.007), (-0.009, 0.012)] {
+            let (px, py) = (px + dx, py + dy);
+            let (eye, dir) = if pr.ortho {
+                (pr.unrotate([(px - pr.cx) / pr.scale - pr.pan[0], -(py - pr.cy) / pr.scale - pr.pan[1], pr.dist]), pr.unrotate([0.0, 0.0, -1.0]))
+            } else {
+                (pr.unrotate([-pr.pan[0], -pr.pan[1], pr.dist]), pr.unrotate(norm([(px - pr.cx) / pr.focal, -(py - pr.cy) / pr.focal, -1.0])))
+            };
+            if let Some(hit) = b.closest(eye, dir, if pr.ortho { -1e6 } else { 0.02 }, 1e9) {
+                return Some((hit.tri as usize, [1.0 - hit.u - hit.v, hit.u, hit.v]));
+            }
         }
-    };
-    let screen: Vec<Option<[f32; 3]>> = m.pos.iter().map(|v| proj(*v)).collect();
+        return None;
+    }
+    pick_scan(m, &pr, px, py)
+}
+
+/// À partir de combien de triangles `pick` passe par l'arbre de rayons
+const PICK_TREE_MIN: usize = 20_000;
+
+/// Pointage par parcours de tous les triangles projetés à l'écran. Les poids rendus sont ceux de
+/// la surface (corrigés de la perspective), pas ceux de l'écran.
+fn pick_scan(m: &Prepared, pr: &Proj, px: f32, py: f32) -> Option<(usize, [f32; 3])> {
+    let screen: Vec<[f32; 3]> = m.pos.iter().map(|v| pr.screen(*v)).collect();
     let mut best: Option<(usize, [f32; 3], f32)> = None;
     for (ti, t) in m.tris.iter().enumerate() {
-        let (Some(a), Some(b), Some(c)) = (screen[t[0] as usize], screen[t[1] as usize], screen[t[2] as usize]) else { continue };
+        let (Some(a), Some(b), Some(c)) = (screen.get(t[0] as usize), screen.get(t[1] as usize), screen.get(t[2] as usize)) else { continue };
+        // Boîte à l'écran d'abord ; les comparaisons avec NaN (derrière la caméra) sont fausses
+        if !(a[0].min(b[0]).min(c[0]) <= px && a[0].max(b[0]).max(c[0]) >= px && a[1].min(b[1]).min(c[1]) <= py && a[1].max(b[1]).max(c[1]) >= py) || a[0].is_nan() || b[0].is_nan() || c[0].is_nan() {
+            continue;
+        }
         let d = (b[1] - c[1]) * (a[0] - c[0]) + (c[0] - b[0]) * (a[1] - c[1]);
         if d.abs() < 1e-9 {
             continue;
@@ -1492,9 +1562,10 @@ pub fn pick(m: &Prepared, cam: &Camera, w: f32, h: f32, px: f32, py: f32) -> Opt
         if w0 < 0.0 || w1 < 0.0 || w2 < 0.0 {
             continue;
         }
-        let z = a[2] * w0 + b[2] * w1 + c[2] * w2;
+        // Plus grand = plus proche, comme dans le rendu
+        let (z, bw) = if pr.ortho { (a[2] * w0 + b[2] * w1 + c[2] * w2, [w0, w1]) } else { persp_bary([w0, w1, w2], [1.0 / -a[2], 1.0 / -b[2], 1.0 / -c[2]]) };
         if best.as_ref().is_none_or(|bb| z > bb.2) {
-            best = Some((ti, [w0, w1, w2], z));
+            best = Some((ti, [bw[0], bw[1], 1.0 - bw[0] - bw[1]], z));
         }
     }
     best.map(|(t, b, _)| (t, b))
@@ -1521,20 +1592,11 @@ pub fn render(m: &Prepared, cam: &Camera, look: &Look, w: usize, h: usize) -> Fr
     let focal = w.min(h) as f32 * 1.2;
     let ortho_scale = focal / cam.dist;
     let (cx, cy) = (w as f32 / 2.0, h as f32 / 2.0);
-    let screen: Vec<[f32; 3]> = m
-        .pos
-        .par_iter()
-        .map(|v| {
-            let c = cam.view(*v);
-            if cam.ortho {
-                [cx + c[0] * ortho_scale, cy - c[1] * ortho_scale, c[2]]
-            } else if c[2] < -0.02 {
-                [cx + c[0] / -c[2] * focal, cy - c[1] / -c[2] * focal, c[2]]
-            } else {
-                [f32::NAN, f32::NAN, c[2]]
-            }
-        })
-        .collect();
+    let pr = Proj::new(cam, w as f32, h as f32);
+    let screen: Vec<[f32; 3]> = m.pos.par_iter().map(|v| pr.screen(*v)).collect();
+    // Rotation de l'environnement : sinus et cosinus une fois, pas à chaque pixel
+    let (env_s, env_c) = (-look.env_rot).sin_cos();
+    let env_dir = |d: V3| -> V3 { [d[0] * env_c + d[2] * env_s, d[1], -d[0] * env_s + d[2] * env_c] };
     let exposure = 2f32.powf(look.exposure);
     let env = &look.env;
     let ld = look.light.dir();
@@ -1556,22 +1618,68 @@ pub fn render(m: &Prepared, cam: &Camera, look: &Look, w: usize, h: usize) -> Fr
         let turn = (h >> 8) as f32 / 16_777_216.0 * std::f32::consts::TAU;
         // Écart : un angle pour un soleil ; pour une ponctuelle, la taille de la source vue d'ici
         let spread = if point { soft * 0.06 / reach.max(0.05) } else { soft * 0.09 };
-        let mut open = 0.0;
-        for k in 0..samples {
+        let ray = |k: usize| -> bool {
             let r = ((k as f32 + 0.5) / samples as f32).sqrt() * spread;
-            let a = turn + k as f32 * 2.399_963;
-            let d = norm([dir[0] + (t1[0] * a.cos() + t2[0] * a.sin()) * r, dir[1] + (t1[1] * a.cos() + t2[1] * a.sin()) * r, dir[2] + (t1[2] * a.cos() + t2[2] * a.sin()) * r]);
-            if !b.occluded(o, d, 1e-3, reach) {
-                open += 1.0;
-            }
+            let (sa, ca) = (turn + k as f32 * 2.399_963).sin_cos();
+            let d = norm([dir[0] + (t1[0] * ca + t2[0] * sa) * r, dir[1] + (t1[1] * ca + t2[1] * sa) * r, dir[2] + (t1[2] * ca + t2[2] * sa) * r]);
+            !b.occluded(o, d, 1e-3, reach)
+        };
+        // D'abord un rayon sur deux, du bord du disque vers le centre : s'ils sont tous d'accord (plein
+        // jour ou pleine ombre, presque toute l'image), les autres ne diraient rien de plus
+        let mut open = 0;
+        let mut probes = 0;
+        for k in (0..samples).rev().step_by(2) {
+            open += ray(k) as usize;
+            probes += 1;
         }
-        open / samples as f32
+        if samples >= 4 && (open == 0 || open == probes) {
+            return if open == 0 { 0.0 } else { 1.0 };
+        }
+        for k in (0..samples).rev().skip(1).step_by(2) {
+            open += ray(k) as usize;
+        }
+        open as f32 / samples as f32
     };
     let (albedo0, rough, metal) = look.material.params();
     let wire = look.wire;
 
     let band = 16usize;
     let mut rgba = vec![0u8; w * h * 4];
+    // Chaque bande ne parcourt que ses triangles : on range d'abord chaque triangle dans les bandes
+    // qu'il touche (avant, toutes les bandes relisaient tout le maillage)
+    let n_bands = h.div_ceil(band).max(1);
+    let spans: Vec<(u32, u32)> = m
+        .tris
+        .par_iter()
+        .map(|t| {
+            let (a, b, c) = (screen[t[0] as usize], screen[t[1] as usize], screen[t[2] as usize]);
+            let (y0, y1) = (a[1].min(b[1]).min(c[1]).floor(), a[1].max(b[1]).max(c[1]).ceil());
+            let (x0, x1) = (a[0].min(b[0]).min(c[0]), a[0].max(b[0]).max(c[0]));
+            // NaN (derrière la caméra) ou hors de l'image : aucune bande
+            if !(y1 >= 0.0 && y0 <= h as f32 - 1.0 && x1 >= 0.0 && x0 <= w as f32) || a[0].is_nan() || b[0].is_nan() || c[0].is_nan() {
+                return (1, 0);
+            }
+            ((y0.max(0.0) as usize / band) as u32, ((y1.min(h as f32 - 1.0).max(0.0) as usize / band).min(n_bands - 1)) as u32)
+        })
+        .collect();
+    let mut bin_start = vec![0usize; n_bands + 1];
+    for &(b0, b1) in &spans {
+        for b in b0..=b1 {
+            bin_start[b as usize + 1] += 1;
+        }
+    }
+    for b in 0..n_bands {
+        bin_start[b + 1] += bin_start[b];
+    }
+    let mut bins = vec![0u32; bin_start[n_bands]];
+    let mut fill = bin_start.clone();
+    for (ti, &(b0, b1)) in spans.iter().enumerate() {
+        for b in b0..=b1 {
+            bins[fill[b as usize]] = ti as u32;
+            fill[b as usize] += 1;
+        }
+    }
+    drop(spans);
     let bands: Vec<(Vec<u32>, Vec<f32>)> = rgba.par_chunks_mut(w * 4 * band).enumerate().map(|(bi, chunk)| {
         let y0 = bi * band;
         let rows = chunk.len() / (w * 4);
@@ -1580,7 +1688,9 @@ pub fn render(m: &Prepared, cam: &Camera, look: &Look, w: usize, h: usize) -> Fr
         let mut tri = vec![u32::MAX; n];
         let mut bary = vec![[0.0f32; 2]; n];
         // Passe 1 : triangle visible de chaque pixel
-        for (ti, t) in m.tris.iter().enumerate() {
+        for &ti in &bins[bin_start[bi]..bin_start[bi + 1]] {
+            let ti = ti as usize;
+            let t = &m.tris[ti];
             let (a, b, c) = (screen[t[0] as usize], screen[t[1] as usize], screen[t[2] as usize]);
             if a[0].is_nan() || b[0].is_nan() || c[0].is_nan() {
                 continue;
@@ -1630,13 +1740,17 @@ pub fn render(m: &Prepared, cam: &Camera, look: &Look, w: usize, h: usize) -> Fr
             let x = k % w;
             let y = y0 + k / w;
             let o = k * 4;
+            // Fond vide, sans environnement ni ombre au sol : rien à calculer pour ce pixel
+            if tri[k] == u32::MAX && !look.show_bg && bvh.is_none() {
+                continue;
+            }
             // Direction du regard (du pixel vers la scène) en espace monde
             let ray_view = if cam.ortho { [0.0, 0.0, -1.0] } else { norm([(x as f32 + 0.5 - cx) / focal, -(y as f32 + 0.5 - cy) / focal, -1.0]) };
-            let ray = cam.unrotate(ray_view);
+            let ray = pr.unrotate(ray_view);
             let ti = tri[k];
             if ti == u32::MAX {
                 if look.show_bg {
-                    let d = rot_y(ray, -look.env_rot);
+                    let d = env_dir(ray);
                     let c = if look.blur_bg { env.bg_blur.sample(d) } else { env.bg.sample(d) };
                     let s = look.env_strength;
                     let t = tone([c[0] * s, c[1] * s, c[2] * s], exposure);
@@ -1644,7 +1758,7 @@ pub fn render(m: &Prepared, cam: &Camera, look: &Look, w: usize, h: usize) -> Fr
                     chunk[o + 3] = 255;
                 } else if let Some(b) = bvh {
                     // Sol : là où un objet cache une lumière, une ombre se pose sur le plan du sol
-                    let eye = if cam.ortho { cam.unrotate([(x as f32 + 0.5 - cx) / ortho_scale - cam.pan[0], -(y as f32 + 0.5 - cy) / ortho_scale - cam.pan[1], cam.dist]) } else { cam.unrotate([-cam.pan[0], -cam.pan[1], cam.dist]) };
+                    let eye = if cam.ortho { pr.unrotate([(x as f32 + 0.5 - cx) / ortho_scale - cam.pan[0], -(y as f32 + 0.5 - cy) / ortho_scale - cam.pan[1], cam.dist]) } else { pr.unrotate([-cam.pan[0], -cam.pan[1], cam.dist]) };
                     if ray[1].abs() > 1e-5 {
                         let tt = (m.floor - eye[1]) / ray[1];
                         if tt > 0.0 {
@@ -1755,13 +1869,13 @@ pub fn render(m: &Prepared, cam: &Camera, look: &Look, w: usize, h: usize) -> Fr
                 }
                 let albedo = if metal > 0.5 && look.nodes.is_some() { albedo } else { albedo };
                 let ndv = dot(nrm, v).clamp(0.0, 1.0);
-                let ne = rot_y(nrm, -look.env_rot);
+                let ne = env_dir(nrm);
                 let s = look.env_strength;
                 let (ao, sheen, sss, sss_col) = extra;
                 let irr = env.irradiance(ne);
                 let irr = [irr[0] * ao, irr[1] * ao, irr[2] * ao];
                 let r = sub([2.0 * dot(nrm, v) * nrm[0], 2.0 * dot(nrm, v) * nrm[1], 2.0 * dot(nrm, v) * nrm[2]], v);
-                let refl = env.reflect(rot_y(r, -look.env_rot), rough);
+                let refl = env.reflect(env_dir(r), rough);
                 let f0 = if look.nodes.is_some() || slot_prog.is_some() {
                     [0.04 + (albedo[0] - 0.04) * metal, 0.04 + (albedo[1] - 0.04) * metal, 0.04 + (albedo[2] - 0.04) * metal]
                 } else if metal > 0.5 {
@@ -1829,11 +1943,11 @@ pub fn render(m: &Prepared, cam: &Camera, look: &Look, w: usize, h: usize) -> Fr
                         let a = eta * cosi - k.sqrt();
                         [-eta * v[0] + a * nrm[0], -eta * v[1] + a * nrm[1], -eta * v[2] + a * nrm[2]]
                     };
-                    env.reflect(rot_y(d, -look.env_rot), rough)
+                    env.reflect(env_dir(d), rough)
                 } else {
                     [0.0; 3]
                 };
-                let coat_refl = if coat > 0.0 { env.reflect(rot_y(r, -look.env_rot), 0.04) } else { [0.0; 3] };
+                let coat_refl = if coat > 0.0 { env.reflect(env_dir(r), 0.04) } else { [0.0; 3] };
                 let mut out = [0.0f32; 3];
                 for ch in 0..3 {
                     let f = f0[ch] + (1.0 - f0[ch]) * fres * (1.0 - rough).powf(2.0);
@@ -2207,7 +2321,7 @@ struct SculptUi {
 struct SculptStroke {
     start: Vec<V3>,
     grabbed: Vec<(Vec<(usize, f32)>, bool)>,
-    nb: Vec<Vec<u32>>,
+    topo: crate::sculpt::Topo,
     at0: Pos2,
     last: Pos2,
     centre: V3,
@@ -3882,7 +3996,9 @@ impl Viewer {
         let c = [(lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0, (lo[2] + hi[2]) / 2.0];
         let focal = rect.height().min(rect.width()) * 1.2;
         let (cam, rc) = (self.cam, rect.center());
-        let view = |w: V3| cam.view([(w[0] - c[0]) / longest, (w[1] - c[1]) / longest, (w[2] - c[2]) / longest]);
+        // Rotation de la caméra préparée une fois : ces projections tournent sur tous les sommets, à chaque image
+        let cam_proj = Proj::new(&cam, rect.width(), rect.height());
+        let view = |w: V3| cam_proj.view([(w[0] - c[0]) / longest, (w[1] - c[1]) / longest, (w[2] - c[2]) / longest]);
         let project = |w: V3| -> Option<Pos2> {
             let q = view(w);
             if cam.ortho {
@@ -4057,7 +4173,7 @@ impl Viewer {
                     if let Some((c, rr)) = probe(me, at) {
                         snapshot(me);
                         let grabbed = sets(&me.mesh.pos, c, rr);
-                        sc.stroke = Some(SculptStroke { start: me.mesh.pos.clone(), grabbed, nb: me.mesh.neighbors(), at0: at, last: at, centre: c });
+                        sc.stroke = Some(SculptStroke { start: me.mesh.pos.clone(), grabbed, topo: crate::sculpt::Topo::new(&me.mesh), at0: at, last: at, centre: c });
                     }
                 }
             }
@@ -4088,7 +4204,7 @@ impl Viewer {
                         let Some((c, rr)) = probe(me, q) else { continue };
                         let step = rr * 0.025 * sc.strength;
                         for (set, _) in sets(&me.mesh.pos, c, rr) {
-                            crate::sculpt::dab(&mut me.mesh, &st.nb, brush, &set, step, cmd);
+                            crate::sculpt::dab(&mut me.mesh, &st.topo, brush, &set, step, cmd);
                         }
                     }
                     st.last = at;
@@ -10300,5 +10416,105 @@ mod thumb_tests {
         let a = |x: usize, y: usize| f.rgba[(y * 48 + x) * 4 + 3];
                 assert_eq!(a(24, 24), 255);
         assert_eq!(a(1, 1), 0);
+    }
+}
+
+#[cfg(test)]
+mod pointage {
+    use super::*;
+
+    /// L'arbre de rayons et le parcours complet désignent le même triangle, avec les mêmes poids, en
+    /// perspective comme en orthographique ; et un maillage vide ou des indices faux ne paniquent pas.
+    #[test]
+    fn arbre_et_parcours_d_accord() {
+        let s = preview_sphere();
+        for ortho in [false, true] {
+            let cam = Camera { yaw: 0.7, pitch: 0.3, dist: 2.4, pan: [0.1, -0.05], ortho };
+            let pr = Proj::new(&cam, 320.0, 240.0);
+            let mut seen = 0;
+            for k in 0..60 {
+                let (x, y) = (40.3 + (k % 10) as f32 * 24.7, 30.6 + (k / 10) as f32 * 31.1);
+                let a = pick_scan(&s, &pr, x, y);
+                s.bvh.get_or_init(|| crate::bvh::Bvh::new(&s.pos, &s.tris));
+                let b = pick(&s, &cam, 320.0, 240.0, x, y);
+                assert_eq!(a.map(|h| h.0), b.map(|h| h.0), "pixel {x} {y}");
+                if let (Some(a), Some(b)) = (a, b) {
+                    seen += 1;
+                    assert!((0..3).all(|i| (a.1[i] - b.1[i]).abs() < 2e-3), "{:?} {:?}", a.1, b.1);
+                    // Le point retrouvé avec ces poids se projette bien sous le pixel
+                    let t = s.triangle(a.0);
+                    let p = [0, 1, 2].map(|c| (0..3).map(|i| s.vertex(t[i] as usize)[c] * a.1[i]).sum::<f32>());
+                    let q = project_point(&cam, 320.0, 240.0, p).unwrap();
+                    assert!((q[0] - x).abs() < 0.05 && (q[1] - y).abs() < 0.05, "{q:?} {x} {y}");
+                }
+            }
+            assert!(seen > 10);
+        }
+        let n = 1;
+        let empty = Prepared::from_mesh_fixed(crate::modifiers::Mesh { pos: vec![], tris: vec![], colors: vec![], edges: vec![] }, 0.0);
+        assert!(pick(&empty, &Camera::default(), 100.0, 100.0, 50.0, 50.0).is_none());
+        let broken = Prepared::from_mesh_fixed(crate::modifiers::Mesh { pos: vec![[0.0; 3], [f32::NAN, 0.0, 0.0], [0.0, 1.0, 0.0]], tris: vec![[0, 1, 2]], colors: vec![Color32::WHITE; n], edges: vec![7; n] }, 0.0);
+        assert!(pick(&broken, &Camera::default(), 100.0, 100.0, 50.0, 50.0).is_none());
+        let f = render(&broken, &Camera::default(), &Look::default(), 32, 32);
+        assert_eq!(f.rgba.len(), 32 * 32 * 4);
+    }
+
+    /// Le rendu range les triangles par bande : le résultat est le même pour une image plus haute
+    /// qu'une bande, et un triangle à cheval sur plusieurs bandes est dessiné dans chacune.
+    #[test]
+    fn bandes_du_rendu() {
+        let n = 1;
+        let tri = Prepared::from_mesh_fixed(crate::modifiers::Mesh { pos: vec![[-0.4, -0.45, 0.0], [0.4, -0.45, 0.0], [0.0, 0.45, 0.0]], tris: vec![[0, 1, 2]], colors: vec![Color32::WHITE; n], edges: vec![7; n] }, -0.5);
+        let cam = Camera { yaw: 0.0, pitch: 0.0, dist: 2.0, ..Default::default() };
+        let f = render(&tri, &cam, &Look::default(), 160, 100);
+        // Une colonne au milieu : couverte sans trou du haut au bas du triangle (plusieurs bandes de 16 lignes)
+        let col: Vec<bool> = (0..100).map(|y| f.ids[y * 160 + 80] == 0).collect();
+        let (first, last) = (col.iter().position(|c| *c).unwrap(), col.iter().rposition(|c| *c).unwrap());
+        assert!(last - first > 40, "{first} {last}");
+        assert!(col[first..=last].iter().all(|c| *c));
+        // Hauteur qui n'est pas un multiple de la bande, et image minuscule
+        assert_eq!(render(&tri, &cam, &Look::default(), 7, 5).ids.len(), 35);
+        assert_eq!(render(&tri, &cam, &Look::default(), 1, 1).ids.len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod banc {
+    use super::*;
+
+    /// Temps du rendu et du pointage sur un maillage dense :
+    /// `cargo test --release --offline banc_rendu -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn banc_rendu_et_pointage() {
+        let obj = "v -1 -1 -1\nv 1 -1 -1\nv 1 1 -1\nv -1 1 -1\nv -1 -1 1\nv 1 -1 1\nv 1 1 1\nv -1 1 1\nf 1 4 3 2\nf 5 6 7 8\nf 1 2 6 5\nf 2 3 7 6\nf 3 4 8 7\nf 4 1 5 8\n";
+        let m = load_obj(obj.as_bytes()).unwrap();
+        for levels in [5u8, 8] {
+            let pos = m.normalized(false);
+            let (mut pos, mut tris, mut colors, mut edges) = catmull_clark(&pos, &m.tris, &m.colors, &m.edges, levels.min(5), false);
+            if levels > 5 {
+                (pos, tris, colors, edges) = catmull_clark(&pos, &tris, &colors, &edges, levels - 5, false);
+            }
+            let p = Prepared::from_mesh_fixed(crate::modifiers::Mesh { pos, tris, colors, edges }, -0.5);
+            let cam = Camera::default();
+            let pk = |f: &dyn Fn(f32) -> bool| {
+                let t = std::time::Instant::now();
+                let hits: u32 = (0..50).map(|i| f(400.0 + i as f32 * 9.0) as u32).sum();
+                (t.elapsed().as_secs_f64() * 1000.0 / 50.0, hits)
+            };
+            let pr = Proj::new(&cam, 1280.0, 720.0);
+            let (scan, _) = pk(&|x| pick_scan(&p, &pr, x, 360.0).is_some());
+            let t = std::time::Instant::now();
+            p.bvh.get_or_init(|| crate::bvh::Bvh::new(&p.pos, &p.tris));
+            let build = t.elapsed().as_secs_f64() * 1000.0;
+            let (tree, _) = pk(&|x| pick(&p, &cam, 1280.0, 720.0, x, 360.0).is_some());
+            println!("BANC {} triangles : pointage par parcours {scan:.2} ms, par l'arbre {tree:.4} ms (arbre construit en {build:.0} ms)", p.tri_count());
+            for (name, look) in [("simple", Look::default()), ("ombres", Look { shadows: true, ..Default::default() })] {
+                let t = std::time::Instant::now();
+                let n = 8;
+                let sum: u64 = (0..n).map(|_| render(&p, &cam, &look, 1280, 720).rgba[1000] as u64).sum();
+                println!("BANC {} triangles, {name} : rendu {:.1} ms ({sum})", p.tri_count(), t.elapsed().as_secs_f64() * 1000.0 / n as f64);
+            }
+        }
     }
 }

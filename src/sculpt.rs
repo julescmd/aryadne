@@ -69,74 +69,124 @@ pub fn falloff(t: f32) -> f32 {
     u * u
 }
 
+/// Voisinage du maillage, calculé une fois par geste : voisins de chaque sommet (par les arêtes) et
+/// faces qui le touchent. Les pinceaux ne recalculent ainsi que ce qui est sous eux.
+pub struct Topo {
+    pub nb: Vec<Vec<u32>>,
+    pub vp: Vec<Vec<u32>>,
+}
+
+impl Topo {
+    pub fn new(m: &EMesh) -> Topo {
+        let mut vp: Vec<Vec<u32>> = vec![vec![]; m.pos.len()];
+        for (f, p) in m.polys.iter().enumerate() {
+            for &v in p {
+                if let Some(l) = vp.get_mut(v as usize) {
+                    l.push(f as u32);
+                }
+            }
+        }
+        Topo { nb: m.neighbors(), vp }
+    }
+
+    /// Normale d'un sommet d'après ses seules faces voisines (même résultat que `normals`)
+    pub fn normal(&self, m: &EMesh, i: usize) -> V3 {
+        let mut n = [0.0f32; 3];
+        for &f in self.vp.get(i).map(|l| l.as_slice()).unwrap_or(&[]) {
+            let Some(p) = m.polys.get(f as usize).filter(|p| p.len() >= 3) else { continue };
+            for k in 0..p.len() {
+                let (a, b) = (m.pos[p[k] as usize], m.pos[p[(k + 1) % p.len()] as usize]);
+                n[0] += (a[1] - b[1]) * (a[2] + b[2]);
+                n[1] += (a[2] - b[2]) * (a[0] + b[0]);
+                n[2] += (a[0] - b[0]) * (a[1] + b[1]);
+            }
+        }
+        norm(n)
+    }
+}
+
 /// Un coup de pinceau (hors « saisir ») sur les sommets touchés, chacun avec son atténuation.
 /// `step` : déplacement de base dans le repère du maillage ; `invert` : creuser au lieu d'ajouter.
-pub fn dab(m: &mut EMesh, nb: &[Vec<u32>], brush: Brush, hits: &[(usize, f32)], step: f32, invert: bool) {
+/// Ne lit et n'écrit que la zone touchée : le coût suit la taille du pinceau, pas celle du maillage.
+pub fn dab(m: &mut EMesh, topo: &Topo, brush: Brush, hits: &[(usize, f32)], step: f32, invert: bool) {
+    let hits: Vec<(usize, f32)> = hits.iter().copied().filter(|&(i, w)| i < m.pos.len() && w.is_finite()).collect();
     if hits.is_empty() {
         return;
     }
-    let ns = normals(m);
+    let ns: Vec<V3> = hits.iter().map(|&(i, _)| topo.normal(m, i)).collect();
     let sign = if invert { -1.0 } else { 1.0 };
     // Normale et centre moyens de la zone
     let mut an = [0.0f32; 3];
     let mut ac = [0.0f32; 3];
     let mut wsum = 0.0;
-    for &(i, w) in hits {
+    for (h, &(i, w)) in hits.iter().enumerate() {
         for k in 0..3 {
-            an[k] += ns[i][k] * w;
+            an[k] += ns[h][k] * w;
             ac[k] += m.pos[i][k] * w;
         }
         wsum += w;
     }
     let an = norm(an);
     let ac = ac.map(|x| x / wsum.max(1e-12));
-    let old = m.pos.clone();
+    let old = &m.pos;
     let avg = |i: usize| -> V3 {
-        let list = &nb[i];
-        if list.is_empty() {
-            return old[i];
-        }
+        let list = topo.nb.get(i).map(|l| l.as_slice()).unwrap_or(&[]);
         let mut s = [0.0f32; 3];
+        let mut n = 0.0f32;
         for &j in list {
-            for k in 0..3 {
-                s[k] += old[j as usize][k];
+            if let Some(q) = old.get(j as usize) {
+                for k in 0..3 {
+                    s[k] += q[k];
+                }
+                n += 1.0;
             }
         }
-        s.map(|x| x / list.len() as f32)
+        if n == 0.0 { old[i] } else { s.map(|x| x / n) }
     };
     // Plan de la zone, au-dessus des points les plus hauts pour l'argile
     let top = hits.iter().map(|&(i, _)| dot(sub(old[i], ac), an)).fold(f32::MIN, f32::max);
-    for &(i, w) in hits {
-        let p = old[i];
-        let d: V3 = match brush {
-            Brush::Draw => an.map(|x| x * step * w * sign),
-            Brush::Inflate => ns[i].map(|x| x * step * w * sign),
-            Brush::Smooth => {
-                let a = avg(i);
-                sub(a, p).map(|x| x * (w * 0.5).min(1.0))
-            }
-            Brush::Clay => {
-                // Monte vers un plan un peu au-dessus de la zone, sans dépasser : la matière s'empile à plat
-                let plane = top.min(step * 4.0) * 0.5 + step;
-                let h = dot(sub(p, ac), an);
-                let push = (plane * sign - h * sign).max(0.0) * sign;
-                let a = avg(i);
-                let s = sub(a, p).map(|x| x * 0.25 * w);
-                [an[0] * push * w * 0.5 + s[0], an[1] * push * w * 0.5 + s[1], an[2] * push * w * 0.5 + s[2]]
-            }
-            Brush::Flatten => {
-                let h = dot(sub(p, ac), an);
-                an.map(|x| -x * h * (w * 0.3).min(1.0))
-            }
-            Brush::Pinch => {
-                let to = sub(ac, p);
-                let along = dot(to, an);
-                let flat = [to[0] - an[0] * along, to[1] - an[1] * along, to[2] - an[2] * along];
-                flat.map(|x| x * 0.15 * w * sign)
-            }
-            Brush::Grab => [0.0; 3],
-        };
-        m.pos[i] = [p[0] + d[0], p[1] + d[1], p[2] + d[2]];
+    // Tous les déplacements d'abord (lus sur le maillage intact), appliqués ensuite
+    let moved: Vec<V3> = hits
+        .iter()
+        .enumerate()
+        .map(|(h, &(i, w))| {
+            let p = old[i];
+            let d: V3 = match brush {
+                Brush::Draw => an.map(|x| x * step * w * sign),
+                Brush::Inflate => ns[h].map(|x| x * step * w * sign),
+                Brush::Smooth => {
+                    let a = avg(i);
+                    sub(a, p).map(|x| x * (w * 0.5).min(1.0))
+                }
+                Brush::Clay => {
+                    // Monte vers un plan un peu au-dessus de la zone, sans dépasser : la matière s'empile à plat
+                    let plane = top.min(step * 4.0) * 0.5 + step;
+                    let h = dot(sub(p, ac), an);
+                    let push = (plane * sign - h * sign).max(0.0) * sign;
+                    let a = avg(i);
+                    let s = sub(a, p).map(|x| x * 0.25 * w);
+                    [an[0] * push * w * 0.5 + s[0], an[1] * push * w * 0.5 + s[1], an[2] * push * w * 0.5 + s[2]]
+                }
+                Brush::Flatten => {
+                    let h = dot(sub(p, ac), an);
+                    an.map(|x| -x * h * (w * 0.3).min(1.0))
+                }
+                Brush::Pinch => {
+                    let to = sub(ac, p);
+                    let along = dot(to, an);
+                    let flat = [to[0] - an[0] * along, to[1] - an[1] * along, to[2] - an[2] * along];
+                    flat.map(|x| x * 0.15 * w * sign)
+                }
+                Brush::Grab => [0.0; 3],
+            };
+            [p[0] + d[0], p[1] + d[1], p[2] + d[2]]
+        })
+        .collect();
+    for (&(i, _), q) in hits.iter().zip(moved) {
+        // Un sommet touché deux fois (pinceau et reflet au milieu) garde le dernier déplacement, comme avant
+        if q.iter().all(|x| x.is_finite()) {
+            m.pos[i] = q;
+        }
     }
 }
 
@@ -176,9 +226,18 @@ mod tests {
     #[test]
     fn pinceaux() {
         let mut m = grid();
-        let nb = m.neighbors();
+        let nb = Topo::new(&m);
         let n = normals(&m);
         assert!(n[60][1] > 0.99, "{:?}", n[60]);
+        // La normale locale est celle du calcul complet
+        for i in [0, 5, 60, 120] {
+            let l = nb.normal(&m, i);
+            assert!((0..3).all(|k| (l[k] - n[i][k]).abs() < 1e-5));
+        }
+        // Entrées douteuses : indice hors du maillage, poids NaN, rien ne panique ni ne casse les positions
+        let mut bad = grid();
+        dab(&mut bad, &nb, Brush::Draw, &[(9999, 1.0), (3, f32::NAN)], 0.1, false);
+        assert!(bad.pos.iter().flatten().all(|x| x.is_finite()));
         // Dessiner : le centre monte, plus que les bords du pinceau
         let hits: Vec<(usize, f32)> = vec![(60, 1.0), (61, 0.5), (59, 0.5)];
         dab(&mut m, &nb, Brush::Draw, &hits, 0.1, false);
