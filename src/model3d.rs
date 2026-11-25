@@ -1450,6 +1450,20 @@ fn checker(uv: [f32; 2], tint: Option<[f32; 3]>) -> [f32; 3] {
 
 /// Triangle sous un point de l'écran (même projection que le rendu). Retourne
 /// (triangle, coordonnées barycentriques).
+/// Un point de la vue (repère du modèle préparé) à l'écran, dans une vue de `w` × `h`
+pub fn project_point(cam: &Camera, w: f32, h: f32, v: V3) -> Option<[f32; 2]> {
+    let focal = w.min(h) * 1.2;
+    let c = cam.view(v);
+    if cam.ortho {
+        let k = focal / cam.dist;
+        Some([w / 2.0 + c[0] * k, h / 2.0 - c[1] * k])
+    } else if c[2] < -0.02 {
+        Some([w / 2.0 + c[0] / -c[2] * focal, h / 2.0 - c[1] / -c[2] * focal])
+    } else {
+        None
+    }
+}
+
 pub fn pick(m: &Prepared, cam: &Camera, w: f32, h: f32, px: f32, py: f32) -> Option<(usize, [f32; 3])> {
     let focal = w.min(h) * 1.2;
     let ortho_scale = focal / cam.dist;
@@ -2661,6 +2675,8 @@ pub struct Viewer {
     /// Annuler, rétablir : (objet, texture avant)
     paint_undo: Vec<(usize, image::RgbaImage)>,
     paint_redo: Vec<(usize, image::RgbaImage)>,
+    /// Décalque : une image projetée sur l'objet au clic (chemin, image)
+    paint_stamp: Option<(String, std::sync::Arc<image::RgbaImage>)>,
     /// Barre d'outils d'animation (tweener, décaler, poses…)
     anim_tools: bool,
     /// Pelure d'oignon : l'objet choisi aux clés d'avant et d'après, en fil de fer
@@ -2878,6 +2894,7 @@ impl Viewer {
             paint_saved: vec![],
             paint_undo: vec![],
             paint_redo: vec![],
+            paint_stamp: None,
             anim_tools: false,
             onion: false,
             look_through: false,
@@ -3010,7 +3027,14 @@ impl Viewer {
             ui.painter_at(rect).circle_stroke(h, b.radius * b.hardness.clamp(0.05, 1.0), Stroke::new(1.0, col.gamma_multiply(0.5)));
         }
         let alt = ui.input(|i| i.modifiers.alt);
-        let painting = resp.dragged_by(egui::PointerButton::Primary) && !alt || (resp.clicked() && !alt);
+        let stamping = self.paint_stamp.is_some();
+        let painting = if stamping {
+            // Un décalque se pose une fois, au clic (pas en traînée)
+            !alt && (resp.drag_started_by(egui::PointerButton::Primary) || resp.clicked()) && self.paint_last.is_none()
+        } else {
+            resp.dragged_by(egui::PointerButton::Primary) && !alt || (resp.clicked() && !alt)
+        };
+        let stamp = self.paint_stamp.as_ref().map(|x| x.1.clone());
         if painting {
             let scene_names: Vec<String> = self.scene.as_ref().map(|sc| sc.objects.iter().map(|o| o.name.clone()).collect()).unwrap_or_default();
             if let (Some(at), Some((_, _, prep))) = (resp.interact_pointer_pos(), self.prepared.clone()) {
@@ -3070,7 +3094,26 @@ impl Viewer {
                         }
                         if let Ok(mut img) = t.write() {
                             let (_, _, last) = ranges.iter().find(|r| r.0 == k).copied().unwrap_or((k, first, first + uv.len()));
-                            crate::paint3d::dab3d(&mut img, &prep.pos, &prep.tris[first..last.min(prep.tris.len())], &uv, c, n, self.paint_r_uv, &b);
+                            match &stamp {
+                                // Décalque : l'image projetée depuis la caméra, centrée sur le point cliqué, dans le cercle du pinceau
+                                Some(si) => {
+                                    let (sw, sh) = (si.width() as f32, si.height() as f32);
+                                    let side = sw.max(sh);
+                                    let rr = b.radius;
+                                    let f = |pt: [f32; 3]| -> Option<[f32; 4]> {
+                                        let s2 = crate::model3d::project_point(&cam, w, h, pt)?;
+                                        let (dx, dy) = (s2[0] + rect.left() - q.x, s2[1] + rect.top() - q.y);
+                                        let (u, v) = (dx / (2.0 * rr) * side / sw + 0.5, dy / (2.0 * rr) * side / sh + 0.5);
+                                        if !(0.0..1.0).contains(&u) || !(0.0..1.0).contains(&v) {
+                                            return None;
+                                        }
+                                        let p = si.get_pixel((u * sw) as u32, (v * sh) as u32);
+                                        Some([p[0] as f32 / 255.0, p[1] as f32 / 255.0, p[2] as f32 / 255.0, p[3] as f32 / 255.0])
+                                    };
+                                    crate::paint3d::dab3d_with(&mut img, &prep.pos, &prep.tris[first..last.min(prep.tris.len())], &uv, c, n, self.paint_r_uv * 1.42, &b, Some(&f));
+                                }
+                                None => crate::paint3d::dab3d(&mut img, &prep.pos, &prep.tris[first..last.min(prep.tris.len())], &uv, c, n, self.paint_r_uv, &b),
+                            }
                         }
                     }
                     if !self.paint_dirty.contains(&k) {
@@ -3121,6 +3164,35 @@ impl Viewer {
             let er = egui::Button::new(egui::RichText::new(crate::lucide::ERASER).size(15.0).color(if b.erase { p.on_accent } else { p.text })).fill(if b.erase { p.accent } else { Color32::TRANSPARENT }).min_size(egui::vec2(28.0, 26.0));
             if ui.add(er).on_hover_text(crate::i18n::t("gomme (E)")).clicked() {
                 b.erase = !b.erase;
+            }
+            // Décalque : une image (logo, étiquette, motif) projetée sur l'objet là où on clique
+            let on = self.paint_stamp.is_some();
+            let st = egui::Button::new(egui::RichText::new(crate::lucide::STAMP).size(15.0).color(if on { p.on_accent } else { p.text })).fill(if on { p.accent } else { Color32::TRANSPARENT }).min_size(egui::vec2(28.0, 26.0));
+            let tip = match &self.paint_stamp {
+                Some((path, _)) => format!("{} : {}  ({})", crate::i18n::t("décalque"), std::path::Path::new(path).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(), crate::i18n::t("clic : retirer")),
+                None => crate::i18n::t("décalque : projeter une image sur l'objet au clic (logo, étiquette)"),
+            };
+            if ui.add(st).on_hover_text(tip).clicked() {
+                if on {
+                    self.paint_stamp = None;
+                } else {
+                    let mut d = rfd::FileDialog::new().add_filter("image", &["png", "jpg", "jpeg", "webp"]);
+                    if !self.root.is_empty() {
+                        d = d.set_directory(&self.root);
+                    }
+                    if let Some(f) = d.pick_file() {
+                        match image::open(&f) {
+                            Ok(im) => {
+                                let im = im.to_rgba8();
+                                // Assez grand pour être net, pas plus
+                                let im = if im.width().max(im.height()) > 1024 { image::imageops::thumbnail(&im, 1024 * im.width() / im.width().max(im.height()), 1024 * im.height() / im.width().max(im.height())) } else { im };
+                                self.paint_stamp = Some((f.to_string_lossy().to_string(), std::sync::Arc::new(im)));
+                                b.erase = false;
+                            }
+                            Err(e) => crate::notify(format!("{} : {e}", crate::i18n::t("image illisible"))),
+                        }
+                    }
+                }
             }
             ui.separator();
             ui.label(egui::RichText::new(crate::lucide::CIRCLE).size(13.0).color(p.muted)).on_hover_text(crate::i18n::t("rayon ([ et ])"));

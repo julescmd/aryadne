@@ -3442,5 +3442,8 @@
   "composant(s) mis à jour": "component(s) updated",
   "Les composants des autres dessins du coffre apparaissent ici, à poser dans ce dessin.": "Components from the vault's other drawings show up here, ready to place in this drawing.",
   "Poser une instance au milieu du plan de travail": "Place an instance in the middle of the artboard",
-  "composant introuvable": "component not found"
+  "composant introuvable": "component not found",
+  "décalque": "decal",
+  "décalque : projeter une image sur l'objet au clic (logo, étiquette)": "decal: project an image onto the object where you click (logo, label)",
+  "image illisible": "unreadable image"
 }

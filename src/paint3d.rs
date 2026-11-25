@@ -94,12 +94,19 @@ fn falloff(d: f32, r: f32, hardness: f32) -> f32 {
 /// qu'elle touche est rempli dans ses UV, la force suivant la distance en 3D. Pas de débordement d'un îlot d'UV
 /// à l'autre, pas de couture visible ; les faces tournées à l'opposé de `n` (l'autre côté d'une paroi) sont épargnées.
 pub fn dab3d(img: &mut image::RgbaImage, pos: &[[f32; 3]], tris: &[[u32; 3]], uv: &[[[f32; 2]; 3]], c: [f32; 3], n: [f32; 3], r: f32, b: &Brush) {
+    dab3d_with(img, pos, tris, uv, c, n, r, b, None);
+}
+
+/// Comme `dab3d`, avec un décalque : pour chaque point de la surface, sa couleur et son alpha (sRGB, 0..1),
+/// ou rien hors de l'image. Le décalque remplace la couleur du pinceau et son bord doux.
+#[allow(clippy::too_many_arguments)]
+pub fn dab3d_with(img: &mut image::RgbaImage, pos: &[[f32; 3]], tris: &[[u32; 3]], uv: &[[[f32; 2]; 3]], c: [f32; 3], n: [f32; 3], r: f32, b: &Brush, stamp: Option<&dyn Fn([f32; 3]) -> Option<[f32; 4]>>) {
     let (w, h) = (img.width() as f32, img.height() as f32);
     let col = b.color.map(|c| (c.clamp(0.0, 1.0) * 255.0).round());
     let sub = |a: [f32; 3], b: [f32; 3]| [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
     let d2 = |a: [f32; 3]| a[0] * a[0] + a[1] * a[1] + a[2] * a[2];
     // Un pixel partagé par deux triangles voisins (leurs marges) ne reçoit la touche qu'une fois
-    let mut got: std::collections::HashMap<(u32, u32), f32> = Default::default();
+    let mut got: std::collections::HashMap<(u32, u32), (f32, [f32; 3])> = Default::default();
     for (t, u) in tris.iter().zip(uv) {
         let p = t.map(|i| pos[i as usize]);
         // Le triangle est-il assez près de la boule ? (sa sphère englobante)
@@ -139,17 +146,24 @@ pub fn dab3d(img: &mut image::RgbaImage, pos: &[[f32; 3]], tris: &[[u32; 3]], uv
                 let (a0, a1, a2) = (w0.max(0.0), w1.max(0.0), w2.max(0.0));
                 let s = (a0 + a1 + a2).max(1e-6);
                 let pt = [0, 1, 2].map(|k| (p[0][k] * a0 + p[1][k] * a1 + p[2][k] * a2) / s);
-                let f = falloff(d2(sub(pt, c)).sqrt(), r, b.hardness);
-                let a = (b.strength.clamp(0.0, 1.0) * f).clamp(0.0, 1.0);
+                let (a, cc) = match stamp {
+                    Some(st) => match st(pt) {
+                        Some(sc) if d2(sub(pt, c)).sqrt() <= r * 1.5 => ((b.strength.clamp(0.0, 1.0) * sc[3]).clamp(0.0, 1.0), [sc[0] * 255.0, sc[1] * 255.0, sc[2] * 255.0]),
+                        _ => (0.0, col),
+                    },
+                    None => ((b.strength.clamp(0.0, 1.0) * falloff(d2(sub(pt, c)).sqrt(), r, b.hardness)).clamp(0.0, 1.0), col),
+                };
                 if a > 0.0 {
-                    let e = got.entry((x, y)).or_insert(0.0);
-                    *e = e.max(a);
+                    let e = got.entry((x, y)).or_insert((0.0, cc));
+                    if a > e.0 {
+                        *e = (a, cc);
+                    }
                 }
             }
         }
     }
-    for ((x, y), a) in got {
-        put(img.get_pixel_mut(x, y), a, col, b.erase);
+    for ((x, y), (a, cc)) in got {
+        put(img.get_pixel_mut(x, y), a, cc, b.erase);
     }
 }
 
@@ -179,6 +193,21 @@ pub fn spaced(a: [f32; 2], b: [f32; 2], radius: f32) -> Vec<[f32; 2]> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn decalque_projete() {
+        let pos = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 1.0, 0.0], [0.0, 1.0, 0.0]];
+        let tris = [[0, 1, 2], [0, 2, 3]];
+        let uv = [[[0.0, 0.0], [1.0, 0.0], [1.0, 1.0]], [[0.0, 0.0], [1.0, 1.0], [0.0, 1.0]]];
+        let mut img = image::RgbaImage::new(32, 32);
+        let b = Brush { strength: 1.0, ..Default::default() };
+        // Moitié gauche bleue, moitié droite transparente
+        let st = |p: [f32; 3]| (p[0] < 0.5).then_some([0.0, 0.0, 1.0, 1.0]);
+        dab3d_with(&mut img, &pos, &tris, &uv, [0.5, 0.5, 0.0], [0.0, 0.0, 1.0], 1.0, &b, Some(&st));
+        assert_eq!(img.get_pixel(4, 16).0, [0, 0, 255, 255]);
+        assert_eq!(img.get_pixel(28, 16)[3], 0);
+    }
+
 
     #[test]
     fn touche_en_3d_sans_deborder() {
