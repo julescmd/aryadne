@@ -81,17 +81,12 @@ impl Reader<'_> {
     fn prop(&self, o: usize) -> Result<(Prop, usize), String> {
         let t = self.u8(o)?;
         let o = o + 1;
-        let le = |b: &[u8]| -> [u8; 8] {
-            let mut a = [0u8; 8];
-            a[..b.len()].copy_from_slice(b);
-            a
-        };
         Ok(match t {
-            b'Y' => (Prop::Int(i16::from_le_bytes(self.d[o..o + 2].try_into().unwrap()) as i64), o + 2),
+            b'Y' => (Prop::Int(i16::from_le_bytes([self.u8(o)?, self.u8(o + 1)?]) as i64), o + 2),
             b'C' => (Prop::Int(self.u8(o)? as i64), o + 1),
             b'I' => (Prop::Int(self.u32(o)? as i32 as i64), o + 4),
-            b'F' => (Prop::Float(f32::from_le_bytes(self.d[o..o + 4].try_into().unwrap()) as f64), o + 4),
-            b'D' => (Prop::Float(f64::from_le_bytes(le(&self.d[o..o + 8]))), o + 8),
+            b'F' => (Prop::Float(f32::from_bits(self.u32(o)?) as f64), o + 4),
+            b'D' => (Prop::Float(f64::from_bits(self.u64(o)?)), o + 8),
             b'L' => (Prop::Int(self.u64(o)? as i64), o + 8),
             b'S' | b'R' => {
                 let n = self.u32(o)? as usize;
@@ -105,7 +100,8 @@ impl Reader<'_> {
                 let clen = self.u32(o + 8)? as usize;
                 let raw = self.d.get(o + 12..o + 12 + clen).ok_or("FBX tronqué.")?;
                 let bytes = if enc == 1 {
-                    let mut out = Vec::with_capacity(count * 8);
+                    // La taille annoncée vient du fichier : on ne réserve pas plus que raisonnable d'avance
+                    let mut out = Vec::with_capacity(count.saturating_mul(8).min(1 << 26));
                     ZlibDecoder::new(raw).read_to_end(&mut out).map_err(|e| format!("FBX : tableau compressé illisible ({e})"))?;
                     out
                 } else {
@@ -414,5 +410,28 @@ mod conv {
             o += &format!("f {} {} {}\n", t[0] + 1, t[1] + 1, t[2] + 1);
         }
         std::fs::write(std::env::var("FBX_OUT").unwrap(), o).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod robustesse {
+    /// Un FBX coupé au milieu d'une valeur rend une erreur, sans panique
+    #[test]
+    fn fbx_tronque_sans_panique() {
+        for t in [b'Y', b'F', b'D', b'I', b'L', b'S', b'f'] {
+            let mut d = b"Kaydara FBX Binary  \x00\x1a\x00".to_vec();
+            d.extend(7400u32.to_le_bytes());
+            // Un nœud qui annonce une propriété, puis le fichier s'arrête après son type
+            let name = b"N";
+            let end = (d.len() + 13 + name.len() + 2) as u32;
+            d.extend(end.to_le_bytes());
+            d.extend(1u32.to_le_bytes());
+            d.extend(2u32.to_le_bytes());
+            d.push(name.len() as u8);
+            d.extend(name);
+            d.push(t);
+            d.push(1);
+            let _ = super::parse(&d);
+        }
     }
 }

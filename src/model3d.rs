@@ -81,6 +81,13 @@ impl Model {
             return Err("Aucun triangle dans ce fichier.".into());
         }
         let colors = colors.filter(|c| c.len() == tris.len()).unwrap_or_else(|| vec![Color32::from_gray(205); tris.len()]);
+        // Une coordonnée infinie ou NaN (fichier abîmé) fausserait les bornes, donc tout le cadrage
+        let mut positions = positions;
+        for v in positions.iter_mut() {
+            for x in v.iter_mut().filter(|x| !x.is_finite()) {
+                *x = 0.0;
+            }
+        }
         let mut min = [f32::MAX; 3];
         let mut max = [f32::MIN; 3];
         for v in &positions {
@@ -302,6 +309,13 @@ pub fn load_obj(reader: impl BufRead) -> Result<Model, String> {
                 edges.push(fan_mask(k, n));
             }
         }
+    }
+    // Une face qui cite un sommet absent (fichier abîmé) est écartée ici : la fusion des sommets lit ces indices
+    let nv = verts.len();
+    let ok: Vec<bool> = tris.iter().map(|t: &[u32; 3]| t.iter().all(|&i| (i as usize) < nv)).collect();
+    if ok.iter().any(|k| !k) {
+        tris = keep_per_tri(&tris, &ok);
+        edges = keep_per_tri(&edges, &ok);
     }
     // OBJ : les « s » (groupes de lissage), « vn » et « vt » sont ignorés ; on refusionne aussi les sommets en double
     if ours {
@@ -1578,6 +1592,10 @@ impl Prepared {
     }
     pub fn triangle(&self, t: usize) -> [u32; 3] {
         self.tris[t]
+    }
+    /// Construit l'arbre de rayons si ce n'est pas fait : les pointages suivants passent par lui
+    pub fn ensure_tree(&self) {
+        self.bvh.get_or_init(|| crate::bvh::Bvh::new(&self.pos, &self.tris));
     }
 }
 
@@ -3157,6 +3175,8 @@ impl Viewer {
                 // Les UV de chaque objet sous le trait (calculées une fois par objet)
                 let cam = self.cam.clone();
                 let ranges = self.scene_ranges.clone();
+                // Cinq pointages par touche : l'arbre de rayons, construit une fois par maillage, les rend presque gratuits
+                prep.ensure_tree();
                 let hit = |q: Pos2| pick(&prep, &cam, w, h, q.x - rect.left(), q.y - rect.top());
                 let ks: Vec<usize> = [from, at].iter().filter_map(|q| hit(*q)).filter_map(|(tri, _)| ranges.iter().find(|r| (r.1..r.2).contains(&tri)).map(|r| r.0)).collect();
                 let uvs: Vec<(usize, usize, std::sync::Arc<Vec<[[f32; 2]; 3]>>)> = ks.into_iter().filter_map(|k| Some((k, ranges.iter().find(|r| r.0 == k)?.1, self.paint_uvs(k)?))).collect();
@@ -9950,6 +9970,11 @@ mod tests {
         let m = load_obj(obj.as_bytes()).unwrap();
         assert_eq!(m.total_tris, 3, "un quad = 2 triangles, plus un triangle en indices négatifs");
         assert_eq!(m.size(), [1.0, 1.0, 0.0]);
+        // Fichier abîmé : une face cite un sommet absent, un sommet est infini ; ni panique ni bornes fausses
+        let bad = load_obj("v 0 0 0\nv 1 0 0\nv 1 1 0\nv inf 0 nan\nf 1 2 3\nf 1 2 99\n".as_bytes()).unwrap();
+        assert_eq!(bad.total_tris, 1);
+        assert!(bad.size().iter().all(|x| x.is_finite()));
+        assert!(load_obj("f 1 2 3\n".as_bytes()).is_err());
 
         let mut stl = vec![0u8; 80];
         stl.extend(2u32.to_le_bytes());
