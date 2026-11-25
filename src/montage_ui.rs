@@ -217,6 +217,8 @@ enum Smart {
     Track(u64, Vec<crate::montage::PoseKey>),
     /// Version 9:16 recadrée, enregistrée : à ouvrir
     Vertical(std::path::PathBuf),
+    /// Multicam : décalages des prises par rapport à la première
+    Synced(Vec<u64>, Vec<f32>),
 }
 
 impl Drop for Editor {
@@ -1147,6 +1149,15 @@ impl Editor {
         }
         if cmd {
             return;
+        }
+        // Multicam : 1 à 9 coupent vers un angle à la tête de lecture
+        if !self.project.angles.is_empty() && !cmd {
+            let nums = [Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5, Key::Num6, Key::Num7, Key::Num8, Key::Num9];
+            if let Some(n) = nums.iter().position(|key| k(*key)) {
+                if self.project.switch_angle(self.playhead, n) {
+                    self.changed();
+                }
+            }
         }
         if k(Key::Space) {
             if self.play.is_some() {

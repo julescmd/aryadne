@@ -1285,6 +1285,49 @@ impl Editor {
             changed
         };
         let is_visual = self.project.clips[i].visual();
+        // Multicam : caler des prises au son, en faire des angles, couper d'un angle à l'autre
+        let videos: Vec<u64> = self.sel.iter().copied().filter(|id| self.project.index(*id).is_some_and(|k| self.project.clips[k].visual() && self.project.clips[k].kind == "video")).collect();
+        let (mut want_sync, mut want_multi, mut want_angle) = (false, false, None);
+        if is_visual && (videos.len() >= 2 || !self.project.angles.is_empty()) {
+            card(ui, "Multicam", &mut |ui| {
+                if videos.len() >= 2 {
+                    ui.horizontal_wrapped(|ui| {
+                        let b = egui::Button::new(RichText::new(format!("{}  {}", crate::lucide::AUDIO_WAVEFORM, crate::i18n::t("Caler au son"))).size(12.0)).corner_radius(12).min_size(vec2(0.0, 24.0));
+                        want_sync = ui.add_enabled(self.smart_rx.is_none(), b).on_hover_text(crate::i18n::t("Les prises choisies se calent sur la première d'après leur son (clap, voix)")).clicked();
+                        let b = egui::Button::new(RichText::new(format!("{}  {}", crate::lucide::CAMERA, crate::i18n::t("Faire un multicam"))).size(12.0)).corner_radius(12).min_size(vec2(0.0, 24.0));
+                        want_multi = ui.add_enabled(self.smart_rx.is_none(), b).on_hover_text(crate::i18n::t("Chaque prise devient un angle ; la première reste à l'image, les autres se choisissent avec 1 à 9")).clicked();
+                    });
+                }
+                if !self.project.angles.is_empty() {
+                    let now = self.project.clips[i].file.clone();
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing.x = 4.0;
+                        for (k, a) in self.project.angles.iter().enumerate() {
+                            if chip(ui, &format!("{}  {}", k + 1, a.name), a.file == now) {
+                                want_angle = Some(k);
+                            }
+                        }
+                    });
+                    ui.label(RichText::new(crate::i18n::t("Touches 1 à 9 : couper vers un angle à la tête de lecture, même pendant la lecture.")).size(11.0).color(p.muted));
+                }
+            });
+        }
+        if let Some(k) = want_angle {
+            self.project.switch_angle(self.playhead, k);
+        }
+        if want_multi {
+            let n = self.project.make_multicam(&videos);
+            self.message = Some(format!("{n} {}", crate::i18n::t_mid("angles")));
+            self.sel.retain(|id| self.project.index(*id).is_some());
+        }
+        if want_sync {
+            self.start_sync(videos.clone());
+        }
+        if want_multi || want_angle.is_some() {
+            // Les clips ont changé de place : on reprend au prochain affichage
+            self.changed();
+            return;
+        }
         let picking = self.track_pick == Some(self.project.clips[i].id);
         let mut want_track = false;
         if is_visual {
@@ -3047,6 +3090,22 @@ impl Editor {
         self.message = Some(crate::i18n::t("Suivi du point…"));
     }
 
+    /// Multicam : décode le son de chaque prise (10 premières minutes) et mesure leurs décalages
+    fn start_sync(&mut self, ids: Vec<u64>) {
+        let files: Vec<std::path::PathBuf> = ids.iter().filter_map(|id| self.project.index(*id)).map(|i| resolve(&self.path, &self.project.clips[i].file)).collect();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let r = (|| {
+                let envs: Vec<Vec<f32>> = files.iter().map(|f| crate::audio::decode(f, "atrim=0:600").map(|b| crate::montage::energy_envelope(&b.data, crate::audio::RATE))).collect::<Result<_, _>>()?;
+                let lags: Vec<f32> = envs[1..].iter().map(|e| crate::montage::sync_lag(&envs[0], e, 120.0)).collect();
+                Ok(Smart::Synced(ids, lags))
+            })();
+            let _ = tx.send(r);
+        });
+        self.smart_rx = Some(rx);
+        self.message = Some(crate::i18n::t("Écoute des prises pour les caler…"));
+    }
+
     fn poll_smart(&mut self) {
         let Some(rx) = &self.smart_rx else { return };
         let Ok(r) = rx.try_recv() else { return };
@@ -3087,6 +3146,11 @@ impl Editor {
                 let c = &mut self.project.clips[i];
                 c.keys = kept;
                 self.message = Some(format!("{} {n} {}", crate::i18n::t("Point suivi sur"), crate::i18n::t_mid("images")));
+                self.changed();
+            }
+            Ok(Smart::Synced(ids, lags)) => {
+                let n = self.project.sync_clips(&ids, &lags);
+                self.message = Some(format!("{n} {}", crate::i18n::t_mid("prises calées au son")));
                 self.changed();
             }
             Ok(Smart::Vertical(path)) => {

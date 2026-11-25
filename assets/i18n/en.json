@@ -3246,5 +3246,15 @@
   "Centre X": "Center X",
   "Centre Y": "Center Y",
   "Largeur": "Width",
-  "Adoucir": "Soften"
+  "Adoucir": "Soften",
+  "Multicam": "Multicam",
+  "Caler au son": "Sync by sound",
+  "Les prises choisies se calent sur la première d'après leur son (clap, voix)": "The selected takes line up with the first one by their sound (clap, voice)",
+  "Faire un multicam": "Make a multicam",
+  "Chaque prise devient un angle ; la première reste à l'image, les autres se choisissent avec 1 à 9": "Each take becomes an angle; the first stays on screen, pick the others with 1 to 9",
+  "Touches 1 à 9 : couper vers un angle à la tête de lecture, même pendant la lecture.": "Keys 1 to 9: cut to an angle at the playhead, even during playback.",
+  "angles": "angles",
+  "Angle": "Angle",
+  "Écoute des prises pour les caler…": "Listening to the takes to sync them…",
+  "prises calées au son": "takes synced by sound"
 }

@@ -134,6 +134,59 @@ pub fn wheel_rgb(v: [f32; 3]) -> [f32; 3] {
 }
 
 /// Filtre ffmpeg des roues : ombres (lift), tons moyens (gamma), hautes lumières (gain)
+/// Un angle de caméra d'un multicam : le média, et l'instant de la timeline où il commence (média à 0 s)
+#[derive(Clone, PartialEq, Serialize, Deserialize, Debug)]
+pub struct Angle {
+    pub name: String,
+    pub file: String,
+    /// Instant de la timeline qui montre le début du média
+    pub offset: f32,
+    /// Durée du média
+    pub media: f32,
+}
+
+/// Enveloppe d'énergie d'un son stéréo (100 valeurs par seconde), pour caler des prises entre elles
+pub fn energy_envelope(stereo: &[f32], rate: u32) -> Vec<f32> {
+    let hop = (rate / 100).max(1) as usize;
+    let raw: Vec<f32> = stereo.chunks(hop * 2).map(|c| (c.iter().map(|v| v * v).sum::<f32>() / c.len().max(1) as f32).sqrt()).collect();
+    // On garde les attaques (ce qui monte), pas le niveau : deux micros différents se ressemblent alors
+    let mut out = vec![0.0; raw.len()];
+    for i in 1..raw.len() {
+        out[i] = (raw[i] - raw[i - 1]).max(0.0);
+    }
+    out
+}
+
+/// Le décalage (secondes) qui cale `b` sur `a` : un même son arrive à l'instant t dans `a` et t + décalage
+/// dans `b`. Cherché entre -`max_s` et +`max_s` ; enveloppes à 100 valeurs par seconde.
+pub fn sync_lag(a: &[f32], b: &[f32], max_s: f32) -> f32 {
+    let m = (max_s * 100.0) as i64;
+    let norm = |v: &[f32]| -> Vec<f32> {
+        let mean = v.iter().sum::<f32>() / v.len().max(1) as f32;
+        let sd = (v.iter().map(|x| (x - mean).powi(2)).sum::<f32>() / v.len().max(1) as f32).sqrt().max(1e-9);
+        v.iter().map(|x| (x - mean) / sd).collect()
+    };
+    let (a, b) = (norm(a), norm(b));
+    let corr = |lag: i64| -> f32 {
+        let mut s = 0.0;
+        let mut n = 0;
+        for (i, x) in a.iter().enumerate() {
+            let j = i as i64 + lag;
+            if j >= 0 && (j as usize) < b.len() {
+                s += x * b[j as usize];
+                n += 1;
+            }
+        }
+        // Peu de recouvrement : moins fiable
+        if n < 50 { f32::MIN } else { s / n as f32 * (n as f32).sqrt() }
+    };
+    let best = {
+        use rayon::prelude::*;
+        (-m..=m).into_par_iter().map(|l| (l, corr(l))).max_by(|x, y| x.1.total_cmp(&y.1)).map(|x| x.0).unwrap_or(0)
+    };
+    best as f32 / 100.0
+}
+
 /// Zone d'un masque d'étalonnage, en fraction de l'image du clip
 #[derive(Clone, Copy, PartialEq, Serialize, Deserialize, Debug)]
 pub struct GradeMask {
@@ -563,6 +616,9 @@ pub struct Project {
     /// Lecture avec des copies légères des vidéos (proxies), quand elles sont prêtes
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub proxies: bool,
+    /// Multicam : les angles synchronisés (touches 1 à 9 pour couper vers un angle)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub angles: Vec<Angle>,
 }
 
 /// Le proxy d'une vidéo : une copie en 540p dans le cache, propre à son contenu (chemin, taille, date).
@@ -607,7 +663,7 @@ pub const SUBTITLE: &str = "sous-titre";
 
 impl Default for Project {
     fn default() -> Self {
-        Project { version: 2, width: 1920, height: 1080, fps: 24.0, tracks: 3, clips: vec![], atracks: 3, vstate: vec![], astate: vec![], markers: vec![], mark_in: None, mark_out: None, bin: vec![], magnetic: true, chapters: vec![], proxies: false }
+        Project { version: 2, width: 1920, height: 1080, fps: 24.0, tracks: 3, clips: vec![], atracks: 3, vstate: vec![], astate: vec![], markers: vec![], mark_in: None, mark_out: None, bin: vec![], magnetic: true, chapters: vec![], proxies: false, angles: vec![] }
     }
 }
 
@@ -960,6 +1016,85 @@ impl Project {
             }
         }
         out
+    }
+
+    /// Cale les clips `ids` sur le premier d'après leur son : `lags[k]` est le décalage de `ids[k + 1]`
+    /// (voir `sync_lag`, mesuré sur les médias depuis 0 s). Les clips liés suivent. Rend le nombre de clips déplacés.
+    pub fn sync_clips(&mut self, ids: &[u64], lags: &[f32]) -> usize {
+        let Some(r) = ids.first().and_then(|id| self.index(*id)) else { return 0 };
+        let (sa, ia) = (self.clips[r].start, self.clips[r].src_in);
+        let mut n = 0;
+        for (id, lag) in ids[1..].iter().zip(lags) {
+            let Some(i) = self.index(*id) else { continue };
+            let c = &self.clips[i];
+            let want = (sa - ia + c.src_in - lag).max(0.0);
+            let d = want - c.start;
+            let link = c.link;
+            for k in 0..self.clips.len() {
+                if k == i || (link != 0 && self.clips[k].link == link) {
+                    self.clips[k].start = (self.clips[k].start + d).max(0.0);
+                }
+            }
+            n += 1;
+        }
+        n
+    }
+
+    /// Fait un multicam des clips vidéo `ids` (déjà calés) : chacun devient un angle, le premier reste à
+    /// l'image, les autres quittent la timeline avec leur son lié. Rend le nombre d'angles.
+    pub fn make_multicam(&mut self, ids: &[u64]) -> usize {
+        let idx: Vec<usize> = ids.iter().filter_map(|id| self.index(*id)).filter(|&i| self.clips[i].visual() && self.clips[i].kind == "video").collect();
+        if idx.len() < 2 {
+            return 0;
+        }
+        self.angles = idx
+            .iter()
+            .enumerate()
+            .map(|(k, &i)| {
+                let c = &self.clips[i];
+                Angle { name: format!("{} {}", crate::i18n::t("Angle"), k + 1), file: c.file.clone(), offset: c.start - c.src_in / c.speed.max(1e-3), media: c.media }
+            })
+            .collect();
+        let keep = self.clips[idx[0]].id;
+        let gone: Vec<(u64, u32)> = idx[1..].iter().map(|&i| (self.clips[i].id, self.clips[i].link)).collect();
+        self.clips.retain(|c| !gone.iter().any(|&(id, link)| c.id == id || (link != 0 && c.link == link && c.id != keep)));
+        // Le plan gardé couvre tout ce que les angles couvrent ensemble
+        if let Some(i) = self.index(keep) {
+            let a0 = self.angles[0].clone();
+            let end = self.angles.iter().map(|a| a.offset + a.media).fold(0.0f32, f32::max);
+            let c = &mut self.clips[i];
+            c.speed = 1.0;
+            c.start = a0.offset.max(0.0);
+            c.src_in = c.start - a0.offset;
+            c.src_out = if a0.media > 0.0 { a0.media.min(end - a0.offset) } else { c.src_out };
+            c.name = a0.name.clone();
+        }
+        self.angles.len()
+    }
+
+    /// Multicam : à partir de l'instant `t`, le plan montre l'angle `k` (jusqu'à la coupe suivante).
+    /// Rend false si l'angle ne couvre pas cet instant.
+    pub fn switch_angle(&mut self, t: f32, k: usize) -> bool {
+        let Some(a) = self.angles.get(k).cloned() else { return false };
+        let files: Vec<String> = self.angles.iter().map(|a| a.file.clone()).collect();
+        let Some(i) = (0..self.clips.len()).filter(|&i| {
+            let c = &self.clips[i];
+            c.visual() && files.contains(&c.file) && t >= c.start - 1e-3 && t < c.end()
+        }).max_by_key(|&i| self.clips[i].track) else { return false };
+        let j = if t <= self.clips[i].start + 0.02 { i } else { match self.split(i, t) { Some(j) => j, None => i } };
+        let c = &mut self.clips[j];
+        let src_in = c.start - a.offset;
+        let len = c.len();
+        if src_in < -0.01 || (a.media > 0.0 && src_in > a.media - 0.05) {
+            return false;
+        }
+        c.file = a.file;
+        c.name = a.name;
+        c.media = a.media;
+        c.speed = 1.0;
+        c.src_in = src_in.max(0.0);
+        c.src_out = if a.media > 0.0 { (c.src_in + len).min(a.media) } else { c.src_in + len };
+        true
     }
 
     /// Coupe le clip `i` en deux à l'instant `t` de la timeline. Renvoie l'indice de la seconde moitié.
@@ -2339,5 +2474,44 @@ mod mask_tests {
         assert!(edge > 0.3 && edge < 0.7, "{edge}");
         assert_eq!(GradeMask { invert: true, ..m }.at(0.5, 0.5), 0.0);
         assert!(m.geq_alpha().starts_with("255*clip("));
+    }
+}
+
+#[cfg(test)]
+mod multicam_tests {
+    use super::*;
+    #[test]
+    fn multicam() {
+        // Deux prises du même son, la seconde a commencé 1,5 s plus tôt
+        let mut a = vec![0.0f32; 1000];
+        for &p in &[120usize, 260, 300, 480, 700, 850] {
+            a[p] = 1.0;
+        }
+        let mut b = vec![0.0f32; 1150];
+        for (i, v) in a.iter().enumerate() {
+            b[i + 150] = *v;
+        }
+        assert!((sync_lag(&a, &b, 5.0) - 1.5).abs() < 0.011);
+        let mut p = Project::default();
+        let mut ca = Clip::test();
+        (ca.file, ca.src_out, ca.media, ca.start) = ("a.mp4".into(), 10.0, 10.0, 0.0);
+        let mut cb = Clip::test();
+        (cb.file, cb.src_out, cb.media, cb.start, cb.track) = ("b.mp4".into(), 11.0, 11.0, 4.0, 1);
+        p.clips = vec![ca, cb];
+        p.ensure_ids();
+        let ids: Vec<u64> = p.clips.iter().map(|c| c.id).collect();
+        assert_eq!(p.sync_clips(&ids, &[1.5]), 1);
+        assert!((p.clips[1].start + 1.5).abs() < 1e-4 || p.clips[1].start == 0.0);
+        // b ne peut pas commencer avant 0 : on le met à 0 (décalé) ; on recale à la main pour le test
+        p.clips[0].start = 2.0;
+        p.clips[1].start = 0.5;
+        assert_eq!(p.make_multicam(&ids), 2);
+        assert_eq!(p.clips.len(), 1);
+        assert!(p.switch_angle(5.0, 1));
+        let c = p.clips.iter().find(|c| c.file == "b.mp4").unwrap();
+        assert!((c.start - 5.0).abs() < 1e-4 && (c.src_in - 4.5).abs() < 1e-4, "{c:?}");
+        assert!(p.switch_angle(7.0, 0));
+        assert_eq!(p.clips.len(), 3);
+        assert!(!p.switch_angle(20.0, 1));
     }
 }
