@@ -3719,7 +3719,7 @@ impl App {
                     let corner = ui.max_rect().right_top() + egui::vec2(-380.0, 8.0);
                     if let Some((at, mut name)) = ed.rename.take() {
                         let mut keep = true;
-                        egui::Area::new(egui::Id::new(("lsp-rename", &rel))).order(egui::Order::Foreground).fixed_pos(corner).show(ui.ctx(), |ui| {
+                        egui::Area::new(egui::Id::unique(("lsp-rename", &rel))).order(egui::Order::Foreground).fixed_pos(corner).show(ui.ctx(), |ui| {
                             egui::Frame::popup(ui.style()).show(ui, |ui| {
                                 ui.horizontal(|ui| {
                                     ui.label(RichText::new(crate::lucide::PENCIL).color(p.muted)).on_hover_text(crate::i18n::t("renommer partout (F2)"));
@@ -3748,7 +3748,7 @@ impl App {
                     if let Some(list) = ed.refs.take() {
                         let mut keep = true;
                         let here = vault::safe(&root, &rel).ok();
-                        egui::Area::new(egui::Id::new(("lsp-refs", &rel))).order(egui::Order::Foreground).fixed_pos(corner).show(ui.ctx(), |ui| {
+                        egui::Area::new(egui::Id::unique(("lsp-refs", &rel))).order(egui::Order::Foreground).fixed_pos(corner).show(ui.ctx(), |ui| {
                             egui::Frame::popup(ui.style()).show(ui, |ui| {
                                 ui.set_width(360.0);
                                 ui.horizontal(|ui| {

@@ -405,7 +405,7 @@ impl Editor {
             return;
         }
         // ---- Dessin : les événements bruts du pointeur, pour garder chaque point même si l'image est lente
-        let resp = ui.interact(rect.expand(30.0), egui::Id::new(("story-canvas", &self.path)), egui::Sense::drag());
+        let resp = ui.interact(rect.expand(30.0), egui::Id::unique(("story-canvas", &self.path)), egui::Sense::drag());
         let to_px = |q: Pos2| ((q.x - rect.left()) / s, (q.y - rect.top()) / s);
         // Pression du stylet, si la tablette en donne
         let force = ui.input(|i| i.events.iter().rev().find_map(|e| if let egui::Event::Touch { force: Some(f), .. } = e { Some(*f) } else { None })).unwrap_or(1.0).clamp(0.1, 1.0);

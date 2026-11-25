@@ -551,10 +551,6 @@ fn hex(c: [u8; 4]) -> String {
     format!("#{:02x}{:02x}{:02x}", c[0], c[1], c[2])
 }
 
-fn esc(s: &str) -> String {
-    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
-}
-
 /// Écrit le SVG du document. `area` : la zone du monde à montrer (x, y, w, h) ; `px` : taille de sortie en pixels.
 /// `root` : le coffre (pour les images).
 pub fn to_svg(doc: &Doc, area: [f32; 4], px: [u32; 2], root: &str, with_boards: bool) -> String {

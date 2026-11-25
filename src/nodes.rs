@@ -69,6 +69,7 @@ pub const DEFS: &[Def] = &[
     Def { op: "mat_out", label: "Sortie matériau", cat: "sortie", inputs: &[("couleur", Sock::Color, [0.8, 0.5, 0.4, 1.0]), ("rugosité", Sock::Float, f(0.5)), ("métal", Sock::Float, f(0.0)), ("émission", Sock::Color, BLACK), ("transmission", Sock::Float, f(0.0)), ("indice de réfraction", Sock::Float, f(1.45)), ("vernis", Sock::Float, f(0.0)), ("bandes toon", Sock::Float, f(0.0)), ("reflets", Sock::Float, f(1.0)), ("force d'émission", Sock::Float, f(1.0)), ("occlusion", Sock::Float, f(1.0)), ("relief", Sock::Float, f(0.5)), ("force du relief", Sock::Float, f(1.0)), ("velours", Sock::Float, f(0.0)), ("sous-surface", Sock::Float, f(0.0)), ("teinte sous-surface", Sock::Color, [0.9, 0.3, 0.2, 1.0])], outputs: &[], params: &[], mat: true, comp: false },
     Def { op: "comp_out", label: "Sortie", cat: "sortie", inputs: &[("image", Sock::Color, GRAY)], outputs: &[], params: &[], mat: false, comp: true },
     // Entrées
+    Def { op: "exr", label: "EXR multicouche", cat: "entrée", inputs: &[], outputs: &[("image", Sock::Color), ("alpha", Sock::Float)], params: &[ParamDef::File("fichier"), ParamDef::Text("calque")], mat: false, comp: true },
     Def { op: "image", label: "Image", cat: "entrée", inputs: &[], outputs: &[("image", Sock::Color), ("alpha", Sock::Float)], params: &[ParamDef::File("fichier")], mat: false, comp: true },
     Def { op: "color", label: "Couleur", cat: "entrée", inputs: &[("couleur", Sock::Color, [0.9, 0.4, 0.2, 1.0])], outputs: &[("couleur", Sock::Color)], params: &[], mat: true, comp: true },
     Def { op: "param", label: "Paramètre exposé", cat: "entrée", inputs: &[("valeur", Sock::Color, [0.5, 0.5, 0.5, 1.0])], outputs: &[("couleur", Sock::Color), ("valeur", Sock::Float)], params: &[ParamDef::Choice("type", &["couleur", "valeur"])], mat: true, comp: false },
@@ -154,6 +155,10 @@ pub const DEFS: &[Def] = &[
     Def { op: "colorbalance", label: "Balance des couleurs", cat: "couleur", inputs: &[("couleur", Sock::Color, GRAY), ("ombres (lift)", Sock::Color, GRAY), ("tons moyens (gamma)", Sock::Color, GRAY), ("lumières (gain)", Sock::Color, GRAY)], outputs: &[("couleur", Sock::Color)], params: &[], mat: true, comp: true },
     Def { op: "splittone", label: "Virage partiel", cat: "couleur", inputs: &[("couleur", Sock::Color, GRAY), ("teinte des ombres", Sock::Color, [0.2, 0.4, 0.6, 1.0]), ("teinte des lumières", Sock::Color, [1.0, 0.7, 0.4, 1.0]), ("force", Sock::Float, f(0.3))], outputs: &[("couleur", Sock::Color)], params: &[], mat: true, comp: true },
     Def { op: "tonemap", label: "Rendu des tons (tone mapping)", cat: "couleur", inputs: &[("couleur", Sock::Color, GRAY), ("EV", Sock::Float, f(0.0))], outputs: &[("couleur", Sock::Color)], params: &[ParamDef::Choice("courbe", &["ACES", "filmique", "Reinhard"])], mat: true, comp: true },
+    Def { op: "lumakey", label: "Incrustation par luminance", cat: "couleur", inputs: &[("image", Sock::Color, GRAY), ("bas", Sock::Float, f(0.1)), ("haut", Sock::Float, f(0.3))], outputs: &[("image", Sock::Color), ("masque", Sock::Float)], params: &[ParamDef::Choice("garder", &["clair", "sombre"])], mat: false, comp: true },
+    Def { op: "diffkey", label: "Incrustation par différence", cat: "couleur", inputs: &[("image", Sock::Color, GRAY), ("plaque vide", Sock::Color, GRAY), ("tolérance", Sock::Float, f(0.08)), ("douceur", Sock::Float, f(0.08))], outputs: &[("image", Sock::Color), ("masque", Sock::Float)], params: &[], mat: false, comp: true },
+    Def { op: "despill", label: "Retirer le débordement", cat: "couleur", inputs: &[("image", Sock::Color, GRAY), ("force", Sock::Float, f(1.0))], outputs: &[("image", Sock::Color)], params: &[ParamDef::Choice("couleur", &["vert", "bleu"])], mat: false, comp: true },
+    Def { op: "roto", label: "Masque roto (tracé)", cat: "motif", inputs: &[("douceur", Sock::Float, f(0.01))], outputs: &[("masque", Sock::Float)], params: &[ParamDef::Text("points"), ParamDef::Choice("mode", &["intérieur", "extérieur"])], mat: false, comp: true },
     Def { op: "chromakey", label: "Incrustation (fond vert)", cat: "couleur", inputs: &[("image", Sock::Color, GRAY), ("couleur clé", Sock::Color, [0.1, 0.8, 0.2, 1.0]), ("tolérance", Sock::Float, f(0.25)), ("douceur", Sock::Float, f(0.1))], outputs: &[("image", Sock::Color), ("masque", Sock::Float)], params: &[], mat: false, comp: true },
     Def { op: "alphaover", label: "Superposer (alpha)", cat: "couleur", inputs: &[("dessous", Sock::Color, GRAY), ("dessus", Sock::Color, W), ("opacité", Sock::Float, f(1.0))], outputs: &[("image", Sock::Color)], params: &[], mat: true, comp: true },
     Def { op: "setalpha", label: "Définir l'alpha", cat: "couleur", inputs: &[("image", Sock::Color, GRAY), ("alpha", Sock::Float, f(1.0))], outputs: &[("image", Sock::Color)], params: &[], mat: false, comp: true },
@@ -1349,6 +1354,100 @@ pub fn video_frame(root: &str, rel: &str, path: &Path, t: f32) -> Result<std::pa
     Ok(out)
 }
 
+/// Points d'un tracé roto : « x,y;x,y;… », coordonnées entre 0 et 1.
+pub fn parse_points(s: &str) -> Vec<[f32; 2]> {
+    s.split(';').filter_map(|p| {
+        let mut it = p.split(',');
+        Some([it.next()?.trim().parse().ok()?, it.next()?.trim().parse().ok()?])
+    }).collect()
+}
+
+pub fn format_points(pts: &[[f32; 2]]) -> String {
+    pts.iter().map(|p| format!("{:.4},{:.4}", p[0], p[1])).collect::<Vec<_>>().join(";")
+}
+
+fn point_in_poly(pts: &[[f32; 2]], q: [f32; 2]) -> bool {
+    let mut inside = false;
+    let n = pts.len();
+    for k in 0..n {
+        let (a, b) = (pts[k], pts[(k + n - 1) % n]);
+        if (a[1] > q[1]) != (b[1] > q[1]) && q[0] < (b[0] - a[0]) * (q[1] - a[1]) / (b[1] - a[1]) + a[0] {
+            inside = !inside;
+        }
+    }
+    inside
+}
+
+fn poly_distance(pts: &[[f32; 2]], q: [f32; 2]) -> f32 {
+    let n = pts.len();
+    (0..n).map(|k| {
+        let (a, b) = (pts[k], pts[(k + 1) % n]);
+        let ab = [b[0] - a[0], b[1] - a[1]];
+        let t = (((q[0] - a[0]) * ab[0] + (q[1] - a[1]) * ab[1]) / (ab[0] * ab[0] + ab[1] * ab[1]).max(1e-12)).clamp(0.0, 1.0);
+        ((q[0] - a[0] - ab[0] * t).powi(2) + (q[1] - a[1] - ab[1] * t).powi(2)).sqrt()
+    }).fold(f32::MAX, f32::min)
+}
+
+/// Les calques (passes) d'un EXR : « diffuse », « ViewLayer.Combined »… (vide : le calque principal R G B A).
+pub fn exr_passes(path: &Path) -> Result<Vec<String>, String> {
+    let img = exr::prelude::read_all_flat_layers_from_file(path).map_err(|e| e.to_string())?;
+    let mut out: Vec<String> = vec![];
+    for layer in &img.layer_data {
+        let lname = layer.attributes.layer_name.as_ref().map(|t| t.to_string()).unwrap_or_default();
+        for ch in &layer.channel_data.list {
+            let name = ch.name.to_string();
+            let pass = name.rsplit_once('.').map(|(p, _)| p.to_string()).unwrap_or_default();
+            let full = [lname.as_str(), pass.as_str()].iter().filter(|x| !x.is_empty()).copied().collect::<Vec<_>>().join(".");
+            if !out.contains(&full) {
+                out.push(full);
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Charge une passe d'un EXR multicouche. Les canaux R G B A (ou X Y Z, ou un seul canal) donnent la couleur.
+pub fn load_exr_pass(path: &Path, pass: &str, max: u32) -> Result<Img, String> {
+    let img = exr::prelude::read_all_flat_layers_from_file(path).map_err(|e| e.to_string())?;
+    let want = pass.trim().to_lowercase();
+    for layer in &img.layer_data {
+        let lname = layer.attributes.layer_name.as_ref().map(|t| t.to_string()).unwrap_or_default();
+        let (w, h) = (layer.size.0, layer.size.1);
+        // Canaux de la passe : leur nom complet (calque.passe) correspond à ce qu'on cherche
+        let chans: Vec<(String, &exr::prelude::FlatSamples)> = layer.channel_data.list.iter().filter_map(|ch| {
+            let name = ch.name.to_string();
+            let (p, c) = name.rsplit_once('.').map(|(p, c)| (p.to_string(), c.to_string())).unwrap_or((String::new(), name.clone()));
+            let full = [lname.as_str(), p.as_str()].iter().filter(|x| !x.is_empty()).copied().collect::<Vec<_>>().join(".").to_lowercase();
+            let ok = full == want || (!want.is_empty() && (p.to_lowercase() == want || full.ends_with(&format!(".{want}"))));
+            ok.then_some((c.to_uppercase(), &ch.sample_data))
+        }).collect();
+        if chans.is_empty() {
+            continue;
+        }
+        let pick = |names: &[&str]| chans.iter().find(|(c, _)| names.contains(&c.as_str())).map(|x| x.1);
+        let single = if chans.len() == 1 { Some(chans[0].1) } else { None };
+        let r = pick(&["R", "X", "U"]).or(single);
+        let g = pick(&["G", "Y", "V"]).or(single).or(r);
+        let b = pick(&["B", "Z", "W"]).or(single).or(r);
+        let a = pick(&["A"]);
+        let px: Vec<V> = (0..w * h).map(|i| {
+            let v = |s: Option<&exr::prelude::FlatSamples>, d: f32| s.map(|s| s.value_by_flat_index(i).to_f32()).unwrap_or(d);
+            [v(r, 0.0), v(g, 0.0), v(b, 0.0), v(a, 1.0)]
+        }).collect();
+        let full = Img { w, h, px };
+        // Trop grande : réduite par échantillonnage
+        if w as u32 > max || h as u32 > max {
+            let k = max as f32 / w.max(h) as f32;
+            let (nw, nh) = (((w as f32 * k) as usize).max(1), ((h as f32 * k) as usize).max(1));
+            let px = (0..nw * nh).map(|i| full.sample(((i % nw) as f32 + 0.5) / nw as f32, ((i / nw) as f32 + 0.5) / nh as f32)).collect();
+            return Ok(Img { w: nw, h: nh, px });
+        }
+        return Ok(full);
+    }
+    let list = exr_passes(path).unwrap_or_default();
+    Err(format!("calque « {pass} » introuvable ; calques : {}", list.iter().map(|x| if x.is_empty() { "(principal)" } else { x.as_str() }).collect::<Vec<_>>().join(", ")))
+}
+
 pub fn load_img(path: &Path, max: u32) -> Option<Img> {
     let i = image::open(path).ok()?;
     let i = if i.width() > max || i.height() > max { i.thumbnail(max, max) } else { i };
@@ -1412,7 +1511,15 @@ impl Program {
                 })
                 .collect();
             let shader = if n.op == "shader" { Some(Shader::compile(pstr(&n.params, "code")).map_err(|e| (id, e))?) } else { None };
-            let image = if n.op == "image" || n.op == "texture" || n.op == "video" {
+            let image = if n.op == "exr" {
+                let rel = pstr(&n.params, "fichier");
+                if rel.is_empty() {
+                    None
+                } else {
+                    let p = crate::vault::safe(root, rel).map_err(|e| (id, e))?;
+                    Some(std::sync::Arc::new(load_exr_pass(&p, pstr(&n.params, "calque"), max_img).map_err(|e| (id, e))?))
+                }
+            } else if n.op == "image" || n.op == "texture" || n.op == "video" {
                 let rel = pstr(&n.params, "fichier");
                 if rel.is_empty() {
                     None
@@ -1668,7 +1775,7 @@ impl Program {
                         [a[0] + (b[0] - a[0]) * k, a[1] + (b[1] - a[1]) * k, a[2] + (b[2] - a[2]) * k, a[3]]
                     }).collect()]
                 }
-                "image" => match over.or(s.image.as_deref()) {
+                "image" | "exr" => match over.or(s.image.as_deref()) {
                     Some(img) => {
                         let px: Vec<V> = if img.w == w && img.h == h { img.px.clone() } else { (0..n).into_par_iter().map(|i| img.sample(((i % w) as f32 + 0.5) / w as f32, ((i / w) as f32 + 0.5) / h as f32)).collect() };
                         let alpha: Vec<V> = px.iter().map(|p| [p[3]; 4]).collect();
@@ -1959,6 +2066,51 @@ fn pixel(s: &Step, i: &[V], c: &Ctx) -> [V; 4] {
                 }
             };
             [[f(i[0][0]), f(i[0][1]), f(i[0][2]), i[0][3]], z, z, z]
+        }
+        "lumakey" => {
+            let l = 0.2126 * i[0][0] + 0.7152 * i[0][1] + 0.0722 * i[0][2];
+            let (lo, hi) = (i[1][0].min(i[2][0]), i[1][0].max(i[2][0]).max(i[1][0].min(i[2][0]) + 1e-4));
+            let mut k = smoothstep(lo, hi, l);
+            if pstr(&s.params, "garder") == "sombre" {
+                k = 1.0 - k;
+            }
+            [[i[0][0], i[0][1], i[0][2], i[0][3] * k], one(k), z, z]
+        }
+        "diffkey" => {
+            let d = ((i[0][0] - i[1][0]).powi(2) + (i[0][1] - i[1][1]).powi(2) + (i[0][2] - i[1][2]).powi(2)).sqrt();
+            let k = smoothstep(i[2][0], i[2][0] + i[3][0].max(1e-4), d);
+            [[i[0][0], i[0][1], i[0][2], i[0][3] * k], one(k), z, z]
+        }
+        "despill" => {
+            // Le canal en trop ne dépasse plus la moyenne des deux autres
+            let mut o = i[0];
+            let (k, a, b) = if pstr(&s.params, "couleur") == "bleu" { (2, 0, 1) } else { (1, 0, 2) };
+            let limit = (o[a] + o[b]) * 0.5;
+            if o[k] > limit {
+                o[k] -= (o[k] - limit) * i[1][0].clamp(0.0, 1.0);
+            }
+            [o, z, z, z]
+        }
+        "roto" => {
+            let pts = parse_points(pstr(&s.params, "points"));
+            let inside = point_in_poly(&pts, c.uv);
+            let soft = i[0][0].max(0.0);
+            let d = if soft > 0.0 { poly_distance(&pts, c.uv) } else { 0.0 };
+            let mut k = if pts.len() < 3 {
+                0.0
+            } else if soft > 0.0 {
+                // Bord adouci de part et d'autre du tracé
+                let sd = if inside { d } else { -d };
+                smoothstep(-soft, soft, sd)
+            } else if inside {
+                1.0
+            } else {
+                0.0
+            };
+            if pstr(&s.params, "mode") == "extérieur" {
+                k = 1.0 - k;
+            }
+            [one(k), z, z, z]
         }
         "chromakey" => {
             // Distance dans le plan des couleurs (sans la luminosité), puis retrait du reflet vert
@@ -2374,6 +2526,8 @@ pub struct Editor {
     pv_key: u64,
     /// Node dont la sortie remplace le matériau dans l'aperçu (« prévisualiser la node »)
     solo: Option<u32>,
+    /// Point du tracé roto qu'on déplace dans l'aperçu
+    roto_drag: Option<usize>,
     /// Fichier à ouvrir dans un autre onglet (le maître d'un calque de l'atelier)
     pub open_request: Option<PathBuf>,
     /// Miniatures des préréglages de matériaux (bande du bas)
@@ -2463,7 +2617,7 @@ impl Editor {
             masters_seen: 0,
             frame_sel: false,
             frame_rename: None,
-            frame_sel_request: false, pv_yaw: 0.4, pv_pitch: 0.25, pv_dist: 2.0, pv_env: 0, pv_shape: None, boxy: None, pv_model: None, pv_key: 0, solo: None,
+            frame_sel_request: false, pv_yaw: 0.4, pv_pitch: 0.25, pv_dist: 2.0, pv_env: 0, pv_shape: None, boxy: None, pv_model: None, pv_key: 0, solo: None, roto_drag: None,
         };
         // Un graphe dont des nodes se chevauchent (fichier écrit à la main, ancienne version) est rangé à l'ouverture
         if ed.overlaps() {
@@ -4432,6 +4586,85 @@ impl Editor {
         ctx.request_repaint_after(std::time::Duration::from_millis(500));
     }
 
+    /// Tracé roto du node choisi, sur l'aperçu : clic pour ajouter un point, glisser pour le déplacer,
+    /// clic droit pour le retirer.
+    fn roto_ui(&mut self, ui: &mut egui::Ui, r: Rect) {
+        if self.graph.kind != GraphKind::Compositor || self.selected.len() != 1 {
+            return;
+        }
+        let id = *self.selected.iter().next().unwrap();
+        let Some(ni) = self.graph.nodes.iter().position(|n| n.id == id && n.op == "roto") else { return };
+        let mut pts = parse_points(pstr(&self.graph.nodes[ni].params, "points"));
+        let to_screen = |p: [f32; 2]| pos2(r.left() + p[0] * r.width(), r.top() + p[1] * r.height());
+        let to_uv = |q: Pos2| [((q.x - r.left()) / r.width()).clamp(0.0, 1.0), ((q.y - r.top()) / r.height()).clamp(0.0, 1.0)];
+        let resp = ui.interact(r, egui::Id::unique(("roto", id)), egui::Sense::click_and_drag());
+        let near = |q: Pos2, pts: &[[f32; 2]]| pts.iter().position(|p| (to_screen(*p) - q).length() < 8.0);
+        let mut moved = false;
+        if resp.drag_started() {
+            self.roto_drag = resp.interact_pointer_pos().and_then(|q| near(q, &pts));
+        }
+        if resp.dragged() {
+            if let (Some(k), Some(q)) = (self.roto_drag, resp.interact_pointer_pos()) {
+                if k < pts.len() {
+                    pts[k] = to_uv(q);
+                    moved = true;
+                }
+            }
+        }
+        if resp.drag_stopped() {
+            self.roto_drag = None;
+        }
+        if resp.clicked() {
+            if let Some(q) = resp.interact_pointer_pos() {
+                if near(q, &pts).is_none() {
+                    // Le nouveau point s'insère dans le côté le plus proche (à la fin s'il y en a moins de trois)
+                    let at = if pts.len() < 3 {
+                        pts.len()
+                    } else {
+                        let u = to_uv(q);
+                        let n = pts.len();
+                        (0..n).min_by(|&a, &b| {
+                            let d = |k: usize| poly_distance(&[pts[k], pts[(k + 1) % n]], u);
+                            d(a).total_cmp(&d(b))
+                        }).map(|k| k + 1).unwrap_or(n)
+                    };
+                    pts.insert(at, to_uv(q));
+                    moved = true;
+                }
+            }
+        }
+        if resp.secondary_clicked() {
+            if let Some(k) = resp.interact_pointer_pos().and_then(|q| near(q, &pts)) {
+                pts.remove(k);
+                moved = true;
+            }
+        }
+        // Le tracé, ses points
+        let col = Color32::from_rgb(255, 200, 60);
+        let sp: Vec<Pos2> = pts.iter().map(|p| to_screen(*p)).collect();
+        if sp.len() >= 2 {
+            let mut line = sp.clone();
+            if sp.len() >= 3 {
+                line.push(sp[0]);
+            }
+            ui.painter().add(egui::Shape::line(line, Stroke::new(1.5, col)));
+        }
+        for q in &sp {
+            ui.painter().circle_filled(*q, 4.0, col);
+            ui.painter().circle_stroke(*q, 4.0, Stroke::new(1.0, Color32::BLACK));
+        }
+        if pts.is_empty() {
+            ui.painter().text(r.center(), egui::Align2::CENTER_CENTER, crate::i18n::t("cliquer pour poser les points du tracé"), egui::FontId::proportional(12.0), col);
+        }
+        if resp.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
+        }
+        if moved {
+            self.graph.nodes[ni].params.insert("points".into(), Param::S(format_points(&pts)));
+            self.changed();
+        }
+    }
+
     fn preview_ui(&mut self, ui: &mut egui::Ui, rect: Rect, ctx: &egui::Context) {
         let p = theme::pal();
         ui.painter().rect_filled(rect, 0.0, Color32::from_gray(30));
@@ -4525,6 +4758,7 @@ impl Editor {
                 ui.painter().rect_filled(r, 0.0, Color32::from_gray(60));
             }
             ui.painter().image(t.id(), r, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+            self.roto_ui(ui, r);
         }
         if self.preview_rx.is_some() {
             ui.painter().text(rect.left_top() + vec2(8.0, 8.0), egui::Align2::LEFT_TOP, "calcul…", egui::FontId::monospace(11.0), p.muted);
@@ -4638,6 +4872,34 @@ fn sock_color(s: Sock) -> Color32 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn exr_multicouche_et_roto() {
+        use exr::prelude::*;
+        let dir = std::env::temp_dir().join(format!("aryadne-exr-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("passes.exr");
+        let (w, h) = (8usize, 4usize);
+        let ch = |name: &str, v: f32| AnyChannel::new(name, FlatSamples::F32(vec![v; w * h]));
+        let chans = AnyChannels::sort(vec![ch("Diffuse.R", 0.8), ch("Diffuse.G", 0.2), ch("Diffuse.B", 0.1), ch("Depth.Z", 5.0), ch("R", 0.5), ch("G", 0.5), ch("B", 0.5), ch("A", 1.0)].into());
+        let layer = Layer::new((w, h), LayerAttributes::named("ViewLayer"), Encoding::FAST_LOSSLESS, chans);
+        Image::from_layer(layer).write().to_file(&f).unwrap();
+        let passes = exr_passes(&f).unwrap();
+        assert!(passes.contains(&"ViewLayer.Diffuse".to_string()), "{passes:?}");
+        let d = load_exr_pass(&f, "diffuse", 1024).unwrap();
+        assert_eq!((d.w, d.h), (8, 4));
+        assert!((d.px[0][0] - 0.8).abs() < 1e-5 && (d.px[0][2] - 0.1).abs() < 1e-5);
+        // Un canal seul (profondeur) remplit les trois couleurs
+        let z = load_exr_pass(&f, "Depth", 1024).unwrap();
+        assert!((z.px[3][1] - 5.0).abs() < 1e-5);
+        assert!(load_exr_pass(&f, "rien", 1024).err().unwrap().contains("Diffuse"));
+        // Tracé roto : un carré au milieu
+        let pts = parse_points("0.25,0.25;0.75,0.25;0.75,0.75;0.25,0.75");
+        assert_eq!(parse_points(&format_points(&pts)), pts);
+        assert!(point_in_poly(&pts, [0.5, 0.5]) && !point_in_poly(&pts, [0.1, 0.5]));
+        assert!((poly_distance(&pts, [0.5, 0.5]) - 0.25).abs() < 1e-5);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     use super::*;
 
     #[test]

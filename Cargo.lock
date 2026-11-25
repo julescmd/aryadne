@@ -283,6 +283,7 @@ dependencies = [
  "eframe",
  "egui_extras",
  "egui_tiles",
+ "exr",
  "flate2",
  "gltf",
  "hmac",

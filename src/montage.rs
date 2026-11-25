@@ -1252,6 +1252,7 @@ pub const PRESETS: [(&str, &str, &str); 7] = [
 ];
 
 /// Exporte le montage en MP4 (H.264 + AAC).
+#[cfg(test)]
 pub fn export(p: &Project, project: &Path, out: &Path) -> Result<(), String> {
     export_as(p, project, out, 0)
 }

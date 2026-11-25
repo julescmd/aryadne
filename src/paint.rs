@@ -698,6 +698,7 @@ impl Doc {
     }
 
     /// `g` est-il `anc` ou l'un de ses sous-groupes ?
+    #[cfg(test)]
     pub fn within(&self, g: u32, anc: u32) -> bool {
         anc == 0 || self.chain(g).contains(&anc)
     }

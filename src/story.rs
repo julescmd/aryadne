@@ -6,8 +6,6 @@ use resvg::tiny_skia::{self, Pixmap};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-pub const EXT: &str = "arystory";
-
 pub fn is_story(rel: &str) -> bool {
     rel.to_lowercase().ends_with(".arystory")
 }
