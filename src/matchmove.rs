@@ -921,8 +921,9 @@ fn solve_focal(tracks: &[Track], frames: usize, w: usize, h: usize, focal: f64) 
 
 /// Retrouve la caméra et les points de la scène à partir des pistes. `fov` : champ horizontal en
 /// degrés s'il est connu ; sinon plusieurs focales sont essayées et la plus cohérente est gardée.
-/// La première image résolue devient le repère du monde, et la scène est mise à l'échelle pour que
-/// les points soient à cinq unités de la caméra en médiane.
+/// La première image résolue donne l'orientation du monde (elle regarde droit devant), la scène est
+/// mise à l'échelle pour que les points soient à cinq unités de cette caméra en médiane, et son
+/// origine est au milieu des points.
 pub fn solve(tracks: &[Track], frames: usize, w: usize, h: usize, fov: Option<f32>) -> Result<Solution, String> {
     if frames < 2 || w < 2 || h < 2 {
         return Err(crate::i18n::t("Pas assez de points suivis ou pas assez de déplacement de la caméra pour retrouver son mouvement."));
@@ -973,6 +974,20 @@ pub fn solve(tracks: &[Track], frames: usize, w: usize, h: usize, fov: Option<f3
     }
     for x in sol.points.iter_mut().flatten() {
         *x = mul(mv(&p0.r, sub(*x, c0)), k);
+    }
+    // L'origine de la scène au milieu des points (leur médiane) : ce qu'on y pose est devant la caméra, pas sur elle
+    let mut centre = [0.0; 3];
+    for (i, c) in centre.iter_mut().enumerate() {
+        let mut v: Vec<f64> = sol.points.iter().flatten().map(|x| x[i]).collect();
+        v.sort_by(f64::total_cmp);
+        *c = v.get(v.len() / 2).copied().unwrap_or(0.0);
+    }
+    for x in sol.points.iter_mut().flatten() {
+        *x = sub(*x, centre);
+    }
+    for p in sol.poses.iter_mut().flatten() {
+        let c = sub(p.centre(), centre);
+        p.t = mul(mv(&p.r, c), -1.0);
     }
     Ok(sol)
 }
@@ -1269,7 +1284,8 @@ mod tests {
         let npts = sol.points.iter().flatten().count();
         assert!(npts * 10 > tracks.len() * 7, "{npts} points pour {} pistes, erreur {}", tracks.len(), sol.error);
         // Même trajectoire que la vraie, à l'échelle près (les deux partent de l'origine)
-        let est: Vec<V> = sol.poses.iter().map(|p| p.unwrap().centre()).collect();
+        let c0 = sol.poses[0].unwrap().centre();
+        let est: Vec<V> = sol.poses.iter().map(|p| sub(p.unwrap().centre(), c0)).collect();
         let tru: Vec<V> = truth.iter().map(|p| p.centre()).collect();
         let k = len(tru[47]) / len(est[47]);
         let worst = (0..48).map(|f| len(sub(mul(est[f], k), tru[f]))).fold(0.0f64, f64::max);
@@ -1278,9 +1294,13 @@ mod tests {
         let dr = mm(&sol.poses[47].unwrap().r, &tr(&truth[47].r));
         assert!(dr[0][0] > 0.9995 && dr[1][1] > 0.9995, "{dr:?}");
         // Échelle : les points sont à cinq unités en médiane
-        let mut d: Vec<f64> = sol.points.iter().flatten().map(|x| len(*x)).collect();
+        let mut d: Vec<f64> = sol.points.iter().flatten().map(|x| len(sub(*x, c0))).collect();
         d.sort_by(f64::total_cmp);
         assert!((d[d.len() / 2] - 5.0).abs() < 1e-6);
+        // L'origine est au milieu des points, la caméra de départ en recul et sans rotation
+        assert!(len(c0) > 3.0 && c0[2] < -3.0, "{c0:?}");
+        let r0 = sol.poses[0].unwrap().r;
+        assert!((0..3).all(|i| (r0[i][i] - 1.0).abs() < 1e-9));
         // Pas assez de données : une erreur, pas de panique
         assert!(solve(&tracks[..5], 48, w, h, Some(fov)).is_err());
         assert!(solve(&[], 48, w, h, None).is_err());
@@ -1329,7 +1349,9 @@ mod tests {
         assert_eq!((b.frame_at(0.0), b.frame_at(29.0), b.frame_at(30.0), b.frame_at(-1.0)), (Some(0), Some(29), None, None));
         // La caméra avance vers +x (travelling à droite) et les repères sont devant elle (z négatif)
         assert!(o.keys[29].pos[0] > o.keys[0].pos[0] + 0.1);
-        assert!(sc.objects.iter().filter(|o| o.name.starts_with("repère ") || o.name.starts_with("repère") && !o.parent.is_empty()).all(|o| o.pos[2] < 0.0));
+        let cam_z = o.keys[0].pos[2];
+        assert!(cam_z > 3.0, "la caméra est en recul devant les repères : {cam_z}");
+        assert!(sc.objects.iter().filter(|o| o.name.starts_with("repère") && !o.parent.is_empty()).all(|o| o.pos[2] < cam_z));
         assert!((sc.frame_aspect() - 16.0 / 9.0).abs() < 1e-3);
         // Les angles ne sautent pas d'une image à l'autre
         assert!(o.keys.windows(2).all(|k| (0..3).all(|i| (k[1].rot[i] - k[0].rot[i]).abs() < 5.0)));
@@ -1440,7 +1462,8 @@ mod tests {
         let sol = solve(&tracks, n, w, h, Some(fov)).unwrap();
         assert!(sol.poses.iter().all(|p| p.is_some()) && sol.error < 1.0, "erreur {}", sol.error);
         // La trajectoire retrouvée est la vraie, à l'échelle près
-        let est: Vec<V> = sol.poses.iter().map(|p| p.unwrap().centre()).collect();
+        let c0 = sol.poses[0].unwrap().centre();
+        let est: Vec<V> = sol.poses.iter().map(|p| sub(p.unwrap().centre(), c0)).collect();
         let tru: Vec<V> = poses.iter().map(|p| p.centre()).collect();
         let k = len(tru[n - 1]) / len(est[n - 1]);
         let worst = (0..n).map(|f| len(sub(mul(est[f], k), tru[f]))).fold(0.0f64, f64::max);

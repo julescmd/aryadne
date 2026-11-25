@@ -7614,7 +7614,7 @@ impl Viewer {
             let mut strip_hits: Vec<(usize, egui::Rect)> = vec![];
             let rows = scene.strips.iter().map(|s| s.row as usize + 1).max().unwrap_or(0);
             if rows > 0 {
-                painter.text(egui::pos2(r.left() - 8.0, y + (rows as f32 - 1.0) * 10.0), egui::Align2::RIGHT_CENTER, crate::i18n::t("montage"), egui::FontId::proportional(11.0), p.muted);
+                painter.text(egui::pos2(r.left() - 8.0, y + (rows as f32 - 1.0) * 10.0), egui::Align2::RIGHT_CENTER, crate::i18n::t("bandes"), egui::FontId::proportional(11.0), p.muted);
                 for (i, s) in scene.strips.iter().enumerate() {
                     let Some(act) = scene.actions.iter().find(|x| x.name == s.action) else { continue };
                     let yy = y + (rows - 1 - s.row as usize) as f32 * 20.0;

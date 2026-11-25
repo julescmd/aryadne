@@ -2778,6 +2778,7 @@
   "Os": "Bone",
   "Pinceaux qui modèlent la surface : dessiner, argile, gonfler, lisser, saisir, aplatir, pincer": "Brushes that shape the surface: draw, clay, inflate, smooth, grab, flatten, pinch",
   "quitter la sculpture": "leave sculpting",
+  "bandes": "strips",
   "rig bipède": "biped rig",
   "poser les repères": "place the markers",
   "Choisis d'abord le personnage : des repères (bassin, épaule, coude, genou…) sont posés à leur place probable, du côté gauche. Déplace-les sur les articulations, puis génère le squelette": "Select the character first: markers (pelvis, shoulder, elbow, knee…) are placed where they probably belong, on the left side. Move them onto the joints, then generate the skeleton",
