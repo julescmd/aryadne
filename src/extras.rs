@@ -99,6 +99,7 @@ pub enum Cmd {
     NewBoard,
     NewVector,
     NewStory,
+    NewProduction,
 }
 
 impl App {
@@ -126,6 +127,7 @@ impl App {
             ("nouveau matériau à calques (atelier)", "", Cmd::NewLayered),
             ("nouveau dessin vectoriel", "", Cmd::NewVector),
             ("nouveau storyboard", "", Cmd::NewStory),
+            ("nouveau suivi de production", "", Cmd::NewProduction),
             ("nouveau matériau (nodes)", "", Cmd::NewMaterial),
             ("nouveau compositing (nodes)", "", Cmd::NewCompositor),
             ("importer des fichiers…", "", Cmd::Import),
@@ -286,6 +288,14 @@ impl App {
             Cmd::NewLayered => self.new_untitled(crate::formats::ext("mat"), |p| nodes::Graph::new_layered().save(p)),
             Cmd::NewCompositor => self.new_untitled(crate::formats::ext("comp"), |p| nodes::Graph::new_compositor().save(p)),
             Cmd::NewVector => self.new_untitled(crate::formats::ext("vector"), |p| crate::vector::Doc::starter().save(p)),
+            Cmd::NewProduction => {
+                let root = self.root();
+                let r = production_starter(&root);
+                if let Some(rel) = self.report(r) {
+                    self.refresh();
+                    self.open(rel);
+                }
+            }
             Cmd::NewStory => self.new_untitled(crate::formats::ext("story"), |p| crate::story::Story::starter().save(p)),
             Cmd::NewBoard => {
                 self.new_board("Moodboard");
@@ -2057,4 +2067,37 @@ mod palette_tests {
         assert!(fuzzy("scene", "nouvelle scene 3d").unwrap() > fuzzy("scene", "sauvegarder le coffre maintenant").unwrap_or(-99));
         assert!(fuzzy("ns", "nouvelle scene").unwrap() > fuzzy("ns", "transfert").unwrap_or(-99));
     }
+}
+
+/// Statuts d'un plan ou d'un élément, dans l'ordre du travail
+pub const STATUTS: [&str; 5] = ["à faire", "en cours", "à valider", "retouches", "validé"];
+
+/// Un dossier de suivi de production : un tableau kanban des plans, un tableau des éléments, et quelques fiches d'exemple.
+/// Renvoie le chemin de la note de suivi.
+pub fn production_starter(root: &str) -> Result<String, String> {
+    let mut dir = "Production".to_string();
+    let mut n = 2;
+    while std::path::Path::new(root).join(&dir).exists() {
+        dir = format!("Production {n}");
+        n += 1;
+    }
+    let order = STATUTS.join(", ");
+    let suivi = format!(
+        "# Suivi de production\n\nGlisse une carte d'une colonne à l'autre : son statut change dans sa fiche.\n\n## Plans\n\n```base\nfrom: {dir}/Plans\nview: kanban\ngroup: statut\norder: {order}\ncolumns: nom, étape, assigné, échéance, version\nsort: nom\n```\n\n## Éléments\n\n```base\nfrom: {dir}/Éléments\nview: kanban\ngroup: statut\norder: {order}\ncolumns: nom, type, assigné\n```\n\n## Tout le travail\n\n```base\nfrom: {dir}/Plans, {dir}/Éléments\ncolumns: nom, statut, étape, assigné, échéance\nsort: échéance\n```\n"
+    );
+    let w = |rel: String, text: String| {
+        if let Some(parent) = std::path::Path::new(root).join(&rel).parent() {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        crate::vault::write(root, &rel, &text)
+    };
+    w(format!("{dir}/Suivi.md"), suivi)?;
+    let shots = [("SH010", "à faire", "layout", "Alex", "Plan large du village au lever du soleil."), ("SH020", "en cours", "animation", "Alex", "Léa traverse la place."), ("SH030", "à valider", "rendu", "Sam", "Gros plan, réaction."), ("SH040", "validé", "compositing", "Alex", "Raccord dans l'axe.")];
+    for (k, (name, st, step, who, about)) in shots.iter().enumerate() {
+        w(format!("{dir}/Plans/{name}.md"), format!("---\ntype: plan\nstatut: {st}\nétape: {step}\nassigné: {who}\néchéance: 2026-12-{:02}\nversion: v00{}\n---\n# {name}\n\n{about}\n\n## Versions\n- v001 : premier jet\n\n## Retours\n- [ ] \n", 5 + k * 3, k + 1))?;
+    }
+    for (name, st, kind, who) in [("Léa", "en cours", "personnage", "Alex"), ("Village", "à faire", "décor", "Sam"), ("Lanterne", "validé", "accessoire", "Alex")] {
+        w(format!("{dir}/Éléments/{name}.md"), format!("---\ntype: {kind}\nstatut: {st}\nassigné: {who}\n---\n# {name}\n\n- [ ] modélisation\n- [ ] textures\n- [ ] rig\n"))?;
+    }
+    Ok(format!("{dir}/Suivi.md"))
 }

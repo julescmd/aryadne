@@ -36,6 +36,8 @@ pub enum Out {
     SetProp { key: String, vals: Option<Vec<String>>, list: bool },
     /// Renommer (Some) ou retirer (None) une propriété dans toutes les notes du coffre
     RenameProp { from: String, to: Option<String> },
+    /// Changer une propriété d'une autre note (kanban d'une base)
+    SetPropOf { rel: String, key: String, value: String },
 }
 
 /// Affiche la note et retourne le nom de la note cliquée, s'il y en a une (lecture seule)
@@ -687,6 +689,10 @@ fn base_block(ui: &mut egui::Ui, src: &str, ctx: &Ctx, out: &mut Option<Out>) {
     let all = crate::bases::rows(&crate::nodes::vault_root(), &rels);
     let groups = crate::bases::run(&q, &all);
     let total: usize = groups.iter().map(|g| g.1.len()).sum();
+    if matches!(q.view.as_str(), "kanban" | "tableau") {
+        kanban(ui, &q, groups, out);
+        return;
+    }
     egui::Frame::new().fill(p.code_bg.gamma_multiply(0.5)).stroke(egui::Stroke::new(1.0, p.line)).corner_radius(6).inner_margin(10.0).show(ui, |ui| {
         ui.set_width(ui.available_width());
         ui.label(RichText::new(format!("{}  {} {}", crate::lucide::TABLE, total, crate::i18n::t_mid("notes"))).size(11.0).color(p.muted));
@@ -754,6 +760,67 @@ fn base_block(ui: &mut egui::Ui, src: &str, ctx: &Ctx, out: &mut Option<Out>) {
         if total == 0 {
             ui.label(RichText::new(crate::i18n::t("Aucune note ne répond à ces conditions.")).color(p.muted));
         }
+    });
+}
+
+/// Vue kanban d'une base : une colonne par valeur de `group` (« statut » par défaut) ;
+/// glisser une carte dans une autre colonne change cette propriété dans la note.
+fn kanban(ui: &mut egui::Ui, q: &crate::bases::Query, groups: Vec<(String, Vec<crate::bases::Row>)>, out: &mut Option<Out>) {
+    let p = theme::pal();
+    let key = q.group.clone().unwrap_or_else(|| "statut".into());
+    let groups = if q.group.is_none() {
+        // Sans « group » : on regroupe par statut
+        let mut q2 = q.clone();
+        q2.group = Some(key.clone());
+        let all: Vec<crate::bases::Row> = groups.into_iter().flat_map(|g| g.1).collect();
+        crate::bases::run(&q2, &all)
+    } else {
+        groups
+    };
+    let col_w = 210.0;
+    egui::ScrollArea::horizontal().id_salt(("kanban", q.from.join(","), key.clone())).show(ui, |ui| {
+        ui.horizontal_top(|ui| {
+            for (g, rows) in &groups {
+                let frame = egui::Frame::new().fill(p.code_bg.gamma_multiply(0.5)).stroke(egui::Stroke::new(1.0, p.line)).corner_radius(6).inner_margin(8.0);
+                let (_, dropped) = ui.dnd_drop_zone::<String, ()>(frame, |ui| ui.vertical(|ui| {
+                    ui.set_width(col_w);
+                    ui.set_min_height(120.0);
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(if g.is_empty() { crate::i18n::t("(sans valeur)") } else { g.clone() }).strong());
+                        ui.label(RichText::new(rows.len().to_string()).size(11.0).color(p.muted));
+                    });
+                    ui.add_space(4.0);
+                    for r in rows {
+                        let id = egui::Id::unique(("kanban-card", &r.rel));
+                        ui.dnd_drag_source(id, r.rel.clone(), |ui| {
+                            egui::Frame::new().fill(p.panel).stroke(egui::Stroke::new(1.0, p.line)).corner_radius(5).inner_margin(7.0).show(ui, |ui| ui.vertical(|ui| {
+                                ui.set_width(col_w - 16.0);
+                                // Le texte ne se sélectionne pas : glisser déplace la carte
+                                ui.style_mut().interaction.selectable_labels = false;
+                                let l = ui.add(egui::Label::new(RichText::new(r.name()).color(p.link)).sense(egui::Sense::click())).on_hover_cursor(egui::CursorIcon::PointingHand);
+                                if l.clicked() {
+                                    *out = Some(Out::Open(r.rel.trim_end_matches(".md").to_string()));
+                                }
+                                for c in q.columns.iter().filter(|c| !matches!(c.to_lowercase().as_str(), "file" | "fichier" | "nom" | "name") && !c.eq_ignore_ascii_case(&key)) {
+                                    let v = r.get(c);
+                                    if !v.is_empty() {
+                                        ui.label(RichText::new(format!("{c} : {v}")).size(11.0).color(p.muted));
+                                    }
+                                }
+                            }));
+                        });
+                        ui.add_space(4.0);
+                    }
+                }).inner);
+                if let Some(rel) = dropped {
+                    if let Some(r) = rows.iter().find(|r| r.rel == *rel) {
+                        let _ = r;
+                    } else {
+                        *out = Some(Out::SetPropOf { rel: (*rel).clone(), key: key.clone(), value: g.clone() });
+                    }
+                }
+            }
+        });
     });
 }
 

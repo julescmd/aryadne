@@ -103,6 +103,8 @@ pub struct Query {
     pub group: Option<String>,
     pub view: String,
     pub limit: usize,
+    /// Ordre des groupes (colonnes du kanban), même vides
+    pub order: Vec<String>,
 }
 
 pub fn parse_query(src: &str) -> Query {
@@ -129,6 +131,7 @@ pub fn parse_query(src: &str) -> Query {
             }
             "group" | "grouper" => q.group = Some(v.to_string()).filter(|s| !s.is_empty()),
             "view" | "vue" => q.view = v.to_lowercase(),
+            "order" | "ordre" => q.order = v.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect(),
             "limit" | "limite" => q.limit = v.parse().unwrap_or(500),
             _ => {}
         }
@@ -195,6 +198,17 @@ pub fn run(q: &Query, all: &[Row]) -> Vec<(String, Vec<Row>)> {
                 }
             }
             groups.sort_by(|a, b| cmp_vals(&a.0, &b.0));
+            // Ordre imposé : ces groupes d'abord, dans cet ordre (même vides), puis les autres
+            if !q.order.is_empty() {
+                let mut out: Vec<(String, Vec<Row>)> = q.order.iter().map(|o| (o.clone(), vec![])).collect();
+                for (k, rows) in groups {
+                    match out.iter_mut().find(|(n, _)| n.eq_ignore_ascii_case(&k)) {
+                        Some((_, r)) => r.extend(rows),
+                        None => out.push((k, rows)),
+                    }
+                }
+                return out;
+            }
             groups
         }
     }

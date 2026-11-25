@@ -263,6 +263,8 @@ enum Action {
     OpenLink(String),
     /// Renommer ou retirer une propriété dans toutes les notes
     RenameProp(String, Option<String>),
+    /// Changer une propriété d'une note (sa valeur) : glisser une carte de kanban
+    SetPropOf(String, String, String),
     NewFile(String),
     NewDir(String),
     Rename(String),
@@ -2302,6 +2304,7 @@ impl App {
                     self.dialog = Some(Dialog::NewDir { dir });
                 }
                 Action::RenameProp(from, to) => self.rename_prop_everywhere(&from, to.as_deref()),
+                Action::SetPropOf(rel, key, value) => self.set_prop_of(&rel, &key, &value),
                 Action::Rename(from) => {
                     self.dialog_text = from.clone();
                     self.dialog = Some(Dialog::Rename { from });
@@ -3627,6 +3630,7 @@ impl App {
                                         Some(preview::Out::Toggle(l)) => toggle = Some(l),
                                         Some(preview::Out::SetProp { key, vals, list }) => set_prop = Some((key, vals, list)),
                                         Some(preview::Out::RenameProp { from, to }) => self.actions.push(Action::RenameProp(from, to)),
+                                        Some(preview::Out::SetPropOf { rel, key, value }) => self.actions.push(Action::SetPropOf(rel, key, value)),
                                         None => {}
                                     }
                                 });
@@ -5826,6 +5830,27 @@ impl App {
     /// Remplace partout où la recherche a trouvé, sauf dans les fichiers décochés ; un fichier ouvert est
     /// changé dans son onglet (et s'enregistre comme une saisie)
     /// Renomme (ou retire) une propriété de l'en-tête dans toutes les notes du coffre, notes ouvertes comprises
+    /// Change une propriété d'une note : dans son onglet si elle est ouverte, sinon sur le disque.
+    fn set_prop_of(&mut self, rel: &str, key: &str, value: &str) {
+        let vals: Option<Vec<String>> = (!value.is_empty()).then(|| vec![value.to_string()]);
+        if let Some(d) = self.docs.iter_mut().find(|d| d.rel == rel) {
+            if let Content::Text(t) = &mut d.content {
+                *t = vault::set_front(t, key, vals.as_deref(), false);
+                d.dirty_since = Some(Instant::now());
+                return;
+            }
+        }
+        let root = self.root();
+        match vault::read(&root, rel) {
+            Ok(t) => {
+                let r = vault::write(&root, rel, &vault::set_front(&t, key, vals.as_deref(), false));
+                live::bump();
+                self.report(r);
+            }
+            Err(e) => self.toast = Some((e, Instant::now())),
+        }
+    }
+
     fn rename_prop_everywhere(&mut self, from: &str, to: Option<&str>) {
         let rewrite = |text: &str| -> Option<String> {
             let (props, _) = vault::frontmatter(text)?;

@@ -2792,5 +2792,6 @@
   "Retirer le débordement": "Despill",
   "Masque roto (tracé)": "Roto mask (path)",
   "intérieur": "inside",
-  "cliquer pour poser les points du tracé": "click to place the path points"
+  "cliquer pour poser les points du tracé": "click to place the path points",
+  "nouveau suivi de production": "new production tracker"
 }
