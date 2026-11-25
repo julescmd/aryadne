@@ -136,6 +136,9 @@ pub fn colorbalance(w: &[[f32; 3]; 3]) -> String {
     format!("colorbalance=rs={:.3}:gs={:.3}:bs={:.3}:rm={:.3}:gm={:.3}:bm={:.3}:rh={:.3}:gh={:.3}:bh={:.3}", s[0], s[1], s[2], m[0], m[1], m[2], h[0], h[1], h[2])
 }
 
+/// Couleur du mot en cours dans les sous-titres mot par mot
+pub const HIGHLIGHT: [u8; 3] = [255, 214, 64];
+
 pub fn render_text(c: &Clip, w: u32, h: u32) -> image::RgbaImage {
     use ab_glyph::{Font, FontArc, PxScale, ScaleFont};
     let mut img = image::RgbaImage::new(w.max(1), h.max(1));
@@ -149,7 +152,25 @@ pub fn render_text(c: &Clip, w: u32, h: u32) -> image::RgbaImage {
     let size = c.text_size.clamp(4.0, 2000.0);
     let sf = font.as_scaled(PxScale::from(size));
     let line_h = sf.height() + sf.line_gap();
-    let lines: Vec<&str> = c.text.lines().collect();
+    // « **mot** » : le mot en surbrillance (sous-titres mot par mot) ; les marques ne s'affichent pas
+    let plain = c.text.replace("**", "");
+    let lit: Vec<Vec<bool>> = c.text.lines().map(|l| {
+        let mut on = false;
+        let mut v = vec![];
+        let mut rest = l;
+        while !rest.is_empty() {
+            if let Some(r) = rest.strip_prefix("**") {
+                on = !on;
+                rest = r;
+                continue;
+            }
+            let ch = rest.chars().next().unwrap();
+            v.push(on);
+            rest = &rest[ch.len_utf8()..];
+        }
+        v
+    }).collect();
+    let lines: Vec<&str> = plain.lines().collect();
     let width = |l: &str| {
         let mut x = 0.0;
         let mut prev = None;
@@ -179,11 +200,13 @@ pub fn render_text(c: &Clip, w: u32, h: u32) -> image::RgbaImage {
             let mut x = (w as f32 - width(l)) / 2.0 + dx;
             let y = top + li as f32 * line_h + sf.ascent() + dy;
             let mut prev = None;
-            for ch in l.chars() {
+            for (ci, ch) in l.chars().enumerate() {
                 let id = sf.glyph_id(ch);
                 if let Some(p) = prev {
                     x += sf.kern(p, id);
                 }
+                // Le mot en surbrillance prend la couleur vive (le contour reste noir)
+                let col = if col != [0, 0, 0] && lit.get(li).and_then(|v| v.get(ci)).copied().unwrap_or(false) { HIGHLIGHT } else { col };
                 let glyph = id.with_scale_and_position(PxScale::from(size), ab_glyph::point(x, y));
                 x += sf.h_advance(id);
                 prev = Some(id);
@@ -842,11 +865,62 @@ impl Project {
         cues.len()
     }
 
+    /// Sous-titres mot par mot (formats verticaux) : des groupes de `group` mots, gros et centrés, le mot dit
+    /// à cet instant en couleur vive. Le temps de chaque mot suit sa longueur dans la réplique.
+    pub fn set_word_captions(&mut self, cues: &[crate::transcribe::Cue], group: usize) -> usize {
+        self.clips.retain(|c| !(c.kind == "text" && c.name == SUBTITLE));
+        let top = self.tracks.saturating_sub(1);
+        let group = group.max(1);
+        let mut n = 0;
+        for cue in cues {
+            let words: Vec<&str> = cue.text.split_whitespace().collect();
+            if words.is_empty() {
+                continue;
+            }
+            let total: usize = words.iter().map(|w| w.chars().count() + 1).sum();
+            let mut t = cue.start;
+            let times: Vec<(f32, f32)> = words.iter().map(|w| {
+                let d = (cue.end - cue.start) * (w.chars().count() + 1) as f32 / total as f32;
+                let r = (t, t + d);
+                t += d;
+                r
+            }).collect();
+            for (g, chunk) in words.chunks(group).enumerate() {
+                for (k, _) in chunk.iter().enumerate() {
+                    let wi = g * group + k;
+                    let text = chunk.iter().enumerate().map(|(j, w)| if j == k { format!("**{w}**") } else { w.to_string() }).collect::<Vec<_>>().join(" ");
+                    let (a, b) = times[wi];
+                    let i = self.add_text(a);
+                    let c = &mut self.clips[i];
+                    c.name = SUBTITLE.into();
+                    c.track = top;
+                    c.src_out = (b - a).max(0.05);
+                    c.text = text;
+                    c.text_size = (self.height.min(self.width) as f32 / 11.0).round().max(16.0);
+                    c.y = self.height as f32 * 0.22;
+                    c.outline = true;
+                    c.fade_in = 0.0;
+                    c.fade_out = 0.0;
+                    n += 1;
+                }
+            }
+        }
+        n
+    }
+
     /// Les sous-titres du montage, dans l'ordre.
     pub fn subtitles(&self) -> Vec<crate::transcribe::Cue> {
-        let mut v: Vec<crate::transcribe::Cue> = self.clips.iter().filter(|c| c.kind == "text" && c.name == SUBTITLE).map(|c| crate::transcribe::Cue { start: c.start, end: c.end(), text: c.text.clone() }).collect();
+        let mut v: Vec<crate::transcribe::Cue> = self.clips.iter().filter(|c| c.kind == "text" && c.name == SUBTITLE).map(|c| crate::transcribe::Cue { start: c.start, end: c.end(), text: c.text.replace("**", "") }).collect();
         v.sort_by(|a, b| a.start.total_cmp(&b.start));
-        v
+        // Mot par mot : un même groupe répété se fond en une réplique (pour l'export SRT)
+        let mut out: Vec<crate::transcribe::Cue> = vec![];
+        for c in v {
+            match out.last_mut() {
+                Some(l) if l.text == c.text && (c.start - l.end).abs() < 0.05 => l.end = c.end,
+                _ => out.push(c),
+            }
+        }
+        out
     }
 
     /// Coupe le clip `i` en deux à l'instant `t` de la timeline. Renvoie l'indice de la seconde moitié.
@@ -1957,3 +2031,27 @@ mod nest_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
+
+#[cfg(test)]
+mod words_tests {
+    #[test]
+    fn sous_titres_mot_par_mot() {
+        let mut p = super::Project::default();
+        let cues = vec![crate::transcribe::Cue { start: 1.0, end: 3.0, text: "un deux trois quatre".into() }];
+        let n = p.set_word_captions(&cues, 3);
+        assert_eq!(n, 4);
+        let mut subs: Vec<&super::Clip> = p.clips.iter().filter(|c| c.name == super::SUBTITLE).collect();
+        subs.sort_by(|a, b| a.start.total_cmp(&b.start));
+        assert_eq!(subs[1].text, "un **deux** trois");
+        assert_eq!(subs[3].text, "**quatre**");
+        assert!((subs[0].start - 1.0).abs() < 1e-4 && (subs[3].end() - 3.0).abs() < 1e-3);
+        // Pour le SRT : deux répliques, sans les marques
+        let srt = p.subtitles();
+        assert_eq!(srt.len(), 2);
+        assert_eq!(srt[0].text, "un deux trois");
+        // Le rendu ne montre pas les étoiles, et colore le mot
+        let img = super::render_text(subs[1], 600, 120);
+        assert!(img.pixels().any(|px| px.0[0] > 240 && px.0[1] > 190 && px.0[2] < 120 && px.0[3] > 200));
+    }
+}
+

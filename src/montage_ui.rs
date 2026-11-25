@@ -122,6 +122,8 @@ pub struct Editor {
     pub(crate) sel: Vec<u64>,
     /// Étalonnage copié (luminosité, contraste, saturation, roues, étalonnage en nodes)
     pub(crate) grade_clip: Option<(f32, f32, f32, [[f32; 3]; 3], String)>,
+    /// Sous-titres posés mot par mot (formats verticaux)
+    pub(crate) words_mode: bool,
     zoom: f32,
     scroll: f32,
     drag: Option<DragState>,
@@ -239,6 +241,7 @@ impl Editor {
             playhead: 0.0,
             sel: vec![],
             grade_clip: None,
+            words_mode: false,
             zoom: 60.0,
             scroll: 0.0,
             drag: None,

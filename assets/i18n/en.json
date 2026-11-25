@@ -3167,5 +3167,9 @@
   "Aucun changement de plan trouvé": "No scene cut found",
   "plans séparés": "shots separated",
   "Imbriquer en sous-séquence": "Nest into a sub-sequence",
-  "Les plans choisis partent dans un nouveau montage, qui revient ici comme un seul plan (double-clic dans les fichiers pour l'ouvrir)": "The selected clips move into a new edit that comes back here as a single clip (double-click it in the files to open it)"
+  "Les plans choisis partent dans un nouveau montage, qui revient ici comme un seul plan (double-clic dans les fichiers pour l'ouvrir)": "The selected clips move into a new edit that comes back here as a single clip (double-click it in the files to open it)",
+  "mot par mot (formats verticaux)": "word by word (vertical formats)",
+  "Gros sous-titres de trois mots, le mot dit en couleur vive, comme sur les réseaux": "Big three-word captions, the spoken word in a bright color, like on social media",
+  "refaire les sous-titres mot par mot": "redo the subtitles word by word",
+  "refaire les sous-titres en répliques": "redo the subtitles as lines"
 }

@@ -2798,7 +2798,7 @@ impl Editor {
                 match std::fs::read_to_string(&f) {
                     Ok(t) => {
                         let cues = crate::transcribe::parse_srt(&t);
-                        let n = self.project.set_subtitles(&cues);
+                        let n = if self.words_mode { self.project.set_word_captions(&cues, 3) } else { self.project.set_subtitles(&cues) };
                         self.message = Some(format!("{n} {}", crate::i18n::t_mid("sous-titres posés")));
                         self.changed();
                     }
@@ -2807,7 +2807,20 @@ impl Editor {
             }
             ui.close();
         }
+        ui.checkbox(&mut self.words_mode, crate::i18n::t("mot par mot (formats verticaux)")).on_hover_text(crate::i18n::t("Gros sous-titres de trois mots, le mot dit en couleur vive, comme sur les réseaux"));
         let subs = self.project.subtitles();
+        if !subs.is_empty() {
+            let label = if self.words_mode { "refaire les sous-titres mot par mot" } else { "refaire les sous-titres en répliques" };
+            if ui.button(format!("{}  {}", crate::lucide::REFRESH_CW, crate::i18n::t(label))).clicked() {
+                if self.words_mode {
+                    self.project.set_word_captions(&subs, 3);
+                } else {
+                    self.project.set_subtitles(&subs);
+                }
+                self.changed();
+                ui.close();
+            }
+        }
         if ui.add_enabled(!subs.is_empty(), egui::Button::new(format!("{}  {}", crate::lucide::DOWNLOAD, crate::i18n::t("exporter en SRT")))).on_hover_text(crate::i18n::t("À côté du montage, pour YouTube ou un lecteur vidéo")).clicked() {
             let f = self.path.with_extension("srt");
             self.message = Some(match crate::vault::atomic_write(&f, crate::transcribe::to_srt(&subs)) {
@@ -2920,7 +2933,7 @@ impl Editor {
                     self.message = Some(crate::i18n::t("Aucune parole entendue dans le montage."));
                     return;
                 }
-                let n = self.project.set_subtitles(&cues);
+                let n = if self.words_mode { self.project.set_word_captions(&cues, 3) } else { self.project.set_subtitles(&cues) };
                 self.message = Some(format!("{n} {}", crate::i18n::t_mid("sous-titres posés")));
                 self.changed();
             }
