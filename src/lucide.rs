@@ -154,6 +154,7 @@ pub const PRESENTATION: &str = "\u{f04ae}";
 pub const LIBRARY_BIG: &str = "\u{f054e}";
 pub const CLOUD_FOG: &str = "\u{f0214}";
 pub const METRONOME: &str = "\u{f06bc}";
+pub const WAND: &str = "\u{f0246}";
 pub const FLIP_HORIZONTAL_2: &str = "\u{f035e}";
 pub const GLOBE: &str = "\u{f00e8}";
 pub const UNDO_2: &str = "\u{f02a1}";

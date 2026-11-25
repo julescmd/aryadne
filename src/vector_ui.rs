@@ -106,6 +106,9 @@ pub struct Editor {
     offset_by: f32,
     /// Fusion entre deux objets : nombre d'étapes
     blend_steps: u32,
+    /// Déformation : le genre (voir WARPS) et l'intensité (%)
+    warp_kind: usize,
+    warp_bend: f32,
     /// Bibliothèque d'icônes ouverte : la recherche
     icon_pick: Option<String>,
     /// Présentation du prototype : le plan affiché et son image (clé, texture)
@@ -158,6 +161,8 @@ impl Editor {
             builder_tex: None,
             offset_by: 10.0,
             blend_steps: 5,
+            warp_kind: 0,
+            warp_bend: 50.0,
             icon_pick: None,
             present: None,
             present_tex: None,
@@ -1394,6 +1399,33 @@ impl Editor {
                 if ui.add_enabled(strokes, egui::Button::new(l::PEN_LINE)).on_hover_text(crate::i18n::t("vectoriser le contour : il devient une forme pleine")).clicked() {
                     self.doc = snapshot.clone();
                     self.outline_strokes();
+                    ch = true;
+                }
+            });
+        }
+        // Déformer (enveloppe) : arc, drapeau, gonfler… sur chaque forme choisie, en tracés
+        if !self.sel.is_empty() {
+            ui.horizontal(|ui| {
+                egui::ComboBox::from_id_salt("vec-warp").width(96.0).selected_text(crate::i18n::t(crate::vector::WARPS[self.warp_kind])).show_ui(ui, |ui| {
+                    for (k, name) in crate::vector::WARPS.iter().enumerate() {
+                        ui.selectable_value(&mut self.warp_kind, k, crate::i18n::t(name));
+                    }
+                });
+                ui.add(egui::DragValue::new(&mut self.warp_bend).speed(1.0).range(-100.0..=100.0).suffix(" %")).on_hover_text(crate::i18n::t("intensité (négatif : dans l'autre sens)"));
+                if ui.button(format!("{} {}", l::WAND, crate::i18n::t("déformer"))).on_hover_text(crate::i18n::t("Déforme la sélection dans une enveloppe (comme Effet › Déformation d'Illustrator) ; la forme devient un tracé")).clicked() {
+                    self.doc = snapshot.clone();
+                    let ids: Vec<u64> = self.sel.iter().map(|i| self.top_of(*i)).collect();
+                    let mut out = vec![];
+                    for id in ids {
+                        if let Some(n) = crate::vector::warp_shape(&mut self.doc, id, self.warp_kind, self.warp_bend / 100.0) {
+                            out.push(n);
+                        }
+                    }
+                    if out.is_empty() {
+                        self.message = Some(crate::i18n::t("Rien à déformer (les images et les groupes ne se déforment pas)."));
+                    } else {
+                        self.sel = out;
+                    }
                     ch = true;
                 }
             });

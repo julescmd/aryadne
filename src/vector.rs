@@ -2209,3 +2209,168 @@ mod tests {
         assert!(matches!(&e.shapes[0].kind, Kind::Path { closed: true, nodes } if nodes.len() == 3));
     }
 }
+
+// ---------- Déformations (enveloppes prédéfinies, comme Effet > Déformation d'Illustrator) ----------
+
+pub const WARPS: [&str; 9] = ["Arc", "Arche", "Renflement", "Drapeau", "Vague", "Poisson", "Montée", "Gonfler", "Torsion"];
+
+/// Où va le point `p` (repère de la forme, cadre `b`) avec la déformation `kind` d'intensité `bend` (-1 à 1)
+pub fn warp_point(kind: usize, b: [f32; 4], p: [f32; 2], bend: f32) -> [f32; 2] {
+    let (w, h) = ((b[2] - b[0]).max(1e-3), (b[3] - b[1]).max(1e-3));
+    let (u, v) = ((p[0] - b[0]) / w, (p[1] - b[1]) / h);
+    let (cu, cv) = (2.0 * u - 1.0, 2.0 * v - 1.0);
+    let arc = 1.0 - cu * cu;
+    let pi = std::f32::consts::PI;
+    let (dx, dy) = match kind {
+        0 => (0.0, -bend * h * 0.5 * arc),
+        1 => (0.0, -bend * h * 0.5 * arc * (1.0 - v)),
+        2 => (0.0, bend * h * 0.35 * arc * cv),
+        3 => (0.0, bend * h * 0.25 * (2.0 * pi * u).sin()),
+        4 => (0.0, bend * h * 0.2 * (2.0 * pi * u).sin() * (1.0 - cv.abs() * 0.5)),
+        5 => (0.0, bend * h * 0.3 * cv * (pi * u).sin() * (1.0 - u)),
+        6 => (0.0, -bend * h * 0.5 * u),
+        7 => (bend * w * 0.25 * cu * (1.0 - cv * cv), bend * h * 0.25 * cv * (1.0 - cu * cu)),
+        _ => {
+            let (cx, cy) = ((b[0] + b[2]) / 2.0, (b[1] + b[3]) / 2.0);
+            let r = (((p[0] - cx) / (w / 2.0)).powi(2) + ((p[1] - cy) / (h / 2.0)).powi(2)).sqrt().min(1.0);
+            let a = bend * pi * (1.0 - r);
+            let (c, sn) = (a.cos(), a.sin());
+            let (x, y) = (p[0] - cx, p[1] - cy);
+            return [cx + c * x - sn * y, cy + sn * x + c * y];
+        }
+    };
+    [p[0] + dx, p[1] + dy]
+}
+
+/// Les contours d'une forme en tracés (repère de la forme), quelle que soit sa nature
+pub fn shape_subpaths(s: &Shape) -> Vec<(Vec<Node>, bool)> {
+    if let Kind::Path { nodes, closed } = &s.kind {
+        return vec![(nodes.clone(), *closed)];
+    }
+    let d = path_data(s);
+    if d.is_empty() {
+        return vec![];
+    }
+    let mut tmp = Doc { shapes: vec![], ..Doc::starter() };
+    let svg = format!(r#"<svg xmlns="http://www.w3.org/2000/svg"><path d="{d}" fill="black"/></svg>"#);
+    if import_svg(&mut tmp, &svg, [0.0, 0.0]).is_err() {
+        return vec![];
+    }
+    tmp.shapes.into_iter().filter_map(|sh| match sh.kind {
+        Kind::Path { nodes, closed } => Some((nodes, closed)),
+        _ => None,
+    }).collect()
+}
+
+/// Coupe chaque segment en `n` (de Casteljau) : la déformation suit mieux les courbes
+pub fn subdivide(nodes: &[Node], closed: bool, n: usize) -> Vec<Node> {
+    let m = nodes.len();
+    if m < 2 || n < 2 {
+        return nodes.to_vec();
+    }
+    let lerp = |a: [f32; 2], b: [f32; 2], t: f32| [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t];
+    let segs = if closed { m } else { m - 1 };
+    let mut out: Vec<Node> = vec![nodes[0]];
+    for k in 0..segs {
+        let (a, b) = (nodes[k], nodes[(k + 1) % m]);
+        let (mut p0, mut p1, mut p2, p3) = (a.p, a.o, b.i, b.p);
+        for j in 0..n {
+            let rem = (n - j) as f32;
+            let t = 1.0 / rem;
+            // Le morceau [0, t] de la courbe restante
+            let (q0, q1, q2) = (lerp(p0, p1, t), lerp(p1, p2, t), lerp(p2, p3, t));
+            let (r0, r1) = (lerp(q0, q1, t), lerp(q1, q2, t));
+            let s0 = lerp(r0, r1, t);
+            if let Some(last) = out.last_mut() {
+                last.o = q0;
+            }
+            let end = if j + 1 == n { p3 } else { s0 };
+            out.push(Node { p: end, i: if j + 1 == n { p2 } else { r0 }, o: end });
+            (p0, p1, p2) = (s0, r1, q2);
+        }
+    }
+    if closed {
+        // Le dernier point refait le premier : on garde sa poignée d'arrivée
+        if let Some(last) = out.pop() {
+            out[0].i = last.i;
+        }
+    } else if let Some(last) = out.last_mut() {
+        last.o = nodes[m - 1].o;
+    }
+    out
+}
+
+/// Déforme une forme (devenue tracé) ; plusieurs contours (texte, trous) deviennent un groupe pair-impair.
+/// Rend la forme obtenue.
+pub fn warp_shape(doc: &mut Doc, id: u64, kind: usize, bend: f32) -> Option<u64> {
+    let i = doc.index(id)?;
+    let s = doc.shapes[i].clone();
+    if matches!(s.kind, Kind::Group { .. } | Kind::Image { .. }) {
+        return None;
+    }
+    let subs = shape_subpaths(&s);
+    let pts: Vec<[f32; 2]> = subs.iter().flat_map(|(n, _)| n.iter().map(|x| x.p)).collect();
+    if pts.is_empty() {
+        return None;
+    }
+    let b = [pts.iter().map(|p| p[0]).fold(f32::MAX, f32::min), pts.iter().map(|p| p[1]).fold(f32::MAX, f32::min), pts.iter().map(|p| p[0]).fold(f32::MIN, f32::max), pts.iter().map(|p| p[1]).fold(f32::MIN, f32::max)];
+    let warped: Vec<(Vec<Node>, bool)> = subs
+        .into_iter()
+        .map(|(n, c)| {
+            let fine = subdivide(&n, c, 4);
+            (fine.into_iter().map(|x| Node { p: warp_point(kind, b, x.p, bend), i: warp_point(kind, b, x.i, bend), o: warp_point(kind, b, x.o, bend) }).collect(), c)
+        })
+        .collect();
+    let text_fill = matches!(s.kind, Kind::Text { .. }) && s.fills.is_empty();
+    if warped.len() == 1 {
+        let (nodes, closed) = warped.into_iter().next()?;
+        let sh = &mut doc.shapes[i];
+        sh.kind = Kind::Path { nodes, closed };
+        if text_fill {
+            sh.fills = vec![Paint::solid([24, 24, 27, 255])];
+        }
+        return Some(id);
+    }
+    let mut ids = vec![];
+    doc.shapes.remove(i);
+    for (k, (nodes, closed)) in warped.into_iter().enumerate() {
+        let nid = doc.new_id();
+        let mut sh = Shape { id: nid, kind: Kind::Path { nodes, closed }, name: format!("{} {}", s.name, k + 1), parent: 0, ..s.clone() };
+        if text_fill {
+            sh.fills = vec![Paint::solid([24, 24, 27, 255])];
+        }
+        doc.shapes.insert((i + k).min(doc.shapes.len()), sh);
+        ids.push(nid);
+    }
+    let g = doc.group(&ids, 5)?;
+    if let Some(gs) = doc.shapes.iter_mut().find(|x| x.id == g) {
+        gs.name = s.name.clone();
+    }
+    Some(g)
+}
+
+#[cfg(test)]
+mod warp_tests {
+    use super::*;
+    #[test]
+    fn deformations() {
+        // L'arc garde les coins et monte le milieu
+        let b = [0.0, 0.0, 100.0, 50.0];
+        assert_eq!(warp_point(0, b, [0.0, 0.0], 1.0), [0.0, 0.0]);
+        assert!(warp_point(0, b, [50.0, 0.0], 1.0)[1] < -20.0);
+        // Subdiviser garde la forme : le milieu d'un segment droit reste sur la droite
+        let n = vec![Node::corner([0.0, 0.0]), Node::corner([100.0, 0.0]), Node::corner([100.0, 100.0])];
+        let f = subdivide(&n, true, 4);
+        assert_eq!(f.len(), 12);
+        assert!(f.iter().all(|x| x.p[0] >= -1e-3 && x.p[0] <= 100.001));
+        // Un rectangle déformé en drapeau devient un tracé ondulé
+        let mut d = Doc::starter();
+        d.shapes.clear();
+        let id = d.new_id();
+        d.shapes.push(Shape { id, kind: Kind::Rect { w: 200.0, h: 60.0, r: [0.0; 4] }, fills: vec![Paint::solid([200, 80, 80, 255])], ..Shape::base() });
+        let r = warp_shape(&mut d, id, 3, 0.8).unwrap();
+        let Kind::Path { nodes, closed } = &d.get(r).unwrap().kind else { panic!() };
+        assert!(*closed && nodes.len() >= 16);
+        assert!(nodes.iter().any(|n| n.p[1] < -5.0));
+    }
+}

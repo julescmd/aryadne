@@ -3312,5 +3312,16 @@
   "vagues": "waves",
   "hachures croisées": "crosshatch",
   "motif, puis fond (transparent possible)": "pattern, then background (can be transparent)",
-  "case ": "tile "
+  "case ": "tile ",
+  "Arc": "Arc",
+  "Arche": "Arch",
+  "Renflement": "Bulge",
+  "Drapeau": "Flag",
+  "Vague": "Wave",
+  "Poisson": "Fish",
+  "Montée": "Rise",
+  "Torsion": "Twist",
+  "intensité (négatif : dans l'autre sens)": "strength (negative: the other way)",
+  "Déforme la sélection dans une enveloppe (comme Effet › Déformation d'Illustrator) ; la forme devient un tracé": "Warps the selection in an envelope (like Illustrator's Effect › Warp); the shape becomes a path",
+  "Rien à déformer (les images et les groupes ne se déforment pas).": "Nothing to warp (images and groups can't be warped)."
 }
