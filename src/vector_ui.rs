@@ -841,6 +841,62 @@ impl Editor {
                 }
             }
         }
+        // Mise en page automatique d'un groupe (comme Figma)
+        if let Some(gid) = single.filter(|i| self.doc.get(*i).is_some_and(|s| matches!(s.kind, Kind::Group { op: 0, .. }))) {
+            head(ui, "Mise en page auto");
+            let mut lay = self.doc.get(gid).and_then(|s| s.layout.clone());
+            let mut on = lay.is_some();
+            let mut lch = false;
+            if ui.checkbox(&mut on, crate::i18n::t("les formes se suivent (Maj+A)")).changed() {
+                lay = on.then(crate::vector::AutoLayout::default);
+                lch = true;
+            }
+            if let Some(l) = &mut lay {
+                ui.horizontal(|ui| {
+                    for (d, icon, tip) in [(0u8, l::ARROW_RIGHT, "en ligne"), (1, l::ARROW_DOWN, "en colonne")] {
+                        if ui.selectable_label(l.dir == d, icon).on_hover_text(crate::i18n::t(tip)).clicked() {
+                            l.dir = d;
+                            lch = true;
+                        }
+                    }
+                    ui.separator();
+                    for (a, icon, tip) in [(0u8, l::ALIGN_START_VERTICAL, "aligner au début"), (1, l::ALIGN_CENTER_VERTICAL, "centrer"), (2, l::ALIGN_END_VERTICAL, "aligner à la fin")] {
+                        if ui.selectable_label(l.align == a, icon).on_hover_text(crate::i18n::t(tip)).clicked() {
+                            l.align = a;
+                            lch = true;
+                        }
+                    }
+                });
+                ui.horizontal(|ui| {
+                    lch |= ui.add(egui::DragValue::new(&mut l.gap).speed(0.5).range(-500.0..=2000.0).prefix(format!("{} ", crate::i18n::t("écart")))).changed();
+                    lch |= ui.add(egui::DragValue::new(&mut l.pad[0]).speed(0.5).range(0.0..=2000.0).prefix("↔ ")).on_hover_text(crate::i18n::t("marge horizontale")).changed();
+                    lch |= ui.add(egui::DragValue::new(&mut l.pad[1]).speed(0.5).range(0.0..=2000.0).prefix("↕ ")).on_hover_text(crate::i18n::t("marge verticale")).changed();
+                });
+                ui.horizontal(|ui| {
+                    let mut has_bg = l.bg.is_some();
+                    if ui.checkbox(&mut has_bg, crate::i18n::t("couleur de fond")).changed() {
+                        l.bg = has_bg.then_some([232, 236, 242, 255]);
+                        lch = true;
+                    }
+                    if let Some(c) = &mut l.bg {
+                        let mut col = egui::Color32::from_rgba_unmultiplied(c[0], c[1], c[2], c[3]);
+                        if ui.color_edit_button_srgba(&mut col).changed() {
+                            *c = col.to_srgba_unmultiplied();
+                            lch = true;
+                        }
+                        lch |= ui.add(egui::DragValue::new(&mut l.radius).speed(0.5).range(0.0..=1000.0).prefix(format!("{} ", crate::i18n::t("coins")))).changed();
+                    }
+                });
+            }
+            if lch {
+                self.doc = snapshot.clone();
+                if let Some(s) = self.doc.shapes.iter_mut().find(|s| s.id == gid) {
+                    s.layout = lay;
+                }
+                self.doc.apply_layouts();
+                ch = true;
+            }
+        }
         head(ui, "Combiner");
         ui.horizontal(|ui| {
             for (k, (icon, tip)) in BOOLS.iter().enumerate() {
@@ -871,6 +927,34 @@ impl Editor {
         }
         if let Some(bi) = self.board_of_selection() {
             self.export_ui(ui, bi);
+        }
+    }
+
+    /// Met la sélection dans un groupe en mise en page automatique, rangé dans l'ordre de lecture.
+    fn auto_layout_selection(&mut self) {
+        let mut ids: Vec<u64> = self.sel.iter().map(|i| self.top_of(*i)).collect();
+        ids.sort_by_key(|i| self.doc.index(*i));
+        ids.dedup();
+        let b = self.doc.bounds_of(&ids).unwrap_or([0.0; 4]);
+        // En ligne si la sélection est plus large que haute
+        let dir = if b[2] - b[0] >= b[3] - b[1] { 0 } else { 1 };
+        // L'ordre de lecture : de gauche à droite, ou de haut en bas
+        ids.sort_by(|a, c| {
+            let (ba, bc) = (self.doc.get(*a).map(|s| self.doc.bounds(s)).unwrap_or([0.0; 4]), self.doc.get(*c).map(|s| self.doc.bounds(s)).unwrap_or([0.0; 4]));
+            ba[dir as usize].total_cmp(&bc[dir as usize])
+        });
+        if let Some(g) = self.doc.group(&ids, 0) {
+            if let Some(s) = self.doc.shapes.iter_mut().find(|s| s.id == g) {
+                s.name = crate::i18n::t("Cadre");
+                s.layout = Some(crate::vector::AutoLayout { dir, ..Default::default() });
+                s.x -= 24.0;
+                s.y -= 16.0;
+            }
+            if let Some(Shape { kind: Kind::Group { children, .. }, .. }) = self.doc.shapes.iter_mut().find(|s| s.id == g) {
+                *children = ids.clone();
+            }
+            self.doc.apply_layouts();
+            self.sel = vec![g];
         }
     }
 
@@ -1085,6 +1169,8 @@ impl Editor {
         let ppp = ctx.pixels_per_point();
         let (pw, ph) = ((rect.width() * ppp).round().max(1.0) as u32, (rect.height() * ppp).round().max(1.0) as u32);
         let area = [c[0] - rect.width() / 2.0 / z, c[1] - rect.height() / 2.0 / z, rect.width() / z, rect.height() / z];
+        // Les cadres en mise en page automatique replacent leurs formes avant le rendu
+        self.doc.apply_layouts();
         let key = {
             use std::hash::{Hash, Hasher};
             let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -1810,6 +1896,11 @@ impl Editor {
                 self.doc.ungroup(id);
             }
             self.sel.clear();
+            self.changed();
+        } else if !self.sel.is_empty() && ui.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Key { key: egui::Key::A, pressed: true, modifiers, .. } if modifiers.shift && !modifiers.command))) {
+            // Maj+A : la sélection dans un cadre en mise en page automatique (comme Figma)
+            self.checkpoint();
+            self.auto_layout_selection();
             self.changed();
         } else if cmd && k(egui::Key::G) && !self.sel.is_empty() {
             self.checkpoint();

@@ -154,6 +154,35 @@ pub struct Shape {
     /// Mode de fusion CSS (normal, multiply, screen…)
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub blend: String,
+    /// Groupe en mise en page automatique (comme Figma) : ses formes se suivent, avec un écart et des marges
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layout: Option<AutoLayout>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct AutoLayout {
+    /// 0 en ligne, 1 en colonne
+    pub dir: u8,
+    pub gap: f32,
+    /// Marges : horizontale, verticale
+    pub pad: [f32; 2],
+    /// Alignement sur l'autre axe : 0 début, 1 centre, 2 fin
+    #[serde(default)]
+    pub align: u8,
+    /// Fond du cadre (None : transparent) et rayon de ses coins
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bg: Option<[u8; 4]>,
+    #[serde(default)]
+    pub radius: f32,
+    /// Taille calculée du cadre (marges comprises)
+    #[serde(default)]
+    pub size: [f32; 2],
+}
+
+impl Default for AutoLayout {
+    fn default() -> Self {
+        AutoLayout { dir: 0, gap: 16.0, pad: [24.0, 16.0], align: 1, bg: None, radius: 8.0, size: [0.0; 2] }
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
@@ -216,8 +245,63 @@ impl Doc {
         out
     }
 
+    /// Place les formes des groupes en mise en page automatique (les groupes intérieurs d'abord).
+    pub fn apply_layouts(&mut self) {
+        // Les plus profonds d'abord : un bouton dans une barre se calcule avant la barre
+        let depth = |d: &Doc, mut id: u64| {
+            let mut n = 0;
+            while let Some(p) = d.get(id).map(|s| s.parent).filter(|p| *p != 0) {
+                id = p;
+                n += 1;
+                if n > 64 {
+                    break;
+                }
+            }
+            n
+        };
+        let mut groups: Vec<(usize, u64)> = self.shapes.iter().filter(|s| s.layout.is_some() && matches!(s.kind, Kind::Group { .. })).map(|s| (depth(self, s.id), s.id)).collect();
+        groups.sort_by(|a, b| b.0.cmp(&a.0));
+        for (_, gid) in groups {
+            let Some(g) = self.get(gid).cloned() else { continue };
+            let (Kind::Group { children, .. }, Some(l)) = (&g.kind, &g.layout) else { continue };
+            let kids: Vec<u64> = children.iter().copied().filter(|c| self.get(*c).is_some_and(|s| s.visible)).collect();
+            let sizes: Vec<[f32; 4]> = kids.iter().map(|c| self.bounds(self.get(*c).unwrap())).collect();
+            let (main, cross) = if l.dir == 0 { (0, 1) } else { (1, 0) };
+            let span = |b: &[f32; 4], a: usize| b[a + 2] - b[a];
+            let cross_max = sizes.iter().map(|b| span(b, cross)).fold(0.0f32, f32::max);
+            let mut cur = [g.x + l.pad[0], g.y + l.pad[1]];
+            for (c, b) in kids.iter().zip(&sizes) {
+                let free = cross_max - span(b, cross);
+                let off = match l.align {
+                    0 => 0.0,
+                    2 => free,
+                    _ => free / 2.0,
+                };
+                let mut want = cur;
+                want[cross] += off;
+                let (dx, dy) = (want[0] - b[0], want[1] - b[1]);
+                if dx.abs() > 1e-3 || dy.abs() > 1e-3 {
+                    self.translate(*c, dx, dy);
+                }
+                cur[main] += span(b, main) + l.gap;
+            }
+            let content = if kids.is_empty() { 0.0 } else { cur[main] - l.gap - (if main == 0 { g.x } else { g.y }) - l.pad[main] };
+            let mut size = [0.0; 2];
+            size[main] = content + 2.0 * l.pad[main];
+            size[cross] = cross_max + 2.0 * l.pad[cross];
+            if let Some(Shape { layout: Some(ll), .. }) = self.shapes.iter_mut().find(|s| s.id == gid) {
+                ll.size = size;
+            }
+        }
+    }
+
     /// Le cadre (monde) d'une forme, rotation comprise
     pub fn bounds(&self, s: &Shape) -> [f32; 4] {
+        if let (Kind::Group { .. }, Some(l)) = (&s.kind, &s.layout) {
+            if l.size[0] > 0.0 {
+                return [s.x, s.y, s.x + l.size[0], s.y + l.size[1]];
+            }
+        }
         if let Kind::Group { children, .. } = &s.kind {
             return children.iter().filter_map(|c| self.get(*c)).map(|c| self.bounds(c)).fold([f32::MAX, f32::MAX, f32::MIN, f32::MIN], union);
         }
@@ -319,7 +403,7 @@ fn union(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {
 
 impl Shape {
     pub fn base() -> Shape {
-        Shape { id: 0, name: String::new(), kind: Kind::Rect { w: 100.0, h: 100.0, r: [0.0; 4] }, x: 0.0, y: 0.0, rot: 0.0, fills: vec![], strokes: vec![], opacity: 1.0, visible: true, locked: false, parent: 0, shadow: None, blur: 0.0, blend: String::new() }
+        Shape { id: 0, name: String::new(), kind: Kind::Rect { w: 100.0, h: 100.0, r: [0.0; 4] }, x: 0.0, y: 0.0, rot: 0.0, fills: vec![], strokes: vec![], opacity: 1.0, visible: true, locked: false, parent: 0, shadow: None, blur: 0.0, blend: String::new(), layout: None }
     }
 
     pub fn kind_label(&self) -> &'static str {
@@ -647,6 +731,12 @@ impl Gen<'_> {
         if let Kind::Group { children, op } = &sh.kind {
             let kids: Vec<&Shape> = children.iter().filter_map(|c| self.doc.get(*c)).filter(|c| c.visible).collect();
             let _ = write!(out, r#"<g opacity="{}">"#, sh.opacity);
+            // Fond d'un cadre en mise en page automatique
+            if let Some(l) = sh.layout.as_ref().filter(|l| l.size[0] > 0.0) {
+                if let Some(c) = l.bg {
+                    let _ = write!(out, r#"<rect x="{}" y="{}" width="{}" height="{}" rx="{}" fill="rgb({},{},{})" fill-opacity="{:.3}"/>"#, sh.x, sh.y, l.size[0], l.size[1], l.radius, c[0], c[1], c[2], c[3] as f32 / 255.0);
+                }
+            }
             match (op, kids.split_first()) {
                 // Pair-impair : tous les contours en un seul tracé (les trous dans les formes restent vides)
                 (5, Some((first, _))) => {
@@ -1142,6 +1232,34 @@ mod tests {
         assert_eq!(at(13, 13), vec![0, 0, 255, 255]);
         assert_eq!(at(3, 3), vec![255, 255, 255, 255]);
         assert_eq!(at(0, 0)[3], 0);
+    }
+
+    #[test]
+    fn mise_en_page_auto() {
+        let mut d = Doc::starter();
+        let mut ids = vec![];
+        for (k, w) in [100.0f32, 60.0].iter().enumerate() {
+            let id = d.new_id();
+            d.shapes.push(Shape { id, kind: Kind::Rect { w: *w, h: 40.0 + k as f32 * 20.0, r: [0.0; 4] }, x: 500.0 * k as f32, y: 300.0, ..Shape::base() });
+            ids.push(id);
+        }
+        let g = d.group(&ids, 0).unwrap();
+        if let Some(s) = d.shapes.iter_mut().find(|s| s.id == g) {
+            (s.x, s.y) = (0.0, 0.0);
+            s.layout = Some(AutoLayout { gap: 10.0, pad: [20.0, 5.0], align: 1, ..Default::default() });
+        }
+        d.apply_layouts();
+        let b0 = d.bounds(d.get(ids[0]).unwrap());
+        let b1 = d.bounds(d.get(ids[1]).unwrap());
+        assert_eq!([b0[0], b0[1]], [20.0, 15.0]);
+        assert_eq!([b1[0], b1[1]], [130.0, 5.0]);
+        assert_eq!(d.get(g).unwrap().layout.as_ref().unwrap().size, [210.0, 70.0]);
+        // Le premier grandit : le second suit
+        if let Some(Shape { kind: Kind::Rect { w, .. }, .. }) = d.shapes.iter_mut().find(|s| s.id == ids[0]) {
+            *w = 150.0;
+        }
+        d.apply_layouts();
+        assert_eq!(d.bounds(d.get(ids[1]).unwrap())[0], 180.0);
     }
 
     #[test]

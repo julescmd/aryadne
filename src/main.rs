@@ -2624,8 +2624,8 @@ impl App {
             if let Some(i) = self.active {
                 self.docs[i].code.goto = Some(String::new());
             }
-        } else if !matches!(self.current().map(|d| &d.content), Some(Content::Paint(_))) && pressed(Modifiers::COMMAND, Key::G) {
-            // (Dans la Retouche, Ctrl+G groupe les calques, comme dans Photoshop)
+        } else if !matches!(self.current().map(|d| &d.content), Some(Content::Paint(_) | Content::Vector(_))) && pressed(Modifiers::COMMAND, Key::G) {
+            // (Dans la Retouche et le vectoriel, Ctrl+G groupe, comme dans Photoshop et Illustrator)
             self.view = Some(if self.view() == View::Brain { View::Files } else { View::Brain });
         }
         // Ctrl+1, 2, 3… : les étapes du pipeline ; Alt+1, 2, 3… : les outils de l'étape en cours
