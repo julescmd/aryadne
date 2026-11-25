@@ -1107,8 +1107,11 @@ impl Editor {
             ui.horizontal(|ui| {
                 let mut sh = s.shadow.is_some();
                 if ui.checkbox(&mut sh, crate::i18n::t("ombre portée")).changed() {
-                    s.shadow = sh.then_some(Shadow { dx: 0.0, dy: 8.0, blur: 16.0, c: [0, 0, 0, 90] });
+                    s.shadow = sh.then_some(Shadow { dx: 0.0, dy: 8.0, blur: 16.0, c: [0, 0, 0, 90], inner: false });
                     ch = true;
+                }
+                if let Some(d) = &mut s.shadow {
+                    ch |= ui.checkbox(&mut d.inner, crate::i18n::t("interne")).on_hover_text(crate::i18n::t("Ombre interne : elle entre dans la forme par ses bords (bouton enfoncé, creux)")).changed();
                 }
                 ch |= ui.add(egui::DragValue::new(&mut s.blur).range(0.0..=200.0).prefix(crate::i18n::t("flou "))).changed();
             });
@@ -3336,7 +3339,7 @@ fn handles(r: Rect) -> [Pos2; 8] {
 /// Pour chaque poignée : quel côté elle déplace (-1 gauche/haut, 1 droite/bas, 0 aucun)
 const HANDLE_SIDES: [(i8, i8); 8] = [(-1, -1), (1, -1), (1, 1), (-1, 1), (0, -1), (1, 0), (0, 1), (-1, 0)];
 
-const BOOLS: [(&str, &str); 7] = [
+const BOOLS: [(&str, &str); 8] = [
     (l::GROUP, "Grouper (Ctrl+G)"),
     (l::SQUARES_UNITE, "Union : une seule forme, la couleur de celle du dessous"),
     (l::SQUARES_SUBTRACT, "Soustraire : les formes du dessus creusent celle du dessous"),
@@ -3344,6 +3347,7 @@ const BOOLS: [(&str, &str); 7] = [
     (l::SQUARES_EXCLUDE, "Exclure : tout sauf la partie commune"),
     (l::SQUARE_DASHED_BOTTOM, "Pair-impair : les formes qui se recouvrent font des trous"),
     (l::SQUARE_DASHED_MOUSE_POINTER, "Masque d'écrêtage : la forme du dessous découpe celles du dessus"),
+    (l::BLEND, "Masque d'opacité : la clarté de la forme du dessous (un dégradé blanc vers noir) rend le dessus plus ou moins visible"),
 ];
 
 const BLENDS: [(&str, &str); 9] = [("normal", "Normal"), ("multiply", "Produit"), ("screen", "Superposition"), ("overlay", "Incrustation"), ("darken", "Obscurcir"), ("lighten", "Éclaircir"), ("color-dodge", "Densité couleur −"), ("difference", "Différence"), ("color", "Couleur")];

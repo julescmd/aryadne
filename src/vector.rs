@@ -199,6 +199,9 @@ pub struct Shadow {
     pub dy: f32,
     pub blur: f32,
     pub c: [u8; 4],
+    /// Ombre interne (dans la forme, depuis ses bords) plutôt que portée
+    #[serde(default)]
+    pub inner: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -651,6 +654,7 @@ impl Doc {
             4 => "Exclusion",
             5 => "Pair-impair",
             6 => "Masque",
+            7 => "Masque d'opacité",
             _ => "Groupe",
         };
         let children: Vec<u64> = members.iter().map(|&k| self.shapes[k].id).collect();
@@ -1185,11 +1189,18 @@ impl Gen<'_> {
         if sh.shadow.is_some() || sh.blur > 0.0 {
             let id = self.id("f");
             let _ = write!(self.defs, r#"<filter id="{id}" x="-50%" y="-50%" width="200%" height="200%">"#);
+            let mut last = "SourceGraphic";
             if let Some(d) = &sh.shadow {
-                let _ = write!(self.defs, r#"<feDropShadow dx="{}" dy="{}" stdDeviation="{}" flood-color="{}" flood-opacity="{}"/>"#, d.dx, d.dy, d.blur / 2.0, hex(d.c), d.c[3] as f32 / 255.0);
+                if d.inner {
+                    // L'ombre entre par les bords : l'alpha décalé et flou, retourné, gardé dans la forme
+                    let _ = write!(self.defs, r#"<feOffset in="SourceAlpha" dx="{}" dy="{}" result="io"/><feGaussianBlur in="io" stdDeviation="{}" result="ib"/><feComposite in="SourceAlpha" in2="ib" operator="out" result="ie"/><feFlood flood-color="{}" flood-opacity="{}" result="ic"/><feComposite in="ic" in2="ie" operator="in" result="is"/><feMerge result="s1"><feMergeNode in="SourceGraphic"/><feMergeNode in="is"/></feMerge>"#, d.dx, d.dy, d.blur / 2.0, hex(d.c), d.c[3] as f32 / 255.0);
+                } else {
+                    let _ = write!(self.defs, r#"<feDropShadow in="SourceGraphic" dx="{}" dy="{}" stdDeviation="{}" flood-color="{}" flood-opacity="{}" result="s1"/>"#, d.dx, d.dy, d.blur / 2.0, hex(d.c), d.c[3] as f32 / 255.0);
+                }
+                last = "s1";
             }
             if sh.blur > 0.0 {
-                let _ = write!(self.defs, r#"<feGaussianBlur stdDeviation="{}"/>"#, sh.blur / 2.0);
+                let _ = write!(self.defs, r#"<feGaussianBlur in="{last}" stdDeviation="{}"/>"#, sh.blur / 2.0);
             }
             self.defs.push_str("</filter>");
             filter = format!(r#" filter="url(#{id})""#);
@@ -1217,6 +1228,19 @@ impl Gen<'_> {
                     let mid = self.id("m");
                     let mut mask = format!(r#"<mask id="{mid}" maskUnits="userSpaceOnUse" x="-100000" y="-100000" width="200000" height="200000">"#);
                     self.silhouette(&mut mask, first, "white");
+                    mask.push_str("</mask>");
+                    self.defs.push_str(&mask);
+                    let _ = write!(out, r#"<g mask="url(#{mid})">"#);
+                    for k in rest {
+                        self.shape(out, k);
+                    }
+                    out.push_str("</g>");
+                }
+                // Masque d'opacité : la luminosité de la forme du dessous (dégradé compris) règle l'opacité du dessus
+                (7, Some((first, rest))) if !rest.is_empty() => {
+                    let mid = self.id("m");
+                    let mut mask = format!(r#"<mask id="{mid}" maskUnits="userSpaceOnUse" x="-100000" y="-100000" width="200000" height="200000">"#);
+                    self.shape(&mut mask, first);
                     mask.push_str("</mask>");
                     self.defs.push_str(&mask);
                     let _ = write!(out, r#"<g mask="url(#{mid})">"#);
@@ -2686,6 +2710,34 @@ mod brush_tests {
         assert!(bands[2] < bands[0], "{bands:?}");
         if std::env::var("ARY_DEMO").is_ok() {
             img.save("/tmp/brushes.png").unwrap();
+        }
+    }
+}
+#[cfg(test)]
+mod fx_tests2 {
+    use super::*;
+    #[test]
+    fn ombre_interne_et_masque_d_opacite() {
+        let mut d = Doc::starter();
+        d.shapes.clear();
+        let (bx, by) = (d.boards[0].x, d.boards[0].y);
+        let id = d.new_id();
+        d.shapes.push(Shape { id, kind: Kind::Rect { w: 420.0, h: 240.0, r: [40.0; 4] }, x: bx + 80.0, y: by + 80.0, fills: vec![Paint::solid([236, 236, 240, 255])], shadow: Some(Shadow { dx: 0.0, dy: 14.0, blur: 24.0, c: [0, 0, 0, 160], inner: true }), ..Shape::base() });
+        // Masque d'opacité : un dégradé blanc vers noir sous un grand rectangle orange
+        let m = d.new_id();
+        d.shapes.push(Shape { id: m, kind: Kind::Rect { w: 800.0, h: 300.0, r: [0.0; 4] }, x: bx + 80.0, y: by + 500.0, fills: vec![Paint::Linear { stops: vec![(0.0, [255, 255, 255, 255]), (1.0, [0, 0, 0, 255])], angle: 0.0 }], ..Shape::base() });
+        let t = d.new_id();
+        d.shapes.push(Shape { id: t, kind: Kind::Rect { w: 800.0, h: 300.0, r: [0.0; 4] }, x: bx + 80.0, y: by + 500.0, fills: vec![Paint::solid([236, 108, 89, 255])], ..Shape::base() });
+        d.group(&[m, t], 7).unwrap();
+        let img = export_png(&d, 0, "/tmp", 0.5).unwrap();
+        // L'ombre interne fonce le haut du bouton, pas son centre
+        let (top, mid) = (img.get_pixel(((80 + 210) / 2) as u32, ((80 + 12) / 2) as u32)[0], img.get_pixel(((80 + 210) / 2) as u32, ((80 + 160) / 2) as u32)[0]);
+        assert!(top + 20 < mid, "{top} {mid}");
+        // Le masque : à gauche bien orange, à droite presque le fond blanc
+        let (l, r) = (img.get_pixel(60, 320), img.get_pixel(430, 320));
+        assert!(l[1] < 150 && r[1] > 220, "{l:?} {r:?}");
+        if std::env::var("ARY_DEMO").is_ok() {
+            img.save("/tmp/fx2.png").unwrap();
         }
     }
 }
