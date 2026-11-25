@@ -831,6 +831,32 @@ pub fn normalize_gain(c: &Clip, buf: &Buffer, target: f32) -> f32 {
 }
 
 /// Exporte le mixage en WAV 24 bits, ou dans un autre format par ffmpeg (selon l'extension)
+/// Les régions de la session : d'un repère au suivant (le dernier va jusqu'à la fin), nommées d'après le repère
+pub fn regions(s: &Session) -> Vec<(String, f64, f64)> {
+    let end = s.duration();
+    let mut m: Vec<&Marker> = s.markers.iter().filter(|m| m.t < end).collect();
+    m.sort_by(|a, b| a.t.total_cmp(&b.t));
+    (0..m.len()).map(|k| (m[k].name.clone(), m[k].t, m.get(k + 1).map(|n| n.t).unwrap_or(end))).filter(|r| r.2 - r.1 > 0.01).collect()
+}
+
+/// Un WAV par région, dans `dir`
+pub fn export_regions(s: &Session, sounds: &Sounds, dir: &Path) -> Result<Vec<PathBuf>, String> {
+    let regs = regions(s);
+    if regs.is_empty() {
+        return Err(crate::i18n::t("Pose des repères : chaque région va d'un repère au suivant."));
+    }
+    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    let mut out = vec![];
+    for (k, (name, a, b)) in regs.iter().enumerate() {
+        let data = mix(s, sounds, *a, *b, true);
+        let clean: String = name.chars().map(|c| if "/\\:*?\"<>|".contains(c) { '-' } else { c }).collect();
+        let path = dir.join(format!("{:02} {}.wav", k + 1, clean.trim()));
+        std::fs::write(&path, wav_bytes(&data)).map_err(|e| e.to_string())?;
+        out.push(path);
+    }
+    Ok(out)
+}
+
 pub fn export(s: &Session, sounds: &Sounds, out: &Path) -> Result<(), String> {
     let data = mix(s, sounds, 0.0, s.duration(), true);
     let wav = wav_bytes(&data);
@@ -1030,5 +1056,19 @@ mod meter_tests {
         assert!((super::correlation(&data) - 1.0).abs() < 1e-4);
         let anti: Vec<f32> = data.chunks(2).flat_map(|f| [f[0], -f[1]]).collect();
         assert!((super::correlation(&anti) + 1.0).abs() < 1e-4);
+    }
+}
+
+#[cfg(test)]
+mod region_tests {
+    #[test]
+    fn regions_entre_reperes() {
+        let mut s = super::Session::starter();
+        s.tracks[0].clips.push(super::Clip { src: "x.wav".into(), start: 0.0, offset: 0.0, len: 10.0, gain: 0.0, fade_in: 0.0, fade_out: 0.0, fx: vec![] });
+        s.markers = vec![super::Marker { t: 6.0, name: "Pas".into() }, super::Marker { t: 1.0, name: "Porte".into() }];
+        let r = super::regions(&s);
+        assert_eq!(r.len(), 2);
+        assert_eq!(r[0], ("Porte".to_string(), 1.0, 6.0));
+        assert!((r[1].2 - s.duration()).abs() < 1e-6);
     }
 }

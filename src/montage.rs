@@ -2055,6 +2055,8 @@ mod nest_tests {
         assert!((sub.clips[0].start).abs() < 1e-4);
         let subf = dir.join("principal - imbrication 1.aryav");
         sub.write(&subf).unwrap();
+        // Rendu de la sous-séquence d'abord (l'import la lance sinon en arrière-plan)
+        assert!(nested_cached(&subf, true).exists());
         let c = import(&main, &subf, track, t0).unwrap();
         assert!((c.media - sub.duration()).abs() < 0.05 || (c.src_out - sub.duration()).abs() < 0.05);
         p.clips.push(c);

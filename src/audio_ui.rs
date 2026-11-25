@@ -531,6 +531,12 @@ impl Editor {
             section(ui, &crate::i18n::t("Repères"));
             if self.session.markers.is_empty() {
                 ui.label(egui::RichText::new(crate::i18n::t("M pose un repère à la tête de lecture.")).size(11.5).color(p.muted));
+            } else if ui.button(format!("{}  {}", crate::lucide::DOWNLOAD, crate::i18n::t("exporter chaque région"))).on_hover_text(crate::i18n::t("Un WAV par région, d'un repère au suivant, nommé comme le repère (banques de bruitages)")).clicked() {
+                let dir = self.export_path("wav").with_extension("").with_file_name(format!("{} - régions", self.path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "son".into())));
+                match audio::export_regions(&self.session, &self.sounds, &dir) {
+                    Ok(v) => self.say(format!("{} {} · {}", v.len(), crate::i18n::t_mid("régions exportées"), dir.display())),
+                    Err(e) => self.say(e),
+                }
             }
         });
         let mut goto = None;

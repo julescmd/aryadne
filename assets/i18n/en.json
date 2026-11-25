@@ -3186,5 +3186,9 @@
   "Remplace les effets des clips choisis par cette chaîne": "Replaces the effects of the selected clips with this chain",
   "Mesurer : crête vraie, corrélation": "Measure: true peak, correlation",
   "Crête vraie (dBTP, à garder sous -1 pour les plateformes) et corrélation stéréo (proche de 1 : passe bien en mono)": "True peak (dBTP, keep under -1 for platforms) and stereo correlation (close to 1: folds well to mono)",
-  "corrélation": "correlation"
+  "corrélation": "correlation",
+  "Pose des repères : chaque région va d'un repère au suivant.": "Add markers: each region runs from one marker to the next.",
+  "exporter chaque région": "export each region",
+  "Un WAV par région, d'un repère au suivant, nommé comme le repère (banques de bruitages)": "One WAV per region, from one marker to the next, named after the marker (sound effect libraries)",
+  "régions exportées": "regions exported"
 }
