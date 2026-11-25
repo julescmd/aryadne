@@ -3107,5 +3107,11 @@
   "rayon max (px)": "max radius (px)",
   "plaque": "plate",
   "force mesurée": "measured strength",
-  "dosage": "amount"
+  "dosage": "amount",
+  "Booléen (forme)": "Boolean (shape)",
+  "ajoute, creuse ou garde l'intersection avec un cube, une sphère ou un cylindre": "adds, carves or keeps the intersection with a cube, sphere or cylinder",
+  "union": "union",
+  "intersection": "intersection",
+  "demi-taille": "half size",
+  "Le résultat est remaillé en voxels : les arêtes vives s'adoucissent un peu.": "The result is voxel-remeshed: sharp edges soften a little."
 }

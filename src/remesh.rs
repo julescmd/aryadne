@@ -17,6 +17,14 @@ pub fn remesh(pos: &[V3], tris: &[[u32; 3]], cell: f32, smooth: u32) -> Option<O
     if tris.is_empty() {
         return None;
     }
+    let (lo, hi) = bounds(pos);
+    let g = Grid::new(lo, hi, cell);
+    let field = mesh_field(pos, tris, &g)?;
+    extract(&field, &g, smooth)
+}
+
+/// Le cadre d'un nuage de points
+fn bounds(pos: &[V3]) -> (V3, V3) {
     let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
     for p in pos {
         for k in 0..3 {
@@ -24,15 +32,110 @@ pub fn remesh(pos: &[V3], tris: &[[u32; 3]], cell: f32, smooth: u32) -> Option<O
             hi[k] = hi[k].max(p[k]);
         }
     }
-    let size = [hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]];
-    let mut cell = cell.max(1e-5);
-    let cells = |c: f32| (0..3).map(|k| (size[k] / c).ceil() as usize + 4).product::<usize>();
-    while cells(cell) > 2_000_000 {
-        cell *= 1.25;
+    (lo, hi)
+}
+
+/// Une grille de voxels qui couvre un cadre, avec deux cases de marge
+struct Grid {
+    n: [usize; 3],
+    origin: V3,
+    cell: f32,
+}
+
+impl Grid {
+    fn new(lo: V3, hi: V3, cell: f32) -> Grid {
+        let size = [hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]];
+        let mut cell = cell.max(1e-5);
+        let cells = |c: f32| (0..3).map(|k| (size[k] / c).ceil() as usize + 4).product::<usize>();
+        while cells(cell) > 2_000_000 {
+            cell *= 1.25;
+        }
+        let n: [usize; 3] = [0, 1, 2].map(|k| (size[k] / cell).ceil() as usize + 4);
+        Grid { n, origin: [0, 1, 2].map(|k| lo[k] - 2.0 * cell), cell }
     }
-    // Deux cases de marge autour
-    let n: [usize; 3] = [0, 1, 2].map(|k| (size[k] / cell).ceil() as usize + 4);
-    let origin = [0, 1, 2].map(|k| lo[k] - 2.0 * cell);
+    fn point(&self, i: usize, j: usize, k: usize) -> V3 {
+        [self.origin[0] + i as f32 * self.cell, self.origin[1] + j as f32 * self.cell, self.origin[2] + k as f32 * self.cell]
+    }
+}
+
+/// Forme simple pour les booléens : 0 cube, 1 sphère, 2 cylindre (axe Y) ; centre et demi-tailles
+pub struct Shape {
+    pub kind: u8,
+    pub center: V3,
+    pub half: V3,
+}
+
+impl Shape {
+    /// Distance signée, positive dedans (comme le champ du maillage)
+    fn sdf(&self, p: V3) -> f32 {
+        let d = [p[0] - self.center[0], p[1] - self.center[1], p[2] - self.center[2]];
+        let h = self.half.map(|x| x.abs().max(1e-5));
+        match self.kind {
+            1 => {
+                // Ellipsoïde : approximation par mise à l'échelle
+                let q = [d[0] / h[0], d[1] / h[1], d[2] / h[2]];
+                let l = (q[0] * q[0] + q[1] * q[1] + q[2] * q[2]).sqrt();
+                (1.0 - l) * h[0].min(h[1]).min(h[2])
+            }
+            2 => {
+                let r = ((d[0] / h[0]).powi(2) + (d[2] / h[2]).powi(2)).sqrt();
+                let radial = (1.0 - r) * h[0].min(h[2]);
+                let axial = h[1] - d[1].abs();
+                radial.min(axial)
+            }
+            _ => {
+                let q = [h[0] - d[0].abs(), h[1] - d[1].abs(), h[2] - d[2].abs()];
+                if q.iter().all(|x| *x >= 0.0) {
+                    q[0].min(q[1]).min(q[2])
+                } else {
+                    -(q.iter().map(|x| x.min(0.0).powi(2)).sum::<f32>()).sqrt()
+                }
+            }
+        }
+    }
+}
+
+/// Booléen par voxels entre le maillage et une forme : 0 union, 1 différence, 2 intersection
+pub fn boolean(pos: &[V3], tris: &[[u32; 3]], shape: &Shape, op: u8, cell: f32, smooth: u32) -> Option<Out> {
+    if tris.is_empty() {
+        return None;
+    }
+    let (mut lo, mut hi) = bounds(pos);
+    if op == 0 {
+        for k in 0..3 {
+            lo[k] = lo[k].min(shape.center[k] - shape.half[k].abs());
+            hi[k] = hi[k].max(shape.center[k] + shape.half[k].abs());
+        }
+    }
+    let g = Grid::new(lo, hi, cell);
+    let mut field = mesh_field(pos, tris, &g)?;
+    let n = g.n;
+    for k in 0..n[2] {
+        for j in 0..n[1] {
+            for i in 0..n[0] {
+                let idx = (k * n[1] + j) * n[0] + i;
+                let s = shape.sdf(g.point(i, j, k));
+                let f = field[idx];
+                field[idx] = match op {
+                    0 => f.max(s),
+                    2 => f.min(s),
+                    _ => f.min(-s),
+                };
+            }
+        }
+    }
+    // Garde le champ hors de zéro (la surface reste fermée)
+    for f in field.iter_mut() {
+        if f.abs() < g.cell * 1e-3 {
+            *f = -g.cell * 1e-3;
+        }
+    }
+    extract(&field, &g, smooth)
+}
+
+/// Le champ signé du maillage dans la grille (positif dedans) ; None s'il n'enferme rien
+fn mesh_field(pos: &[V3], tris: &[[u32; 3]], g: &Grid) -> Option<Vec<f32>> {
+    let (n, origin, cell) = (g.n, g.origin, g.cell);
     let at = |i: usize, j: usize, k: usize| (k * n[1] + j) * n[0] + i;
     // 1. Dedans ou dehors : pour chaque colonne verticale (x, z), les traversées de la surface le long de y
     let mut cols: Vec<Vec<f32>> = vec![vec![]; n[0] * n[2]];
@@ -115,6 +218,13 @@ pub fn remesh(pos: &[V3], tris: &[[u32; 3]], cell: f32, smooth: u32) -> Option<O
         let d = d.max(cell * 1e-3);
         *f = if *f > 0.5 { d } else { -d };
     }
+    Some(field)
+}
+
+/// Surface nets sur le champ, puis lissage léger
+fn extract(field: &[f32], g: &Grid, smooth: u32) -> Option<Out> {
+    let (n, origin, cell) = (g.n, g.origin, g.cell);
+    let at = |i: usize, j: usize, k: usize| (k * n[1] + j) * n[0] + i;
     // 3. Surface nets : un sommet par case traversée par l'iso 0,5, à la moyenne des points de passage
     let iso = 0.0f32;
     let mut vid = vec![u32::MAX; n[0] * n[1] * n[2]];
@@ -217,6 +327,9 @@ pub fn remesh(pos: &[V3], tris: &[[u32; 3]], cell: f32, smooth: u32) -> Option<O
                 }
             }
         }
+    }
+    if out_tris.is_empty() {
+        return None;
     }
     Some(Out { pos: out_pos, tris: out_tris, edges: out_edges })
 }
@@ -344,5 +457,47 @@ mod tests {
             }
         }
         assert!(count.values().all(|c| *c == 2), "surface ouverte");
+    }
+}
+
+#[cfg(test)]
+mod bool_tests {
+    use super::*;
+
+    fn cube() -> (Vec<V3>, Vec<[u32; 3]>) {
+        let pos: Vec<V3> = (0..8).map(|i| [(i & 1) as f32 - 0.5, ((i >> 1) & 1) as f32 - 0.5, ((i >> 2) & 1) as f32 - 0.5]).collect();
+        let q = [[0, 2, 3, 1], [4, 5, 7, 6], [0, 1, 5, 4], [2, 6, 7, 3], [0, 4, 6, 2], [1, 3, 7, 5]];
+        let tris = q.iter().flat_map(|f: &[u32; 4]| [[f[0], f[1], f[2]], [f[0], f[2], f[3]]]).collect();
+        (pos, tris)
+    }
+
+    /// Volume d'un maillage fermé (théorème de la divergence)
+    fn volume(o: &Out) -> f32 {
+        o.tris.iter().map(|t| {
+            let (a, b, c) = (o.pos[t[0] as usize], o.pos[t[1] as usize], o.pos[t[2] as usize]);
+            (a[0] * (b[1] * c[2] - b[2] * c[1]) - a[1] * (b[0] * c[2] - b[2] * c[0]) + a[2] * (b[0] * c[1] - b[1] * c[0])) / 6.0
+        }).sum::<f32>().abs()
+    }
+
+    #[test]
+    fn booleens_par_voxels() {
+        let (pos, tris) = cube();
+        let plain = remesh(&pos, &tris, 0.04, 0).unwrap();
+        let v0 = volume(&plain);
+        assert!((v0 - 1.0).abs() < 0.1, "{v0}");
+        // Une sphère de rayon 0,3 au coin : la différence creuse, l'union ajoute, l'intersection garde peu
+        let sh = Shape { kind: 1, center: [0.5, 0.5, 0.5], half: [0.3; 3] };
+        let diff = volume(&boolean(&pos, &tris, &sh, 1, 0.04, 0).unwrap());
+        let uni = volume(&boolean(&pos, &tris, &sh, 0, 0.04, 0).unwrap());
+        let inter = volume(&boolean(&pos, &tris, &sh, 2, 0.04, 0).unwrap());
+        let octant = 4.0 / 3.0 * std::f32::consts::PI * 0.027 / 8.0;
+        assert!((v0 - diff - octant).abs() < 0.03, "{v0} {diff} {octant}");
+        assert!((uni - v0 - 7.0 * octant).abs() < 0.05, "{uni}");
+        assert!((inter - octant).abs() < 0.02, "{inter}");
+        // Cube et cylindre au centre : un trou qui traverse
+        let tube = Shape { kind: 2, center: [0.0; 3], half: [0.2, 1.0, 0.2] };
+        let holed = volume(&boolean(&pos, &tris, &tube, 1, 0.03, 0).unwrap());
+        let hole = std::f32::consts::PI * 0.04;
+        assert!((v0 - holed - hole).abs() < 0.04, "{holed}");
     }
 }
