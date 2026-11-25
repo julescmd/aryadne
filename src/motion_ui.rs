@@ -1252,6 +1252,23 @@ impl Editor {
                             }
                         });
                     });
+                    ui.horizontal(|ui| {
+                        changed |= ui.add(egui::DragValue::new(&mut r.slide).speed(1.0).range(-2000.0..=2000.0).prefix(crate::i18n::t("départ x ")).suffix(" px")).changed();
+                        let mut pc = r.scale * 100.0;
+                        if ui.add(egui::DragValue::new(&mut pc).speed(1.0).range(0.0..=1000.0).prefix(crate::i18n::t("taille de départ ")).suffix(" %")).changed() {
+                            r.scale = pc / 100.0;
+                            changed = true;
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new(crate::i18n::t("ordre")).size(11.0));
+                        for (o, icon, tip) in [(0u8, crate::lucide::ARROW_RIGHT, "dans l'ordre"), (1, crate::lucide::ARROW_LEFT, "à l'envers"), (2, crate::lucide::ARROW_LEFT_RIGHT, "du centre vers les bords"), (3, crate::lucide::SHUFFLE, "au hasard")] {
+                            if ui.selectable_label(r.order == o, icon).on_hover_text(crate::i18n::t(tip)).clicked() {
+                                r.order = o;
+                                changed = true;
+                            }
+                        }
+                    });
                 }
             }
             section(ui, "Lisser les clés");

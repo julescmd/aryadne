@@ -2839,5 +2839,12 @@
   "revenir à cette version (l'état actuel est publié avant)": "go back to this version (the current state is published first)",
   "revenu à": "back to",
   "état précédent gardé en": "previous state kept as",
-  "Versions publiées (v001, v002…)": "Published versions (v001, v002…)"
+  "Versions publiées (v001, v002…)": "Published versions (v001, v002…)",
+  "départ x ": "start x ",
+  "taille de départ ": "start size ",
+  "ordre": "order",
+  "dans l'ordre": "in order",
+  "à l'envers": "reversed",
+  "du centre vers les bords": "from the center out",
+  "au hasard": "random"
 }

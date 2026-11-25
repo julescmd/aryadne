@@ -138,11 +138,51 @@ pub struct Reveal {
     pub dur: f32,
     #[serde(default)]
     pub ease: Ease,
+    /// Taille de départ de chaque morceau (1 : sa taille)
+    #[serde(default = "one_f", skip_serializing_if = "is_one_f")]
+    pub scale: f32,
+    /// Départ en x (px), comme `rise` pour y
+    #[serde(default, skip_serializing_if = "is_zero_f")]
+    pub slide: f32,
+    /// Ordre d'arrivée : 0 dans l'ordre, 1 à l'envers, 2 du centre vers les bords, 3 au hasard
+    #[serde(default, skip_serializing_if = "is_zero_u8")]
+    pub order: u8,
+}
+
+fn one_f() -> f32 {
+    1.0
+}
+fn is_one_f(v: &f32) -> bool {
+    (*v - 1.0).abs() < 1e-6
+}
+fn is_zero_f(v: &f32) -> bool {
+    *v == 0.0
+}
+fn is_zero_u8(v: &u8) -> bool {
+    *v == 0
+}
+
+impl Reveal {
+    /// Rang d'arrivée du morceau `u` sur `n`.
+    pub fn rank(&self, u: usize, n: usize) -> f32 {
+        let n = n.max(1);
+        match self.order {
+            1 => (n - 1 - u.min(n - 1)) as f32,
+            2 => ((u as f32) - (n as f32 - 1.0) / 2.0).abs(),
+            3 => {
+                // Un mélange stable : la même place à chaque image
+                let mut idx: Vec<usize> = (0..n).collect();
+                idx.sort_by_key(|&i| (i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15).rotate_left(17));
+                idx.iter().position(|&i| i == u).unwrap_or(u) as f32
+            }
+            _ => u as f32,
+        }
+    }
 }
 
 impl Default for Reveal {
     fn default() -> Reveal {
-        Reveal { by: Unit::Letter, delay: 0.04, rise: 60.0, dur: 0.5, ease: Ease::Bounce }
+        Reveal { by: Unit::Letter, delay: 0.04, rise: 60.0, dur: 0.5, ease: Ease::Bounce, scale: 1.0, slide: 0.0, order: 0 }
     }
 }
 
@@ -1260,7 +1300,7 @@ fn bitmap(l: &Layer, t: f32, k: f32, cache: &mut Cache) -> Option<Bitmap> {
             use ab_glyph::{Font, ScaleFont};
             let by = l.reveal.as_ref().map(|r| r.by).unwrap_or_default();
             let lay = layout_text(text, *size, fname, *tracking, *align, by);
-            let rise = l.reveal.as_ref().map(|r| r.rise.abs()).unwrap_or(0.0);
+            let rise = l.reveal.as_ref().map(|r| r.rise.abs().max(r.slide.abs()) + size * (r.scale - 1.0).max(0.0)).unwrap_or(0.0);
             let pad = size * 0.3 + rise;
             let (bw, bh) = (((lay.w + 2.0 * pad) * k).ceil().clamp(1.0, 8192.0) as u32, ((lay.h + 2.0 * pad) * k).ceil().clamp(1.0, 8192.0) as u32);
             let mut img = image::RgbaImage::from_pixel(bw, bh, image::Rgba([color[0], color[1], color[2], 0]));
@@ -1268,19 +1308,23 @@ fn bitmap(l: &Layer, t: f32, k: f32, cache: &mut Cache) -> Option<Bitmap> {
             let sf = f.as_scaled(ab_glyph::PxScale::from(size * k));
             let local = t - l.start;
             for g in &lay.glyphs {
-                let (dy, alpha) = match &l.reveal {
+                let (dx, dy, gs, alpha) = match &l.reveal {
                     Some(r) => {
-                        let x = (local - g.unit as f32 * r.delay) / r.dur.max(1e-3);
+                        let x = (local - r.rank(g.unit, lay.units) * r.delay) / r.dur.max(1e-3);
                         let e = r.ease.apply(x);
-                        (r.rise * (1.0 - e), Ease::Linear.apply(x * 1.6))
+                        (r.slide * (1.0 - e), r.rise * (1.0 - e), r.scale + (1.0 - r.scale) * e, Ease::Linear.apply(x * 1.6))
                     }
-                    None => (0.0, 1.0),
+                    None => (0.0, 0.0, 1.0, 1.0),
                 };
-                if alpha <= 0.0 {
+                if alpha <= 0.0 || gs <= 0.001 {
                     continue;
                 }
-                let glyph = sf.scaled_glyph(g.ch);
-                let glyph = ab_glyph::Glyph { position: ab_glyph::point((g.x + pad) * k, (g.y + dy + pad) * k), ..glyph };
+                // Mise à l'échelle autour du milieu de la lettre
+                let adv = sf.h_advance(f.glyph_id(g.ch));
+                let cx = g.x + adv / 2.0;
+                let cy = g.y - size * 0.35;
+                let px = ab_glyph::PxScale::from(size * k * gs);
+                let glyph = ab_glyph::Glyph { id: f.glyph_id(g.ch), scale: px, position: ab_glyph::point((cx + (g.x - cx) * gs + dx + pad) * k, (cy + (g.y - cy) * gs + dy + pad) * k) };
                 if let Some(o) = f.outline_glyph(glyph) {
                     let b = o.px_bounds();
                     o.draw(|gx, gy, cov| {
@@ -1293,7 +1337,6 @@ fn bitmap(l: &Layer, t: f32, k: f32, cache: &mut Cache) -> Option<Bitmap> {
                     });
                 }
             }
-            let _ = lay.units;
             Some(Bitmap { img, ox: -lay.w / 2.0 - pad, oy: -lay.h / 2.0 - pad, k })
         }
     }
