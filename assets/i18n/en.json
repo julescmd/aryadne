@@ -3352,5 +3352,10 @@
   "iPhone": "iPhone",
   "Android": "Android",
   "écran": "screen",
-  "Le plan dans un cadre d'appareil, barre d'état comprise (affiché et exporté en SVG)": "The artboard in a device frame, status bar included (shown and exported to SVG)"
+  "Le plan dans un cadre d'appareil, barre d'état comprise (affiché et exporté en SVG)": "The artboard in a device frame, status bar included (shown and exported to SVG)",
+  "commentaire : clic pour épingler une note sur la toile, clic sur une bulle pour la lire": "comment: click to pin a note on the canvas, click a bubble to read it",
+  "Commentaire": "Comment",
+  "Ce qui est à revoir ici…": "What needs another look here…",
+  "résolu": "resolved",
+  "retirer le commentaire": "remove comment"
 }

@@ -23,9 +23,10 @@ pub enum Tool {
     Builder,
     Pencil,
     Paint,
+    Comment,
 }
 
-const TOOLS: [(Tool, &str, &str, &str); 14] = [
+const TOOLS: [(Tool, &str, &str, &str); 15] = [
     (Tool::Select, l::MOUSE_POINTER_2, "sélection", "V"),
     (Tool::Direct, l::MOUSE_POINTER, "sélection directe : les points d'un tracé", "A"),
     (Tool::Pen, l::PEN_TOOL, "plume : clic pour un point, glisser pour une courbe", "P"),
@@ -39,6 +40,7 @@ const TOOLS: [(Tool, &str, &str, &str); 14] = [
     (Tool::Board, l::FRAME, "plan de travail", "F"),
     (Tool::Width, l::SPLINE, "largeur : glisser sur un contour pour l'épaissir à cet endroit (Alt+clic : retirer le point)", "W"),
     (Tool::Builder, l::SHAPES, "concepteur de formes : glisser sur les zones des formes choisies pour les fusionner (Alt : effacer)", "M"),
+    (Tool::Comment, l::MESSAGE_CIRCLE, "commentaire : clic pour épingler une note sur la toile, clic sur une bulle pour la lire", "C"),
     (Tool::Paint, l::PAINT_BUCKET, "peinture dynamique : clic dans une zone fermée par des traits pour la remplir (Alt+clic : prendre la couleur)", "K"),
 ];
 
@@ -102,6 +104,10 @@ pub struct Editor {
     picked: Vec<u32>,
     /// Peinture dynamique : la couleur du pot
     paint_color: [u8; 4],
+    /// Commentaire ouvert (indice)
+    comment_open: Option<usize>,
+    /// Où ouvrir la fenêtre du commentaire (près de sa bulle)
+    comment_at: Option<Pos2>,
     /// Surbrillance des zones (zones affichées, texture)
     builder_tex: Option<(Vec<u32>, egui::TextureHandle)>,
     /// Décalage de tracé (unités)
@@ -162,6 +168,8 @@ impl Editor {
             builder: None,
             picked: vec![],
             paint_color: [236, 108, 89, 255],
+            comment_open: None,
+            comment_at: None,
             builder_tex: None,
             offset_by: 10.0,
             blend_steps: 5,
@@ -466,6 +474,7 @@ impl Editor {
         egui::Panel::left(egui::Id::unique(("vec-layers", &key))).resizable(true).default_size(200.0).min_size(150.0).max_size(360.0).frame(egui::Frame::new().fill(p.panel).stroke(Stroke::new(1.0, p.line)).inner_margin(8)).show(ui, |ui| self.layers(ui));
         self.toolbar(ui);
         self.icon_window(&ui.ctx().clone());
+        self.comment_window(&ui.ctx().clone());
         self.canvas(ui);
         self.save_if_due(false);
         if self.save_due.is_some() {
@@ -713,7 +722,8 @@ impl Editor {
                         b.device = 0;
                     }
                     for (k, name) in crate::vector::DEVICES.iter().enumerate() {
-                        if ui.selectable_label(b.device == k as u8 + 1, crate::i18n::t(name)).on_hover_text(crate::i18n::t("Le plan dans un cadre d'appareil, barre d'état comprise (affiché et exporté en SVG)")).clicked() {
+                        let label = if k < 2 { name.to_string() } else { crate::i18n::t(name) };
+                        if ui.selectable_label(b.device == k as u8 + 1, label).on_hover_text(crate::i18n::t("Le plan dans un cadre d'appareil, barre d'état comprise (affiché et exporté en SVG)")).clicked() {
                             b.device = k as u8 + 1;
                         }
                     }
@@ -1729,6 +1739,46 @@ impl Editor {
     }
 
     /// La bibliothèque d'icônes : recherche par nom (en anglais), un clic pose l'icône au centre de la vue
+    /// Le commentaire ouvert : son texte, résolu ou pas, le retirer
+    fn comment_window(&mut self, ctx: &egui::Context) {
+        let Some(i) = self.comment_open.filter(|i| *i < self.doc.comments.len()) else {
+            self.comment_open = None;
+            return;
+        };
+        let mut open = true;
+        let (mut del, mut ch) = (false, false);
+        let mut win = egui::Window::new(format!("{} {}", crate::i18n::t("Commentaire"), i + 1)).id(egui::Id::new(("vec-comment", &self.path, i))).open(&mut open);
+        if let Some(at) = self.comment_at {
+            win = win.default_pos(at);
+        }
+        win.collapsible(false).resizable(false).default_width(280.0).show(ctx, |ui| {
+            let c = &mut self.doc.comments[i];
+            let r = ui.add(egui::TextEdit::multiline(&mut c.text).desired_rows(4).desired_width(f32::INFINITY).hint_text(crate::i18n::t("Ce qui est à revoir ici…")));
+            if c.text.is_empty() {
+                r.request_focus();
+            }
+            ch |= r.changed();
+            ui.horizontal(|ui| {
+                ch |= ui.checkbox(&mut c.done, crate::i18n::t("résolu")).changed();
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    del = ui.button(egui::RichText::new(l::TRASH_2).size(13.0)).on_hover_text(crate::i18n::t("retirer le commentaire")).clicked();
+                });
+            });
+        });
+        if del {
+            self.checkpoint();
+            self.doc.comments.remove(i);
+            open = false;
+            ch = true;
+        }
+        if ch {
+            self.changed();
+        }
+        if !open {
+            self.comment_open = None;
+        }
+    }
+
     fn icon_window(&mut self, ctx: &egui::Context) {
         let Some(q) = self.icon_pick.as_mut() else { return };
         let mut open = true;
@@ -2203,6 +2253,18 @@ impl Editor {
             }
         }
         self.mouse(ui, &resp, rect, &to_world, &to_screen, label_hit);
+        // Commentaires : une bulle numérotée, la pointe sur l'endroit commenté
+        for (i, c) in self.doc.comments.iter().enumerate() {
+            let tip = to_screen([c.x, c.y]);
+            let center = tip - vec2(0.0, 16.0);
+            let col = if c.done { p.muted } else { p.accent };
+            painter.add(egui::Shape::convex_polygon(vec![tip, center + vec2(-6.0, 6.0), center + vec2(6.0, 6.0)], col, Stroke::NONE));
+            painter.circle(center, 11.0, col, Stroke::new(1.5, Color32::WHITE));
+            painter.text(center, egui::Align2::CENTER_CENTER, (i + 1).to_string(), egui::FontId::proportional(11.0), p.on_accent);
+            if self.comment_open == Some(i) {
+                painter.circle_stroke(center, 14.0, Stroke::new(2.0, col));
+            }
+        }
         // Dégradé à points libres : ses points, de leur couleur, qu'on tire à la souris
         if self.tool == Tool::Select {
             if let Some(s) = self.sel.first().and_then(|i| self.doc.get(*i)) {
@@ -2485,6 +2547,25 @@ impl Editor {
             }
         }
         let tol = 4.0 / self.zoom;
+        if !space && self.tool == Tool::Comment && !resp.drag_started_by(egui::PointerButton::Middle) && !matches!(self.drag, Some(Drag::Pan)) {
+            if resp.clicked() {
+                if let Some(h) = resp.interact_pointer_pos() {
+                    let w = to_world(h);
+                    let hit = self.doc.comments.iter().position(|c| (to_screen([c.x, c.y]) - vec2(0.0, 16.0)).distance(h) < 14.0);
+                    self.comment_at = Some(h + vec2(24.0, -40.0));
+                    match hit {
+                        Some(i) => self.comment_open = Some(i),
+                        None => {
+                            self.checkpoint();
+                            self.doc.comments.push(crate::vector::Comment { x: w[0], y: w[1], text: String::new(), done: false });
+                            self.comment_open = Some(self.doc.comments.len() - 1);
+                            self.changed();
+                        }
+                    }
+                }
+            }
+            return;
+        }
         if !space && self.tool == Tool::Paint && !resp.drag_started_by(egui::PointerButton::Middle) && !matches!(self.drag, Some(Drag::Pan)) {
             if resp.hovered() {
                 ui.ctx().set_cursor_icon(egui::CursorIcon::Cell);
@@ -2683,7 +2764,7 @@ impl Editor {
                 self.sel = vec![id];
                 Some(Drag::Pencil { id, pts: vec![w] })
             }
-            Tool::Width | Tool::Builder | Tool::Paint => None,
+            Tool::Width | Tool::Builder | Tool::Paint | Tool::Comment => None,
         }
     }
 

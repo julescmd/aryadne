@@ -337,6 +337,18 @@ pub struct Doc {
     /// Styles partagés (comme Figma) : changer un style change toutes les formes qui l'utilisent
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub styles: Vec<NamedStyle>,
+    /// Commentaires épinglés sur la toile (jamais exportés)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub comments: Vec<Comment>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct Comment {
+    pub x: f32,
+    pub y: f32,
+    pub text: String,
+    #[serde(default)]
+    pub done: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -402,6 +414,7 @@ impl Doc {
             next_id: 1,
             swatches: vec![[24, 24, 27, 255], [255, 255, 255, 255], [236, 108, 89, 255], [244, 191, 80, 255], [86, 166, 122, 255], [84, 128, 220, 255], [150, 110, 210, 255]],
             styles: vec![],
+            comments: vec![],
         }
     }
 
