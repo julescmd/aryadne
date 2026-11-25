@@ -1382,85 +1382,143 @@ pub fn panel_with(ui: &mut egui::Ui, stack: &mut Vec<Modifier>, applied: bool, r
     if stack.is_empty() {
         ui.label(RichText::new(crate::i18n::t("Aucun modificateur. Ils s'appliquent de haut en bas, sans changer le fichier d'origine.")).color(p.muted).size(11.0));
     }
-    // (index, action) : -1 haut, 1 bas, 0 supprimer, 2 dupliquer
+    // (index, action) : 0 supprimer, 2 dupliquer
     let mut action: Option<(usize, i32)> = None;
-    let n = stack.len();
+    // Glisser-déposer : (modificateur tiré, place d'arrivée)
+    let mut moved: Option<(usize, usize)> = None;
+    let dragging = egui::DragAndDrop::has_payload_of_type::<ModDrag>(ui.ctx());
+    ui.add_space(4.0);
     for (i, md) in stack.iter_mut().enumerate() {
-        egui::Frame::new().fill(p.bg).stroke(egui::Stroke::new(1.0, if md.on { p.line } else { p.line.gamma_multiply(0.5) })).inner_margin(6).show(ui, |ui| {
+        let icon = |ui: &mut egui::Ui, glyph: &str, tip: &str| ui.add(egui::Button::new(RichText::new(glyph).size(13.0).color(p.muted)).frame(false).min_size(egui::vec2(22.0, 22.0))).on_hover_text(crate::i18n::t(tip)).clicked();
+        let card = egui::Frame::new().fill(p.panel).stroke(egui::Stroke::new(1.0, if md.on { p.line } else { p.line.gamma_multiply(0.5) })).corner_radius(8).inner_margin(egui::Margin { left: 8, right: 10, top: 6, bottom: if md.open { 12 } else { 6 } }).show(ui, |ui| {
             ui.set_width(ui.available_width());
+            ui.spacing_mut().item_spacing = egui::vec2(6.0, 8.0);
             ui.horizontal(|ui| {
-                if ui.add(egui::Button::new(if md.open { "▾" } else { "▸" }).frame(false)).clicked() {
+                // La poignée : glisser pour changer l'ordre, comme dans Blender
+                let grip = ui.dnd_drag_source(egui::Id::new(("mod-drag", i)), ModDrag(i), |ui| {
+                    ui.label(RichText::new(crate::lucide::GRIP_VERTICAL).size(14.0).color(p.muted));
+                });
+                grip.response.on_hover_cursor(egui::CursorIcon::Grab).on_hover_text(crate::i18n::t("glisser pour changer l'ordre"));
+                if ui.add(egui::Button::new(RichText::new(if md.open { crate::lucide::CHEVRON_DOWN } else { crate::lucide::CHEVRON_RIGHT }).size(13.0).color(p.muted)).frame(false)).clicked() {
                     md.open = !md.open;
                 }
                 if ui.checkbox(&mut md.on, "").on_hover_text(crate::i18n::t("activer / désactiver")).changed() {
                     changed = true;
                 }
-                let t = RichText::new(crate::i18n::t(md.kind.name())).family(crate::theme::bold()).size(12.0);
+                let t = RichText::new(crate::i18n::t(md.kind.name())).family(crate::theme::bold()).size(13.0);
                 if ui.add(egui::Button::new(if md.on { t } else { t.color(p.muted).strikethrough() }).frame(false)).clicked() {
                     md.open = !md.open;
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.small_button("×").on_hover_text(crate::i18n::t("supprimer")).clicked() {
+                    ui.spacing_mut().item_spacing.x = 2.0;
+                    if icon(ui, crate::lucide::X, "supprimer") {
                         action = Some((i, 0));
                     }
-                    if can_apply && md.on && ui.small_button("✔").on_hover_text(crate::i18n::t("Appliquer : le résultat devient le maillage de base (avec les modificateurs au-dessus)")).clicked() {
-                        *request = Some(Request::ApplyUpTo(i));
-                    }
-                    if ui.small_button("⧉").on_hover_text(crate::i18n::t("dupliquer")).clicked() {
+                    if icon(ui, crate::lucide::COPY, "dupliquer") {
                         action = Some((i, 2));
                     }
-                    if i + 1 < n && ui.small_button("↓").on_hover_text(crate::i18n::t("descendre")).clicked() {
-                        action = Some((i, 1));
-                    }
-                    if i > 0 && ui.small_button("↑").on_hover_text(crate::i18n::t("monter")).clicked() {
-                        action = Some((i, -1));
+                    if can_apply && md.on && icon(ui, crate::lucide::CHECK, "Appliquer : le résultat devient le maillage de base (avec les modificateurs au-dessus)") {
+                        *request = Some(Request::ApplyUpTo(i));
                     }
                 });
             });
             if md.open {
+                ui.add_space(2.0);
+                // Réglages aérés : boutons en pastilles, comme l'inspecteur du montage
+                ui.spacing_mut().button_padding = egui::vec2(10.0, 4.0);
+                ui.style_mut().visuals.widgets.inactive.corner_radius = egui::CornerRadius::same(10);
+                ui.style_mut().visuals.widgets.hovered.corner_radius = egui::CornerRadius::same(10);
+                ui.style_mut().visuals.widgets.active.corner_radius = egui::CornerRadius::same(10);
                 changed |= params(ui, &mut md.kind);
                 if md.kind.is_deform() {
                     let head = if md.influence < 0.999 || md.limit_on || md.invert { "influence et zone ●" } else { "influence et zone" };
-                    if ui.add(egui::Button::new(RichText::new(format!("{} {head}", if md.common_open { "▾" } else { "▸" })).size(11.0).color(p.muted)).frame(false)).clicked() {
+                    if ui.add(egui::Button::new(RichText::new(format!("{}  {}", if md.common_open { crate::lucide::CHEVRON_DOWN } else { crate::lucide::CHEVRON_RIGHT }, crate::i18n::t(head))).size(11.5).color(p.muted)).frame(false)).clicked() {
                         md.common_open = !md.common_open;
                     }
                     if md.common_open {
-                        changed |= ui.add(egui::Slider::new(&mut md.influence, 0.0..=1.0).text(crate::i18n::t("influence"))).changed();
+                        changed |= row_slider(ui, "influence", egui::Slider::new(&mut md.influence, 0.0..=1.0));
                         changed |= ui.checkbox(&mut md.limit_on, crate::i18n::t("limiter à une zone")).changed();
                         if md.limit_on {
                             changed |= axis_ui(ui, &mut md.limit_axis);
-                            changed |= ui.add(egui::Slider::new(&mut md.limit[0], -1.0..=1.0).text(crate::i18n::t("début"))).changed();
-                            changed |= ui.add(egui::Slider::new(&mut md.limit[1], -1.0..=1.0).text(crate::i18n::t("fin"))).changed();
-                            changed |= ui.add(egui::Slider::new(&mut md.falloff, 0.0..=1.0).text(crate::i18n::t("fondu"))).changed();
+                            changed |= row_slider(ui, "début", egui::Slider::new(&mut md.limit[0], -1.0..=1.0));
+                            changed |= row_slider(ui, "fin", egui::Slider::new(&mut md.limit[1], -1.0..=1.0));
+                            changed |= row_slider(ui, "fondu", egui::Slider::new(&mut md.falloff, 0.0..=1.0));
                         }
                         changed |= ui.checkbox(&mut md.invert, crate::i18n::t("inverser la zone")).changed();
                     }
                 }
             }
         });
-        ui.add_space(4.0);
+        // Dépôt : au-dessus ou au-dessous de cette carte selon la moitié survolée
+        let r = card.response.rect;
+        if dragging {
+            if let Some(q) = ui.ctx().pointer_hover_pos().filter(|q| r.expand2(egui::vec2(0.0, 5.0)).contains(*q)) {
+                let below = q.y > r.center().y;
+                let y = if below { r.bottom() + 5.0 } else { r.top() - 5.0 };
+                ui.painter().hline(r.x_range(), y, egui::Stroke::new(2.0, p.accent));
+                if let Some(from) = ui.input(|inp| inp.pointer.any_released()).then(|| egui::DragAndDrop::payload::<ModDrag>(ui.ctx())).flatten() {
+                    moved = Some((from.0, if below { i + 1 } else { i }));
+                }
+            }
+        }
+        ui.add_space(10.0);
+    }
+    if let Some((from, mut to)) = moved {
+        if from < stack.len() && to != from && to != from + 1 {
+            let m = stack.remove(from);
+            if to > from {
+                to -= 1;
+            }
+            stack.insert(to.min(stack.len()), m);
+            changed = true;
+        }
+        egui::DragAndDrop::clear_payload(ui.ctx());
     }
     if let Some((i, a)) = action {
         match a {
             0 => {
                 stack.remove(i);
             }
-            2 => {
+            _ => {
                 let c = stack[i];
                 stack.insert(i + 1, c);
             }
-            -1 => stack.swap(i, i - 1),
-            _ => stack.swap(i, i + 1),
         }
         changed = true;
     }
     changed
 }
 
+/// Ce qu'on tire quand on change l'ordre des modificateurs
+#[derive(Clone, Copy)]
+struct ModDrag(usize);
+
+/// Largeur de la colonne des noms dans les réglages
+const LABEL_W: f32 = 84.0;
+
+/// Une ligne de réglage : le nom (discret) à gauche, le contrôle qui remplit le reste
+fn row<R>(ui: &mut egui::Ui, label: &str, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    ui.horizontal(|ui| {
+        let (r, _) = ui.allocate_exact_size(egui::vec2(LABEL_W, 20.0), egui::Sense::hover());
+        let g = ui.painter().layout(crate::i18n::t(label), egui::FontId::proportional(12.0), crate::theme::pal().muted, LABEL_W);
+        ui.painter().galley(egui::pos2(r.left(), r.center().y - g.size().y / 2.0), g, crate::theme::pal().muted);
+        add(ui)
+    })
+    .inner
+}
+
+/// Un curseur sur une ligne : nom, curseur qui s'étire, valeur
+fn row_slider(ui: &mut egui::Ui, label: &str, s: egui::Slider) -> bool {
+    row(ui, label, |ui| {
+        // La valeur prend environ 60 px à droite ; on laisse une marge pour ne jamais élargir le panneau
+        ui.spacing_mut().slider_width = (ui.available_width() - 84.0).max(40.0);
+        ui.add(s).changed()
+    })
+}
+
 fn axis_ui(ui: &mut egui::Ui, a: &mut u8) -> bool {
     let mut c = false;
-    ui.horizontal(|ui| {
-        ui.label(RichText::new(crate::i18n::t("axe")).size(11.0));
+    row(ui, "axe", |ui| {
         // Montrés avec Z vers le haut (l'axe interne 1)
         for (shown, l) in ["X", "Y", "Z"].iter().enumerate() {
             let k = crate::gizmo::SHOWN[shown].0;
@@ -1472,14 +1530,14 @@ fn axis_ui(ui: &mut egui::Ui, a: &mut u8) -> bool {
 
 fn vec3_ui(ui: &mut egui::Ui, v: &mut V3, label: &str, speed: f32) -> bool {
     let mut c = false;
-    ui.horizontal(|ui| {
-        ui.label(RichText::new(label).size(11.0));
-        for (shown, l) in ["x", "y", "z"].iter().enumerate() {
+    row(ui, label, |ui| {
+        let w = ((ui.available_width() - 2.0 * ui.spacing().item_spacing.x - 6.0) / 3.0).max(30.0);
+        for (shown, l) in ["X", "Y", "Z"].iter().enumerate() {
             let (k, sign) = crate::gizmo::SHOWN[shown];
-            // Une échelle n'a pas de sens : seul l'ordre des axes change
-            let sign = if label.contains("échelle") { 1.0 } else { sign };
+            // Une taille ou une échelle n'a pas de sens : seul l'ordre des axes change
+            let sign = if label.contains("échelle") || label.contains("taille") { 1.0 } else { sign };
             let mut val = v[k] * sign + 0.0;
-            if ui.add(egui::DragValue::new(&mut val).speed(speed).max_decimals(3).prefix(format!("{l} "))).changed() {
+            if ui.add_sized([w, 22.0], egui::DragValue::new(&mut val).speed(speed).max_decimals(3).prefix(format!("{l}  "))).changed() {
                 v[k] = val * sign;
                 c = true;
             }
@@ -1490,8 +1548,7 @@ fn vec3_ui(ui: &mut egui::Ui, v: &mut V3, label: &str, speed: f32) -> bool {
 
 fn bool3_ui(ui: &mut egui::Ui, v: &mut [bool; 3], label: &str) -> bool {
     let mut c = false;
-    ui.horizontal(|ui| {
-        ui.label(RichText::new(label).size(11.0));
+    row(ui, label, |ui| {
         for (shown, l) in ["X", "Y", "Z"].iter().enumerate() {
             let k = crate::gizmo::SHOWN[shown].0;
             c |= ui.toggle_value(&mut v[k], *l).changed();
@@ -1503,7 +1560,7 @@ fn bool3_ui(ui: &mut egui::Ui, v: &mut [bool; 3], label: &str) -> bool {
 fn params(ui: &mut egui::Ui, k: &mut Kind) -> bool {
     let mut c = false;
     fn sl(ui: &mut egui::Ui, v: &mut f32, r: std::ops::RangeInclusive<f32>, t: &str) -> bool {
-        ui.add(egui::Slider::new(v, r).text(t).clamping(egui::SliderClamping::Never)).changed()
+        row_slider(ui, t, egui::Slider::new(v, r).clamping(egui::SliderClamping::Never))
     }
     macro_rules! s {
         ($ui:expr, $v:expr, $r:expr, $t:expr) => {
@@ -1518,7 +1575,7 @@ fn params(ui: &mut egui::Ui, k: &mut Kind) -> bool {
             c |= ui.checkbox(bisect, crate::i18n::t("couper avant (bisect)")).changed();
         }
         Kind::Array { count, axis, offset, constant, rotate, scale } => {
-            c |= ui.add(egui::Slider::new(count, 1..=256).clamping(egui::SliderClamping::Never).text(crate::i18n::t("copies")).logarithmic(true)).changed();
+            c |= row_slider(ui, "copies", egui::Slider::new(count, 1..=256).clamping(egui::SliderClamping::Never).logarithmic(true));
             c |= axis_ui(ui, axis);
             s!(ui, offset, -3.0..=3.0, "écart (× taille)");
             c |= vec3_ui(ui, constant, "décalage", 0.01);
@@ -1526,7 +1583,7 @@ fn params(ui: &mut egui::Ui, k: &mut Kind) -> bool {
             s!(ui, scale, 0.5..=1.5, "échelle par copie");
         }
         Kind::Subdivision { levels, optimal, simple } => {
-            c |= ui.add(egui::Slider::new(levels, 0..=5).clamping(egui::SliderClamping::Never).text(crate::i18n::t("niveaux"))).changed();
+            c |= row_slider(ui, "niveaux", egui::Slider::new(levels, 0..=5).clamping(egui::SliderClamping::Never));
             ui.horizontal(|ui| {
                 c |= ui.selectable_value(simple, false, crate::i18n::t("Catmull-Clark")).changed();
                 c |= ui.selectable_value(simple, true, crate::i18n::t("simple")).changed();
@@ -1535,7 +1592,7 @@ fn params(ui: &mut egui::Ui, k: &mut Kind) -> bool {
         }
         Kind::Decimate { ratio } => s!(ui, ratio, 0.01..=1.0, "proportion gardée"),
         Kind::Smooth { iterations, factor, preserve_volume, axes } => {
-            c |= ui.add(egui::Slider::new(iterations, 1..=100).clamping(egui::SliderClamping::Never).text(crate::i18n::t("passes"))).changed();
+            c |= row_slider(ui, "passes", egui::Slider::new(iterations, 1..=100).clamping(egui::SliderClamping::Never));
             s!(ui, factor, -1.0..=1.0, "force");
             c |= ui.checkbox(preserve_volume, crate::i18n::t("garder le volume (Taubin)")).changed();
             c |= bool3_ui(ui, axes, "axes");
@@ -1543,7 +1600,7 @@ fn params(ui: &mut egui::Ui, k: &mut Kind) -> bool {
         Kind::Displace { strength, scale, seed, octaves, roughness, direction, midlevel } => {
             s!(ui, strength, -0.5..=0.5, "force");
             s!(ui, scale, 0.1..=40.0, "échelle");
-            c |= ui.add(egui::Slider::new(octaves, 1..=10).clamping(egui::SliderClamping::Never).text(crate::i18n::t("octaves"))).changed();
+            c |= row_slider(ui, "octaves", egui::Slider::new(octaves, 1..=10).clamping(egui::SliderClamping::Never));
             s!(ui, roughness, 0.05..=0.95, "rugosité");
             s!(ui, midlevel, 0.0..=1.0, "niveau neutre");
             s!(ui, seed, 0.0..=100.0, "graine");
@@ -1596,14 +1653,14 @@ fn params(ui: &mut egui::Ui, k: &mut Kind) -> bool {
             c |= vec3_ui(ui, offset, "décalage", 0.01);
         }
         Kind::Weld { distance } => {
-            c |= ui.add(egui::Slider::new(distance, 0.00001..=0.2).logarithmic(true).text(crate::i18n::t("distance"))).changed();
+            c |= row_slider(ui, "distance", egui::Slider::new(distance, 0.00001..=0.2).logarithmic(true));
         }
         Kind::Triangulate | Kind::FlipNormals => {
             ui.label(RichText::new(crate::i18n::t("sans réglage")).size(11.0));
         }
         Kind::EdgeSplit { angle } => s!(ui, angle, 0.0..=180.0, "angle °"),
         Kind::Wireframe { thickness, keep } => {
-            c |= ui.add(egui::Slider::new(thickness, 0.0005..=0.1).logarithmic(true).text(crate::i18n::t("épaisseur"))).changed();
+            c |= row_slider(ui, "épaisseur", egui::Slider::new(thickness, 0.0005..=0.1).logarithmic(true));
             c |= ui.checkbox(keep, crate::i18n::t("garder le maillage")).changed();
         }
         Kind::Explode { distance, random, seed } => {
@@ -1618,7 +1675,7 @@ fn params(ui: &mut egui::Ui, k: &mut Kind) -> bool {
             c |= ui.checkbox(along_normal, crate::i18n::t("le long des normales")).changed();
         }
         Kind::Voxelize { step } => {
-            c |= ui.add(egui::Slider::new(step, 0.002..=0.5).logarithmic(true).text(crate::i18n::t("taille"))).changed();
+            c |= row_slider(ui, "taille", egui::Slider::new(step, 0.002..=0.5).logarithmic(true));
         }
         Kind::Stretch { factor, axis } => {
             s!(ui, factor, -0.9..=3.0, "facteur");
@@ -1650,7 +1707,7 @@ fn params(ui: &mut egui::Ui, k: &mut Kind) -> bool {
         }
         Kind::Screw { angle, steps, height, axis } => {
             s!(ui, angle, -1440.0..=1440.0, "angle total °");
-            c |= ui.add(egui::Slider::new(steps, 1..=256).clamping(egui::SliderClamping::Never).text(crate::i18n::t("étapes")).logarithmic(true)).changed();
+            c |= row_slider(ui, "étapes", egui::Slider::new(steps, 1..=256).clamping(egui::SliderClamping::Never).logarithmic(true));
             s!(ui, height, -2.0..=2.0, "hauteur");
             c |= axis_ui(ui, axis);
         }
@@ -1685,25 +1742,25 @@ fn params(ui: &mut egui::Ui, k: &mut Kind) -> bool {
             s!(ui, seed, 0.0..=100.0, "graine");
         }
         Kind::Remesh { voxel, smooth } => {
-            c |= ui.add(egui::Slider::new(voxel, 0.004..=0.1).logarithmic(true).text(crate::i18n::t("taille des voxels"))).changed();
-            c |= ui.add(egui::Slider::new(smooth, 0..=6).text(crate::i18n::t("lissage"))).changed();
+            c |= row_slider(ui, "taille des voxels", egui::Slider::new(voxel, 0.004..=0.1).logarithmic(true));
+            c |= row_slider(ui, "lissage", egui::Slider::new(smooth, 0..=6));
             ui.label(egui::RichText::new(crate::i18n::t("Plus petit : plus de détails et plus de faces.")).size(11.0).color(crate::theme::pal().muted));
         }
         Kind::Boolean { op, shape, center, size, voxel, smooth } => {
-            ui.horizontal(|ui| {
+            row(ui, "opération", |ui| {
                 for (v, l) in [(0u8, "union"), (1, "différence"), (2, "intersection")] {
                     c |= ui.selectable_value(op, v, crate::i18n::t(l)).changed();
                 }
             });
-            ui.horizontal(|ui| {
+            row(ui, "forme", |ui| {
                 for (v, l) in [(0u8, "cube"), (1, "sphère"), (2, "cylindre")] {
                     c |= ui.selectable_value(shape, v, crate::i18n::t(l)).changed();
                 }
             });
             c |= vec3_ui(ui, center, "centre", 0.01);
             c |= vec3_ui(ui, size, "demi-taille", 0.01);
-            c |= ui.add(egui::Slider::new(voxel, 0.004..=0.05).logarithmic(true).text(crate::i18n::t("taille des voxels"))).changed();
-            c |= ui.add(egui::Slider::new(smooth, 0..=6).text(crate::i18n::t("lissage"))).changed();
+            c |= row_slider(ui, "taille des voxels", egui::Slider::new(voxel, 0.004..=0.05).logarithmic(true));
+            c |= row_slider(ui, "lissage", egui::Slider::new(smooth, 0..=6));
             ui.label(egui::RichText::new(crate::i18n::t("Le résultat est remaillé en voxels : les arêtes vives s'adoucissent un peu.")).size(11.0).color(crate::theme::pal().muted));
         }
     }

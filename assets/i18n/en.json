@@ -3132,5 +3132,8 @@
   "arrondi des bords": "edge rounding",
   "créer le texte 3D": "create the 3D text",
   "Extrudé en volume, enregistré en .obj à côté de la scène": "Extruded into a volume, saved as .obj next to the scene",
-  "Texte 3D impossible": "3D text failed"
+  "Texte 3D impossible": "3D text failed",
+  "glisser pour changer l'ordre": "drag to reorder",
+  "influence et zone": "influence and area",
+  "influence et zone ●": "influence and area ●"
 }
