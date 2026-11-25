@@ -165,7 +165,9 @@ pub fn mesh_at(cols: u8, rows: u8, pts: &[([f32; 2], [u8; 4])], s: f32, t: f32) 
     };
     let raw = |i: i32, j: i32| -> [f32; 6] {
         let (p, c) = pts[(j * (nc + 1) + i) as usize];
-        [p[0], p[1], c[0] as f32, c[1] as f32, c[2] as f32, c[3] as f32]
+        // Un nœud parti à l'infini (fichier abîmé) est ramené près de la forme
+        let fix = |v: f32| if v.is_finite() { v.clamp(-2.0, 3.0) } else { 0.5 };
+        [fix(p[0]), fix(p[1]), c[0] as f32, c[1] as f32, c[2] as f32, c[3] as f32]
     };
     // Un nœud hors de la grille : le reflet à travers le bord (une grille régulière reste régulière)
     let get = |i: i32, j: i32| -> [f32; 6] {
@@ -1470,6 +1472,22 @@ fn hex(c: [u8; 4]) -> String {
     format!("#{:02x}{:02x}{:02x}", c[0], c[1], c[2])
 }
 
+/// Une forme dessinable : position et taille finies et raisonnables. Un fichier abîmé (taille de 1e30, position
+/// infinie) ferait sinon tomber le rendu ; la forme reste dans le document, elle n'est simplement pas dessinée.
+pub fn sane(s: &Shape) -> bool {
+    const MAX: f32 = 1e7;
+    let ok = |v: f32| v.is_finite() && v.abs() < MAX;
+    ok(s.x) && ok(s.y) && ok(s.rot) && ok(s.blur) && ok(s.opacity) && (matches!(s.kind, Kind::Group { .. } | Kind::Text { .. }) || local_bounds(s).iter().all(|v| ok(*v)))
+        && s.strokes.iter().all(|k| ok(k.width) && k.dash.iter().all(|d| ok(*d)))
+        && s.shadow.as_ref().is_none_or(|h| ok(h.dx) && ok(h.dy) && ok(h.blur))
+        && match &s.kind {
+            Kind::Text { size, spacing, leading, width, .. } => ok(*size) && ok(*spacing) && ok(*leading) && width.is_none_or(ok),
+            Kind::Polygon { sides, .. } => *sides <= 10_000,
+            Kind::Star { points, .. } => *points <= 10_000,
+            _ => true,
+        }
+}
+
 /// Écrit le SVG du document. `area` : la zone du monde à montrer (x, y, w, h) ; `px` : taille de sortie en pixels.
 /// `root` : le coffre (pour les images).
 pub fn to_svg(doc: &Doc, area: [f32; 4], px: [u32; 2], root: &str, with_boards: bool) -> String {
@@ -1607,7 +1625,7 @@ impl Gen<'_> {
     }
 
     fn shape(&mut self, out: &mut String, sh: &Shape) {
-        if !sh.visible {
+        if !sh.visible || !sane(sh) {
             return;
         }
         if let Kind::Group { children, op } = &sh.kind {
@@ -1879,6 +1897,10 @@ fn end_dir(sh: &Shape) -> Option<([f32; 2], [f32; 2])> {
 pub fn rasterize(svg: &str, w: u32, h: u32) -> Option<Vec<u8>> {
     use resvg::{tiny_skia, usvg};
     let opt = usvg::Options::default();
+    // Une image démesurée (plan de travail abîmé, échelle folle) : refusée plutôt que d'épuiser la mémoire
+    if w as u64 * h as u64 > 16384 * 16384 {
+        return None;
+    }
     let tree = usvg::Tree::from_str(svg, &opt).ok()?;
     let mut pm = tiny_skia::Pixmap::new(w.max(1), h.max(1))?;
     // Les images (PNG, JPEG, WebP) se décodent ici (resvg est compilé sans) : on dessine nœud par nœud,
@@ -3256,6 +3278,31 @@ pub fn render_text(json: &str, root: &str, max: u32) -> Option<(Doc, image::Rgba
 }
 
 #[cfg(test)]
+mod abime_tests {
+    use super::*;
+    #[test]
+    fn fichier_abime_sans_panique() {
+        // Un dessin dont un nombre a été abîmé (taille de 1e30, position infinie, plan de travail démesuré)
+        let mut d = Doc::starter();
+        let (bx, by) = (d.boards[0].x, d.boards[0].y);
+        let id = d.new_id();
+        d.shapes.push(Shape { id, kind: Kind::Ellipse { w: 300.0, h: 1e30 }, x: bx + 50.0, y: by + 50.0, fills: vec![Paint::solid([255, 0, 0, 255])], ..Shape::base() });
+        let id = d.new_id();
+        d.shapes.push(Shape { id, kind: Kind::Rect { w: 80.0, h: 80.0, r: [0.0; 4] }, x: f32::INFINITY, y: by, fills: vec![Paint::solid([0, 0, 255, 255])], ..Shape::base() });
+        let id = d.new_id();
+        d.shapes.push(Shape { id, kind: Kind::Rect { w: 80.0, h: 80.0, r: [0.0; 4] }, x: bx + 10.0, y: by + 10.0, fills: vec![Paint::solid([0, 160, 0, 255])], ..Shape::base() });
+        assert!(!sane(&d.shapes[d.shapes.len() - 3]) && !sane(&d.shapes[d.shapes.len() - 2]) && sane(&d.shapes[d.shapes.len() - 1]));
+        // Les formes saines sont rendues, les autres ignorées
+        let img = export_png(&d, 0, "/tmp", 0.5).unwrap();
+        assert_eq!(img.get_pixel(25, 25).0, [0, 160, 0, 255]);
+        // Un plan de travail démesuré : pas d'image, pas de mémoire épuisée
+        d.boards[0].w = 4e9;
+        d.boards[0].h = 4e9;
+        assert!(export_png(&d, 0, "/tmp", 1.0).is_none());
+    }
+}
+
+#[cfg(test)]
 mod diff_tests {
     use super::*;
     #[test]
@@ -3322,6 +3369,9 @@ mod mesh_tests {
         assert_eq!(p2[12], pts[4]);
         // Un filet abîmé (fichier modifié à la main) ne fait rien paniquer
         assert!(mesh_quads(3, 3, &pts, 4).is_empty());
+        let mut far = pts.clone();
+        far[2].0 = [1.0, -1e9];
+        assert!(mesh_quads(cols, rows, &far, 4).iter().all(|(q, _)| q.iter().all(|p| p[0].abs() < 10.0 && p[1].abs() < 10.0)));
         assert_eq!(mesh_at(3, 3, &pts, 1.0, 1.0).1, [0.0; 4]);
         // Rendu : la forme porte bien plusieurs couleurs, et le SVG reste lisible
         let mut d = Doc::starter();

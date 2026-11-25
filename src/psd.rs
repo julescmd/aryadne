@@ -454,8 +454,28 @@ pub fn read(bytes: &[u8]) -> Result<Doc, String> {
         }
         layers.push(Layer { px, ..Layer::blank("calque 1", w, h) });
     }
+    if layers.is_empty() {
+        layers.push(Layer::blank("calque 1", w, h));
+    }
+    mend(&mut layers);
     let n = layers.len();
     Ok(Doc { w, h, layers, active: n - 1, groups, guides: vec![], anim: None, palette: vec![] })
+}
+
+/// Fichier abîmé : un calque (ou son masque) dont les pixels ne font pas sa taille est complété de vide,
+/// pour que la lecture d'un pixel ne sorte jamais du tableau
+fn mend(layers: &mut [Layer]) {
+    for l in layers.iter_mut() {
+        // Une taille délirante (plus d'un gigaoctet) : le calque est vidé plutôt que d'épuiser la mémoire
+        if l.w.saturating_mul(l.h) > 1 << 28 {
+            (l.w, l.h) = (1, 1);
+            l.px.clear();
+        }
+        l.px.resize(l.w * l.h * 4, 0);
+        if let Some(m) = &mut l.mask {
+            m.px.resize(m.w * m.h * 4, 0);
+        }
+    }
 }
 
 fn unpack(row: &[u8], w: usize) -> Vec<u8> {
@@ -729,6 +749,17 @@ pub fn write(doc: &Doc) -> (Vec<u8>, Vec<String>) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn calque_abime_complete() {
+        // Un calque annoncé en 8 × 8 mais livré avec la moitié de ses pixels (PSD abîmé) : complété, lisible sans panique
+        let mut layers = vec![Layer { px: vec![255; 8 * 4 * 4], mask: Some(Box::new(Layer { px: vec![], ..Layer::blank("m", 8, 8) })), ..Layer::blank("abîmé", 8, 8) }];
+        super::mend(&mut layers);
+        assert_eq!(layers[0].px.len(), 8 * 8 * 4);
+        assert_eq!(layers[0].mask.as_ref().unwrap().px.len(), 8 * 8 * 4);
+        let d = Doc { layers, ..Doc::new(8, 8, false) };
+        assert_eq!(d.flatten().dimensions(), (8, 8));
+    }
+
     use super::*;
 
     #[test]

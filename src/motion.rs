@@ -1829,7 +1829,8 @@ fn bitmap(l: &Layer, t: f32, k: f32, cache: &mut Cache) -> Option<Bitmap> {
         }
         Kind::Rect { w, h, radius, color } => {
             let (hw, hh) = (w / 2.0, h / 2.0);
-            let r = radius.clamp(0.0, hw.min(hh));
+            // Une taille négative (fichier modifié à la main) ne doit pas faire tomber le rendu
+            let r = radius.max(0.0).min(hw.min(hh).max(0.0));
             Some(shape_bitmap(*w, *h, k, *color, |x, y| {
                 // Distance signée à un rectangle arrondi, en px du calque, puis en pixels
                 let qx = x.abs() - (hw - r);
@@ -1934,6 +1935,10 @@ fn bitmap(l: &Layer, t: f32, k: f32, cache: &mut Cache) -> Option<Bitmap> {
                 let adv = sf.h_advance(f.glyph_id(g.ch));
                 let cx = g.x + adv / 2.0;
                 let cy = g.y - size * 0.35;
+                // Une lettre plus haute que l'image la plus grande (taille délirante) : rien à dessiner, et pas de mémoire à prendre
+                if !(size * k * gs).is_finite() || size * k * gs > 8192.0 {
+                    continue;
+                }
                 let px = ab_glyph::PxScale::from(size * k * gs);
                 let glyph = ab_glyph::Glyph { id: f.glyph_id(g.ch), scale: px, position: ab_glyph::point((cx + (g.x - cx) * gs + dx + pad) * k, (cy + (g.y - cy) * gs + dy + pad) * k) };
                 if let Some(o) = f.outline_glyph(glyph) {
@@ -2246,7 +2251,8 @@ fn matte_map(c: &Compo, li: usize, t: f32, scale: f32, cache: &mut Cache, (w, h)
 
 fn render_one(c: &Compo, t: f32, scale: f32, cache: &mut Cache) -> image::RgbaImage {
     use rayon::prelude::*;
-    let (w, h) = (((c.w as f32 * scale).round() as u32).max(1), ((c.h as f32 * scale).round() as u32).max(1));
+    // Bornée à 16384 px de côté : une composition de taille délirante ne doit pas épuiser la mémoire
+    let (w, h) = (((c.w as f32 * scale).round() as u32).clamp(1, 16384), ((c.h as f32 * scale).round() as u32).clamp(1, 16384));
     // Une précomposition se rend sur fond transparent
     let mut out = image::RgbaImage::from_pixel(w, h, image::Rgba([c.bg[0], c.bg[1], c.bg[2], if cache.depth > 0 { 0 } else { 255 }]));
     // Les calques qui servent de cache au calque d'en dessous ne se dessinent pas eux-mêmes
@@ -2557,6 +2563,23 @@ fn fade(l: &mut Layer, t: f32, d: f32, enter: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn composition_abimee_sans_panique() {
+        // Nombres abîmés dans le fichier : rectangle de largeur négative, texte de taille folle, composition démesurée
+        let mut c = Compo { layers: vec![], ..Compo::default() };
+        (c.w, c.h) = (200, 100);
+        c.layers.push(Layer::new("r", Kind::Rect { w: -1.0, h: 10.0, radius: 5.0, color: [255, 255, 255] }, &c));
+        c.layers.push(Layer::new("t", Kind::Text { text: "Titre".into(), size: 1e9, color: [255, 255, 255], font: "inter".into(), tracking: 0.0, align: 1 }, &c));
+        c.layers.push(Layer::new("ok", Kind::Rect { w: 40.0, h: 40.0, radius: 0.0, color: [0, 255, 0] }, &c));
+        let mut cache = Cache::new(Path::new("/tmp"));
+        let img = render(&c, 0.5, 1.0, &mut cache);
+        assert_eq!(img.dimensions(), (200, 100));
+        assert_eq!(img.get_pixel(100, 50).0[1], 255, "le calque sain est rendu");
+        (c.w, c.h) = (4_000_000_000, 4_000_000_000);
+        let img = render(&c, 0.5, 0.000004, &mut cache);
+        assert!(img.width() <= 16384 && img.height() <= 16384);
+    }
 
     #[test]
     fn flou_de_mouvement() {
