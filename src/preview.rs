@@ -32,6 +32,8 @@ pub enum Out {
     Open(String),
     /// Cocher ou décocher la case de cette ligne (numéro de ligne, depuis 0)
     Toggle(usize),
+    /// Changer une propriété de l'en-tête (None : la retirer) ; `list` : l'écrire en liste
+    SetProp { key: String, vals: Option<Vec<String>>, list: bool },
 }
 
 /// Affiche la note et retourne le nom de la note cliquée, s'il y en a une (lecture seule)
@@ -330,10 +332,21 @@ pub fn section(text: &str, title: &str) -> Option<String> {
 
 /// Les propriétés de l'en-tête : une ligne par clé, les listes et les tags en pastilles
 fn properties(ui: &mut egui::Ui, props: &[(String, Vec<String>)], ctx: &Ctx, out: &mut Option<Out>) {
-    if props.is_empty() {
-        return;
-    }
     let p = theme::pal();
+    // Édition en cours : (clé, texte) ; une clé vide avec « nouvelle » : la ligne d'ajout
+    let eid = ui.id().with("prop-edit");
+    let mut edit: Option<(String, String, String)> = ui.data(|d| d.get_temp(eid));
+    let is_list = |k: &str, vals: &[String]| vals.len() > 1 || matches!(k.to_lowercase().as_str(), "tags" | "tag" | "aliases" | "alias" | "cssclasses");
+    let parse = |k: &str, buf: &str, list: bool| -> Vec<String> {
+        let tags = matches!(k.to_lowercase().as_str(), "tags" | "tag");
+        if tags {
+            buf.split([',', ' ']).map(|t| t.trim().trim_start_matches('#').to_string()).filter(|t| !t.is_empty()).collect()
+        } else if list {
+            buf.split(',').map(|t| t.trim().to_string()).filter(|t| !t.is_empty()).collect()
+        } else {
+            vec![buf.trim().to_string()]
+        }
+    };
     egui::Frame::new().stroke(egui::Stroke::new(1.0, p.line)).corner_radius(6).inner_margin(egui::Margin::symmetric(12, 8)).show(ui, |ui| {
         ui.set_width(ui.available_width());
         egui::Grid::new(ui.next_auto_id()).num_columns(2).spacing(egui::vec2(18.0, 6.0)).show(ui, |ui| {
@@ -348,27 +361,89 @@ fn properties(ui: &mut egui::Ui, props: &[(String, Vec<String>)], ctx: &Ctx, out
                     _ => crate::lucide::TEXT_ICON,
                 };
                 ui.label(RichText::new(format!("{icon}  {k}")).color(p.muted).size(12.5));
-                ui.horizontal_wrapped(|ui| {
-                    if vals.is_empty() {
-                        ui.label(RichText::new("—").color(p.muted));
-                    }
-                    let tags = low == "tags" || low == "tag";
-                    for v in vals {
-                        if tags {
-                            for t in v.split_whitespace() {
-                                let t = t.trim_start_matches('#');
-                                ui.label(RichText::new(format!("#{t}")).size(12.0).color(p.link).background_color(p.link.gamma_multiply(0.15)));
-                            }
-                        } else if vals.len() > 1 {
-                            egui::Frame::new().fill(p.code_bg).corner_radius(10).inner_margin(egui::Margin::symmetric(8, 1)).show(ui, |ui| inline(ui, v, ctx, out, None));
-                        } else {
-                            inline(ui, v, ctx, out, None);
+                let list = is_list(k, vals);
+                match edit.as_mut().filter(|e| &e.0 == k) {
+                    Some(e) => {
+                        let r = ui.add(egui::TextEdit::singleline(&mut e.1).desired_width(ui.available_width() - 8.0).hint_text(crate::i18n::t(if list { "valeurs séparées par des virgules" } else { "valeur" })));
+                        r.request_focus();
+                        let (enter, esc) = ui.input(|i| (i.key_pressed(egui::Key::Enter), i.key_pressed(egui::Key::Escape)));
+                        if enter || (r.lost_focus() && !esc) {
+                            *out = Some(Out::SetProp { key: k.clone(), vals: Some(parse(k, &e.1, list)), list });
+                            edit = None;
+                        } else if esc {
+                            edit = None;
                         }
                     }
-                });
+                    None => {
+                        let row = ui.horizontal_wrapped(|ui| {
+                            if vals.is_empty() {
+                                ui.label(RichText::new("—").color(p.muted));
+                            }
+                            let tags = low == "tags" || low == "tag";
+                            for v in vals {
+                                if tags {
+                                    for t in v.split_whitespace() {
+                                        let t = t.trim_start_matches('#');
+                                        ui.label(RichText::new(format!("#{t}")).size(12.0).color(p.link).background_color(p.link.gamma_multiply(0.15)));
+                                    }
+                                } else if vals.len() > 1 {
+                                    egui::Frame::new().fill(p.code_bg).corner_radius(10).inner_margin(egui::Margin::symmetric(8, 1)).show(ui, |ui| inline(ui, v, ctx, out, None));
+                                } else {
+                                    inline(ui, v, ctx, out, None);
+                                }
+                            }
+                        });
+                        let r = ui.interact(row.response.rect, ui.id().with(("prop", k)), egui::Sense::click());
+                        // Retirer la propriété : la corbeille paraît après la valeur, au survol de la ligne
+                        let x = egui::Rect::from_center_size(egui::pos2(row.response.rect.right() + 14.0, row.response.rect.center().y), egui::vec2(18.0, 18.0));
+                        if ui.rect_contains_pointer(row.response.rect.union(x)) {
+                            let xr = ui.interact(x, ui.id().with(("prop-del", k)), egui::Sense::click());
+                            ui.painter().text(x.center(), egui::Align2::CENTER_CENTER, crate::lucide::TRASH_2, egui::FontId::proportional(12.0), if xr.hovered() { p.missing } else { p.muted });
+                            if xr.clicked() {
+                                *out = Some(Out::SetProp { key: k.clone(), vals: None, list });
+                            }
+                        }
+                        if r.on_hover_text(crate::i18n::t("double-clic pour modifier")).double_clicked() {
+                            edit = Some((k.clone(), vals.join(if low == "tags" || low == "tag" { " " } else { ", " }), String::new()));
+                        }
+                    }
+                }
                 ui.end_row();
             }
+            // Ajouter une propriété
+            match edit.as_mut().filter(|e| e.0.is_empty() && e.2 == "nouvelle") {
+                Some(e) => {
+                    let (mut key, mut val) = e.1.split_once('\u{1f}').map(|(a, b)| (a.to_string(), b.to_string())).unwrap_or_default();
+                    let kr = ui.add(egui::TextEdit::singleline(&mut key).desired_width(110.0).hint_text(crate::i18n::t("nom")));
+                    let vr = ui.add(egui::TextEdit::singleline(&mut val).desired_width(ui.available_width() - 8.0).hint_text(crate::i18n::t("valeur")));
+                    if !kr.has_focus() && !vr.has_focus() && key.is_empty() {
+                        kr.request_focus();
+                    }
+                    e.1 = format!("{key}\u{1f}{val}");
+                    let (enter, esc) = ui.input(|i| (i.key_pressed(egui::Key::Enter), i.key_pressed(egui::Key::Escape)));
+                    if enter && !key.trim().is_empty() {
+                        let list = is_list(&key, &[]);
+                        *out = Some(Out::SetProp { key: key.trim().to_string(), vals: Some(parse(&key, &val, list)), list });
+                        edit = None;
+                    } else if esc {
+                        edit = None;
+                    }
+                    ui.end_row();
+                }
+                None => {
+                    if ui.add(egui::Button::new(RichText::new(format!("{}  {}", crate::lucide::PLUS, crate::i18n::t("propriété"))).size(12.0).color(p.muted)).frame(false)).clicked() {
+                        edit = Some((String::new(), "\u{1f}".into(), "nouvelle".into()));
+                    }
+                    ui.end_row();
+                }
+            }
         });
+    });
+    ui.data_mut(|d| match edit {
+        Some(e) => {
+            d.insert_temp(eid, e);
+        }
+        None => d.remove::<(String, String, String)>(eid),
     });
     ui.add_space(6.0);
 }

@@ -835,6 +835,64 @@ pub fn frontmatter(text: &str) -> Option<(Vec<(String, Vec<String>)>, usize)> {
     None
 }
 
+/// Change une propriété de l'en-tête YAML (la crée au besoin, avec l'en-tête) ; `None` la retire.
+/// Une liste s'écrit « clé: [a, b] », une valeur seule « clé: valeur » (entre guillemets si elle en a besoin).
+pub fn set_front(text: &str, key: &str, vals: Option<&[String]>, list: bool) -> String {
+    let key = key.trim();
+    let quote = |v: &str| {
+        if v.is_empty() || v.contains(": ") || v.contains('#') || v.starts_with(['[', '{', '"', '\'', '-', '*', '&', '!', '|', '>', '%', '@']) {
+            format!("\"{}\"", v.replace('"', "\\\""))
+        } else {
+            v.to_string()
+        }
+    };
+    let line = vals.map(|v| {
+        if list || v.len() > 1 {
+            format!("{key}: [{}]", v.iter().map(|x| quote(x)).collect::<Vec<_>>().join(", "))
+        } else {
+            format!("{key}: {}", v.first().map(|x| quote(x)).unwrap_or_default())
+        }
+    });
+    let Some((_, n)) = frontmatter(text) else {
+        return match line {
+            Some(l) => format!("---\n{l}\n---\n{text}"),
+            None => text.to_string(),
+        };
+    };
+    let lines: Vec<&str> = text.lines().collect();
+    // Les lignes de la clé : la sienne, puis ses « - élément » en dessous
+    let mut out: Vec<String> = vec![];
+    let mut i = 0;
+    let mut done = false;
+    while i < lines.len() {
+        let l = lines[i];
+        let is_key = i > 0 && i < n - 1 && l.split_once(':').is_some_and(|(k, _)| k.trim() == key && !k.starts_with(' '));
+        if is_key {
+            i += 1;
+            while i < n - 1 && (lines[i].starts_with(' ') || lines[i].starts_with("- ")) {
+                i += 1;
+            }
+            if let Some(l) = &line {
+                out.push(l.clone());
+            }
+            done = true;
+            continue;
+        }
+        if i == n - 1 && !done {
+            if let Some(l) = &line {
+                out.push(l.clone());
+            }
+        }
+        out.push(l.to_string());
+        i += 1;
+    }
+    let mut s = out.join("\n");
+    if text.ends_with('\n') {
+        s.push('\n');
+    }
+    s
+}
+
 /// Les tags de l'en-tête (« tags: » ou « tag: »), sans le « # »
 pub fn front_tags(text: &str) -> Vec<String> {
     frontmatter(text)
@@ -859,5 +917,15 @@ mod front_tests {
         assert_eq!(front_tags("---\ntags: a b\n---"), vec!["a".to_string(), "b".into()]);
         assert!(frontmatter("# pas d'en-tête").is_none());
         assert!(frontmatter("---\njamais fermé").is_none());
+        // Modifier, ajouter, retirer
+        let t2 = set_front(t, "titre", Some(&["Le long".to_string()]), false);
+        assert!(t2.contains("titre: Le long\n"));
+        let t3 = set_front(&t2, "auteurs", Some(&["Jules".to_string()]), true);
+        assert!(t3.contains("auteurs: [Jules]\n") && !t3.contains("  - Annabelle"));
+        let t4 = set_front(&t3, "statut", Some(&["à faire: vite".to_string()]), false);
+        assert_eq!(frontmatter(&t4).unwrap().0.iter().find(|p| p.0 == "statut").unwrap().1, vec!["à faire: vite".to_string()]);
+        let t5 = set_front(&t4, "vide", None, false);
+        assert!(!t5.contains("vide:") && t5.ends_with("# Corps"));
+        assert_eq!(set_front("# Note", "tags", Some(&["a".to_string()]), true), "---\ntags: [a]\n---\n# Note");
     }
 }

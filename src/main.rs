@@ -3561,6 +3561,7 @@ impl App {
                 Content::Text(text) if doc.preview => {
                     let mut goto = None;
                     let mut toggle = None;
+                    let mut set_prop: Option<(String, Option<Vec<String>>, bool)> = None;
                     egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
                         ui.with_layout(egui::Layout::top_down(egui::Align::Center), |ui| {
                             ui.set_max_width((680.0 + 64.0_f32).min(ui.available_width()));
@@ -3569,6 +3570,7 @@ impl App {
                                     match preview::show_doc(ui, text, &existing, &paths) {
                                         Some(preview::Out::Open(n)) => goto = Some(n),
                                         Some(preview::Out::Toggle(l)) => toggle = Some(l),
+                                        Some(preview::Out::SetProp { key, vals, list }) => set_prop = Some((key, vals, list)),
                                         None => {}
                                     }
                                 });
@@ -3577,6 +3579,11 @@ impl App {
                     });
                     if let Some(n) = goto {
                         self.actions.push(Action::OpenLink(n));
+                    }
+                    // Une propriété modifiée en lecture change l'en-tête de la note
+                    if let Some((key, vals, list)) = set_prop {
+                        *text = vault::set_front(text, &key, vals.as_deref(), list);
+                        doc.dirty_since = Some(Instant::now());
                     }
                     // Une case cochée en lecture est cochée dans la note
                     if let Some(nt) = toggle.and_then(|l| preview::toggle_task(text, l)) {

@@ -2483,5 +2483,8 @@
   "Le tracé se dessine en une seconde à partir de la tête de lecture": "The path draws itself over one second from the playhead",
   "Effacer à la fin": "Erase at the end",
   "Le tracé s'efface pendant la dernière seconde du calque": "The path erases itself during the layer's last second",
-  "Tracé à main levée (P) : dessinez dans la composition": "Freehand path (P): draw in the composition"
+  "Tracé à main levée (P) : dessinez dans la composition": "Freehand path (P): draw in the composition",
+  "valeurs séparées par des virgules": "values separated by commas",
+  "propriété": "property",
+  "double-clic pour modifier": "double-click to edit"
 }
