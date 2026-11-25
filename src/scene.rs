@@ -56,6 +56,9 @@ pub struct Object {
     /// Matériau en nodes de l'objet : chemin dans le coffre (vide = aucun)
     #[serde(default)]
     pub material: String,
+    /// Peinture sur l'objet (texture PNG sur ses UV, chemin dans le coffre ; vide = aucune)
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub paint: String,
     /// Nom de l'objet parent (vide = aucun) : l'enfant suit ses déplacements, rotations et changements de taille
     #[serde(default)]
     pub parent: String,
@@ -360,7 +363,7 @@ impl Object {
     }
 
     pub fn new(name: String, file: String) -> Object {
-        Object { name, file, pos: [0.0; 3], rot: [0.0; 3], scale: [1.0; 3], visible: true, color: None, mods: vec![], material: String::new(), parent: String::new(), opacity: 0.5, role: String::new(), energy: 1.2, point: false, range: 8.0, shape: 0, spot: spot_deg(), blend: spot_blend(), size: area_size(), keys: vec![], cycle: Default::default(), aim: String::new(), length: 1.0, rest: None, skin: String::new(), ik: String::new(), ik_chain: 2, reach: 1.0, morphs: vec![], copy_loc: String::new(), copy_rot: String::new(), limit: None }
+        Object { name, file, pos: [0.0; 3], rot: [0.0; 3], scale: [1.0; 3], visible: true, color: None, mods: vec![], material: String::new(), paint: String::new(), parent: String::new(), opacity: 0.5, role: String::new(), energy: 1.2, point: false, range: 8.0, shape: 0, spot: spot_deg(), blend: spot_blend(), size: area_size(), keys: vec![], cycle: Default::default(), aim: String::new(), length: 1.0, rest: None, skin: String::new(), ik: String::new(), ik_chain: 2, reach: 1.0, morphs: vec![], copy_loc: String::new(), copy_rot: String::new(), limit: None }
     }
 }
 

@@ -3407,5 +3407,12 @@
   "Nouveau": "New",
   "autre… (choisir le genre)": "other… (choose the kind)",
   "Épingler au-dessus": "Keep on top",
-  "Éditeur de courbes dans sa propre fenêtre, qu'on peut sortir de l'application (sur un autre écran)": "Graph editor in its own window, which you can move outside the app (to another screen)"
+  "Éditeur de courbes dans sa propre fenêtre, qu'on peut sortir de l'application (sur un autre écran)": "Graph editor in its own window, which you can move outside the app (to another screen)",
+  "Cet objet n'a pas d'UV : mode « UV, matériaux et retopo », puis « déplier », pour pouvoir le peindre.": "This object has no UVs: use “UV, materials and retopo” mode, then “unwrap”, to paint it.",
+  "Peindre directement sur l'objet, comme dans Substance Painter (il faut des UV)": "Paint directly on the object, like in Substance Painter (needs UVs)",
+  "dureté du bord": "edge hardness",
+  "effacer la peinture de l'objet choisi": "clear the selected object's paint",
+  "quitter la peinture": "leave painting",
+  "peinture": "paint",
+  "glisser : peindre · Alt+glisser : tourner · molette enfoncée : tourner (Maj : déplacer) · [ ] : taille du pinceau · E : gomme · Ctrl+Z annuler": "drag: paint · Alt+drag: orbit · middle drag: orbit (Shift: pan) · [ ]: brush size · E: eraser · Ctrl+Z undo"
 }

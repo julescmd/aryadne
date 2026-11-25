@@ -1259,6 +1259,8 @@ pub struct Look {
     pub uv_checker: bool,
     /// Matériaux en nodes par ID de matériau (mode édition) ; `slot_rev` change quand l'un d'eux change
     pub slot_nodes: Vec<Option<std::sync::Arc<crate::nodes::Program>>>,
+    /// Peinture posée sur chaque objet (scène), mélangée à la couleur du matériau
+    pub slot_paint: Vec<Option<crate::paint3d::Layer>>,
     pub slot_rev: u64,
     /// Lumières de la scène ; vide : la lumière unique de la vue (`light`)
     pub lamps: Vec<Lamp>,
@@ -1287,6 +1289,7 @@ impl Default for Look {
             nodes: None,
             uv_checker: false,
             slot_nodes: vec![],
+            slot_paint: vec![],
             slot_rev: 0,
             lamps: vec![],
             shadows: false,
@@ -1722,6 +1725,19 @@ pub fn render(m: &Prepared, cam: &Camera, look: &Look, w: usize, h: usize) -> Fr
                     rough = r;
                     metal = mt;
                     emit = [em[0].max(0.0).powf(2.2), em[1].max(0.0).powf(2.2), em[2].max(0.0).powf(2.2)];
+                }
+                // Peinture sur l'objet : par-dessus la couleur du matériau
+                let layer = m.mat.get(ti as usize).and_then(|&k| look.slot_paint.get(k as usize)).and_then(|p| p.as_ref());
+                if let Some((pt, u)) = layer.and_then(|l| Some((&l.tex, l.uv.get((ti as usize).checked_sub(l.first)?)?))) {
+                    let uv = [u[0][0] * w0 + u[1][0] * w1 + u[2][0] * w2, u[0][1] * w0 + u[1][1] * w1 + u[2][1] * w2];
+                    if let Ok(img) = pt.read() {
+                        let c = crate::paint3d::sample(&img, uv);
+                        if c[3] > 0.0 {
+                            for k in 0..3 {
+                                albedo[k] = albedo[k] * (1.0 - c[3]) + c[k].powf(2.2) * c[3];
+                            }
+                        }
+                    }
                 }
                 let albedo = if metal > 0.5 && look.nodes.is_some() { albedo } else { albedo };
                 let ndv = dot(nrm, v).clamp(0.0, 1.0);
@@ -2618,6 +2634,20 @@ pub struct Viewer {
     anim_graph: bool,
     /// L'éditeur de courbes dans sa propre fenêtre du système (on peut la sortir de l'application)
     graph_window: bool,
+    /// Peinture sur le modèle (comme Substance Painter) : le pinceau quand le mode est actif
+    paint3d: Option<crate::paint3d::Brush>,
+    /// Textures de peinture par objet de la scène (chemin dans le coffre, image), et le trait en cours
+    paint_tex: Vec<Option<(String, crate::paint3d::Shared)>>,
+    paint_last: Option<Pos2>,
+    /// Rayon du pinceau en 3D (unités de la vue), mesuré sous la souris
+    paint_r_uv: f32,
+    /// UV automatiques de chaque objet peint (nombre de triangles au calcul, UV par triangle)
+    paint_uv: Vec<Option<(usize, std::sync::Arc<Vec<[[f32; 2]; 3]>>)>>,
+    paint_dirty: Vec<usize>,
+    paint_saved: Vec<usize>,
+    /// Annuler, rétablir : (objet, texture avant)
+    paint_undo: Vec<(usize, image::RgbaImage)>,
+    paint_redo: Vec<(usize, image::RgbaImage)>,
     /// Barre d'outils d'animation (tweener, décaler, poses…)
     anim_tools: bool,
     /// Pelure d'oignon : l'objet choisi aux clés d'avant et d'après, en fil de fer
@@ -2826,6 +2856,15 @@ impl Viewer {
             prop_tab: PropTab::Object,
             anim_graph: false,
             graph_window: false,
+            paint3d: None,
+            paint_tex: vec![],
+            paint_last: None,
+            paint_r_uv: 0.02,
+            paint_uv: vec![],
+            paint_dirty: vec![],
+            paint_saved: vec![],
+            paint_undo: vec![],
+            paint_redo: vec![],
             anim_tools: false,
             onion: false,
             look_through: false,
@@ -2900,12 +2939,219 @@ impl Viewer {
         self.env_error = None;
     }
 
+    /// Les UV de peinture d'un objet de la scène, calculées une fois (et refaites si son maillage change)
+    fn paint_uvs(&mut self, k: usize) -> Option<std::sync::Arc<Vec<[[f32; 2]; 3]>>> {
+        let &(_, a, b) = self.scene_ranges.iter().find(|r| r.0 == k)?;
+        if let Some(Some((n, uv))) = self.paint_uv.get(k) {
+            if *n == b - a {
+                return Some(uv.clone());
+            }
+        }
+        let prep = self.prepared.as_ref()?.2.clone();
+        if b > prep.tris.len() {
+            return None;
+        }
+        let edges: Vec<u8> = (a..b).map(|t| prep.edges.get(t).copied().unwrap_or(7)).collect();
+        let uv = std::sync::Arc::new(crate::paint3d::auto_uv(&prep.pos, &prep.tris[a..b], &edges));
+        if self.paint_uv.len() <= k {
+            self.paint_uv.resize(k + 1, None);
+        }
+        self.paint_uv[k] = Some((b - a, uv.clone()));
+        Some(uv)
+    }
+
+    /// Peinture sur le modèle : le pinceau sous la souris, les touches dans la texture de l'objet touché,
+    /// et la barre du pinceau en bas de la vue
+    fn paint_ui(&mut self, ui: &mut egui::Ui, rect: egui::Rect, resp: &egui::Response) {
+        let p = theme::pal();
+        let Some(mut b) = self.paint3d else { return };
+        let typing = ui.ctx().egui_wants_keyboard_input();
+        if !typing && resp.hovered() {
+            if ui.input(|i| i.key_pressed(Key::OpenBracket)) {
+                b.radius = (b.radius / 1.15).max(2.0);
+            }
+            if ui.input(|i| i.key_pressed(Key::CloseBracket)) {
+                b.radius = (b.radius * 1.15).min(400.0);
+            }
+            if ui.input(|i| i.key_pressed(Key::E) && !i.modifiers.any()) {
+                b.erase = !b.erase;
+            }
+        }
+        if !typing && ui.input(|i| i.modifiers.command && i.key_pressed(Key::Z)) {
+            let redo = ui.input(|i| i.modifiers.shift);
+            let (from, to) = if redo { (&mut self.paint_redo, &mut self.paint_undo) } else { (&mut self.paint_undo, &mut self.paint_redo) };
+            if let Some((k, img)) = from.pop() {
+                if let Some(Some((_, t))) = self.paint_tex.get(k) {
+                    if let Ok(mut cur) = t.write() {
+                        to.push((k, std::mem::replace(&mut *cur, img)));
+                    }
+                    self.paint_dirty.push(k);
+                    self.slot_rev += 1;
+                }
+            }
+        }
+        // Le cercle du pinceau
+        if let Some(h) = resp.hover_pos() {
+            let col = if b.erase { p.text } else { Color32::from_rgb((b.color[0] * 255.0) as u8, (b.color[1] * 255.0) as u8, (b.color[2] * 255.0) as u8) };
+            ui.painter_at(rect).circle_stroke(h, b.radius, Stroke::new(1.5, col));
+            ui.painter_at(rect).circle_stroke(h, b.radius * b.hardness.clamp(0.05, 1.0), Stroke::new(1.0, col.gamma_multiply(0.5)));
+        }
+        let alt = ui.input(|i| i.modifiers.alt);
+        let painting = resp.dragged_by(egui::PointerButton::Primary) && !alt || (resp.clicked() && !alt);
+        if painting {
+            let scene_names: Vec<String> = self.scene.as_ref().map(|sc| sc.objects.iter().map(|o| o.name.clone()).collect()).unwrap_or_default();
+            if let (Some(at), Some((_, _, prep))) = (resp.interact_pointer_pos(), self.prepared.clone()) {
+                let (w, h) = (rect.width(), rect.height());
+                let from = self.paint_last.unwrap_or(at);
+                // Les UV de chaque objet sous le trait (calculées une fois par objet)
+                let cam = self.cam.clone();
+                let ranges = self.scene_ranges.clone();
+                let hit = |q: Pos2| pick(&prep, &cam, w, h, q.x - rect.left(), q.y - rect.top());
+                let ks: Vec<usize> = [from, at].iter().filter_map(|q| hit(*q)).filter_map(|(tri, _)| ranges.iter().find(|r| (r.1..r.2).contains(&tri)).map(|r| r.0)).collect();
+                let uvs: Vec<(usize, usize, std::sync::Arc<Vec<[[f32; 2]; 3]>>)> = ks.into_iter().filter_map(|k| Some((k, ranges.iter().find(|r| r.0 == k)?.1, self.paint_uvs(k)?))).collect();
+                // Le point touché en 3D (objet, position, normale de la face)
+                let at3 = |q: Pos2| -> Option<(usize, [f32; 3], [f32; 3])> {
+                    let (tri, bary) = hit(q)?;
+                    let k = ranges.iter().find(|r| (r.1..r.2).contains(&tri))?.0;
+                    let t = prep.tris.get(tri)?;
+                    let p = t.map(|i| prep.pos[i as usize]);
+                    let c = [0, 1, 2].map(|j| p[0][j] * bary[0] + p[1][j] * bary[1] + p[2][j] * bary[2]);
+                    let n = cross(sub(p[1], p[0]), sub(p[2], p[0]));
+                    Some((k, c, n))
+                };
+                let stem = self.path.file_stem().map(|s| crate::formats::strip(&s.to_string_lossy()).to_string()).unwrap_or_else(|| "scène".into());
+                for q in crate::paint3d::spaced([from.x, from.y], [at.x, at.y], b.radius) {
+                    let q = Pos2::new(q[0], q[1]);
+                    let Some((k, c, n)) = at3(q) else { continue };
+                    let Some((_, first, uv)) = uvs.iter().find(|x| x.0 == k).cloned() else { continue };
+                    // Le rayon en 3D : la distance aux points touchés un rayon plus loin à l'écran (le plus court,
+                    // pour ne pas sauter vers un autre pan du modèle)
+                    let side = [q + egui::vec2(b.radius, 0.0), q + egui::vec2(0.0, b.radius), q - egui::vec2(b.radius, 0.0), q - egui::vec2(0.0, b.radius)];
+                    let r3 = side.iter().filter_map(|s2| at3(*s2).filter(|x| x.0 == k)).map(|x| dot(sub(x.1, c), sub(x.1, c)).sqrt()).fold(f32::MAX, f32::min);
+                    if r3 < f32::MAX {
+                        self.paint_r_uv = r3;
+                    }
+                    // La texture de l'objet : créée au premier coup de pinceau
+                    if self.paint_tex.len() <= k {
+                        self.paint_tex.resize(k + 1, None);
+                    }
+                    if self.paint_tex[k].is_none() {
+                        let name = scene_names.get(k).cloned().unwrap_or_default();
+                        let rel = format!("textures/{stem} - {name} - peinture.png");
+                        // La scène retient tout de suite le chemin (sinon son chargement l'oublierait)
+                        if let Some(o) = self.scene.as_mut().and_then(|sc| sc.objects.get_mut(k)) {
+                            o.paint = rel.clone();
+                        }
+                        self.paint_tex[k] = Some((rel, std::sync::Arc::new(std::sync::RwLock::new(crate::paint3d::blank()))));
+                    }
+                    if let Some((_, t)) = &self.paint_tex[k] {
+                        // Annuler : l'état de la texture avant le trait (une fois par trait et par objet)
+                        if !self.paint_dirty.contains(&k) {
+                            if let Ok(img) = t.read() {
+                                self.paint_undo.push((k, img.clone()));
+                                if self.paint_undo.len() > 8 {
+                                    self.paint_undo.remove(0);
+                                }
+                                self.paint_redo.clear();
+                            }
+                        }
+                        if let Ok(mut img) = t.write() {
+                            let (_, _, last) = ranges.iter().find(|r| r.0 == k).copied().unwrap_or((k, first, first + uv.len()));
+                            crate::paint3d::dab3d(&mut img, &prep.pos, &prep.tris[first..last.min(prep.tris.len())], &uv, c, n, self.paint_r_uv, &b);
+                        }
+                    }
+                    if !self.paint_dirty.contains(&k) {
+                        self.paint_dirty.push(k);
+                    }
+                    self.slot_rev += 1;
+                }
+                self.paint_last = Some(at);
+                ui.ctx().request_repaint();
+            }
+        }
+        // Fin du trait : les textures touchées s'enregistrent, et la scène retient leur chemin
+        if (resp.drag_stopped() || resp.clicked() || !ui.input(|i| i.pointer.primary_down())) && !self.paint_dirty.is_empty() {
+            self.paint_last = None;
+            for k in std::mem::take(&mut self.paint_dirty) {
+                let Some((rel, t)) = self.paint_tex.get(k).cloned().flatten() else { continue };
+                let full = std::path::Path::new(&self.root).join(&rel);
+                if let Some(d) = full.parent() {
+                    let _ = std::fs::create_dir_all(d);
+                }
+                if let Ok(img) = t.read() {
+                    let _ = img.save(&full);
+                }
+                // Enregistrer la scène (le chemin de la peinture) sans tout reconstruire
+                if let Some(sc) = self.scene.as_ref() {
+                    if sc.objects.get(k).is_some_and(|o| o.paint == rel) && !self.paint_saved.contains(&k) {
+                        let _ = sc.write(&self.path);
+                        self.paint_saved.push(k);
+                    }
+                }
+            }
+        } else if !ui.input(|i| i.pointer.primary_down()) {
+            self.paint_last = None;
+        }
+        // La barre du pinceau, en bas au milieu de la vue
+        let bar = egui::Rect::from_center_size(egui::pos2(rect.center().x, rect.bottom() - 30.0), egui::vec2(560.0f32.min(rect.width() - 20.0), 40.0));
+        let mut leave = false;
+        let mut clear = false;
+        let mut bui = ui.new_child(egui::UiBuilder::new().max_rect(bar).layout(egui::Layout::left_to_right(egui::Align::Center)));
+        egui::Frame::new().fill(p.panel).stroke(Stroke::new(1.0, p.line)).corner_radius(8.0).inner_margin(egui::Margin::symmetric(10, 5)).show(&mut bui, |ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            ui.label(egui::RichText::new(crate::lucide::PAINTBRUSH).size(15.0).color(p.accent));
+            let mut c = b.color;
+            if ui.color_edit_button_rgb(&mut c).on_hover_text(crate::i18n::t("couleur")).changed() {
+                b.color = c;
+                b.erase = false;
+            }
+            let er = egui::Button::new(egui::RichText::new(crate::lucide::ERASER).size(15.0).color(if b.erase { p.on_accent } else { p.text })).fill(if b.erase { p.accent } else { Color32::TRANSPARENT }).min_size(egui::vec2(28.0, 26.0));
+            if ui.add(er).on_hover_text(crate::i18n::t("gomme (E)")).clicked() {
+                b.erase = !b.erase;
+            }
+            ui.separator();
+            ui.label(egui::RichText::new(crate::lucide::CIRCLE).size(13.0).color(p.muted)).on_hover_text(crate::i18n::t("rayon ([ et ])"));
+            ui.add(egui::DragValue::new(&mut b.radius).range(2.0..=400.0).speed(1.0).suffix(" px"));
+            ui.label(egui::RichText::new(crate::lucide::GAUGE).size(13.0).color(p.muted)).on_hover_text(crate::i18n::t("opacité"));
+            ui.spacing_mut().slider_width = 70.0;
+            ui.add(egui::Slider::new(&mut b.strength, 0.02..=1.0).show_value(false));
+            ui.label(egui::RichText::new(crate::lucide::CIRCLE_DOT).size(13.0).color(p.muted)).on_hover_text(crate::i18n::t("dureté du bord"));
+            ui.add(egui::Slider::new(&mut b.hardness, 0.0..=1.0).show_value(false));
+            ui.separator();
+            if ui.add(egui::Button::new(egui::RichText::new(crate::lucide::TRASH_2).size(15.0)).fill(Color32::TRANSPARENT).min_size(egui::vec2(28.0, 26.0))).on_hover_text(crate::i18n::t("effacer la peinture de l'objet choisi")).clicked() {
+                clear = true;
+            }
+            if ui.add(egui::Button::new(egui::RichText::new(crate::lucide::X).size(15.0)).fill(Color32::TRANSPARENT).min_size(egui::vec2(28.0, 26.0))).on_hover_text(crate::i18n::t("quitter la peinture")).clicked() {
+                leave = true;
+            }
+        });
+        if clear {
+            if let Some(k) = self.scene_sel {
+                if let Some(Some((_, t))) = self.paint_tex.get(k) {
+                    if let Ok(mut img) = t.write() {
+                        self.paint_undo.push((k, std::mem::replace(&mut *img, crate::paint3d::blank())));
+                    }
+                    self.paint_dirty.push(k);
+                    self.slot_rev += 1;
+                }
+            }
+        }
+        self.paint3d = if leave { None } else { Some(b) };
+    }
+
     /// Ce que la vue affiche vraiment : matériaux par objet, lumières de la scène, images de référence.
     /// Les captures passent par ici aussi, pour donner la même image que la vue.
     fn render_setup(&mut self) -> (Look, Vec<RefPlane>, u64) {
         let mut look = self.look.clone();
         if self.edit.is_none() && self.scene.is_some() {
             look.slot_nodes = self.slot_progs.iter().map(|p| p.as_ref().map(|x| x.2.clone())).collect();
+            let n = self.paint_tex.len();
+            look.slot_paint = (0..n).map(|k| {
+                let tex = self.paint_tex[k].as_ref()?.1.clone();
+                let uv = self.paint_uvs(k)?;
+                let first = self.scene_ranges.iter().find(|r| r.0 == k)?.1;
+                Some(crate::paint3d::Layer { tex, uv, first })
+            }).collect();
             look.slot_rev = self.slot_rev;
         }
         if let Some(e) = &self.edit {
@@ -5069,6 +5315,11 @@ impl Viewer {
         self.embedded
     }
 
+    /// Le pinceau de peinture sur le modèle est-il actif ?
+    pub fn painting(&self) -> bool {
+        self.paint3d.is_some()
+    }
+
     pub fn is_scene(&self) -> bool {
         crate::scene::is_scene(&self.path)
     }
@@ -6828,7 +7079,7 @@ impl Viewer {
                 self.scene_redo.clear();
             }
         }
-        if !ui.ctx().egui_wants_keyboard_input() && self.edit.is_none() && self.mesh.is_none() && self.modal.is_none() && (undo || redo) {
+        if !ui.ctx().egui_wants_keyboard_input() && self.edit.is_none() && self.mesh.is_none() && self.paint3d.is_none() && self.modal.is_none() && (undo || redo) {
             let (from, to) = if redo { (&mut self.scene_redo, &mut self.scene_hist) } else { (&mut self.scene_hist, &mut self.scene_redo) };
             if let Some(prev) = from.pop() {
                 to.push(std::mem::replace(scene, prev));
@@ -7088,6 +7339,18 @@ impl Viewer {
         if self.edit.is_none() {
             if let Some(scene) = self.scene.as_ref().filter(|_| crate::scene::is_scene(&self.path)) {
                 self.slot_progs.resize(scene.objects.len(), None);
+                // Peintures des objets : chargées une fois (puis tenues à jour par le pinceau)
+                self.paint_tex.resize(scene.objects.len(), None);
+                for (k, o) in scene.objects.iter().enumerate() {
+                    let want = (!o.paint.is_empty()).then(|| o.paint.clone());
+                    if self.paint_tex[k].as_ref().map(|x| &x.0) != want.as_ref() {
+                        self.paint_tex[k] = want.and_then(|rel| {
+                            let img = image::open(std::path::Path::new(&self.root).join(&rel)).ok()?.to_rgba8();
+                            Some((rel, std::sync::Arc::new(std::sync::RwLock::new(img))))
+                        });
+                        self.slot_rev += 1;
+                    }
+                }
                 for (k, o) in scene.objects.iter().enumerate() {
                     if o.material.is_empty() {
                         if self.slot_progs[k].take().is_some() {
@@ -7243,10 +7506,11 @@ impl Viewer {
                         }
                     }
                     Hdr::Mode => {
-                        let mode = if self.sculpt.is_some() { "sculpture" } else if self.mesh.is_some() { "mode édition" } else if self.edit.is_some() { "UV et matériaux" } else { "mode objet" };
+                        let mode = if self.paint3d.is_some() { "peinture" } else if self.sculpt.is_some() { "sculpture" } else if self.mesh.is_some() { "mode édition" } else if self.edit.is_some() { "UV et matériaux" } else { "mode objet" };
                     egui::containers::menu::MenuButton::from_button(egui::Button::new(egui::RichText::new(format!("◆ {} ▾", crate::i18n::t(mode))).family(theme::bold()).size(12.0)).fill(p.panel)).ui(ui, |ui| {
                             ui.set_min_width(220.0);
-                            if ui.selectable_label(self.mesh.is_none() && self.edit.is_none(), crate::i18n::t("mode objet")).clicked() {
+                            if ui.selectable_label(self.mesh.is_none() && self.edit.is_none() && self.paint3d.is_none(), crate::i18n::t("mode objet")).clicked() {
+                                self.paint3d = None;
                                 if self.mesh.is_some() {
                                     self.mesh_toggle = true;
                                 }
@@ -7266,6 +7530,14 @@ impl Viewer {
                                         self.mesh_toggle = true;
                                     }
                                     self.sculpt = Some(SculptUi::new());
+                                    ui.close();
+                                }
+                                if ui.selectable_label(self.paint3d.is_some(), format!("{}  {}", crate::lucide::PAINTBRUSH, crate::i18n::t("peinture"))).on_hover_text(crate::i18n::t("Peindre directement sur l'objet, comme dans Substance Painter (il faut des UV)")).clicked() {
+                                    self.sculpt = None;
+                                    if self.mesh.is_some() {
+                                        self.mesh_toggle = true;
+                                    }
+                                    self.paint3d = Some(crate::paint3d::Brush::default());
                                     ui.close();
                                 }
                                 if ui.selectable_label(false, crate::i18n::t("UV, matériaux et retopo")).on_hover_text(crate::i18n::t("IDs de matériau, coutures, UV et retopo de l'objet choisi")).clicked() {
@@ -8324,7 +8596,7 @@ impl Viewer {
                 let ax = axis.map(|k| format!(" · {} {}", crate::i18n::t("axe"), crate::gizmo::LETTER[k])).unwrap_or_default();
                 tool_hint(ui, rect, format!("{what}{ax}   ·   X Y Z : {}   ·   {}   ·   {}", crate::i18n::t("imposer un axe"), crate::i18n::t("clic : valider"), crate::i18n::t("Échap : annuler")));
             }
-            if let (Some(sel), Some((lo, hi)), Some(scene)) = (self.scene_sel, self.scene_frame, self.scene.as_mut()) {
+            if let (Some(sel), Some((lo, hi)), Some(scene)) = (self.scene_sel.filter(|_| self.paint3d.is_none()), self.scene_frame, self.scene.as_mut()) {
                 // Place de l'objet dans la scène et direction de ses axes, parents compris
                 let placed = scene.objects.get(sel).map(|o| {
                     let base = scene.from_parent(sel, o.pos);
@@ -8565,7 +8837,7 @@ impl Viewer {
         // Navigation comme dans Blender, dans une scène : glisser à gauche dans le vide = sélection au rectangle,
         // molette enfoncée = tourner (Maj : déplacer, Ctrl : zoom), Alt + glisser à gauche = tourner (sans souris à trois boutons)
         let scene_nav = crate::scene::is_scene(&self.path) && self.edit.is_none();
-        if scene_nav && resp.drag_started_by(egui::PointerButton::Primary) && !mods.alt && self.gizmo_hold.is_none() && self.modal.is_none() && !lkey && !hkey {
+        if scene_nav && self.paint3d.is_none() && resp.drag_started_by(egui::PointerButton::Primary) && !mods.alt && self.gizmo_hold.is_none() && self.modal.is_none() && !lkey && !hkey {
             let at = ui.input(|i| i.pointer.press_origin());
             match self.mesh.as_mut() {
                 Some(me) if me.modal.is_none() => me.boxing = Some(at),
@@ -8818,6 +9090,9 @@ impl Viewer {
             painter.image(t.id(), rect, egui::Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
         }
         self.draw_outline(ui, &painter, rect);
+        if self.paint3d.is_some() {
+            self.paint_ui(ui, rect, &resp);
+        }
         // Le curseur 3D : un anneau rouge et blanc et sa croix, par-dessus la vue
         if let Some(s) = self.cursor_screen.take().filter(|s| rect.contains(*s)) {
             for k in 0..8 {

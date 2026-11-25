@@ -27,6 +27,7 @@ mod sources;
 mod text3d;
 mod timetrack;
 mod timenav;
+mod paint3d;
 mod pbrphoto;
 mod vector_ui;
 mod keymap;
@@ -2663,6 +2664,7 @@ impl App {
         }
         match self.current().map(|d| &d.content) {
             Some(Content::Model(v)) if v.is_mesh_edit() => t("MODE ÉDITION · 1 2 3 : sommets, arêtes, faces · glisser : rectangle (Maj ajoute, Ctrl retire) · Ctrl+clic : chemin · Alt+clic : boucle · Ctrl+plus / moins · Ctrl+I inverser · G R S · E extruder · I incruster · M fusionner · L pièce liée · X supprimer · Ctrl+Z"),
+            Some(Content::Model(v)) if v.is_scene() && v.painting() => t("glisser : peindre · Alt+glisser : tourner · molette enfoncée : tourner (Maj : déplacer) · [ ] : taille du pinceau · E : gomme · Ctrl+Z annuler"),
             Some(Content::Model(v)) if v.is_scene() => t("molette enfoncée : tourner (Maj : déplacer) · glisser : rectangle · G R S : déplacer, tourner, taille (X Y Z : axe) · Maj+clic, A, B : sélection · Maj+A ajouter · X supprimer · Maj+D dupliquer · P parent · H cacher · I clé · Tab édition · Espace lecture · Ctrl+Z annuler"),
             Some(Content::Model(_)) => t("glisser : tourner · Maj+glisser : déplacer · molette : zoom · 1 3 7 : vues · 5 : perspective · L + glisser : lumière · H + glisser : HDRI · F2 renommer le fichier"),
             Some(Content::Music(_)) => t("Espace lire · L reprendre · double-clic : nouvelle région · cadre : choisir des notes · Ctrl+A/C/X/V · ↑↓ transposer (Maj : octave) · ←→ décaler · Ctrl+molette : zoom"),
