@@ -697,6 +697,7 @@ impl Editor {
         let mut outline_text: Option<u64> = None;
         let single = (self.sel.len() == 1).then(|| self.sel[0]);
         let mut path_act: Option<&'static str> = None;
+        let guides_list: Vec<(u64, String)> = self.doc.shapes.iter().filter(|s| matches!(s.kind, Kind::Path { .. } | Kind::Ellipse { .. } | Kind::Line { .. })).map(|s| (s.id, s.name.clone())).collect();
         if let Some(id) = single {
             let root = self.root.clone();
             let _ = root;
@@ -810,6 +811,26 @@ impl Editor {
                 }
                 Kind::Text { text, size, font, align, width, spacing, leading } => {
                     head(ui, "Texte");
+                    // Texte sur un tracé (Illustrator) : la ligne de base suit un tracé, une ellipse ou une ligne
+                    let guides: Vec<(u64, String)> = guides_list.clone();
+                    if !guides.is_empty() {
+                        ui.horizontal(|ui| {
+                            ui.label(egui::RichText::new(l::SPLINE).color(p.muted)).on_hover_text(crate::i18n::t("Texte sur un tracé : les lettres suivent la forme choisie"));
+                            let cur = guides.iter().find(|g| g.0 == s.on_path).map(|g| g.1.clone()).unwrap_or_else(|| crate::i18n::t("aucun tracé"));
+                            egui::ComboBox::from_id_salt("vec-onpath").width(150.0).selected_text(cur).show_ui(ui, |ui| {
+                                if ui.selectable_label(s.on_path == 0, crate::i18n::t("aucun tracé")).clicked() {
+                                    s.on_path = 0;
+                                    ch = true;
+                                }
+                                for (gid, gname) in &guides {
+                                    if ui.selectable_label(s.on_path == *gid, gname).clicked() {
+                                        s.on_path = *gid;
+                                        ch = true;
+                                    }
+                                }
+                            });
+                        });
+                    }
                     let te = ui.add(egui::TextEdit::multiline(text).desired_rows(2).desired_width(f32::INFINITY));
                     if self.focus_text {
                         te.request_focus();

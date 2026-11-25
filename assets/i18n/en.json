@@ -3022,5 +3022,7 @@
   "aucun lien": "no link",
   "Animer dans Motion : chaque forme du plan devient un calque modifiable": "Animate in Motion: each shape of the artboard becomes an editable layer",
   "rien à animer sur ce plan de travail": "nothing to animate on this artboard",
-  "plan introuvable": "artboard not found"
+  "plan introuvable": "artboard not found",
+  "Texte sur un tracé : les lettres suivent la forme choisie": "Text on a path: the letters follow the chosen shape",
+  "aucun tracé": "no path"
 }

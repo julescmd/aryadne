@@ -203,9 +203,12 @@ pub struct Shape {
     /// Style partagé utilisé (vide : aucun)
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub style: String,
-    /// Prototype : un clic sur la forme mène à ce plan de travail (son nom ; vide : aucun lien)
+    /// Prototype : un clic sur la forme (en présentation) mène à ce plan de travail (son nom ; vide : aucun lien)
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub link: String,
+    /// Texte sur un tracé : l'identifiant du tracé (ou de l'ellipse) que suit la ligne de base (0 : aucun)
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub on_path: u64,
 }
 
 fn is_default_c(c: &[u8; 2]) -> bool {
@@ -520,6 +523,13 @@ impl Doc {
 
     /// Le cadre (monde) d'une forme, rotation comprise
     pub fn bounds(&self, s: &Shape) -> [f32; 4] {
+        // Un texte sur un tracé occupe le tracé (élargi de la hauteur des lettres)
+        if let (Kind::Text { size, .. }, true) = (&s.kind, s.on_path != 0) {
+            if let Some(g) = self.get(s.on_path).and_then(guide_line) {
+                let b = g.iter().fold([f32::MAX, f32::MAX, f32::MIN, f32::MIN], |b, (p, _)| [b[0].min(p[0]), b[1].min(p[1]), b[2].max(p[0]), b[3].max(p[1])]);
+                return [b[0] - size, b[1] - size, b[2] + size, b[3] + size];
+            }
+        }
         if let (Kind::Group { .. }, Some(l)) = (&s.kind, &s.layout) {
             if l.size[0] > 0.0 {
                 return [s.x, s.y, s.x + l.size[0], s.y + l.size[1]];
@@ -626,7 +636,7 @@ fn union(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {
 
 impl Shape {
     pub fn base() -> Shape {
-        Shape { id: 0, name: String::new(), kind: Kind::Rect { w: 100.0, h: 100.0, r: [0.0; 4] }, x: 0.0, y: 0.0, rot: 0.0, fills: vec![], strokes: vec![], opacity: 1.0, visible: true, locked: false, parent: 0, shadow: None, blur: 0.0, blend: String::new(), layout: None, component: false, instance_of: 0, widths: vec![], constraint: [0, 0], style: String::new(), link: String::new() }
+        Shape { id: 0, name: String::new(), kind: Kind::Rect { w: 100.0, h: 100.0, r: [0.0; 4] }, x: 0.0, y: 0.0, rot: 0.0, fills: vec![], strokes: vec![], opacity: 1.0, visible: true, locked: false, parent: 0, shadow: None, blur: 0.0, blend: String::new(), layout: None, component: false, instance_of: 0, widths: vec![], constraint: [0, 0], style: String::new(), link: String::new(), on_path: 0 }
     }
 
     pub fn kind_label(&self) -> &'static str {
@@ -756,6 +766,107 @@ pub fn nodes_data(nodes: &[Node], closed: bool) -> String {
     if closed && nodes.len() > 2 {
         seg(&mut d, nodes.last().unwrap(), first);
         d.push('Z');
+    }
+    d
+}
+
+/// La ligne que suit un texte sur un tracé : ses points (monde) et leur abscisse curviligne
+pub fn guide_line(p: &Shape) -> Option<Vec<([f32; 2], f32)>> {
+    let (nodes, closed) = match &p.kind {
+        Kind::Path { nodes, closed } => (nodes.clone(), *closed),
+        Kind::Ellipse { w, h } => {
+            let (rx, ry, k) = (w / 2.0, h / 2.0, 0.552_284_8);
+            let c = [rx, ry];
+            (
+                vec![
+                    Node { p: [c[0] - rx, c[1]], i: [c[0] - rx, c[1] + ry * k], o: [c[0] - rx, c[1] - ry * k] },
+                    Node { p: [c[0], c[1] - ry], i: [c[0] - rx * k, c[1] - ry], o: [c[0] + rx * k, c[1] - ry] },
+                    Node { p: [c[0] + rx, c[1]], i: [c[0] + rx, c[1] - ry * k], o: [c[0] + rx, c[1] + ry * k] },
+                    Node { p: [c[0], c[1] + ry], i: [c[0] + rx * k, c[1] + ry], o: [c[0] - rx * k, c[1] + ry] },
+                ],
+                true,
+            )
+        }
+        Kind::Line { x2, y2 } => (vec![Node::corner([0.0, 0.0]), Node::corner([*x2, *y2])], false),
+        _ => return None,
+    };
+    let (sn, cs) = p.rot.to_radians().sin_cos();
+    let t = |q: [f32; 2]| [p.x + q[0] * cs - q[1] * sn, p.y + q[0] * sn + q[1] * cs];
+    let pts: Vec<([f32; 2], f32)> = crate::vgeom::flatten(&nodes, closed).into_iter().map(|(q, d)| (t(q), d)).collect();
+    (pts.len() > 1).then_some(pts)
+}
+
+/// Un texte posé le long d'une ligne : chaque lettre suit la courbe, tournée selon sa pente (tracé SVG, monde)
+pub fn text_on_path(s: &Shape, guide: &[([f32; 2], f32)]) -> String {
+    use ab_glyph::{Font, ScaleFont};
+    let Kind::Text { text, size, font, align, spacing, .. } = &s.kind else { return String::new() };
+    let f = crate::motion::font(font);
+    let sf = f.as_scaled(*size);
+    let line: String = text.replace('\n', " ");
+    let total: f32 = line.chars().map(|c| sf.h_advance(f.glyph_id(c)) + spacing).sum();
+    let len = guide.last().map(|x| x.1).unwrap_or(0.0);
+    let mut x = match align {
+        1 => (len - total) / 2.0,
+        2 => len - total,
+        _ => 0.0,
+    };
+    // Point et pente de la ligne à l'abscisse `d`
+    let at = |d: f32| -> ([f32; 2], f32) {
+        let k = guide.partition_point(|g| g.1 < d).clamp(1, guide.len() - 1);
+        let ((a, da), (b, db)) = (guide[k - 1], guide[k]);
+        let u = ((d - da) / (db - da).max(1e-6)).clamp(0.0, 1.0);
+        ([a[0] + (b[0] - a[0]) * u, a[1] + (b[1] - a[1]) * u], (b[1] - a[1]).atan2(b[0] - a[0]))
+    };
+    let mut d = String::new();
+    let (kx, ky) = (sf.h_scale_factor(), sf.v_scale_factor());
+    for c in line.chars() {
+        let id = f.glyph_id(c);
+        let adv = sf.h_advance(id);
+        let mid = x + adv / 2.0;
+        if mid >= 0.0 && mid <= len {
+            let (o, ang) = at(mid);
+            let (sn, cs) = ang.sin_cos();
+            // La lettre, centrée sur son point, ligne de base sur la courbe
+            let tr = |p: ab_glyph::Point| {
+                let (lx, ly) = (p.x * kx - adv / 2.0, -p.y * ky);
+                [o[0] + lx * cs - ly * sn, o[1] + lx * sn + ly * cs]
+            };
+            if let Some(ol) = f.outline(id) {
+                let mut last: Option<[f32; 2]> = None;
+                for curve in &ol.curves {
+                    use ab_glyph::OutlineCurve::*;
+                    let (start, end) = match curve {
+                        Line(a, b) => (tr(*a), tr(*b)),
+                        Quad(a, _, b) => (tr(*a), tr(*b)),
+                        Cubic(a, _, _, b) => (tr(*a), tr(*b)),
+                    };
+                    if last.is_none_or(|l| (l[0] - start[0]).abs() > 0.01 || (l[1] - start[1]).abs() > 0.01) {
+                        if last.is_some() {
+                            d.push('Z');
+                        }
+                        let _ = write!(d, "M{:.2} {:.2}", start[0], start[1]);
+                    }
+                    match curve {
+                        Line(_, _) => {
+                            let _ = write!(d, "L{:.2} {:.2}", end[0], end[1]);
+                        }
+                        Quad(_, c1, _) => {
+                            let c1 = tr(*c1);
+                            let _ = write!(d, "Q{:.2} {:.2} {:.2} {:.2}", c1[0], c1[1], end[0], end[1]);
+                        }
+                        Cubic(_, c1, c2, _) => {
+                            let (c1, c2) = (tr(*c1), tr(*c2));
+                            let _ = write!(d, "C{:.2} {:.2} {:.2} {:.2} {:.2} {:.2}", c1[0], c1[1], c2[0], c2[1], end[0], end[1]);
+                        }
+                    }
+                    last = Some(end);
+                }
+                if last.is_some() {
+                    d.push('Z');
+                }
+            }
+        }
+        x += adv + spacing;
     }
     d
 }
@@ -1044,6 +1155,20 @@ impl Gen<'_> {
             }
             out.push_str("</g>");
             return;
+        }
+        // Texte sur un tracé : les lettres suivent la ligne (en coordonnées du monde)
+        if let (Kind::Text { .. }, true) = (&sh.kind, sh.on_path != 0) {
+            if let Some(g) = self.doc.get(sh.on_path).and_then(guide_line) {
+                let d = text_on_path(sh, &g);
+                let b = self.doc.bounds(sh);
+                let _ = write!(out, r#"<g opacity="{}">"#, sh.opacity);
+                for f in sh.fills.clone() {
+                    let (p, o) = self.paint(&f, b);
+                    let _ = write!(out, r#"<path d="{d}" fill="{p}" fill-opacity="{o}"/>"#);
+                }
+                out.push_str("</g>");
+                return;
+            }
         }
         self.wrap_open(out, sh);
         let bounds = local_bounds(sh);
@@ -1814,6 +1939,21 @@ mod tests {
         st2.fills = vec![Paint::solid([200, 50, 50, 255])];
         assert_eq!(d.set_style(st2), 2);
         assert!(ids.iter().all(|i| d.get(*i).unwrap().fills[0].first() == [200, 50, 50, 255]));
+    }
+
+    #[test]
+    fn texte_sur_trace() {
+        let mut d = Doc::starter();
+        let p = d.new_id();
+        d.shapes.push(Shape { id: p, kind: Kind::Path { nodes: vec![Node::corner([0.0, 100.0]), Node::corner([400.0, 100.0])], closed: false }, ..Shape::base() });
+        let t = d.new_id();
+        d.shapes.push(Shape { id: t, kind: Kind::Text { text: "Bonjour".into(), size: 40.0, font: "inter".into(), align: 0, width: None, spacing: 0.0, leading: 1.0 }, on_path: p, fills: vec![Paint::solid([0, 0, 0, 255])], ..Shape::base() });
+        let g = guide_line(d.get(p).unwrap()).unwrap();
+        let path = text_on_path(d.get(t).unwrap(), &g);
+        assert!(path.starts_with('M') && path.contains('Z'));
+        let b = d.bounds(d.get(t).unwrap());
+        assert!(b[0] < 0.0 && b[2] > 400.0);
+        assert!(to_svg(&d, [0.0, 0.0, 500.0, 300.0], [100, 60], ".", false).contains(&path[..20]));
     }
 
     #[test]
