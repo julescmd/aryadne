@@ -96,6 +96,9 @@ pub struct Clip {
     /// Stabilisation (0 : aucune) : agrandissement en % qui cache les bords qui bougent
     #[serde(default, skip_serializing_if = "is_zero_f")]
     pub stab: f32,
+    /// Masque d'étalonnage : la correction (roues, lumière, contraste, saturation) seulement dans une ellipse
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mask: Option<GradeMask>,
     /// Identifiant stable dans le montage (la sélection survit aux suppressions et aux coupes)
     #[serde(default)]
     pub id: u64,
@@ -131,6 +134,41 @@ pub fn wheel_rgb(v: [f32; 3]) -> [f32; 3] {
 }
 
 /// Filtre ffmpeg des roues : ombres (lift), tons moyens (gamma), hautes lumières (gain)
+/// Zone d'un masque d'étalonnage, en fraction de l'image du clip
+#[derive(Clone, Copy, PartialEq, Serialize, Deserialize, Debug)]
+pub struct GradeMask {
+    pub cx: f32,
+    pub cy: f32,
+    pub rx: f32,
+    pub ry: f32,
+    /// Adoucissement du bord (0 : net, 1 : tout en dégradé)
+    pub feather: f32,
+    /// Corriger hors de l'ellipse plutôt que dedans
+    #[serde(default)]
+    pub invert: bool,
+}
+
+impl Default for GradeMask {
+    fn default() -> GradeMask {
+        GradeMask { cx: 0.5, cy: 0.5, rx: 0.3, ry: 0.35, feather: 0.4, invert: false }
+    }
+}
+
+impl GradeMask {
+    /// L'opacité du masque (0..1) au point (u, v) de l'image
+    pub fn at(&self, u: f32, v: f32) -> f32 {
+        let d = (((u - self.cx) / self.rx.max(1e-3)).powi(2) + ((v - self.cy) / self.ry.max(1e-3)).powi(2)).sqrt();
+        let a = ((1.0 - d) / self.feather.max(1e-3)).clamp(0.0, 1.0);
+        if self.invert { 1.0 - a } else { a }
+    }
+
+    /// L'expression `geq` de l'alpha (0..255)
+    pub fn geq_alpha(&self) -> String {
+        let a = format!("clip((1-hypot((X/W-{:.4})/{:.4},(Y/H-{:.4})/{:.4}))/{:.4},0,1)", self.cx, self.rx.max(1e-3), self.cy, self.ry.max(1e-3), self.feather.max(1e-3));
+        if self.invert { format!("255*(1-{a})") } else { format!("255*{a}") }
+    }
+}
+
 pub fn colorbalance(w: &[[f32; 3]; 3]) -> String {
     let [s, m, h] = [wheel_rgb(w[0]), wheel_rgb(w[1]), wheel_rgb(w[2])];
     format!("colorbalance=rs={:.3}:gs={:.3}:bs={:.3}:rm={:.3}:gm={:.3}:bm={:.3}:rh={:.3}:gh={:.3}:bh={:.3}", s[0], s[1], s[2], m[0], m[1], m[2], h[0], h[1], h[2])
@@ -451,7 +489,7 @@ impl Clip {
     /// Clip vide pour les tests
     #[cfg(test)]
     pub fn test() -> Clip {
-        Clip { name: "c".into(), file: "c.mp4".into(), kind: "video".into(), track: 0, start: 0.0, src_in: 0.0, src_out: 1.0, media: 10.0, has_audio: false, speed: 1.0, opacity: 1.0, volume: 1.0, fade_in: 0.0, fade_out: 0.0, brightness: 0.0, contrast: 1.0, saturation: 1.0, wheels: [[0.0; 3]; 3], x: 0.0, y: 0.0, scale: 1.0, grade: String::new(), keys: vec![], text: String::new(), text_size: 72.0, text_color: [255; 3], font: String::new(), outline: false, xfade: 0.0, audio: false, link: 0, fx: vec![], stab: 0.0, id: 0 }
+        Clip { name: "c".into(), file: "c.mp4".into(), kind: "video".into(), track: 0, start: 0.0, src_in: 0.0, src_out: 1.0, media: 10.0, has_audio: false, speed: 1.0, opacity: 1.0, volume: 1.0, fade_in: 0.0, fade_out: 0.0, brightness: 0.0, contrast: 1.0, saturation: 1.0, wheels: [[0.0; 3]; 3], x: 0.0, y: 0.0, scale: 1.0, grade: String::new(), keys: vec![], text: String::new(), text_size: 72.0, text_color: [255; 3], font: String::new(), outline: false, xfade: 0.0, audio: false, link: 0, fx: vec![], stab: 0.0, mask: None, id: 0 }
     }
 
     /// Placement, taille et opacité à l'instant `t` de la timeline, d'après les clés (None sans clé).
@@ -840,6 +878,7 @@ impl Project {
             link: 0,
             fx: vec![],
             stab: 0.0,
+            mask: None,
             id: 0,
         });
         self.ensure_ids();
@@ -1399,6 +1438,7 @@ pub fn import(project: &Path, media: &Path, track: usize, start: f32) -> Result<
         link: 0,
         fx: vec![],
         stab: 0.0,
+        mask: None,
         id: 0,
     })
 }
@@ -1464,11 +1504,19 @@ pub fn graph(p: &Project, project: &Path, from: f32, w: u32, h: u32, realtime: b
                 let (cw, ch) = (((w as f32 * sc).round() as u32).max(2), ((h as f32 * sc).round() as u32).max(2));
                 filter += &format!(",scale=w={cw}:h={ch}:force_original_aspect_ratio=decrease");
             }
+            let mut grade = String::new();
             if !wheels_neutral(&c.wheels) {
-                filter += &format!(",{}", colorbalance(&c.wheels));
+                grade += &format!(",{}", colorbalance(&c.wheels));
             }
             if c.brightness != 0.0 || c.contrast != 1.0 || c.saturation != 1.0 {
-                filter += &format!(",eq=brightness={:.3}:contrast={:.3}:saturation={:.3}", c.brightness.clamp(-1.0, 1.0), c.contrast.clamp(0.0, 4.0), c.saturation.clamp(0.0, 3.0));
+                grade += &format!(",eq=brightness={:.3}:contrast={:.3}:saturation={:.3}", c.brightness.clamp(-1.0, 1.0), c.contrast.clamp(0.0, 4.0), c.saturation.clamp(0.0, 3.0));
+            }
+            match c.mask {
+                // Masque : une copie corrigée, découpée en ellipse, posée sur l'image d'origine
+                Some(m) if !grade.is_empty() => {
+                    filter += &format!(",format=rgba,split=2[gm{n}a][gm{n}b];[gm{n}b]null{grade},format=rgba,geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='{}'[gm{n}c];[gm{n}a][gm{n}c]overlay=format=auto", m.geq_alpha());
+                }
+                _ => filter += &grade,
             }
             filter += ",format=rgba";
             if animated {
@@ -1854,7 +1902,7 @@ mod tests {
     #[test]
     fn coupe_et_durees() {
         let mut p = Project::default();
-        let c = Clip { name: "a".into(), file: "a.mp4".into(), kind: "video".into(), track: 1, start: 2.0, src_in: 1.0, src_out: 9.0, media: 10.0, has_audio: true, speed: 2.0, opacity: 1.0, volume: 1.0, fade_in: 0.5, fade_out: 0.5, brightness: 0.0, contrast: 1.0, saturation: 1.0, wheels: [[0.0; 3]; 3], x: 0.0, y: 0.0, scale: 1.0, grade: String::new(), keys: vec![], text: String::new(), text_size: 72.0, text_color: [255; 3], font: String::new(), outline: false, xfade: 0.0, audio: false, link: 0, fx: vec![], stab: 0.0, id: 0 };
+        let c = Clip { name: "a".into(), file: "a.mp4".into(), kind: "video".into(), track: 1, start: 2.0, src_in: 1.0, src_out: 9.0, media: 10.0, has_audio: true, speed: 2.0, opacity: 1.0, volume: 1.0, fade_in: 0.5, fade_out: 0.5, brightness: 0.0, contrast: 1.0, saturation: 1.0, wheels: [[0.0; 3]; 3], x: 0.0, y: 0.0, scale: 1.0, grade: String::new(), keys: vec![], text: String::new(), text_size: 72.0, text_color: [255; 3], font: String::new(), outline: false, xfade: 0.0, audio: false, link: 0, fx: vec![], stab: 0.0, mask: None, id: 0 };
         p.clips.push(c);
         // 8 s de source à vitesse 2 : 4 s sur la timeline
         assert_eq!(p.clips[0].len(), 4.0);
@@ -2276,5 +2324,20 @@ mod reframe_tests {
         let fit = 1080.0f32 / 1920.0;
         let lim = (1920.0 * fit * clip.scale - 1080.0) / 2.0;
         assert!(keys.iter().all(|k| k.x.abs() <= lim + 0.5));
+    }
+}
+
+#[cfg(test)]
+mod mask_tests {
+    use super::*;
+    #[test]
+    fn masque_d_etalonnage() {
+        let m = GradeMask { feather: 0.5, ..GradeMask::default() };
+        assert_eq!(m.at(0.5, 0.5), 1.0);
+        assert_eq!(m.at(0.0, 0.0), 0.0);
+        let edge = m.at(0.5 + 0.3 * 0.75, 0.5);
+        assert!(edge > 0.3 && edge < 0.7, "{edge}");
+        assert_eq!(GradeMask { invert: true, ..m }.at(0.5, 0.5), 0.0);
+        assert!(m.geq_alpha().starts_with("255*clip("));
     }
 }

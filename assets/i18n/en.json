@@ -3239,5 +3239,12 @@
   "Métronome : un clic à chaque temps pendant l'écoute (jamais dans l'export)": "Metronome: a click on every beat while playing (never in the export)",
   "Crée une copie verticale du montage pour Reels, TikTok et Shorts : chaque plan remplit le cadre 9:16 et le cadre suit son sujet (ce qui bouge, ce qui ressort)": "Creates a vertical copy of the edit for Reels, TikTok and Shorts: each shot fills the 9:16 frame and the frame follows its subject (what moves, what stands out)",
   "Version 9:16 : recadrage sur le sujet de chaque plan…": "9:16 version: reframing each shot on its subject…",
-  "Aucune image lue dans ce plan.": "No frame could be read from this shot."
+  "Aucune image lue dans ce plan.": "No frame could be read from this shot.",
+  "Zone": "Area",
+  "Toute l'image": "Whole image",
+  "Inverser : corriger autour de l'ellipse plutôt que dedans": "Invert: correct around the ellipse instead of inside",
+  "Centre X": "Center X",
+  "Centre Y": "Center Y",
+  "Largeur": "Width",
+  "Adoucir": "Soften"
 }

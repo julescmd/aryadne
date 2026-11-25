@@ -1063,6 +1063,20 @@ impl Editor {
                 let bx = Rect::from_center_size(center, half * 2.0);
                 let pt = ui.painter().with_clip_rect(img.expand(6.0));
                 pt.rect_stroke(bx, 0.0, Stroke::new(1.0, p.text), egui::StrokeKind::Middle);
+                // Masque d'étalonnage : l'ellipse, et l'intérieur du dégradé en plus discret
+                if let Some(m) = c.mask {
+                    let o = bx.min + vec2(m.cx * bx.width(), m.cy * bx.height());
+                    for (f, col) in [(1.0, p.accent), ((1.0 - m.feather).max(0.0), p.accent.gamma_multiply(0.45))] {
+                        if f <= 0.01 {
+                            continue;
+                        }
+                        let ring: Vec<egui::Pos2> = (0..=64).map(|j| {
+                            let a = j as f32 / 64.0 * std::f32::consts::TAU;
+                            o + vec2(a.cos() * m.rx * bx.width() * f, a.sin() * m.ry * bx.height() * f)
+                        }).collect();
+                        pt.add(egui::Shape::dashed_line(&ring, Stroke::new(1.5, col), 6.0, 4.0));
+                    }
+                }
                 let pts = [bx.left_top(), bx.right_top(), bx.left_bottom(), bx.right_bottom(), bx.center_top(), bx.center_bottom(), bx.left_center(), bx.right_center()];
                 for (n, h) in pts.iter().enumerate() {
                     let hr = Rect::from_center_size(*h, vec2(8.0, 8.0));
@@ -1373,6 +1387,38 @@ impl Editor {
                         });
                     }
                 });
+                // Zone : toute l'image, ou un masque en ellipse (comme une fenêtre de Resolve)
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    let (lr, _) = ui.allocate_exact_size(vec2(72.0, 20.0), Sense::hover());
+                    ui.painter().text(lr.left_center(), egui::Align2::LEFT_CENTER, crate::i18n::t("Zone"), egui::FontId::proportional(12.0), p.muted);
+                    ui.spacing_mut().item_spacing.x = 4.0;
+                    if chip(ui, &crate::i18n::t("Toute l'image"), c.mask.is_none()) {
+                        c.mask = None;
+                        ch = true;
+                    }
+                    if chip(ui, &format!("{} {}", crate::lucide::CIRCLE_DASHED, crate::i18n::t("Ellipse")), c.mask.is_some()) && c.mask.is_none() {
+                        c.mask = Some(crate::montage::GradeMask::default());
+                        ch = true;
+                    }
+                    if let Some(m) = c.mask.as_mut() {
+                        let b = egui::Button::new(RichText::new(crate::lucide::FLIP_HORIZONTAL_2).size(13.0)).selected(m.invert).min_size(vec2(24.0, 22.0));
+                        if ui.add(b).on_hover_text(crate::i18n::t("Inverser : corriger autour de l'ellipse plutôt que dedans")).clicked() {
+                            m.invert ^= true;
+                            ch = true;
+                        }
+                    }
+                });
+                if let Some(m) = c.mask.as_mut() {
+                    for (label, v, r) in [("Centre X", &mut m.cx, 0.0..=1.0), ("Centre Y", &mut m.cy, 0.0..=1.0), ("Largeur", &mut m.rx, 0.02..=1.0), ("Hauteur", &mut m.ry, 0.02..=1.0), ("Adoucir", &mut m.feather, 0.0..=1.0)] {
+                        ui.horizontal(|ui| {
+                            let (lr, _) = ui.allocate_exact_size(vec2(72.0, 20.0), Sense::hover());
+                            ui.painter().text(lr.left_center(), egui::Align2::LEFT_CENTER, crate::i18n::t(label), egui::FontId::proportional(12.0), p.muted);
+                            ui.spacing_mut().slider_width = (ui.available_width() - 56.0).max(60.0);
+                            ch |= ui.add(egui::Slider::new(v, r).max_decimals(2)).changed();
+                        });
+                    }
+                }
             });
             // Copier l'étalonnage de ce plan, le coller sur les plans choisis
             ui.horizontal(|ui| {
