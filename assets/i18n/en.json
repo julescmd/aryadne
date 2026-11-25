@@ -2993,5 +2993,9 @@
   "crayon : un trait à main levée, lissé (finir près du départ : fermé)": "pencil: a smoothed freehand stroke (end near the start: closed)",
   "Simplifier : moins de points, même allure": "Simplify: fewer points, same shape",
   "Couper le tracé au point choisi (sélection directe)": "Cut the path at the chosen point (direct selection)",
-  "Choisis un point avec la sélection directe (A)": "Pick a point with direct selection (A)"
+  "Choisis un point avec la sélection directe (A)": "Pick a point with direct selection (A)",
+  "Nuance globale : la changer change toutes les formes qui l'utilisent (clic droit : retirer)": "Global swatch: changing it changes every shape that uses it (right-click: remove)",
+  "Ajouter les couleurs du document comme nuances": "Add the document colors as swatches",
+  "Recolorer": "Recolor",
+  "Change cette couleur dans toute la sélection": "Changes this color in the whole selection"
 }

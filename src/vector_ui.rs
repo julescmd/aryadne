@@ -586,12 +586,40 @@ impl Editor {
                 ui.label(egui::RichText::new(crate::i18n::t("Choisis une forme ou un plan de travail.")).color(p.muted));
             }
             head(ui, "Nuances");
+            // Nuances globales : changer une nuance la change partout où elle sert ; clic droit pour la retirer
+            let mut edit: Option<(usize, [u8; 4], [u8; 4])> = None;
+            let mut remove = None;
             ui.horizontal_wrapped(|ui| {
-                for c in self.doc.swatches.clone() {
-                    let (r, _) = ui.allocate_exact_size(vec2(18.0, 18.0), Sense::hover());
-                    ui.painter().rect_filled(r, 2.0, c32(c));
+                for (k, c) in self.doc.swatches.clone().into_iter().enumerate() {
+                    let mut col = c32(c);
+                    let r = ui.color_edit_button_srgba(&mut col).on_hover_text(crate::i18n::t("Nuance globale : la changer change toutes les formes qui l'utilisent (clic droit : retirer)"));
+                    if r.changed() {
+                        edit = Some((k, c, arr(col)));
+                    }
+                    if r.secondary_clicked() {
+                        remove = Some(k);
+                    }
+                }
+                if ui.small_button(l::PLUS).on_hover_text(crate::i18n::t("Ajouter les couleurs du document comme nuances")).clicked() {
+                    for c in self.doc.colors_of(&[]) {
+                        if !self.doc.swatches.contains(&c) {
+                            self.doc.swatches.push(c);
+                        }
+                    }
+                    self.changed();
                 }
             });
+            if let Some((k, from, to)) = edit {
+                self.checkpoint();
+                self.doc.replace_color(&[], from, to);
+                self.doc.swatches[k] = to;
+                self.changed();
+            }
+            if let Some(k) = remove {
+                self.checkpoint();
+                self.doc.swatches.remove(k);
+                self.changed();
+            }
             return;
         }
         let snapshot = self.doc.clone();
@@ -971,6 +999,22 @@ impl Editor {
                 self.doc.apply_layouts();
                 ch = true;
             }
+        }
+        // Recolorer (comme Illustrator) : chaque couleur de la sélection se change d'un coup
+        let cols = self.doc.colors_of(&self.sel);
+        if cols.len() > 1 || (cols.len() == 1 && self.sel.len() > 1) {
+            head(ui, "Recolorer");
+            ui.horizontal_wrapped(|ui| {
+                for c in cols.iter().take(24) {
+                    let mut col = c32(*c);
+                    if ui.color_edit_button_srgba(&mut col).on_hover_text(crate::i18n::t("Change cette couleur dans toute la sélection")).changed() {
+                        self.doc = snapshot.clone();
+                        let sel = self.sel.clone();
+                        self.doc.replace_color(&sel, *c, arr(col));
+                        ch = true;
+                    }
+                }
+            });
         }
         head(ui, "Combiner");
         ui.horizontal(|ui| {

@@ -1386,6 +1386,59 @@ pub fn fit_nodes(pts: &[[f32; 2]], eps: f32, closed: bool) -> Vec<Node> {
 }
 
 impl Doc {
+    /// Les formes concernées (et le contenu des groupes) ; vide : tout le document
+    fn deep(&self, ids: &[u64]) -> Vec<u64> {
+        if ids.is_empty() {
+            return self.shapes.iter().map(|s| s.id).collect();
+        }
+        let mut v: Vec<u64> = ids.to_vec();
+        for i in ids {
+            v.extend(self.descendants(*i));
+        }
+        v
+    }
+
+    /// Les couleurs utilisées (fonds, contours, arrêts de dégradé), de la plus fréquente à la plus rare
+    pub fn colors_of(&self, ids: &[u64]) -> Vec<[u8; 4]> {
+        let set = self.deep(ids);
+        let mut count: Vec<([u8; 4], usize)> = vec![];
+        let mut add = |c: [u8; 4]| match count.iter_mut().find(|x| x.0 == c) {
+            Some(x) => x.1 += 1,
+            None => count.push((c, 1)),
+        };
+        let mut paint = |p: &Paint| match p {
+            Paint::Solid { c } => add(*c),
+            Paint::Linear { stops, .. } | Paint::Radial { stops } => stops.iter().for_each(|s| add(s.1)),
+        };
+        for s in self.shapes.iter().filter(|s| set.contains(&s.id)) {
+            s.fills.iter().for_each(&mut paint);
+            s.strokes.iter().for_each(|k| paint(&k.paint));
+        }
+        count.sort_by(|a, b| b.1.cmp(&a.1));
+        count.into_iter().map(|x| x.0).collect()
+    }
+
+    /// Remplace une couleur par une autre (même opacité gardée si `keep_alpha`) ; rend le nombre de remplacements
+    pub fn replace_color(&mut self, ids: &[u64], from: [u8; 4], to: [u8; 4]) -> usize {
+        let set = self.deep(ids);
+        let mut n = 0;
+        let mut fix = |c: &mut [u8; 4]| {
+            if *c == from {
+                *c = to;
+                n += 1;
+            }
+        };
+        for s in self.shapes.iter_mut().filter(|s| set.contains(&s.id)) {
+            for p in s.fills.iter_mut().chain(s.strokes.iter_mut().map(|k| &mut k.paint)) {
+                match p {
+                    Paint::Solid { c } => fix(c),
+                    Paint::Linear { stops, .. } | Paint::Radial { stops } => stops.iter_mut().for_each(|st| fix(&mut st.1)),
+                }
+            }
+        }
+        n
+    }
+
     /// Les nœuds d'un tracé dans le repère du monde (position et rotation appliquées)
     pub fn path_world(&self, id: u64) -> Option<(Vec<Node>, bool)> {
         let s = self.get(id)?;
@@ -1538,6 +1591,18 @@ mod tests {
         }
         d.apply_layouts();
         assert_eq!(d.bounds(d.get(ids[1]).unwrap())[0], 180.0);
+    }
+
+    #[test]
+    fn recolorer() {
+        let mut d = Doc::starter();
+        for c in [[1, 2, 3, 255], [1, 2, 3, 255], [9, 9, 9, 255]] {
+            let id = d.new_id();
+            d.shapes.push(Shape { id, fills: vec![Paint::solid(c)], ..Shape::base() });
+        }
+        assert_eq!(d.colors_of(&[]), vec![[1, 2, 3, 255], [9, 9, 9, 255]]);
+        assert_eq!(d.replace_color(&[], [1, 2, 3, 255], [200, 0, 0, 255]), 2);
+        assert_eq!(d.colors_of(&[])[0], [200, 0, 0, 255]);
     }
 
     #[test]
