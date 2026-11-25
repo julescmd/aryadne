@@ -3087,5 +3087,14 @@
   "fichier introuvable": "file not found",
   "re-lier à un fichier…": "relink to a file…",
   "Choisir le fichier : il est copié à sa place dans le coffre": "Pick the file: it is copied into its place in the vault",
-  "ouvrir la source": "open the source"
+  "ouvrir la source": "open the source",
+  "Diaporama (croquis de pose)": "Slideshow (gesture drawing)",
+  "Les images choisies (ou toutes), une à la fois": "The selected images (or all), one at a time",
+  "30 secondes": "30 seconds",
+  "1 minute": "1 minute",
+  "2 minutes": "2 minutes",
+  "5 minutes": "5 minutes",
+  "sans minuteur": "no timer",
+  "aucune image sur le board": "no image on the board",
+  "pause (Espace)": "pause (Space)"
 }

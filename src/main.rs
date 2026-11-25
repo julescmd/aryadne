@@ -391,6 +391,8 @@ struct App {
     /// Inspecteur du board : réglages du générateur de palettes, onglet (0 couleurs, 1 propriétés)
     pal_gen: palette::Settings,
     board_tab: u8,
+    /// Diaporama du board (croquis de pose) : images, index, secondes par image, début de l'image, en pause depuis
+    slideshow: Option<Slideshow>,
     toast: Option<(String, Instant)>,
     updater: updater::Updater,
     prefs: settings::Prefs,
@@ -4849,8 +4851,11 @@ impl App {
         self.ensure_board();
         let frame = egui::Frame::new().fill(p.panel).stroke(egui::Stroke::new(1.0, p.line));
         // Comme la maquette : les calques à gauche, les couleurs à droite, le board au centre
-        egui::Panel::left("board-layers").resizable(true).default_size(240.0).min_size(180.0).max_size(360.0).frame(frame).show(ui, |ui| self.board_layers(ui));
-        egui::Panel::right("board-inspector").resizable(true).default_size(300.0).min_size(260.0).max_size(420.0).frame(frame).show(ui, |ui| self.board_inspector(ui));
+        // Pendant le diaporama, l'image prend toute la place
+        if self.slideshow.is_none() {
+            egui::Panel::left("board-layers").resizable(true).default_size(240.0).min_size(180.0).max_size(360.0).frame(frame).show(ui, |ui| self.board_layers(ui));
+            egui::Panel::right("board-inspector").resizable(true).default_size(300.0).min_size(260.0).max_size(420.0).frame(frame).show(ui, |ui| self.board_inspector(ui));
+        }
         egui::CentralPanel::default().frame(egui::Frame::new().fill(p.bg)).show(ui, |ui| {
             let canvas = ui.available_rect_before_wrap();
             let entries = self.entries.clone();
@@ -4866,6 +4871,7 @@ impl App {
             }
             self.board_header(ui, canvas);
             self.board_tools(ui, canvas);
+            self.slideshow_ui(ui, canvas);
             // Invitation à déposer : board vide, ou des fichiers survolent la fenêtre
             let hovering = ui.ctx().input(|i| !i.raw.hovered_files.is_empty());
             if hovering || self.board.data.items.is_empty() {
@@ -4882,6 +4888,97 @@ impl App {
                 ui.painter().galley(egui::pos2(r.left() + 22.0 + gw, r.center().y - sub.size().y / 2.0), sub, p.muted);
             }
         });
+    }
+
+    /// Le diaporama par-dessus le board : l'image, le temps qui reste, les commandes ; Échap ferme
+    fn slideshow_ui(&mut self, ui: &mut egui::Ui, canvas: egui::Rect) {
+        let Some(sh) = self.slideshow.as_mut() else { return };
+        let p = theme::pal();
+        let now = Instant::now();
+        let elapsed = sh.paused.unwrap_or(now).duration_since(sh.since).as_secs_f32();
+        if sh.secs > 0.0 && elapsed >= sh.secs {
+            sh.at = (sh.at + 1) % sh.images.len();
+            sh.since = now;
+        }
+        let rel = sh.images[sh.at].clone();
+        let (n, at, secs) = (sh.images.len(), sh.at, sh.secs);
+        let left = (secs - elapsed).max(0.0);
+        let paused = sh.paused.is_some();
+        let painter = ui.painter_at(canvas);
+        painter.rect_filled(canvas, 0.0, egui::Color32::from_gray(12));
+        // Le board dessous ne reçoit pas les clics
+        let _ = ui.interact(canvas, ui.id().with("slideshow-block"), egui::Sense::click_and_drag());
+        let area = canvas.shrink2(egui::vec2(24.0, 56.0));
+        match self.images.get(&rel, images::Size::Full) {
+            images::Slot::Ready(l) => {
+                let (w, h) = (l.dims[0] as f32, l.dims[1] as f32);
+                let k = (area.width() / w).min(area.height() / h);
+                let r = egui::Rect::from_center_size(area.center(), egui::vec2(w * k, h * k));
+                painter.image(l.tex.id(), r, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), egui::Color32::WHITE);
+            }
+            images::Slot::Loading => {
+                ui.ctx().request_repaint_after(Duration::from_millis(50));
+            }
+            images::Slot::Failed(e) => {
+                painter.text(area.center(), egui::Align2::CENTER_CENTER, e, egui::FontId::proportional(13.0), p.missing);
+            }
+        }
+        // Le temps qui reste, en barre sous l'image et en chiffres
+        if secs > 0.0 {
+            let bar = egui::Rect::from_min_size(egui::pos2(canvas.left(), canvas.bottom() - 4.0), egui::vec2(canvas.width() * (left / secs), 4.0));
+            painter.rect_filled(bar, 0.0, p.accent);
+            ui.ctx().request_repaint_after(Duration::from_millis(200));
+        }
+        let mut cmd = 0i8;
+        let bar = egui::Rect::from_center_size(egui::pos2(canvas.center().x, canvas.bottom() - 30.0), egui::vec2(300.0, 34.0));
+        painter.rect(bar, 6.0, p.panel, egui::Stroke::new(1.0, p.line), egui::StrokeKind::Inside);
+        let mut cui = ui.new_child(egui::UiBuilder::new().max_rect(bar.shrink2(egui::vec2(8.0, 4.0))).layout(egui::Layout::left_to_right(egui::Align::Center)));
+        let b = |ui: &mut egui::Ui, icon: &str, tip: &str| ui.add(egui::Button::new(RichText::new(icon).size(15.0)).frame(false).min_size(egui::vec2(28.0, 26.0))).on_hover_text(crate::i18n::t(tip)).clicked();
+        if b(&mut cui, crate::lucide::SKIP_BACK, "image précédente (←)") {
+            cmd = -1;
+        }
+        if b(&mut cui, if paused { crate::lucide::PLAY } else { crate::lucide::PAUSE }, "pause (Espace)") {
+            cmd = 2;
+        }
+        if b(&mut cui, crate::lucide::SKIP_FORWARD, "image suivante (→)") {
+            cmd = 1;
+        }
+        let clock = if secs > 0.0 { format!("{}:{:02}", left as u32 / 60, left.ceil() as u32 % 60) } else { "—".into() };
+        cui.label(RichText::new(format!("{clock}   {}/{n}", at + 1)).monospace().size(13.0));
+        cui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if b(ui, crate::lucide::X, "fermer (Échap)") {
+                cmd = 3;
+            }
+        });
+        let keys = ui.input(|i| (i.key_pressed(Key::ArrowLeft), i.key_pressed(Key::ArrowRight), i.key_pressed(Key::Space), i.key_pressed(Key::Escape)));
+        if keys.0 {
+            cmd = -1;
+        } else if keys.1 {
+            cmd = 1;
+        } else if keys.2 {
+            cmd = 2;
+        } else if keys.3 {
+            cmd = 3;
+        }
+        let Some(sh) = self.slideshow.as_mut() else { return };
+        match cmd {
+            -1 => {
+                sh.at = (sh.at + n - 1) % n;
+                sh.since = Instant::now();
+                sh.paused = sh.paused.map(|_| sh.since);
+            }
+            1 => {
+                sh.at = (sh.at + 1) % n;
+                sh.since = Instant::now();
+                sh.paused = sh.paused.map(|_| sh.since);
+            }
+            2 => match sh.paused.take() {
+                Some(t) => sh.since += Instant::now().duration_since(t),
+                None => sh.paused = Some(Instant::now()),
+            },
+            3 => self.slideshow = None,
+            _ => {}
+        }
     }
 
     /// En-tête flottant du board : choix du board, menus Vue, Sélection, Ajouter, Disposer ; à droite, le compte et le zoom
@@ -4975,6 +5072,24 @@ impl App {
                 let level = if self.board.on_top { egui::WindowLevel::AlwaysOnTop } else { egui::WindowLevel::Normal };
                 ui.ctx().send_viewport_cmd(egui::ViewportCommand::WindowLevel(level));
             }
+            ui.menu_button(format!("{}  {}", crate::lucide::PRESENTATION, crate::i18n::t("Diaporama (croquis de pose)")), |ui| {
+                ui.label(RichText::new(crate::i18n::t("Les images choisies (ou toutes), une à la fois")).size(11.0).color(theme::pal().muted));
+                for (label, secs) in [("30 secondes", 30.0), ("1 minute", 60.0), ("2 minutes", 120.0), ("5 minutes", 300.0), ("sans minuteur", 0.0)] {
+                    if ui.button(crate::i18n::t(label)).clicked() {
+                        let sel: Vec<usize> = if self.board.selection.len() > 1 { self.board.selection.clone() } else { (0..self.board.data.items.len()).collect() };
+                        let images: Vec<String> = sel.iter().filter_map(|&k| match &self.board.data.items.get(k)?.kind {
+                            board::Kind::Image { rel, .. } if !crate::boardlive::is_model(rel) && !crate::montage::is_project(rel) => Some(rel.clone()),
+                            _ => None,
+                        }).collect();
+                        if images.is_empty() {
+                            self.toast("aucune image sur le board");
+                        } else {
+                            self.slideshow = Some(Slideshow { images, at: 0, secs, since: Instant::now(), paused: None });
+                        }
+                        ui.close();
+                    }
+                }
+            });
             ui.separator();
             if ui.add_enabled(self.board.can_undo(), egui::Button::new(format!("{}  {}", crate::lucide::UNDO_2, crate::i18n::t("Annuler   Ctrl+Z")))).clicked() {
                 self.board.undo();
@@ -7536,6 +7651,14 @@ fn parse_moves(t: &str) -> Result<Vec<OrganizeMove>, String> {
 
 
 /// Ce que la disposition en cases demande à l'application : le contenu et le titre de chaque case.
+struct Slideshow {
+    images: Vec<String>,
+    at: usize,
+    secs: f32,
+    since: Instant,
+    paused: Option<Instant>,
+}
+
 struct Panes<'a> {
     app: &'a mut App,
     /// La case de l'éditeur principal : seule dans ses onglets, elle n'a pas de barre « Document »
