@@ -50,6 +50,7 @@ mod meshedit;
 mod montage;
 mod montage_ui;
 mod motion;
+mod lottie;
 mod audio;
 mod audio_ui;
 mod music;

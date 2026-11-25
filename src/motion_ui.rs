@@ -112,6 +112,8 @@ pub struct Editor {
     /// Zoom de la vue : None = ajusté à la place
     zoom: Option<f32>,
     export_rx: Option<Receiver<Result<PathBuf, String>>>,
+    /// Export Lottie et SVG animé sans le fond de la composition
+    web_no_bg: bool,
     export_prog: Arc<AtomicU32>,
     /// Propriété montrée dans la courbe, à droite de la timeline
     curve: Prop,
@@ -227,6 +229,7 @@ impl Editor {
             insp_tab: 0,
             zoom: None,
             export_rx: None,
+            web_no_bg: false,
             export_prog: Arc::new(AtomicU32::new(0)),
             curve: Prop::Pos,
             expr_open: Default::default(),
@@ -505,6 +508,23 @@ impl Editor {
         std::thread::spawn(move || {
             let r = motion::export(&c, &out, &root, |f| prog.store((f * 1000.0) as u32, Ordering::Relaxed));
             let _ = tx.send(r);
+        });
+    }
+
+    /// Lottie (`json`) ou SVG animé (`svg`), à côté des autres exports ; le message dit ce qui n'a pas pu suivre
+    fn export_web(&mut self, ext: &str) {
+        let stem = self.path.file_stem().map(|s| crate::formats::strip(&s.to_string_lossy()).to_string()).unwrap_or_else(|| "composition".into());
+        let out = crate::untitled::export_dir(&self.path).join(format!("{stem}.{ext}"));
+        let scene = crate::lottie::bake_compo(&self.compo, &mut self.cache, !self.web_no_bg);
+        self.message = Some(match crate::lottie::write(&scene, &out) {
+            Ok(notes) => {
+                let mut m = format!("{} : {}", crate::i18n::t("exporté"), out.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default());
+                if !notes.is_empty() {
+                    m.push_str(&format!("\n{}\n{}", crate::i18n::t("Non exporté :"), notes.iter().take(6).cloned().collect::<Vec<_>>().join("\n")));
+                }
+                m
+            }
+            Err(e) => e,
         });
     }
 
@@ -1093,6 +1113,23 @@ impl Editor {
             if ui.add_enabled(!busy, egui::Button::new(format!("{}  {}", l::FILM, label))).clicked() {
                 self.export();
             }
+            // Pour le web et les applications : Lottie ou SVG animé (vectoriel, léger)
+            ui.menu_button(l::DOWNLOAD, |ui| {
+                ui.set_width(230.0);
+                ui.spacing_mut().item_spacing = vec2(6.0, 8.0);
+                ui.label(egui::RichText::new(crate::i18n::t("Animation vectorielle pour le web et les applications. Les calques sont exportés image par image : parenté, expressions et tremblement compris.")).size(11.0).color(p.muted));
+                ui.checkbox(&mut self.web_no_bg, crate::i18n::t("fond transparent"));
+                ui.horizontal(|ui| {
+                    for (ext, name) in [("json", "Lottie"), ("svg", "SVG animé")] {
+                        if ui.button(format!("{}  {}", l::DOWNLOAD, crate::i18n::t(name))).clicked() {
+                            ui.close();
+                            self.export_web(ext);
+                        }
+                    }
+                });
+            })
+            .response
+            .on_hover_text(crate::i18n::t("Exporter en Lottie ou en SVG animé"));
             // L'image à la tête de lecture part vers un autre outil
             if let Some(t) = crate::sendto::button(ui, true, "motion") {
                 let img = motion::render(&self.compo, self.time, 1.0, &mut self.cache);

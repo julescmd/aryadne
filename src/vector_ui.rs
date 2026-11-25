@@ -2378,6 +2378,15 @@ impl Editor {
                                 }
                             }
                         });
+                        // Vectoriel, pour le web et les applications
+                        ui.horizontal(|ui| {
+                            for (ext, name) in [("json", "Lottie"), ("svg", "SVG animé")] {
+                                if ui.button(format!("{}  {}", l::DOWNLOAD, crate::i18n::t(name))).clicked() {
+                                    ui.close();
+                                    self.export_anim(ext);
+                                }
+                            }
+                        });
                     }
                 });
             }
@@ -2430,6 +2439,21 @@ impl Editor {
         let (tx, rx) = std::sync::mpsc::channel();
         self.anim_rx = Some(rx);
         std::thread::spawn(move || {
+            if ext == "json" || ext == "svg" {
+                // Lottie ou SVG animé : les formes restent vectorielles
+                let scene = crate::lottie::bake_boards(&doc, fps, hold, 0.45);
+                let _ = tx.send(match crate::lottie::write(&scene, &out) {
+                    Ok(notes) => {
+                        let mut m = format!("{} : {} ({} {})", crate::i18n::t("exporté"), out.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(), scene.frames, crate::i18n::t("images"));
+                        if !notes.is_empty() {
+                            m.push_str(&format!("\n{}", notes.iter().take(4).cloned().collect::<Vec<_>>().join("\n")));
+                        }
+                        m
+                    }
+                    Err(e) => e,
+                });
+                return;
+            }
             let frames = crate::vector::anim_frames(&doc, &root, scale, fps, hold, 0.45);
             let r = if frames.is_empty() { Err(crate::i18n::t("rien à animer")) } else if ext == "gif" { crate::vector::write_gif(&frames, fps, &out) } else { crate::vector::write_mp4(&frames, fps, &out) };
             let _ = tx.send(match r {

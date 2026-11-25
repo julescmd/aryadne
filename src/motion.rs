@@ -1428,21 +1428,21 @@ pub fn font(name: &str) -> &'static ab_glyph::FontArc {
 pub const FONTS: [(&str, &str); 6] = [("inter-bold", "Inter gras"), ("inter-semibold", "Inter demi-gras"), ("inter", "Inter"), ("lato-bold", "Lato gras"), ("lato", "Lato"), ("mono", "Mono")];
 
 /// Un caractère d'un texte placé : position du pied (px du calque, origine en haut à gauche), et son morceau
-struct Placed {
-    ch: char,
-    x: f32,
-    y: f32,
-    unit: usize,
+pub(crate) struct Placed {
+    pub ch: char,
+    pub x: f32,
+    pub y: f32,
+    pub unit: usize,
 }
 
-struct TextLayout {
-    w: f32,
-    h: f32,
-    glyphs: Vec<Placed>,
-    units: usize,
+pub(crate) struct TextLayout {
+    pub w: f32,
+    pub h: f32,
+    pub glyphs: Vec<Placed>,
+    pub units: usize,
 }
 
-fn layout_text(text: &str, size: f32, fname: &str, tracking: f32, align: u8, by: Unit) -> TextLayout {
+pub(crate) fn layout_text(text: &str, size: f32, fname: &str, tracking: f32, align: u8, by: Unit) -> TextLayout {
     use ab_glyph::{Font, ScaleFont};
     let f = font(fname);
     let sf = f.as_scaled(ab_glyph::PxScale::from(size.max(1.0)));
