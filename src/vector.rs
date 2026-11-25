@@ -23,6 +23,36 @@ pub struct Board {
     /// Fond (None : transparent)
     #[serde(default)]
     pub bg: Option<[u8; 4]>,
+    /// Grille de mise en page (colonnes), affichée et aimantée, jamais exportée
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grid: Option<LayoutGrid>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+pub struct LayoutGrid {
+    pub cols: u32,
+    pub gutter: f32,
+    pub margin: f32,
+}
+
+impl Default for LayoutGrid {
+    fn default() -> Self {
+        LayoutGrid { cols: 12, gutter: 20.0, margin: 40.0 }
+    }
+}
+
+impl Board {
+    /// Bords gauche et droit de chaque colonne (monde)
+    pub fn columns(&self) -> Vec<(f32, f32)> {
+        let Some(g) = self.grid else { return vec![] };
+        let n = g.cols.max(1) as f32;
+        let inner = (self.w - 2.0 * g.margin - (n - 1.0) * g.gutter).max(1.0);
+        let cw = inner / n;
+        (0..g.cols.max(1)).map(|k| {
+            let x = self.x + g.margin + k as f32 * (cw + g.gutter);
+            (x, x + cw)
+        }).collect()
+    }
 }
 
 /// Un point d'un tracé : le point, ses poignées d'entrée et de sortie (positions absolues, repère de la forme)
@@ -166,6 +196,31 @@ pub struct Shape {
     /// Points de largeur du contour (outil Largeur, comme Illustrator) : position relative, largeur
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub widths: Vec<[f32; 2]>,
+    /// Contraintes quand le plan de travail change de taille (comme Figma) : horizontale, verticale.
+    /// 0 début (gauche, haut), 1 fin (droite, bas), 2 les deux (étirer), 3 centre, 4 échelle
+    #[serde(default, skip_serializing_if = "is_default_c")]
+    pub constraint: [u8; 2],
+}
+
+fn is_default_c(c: &[u8; 2]) -> bool {
+    *c == [0, 0]
+}
+
+/// Où va un segment [s0, s1] quand son cadre passe de [a0, a1] à [b0, b1], selon la contrainte
+pub fn constrain(c: u8, s0: f32, s1: f32, a0: f32, a1: f32, b0: f32, b1: f32) -> (f32, f32) {
+    match c {
+        1 => (s0 + b1 - a1, s1 + b1 - a1),
+        2 => (s0 + b0 - a0, s1 + b1 - a1),
+        3 => {
+            let d = ((b0 + b1) - (a0 + a1)) / 2.0;
+            (s0 + d, s1 + d)
+        }
+        4 => {
+            let k = (b1 - b0) / (a1 - a0).max(1e-3);
+            (b0 + (s0 - a0) * k, b0 + (s1 - a0) * k)
+        }
+        _ => (s0 + b0 - a0, s1 + b0 - a0),
+    }
 }
 
 fn is_zero(v: &u64) -> bool {
@@ -213,7 +268,7 @@ pub struct Doc {
 impl Doc {
     pub fn starter() -> Doc {
         Doc {
-            boards: vec![Board { name: "Plan de travail 1".into(), x: 0.0, y: 0.0, w: 1080.0, h: 1080.0, bg: Some([255, 255, 255, 255]) }],
+            boards: vec![Board { name: "Plan de travail 1".into(), x: 0.0, y: 0.0, w: 1080.0, h: 1080.0, bg: Some([255, 255, 255, 255]), grid: None }],
             shapes: vec![],
             next_id: 1,
             swatches: vec![[24, 24, 27, 255], [255, 255, 255, 255], [236, 108, 89, 255], [244, 191, 80, 255], [86, 166, 122, 255], [84, 128, 220, 255], [150, 110, 210, 255]],
@@ -506,7 +561,7 @@ fn union(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {
 
 impl Shape {
     pub fn base() -> Shape {
-        Shape { id: 0, name: String::new(), kind: Kind::Rect { w: 100.0, h: 100.0, r: [0.0; 4] }, x: 0.0, y: 0.0, rot: 0.0, fills: vec![], strokes: vec![], opacity: 1.0, visible: true, locked: false, parent: 0, shadow: None, blur: 0.0, blend: String::new(), layout: None, component: false, instance_of: 0, widths: vec![] }
+        Shape { id: 0, name: String::new(), kind: Kind::Rect { w: 100.0, h: 100.0, r: [0.0; 4] }, x: 0.0, y: 0.0, rot: 0.0, fills: vec![], strokes: vec![], opacity: 1.0, visible: true, locked: false, parent: 0, shadow: None, blur: 0.0, blend: String::new(), layout: None, component: false, instance_of: 0, widths: vec![], constraint: [0, 0] }
     }
 
     pub fn kind_label(&self) -> &'static str {
@@ -1659,6 +1714,21 @@ mod tests {
         assert_eq!(c.len(), 2, "{}", c.len());
         let xs: Vec<f32> = c[0].iter().map(|n| n.p[0]).collect();
         assert!(xs.iter().cloned().fold(f32::MIN, f32::max) <= 96.5 && xs.iter().cloned().fold(f32::MAX, f32::min) >= -0.5);
+    }
+
+    #[test]
+    fn contraintes_et_grille() {
+        // Plan de 0..100 qui passe à 0..200 : un objet en 80..90
+        assert_eq!(constrain(0, 80.0, 90.0, 0.0, 100.0, 0.0, 200.0), (80.0, 90.0));
+        assert_eq!(constrain(1, 80.0, 90.0, 0.0, 100.0, 0.0, 200.0), (180.0, 190.0));
+        assert_eq!(constrain(2, 80.0, 90.0, 0.0, 100.0, 0.0, 200.0), (80.0, 190.0));
+        assert_eq!(constrain(3, 45.0, 55.0, 0.0, 100.0, 0.0, 200.0), (95.0, 105.0));
+        assert_eq!(constrain(4, 80.0, 90.0, 0.0, 100.0, 0.0, 200.0), (160.0, 180.0));
+        let b = Board { name: String::new(), x: 0.0, y: 0.0, w: 1000.0, h: 100.0, bg: None, grid: Some(LayoutGrid { cols: 4, gutter: 20.0, margin: 40.0 }) };
+        let c = b.columns();
+        assert_eq!(c.len(), 4);
+        assert_eq!(c[0], (40.0, 255.0));
+        assert!((c[3].1 - 960.0).abs() < 1e-3);
     }
 
     #[test]

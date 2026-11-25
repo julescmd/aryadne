@@ -2998,7 +2998,16 @@
   "Ajouter les couleurs du document comme nuances": "Add the document colors as swatches",
   "Recolorer": "Recolor",
   "Change cette couleur dans toute la sélection": "Changes this color in the whole selection",
-  "Bibliothèque d'icônes Lucide (plus de 1 500)": "Lucide icon library (over 1,500)",
   "icônes Lucide": "Lucide icons",
-  "chercher (en anglais : heart, arrow, user…)": "search (heart, arrow, user…)"
+  "chercher (en anglais : heart, arrow, user…)": "search (heart, arrow, user…)",
+  "Bibliothèque d'icônes Lucide (plus de 2 400)": "Lucide icon library (over 2,400)",
+  "Contraintes : quand le plan de travail change de taille": "Constraints: when the artboard is resized",
+  "à gauche et à droite": "left and right",
+  "à l'échelle": "scale",
+  "en haut et en bas": "top and bottom",
+  "grille de colonnes": "column grid",
+  "Des colonnes qui guident et aimantent la mise en page (jamais exportées)": "Columns that guide and snap the layout (never exported)",
+  "colonnes": "columns",
+  "gouttière": "gutter",
+  "espace entre deux colonnes": "space between two columns"
 }

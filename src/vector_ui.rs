@@ -245,6 +245,10 @@ impl Editor {
         for b in &self.doc.boards {
             xs.extend([b.x, b.x + b.w / 2.0, b.x + b.w]);
             ys.extend([b.y, b.y + b.h / 2.0, b.y + b.h]);
+            // Les bords des colonnes de la grille aimantent aussi
+            for (a, c) in b.columns() {
+                xs.extend([a, c]);
+            }
         }
         (xs, ys)
     }
@@ -299,6 +303,29 @@ impl Editor {
 
     fn shape_mut(&mut self, id: u64) -> Option<&mut Shape> {
         self.doc.shapes.iter_mut().find(|s| s.id == id)
+    }
+
+    /// Le plan de travail passe de `a` à `b` : chaque forme posée dessus suit sa contrainte
+    fn apply_constraints(&mut self, a: &Board, b: &Board) {
+        let inside = |s: &Shape, d: &Doc| {
+            let bb = d.bounds(s);
+            let c = [(bb[0] + bb[2]) / 2.0, (bb[1] + bb[3]) / 2.0];
+            c[0] >= a.x && c[0] <= a.x + a.w && c[1] >= a.y && c[1] <= a.y + a.h
+        };
+        let roots: Vec<Shape> = self.doc.shapes.iter().filter(|s| s.parent == 0 && inside(s, &self.doc)).cloned().collect();
+        for r in roots {
+            let b0 = self.doc.bounds(&r);
+            let (x0, x1) = crate::vector::constrain(r.constraint[0], b0[0], b0[2], a.x, a.x + a.w, b.x, b.x + b.w);
+            let (y0, y1) = crate::vector::constrain(r.constraint[1], b0[1], b0[3], a.y, a.y + a.h, b.y, b.y + b.h);
+            let b1 = [x0, y0, x1, y1];
+            let mut ids = vec![r.id];
+            ids.extend(self.doc.descendants(r.id));
+            for id in ids {
+                if let Some(o) = self.doc.get(id).cloned() {
+                    self.rescale(&o, b0, b1);
+                }
+            }
+        }
     }
 
     /// Remet à l'échelle une forme (et un groupe) d'un cadre vers un autre
@@ -379,7 +406,7 @@ impl Editor {
                 self.undo(true);
             }
             ui.separator();
-            if ib(ui, l::SMILE_PLUS, "Bibliothèque d'icônes Lucide (plus de 1 500)", true) {
+            if ib(ui, l::SMILE_PLUS, "Bibliothèque d'icônes Lucide (plus de 2 400)", true) {
                 self.icon_pick = if self.icon_pick.is_some() { None } else { Some(String::new()) };
             }
             if ib(ui, l::FILE_UP, "Importer un SVG (aussi : coller un SVG avec Ctrl+V)", true) {
@@ -574,6 +601,25 @@ impl Editor {
                         }
                     }
                 });
+                // Grille de mise en page
+                ui.horizontal(|ui| {
+                    let mut on = b.grid.is_some();
+                    if ui.checkbox(&mut on, crate::i18n::t("grille de colonnes")).on_hover_text(crate::i18n::t("Des colonnes qui guident et aimantent la mise en page (jamais exportées)")).changed() {
+                        b.grid = on.then(crate::vector::LayoutGrid::default);
+                    }
+                });
+                if let Some(g) = &mut b.grid {
+                    ui.horizontal(|ui| {
+                        ui.add(egui::DragValue::new(&mut g.cols).range(1..=48).prefix(format!("{} ", l::COLUMNS_3))).on_hover_text(crate::i18n::t("colonnes"));
+                        ui.add(egui::DragValue::new(&mut g.gutter).range(0.0..=400.0).prefix(format!("{} ", crate::i18n::t("gouttière")))).on_hover_text(crate::i18n::t("espace entre deux colonnes"));
+                        ui.add(egui::DragValue::new(&mut g.margin).range(0.0..=2000.0).prefix(format!("{} ", crate::i18n::t("marge"))));
+                    });
+                }
+                // Le plan change de place ou de taille : ses formes suivent leurs contraintes
+                let after = self.doc.boards[bi].clone();
+                if (after.x, after.y, after.w, after.h) != (before.x, before.y, before.w, before.h) {
+                    self.apply_constraints(&before, &after);
+                }
                 if self.doc.boards[bi] != before {
                     self.undo.push({
                         let mut d = self.doc.clone();
@@ -648,6 +694,24 @@ impl Editor {
                 ch |= ui.add(egui::DragValue::new(&mut s.y).speed(1.0).max_decimals(1).prefix("y ")).changed();
                 ch |= ui.add(egui::DragValue::new(&mut s.rot).speed(0.5).max_decimals(1).suffix("°")).changed();
             });
+            // Contraintes (comme Figma) : ce que fait la forme quand le plan de travail change de taille
+            if s.parent == 0 {
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new(l::PIN).color(p.muted)).on_hover_text(crate::i18n::t("Contraintes : quand le plan de travail change de taille"));
+                    let hl = ["à gauche", "à droite", "à gauche et à droite", "au centre", "à l'échelle"];
+                    let vl = ["en haut", "en bas", "en haut et en bas", "au centre", "à l'échelle"];
+                    for (axis, labels, salt) in [(0usize, hl, "vec-ch"), (1, vl, "vec-cv")] {
+                        egui::ComboBox::from_id_salt(salt).width(96.0).selected_text(crate::i18n::t(labels[s.constraint[axis].min(4) as usize])).show_ui(ui, |ui| {
+                            for (k, lab) in labels.iter().enumerate() {
+                                if ui.selectable_label(s.constraint[axis] == k as u8, crate::i18n::t(lab)).clicked() {
+                                    s.constraint[axis] = k as u8;
+                                    ch = true;
+                                }
+                            }
+                        });
+                    }
+                });
+            }
             match &mut s.kind {
                 Kind::Rect { w, h, r } => {
                     ui.horizontal(|ui| {
@@ -1514,6 +1578,10 @@ impl Editor {
             if self.sel_board == Some(i) {
                 painter.rect_stroke(Rect::from_two_pos(to_screen([b.x, b.y]), to_screen([b.x + b.w, b.y + b.h])), 0.0, Stroke::new(1.5, p.accent), egui::StrokeKind::Outside);
             }
+            // Grille de colonnes (comme Figma), en rouge translucide
+            for (a, c) in b.columns() {
+                painter.rect_filled(Rect::from_two_pos(to_screen([a, b.y]), to_screen([c, b.y + b.h])), 0.0, Color32::from_rgba_unmultiplied(255, 70, 70, 26));
+            }
         }
         self.mouse(ui, &resp, rect, &to_world, &to_screen, label_hit);
         // Sélection : cadre, poignées, rotation ; points en sélection directe
@@ -2296,7 +2364,7 @@ impl Editor {
                     self.checkpoint();
                     let n = self.doc.boards.len() + 1;
                     let (bw, bh) = if x1 - x0 < 4.0 { (1080.0, 1080.0) } else { (x1 - x0, y1 - y0) };
-                    self.doc.boards.push(Board { name: format!("{} {n}", crate::i18n::t("Plan de travail")), x: x0, y: y0, w: bw, h: bh, bg: Some([255, 255, 255, 255]) });
+                    self.doc.boards.push(Board { name: format!("{} {n}", crate::i18n::t("Plan de travail")), x: x0, y: y0, w: bw, h: bh, bg: Some([255, 255, 255, 255]), grid: None });
                     self.sel_board = Some(self.doc.boards.len() - 1);
                     self.sel.clear();
                     self.tool = Tool::Select;
