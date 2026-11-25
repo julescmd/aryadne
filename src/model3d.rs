@@ -5304,6 +5304,9 @@ impl Viewer {
             }
         }
         // Les contraintes « viser » suivent leurs cibles même quand on déplace les objets à la main
+        if scene.objects.iter().any(|o| !o.copy_loc.is_empty() || !o.copy_rot.is_empty() || o.limit.is_some()) && scene.apply_copies() {
+            self.scene_dirty = true;
+        }
         if scene.objects.iter().any(|o| !o.aim.is_empty()) && scene.apply_aims() {
             self.scene_dirty = true;
         }
@@ -5779,6 +5782,49 @@ impl Viewer {
                                         })
                                         .response
                                         .on_hover_text(crate::i18n::t("Contrainte « viser » : l'objet se tourne toujours vers la cible, même animée. Sa rotation X et Y ne se règle plus à la main."));
+                                        // Contraintes « copier » : position et rotation d'un autre objet
+                                        for (label, icon, which, tip) in [("copier position", crate::lucide::MOVE, 0, "L'objet se place toujours sur l'origine de la cible, même animée"), ("copier rotation", crate::lucide::ROTATE_CW, 1, "L'objet prend toujours la rotation de la cible (objets sans parent)")] {
+                                            ui.horizontal(|ui| {
+                                                let field = if which == 0 { &mut o.copy_loc } else { &mut o.copy_rot };
+                                                ui.label(egui::RichText::new(format!("{icon}  {}", crate::i18n::t(label))).size(11.0).color(if field.is_empty() { p.muted } else { p.accent }));
+                                                let cur = if field.is_empty() { crate::i18n::t("rien") } else { field.clone() };
+                                                egui::ComboBox::from_id_salt(("scene-object-copy", which)).selected_text(egui::RichText::new(cur).size(11.0)).width(110.0).show_ui(ui, |ui| {
+                                                    if ui.selectable_label(field.is_empty(), crate::i18n::t("rien")).clicked() {
+                                                        field.clear();
+                                                        changed = true;
+                                                    }
+                                                    for name in &parents {
+                                                        if ui.selectable_label(field == name, name).clicked() {
+                                                            *field = name.clone();
+                                                            changed = true;
+                                                        }
+                                                    }
+                                                });
+                                            })
+                                            .response
+                                            .on_hover_text(crate::i18n::t(tip));
+                                        }
+                                        // Limites de position : l'objet ne sort pas de cette boîte
+                                        let mut lim = o.limit.is_some();
+                                        if ui.checkbox(&mut lim, egui::RichText::new(crate::i18n::t("limiter la position")).size(11.0)).changed() {
+                                            o.limit = lim.then(|| [[o.pos[0] - 1.0, o.pos[1] - 1.0, o.pos[2] - 1.0], [o.pos[0] + 1.0, o.pos[1] + 1.0, o.pos[2] + 1.0]]);
+                                            changed = true;
+                                        }
+                                        if let Some(l) = &mut o.limit {
+                                            for (row, name) in [(0usize, "min"), (1, "max")] {
+                                                ui.horizontal(|ui| {
+                                                    ui.label(egui::RichText::new(crate::i18n::t(name)).size(11.0).color(p.muted));
+                                                    for (shown, _) in ["X", "Y", "Z"].iter().enumerate() {
+                                                        let (k, sign) = crate::gizmo::SHOWN[shown];
+                                                        let mut v = l[row][k] * sign;
+                                                        if ui.add(egui::DragValue::new(&mut v).speed(0.02).max_decimals(2)).changed() {
+                                                            l[row][k] = v * sign;
+                                                            changed = true;
+                                                        }
+                                                    }
+                                                });
+                                            }
+                                        }
 
                                         if crate::scene::kind(o) == crate::scene::Kind::Image {
                                             ui.horizontal(|ui| {

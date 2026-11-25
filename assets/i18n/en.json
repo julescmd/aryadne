@@ -2851,5 +2851,10 @@
   "volet (glisser la ligne)": "wipe (drag the line)",
   "arrêter la comparaison": "stop comparing",
   "Comparer deux versions, synchronisées": "Compare two versions, in sync",
-  "extraction de l'autre version…": "extracting the other version…"
+  "extraction de l'autre version…": "extracting the other version…",
+  "copier position": "copy location",
+  "copier rotation": "copy rotation",
+  "L'objet se place toujours sur l'origine de la cible, même animée": "The object always sits on the target's origin, even animated",
+  "L'objet prend toujours la rotation de la cible (objets sans parent)": "The object always takes the target's rotation (objects without a parent)",
+  "limiter la position": "limit location"
 }

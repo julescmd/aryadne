@@ -115,6 +115,13 @@ pub struct Object {
     /// Formes (blendshapes) : d'autres versions du même maillage, mélangées selon leur valeur
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub morphs: Vec<Morph>,
+    /// Contraintes : copier la position, la rotation d'un autre objet (avec un décalage), limiter la position
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub copy_loc: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub copy_rot: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<[[f32; 3]; 2]>,
 }
 
 /// Une forme : un fichier au même nombre de sommets que le modèle, et sa part dans le mélange.
@@ -353,7 +360,7 @@ impl Object {
     }
 
     pub fn new(name: String, file: String) -> Object {
-        Object { name, file, pos: [0.0; 3], rot: [0.0; 3], scale: [1.0; 3], visible: true, color: None, mods: vec![], material: String::new(), parent: String::new(), opacity: 0.5, role: String::new(), energy: 1.2, point: false, range: 8.0, shape: 0, spot: spot_deg(), blend: spot_blend(), size: area_size(), keys: vec![], cycle: Default::default(), aim: String::new(), length: 1.0, rest: None, skin: String::new(), ik: String::new(), ik_chain: 2, reach: 1.0, morphs: vec![] }
+        Object { name, file, pos: [0.0; 3], rot: [0.0; 3], scale: [1.0; 3], visible: true, color: None, mods: vec![], material: String::new(), parent: String::new(), opacity: 0.5, role: String::new(), energy: 1.2, point: false, range: 8.0, shape: 0, spot: spot_deg(), blend: spot_blend(), size: area_size(), keys: vec![], cycle: Default::default(), aim: String::new(), length: 1.0, rest: None, skin: String::new(), ik: String::new(), ik_chain: 2, reach: 1.0, morphs: vec![], copy_loc: String::new(), copy_rot: String::new(), limit: None }
     }
 }
 
@@ -476,8 +483,9 @@ impl Scene {
                 }
             }
         }
+        let copied = self.apply_copies();
         let aimed = self.apply_aims();
-        moved | aimed | crate::rig::solve_ik(self)
+        moved | copied | aimed | crate::rig::solve_ik(self)
     }
 
     /// Les contraintes « viser » : chaque objet qui en a une se tourne vers sa cible (le roulis reste le sien).
@@ -509,6 +517,59 @@ impl Scene {
                 if (0..3).any(|i| (r[i] - self.objects[k].rot[i]).abs() > 1e-4) {
                     self.objects[k].rot = r;
                     moved = true;
+                }
+            }
+        }
+        moved
+    }
+
+    /// Contraintes « copier la position », « copier la rotation » (dans la scène) et « limiter la position ».
+    pub fn apply_copies(&mut self) -> bool {
+        let mut moved = false;
+        for k in 0..self.objects.len() {
+            let (cl, cr) = (self.objects[k].copy_loc.clone(), self.objects[k].copy_rot.clone());
+            if !cl.is_empty() {
+                if let Some(t) = self.objects.iter().position(|o| o.name == cl).filter(|&t| t != k && !self.descends(t, k)) {
+                    let w = self.world(t, [0.0; 3]);
+                    // La position voulue dans la scène, ramenée dans l'espace du parent
+                    let mut p = w;
+                    if let Some(up) = self.parent_of(k) {
+                        let (m, o) = crate::rig::affine(self, up);
+                        if let Some(inv) = inverse3(m) {
+                            let d = [p[0] - o[0], p[1] - o[1], p[2] - o[2]];
+                            p = [0, 1, 2].map(|i| inv[i][0] * d[0] + inv[i][1] * d[1] + inv[i][2] * d[2]);
+                        }
+                    }
+                    if (0..3).any(|i| (p[i] - self.objects[k].pos[i]).abs() > 1e-5) {
+                        self.objects[k].pos = p;
+                        moved = true;
+                    }
+                }
+            }
+            if !cr.is_empty() && self.parent_of(k).is_none() {
+                if let Some(t) = self.objects.iter().position(|o| o.name == cr).filter(|&t| t != k) {
+                    let (m, _) = crate::rig::affine(self, t);
+                    // La rotation pure de la cible (sa taille retirée)
+                    let cols = [0, 1, 2].map(|c| {
+                        let v = [m[0][c], m[1][c], m[2][c]];
+                        let l = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt().max(1e-9);
+                        [v[0] / l, v[1] / l, v[2] / l]
+                    });
+                    let r = rot_euler([[cols[0][0], cols[1][0], cols[2][0]], [cols[0][1], cols[1][1], cols[2][1]], [cols[0][2], cols[1][2], cols[2][2]]]);
+                    if (0..3).any(|i| (r[i] - self.objects[k].rot[i]).abs() > 1e-4) {
+                        self.objects[k].rot = r;
+                        moved = true;
+                    }
+                }
+            }
+            if let Some([lo, hi]) = self.objects[k].limit {
+                let o = &mut self.objects[k];
+                for i in 0..3 {
+                    let v = o.pos[i].clamp(lo[i].min(hi[i]), hi[i].max(lo[i]));
+                    if v != o.pos[i] {
+                        o.pos[i] = v;
+                        moved = true;
+                    }
                 }
             }
         }
@@ -1044,6 +1105,25 @@ pub fn build_ranges(scene: &Scene, scene_path: &Path) -> (Result<crate::model3d:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn contraintes_copier() {
+        let mut sc = Scene::default();
+        let a = sc.add_role("cible", "");
+        let b = sc.add_role("suiveur", "");
+        sc.objects[a].pos = [1.0, 2.0, 3.0];
+        sc.objects[a].rot = [0.0, 45.0, 0.0];
+        sc.objects[b].copy_loc = "cible".into();
+        sc.objects[b].copy_rot = "cible".into();
+        assert!(sc.apply_copies());
+        assert_eq!(sc.objects[b].pos, [1.0, 2.0, 3.0]);
+        assert!((sc.objects[b].rot[1] - 45.0).abs() < 0.01);
+        sc.objects[b].copy_loc.clear();
+        sc.objects[b].limit = Some([[0.0; 3], [0.5, 0.5, 0.5]]);
+        assert!(sc.apply_copies());
+        assert_eq!(sc.objects[b].pos, [0.5, 0.5, 0.5]);
+        assert!(!sc.apply_copies());
+    }
 
     #[test]
     fn formes() {
