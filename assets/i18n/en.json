@@ -3171,5 +3171,11 @@
   "mot par mot (formats verticaux)": "word by word (vertical formats)",
   "Gros sous-titres de trois mots, le mot dit en couleur vive, comme sur les réseaux": "Big three-word captions, the spoken word in a bright color, like on social media",
   "refaire les sous-titres mot par mot": "redo the subtitles word by word",
-  "refaire les sous-titres en répliques": "redo the subtitles as lines"
+  "refaire les sous-titres en répliques": "redo the subtitles as lines",
+  "montage par le texte…": "text-based editing…",
+  "La transcription en lignes : retirer une ligne coupe ce passage du montage": "The transcript as lines: removing a line cuts that passage from the edit",
+  "Montage par le texte": "Text-based editing",
+  "Clic sur une ligne : la tête de lecture y va. La poubelle retire le passage de toutes les pistes, et la suite se rapproche.": "Click a line: the playhead goes there. The trash removes the passage from every track, and what follows moves up.",
+  "couper ce passage du montage": "cut this passage from the edit",
+  "Extraire : retire le passage entre l'entrée et la sortie, la suite se rapproche": "Extract: removes the passage between in and out, what follows moves up"
 }

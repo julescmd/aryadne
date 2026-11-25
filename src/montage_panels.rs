@@ -1179,6 +1179,14 @@ impl Editor {
                 self.project.mark_out = Some(self.playhead);
                 self.changed();
             }
+            if let (Some(a), Some(b)) = (self.project.mark_in, self.project.mark_out) {
+                if b > a && ui.add(egui::Button::new(RichText::new(crate::lucide::SCISSORS).size(13.0)).frame(false)).on_hover_text(crate::i18n::t("Extraire : retire le passage entre l'entrée et la sortie, la suite se rapproche")).clicked() {
+                    self.project.ripple_delete(a, b);
+                    (self.project.mark_in, self.project.mark_out) = (None, None);
+                    self.playhead = a;
+                    self.changed();
+                }
+            }
             if ib(ui, "[", "marquer l'entrée (I)", self.project.mark_in.is_some()) {
                 self.project.mark_in = Some(self.playhead);
                 self.changed();
@@ -2807,6 +2815,10 @@ impl Editor {
             }
             ui.close();
         }
+        if ui.add_enabled(!self.project.subtitles().is_empty(), egui::Button::new(format!("{}  {}", crate::lucide::FILE_TEXT, crate::i18n::t("montage par le texte…")))).on_hover_text(crate::i18n::t("La transcription en lignes : retirer une ligne coupe ce passage du montage")).clicked() {
+            self.text_edit = true;
+            ui.close();
+        }
         ui.checkbox(&mut self.words_mode, crate::i18n::t("mot par mot (formats verticaux)")).on_hover_text(crate::i18n::t("Gros sous-titres de trois mots, le mot dit en couleur vive, comme sur les réseaux"));
         let subs = self.project.subtitles();
         if !subs.is_empty() {
@@ -2833,6 +2845,55 @@ impl Editor {
             self.project.set_subtitles(&[]);
             self.changed();
             ui.close();
+        }
+    }
+
+    /// Montage par le texte : chaque réplique sur une ligne ; clic = y aller, poubelle = couper le passage
+    pub(crate) fn text_edit_window(&mut self, ctx: &egui::Context) {
+        if !self.text_edit {
+            return;
+        }
+        let p = crate::theme::pal();
+        let subs = self.project.subtitles();
+        let mut open = true;
+        let mut go = None;
+        let mut cut = None;
+        egui::Window::new(crate::i18n::t("Montage par le texte")).id(egui::Id::unique("montage-text-edit")).default_size(vec2(420.0, 480.0)).open(&mut open).show(ctx, |ui| {
+            ui.label(RichText::new(crate::i18n::t("Clic sur une ligne : la tête de lecture y va. La poubelle retire le passage de toutes les pistes, et la suite se rapproche.")).size(11.5).color(p.muted));
+            ui.add_space(6.0);
+            egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
+                for (k, c) in subs.iter().enumerate() {
+                    let here = self.playhead >= c.start && self.playhead < c.end;
+                    egui::Frame::new().fill(if here { p.raised } else { p.panel }).corner_radius(6).inner_margin(egui::Margin::symmetric(10, 6)).show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new(format!("{}:{:04.1}", c.start as u32 / 60, c.start % 60.0)).monospace().size(11.0).color(p.muted));
+                            let r = ui.add(egui::Label::new(RichText::new(c.text.replace('\n', " ")).size(13.0)).sense(Sense::click()).wrap());
+                            if r.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                                go = Some(c.start);
+                            }
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if ui.add(egui::Button::new(RichText::new(crate::lucide::TRASH_2).size(13.0).color(p.muted)).frame(false)).on_hover_text(crate::i18n::t("couper ce passage du montage")).clicked() {
+                                    cut = Some(k);
+                                }
+                            });
+                        });
+                    });
+                    ui.add_space(4.0);
+                }
+            });
+        });
+        if let Some(t) = go {
+            self.playhead = t;
+        }
+        if let Some(k) = cut {
+            let c = &subs[k];
+            self.project.ripple_delete(c.start, c.end);
+            self.playhead = c.start;
+            self.changed();
+        }
+        if !open {
+            self.text_edit = false;
         }
     }
 

@@ -963,6 +963,41 @@ impl Project {
         cuts
     }
 
+    /// Retire le passage [a, b] de toutes les pistes et rapproche la suite (comme « Extraire » de Premiere).
+    /// Les pistes verrouillées ne bougent pas.
+    pub fn ripple_delete(&mut self, a: f32, b: f32) {
+        if b <= a + 1e-3 {
+            return;
+        }
+        let locked = |c: &Clip, p: &Project| {
+            let st = if c.kind == "audio" { p.astate.get(c.track) } else { p.vstate.get(c.track) };
+            st.is_some_and(|s| s.lock)
+        };
+        // Coupes aux deux bords
+        for t in [a, b] {
+            let ids: Vec<u64> = self.clips.iter().filter(|c| c.start < t - 0.01 && c.end() > t + 0.01 && !locked(c, self)).map(|c| c.id).collect();
+            for id in ids {
+                if let Some(i) = self.index(id) {
+                    self.split(i, t);
+                }
+            }
+        }
+        let d = b - a;
+        let snapshot = self.clone();
+        self.clips.retain(|c| locked(c, &snapshot) || !(c.start >= a - 0.01 && c.end() <= b + 0.01));
+        for c in self.clips.iter_mut() {
+            if c.start >= b - 0.01 && !locked(c, &snapshot) {
+                c.start -= d;
+            }
+        }
+        self.markers.retain(|m| *m < a || *m >= b);
+        for m in self.markers.iter_mut() {
+            if *m >= b {
+                *m -= d;
+            }
+        }
+    }
+
     /// Imbrication : les clips `ids` partent dans un nouveau montage (mêmes réglages, ramenés au début) ;
     /// rend ce montage et la place (piste, début) où poser son clip
     pub fn nest(&mut self, ids: &[u64]) -> Option<(Project, usize, f32)> {
@@ -2055,3 +2090,23 @@ mod words_tests {
     }
 }
 
+
+#[cfg(test)]
+mod ripple_tests {
+    use super::*;
+
+    #[test]
+    fn extraire_un_passage() {
+        let mut p = Project::default();
+        // Un titre de 0 à 10 s sur V1, un autre de 12 à 14 s
+        let i = p.add_text(0.0);
+        p.clips[i].src_out = 10.0;
+        let j = p.add_text(12.0);
+        p.clips[j].src_out = 2.0;
+        p.ripple_delete(4.0, 6.0);
+        let mut v: Vec<(f32, f32)> = p.clips.iter().map(|c| (c.start, c.end())).collect();
+        v.sort_by(|a, b| a.0.total_cmp(&b.0));
+        assert_eq!(v.len(), 3, "{v:?}");
+        assert!((v[0].1 - 4.0).abs() < 1e-3 && (v[1].0 - 4.0).abs() < 1e-3 && (v[1].1 - 8.0).abs() < 1e-3 && (v[2].0 - 10.0).abs() < 1e-3, "{v:?}");
+    }
+}

@@ -124,6 +124,8 @@ pub struct Editor {
     pub(crate) grade_clip: Option<(f32, f32, f32, [[f32; 3]; 3], String)>,
     /// Sous-titres posés mot par mot (formats verticaux)
     pub(crate) words_mode: bool,
+    /// Fenêtre « montage par le texte »
+    pub(crate) text_edit: bool,
     zoom: f32,
     scroll: f32,
     drag: Option<DragState>,
@@ -242,6 +244,7 @@ impl Editor {
             sel: vec![],
             grade_clip: None,
             words_mode: false,
+            text_edit: false,
             zoom: 60.0,
             scroll: 0.0,
             drag: None,
@@ -837,6 +840,7 @@ impl Editor {
     pub fn show(&mut self, ui: &mut egui::Ui) {
         let p = crate::theme::pal();
         let ctx = ui.ctx().clone();
+        self.text_edit_window(&ctx);
         // Médias déposés sur la fenêtre : dans le panneau Projet, et posés à la suite sur les pistes ciblées
         for f in std::mem::take(&mut self.add) {
             let (vt, at) = (self.vtarget, self.atarget);
