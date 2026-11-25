@@ -38,6 +38,32 @@ pub struct Panel {
     pub action: String,
     #[serde(default)]
     pub notes: String,
+    /// Caméra 2D : cadre de départ et d'arrivée dans la case (centre X, centre Y en 0..1, zoom ≥ 1),
+    /// parcourus pendant la durée de la case (pano, zoom, travelling sur le dessin)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cam: Option<[[f32; 3]; 2]>,
+}
+
+/// Le cadre de la caméra 2D à l'instant `t` (0..1) de la case : zone visible (u0, v0, u1, v1) en 0..1
+pub fn cam_rect(cam: &[[f32; 3]; 2], t: f32) -> [f32; 4] {
+    let t = t.clamp(0.0, 1.0);
+    let e = t * t * (3.0 - 2.0 * t);
+    let z = |k: usize| cam[0][k] + (cam[1][k] - cam[0][k]) * e;
+    // Le zoom s'interpole en logarithme : une vitesse régulière à l'œil
+    let zoom = (cam[0][2].max(1.0).ln() + (cam[1][2].max(1.0).ln() - cam[0][2].max(1.0).ln()) * e).exp();
+    let half = 0.5 / zoom;
+    let (cx, cy) = (z(0).clamp(half, 1.0 - half), z(1).clamp(half, 1.0 - half));
+    [cx - half, cy - half, cx + half, cy + half]
+}
+
+/// Une image de la case vue par la caméra 2D à l'instant `t`, à la taille de la case
+pub fn cam_frame(img: &image::RgbImage, cam: &[[f32; 3]; 2], t: f32) -> image::RgbImage {
+    let r = cam_rect(cam, t);
+    let (w, h) = (img.width(), img.height());
+    let (x0, y0) = ((r[0] * w as f32) as u32, (r[1] * h as f32) as u32);
+    let (cw, ch) = ((((r[2] - r[0]) * w as f32) as u32).max(2).min(w - x0), (((r[3] - r[1]) * h as f32) as u32).max(2).min(h - y0));
+    let crop = image::imageops::crop_imm(img, x0, y0, cw, ch).to_image();
+    image::imageops::resize(&crop, w, h, image::imageops::FilterType::Triangle)
 }
 
 fn two() -> f32 {
@@ -83,7 +109,7 @@ impl Story {
         let scene = at.checked_sub(1).and_then(|i| self.panels.get(i)).map(|p| p.scene.clone()).unwrap_or_default();
         let id = self.next_id.max(1);
         self.next_id = id + 1;
-        self.panels.insert(at, Panel { id, scene, shot: String::new(), camera: String::new(), dur: 2.0, dialogue: String::new(), action: String::new(), notes: String::new() });
+        self.panels.insert(at, Panel { id, scene, shot: String::new(), camera: String::new(), dur: 2.0, dialogue: String::new(), action: String::new(), notes: String::new(), cam: None });
         at
     }
 
@@ -326,10 +352,43 @@ fn flats(story_path: &Path, s: &Story, dir: &Path) -> Result<Vec<(PathBuf, f32)>
         let img = flat(&load(story_path, p.id, s.width, s.height));
         let (w, h) = (img.width() & !1, img.height() & !1);
         let img = image::imageops::crop_imm(&img, 0, 0, w, h).to_image();
-        img.save(&f).map_err(|e| e.to_string())?;
-        out.push((f, p.dur.max(0.05)));
+        match &p.cam {
+            // Caméra 2D : la case devient un petit film (24 i/s), le cadre glissant sur le dessin
+            Some(cam) => {
+                let v = dir.join(format!("{:04}.mp4", p.id));
+                cam_video(&img, cam, p.dur.max(0.05), &v)?;
+                out.push((v, p.dur.max(0.05)));
+            }
+            None => {
+                img.save(&f).map_err(|e| e.to_string())?;
+                out.push((f, p.dur.max(0.05)));
+            }
+        }
     }
     Ok(out)
+}
+
+/// Le mouvement de caméra d'une case en vidéo
+fn cam_video(img: &image::RgbImage, cam: &[[f32; 3]; 2], dur: f32, out: &Path) -> Result<(), String> {
+    use std::io::Write;
+    let ff = crate::ffmpeg::find("ffmpeg").ok_or("ffmpeg introuvable")?;
+    let n = (dur * 24.0).round().max(1.0) as usize;
+    let mut child = crate::ffmpeg::command(ff)
+        .args(["-y", "-v", "error", "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", &format!("{}x{}", img.width(), img.height()), "-r", "24", "-i", "-", "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p"])
+        .arg(out)
+        .stdin(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    {
+        let mut si = child.stdin.take().ok_or("ffmpeg")?;
+        for k in 0..n {
+            let fr = cam_frame(img, cam, if n > 1 { k as f32 / (n - 1) as f32 } else { 0.0 });
+            si.write_all(fr.as_raw()).map_err(|e| e.to_string())?;
+        }
+    }
+    let o = child.wait_with_output().map_err(|e| e.to_string())?;
+    if o.status.success() { Ok(()) } else { Err(String::from_utf8_lossy(&o.stderr).lines().last().unwrap_or("échec de ffmpeg").to_string()) }
 }
 
 /// L'animatique en MP4 (une image par case, pendant sa durée).
@@ -346,6 +405,29 @@ pub fn export_mp4(story_path: &Path, s: &Story, out: &Path) -> Result<(), String
     // Le dernier fichier se répète : sinon sa durée est ignorée
     if let Some((f, _)) = list.last() {
         txt.push_str(&format!("file '{}'\n", f.to_string_lossy().replace('\'', "'\\''")));
+    }
+    // Avec des mouvements de caméra : chaque case devient une courte vidéo, puis tout se met bout à bout
+    if list.iter().any(|(f, _)| f.extension().is_some_and(|e| e == "mp4")) {
+        let ff = crate::ffmpeg::find("ffmpeg").ok_or("ffmpeg introuvable")?;
+        txt.clear();
+        for (k, (f, d)) in list.iter().enumerate() {
+            let seg = if f.extension().is_some_and(|e| e == "mp4") {
+                f.clone()
+            } else {
+                let seg = tmp.join(format!("seg{k:04}.mp4"));
+                let o = crate::ffmpeg::command(ff.clone()).args(["-y", "-v", "error", "-loop", "1", "-i"]).arg(f).args(["-t", &format!("{d}"), "-r", "24", "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p"]).arg(&seg).output().map_err(|e| e.to_string())?;
+                if !o.status.success() {
+                    return Err(String::from_utf8_lossy(&o.stderr).lines().last().unwrap_or("échec de ffmpeg").to_string());
+                }
+                seg
+            };
+            txt.push_str(&format!("file '{}'\n", seg.to_string_lossy().replace('\'', "'\\''")));
+        }
+        let lf = tmp.join("liste.txt");
+        std::fs::write(&lf, txt).map_err(|e| e.to_string())?;
+        let o = crate::ffmpeg::command(ff).args(["-y", "-v", "error", "-f", "concat", "-safe", "0", "-i"]).arg(&lf).args(["-c", "copy"]).arg(out).output().map_err(|e| e.to_string())?;
+        let _ = std::fs::remove_dir_all(&tmp);
+        return if o.status.success() { Ok(()) } else { Err(String::from_utf8_lossy(&o.stderr).lines().last().unwrap_or("échec de ffmpeg").to_string()) };
     }
     let lf = tmp.join("liste.txt");
     std::fs::write(&lf, txt).map_err(|e| e.to_string())?;
@@ -411,6 +493,19 @@ mod tests {
         assert_eq!(Story::read(&f).unwrap(), s);
         // Planche
         sheet(&f, &s, &dir.join("planche.png")).unwrap();
+        // Caméra 2D : du plan large au gros plan sur le coin haut gauche
+        let cam = [[0.5, 0.5, 1.0], [0.25, 0.25, 2.0]];
+        assert_eq!(cam_rect(&cam, 0.0), [0.0, 0.0, 1.0, 1.0]);
+        let r = cam_rect(&cam, 1.0);
+        assert!((r[0] - 0.0).abs() < 1e-5 && (r[2] - 0.5).abs() < 1e-5, "{r:?}");
+        if crate::ffmpeg::find("ffmpeg").is_some() {
+            // Petit format pour aller vite
+            (s.width, s.height) = (320, 180);
+            s.panels[0].dur = 0.5;
+            s.panels[0].cam = Some(cam);
+            export_mp4(&f, &s, &dir.join("anim.mp4")).unwrap();
+            assert!(std::fs::metadata(dir.join("anim.mp4")).unwrap().len() > 1000);
+        }
         assert!(image::open(dir.join("planche.png")).unwrap().width() > 1000);
         let _ = std::fs::remove_dir_all(&dir);
     }

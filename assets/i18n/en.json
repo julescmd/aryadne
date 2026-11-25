@@ -3451,5 +3451,8 @@
   "Aucun os du squelette ne porte le nom d'une articulation du BVH (Hips, Spine, LeftArm…).": "No bone in the skeleton has the name of a BVH joint (Hips, Spine, LeftArm…).",
   "os animés": "bones animated",
   "os importés": "bones imported",
-  "Script Python d'exemple (API)": "Example Python script (API)"
+  "Script Python d'exemple (API)": "Example Python script (API)",
+  "caméra 2D": "2D camera",
+  "Pano, zoom ou travelling sur le dessin : le cadre passe de A à B pendant la case (lecture, MP4, montage)": "Pan, zoom or track over the drawing: the frame moves from A to B during the panel (playback, MP4, edit)",
+  "Régler les cadres sur la case : glisser pour déplacer, molette pour zoomer": "Set the frames on the panel: drag to move, scroll to zoom"
 }

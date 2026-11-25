@@ -36,6 +36,9 @@ pub struct Editor {
     redo: Vec<Undo>,
     save_due: Option<Instant>,
     playing: Option<(Instant, f32)>,
+    /// Caméra 2D : on règle ses cadres sur la case (le dessin est alors en pause) ; cadre saisi (0 départ, 1 arrivée)
+    cam_edit: bool,
+    cam_drag: Option<(usize, [f32; 2], Pos2)>,
     message: Option<String>,
     /// Fichier à ouvrir ensuite (le montage créé)
     pub open_request: Option<PathBuf>,
@@ -44,7 +47,7 @@ pub struct Editor {
 impl Editor {
     pub fn open(path: PathBuf) -> Result<Editor, String> {
         let story = Story::read(&path)?;
-        Ok(Editor { path, story, cur: 0, tool: Tool::Pencil, color: [30, 30, 36, 255], size: 4.0, onion: false, pix: HashMap::new(), used: vec![], tex: None, onion_tex: None, thumbs: HashMap::new(), ver: HashMap::new(), stroke: None, undo: vec![], redo: vec![], save_due: None, playing: None, message: None, open_request: None })
+        Ok(Editor { path, story, cur: 0, tool: Tool::Pencil, color: [30, 30, 36, 255], size: 4.0, onion: false, pix: HashMap::new(), used: vec![], tex: None, onion_tex: None, thumbs: HashMap::new(), ver: HashMap::new(), stroke: None, undo: vec![], redo: vec![], save_due: None, playing: None, cam_edit: false, cam_drag: None, message: None, open_request: None })
     }
 
     pub fn save_if_due(&mut self, force: bool) {
@@ -395,10 +398,70 @@ impl Editor {
             let pm = self.pixmap(id).clone();
             self.tex = Some((id, v, Self::texture(ui.ctx(), "story-canvas", &pm, 4096)));
         }
+        // En lecture, la caméra 2D cadre une partie du dessin
+        let uv = match (self.playing, &self.story.panels[self.cur].cam) {
+            (Some((t0, from)), Some(cam)) => {
+                let t = from + t0.elapsed().as_secs_f32();
+                let start = self.story.starts()[self.cur];
+                let r = story::cam_rect(cam, (t - start) / self.story.panels[self.cur].dur.max(0.05));
+                Rect::from_min_max(pos2(r[0], r[1]), pos2(r[2], r[3]))
+            }
+            _ => Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
+        };
         if let Some((_, _, t)) = &self.tex {
-            painter.image(t.id(), rect, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+            painter.image(t.id(), rect, uv, Color32::WHITE);
         }
         painter.rect_stroke(rect, 0.0, Stroke::new(1.0, p.line), egui::StrokeKind::Outside);
+        // Réglage des cadres de la caméra 2D : glisser un cadre pour le déplacer, molette dessus pour zoomer
+        if self.cam_edit && self.playing.is_none() {
+            if let Some(mut cam) = self.story.panels[self.cur].cam {
+                let resp = ui.interact(rect, egui::Id::unique(("story-cam", &self.path)), egui::Sense::drag());
+                let frame_of = |c: [f32; 3]| {
+                    let r = story::cam_rect(&[c, c], 0.0);
+                    Rect::from_min_max(pos2(rect.left() + r[0] * rect.width(), rect.top() + r[1] * rect.height()), pos2(rect.left() + r[2] * rect.width(), rect.top() + r[3] * rect.height()))
+                };
+                let cols = [Color32::from_rgb(70, 170, 120), Color32::from_rgb(230, 110, 90)];
+                // Le cadre le plus petit d'abord : il reste saisissable quand l'autre l'entoure
+                let order = if cam[1][2] >= cam[0][2] { [1usize, 0] } else { [0, 1] };
+                if resp.drag_started() {
+                    let at = ui.input(|i| i.pointer.press_origin()).or(resp.interact_pointer_pos()).unwrap_or_default();
+                    let k = order.into_iter().find(|&k| frame_of(cam[k]).contains(at)).unwrap_or(order[0]);
+                    self.cam_drag = Some((k, [cam[k][0], cam[k][1]], at));
+                }
+                let mut changed = false;
+                // Depuis le point de départ du glisser (pas d'à-coup si la souris saute)
+                if let (Some((k, c0, at0)), true, Some(now)) = (self.cam_drag, resp.dragged(), resp.interact_pointer_pos()) {
+                    cam[k][0] = (c0[0] + (now.x - at0.x) / rect.width()).clamp(0.0, 1.0);
+                    cam[k][1] = (c0[1] + (now.y - at0.y) / rect.height()).clamp(0.0, 1.0);
+                    changed = true;
+                }
+                if resp.drag_stopped() {
+                    self.cam_drag = None;
+                }
+                if let Some(h) = resp.hover_pos() {
+                    let sc = ui.input(|i| i.smooth_scroll_delta.y);
+                    if sc != 0.0 {
+                        if let Some(k) = order.into_iter().find(|&k| frame_of(cam[k]).contains(h)) {
+                            cam[k][2] = (cam[k][2] * (sc * 0.004).exp()).clamp(1.0, 8.0);
+                            changed = true;
+                        }
+                    }
+                }
+                for k in [0usize, 1] {
+                    let fr = frame_of(cam[k]);
+                    painter.rect_stroke(fr, 2.0, Stroke::new(2.0, cols[k]), egui::StrokeKind::Inside);
+                    painter.text(fr.left_top() + vec2(6.0, 4.0), egui::Align2::LEFT_TOP, ["A", "B"][k], egui::FontId::proportional(14.0), cols[k]);
+                }
+                // Le chemin du centre, de A vers B
+                painter.arrow(frame_of(cam[0]).center(), frame_of(cam[1]).center() - frame_of(cam[0]).center(), Stroke::new(1.5, cols[1].gamma_multiply(0.7)));
+                if changed {
+                    self.story.panels[self.cur].cam = Some(cam);
+                    self.touch();
+                    ui.ctx().request_repaint_after(std::time::Duration::from_millis(700));
+                }
+                return;
+            }
+        }
         // Numéro de la case, en haut à gauche, hors du dessin
         painter.text(rect.left_top() + vec2(0.0, -2.0), egui::Align2::LEFT_BOTTOM, self.story.label(self.cur), egui::FontId::proportional(11.0), p.muted);
         if self.playing.is_some() {
@@ -527,6 +590,21 @@ impl Editor {
                             }
                         });
                     });
+                });
+                // Caméra 2D : deux cadres (A au début, B à la fin) parcourus pendant la case
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    let mut on = pan.cam.is_some();
+                    if ui.checkbox(&mut on, crate::i18n::t("caméra 2D")).on_hover_text(crate::i18n::t("Pano, zoom ou travelling sur le dessin : le cadre passe de A à B pendant la case (lecture, MP4, montage)")).changed() {
+                        pan.cam = on.then_some([[0.5, 0.5, 1.0], [0.5, 0.5, 1.6]]);
+                        self.cam_edit = on;
+                    }
+                    if pan.cam.is_some() {
+                        let b = egui::Button::new(RichText::new(crate::lucide::SCAN).color(if self.cam_edit { p.on_accent } else { p.text })).fill(if self.cam_edit { p.accent } else { Color32::TRANSPARENT });
+                        if ui.add(b).on_hover_text(crate::i18n::t("Régler les cadres sur la case : glisser pour déplacer, molette pour zoomer")).clicked() {
+                            self.cam_edit = !self.cam_edit;
+                        }
+                    }
                 });
                 field(ui, "durée");
                 ui.horizontal(|ui| {
