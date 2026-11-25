@@ -900,6 +900,36 @@ pub enum Tool {
     Picker,
 }
 
+/// Pinceaux prêts : (nom, diamètre, dureté, opacité, grain, pression → diamètre, pression → opacité, lissage)
+const BRUSH_PRESETS: [(&str, f32, f32, f32, f32, bool, bool, f32); 7] = [
+    ("crayon", 4.0, 0.9, 0.85, 0.55, true, true, 0.1),
+    ("encre", 6.0, 0.95, 1.0, 0.0, true, false, 0.35),
+    ("feutre", 14.0, 0.85, 0.9, 0.0, false, false, 0.1),
+    ("craie", 28.0, 0.6, 0.9, 0.8, true, false, 0.0),
+    ("aérographe", 90.0, 0.0, 0.25, 0.0, false, true, 0.0),
+    ("peinture sèche", 40.0, 0.75, 0.8, 0.45, true, true, 0.0),
+    ("pinceau rond", 22.0, 0.7, 1.0, 0.0, false, false, 0.0),
+];
+
+/// Texture du papier : un bruit de valeur fixe (entre 0 et 1), à grains de deux tailles.
+fn paper(x: i32, y: i32) -> f32 {
+    fn h(x: i32, y: i32) -> f32 {
+        let mut n = (x as u32).wrapping_mul(374761393) ^ (y as u32).wrapping_mul(668265263);
+        n = (n ^ (n >> 13)).wrapping_mul(1274126177);
+        ((n ^ (n >> 16)) & 0xffff) as f32 / 65535.0
+    }
+    let v = |x: i32, y: i32, s: i32| {
+        let (fx, fy) = (x.div_euclid(s), y.div_euclid(s));
+        let (tx, ty) = ((x.rem_euclid(s)) as f32 / s as f32, (y.rem_euclid(s)) as f32 / s as f32);
+        let a = h(fx, fy) + (h(fx + 1, fy) - h(fx, fy)) * tx;
+        let b = h(fx, fy + 1) + (h(fx + 1, fy + 1) - h(fx, fy + 1)) * tx;
+        a + (b - a) * ty
+    };
+    let n = v(x, y, 2) * 0.6 + v(x, y, 5) * 0.4;
+    // Plus de contraste : des creux francs
+    ((n - 0.35) * 1.8).clamp(0.0, 1.0)
+}
+
 const TOOLS: [(Tool, &str, &str, &str); 14] = [
     (Tool::Move, crate::lucide::MOVE, "déplacer le calque", "V"),
     (Tool::Select, crate::lucide::SQUARE_DASHED, "sélection rectangulaire", "M"),
@@ -1190,6 +1220,18 @@ pub struct Editor {
     /// Lissage du trait (0 : aucun) et le point lissé du trait en cours
     smooth: f32,
     stab: Option<Pos2>,
+    /// Grain du papier (0 : lisse) : le pinceau ne touche pas le fond des creux
+    grain: f32,
+    /// Symétrie du pinceau : sur l'axe vertical, l'axe horizontal (autour du centre du document)
+    sym_x: bool,
+    sym_y: bool,
+    /// Perspective : points de fuite (dans le document), affichage, aimantation du trait, point qu'on déplace
+    persp: Vec<Pos2>,
+    persp_on: bool,
+    persp_snap: bool,
+    persp_drag: Option<usize>,
+    /// Départ du trait en cours (pour l'aimantation de perspective)
+    stroke_from: Option<Pos2>,
     /// Recadrage en cours (x0, y0, x1, y1 du document), le format et le geste (0 : nouveau cadre, 1 : déplacer)
     crop: Option<[f32; 4]>,
     crop_ratio: usize,
@@ -1336,6 +1378,14 @@ impl Editor {
             size: 18.0,
             hardness: 0.7,
             flow: 1.0,
+            grain: 0.0,
+            sym_x: false,
+            sym_y: false,
+            persp: vec![],
+            persp_on: false,
+            persp_snap: true,
+            persp_drag: None,
+            stroke_from: None,
             tolerance: 0.12,
             sel: None,
             lasso: vec![],
@@ -1833,7 +1883,50 @@ impl Editor {
     }
 
     /// Un tampon du pinceau (ou de la gomme) centré en `c` (coordonnées du document).
+    /// Un tampon, et ses reflets si la symétrie est allumée (pinceau et gomme).
     fn dab(&mut self, c: Pos2) {
+        self.dab_one(c);
+        if matches!(self.tool, Tool::Brush | Tool::Eraser) {
+            let (w, h) = (self.doc.w as f32, self.doc.h as f32);
+            if self.sym_x {
+                self.dab_one(pos2(w - c.x, c.y));
+            }
+            if self.sym_y {
+                self.dab_one(pos2(c.x, h - c.y));
+            }
+            if self.sym_x && self.sym_y {
+                self.dab_one(pos2(w - c.x, h - c.y));
+            }
+        }
+    }
+
+    /// Aimantation de perspective : le point suit la droite du point de fuite le plus proche
+    /// de la direction du trait (ou l'horizontale, la verticale).
+    fn persp_snap_pt(&self, from: Pos2, d: Pos2) -> Pos2 {
+        if !self.persp_on || !self.persp_snap || (d - from).length() < 4.0 {
+            return d;
+        }
+        let dir = (d - from).normalized();
+        let mut best: Option<(f32, egui::Vec2)> = None;
+        let mut cands: Vec<egui::Vec2> = self.persp.iter().filter(|v| (**v - from).length() > 1.0).map(|v| (*v - from).normalized()).collect();
+        // Avec un ou deux points de fuite, les verticales restent verticales
+        cands.push(egui::vec2(0.0, 1.0));
+        if self.persp.len() < 2 {
+            cands.push(egui::vec2(1.0, 0.0));
+        }
+        for c in cands {
+            let s = dir.dot(c).abs();
+            if best.is_none_or(|b| s > b.0) {
+                best = Some((s, c));
+            }
+        }
+        match best {
+            Some((_, c)) => from + c * (d - from).dot(c),
+            None => d,
+        }
+    }
+
+    fn dab_one(&mut self, c: Pos2) {
         let edit_mask = self.painting_mask();
         let lock_alpha = !edit_mask && self.doc.layers[self.doc.active].lock_alpha;
         let col = self.paint_color();
@@ -1857,6 +1950,7 @@ impl Editor {
         let (x0, y0) = ((c.x - r).floor() as i32, (c.y - r).floor() as i32);
         let (x1, y1) = ((c.x + r).ceil() as i32, (c.y + r).ceil() as i32);
         let hard = self.hardness.clamp(0.0, 0.99);
+        let grain = if matches!(self.tool, Tool::Brush | Tool::Eraser) { self.grain.clamp(0.0, 1.0) } else { 0.0 };
         let erase = self.tool == Tool::Eraser;
         let heal = self.tool == Tool::Heal;
         if heal {
@@ -1882,7 +1976,11 @@ impl Editor {
                 }
                 // Bord doux : plein jusqu'à la dureté, puis décroissance
                 let k = if d <= hard { 1.0 } else { 1.0 - (d - hard) / (1.0 - hard) };
-                let k = k * k * (3.0 - 2.0 * k) * flow * sk;
+                let mut k = k * k * (3.0 - 2.0 * k) * flow * sk;
+                if grain > 0.0 {
+                    // Le papier : un bruit fixe dans le document, les creux restent blancs
+                    k *= (1.0 - grain * paper(x, y)).max(0.0);
+                }
                 let idx = ly as usize * l.w + lx as usize;
                 if k <= cover[idx] {
                     continue;
@@ -2403,6 +2501,44 @@ impl Editor {
                     };
                     tog(ui, &mut self.press_size, crate::lucide::CIRCLE_DOT, "La pression de la tablette règle le diamètre");
                     tog(ui, &mut self.press_flow, crate::lucide::GAUGE, "La pression de la tablette règle l'opacité");
+                    if matches!(self.tool, Tool::Brush | Tool::Eraser) {
+                        if ui.max_rect().right() - ui.cursor().left() < 190.0 {
+                            ui.end_row();
+                        }
+                        ui.add(egui::Slider::new(&mut self.grain, 0.0..=1.0).text(crate::i18n::t("grain")).show_value(false)).on_hover_text(crate::i18n::t("Grain du papier : le pinceau accroche comme un crayon ou une craie"));
+                        // Préréglages façon Krita
+                        egui::containers::menu::MenuButton::new(egui::RichText::new(crate::lucide::BRUSH).size(14.0)).ui(ui, |ui| {
+                            ui.set_min_width(200.0);
+                            for (name, size, hard, flow, grain, psize, pflow, smooth) in BRUSH_PRESETS {
+                                if ui.button(crate::i18n::t(name)).clicked() {
+                                    (self.size, self.hardness, self.flow, self.grain, self.press_size, self.press_flow, self.smooth) = (size, hard, flow, grain, psize, pflow, smooth);
+                                    self.tool = Tool::Brush;
+                                    ui.close();
+                                }
+                            }
+                        })
+                        .0
+                        .on_hover_text(crate::i18n::t("Pinceaux prêts : crayon, encre, craie, aérographe…"));
+                        tog(ui, &mut self.sym_x, crate::lucide::FLIP_HORIZONTAL_2, "Symétrie : le trait se reflète de l'autre côté de l'axe vertical");
+                        tog(ui, &mut self.sym_y, crate::lucide::FLIP_VERTICAL_2, "Symétrie : le trait se reflète de l'autre côté de l'axe horizontal");
+                    }
+                    let was = self.persp_on;
+                    tog(ui, &mut self.persp_on, crate::lucide::RULER_DIMENSION_LINE, "Perspective : points de fuite (à déplacer à la souris) ; le trait suit leurs lignes");
+                    if self.persp_on && !was && self.persp.is_empty() {
+                        let (w, h) = (self.doc.w as f32, self.doc.h as f32);
+                        self.persp = vec![pos2(w * 0.1, h * 0.45), pos2(w * 0.9, h * 0.45)];
+                    }
+                    if self.persp_on {
+                        egui::ComboBox::from_id_salt("paint-persp").selected_text(format!("{} pt", self.persp.len())).width(48.0).show_ui(ui, |ui| {
+                            let (w, h) = (self.doc.w as f32, self.doc.h as f32);
+                            for (n, pts) in [(1usize, vec![pos2(w * 0.5, h * 0.45)]), (2, vec![pos2(w * 0.1, h * 0.45), pos2(w * 0.9, h * 0.45)]), (3, vec![pos2(w * 0.1, h * 0.4), pos2(w * 0.9, h * 0.4), pos2(w * 0.5, h * 1.6)])] {
+                                if ui.selectable_label(self.persp.len() == n, format!("{n} {}", crate::i18n::t_mid("point(s) de fuite"))).clicked() {
+                                    self.persp = pts;
+                                }
+                            }
+                        });
+                        tog(ui, &mut self.persp_snap, crate::lucide::MAGNET, "Aimanter le trait sur les lignes de fuite");
+                    }
                 }
                 Tool::Crop => {
                     egui::ComboBox::from_id_salt("paint-crop-ratio").selected_text(crate::i18n::t(CROP_RATIOS[self.crop_ratio].0)).show_ui(ui, |ui| {
@@ -2747,7 +2883,22 @@ impl Editor {
         let ruler_w = 18.0;
         let top_band = Rect::from_min_max(rect.min, pos2(rect.right(), rect.top() + ruler_w));
         let left_band = Rect::from_min_max(rect.min, pos2(rect.left() + ruler_w, rect.bottom()));
-        if resp.drag_started_by(egui::PointerButton::Primary) && !xf_on && !space {
+        // Un point de fuite se déplace à la souris
+        if self.persp_on && resp.drag_started_by(egui::PointerButton::Primary) {
+            if let Some(o) = ui.input(|i| i.pointer.press_origin()) {
+                self.persp_drag = self.persp.iter().position(|v| (to_screen(v.x, v.y) - o).length() < 10.0);
+            }
+        }
+        if let Some(k) = self.persp_drag {
+            if let (Some(at), true) = (resp.interact_pointer_pos(), k < self.persp.len()) {
+                self.persp[k] = to_doc(at);
+            }
+            if !resp.dragged() {
+                self.persp_drag = None;
+            }
+        }
+        let persp_busy = self.persp_drag.is_some();
+        if resp.drag_started_by(egui::PointerButton::Primary) && !xf_on && !space && !persp_busy {
             if let Some(o) = ui.input(|i| i.pointer.press_origin()) {
                 let d = to_doc(o);
                 if self.rulers && plain && top_band.contains(o) {
@@ -2778,7 +2929,7 @@ impl Editor {
             }
         } else if resp.dragged_by(egui::PointerButton::Middle) || (space && resp.dragged_by(egui::PointerButton::Primary)) {
             self.pan += resp.drag_delta();
-        } else if !xf_on {
+        } else if !xf_on && !persp_busy {
             if self.swallow_click || self.swatch_pick.is_some() {
                 // Fermer le sélecteur de couleur : rien d'autre
             } else if resp.drag_started_by(egui::PointerButton::Primary) {
@@ -2809,6 +2960,7 @@ impl Editor {
                             let n = l.w * l.h;
                             self.stroke = Some((l, vec![0.0; n], d));
                             self.stab = Some(d);
+                            self.stroke_from = Some(d);
                             self.dab(d);
                         }
                         Tool::Crop => {
@@ -2843,6 +2995,10 @@ impl Editor {
                     let d = to_doc(at);
                     match self.tool {
                         Tool::Brush | Tool::Eraser | Tool::Clone | Tool::Heal => {
+                            let d = match self.stroke_from {
+                                Some(f) => self.persp_snap_pt(f, d),
+                                None => d,
+                            };
                             // Lissage : le point suivi rattrape la souris avec du retard
                             let d = match self.stab {
                                 Some(st) if self.smooth > 0.0 => {
@@ -2936,6 +3092,22 @@ impl Editor {
                 }
             }
             if resp.drag_stopped() {
+                // Le bout du trait : le pointeur a pu bouger depuis la dernière image avant d'être relâché
+                if matches!(self.tool, Tool::Brush | Tool::Eraser | Tool::Clone) && self.smooth <= 0.0 {
+                    if let (Some(at), Some(last)) = (resp.interact_pointer_pos().or(hover), self.stroke.as_ref().map(|s| s.2)) {
+                        let d = to_doc(at);
+                        let d = match self.stroke_from {
+                            Some(f) => self.persp_snap_pt(f, d),
+                            None => d,
+                        };
+                        let dist = (d - last).length();
+                        let step = (self.size * 0.2).max(0.5);
+                        let n = (dist / step).ceil() as usize;
+                        for k in 1..=n {
+                            self.dab(last + (d - last) * (k as f32 / n as f32));
+                        }
+                    }
+                }
                 if self.tool == Tool::Lasso && self.drag_from.is_some() {
                     let pts = std::mem::take(&mut self.lasso);
                     let new = Sel::poly(self.doc.w, self.doc.h, &pts);
@@ -3166,6 +3338,37 @@ impl Editor {
         for g in &self.doc.guides {
             let (a, b) = if g.vertical { (to_screen(g.at, -1e5), to_screen(g.at, 1e5)) } else { (to_screen(-1e5, g.at), to_screen(1e5, g.at)) };
             painter.line_segment([a, b], Stroke::new(1.0, guide_col));
+        }
+        // Perspective : lignes de fuite et poignées des points
+        if self.persp_on {
+            let col = Color32::from_rgba_unmultiplied(120, 170, 255, 70);
+            let (w, h) = (self.doc.w as f32, self.doc.h as f32);
+            let reach = (w + h) * 2.0;
+            for v in &self.persp {
+                for k in 0..36 {
+                    let a = k as f32 / 36.0 * std::f32::consts::TAU;
+                    painter.line_segment([to_screen(v.x, v.y), to_screen(v.x + a.cos() * reach, v.y + a.sin() * reach)], Stroke::new(1.0, col));
+                }
+            }
+            if self.persp.len() >= 2 {
+                let (a, b) = (self.persp[0], self.persp[1]);
+                let dd = (b - a).normalized() * reach;
+                painter.line_segment([to_screen(a.x - dd.x, a.y - dd.y), to_screen(b.x + dd.x, b.y + dd.y)], Stroke::new(1.5, Color32::from_rgb(120, 170, 255)));
+            }
+            for v in &self.persp {
+                let q = to_screen(v.x, v.y);
+                painter.circle_filled(q, 6.0, Color32::from_rgb(120, 170, 255));
+                painter.circle_stroke(q, 6.0, Stroke::new(1.5, Color32::WHITE));
+            }
+        }
+        // Symétrie : l'axe
+        if self.sym_x && matches!(self.tool, Tool::Brush | Tool::Eraser) {
+            let x = self.doc.w as f32 / 2.0;
+            painter.line_segment([to_screen(x, 0.0), to_screen(x, self.doc.h as f32)], Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 120, 200, 140)));
+        }
+        if self.sym_y && matches!(self.tool, Tool::Brush | Tool::Eraser) {
+            let y = self.doc.h as f32 / 2.0;
+            painter.line_segment([to_screen(0.0, y), to_screen(self.doc.w as f32, y)], Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 120, 200, 140)));
         }
         // Règles (vue droite seulement), graduées en pixels
         if self.rulers && plain {

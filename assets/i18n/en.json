@@ -2793,5 +2793,20 @@
   "Masque roto (tracé)": "Roto mask (path)",
   "intérieur": "inside",
   "cliquer pour poser les points du tracé": "click to place the path points",
-  "nouveau suivi de production": "new production tracker"
+  "nouveau suivi de production": "new production tracker",
+  "grain": "grain",
+  "Grain du papier : le pinceau accroche comme un crayon ou une craie": "Paper grain: the brush catches like a pencil or chalk",
+  "Pinceaux prêts : crayon, encre, craie, aérographe…": "Ready brushes: pencil, ink, chalk, airbrush…",
+  "Symétrie : le trait se reflète de l'autre côté de l'axe vertical": "Symmetry: the stroke mirrors across the vertical axis",
+  "Symétrie : le trait se reflète de l'autre côté de l'axe horizontal": "Symmetry: the stroke mirrors across the horizontal axis",
+  "Perspective : points de fuite (à déplacer à la souris) ; le trait suit leurs lignes": "Perspective: vanishing points (drag them); strokes follow their lines",
+  "point(s) de fuite": "vanishing point(s)",
+  "Aimanter le trait sur les lignes de fuite": "Snap strokes to the vanishing lines",
+  "crayon": "pencil",
+  "encre": "ink",
+  "feutre": "marker",
+  "craie": "chalk",
+  "aérographe": "airbrush",
+  "peinture sèche": "dry paint",
+  "pinceau rond": "round brush"
 }
