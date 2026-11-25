@@ -2879,6 +2879,9 @@ pub struct Viewer {
     anim_job: Option<AnimJob>,
     /// Suivi de caméra : demandé depuis le menu, en cours, et les images de la vidéo de fond (avec leur clé)
     want_matchmove: bool,
+    /// Rig bipède demandé depuis le menu (0 : poser les repères, 1 : générer), et le modèle pour lequel ils ont été posés
+    rig_request: Option<u8>,
+    rig_model: String,
     /// Réglages avant de lancer : la vidéo, « estimer le champ », champ horizontal connu (degrés)
     mm_dialog: Option<(std::path::PathBuf, bool, f32)>,
     mm_job: Option<crate::matchmove::Job>,
@@ -3120,6 +3123,8 @@ impl Viewer {
             want_anim: false,
             anim_job: None,
             want_matchmove: false,
+            rig_request: None,
+            rig_model: String::new(),
             mm_dialog: None,
             mm_job: None,
             backdrop: None,
@@ -5944,6 +5949,52 @@ impl Viewer {
                 }
             }
         }
+        // Rig bipède : les repères sur le personnage choisi, puis le squelette
+        match self.rig_request.take() {
+            Some(0) => {
+                // La boîte du personnage dans la scène, d'après ses triangles affichés
+                let model = self.scene_sel.filter(|&k| scene.objects.get(k).is_some_and(|o| crate::scene::kind(o) == crate::scene::Kind::Model));
+                let bounds = model.and_then(|k| {
+                    let &(_, a, b) = self.scene_ranges.iter().find(|r| r.0 == k)?;
+                    let prep = &self.prepared.as_ref()?.2;
+                    let (lo, hi) = self.scene_frame?;
+                    let longest = (hi[0] - lo[0]).max(hi[1] - lo[1]).max(hi[2] - lo[2]).max(1e-9);
+                    let c = [(lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0, (lo[2] + hi[2]) / 2.0];
+                    let (mut mn, mut mx) = ([f32::MAX; 3], [f32::MIN; 3]);
+                    for t in prep.tris.get(a..b.min(prep.tris.len()))? {
+                        for &i in t {
+                            let v = prep.pos.get(i as usize)?;
+                            for j in 0..3 {
+                                let w = v[j] * longest + c[j];
+                                mn[j] = mn[j].min(w);
+                                mx[j] = mx[j].max(w);
+                            }
+                        }
+                    }
+                    (mn[1] < mx[1]).then_some((mn, mx))
+                });
+                self.rig_model = model.map(|k| scene.objects[k].name.clone()).unwrap_or_default();
+                let (lo, hi) = bounds.unwrap_or(([f32::NAN; 3], [f32::NAN; 3]));
+                let g = crate::autorig::place_markers(scene, lo, hi);
+                self.scene_sel = Some(g);
+                self.scene_multi.clear();
+                changed = true;
+                crate::notify(crate::i18n::t(if bounds.is_some() { "Repères posés : déplace-les sur les articulations (côté gauche), puis Ajouter › rig bipède › générer le squelette" } else { "Aucun personnage choisi : repères posés à taille humaine. Déplace-les, puis génère le squelette" }));
+            }
+            Some(_) => {
+                let model = scene.objects.iter().position(|o| !self.rig_model.is_empty() && o.name == self.rig_model).or(self.scene_sel);
+                match crate::autorig::generate(scene, model) {
+                    Ok(rig) => {
+                        self.scene_sel = Some(rig.root);
+                        self.scene_multi.clear();
+                        changed = true;
+                        crate::notify(format!("{} : {} {}, {} {}", crate::i18n::t("squelette généré"), rig.bones, crate::i18n::t("os"), rig.targets.len(), crate::i18n::t("cibles de cinématique inverse (mains et pieds)")));
+                    }
+                    Err(e) => crate::notify(e),
+                }
+            }
+            None => {}
+        }
         // Suivi de caméra : choisir la vidéo, puis suivre son avancement ; à la fin, la caméra est posée dans la scène
         if std::mem::take(&mut self.want_matchmove) && self.mm_job.is_none() {
             if let Some(f) = rfd::FileDialog::new().add_filter(crate::i18n::t("vidéo"), &["mp4", "mov", "mkv", "webm", "avi", "m4v"]).pick_file() {
@@ -6314,6 +6365,17 @@ impl Viewer {
                             self.want_matchmove = true;
                             ui.close();
                         }
+                        ui.menu_button(format!("{}  {}", crate::lucide::PERSON_STANDING, crate::i18n::t("rig bipède")), |ui| {
+                            ui.set_min_width(250.0);
+                            if ui.button(format!("{}  {}", crate::lucide::LOCATE, crate::i18n::t("poser les repères"))).on_hover_text(crate::i18n::t("Choisis d'abord le personnage : des repères (bassin, épaule, coude, genou…) sont posés à leur place probable, du côté gauche. Déplace-les sur les articulations, puis génère le squelette")).clicked() {
+                                self.rig_request = Some(0);
+                                ui.close();
+                            }
+                            if ui.add_enabled(crate::autorig::read_markers(scene).is_some(), egui::Button::new(format!("{}  {}", crate::lucide::BONE, crate::i18n::t("générer le squelette")))).on_hover_text(crate::i18n::t("Construit le squelette des deux côtés d'après les repères, avec des cibles de cinématique inverse aux mains et aux pieds, et lie le personnage au squelette")).clicked() {
+                                self.rig_request = Some(1);
+                                ui.close();
+                            }
+                        });
                         if ui.button(format!("{}  {}", crate::lucide::FOLDER_OPEN, crate::i18n::t("choisir un fichier…"))).clicked() {
                             if let Some(files) = rfd::FileDialog::new().add_filter(crate::i18n::t("modèles et images"), &["obj", "fbx", "glb", "gltf", "stl", "3ds", "ply", "ma", "png", "jpg", "jpeg", "webp"]).pick_files() {
                                 for f in files {

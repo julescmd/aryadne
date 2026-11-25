@@ -315,9 +315,48 @@ pub fn add_bone(scene: &mut Scene, parent: Option<usize>) -> usize {
     k
 }
 
+/// Ajoute un os qui va de `a` à `b` (positions dans la scène), enfant de `parent`. Son axe Y suit
+/// le segment ; son axe X reste le plus horizontal possible, pour que les os se plient dans un sens prévisible.
+pub fn add_bone_between(scene: &mut Scene, name: &str, parent: Option<usize>, a: V3, b: V3) -> usize {
+    let k = scene.add_role(name, "bone");
+    let d = sub(b, a);
+    let length = len(d).max(1e-4);
+    let dir = if len(d) > 1e-6 { norm(d) } else { [0.0, 1.0, 0.0] };
+    let up = if dir[2].abs() < 0.95 { [0.0, 0.0, 1.0] } else { [1.0, 0.0, 0.0] };
+    let x = norm(cross(dir, up));
+    let z = cross(x, dir);
+    let world = [[x[0], dir[0], z[0]], [x[1], dir[1], z[1]], [x[2], dir[2], z[2]]];
+    let id = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+    let (pm, po) = parent.map(|p| affine(scene, p)).unwrap_or((id, [0.0; 3]));
+    let local = mul(transpose(rotation_part(pm)), world);
+    let pos = inverse(pm).map(|inv| apply(inv, sub(a, po))).unwrap_or(sub(a, po));
+    let pname = parent.map(|p| scene.objects[p].name.clone()).unwrap_or_default();
+    let o = &mut scene.objects[k];
+    (o.parent, o.pos, o.rot, o.length) = (pname, pos, rot_euler(local), length);
+    k
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn os_entre_deux_points() {
+        let mut sc = Scene::default();
+        // Une chaîne de trois os dans des directions quelconques : chaque os part bien de son point et arrive à l'autre
+        let pts = [[0.2, 1.0, 0.1], [0.5, 1.6, -0.2], [1.4, 1.5, 0.3], [1.5, 0.4, 0.3], [1.5, 0.4, 1.3]];
+        let mut parent = None;
+        for w in pts.windows(2) {
+            let k = add_bone_between(&mut sc, "os", parent, w[0], w[1]);
+            let (head, tail) = (sc.world(k, [0.0; 3]), sc.world(k, [0.0, sc.objects[k].length, 0.0]));
+            assert!(len(sub(head, w[0])) < 1e-3 && len(sub(tail, w[1])) < 1e-3, "{head:?} {tail:?} pour {w:?}");
+            assert_eq!(sc.parent_of(k), parent);
+            parent = Some(k);
+        }
+        // Deux points confondus : un os minuscule, pas de NaN
+        let k = add_bone_between(&mut sc, "os", None, [1.0; 3], [1.0; 3]);
+        assert!(sc.objects[k].rot.iter().all(|x| x.is_finite()) && sc.objects[k].length > 0.0);
+    }
 
     #[test]
     fn squelette() {
