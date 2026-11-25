@@ -2944,5 +2944,8 @@
   "coulures de pluie": "rain streaks",
   "métal rayé": "scratched metal",
   "sol craquelé": "cracked ground",
-  "taches": "spots"
+  "taches": "spots",
+  "EXR multicouche (passes)": "Multilayer EXR (passes)",
+  "attends la fin du rendu pour les passes EXR": "wait for the render to finish for EXR passes",
+  "passes EXR enregistrées :": "EXR passes saved:"
 }

@@ -158,6 +158,58 @@ impl Accum {
 
 }
 
+/// Passes de rendu en EXR multicouche (32 bits, lumière linéaire) pour le compositing :
+/// beauté (R G B A, débruitée), couleur de surface, normales, profondeur Z et position.
+pub fn write_passes_exr(acc: &Accum, m: &Prepared, cam: &Camera, denoise: bool, path: &std::path::Path) -> Result<(), String> {
+    use exr::prelude::*;
+    let (w, h) = (acc.w, acc.h);
+    let (col, cover) = if denoise && acc.spp >= 2 { acc.denoised() } else { acc.mean() };
+    let n = acc.spp.max(1) as f32;
+    // Profondeur et position : un rayon par centre de pixel
+    let bvh = m.bvh.get_or_init(|| crate::bvh::Bvh::new(&m.pos, &m.tris));
+    let focal = w.min(h) as f32 * 1.2;
+    let ortho_scale = focal / cam.dist;
+    let (cx, cy) = (w as f32 / 2.0, h as f32 / 2.0);
+    let fwd = cam.unrotate([0.0, 0.0, -1.0]);
+    let geo: Vec<(f32, V3)> = (0..w * h)
+        .into_par_iter()
+        .map(|i| {
+            let (x, y) = ((i % w) as f32 + 0.5, (i / w) as f32 + 0.5);
+            let (o, d) = if cam.ortho {
+                (cam.unrotate([(x - cx) / ortho_scale - cam.pan[0], -(y - cy) / ortho_scale - cam.pan[1], cam.dist]), fwd)
+            } else {
+                (cam.unrotate([-cam.pan[0], -cam.pan[1], cam.dist]), cam.unrotate(norm([(x - cx) / focal, -(y - cy) / focal, -1.0])))
+            };
+            match bvh.closest(o, d, 1e-4, 1e9) {
+                Some(hit) => (hit.t * dot(d, fwd), add(o, scale(d, hit.t))),
+                None => (f32::INFINITY, [0.0; 3]),
+            }
+        })
+        .collect();
+    let ch = |name: &str, v: Vec<f32>| AnyChannel::new(name, FlatSamples::F32(v));
+    let pick = |f: &dyn Fn(usize) -> f32| -> Vec<f32> { (0..w * h).map(f).collect() };
+    // Beauté prémultipliée (comme l'attendent Nuke, Resolve et le compositing d'Aryadne)
+    let mut chans = vec![
+        ch("R", pick(&|i| col[i][0] * cover[i])),
+        ch("G", pick(&|i| col[i][1] * cover[i])),
+        ch("B", pick(&|i| col[i][2] * cover[i])),
+        ch("A", pick(&|i| cover[i])),
+        ch("depth.Z", pick(&|i| geo[i].0)),
+        ch("albedo.R", pick(&|i| acc.alb[i][0] / n)),
+        ch("albedo.G", pick(&|i| acc.alb[i][1] / n)),
+        ch("albedo.B", pick(&|i| acc.alb[i][2] / n)),
+        ch("position.X", pick(&|i| geo[i].1[0])),
+        ch("position.Y", pick(&|i| geo[i].1[1])),
+        ch("position.Z", pick(&|i| geo[i].1[2])),
+    ];
+    let nrm: Vec<V3> = acc.nrm.iter().map(|v| { let l = dot(*v, *v).sqrt(); if l > 1e-6 { scale(*v, 1.0 / l) } else { [0.0; 3] } }).collect();
+    chans.push(ch("normal.X", pick(&|i| nrm[i][0])));
+    chans.push(ch("normal.Y", pick(&|i| nrm[i][1])));
+    chans.push(ch("normal.Z", pick(&|i| nrm[i][2])));
+    let layer = Layer::new((w, h), LayerAttributes::default(), Encoding::FAST_LOSSLESS, AnyChannels::sort(chans.into()));
+    Image::from_layer(layer).write().to_file(path).map_err(|e| e.to_string())
+}
+
 /// Rendu final (F12) en arrière-plan : une image à la taille demandée, jusqu'au nombre d'échantillons voulu.
 pub struct Job {
     pub w: usize,
@@ -169,6 +221,12 @@ pub struct Job {
     pub image: Option<Vec<u8>>,
     pub started: std::time::Instant,
     pub elapsed: f32,
+    /// Les échantillons accumulés, gardés à la fin (pour les passes EXR)
+    pub acc: std::sync::Arc<std::sync::Mutex<Option<Accum>>>,
+    /// La scène et la caméra du rendu (les passes de géométrie en ont besoin)
+    pub prep: std::sync::Arc<Prepared>,
+    pub cam: Camera,
+    pub denoise: bool,
 }
 
 impl Job {
@@ -177,6 +235,9 @@ impl Job {
         let (tx, rx) = std::sync::mpsc::channel();
         let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let stop = cancel.clone();
+        let keep = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let keep2 = keep.clone();
+        let (prep, denoise) = (m.clone(), set.denoise);
         std::thread::spawn(move || {
             let mut acc = Accum::new(w, h);
             acc.agx = set.agx;
@@ -199,8 +260,11 @@ impl Job {
                     ctx.request_repaint();
                 }
             }
+            if let Ok(mut k) = keep2.lock() {
+                *k = Some(acc);
+            }
         });
-        Job { w, h, target, spp: 0, rx, cancel, image: None, started: std::time::Instant::now(), elapsed: 0.0 }
+        Job { w, h, target, spp: 0, rx, cancel, image: None, started: std::time::Instant::now(), elapsed: 0.0, acc: keep, prep, cam, denoise }
     }
 
     /// Reçoit les images arrivées ; vrai quand le rendu est fini.
@@ -778,6 +842,30 @@ mod tests {
         assert!(px(32, 24)[3] == 255 && px(32, 24)[0] > 40, "{:?}", px(32, 24));
         // Les coins du haut : ni modèle ni sol, fond transparent
         assert_eq!(px(1, 1)[3], 0);
+    }
+}
+
+#[cfg(test)]
+mod passes_test {
+    use super::*;
+    #[test]
+    fn passes_exr() {
+        let model = crate::scene::primitive("@sphere").unwrap();
+        let prep = Prepared::new(&model, false, 0);
+        let look = Look { shadows: true, ..Default::default() };
+        let cam = Camera::default();
+        let mut acc = Accum::new(48, 32);
+        for _ in 0..3 {
+            pass(&prep, &cam, &look, &Settings::default(), &mut acc);
+        }
+        let out = std::env::temp_dir().join(format!("ary-passes-{}.exr", std::process::id()));
+        write_passes_exr(&acc, &prep, &cam, true, &out).unwrap();
+        let names = crate::nodes::exr_passes(&out).unwrap();
+        assert!(names.iter().any(|n| n == "albedo") && names.iter().any(|n| n == "normal") && names.iter().any(|n| n == "position"), "{names:?}");
+        // La profondeur au centre est finie (la sphère), infinie dans le coin (le vide)
+        let z = crate::nodes::load_exr_pass(&out, "depth", 64);
+        assert!(z.is_ok());
+        let _ = std::fs::remove_file(out);
     }
 }
 

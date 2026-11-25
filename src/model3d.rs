@@ -4923,9 +4923,22 @@ impl Viewer {
         });
         if save {
             if let Some(img) = &job.image {
-                if let Some(path) = rfd::FileDialog::new().add_filter("PNG", &["png"]).set_file_name("rendu.png").save_file() {
+                // PNG (l'image finale) ou EXR multicouche (passes en 32 bits pour le compositing)
+                if let Some(path) = rfd::FileDialog::new().add_filter("PNG", &["png"]).add_filter(crate::i18n::t("EXR multicouche (passes)"), &["exr"]).set_file_name("rendu.png").save_file() {
                     let path = if path.extension().is_none() { path.with_extension("png") } else { path };
-                    if let Some(buf) = image::RgbaImage::from_raw(job.w as u32, job.h as u32, img.clone()) {
+                    if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("exr")) {
+                        let r = match job.acc.lock() {
+                            Ok(g) => match g.as_ref() {
+                                Some(acc) => pathtrace::write_passes_exr(acc, &job.prep, &job.cam, job.denoise, &path),
+                                None => Err(crate::i18n::t("attends la fin du rendu pour les passes EXR")),
+                            },
+                            Err(e) => Err(e.to_string()),
+                        };
+                        self.capture_msg = Some(match r {
+                            Ok(()) => format!("{} {}", crate::i18n::t("passes EXR enregistrées :"), path.to_string_lossy()),
+                            Err(e) => e,
+                        });
+                    } else if let Some(buf) = image::RgbaImage::from_raw(job.w as u32, job.h as u32, img.clone()) {
                         let _ = buf.save(&path);
                     }
                 }
