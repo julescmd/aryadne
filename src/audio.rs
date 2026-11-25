@@ -4,7 +4,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 pub const RATE: u32 = 48_000;
@@ -411,6 +411,30 @@ pub fn mix(s: &Session, sounds: &Sounds, a: f64, b: f64, wait: bool) -> Vec<f32>
         add_track(&mut out, s, sounds, ti, a, n, wait, gains.as_deref());
     }
     out
+}
+
+/// Exporte une piste par fichier (stems) : WAV 24 bits, chacun sur toute la durée de la session (ils se
+/// recalent tels quels), avec le volume, les enveloppes et le ducking du mixage. Rend les fichiers écrits.
+pub fn export_stems(s: &Session, sounds: &Sounds, dir: &Path) -> Result<Vec<PathBuf>, String> {
+    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    let n = (s.duration() * RATE as f64) as usize;
+    let mut out = vec![];
+    for (k, ti) in s.audible().into_iter().enumerate() {
+        if s.tracks[ti].clips.is_empty() {
+            continue;
+        }
+        let mut data = vec![0.0f32; n * 2];
+        let gains = duck_gains(s, sounds, ti, 0.0, n, true);
+        add_track(&mut data, s, sounds, ti, 0.0, n, true, gains.as_deref());
+        let name: String = s.tracks[ti].name.chars().map(|c| if "/\\:*?\"<>|".contains(c) { '-' } else { c }).collect();
+        let path = dir.join(format!("{:02} {}.wav", k + 1, name.trim()));
+        std::fs::write(&path, wav_bytes(&data)).map_err(|e| e.to_string())?;
+        out.push(path);
+    }
+    if out.is_empty() {
+        return Err(crate::i18n::t("Aucune piste à exporter."));
+    }
+    Ok(out)
 }
 
 /// Ajoute une piste au mélange, avec un gain par échantillon en plus (ducking)

@@ -2464,5 +2464,8 @@
   "tampon de duplication (Alt+clic : source)": "clone stamp (Alt+click: source)",
   "Alt+clic d'abord pour choisir où prendre les pixels": "Alt+click first to pick where to take pixels from",
   "viser": "aim at",
-  "Contrainte « viser » : l'objet se tourne toujours vers la cible, même animée. Sa rotation X et Y ne se règle plus à la main.": "Aim constraint: the object always turns toward the target, even animated. Its X and Y rotation can no longer be set by hand."
+  "Contrainte « viser » : l'objet se tourne toujours vers la cible, même animée. Sa rotation X et Y ne se règle plus à la main.": "Aim constraint: the object always turns toward the target, even animated. Its X and Y rotation can no longer be set by hand.",
+  "Pistes séparées (stems)": "Separate tracks (stems)",
+  "Un WAV par piste, tous de la durée de la session : ils se recalent tels quels dans un autre logiciel": "One WAV per track, each as long as the session: they line up as-is in another app",
+  "Aucune piste à exporter.": "No track to export."
 }

@@ -565,6 +565,20 @@ impl Editor {
                         ui.close();
                     }
                 }
+                ui.separator();
+                let b = egui::Button::new(format!("{}  {}", l::LAYERS, crate::i18n::t("Pistes séparées (stems)")));
+                if ui.add_enabled(!busy, b).on_hover_text(crate::i18n::t("Un WAV par piste, tous de la durée de la session : ils se recalent tels quels dans un autre logiciel")).clicked() {
+                    let out = self.export_path("wav");
+                    let dir = out.with_file_name(out.file_stem().map(|s| s.to_string_lossy().replace(" - mix", " - stems")).unwrap_or_else(|| "stems".into()));
+                    let s = self.session.clone();
+                    let sounds = self.sounds.clone();
+                    let (tx, rx) = std::sync::mpsc::channel();
+                    self.export_rx = Some(rx);
+                    std::thread::spawn(move || {
+                        let _ = tx.send(audio::export_stems(&s, &sounds, &dir).map(|_| dir));
+                    });
+                    ui.close();
+                }
             });
             ui.add_space(8.0);
             if ui.available_width() < 300.0 {
