@@ -1025,30 +1025,40 @@ impl Editor {
                 }
             }
         }
-        // Molette : zoom dans le temps ; Ctrl : dans les valeurs
-        if resp.hovered() {
-            let (scroll, ctrl, at) = ui.input(|i| (i.smooth_scroll_delta.y + i.smooth_scroll_delta.x, i.modifiers.command, i.pointer.hover_pos()));
-            if let (true, Some(at)) = (scroll != 0.0, at.filter(|q| plot.contains(*q))) {
-                let k = (-scroll * 0.002).exp();
-                let [mut a, mut b, mut c, mut d] = self.view.unwrap_or(view);
-                if ctrl {
-                    let v = v_of(at.y);
-                    (c, d) = (v + (c - v) * k, v + (d - v) * k);
-                } else {
-                    let t = t_of(at.x);
-                    (a, b) = (t + (a - t) * k, t + (b - t) * k);
-                }
-                self.view = Some([a, b, c, d]);
+        // Navigation commune à toutes les timelines (voir timenav) : molette temps, Ctrl zoom temps,
+        // Maj défiler les valeurs, Alt zoom des valeurs
+        if let Some(w) = crate::timenav::wheel(ui, plot, None).filter(|_| resp.hovered()) {
+            let [mut a, mut b, mut c, mut d] = self.view.unwrap_or(view);
+            let at = w.at.unwrap_or(plot.center());
+            if w.zoom != 1.0 {
+                let t = t_of(at.x);
+                let k = 1.0 / w.zoom;
+                (a, b) = (t + (a - t) * k, t + (b - t) * k);
             }
+            if w.yzoom != 1.0 {
+                let v = v_of(at.y);
+                let k = 1.0 / w.yzoom;
+                (c, d) = (v + (c - v) * k, v + (d - v) * k);
+            }
+            let dt = w.time_px / plot.width() * (b - a);
+            let dv = -w.y_px / plot.height() * (d - c);
+            self.view = Some([a + dt, b + dt, c + dv, d + dv]);
         }
         // Clavier : A tout choisir, F cadrer, Suppr retirer (sur tout le lien)
         if resp.hovered() && !ui.ctx().egui_wants_keyboard_input() {
-            let (all, fit, del) = ui.input(|i| (!i.modifiers.any() && i.key_pressed(egui::Key::A), i.key_pressed(egui::Key::F) || i.key_pressed(egui::Key::Home), i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace)));
+            let (all, fit, del) = ui.input(|i| (!i.modifiers.any() && i.key_pressed(egui::Key::A), !i.modifiers.any() && i.key_pressed(egui::Key::F), i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace)));
             if all {
                 self.sel = curves.iter().enumerate().filter(|(_, c)| shown(c, &self.hidden)).flat_map(|(ci, c)| (0..c.keys.len()).map(move |k| (ci, k))).collect();
             }
             if fit {
                 self.view = None;
+            }
+            // = − : zoom dans le temps autour de la tête de lecture, comme les timelines
+            let kz = crate::timenav::keys(ui).zoom;
+            if kz != 1.0 {
+                let [a, b, c, d] = self.view.unwrap_or(view);
+                let k = 1.0 / kz;
+                self.view = Some([now + (a - now) * k, now + (b - now) * k, c, d]);
             }
             if ui.input(|i| !i.modifiers.any() && i.key_pressed(egui::Key::I)) {
                 let links: Vec<u32> = curves.iter().filter(|c| !self.hidden.contains(&c.label)).map(|c| c.link).collect();

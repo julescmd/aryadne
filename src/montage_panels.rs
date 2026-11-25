@@ -1892,8 +1892,11 @@ impl Editor {
         let (full, _) = ui.allocate_exact_size(ui.available_size(), Sense::hover());
         let area = Rect::from_min_max(pos2(full.left() + HEAD_W, full.top()), pos2(full.right(), full.bottom() - SCROLL_H));
         let (nv, na) = (self.project.lanes(false), self.project.lanes(true));
-        let row_h = ((area.height() - RULER_H - DIVIDER - 4.0) / (nv + na) as f32).clamp(22.0, 54.0);
-        let v_top = area.top() + RULER_H;
+        let row_h = ((area.height() - RULER_H - DIVIDER - 4.0) / (nv + na) as f32).clamp(22.0, 54.0) * self.row_scale;
+        // Défilement vertical : seulement si les pistes dépassent
+        let overflow = ((nv + na) as f32 * row_h + DIVIDER + 4.0 - (area.height() - RULER_H)).max(0.0);
+        self.vscroll = self.vscroll.clamp(0.0, overflow);
+        let v_top = area.top() + RULER_H - self.vscroll;
         let a_top = v_top + nv as f32 * row_h + DIVIDER;
         let dur = self.project.duration();
         if self.fit_zoom && area.width() > 50.0 {
@@ -1902,16 +1905,27 @@ impl Editor {
             self.scroll = 0.0;
         }
         let resp = ui.interact(area, ui.scope_id().with("montage-timeline"), Sense::click_and_drag());
-        // Molette : défiler ; Ctrl ou Alt + molette : zoomer autour du curseur
-        if resp.hovered() {
-            let (scroll, zoom, at, alt) = ui.input(|i| (i.smooth_scroll_delta, i.zoom_delta(), i.pointer.hover_pos(), i.modifiers.alt));
-            let z = if alt && scroll.y != 0.0 { (scroll.y / 200.0).exp() } else { zoom };
-            if z != 1.0 {
-                let t = at.map(|a| self.scroll + (a.x - area.left()) / self.zoom).unwrap_or(self.scroll);
-                self.zoom = (self.zoom * z).clamp(2.0, 800.0);
-                self.scroll = (t - at.map(|a| (a.x - area.left()) / self.zoom).unwrap_or(0.0)).max(0.0);
-            } else if scroll != egui::Vec2::ZERO {
-                self.scroll = (self.scroll - (scroll.x + scroll.y) / self.zoom).max(0.0);
+        // Navigation commune à toutes les timelines (voir timenav)
+        if let Some(w) = crate::timenav::wheel(ui, area, Some(&resp)) {
+            if w.zoom != 1.0 {
+                let (mut l, mut z) = (self.scroll as f64, self.zoom as f64);
+                crate::timenav::zoom_time(&mut l, &mut z, w.zoom as f64, w.at.map(|a| (a.x - area.left()) as f64).unwrap_or(0.0), 2.0, 800.0);
+                (self.scroll, self.zoom) = (l as f32, z as f32);
+            }
+            self.scroll = (self.scroll + w.time_px / self.zoom).max(0.0);
+            self.vscroll += w.y_px;
+            self.row_scale = (self.row_scale * w.yzoom).clamp(0.6, 4.0);
+        }
+        let k = crate::timenav::keys(ui);
+        if resp.hovered() || resp.has_focus() {
+            if k.fit {
+                self.fit_zoom = true;
+            }
+            if k.zoom != 1.0 {
+                let (mut l, mut z) = (self.scroll as f64, self.zoom as f64);
+                let at = ((self.playhead - self.scroll) * self.zoom).clamp(0.0, area.width()) as f64;
+                crate::timenav::zoom_time(&mut l, &mut z, k.zoom as f64, at, 2.0, 800.0);
+                (self.scroll, self.zoom) = (l as f32, z as f32);
             }
         }
         let g = Geo { area, v_top, a_top, row_h, nv, na, zoom: self.zoom, scroll: self.scroll };

@@ -48,6 +48,8 @@ pub struct Editor {
     grid: f64,
     last_len: f64,
     zoom: f32,
+    /// Défilement de l'arrangement (en temps)
+    ascroll: f64,
     roll_zoom: f32,
     roll_scroll: f64,
     roll_top: f32,
@@ -128,6 +130,7 @@ impl Editor {
             grid: 0.25,
             last_len: 0.5,
             zoom: 0.0,
+            ascroll: 0.0,
             roll_zoom: 0.0,
             roll_scroll: 0.0,
             roll_top: 79.0,
@@ -382,6 +385,28 @@ impl Editor {
             self.stop();
             self.beat = 0.0;
         }
+        // Les raccourcis communs à toutes les timelines
+        let k = crate::timenav::keys(ui);
+        if k.end {
+            self.stop();
+            self.beat = self.song.beats();
+        }
+        if k.jump != 0 && self.focus != Focus::Roll {
+            // Mesure précédente / suivante
+            let bpb = self.song.beats_per_bar as f64;
+            self.beat = if k.jump > 0 { ((self.beat / bpb).floor() + 1.0) * bpb } else { (((self.beat - 1e-6) / bpb).ceil() - 1.0).max(0.0) * bpb };
+        }
+        if k.step != 0 && self.focus != Focus::Roll {
+            self.beat = (self.beat + k.step as f64 * 0.25).max(0.0);
+        }
+        if k.fit {
+            self.zoom = 0.0;
+            self.ascroll = 0.0;
+            self.roll_zoom = 0.0;
+        }
+        if k.zoom != 1.0 {
+            self.zoom = (self.zoom * k.zoom).clamp(2.0, 200.0);
+        }
         if cmd && i.key_pressed(egui::Key::Z) {
             self.undo(i.modifiers.shift);
         }
@@ -562,8 +587,9 @@ impl Editor {
             self.zoom = ((ruler.width() - 20.0) / beats as f32).max(4.0);
         }
         let zoom = self.zoom;
-        let x_of = move |b: f64| ruler.left() + 8.0 + b as f32 * zoom;
-        let b_of = move |x: f32| ((x - ruler.left() - 8.0) / zoom).max(0.0) as f64;
+        let ascroll = self.ascroll;
+        let x_of = move |b: f64| ruler.left() + 8.0 + (b - ascroll) as f32 * zoom;
+        let b_of = move |x: f32| ((x - ruler.left() - 8.0) / zoom).max(0.0) as f64 + ascroll;
         let bpb = self.song.beats_per_bar as f64;
         let painter = ui.painter_at(full);
         painter.rect_filled(Rect::from_min_max(full.min, pos2(full.right(), ruler.bottom())), 0.0, p.panel);
@@ -776,11 +802,14 @@ impl Editor {
         for t in todo {
             t(self);
         }
-        if ui.rect_contains_pointer(full) {
-            let (dy, cmd) = ui.input(|i| (i.smooth_scroll_delta.y, i.modifiers.command));
-            if cmd && dy != 0.0 {
-                self.zoom = (self.zoom * (1.0 + dy * 0.003)).clamp(2.0, 200.0);
+        // Navigation commune à toutes les timelines (voir timenav)
+        if let Some(w) = crate::timenav::wheel(ui, full, None) {
+            let (mut l, mut z) = (self.ascroll, self.zoom as f64);
+            if w.zoom != 1.0 {
+                crate::timenav::zoom_time(&mut l, &mut z, w.zoom as f64, w.at.map(|a| (a.x - ruler.left() - 8.0) as f64).unwrap_or(0.0), 2.0, 200.0);
             }
+            self.ascroll = (l + w.time_px as f64 / z).clamp(0.0, beats);
+            self.zoom = z as f32;
         }
         let x = x_of(self.beat);
         painter.vline(x, ruler.top()..=full.bottom(), Stroke::new(1.0, p.accent));
@@ -1060,15 +1089,16 @@ impl Editor {
             }
             other => self.drag = other,
         }
-        // Molette : hauteurs ; Maj : temps ; Ctrl : zoom
-        if ui.rect_contains_pointer(full) {
-            let (dy, dx, cmd, shift) = ui.input(|i| (i.smooth_scroll_delta.y, i.smooth_scroll_delta.x, i.modifiers.command, i.modifiers.shift));
-            if cmd && dy != 0.0 {
-                self.roll_zoom = (self.roll_zoom * (1.0 + dy * 0.003)).clamp(6.0, 400.0);
-            } else if shift || dx != 0.0 {
-                self.roll_scroll = (self.roll_scroll - ((dy + dx) / self.roll_zoom) as f64).clamp(0.0, g.len);
-            } else if !drums && dy != 0.0 {
-                self.roll_top = (self.roll_top + dy / row_h).clamp(36.0, 108.0);
+        // Navigation commune à toutes les timelines : molette temps, Maj+molette hauteurs (notes), Ctrl zoom
+        if let Some(w) = crate::timenav::wheel(ui, full, None) {
+            let (mut l, mut z) = (self.roll_scroll, self.roll_zoom as f64);
+            if w.zoom != 1.0 {
+                crate::timenav::zoom_time(&mut l, &mut z, w.zoom as f64, w.at.map(|a| (a.x - grid_r.left() - 8.0) as f64).unwrap_or(0.0), 6.0, 400.0);
+            }
+            self.roll_scroll = (l + w.time_px as f64 / z).clamp(0.0, g.len);
+            self.roll_zoom = z as f32;
+            if !drums && w.y_px != 0.0 {
+                self.roll_top = (self.roll_top - w.y_px / row_h).clamp(36.0, 108.0);
             }
         }
     }

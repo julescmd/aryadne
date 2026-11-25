@@ -116,6 +116,8 @@ pub struct Editor {
     /// Propriété montrée dans la courbe, à droite de la timeline
     curve: Prop,
     tl_scroll: f32,
+    /// Fenêtre de temps de la timeline (début, fin) ; None : toute la composition
+    tl_view: Option<(f32, f32)>,
     /// Clé sous le clic droit (calque, propriété, instant)
     ctx_key: Option<(usize, Prop, f32)>,
     /// Message affiché et depuis quand (il s'efface après quelques secondes)
@@ -229,6 +231,7 @@ impl Editor {
             curve: Prop::Pos,
             expr_open: Default::default(),
             tl_scroll: 0.0,
+            tl_view: None,
             ctx_key: None,
             msg_seen: None,
             wave_job: None,
@@ -359,11 +362,11 @@ impl Editor {
             undo = i.modifiers.command && !i.modifiers.shift && i.key_pressed(egui::Key::Z);
             redo = i.modifiers.command && (i.key_pressed(egui::Key::Y) || (i.modifiers.shift && i.key_pressed(egui::Key::Z)));
             home = i.key_pressed(egui::Key::Home);
-            if i.key_pressed(egui::Key::ArrowRight) {
-                step = if i.modifiers.shift { 10 } else { 1 };
+            if i.key_pressed(egui::Key::ArrowRight) && !i.modifiers.shift {
+                step = 1;
             }
-            if i.key_pressed(egui::Key::ArrowLeft) {
-                step = if i.modifiers.shift { -10 } else { -1 };
+            if i.key_pressed(egui::Key::ArrowLeft) && !i.modifiers.shift {
+                step = -1;
             }
             if !i.modifiers.command {
                 key = i.key_pressed(egui::Key::K);
@@ -390,6 +393,33 @@ impl Editor {
         if step != 0 {
             self.playing = None;
             self.time = (self.time + step as f32 / self.compo.fps).clamp(0.0, self.compo.duration);
+        }
+        // Les raccourcis communs à toutes les timelines : Fin, Maj+← → (clé suivante), F, = −
+        let k = crate::timenav::keys(ui);
+        if k.end {
+            self.playing = None;
+            self.time = self.compo.duration;
+        }
+        if k.jump != 0 {
+            self.playing = None;
+            let mut keys: Vec<f32> = match self.sel {
+                Some(i) => self.compo.layers.get(i).map(|l| l.key_times()).unwrap_or_default(),
+                None => self.compo.layers.iter().flat_map(|l| l.key_times()).collect(),
+            };
+            keys.sort_by(|a, b| a.total_cmp(b));
+            let now = self.time;
+            self.time = if k.jump > 0 { keys.into_iter().find(|t| *t > now + 1e-4).unwrap_or(now) } else { keys.into_iter().rev().find(|t| *t < now - 1e-4).unwrap_or(0.0) };
+        }
+        if k.fit {
+            self.tl_view = None;
+        }
+        if k.zoom != 1.0 {
+            let dur = self.compo.duration.max(0.01);
+            let (v0, v1) = self.tl_view.unwrap_or((0.0, dur));
+            let span = ((v1 - v0) / k.zoom).clamp(0.1, dur * 4.0);
+            let c = self.time.clamp(v0, v1);
+            let f = (c - v0) / (v1 - v0).max(1e-6);
+            self.tl_view = Some(((c - span * f).max(0.0), (c - span * f).max(0.0) + span));
         }
         // K : une clé de position à la tête de lecture
         if key {
@@ -2218,8 +2248,28 @@ impl Editor {
         let curve_w = if body.width() > 900.0 { 260.0 } else { 0.0 };
         let tracks = Rect::from_min_max(pos2(body.left() + names_w, body.top()), pos2(body.right() - curve_w, body.bottom()));
         let ruler = Rect::from_min_max(tracks.left_top(), pos2(tracks.right(), tracks.top() + 26.0));
-        let x_of = |t: f32| tracks.left() + 10.0 + (t / dur.max(0.01)) * (tracks.width() - 20.0);
-        let t_of = |x: f32| ((x - tracks.left() - 10.0) / (tracks.width() - 20.0) * dur).clamp(0.0, dur);
+        // Navigation commune à toutes les timelines (voir timenav) : la fenêtre de temps se zoome et se déplace
+        let (mut v0, mut v1) = self.tl_view.unwrap_or((0.0, dur.max(0.01)));
+        let span_w = (tracks.width() - 20.0).max(1.0);
+        if let Some(w) = crate::timenav::wheel(ui, tracks, None) {
+            if w.zoom != 1.0 {
+                let at = w.at.map(|a| v0 + (a.x - tracks.left() - 10.0) / span_w * (v1 - v0)).unwrap_or((v0 + v1) / 2.0);
+                let span = ((v1 - v0) / w.zoom).clamp(4.0 / fps.max(1.0), dur.max(0.01) * 4.0);
+                let f = (at - v0) / (v1 - v0).max(1e-6);
+                v0 = at - span * f;
+                v1 = v0 + span;
+            }
+            let dt = w.time_px / span_w * (v1 - v0);
+            v0 += dt;
+            v1 += dt;
+            if v0 < 0.0 {
+                (v0, v1) = (0.0, v1 - v0);
+            }
+            self.tl_scroll += w.y_px;
+            self.tl_view = Some((v0, v1));
+        }
+        let x_of = move |t: f32| tracks.left() + 10.0 + ((t - v0) / (v1 - v0).max(1e-6)) * span_w;
+        let t_of = move |x: f32| (v0 + (x - tracks.left() - 10.0) / span_w * (v1 - v0)).clamp(0.0, dur);
         let snap = |t: f32| (t * fps).round() / fps;
         let painter = ui.painter_at(body);
         painter.vline(tracks.left(), body.y_range(), Stroke::new(1.0, p.line));
@@ -2440,10 +2490,6 @@ impl Editor {
         // Défilement : la molette sur les rangées
         let content = y - top0;
         let room = rows_clip.height();
-        if ui.rect_contains_pointer(rows_clip) {
-            let d = ui.input(|i| if i.modifiers.command { 0.0 } else { i.smooth_scroll_delta.y });
-            self.tl_scroll -= d;
-        }
         self.tl_scroll = self.tl_scroll.clamp(0.0, (content - room + 12.0).max(0.0));
         if content > room {
             let bar_h = (room * room / content).max(24.0);

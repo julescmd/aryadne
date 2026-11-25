@@ -402,6 +402,28 @@ impl Editor {
             self.time = 0.0;
             self.scroll = 0.0;
         }
+        // Les raccourcis communs à toutes les timelines (Fin, ← →, Maj+← →, F, = −)
+        let k = crate::timenav::keys(ui);
+        if k.end {
+            self.stop();
+            self.time = self.session.duration();
+        }
+        if k.step != 0 {
+            self.time = (self.time + k.step as f64 / 30.0).max(0.0);
+        }
+        if k.jump != 0 {
+            // Les bords de clips et les repères
+            let mut edges: Vec<f64> = self.session.tracks.iter().flat_map(|t| t.clips.iter().flat_map(|c| [c.start, c.end()])).chain(self.session.markers.iter().map(|m| m.t)).collect();
+            edges.sort_by(|a, b| a.total_cmp(b));
+            let now = self.time;
+            self.time = if k.jump > 0 { edges.into_iter().find(|e| *e > now + 1e-3).unwrap_or(now) } else { edges.into_iter().rev().find(|e| *e < now - 1e-3).unwrap_or(0.0) };
+        }
+        if k.fit {
+            self.fit = true;
+        }
+        if k.zoom != 1.0 {
+            self.zoom = (self.zoom * k.zoom as f64).clamp(2.0, 4000.0);
+        }
         if cmd && i.key_pressed(egui::Key::Z) {
             self.undo(i.modifiers.shift);
         }
@@ -1260,16 +1282,13 @@ impl Editor {
         for a in actions {
             a(self);
         }
-        // Molette : défilement ; Ctrl : zoom autour de la souris
-        if ui.rect_contains_pointer(full) {
-            let (dy, dx, cmd, hover) = ui.input(|i| (i.smooth_scroll_delta.y, i.smooth_scroll_delta.x, i.modifiers.command, i.pointer.hover_pos()));
-            if cmd && dy != 0.0 {
-                let at = hover.map(|h| t_of(h.x)).unwrap_or(self.time);
-                self.zoom = (self.zoom * (1.0 + dy as f64 * 0.003)).clamp(2.0, 4000.0);
-                self.scroll = (at - (hover.map(|h| h.x).unwrap_or(ruler.center().x) - ruler.left() - 8.0) as f64 / self.zoom).max(0.0);
-            } else if dy != 0.0 || dx != 0.0 {
-                self.scroll = (self.scroll - (dy + dx) as f64 / self.zoom).max(0.0);
+        // Navigation commune à toutes les timelines (voir timenav)
+        if let Some(w) = crate::timenav::wheel(ui, full, None) {
+            if w.zoom != 1.0 {
+                let at = w.at.map(|h| (h.x - ruler.left() - 8.0) as f64).unwrap_or(0.0);
+                crate::timenav::zoom_time(&mut self.scroll, &mut self.zoom, w.zoom as f64, at, 2.0, 4000.0);
             }
+            self.scroll = (self.scroll + w.time_px as f64 / self.zoom).max(0.0);
         }
         // Tête de lecture
         let x = x_of(self.time);

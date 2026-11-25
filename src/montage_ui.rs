@@ -205,6 +205,9 @@ pub struct Editor {
     shuttle: f32,
     /// Ajuster le zoom pour voir tout le montage (\\)
     fit_zoom: bool,
+    /// Hauteur des pistes (Alt+molette) et défilement vertical (Maj+molette), comme partout
+    row_scale: f32,
+    vscroll: f32,
 }
 
 /// Résultat d'une analyse du son, faite en arrière-plan
@@ -308,6 +311,8 @@ impl Editor {
             folded: HashSet::new(),
             shuttle: 0.0,
             fit_zoom: true,
+            row_scale: 1.0,
+            vscroll: 0.0,
             project,
         }
     }
@@ -1180,14 +1185,24 @@ impl Editor {
             let t = self.playhead - 1.0;
             self.seek(t);
         }
-        let step = if shift { 5.0 } else { 1.0 } / fps;
-        if k(Key::ArrowLeft) {
+        // Comme toutes les timelines : ← → une image, Maj+← → la coupe précédente / suivante (↑ ↓ aussi)
+        let step = 1.0 / fps;
+        if k(Key::ArrowLeft) && !shift {
             let t = seconds(self.playhead - step, fps);
             self.seek(t);
         }
-        if k(Key::ArrowRight) {
+        if k(Key::ArrowRight) && !shift {
             let t = seconds(self.playhead + step, fps);
             self.seek(t);
+        }
+        if k(Key::ArrowLeft) && shift {
+            let t = self.edits().into_iter().rev().find(|&e| e < self.playhead - 1e-3).unwrap_or(0.0);
+            self.seek(t);
+        }
+        if k(Key::ArrowRight) && shift {
+            if let Some(t) = self.edits().into_iter().find(|&e| e > self.playhead + 1e-3) {
+                self.seek(t);
+            }
         }
         if k(Key::ArrowUp) {
             let t = self.edits().into_iter().rev().find(|&e| e < self.playhead - 1e-3).unwrap_or(0.0);

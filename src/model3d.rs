@@ -2565,6 +2565,8 @@ pub struct Viewer {
     ref_tex: std::collections::HashMap<std::path::PathBuf, Option<std::sync::Arc<image::RgbaImage>>>,
     /// Animation de la scène : image courante, lecture en cours, clé automatique
     anim_frame: f32,
+    /// Fenêtre de la timeline 3D (première, dernière image affichées) ; None : toute la plage de la scène
+    tl_view: Option<(f32, f32)>,
     anim_playing: bool,
     anim_auto: bool,
     anim_last: Option<std::time::Instant>,
@@ -2796,6 +2798,7 @@ impl Viewer {
             gizmo_mode: 0,
             ref_tex: Default::default(),
             anim_frame: 0.0,
+            tl_view: None,
             anim_playing: false,
             anim_auto: false,
             anim_last: None,
@@ -6482,8 +6485,59 @@ impl Viewer {
             let r = egui::Rect::from_min_max(egui::pos2(full.left() + gutter, full.top()), egui::pos2(full.right() - 12.0, full.bottom()));
             let resp = ui.interact(r, ui.scope_id().with("tl-track"), egui::Sense::click_and_drag());
             ui.allocate_rect(full, egui::Sense::hover());
-            let (a, b) = (scene.start as f32, scene.end.max(scene.start + 1) as f32);
-            let x_of = |f: f32| r.left() + 6.0 + (r.width() - 12.0) * ((f - a) / (b - a)).clamp(0.0, 1.0);
+            // Navigation commune à toutes les timelines (voir timenav), quand la souris est sur la timeline
+            let (sa, sb) = (scene.start as f32, scene.end.max(scene.start + 1) as f32);
+            let (mut a, mut b) = self.tl_view.unwrap_or((sa, sb));
+            let span_w = (r.width() - 12.0).max(1.0);
+            if let Some(w) = crate::timenav::wheel(ui, r, Some(&resp)) {
+                if w.zoom != 1.0 {
+                    let at = w.at.map(|q| a + (q.x - r.left() - 6.0) / span_w * (b - a)).unwrap_or((a + b) / 2.0);
+                    let span = ((b - a) / w.zoom).clamp(4.0, (sb - sa) * 4.0 + 10.0);
+                    let f = (at - a) / (b - a).max(1e-6);
+                    a = at - span * f;
+                    b = a + span;
+                }
+                let d = w.time_px / span_w * (b - a);
+                (a, b) = (a + d, b + d);
+                self.tl_view = Some((a, b));
+            }
+            if resp.hovered() {
+                let k = crate::timenav::keys(ui);
+                if k.home {
+                    seek = Some(sa);
+                }
+                if k.end {
+                    seek = Some(sb);
+                }
+                if k.step != 0 {
+                    seek = Some((self.anim_frame + k.step as f32).clamp(sa, sb));
+                }
+                if k.jump != 0 {
+                    let mut ks: Vec<i32> = match self.scene_sel.and_then(|i| scene.objects.get(i)) {
+                        Some(o) => o.keys.iter().map(|x| x.frame).collect(),
+                        None => scene.objects.iter().flat_map(|o| o.keys.iter().map(|x| x.frame)).collect(),
+                    };
+                    ks.sort();
+                    let now = self.anim_frame.round() as i32;
+                    let to = if k.jump > 0 { ks.into_iter().find(|f| *f > now) } else { ks.into_iter().rev().find(|f| *f < now) };
+                    if let Some(f) = to {
+                        seek = Some(f as f32);
+                    }
+                }
+                if k.fit {
+                    self.tl_view = None;
+                    (a, b) = (sa, sb);
+                }
+                if k.zoom != 1.0 {
+                    let c = self.anim_frame.clamp(a, b);
+                    let span = ((b - a) / k.zoom).clamp(4.0, (sb - sa) * 4.0 + 10.0);
+                    let f = (c - a) / (b - a).max(1e-6);
+                    a = c - span * f;
+                    b = a + span;
+                    self.tl_view = Some((a, b));
+                }
+            }
+            let x_of = |f: f32| r.left() + 6.0 + (r.width() - 12.0) * ((f - a) / (b - a));
             let painter = ui.painter_at(full);
             let step = [1, 2, 5, 10, 20, 50, 100, 200, 500].into_iter().find(|s| (r.width() - 12.0) / (b - a) * *s as f32 > 56.0).unwrap_or(1000);
             let mut f = (scene.start as f32 / step as f32).ceil() as i32 * step;
@@ -6516,7 +6570,7 @@ impl Viewer {
             }
             let x = x_of(self.anim_frame);
             painter.line_segment([egui::pos2(x, full.top()), egui::pos2(x, full.bottom())], Stroke::new(1.0, p.accent));
-            let frame_at = |px: f32| (a + (b - a) * ((px - r.left() - 6.0) / (r.width() - 12.0)).clamp(0.0, 1.0)).round();
+            let frame_at = |px: f32| (a + (b - a) * ((px - r.left() - 6.0) / (r.width() - 12.0)).clamp(0.0, 1.0)).round().clamp(sa, sb);
             let key_under = |pt: egui::Pos2| hits.iter().filter(|h| (h.2 - pt).length() < 8.0).min_by(|u, v| (u.2 - pt).length().total_cmp(&(v.2 - pt).length())).map(|h| (h.0, h.1));
             if resp.drag_started() {
                 if let Some((k, f)) = ui.input(|i| i.pointer.press_origin()).and_then(key_under) {

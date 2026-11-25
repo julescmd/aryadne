@@ -26,6 +26,7 @@ mod mdextra;
 mod sources;
 mod text3d;
 mod timetrack;
+mod timenav;
 mod pbrphoto;
 mod vector_ui;
 mod keymap;
