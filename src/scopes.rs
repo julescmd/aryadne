@@ -171,10 +171,11 @@ mod tests {
         // Blanc : la forme d'onde éclaire la ligne du haut ; noir : celle du bas
         let (sw, sh, wf) = render(0, 40, 20, &flat(40, 20, [255, 255, 255, 255]));
         let lit = |row: usize| (0..sw).filter(|x| wf[(row * sw + x) * 4] > 100).count();
-        assert!(lit(0) > sw / 2 && lit(sh / 2) == 0);
+        assert!(lit(0) >= 30 && lit(sh / 2) == 0);
         // Rouge pur : dans la parade, le tiers rouge en haut, le vert et le bleu en bas
         let (sw, _, pr) = render(1, 30, 30, &flat(30, 30, [255, 0, 0, 255]));
-        assert!(pr[(sw / 6) * 4] > 100, "rouge en haut");
+        assert!((0..sw / 3).any(|x| pr[x * 4] > 100), "rouge en haut");
+        assert!(!(sw / 3..sw).any(|x| pr[x * 4 + 1] > 100 || pr[x * 4 + 2] > 100), "ni vert ni bleu en haut");
         // Gris : le vectorscope ne montre qu'un point au centre
         let (s, _, vs) = render(2, 20, 20, &flat(20, 20, [128, 128, 128, 255]));
         let c = s / 2;
