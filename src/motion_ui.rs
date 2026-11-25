@@ -1650,6 +1650,27 @@ impl Editor {
                     }
                 }
             });
+            section(ui, "Profondeur (2,5D)");
+            let mut on = lay.depth.is_some();
+            if ui.checkbox(&mut on, crate::i18n::t("Calque 3D")).on_hover_text(crate::i18n::t("Le calque a une profondeur : la caméra de la composition le voit en perspective (parallaxe, flou de profondeur de champ)")).changed() {
+                lay.depth = on.then(|| motion::Track::new(0.0, 0.0));
+                changed = true;
+            }
+            let now = self.time;
+            if let Some(d) = &mut lay.depth {
+                crate::modifiers::row(ui, &crate::i18n::t("profondeur"), |ui| {
+                    let mut z = d.at(now)[0];
+                    if ui.add(egui::DragValue::new(&mut z).speed(2.0).range(-20000.0..=50000.0).suffix(" px")).on_hover_text(crate::i18n::t("Plus grand : plus loin ; négatif : devant le plan de la composition")).changed() {
+                        d.set(now, [z, 0.0]);
+                        changed = true;
+                    }
+                    let keyed = d.key_at(now).is_some();
+                    if ui.add(egui::Button::new(egui::RichText::new(if keyed { "◆" } else { "◇" }).size(13.0)).frame(false)).on_hover_text(crate::i18n::t("Clé de profondeur à cet instant")).clicked() {
+                        d.toggle_key(now);
+                        changed = true;
+                    }
+                });
+            }
             section(ui, "Trajectoire");
             changed |= ui.checkbox(&mut lay.auto_orient, crate::i18n::t("Orientation automatique")).on_hover_text(crate::i18n::t("Le calque tourne pour suivre la direction de son mouvement (une voiture sur une route, un avion en papier)")).changed();
             section(ui, "Tremblement");
@@ -1804,6 +1825,54 @@ impl Editor {
             ui.label(egui::RichText::new(crate::i18n::t("180° : le flou du cinéma ; plus d'échantillons : plus lisse, plus lent")).small());
             if ch {
                 self.compo.blur = Some(b);
+                self.changed();
+            }
+        });
+        // Caméra 2,5D : un clic l'allume, un clic droit la règle (les calques 3D la suivent)
+        let mut on = self.compo.camera.is_some();
+        let r = child.toggle_value(&mut on, egui::RichText::new(l::VIDEO).size(14.0)).on_hover_text(crate::i18n::t("Caméra (2,5D) : perspective des calques 3D, travelling, profondeur de champ · clic droit : réglages"));
+        if r.changed() {
+            self.compo.camera = on.then(|| motion::Camera::new(self.compo.w));
+            self.changed();
+        }
+        r.context_menu(|ui| {
+            ui.set_width(300.0);
+            ui.spacing_mut().item_spacing = vec2(6.0, 8.0);
+            let now = self.time;
+            let w = self.compo.w;
+            let cam = self.compo.camera.get_or_insert_with(|| motion::Camera::new(w));
+            let mut ch = false;
+            let key = |ui: &mut egui::Ui, tr: &mut motion::Track| -> bool {
+                let keyed = tr.key_at(now).is_some();
+                let hit = ui.add(egui::Button::new(egui::RichText::new(if keyed { "◆" } else { "◇" }).size(13.0)).frame(false)).on_hover_text(crate::i18n::t("Clé à cet instant")).clicked();
+                if hit {
+                    tr.toggle_key(now);
+                }
+                hit
+            };
+            crate::modifiers::row(ui, &crate::i18n::t("travelling"), |ui| {
+                let mut z = cam.dolly.at(now)[0];
+                if ui.add(egui::DragValue::new(&mut z).speed(2.0).suffix(" px")).on_hover_text(crate::i18n::t("La caméra avance (positif) ou recule")).changed() {
+                    cam.dolly.set(now, [z, 0.0]);
+                    ch = true;
+                }
+                ch |= key(ui, &mut cam.dolly);
+            });
+            crate::modifiers::row(ui, &crate::i18n::t("panoramique"), |ui| {
+                let mut v = cam.pan.at(now);
+                let a = ui.add(egui::DragValue::new(&mut v[0]).speed(1.0).prefix("x ")).changed();
+                let b = ui.add(egui::DragValue::new(&mut v[1]).speed(1.0).prefix("y ")).changed();
+                if a || b {
+                    cam.pan.set(now, v);
+                    ch = true;
+                }
+                ch |= key(ui, &mut cam.pan);
+            });
+            ch |= crate::modifiers::row_slider(ui, "focale", egui::Slider::new(&mut cam.zoom, 200.0..=10000.0).logarithmic(true).suffix(" px"));
+            ch |= crate::modifiers::row_slider(ui, "mise au point", egui::Slider::new(&mut cam.focus, 50.0..=20000.0).logarithmic(true).suffix(" px"));
+            ch |= crate::modifiers::row_slider(ui, "flou", egui::Slider::new(&mut cam.blur, 0.0..=60.0).suffix(" px"));
+            ui.label(egui::RichText::new(crate::i18n::t("Coche « Calque 3D » sur un calque pour lui donner une profondeur.")).small());
+            if ch {
                 self.changed();
             }
         });

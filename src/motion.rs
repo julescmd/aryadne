@@ -340,6 +340,9 @@ pub struct Layer {
     /// Orientation automatique : le calque tourne pour suivre la direction de son mouvement
     #[serde(default, skip_serializing_if = "is_false_b")]
     pub auto_orient: bool,
+    /// Calque 3D (2,5D) : sa profondeur (v[0], px ; plus grand = plus loin), vue par la caméra de la composition
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub depth: Option<Track>,
 }
 
 /// La forme d'un tracé ou d'un masque à un instant
@@ -750,6 +753,7 @@ impl Layer {
             exprs: Default::default(),
             masks: vec![],
             auto_orient: false,
+            depth: None,
             fx: vec![],
             repeat: None,
         }
@@ -960,6 +964,41 @@ pub struct Compo {
     /// Contrôles : des curseurs nommés, lus par leur nom dans les expressions des calques
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub controls: Vec<Control>,
+    /// Caméra (2,5D) : elle voit les calques 3D en perspective ; les calques 2D ne bougent pas
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub camera: Option<Camera>,
+}
+
+/// Caméra d'une composition : un panoramique, un travelling avant (dolly) et la profondeur de champ
+#[derive(Clone, PartialEq, Serialize, Deserialize, Debug)]
+pub struct Camera {
+    /// Décalage du regard (px)
+    pub pan: Track,
+    /// Avancée de la caméra (v[0], px)
+    pub dolly: Track,
+    /// Distance de la caméra au plan de profondeur 0 (px) : grand, perspective douce ; petit, forte
+    pub zoom: f32,
+    /// Profondeur de champ : distance nette (px de la caméra) et flou maximal (px) ; 0 : tout net
+    pub focus: f32,
+    pub blur: f32,
+}
+
+impl Camera {
+    pub fn new(w: u32) -> Camera {
+        // Comme un 50 mm d'After Effects
+        let zoom = (w as f32 * 1.39).round();
+        Camera { pan: Track::new(0.0, 0.0), dolly: Track::new(0.0, 0.0), zoom, focus: zoom, blur: 0.0 }
+    }
+
+    /// Distance d'un calque de profondeur `z` à la caméra, à l'instant `t`
+    pub fn dist(&self, z: f32, t: f32) -> f32 {
+        self.zoom + z - self.dolly.at(t)[0]
+    }
+
+    /// Le flou (px de composition) d'un calque à cette distance
+    pub fn defocus(&self, dist: f32) -> f32 {
+        if self.blur <= 0.0 { 0.0 } else { (self.blur * (dist - self.focus).abs() / self.focus.max(1.0)).min(self.blur) }
+    }
 }
 
 #[derive(Clone, PartialEq, Serialize, Deserialize, Debug)]
@@ -1001,7 +1040,7 @@ impl Default for MotionBlur {
 impl Default for Compo {
     /// Une composition neuve : un titre qui entre lettre par lettre, souligné d'un trait qui s'étire
     fn default() -> Compo {
-        let mut c = Compo { w: 1920, h: 1080, fps: 30.0, duration: 6.0, bg: [0x14, 0x10, 0x1a], layers: vec![], music: None, blur: None, controls: vec![] };
+        let mut c = Compo { w: 1920, h: 1080, fps: 30.0, duration: 6.0, bg: [0x14, 0x10, 0x1a], layers: vec![], music: None, blur: None, camera: None, controls: vec![] };
         let mut title = Layer::new("Titre", Kind::Text { text: "Titre".into(), size: 140.0, color: [0xf4, 0xee, 0xf1], font: "inter-bold".into(), tracking: -2.0, align: 1 }, &c);
         title.reveal = Some(Reveal::default());
         title.pos.v = [960.0, 500.0];
@@ -1038,6 +1077,41 @@ impl Compo {
             cur = self.layers[j].parent;
         }
         m
+    }
+
+    /// Le repère d'un calque vu par la caméra (perspective des calques 3D) et son flou de profondeur de champ.
+    /// None : derrière la caméra.
+    pub fn projected(&self, i: usize, t: f32) -> Option<(Xform, f32)> {
+        let x = self.world(i, t);
+        let Some(z) = self.layers[i].depth.as_ref().map(|d| d.at(t)[0]) else { return Some((x, 0.0)) };
+        let cam = self.camera.clone().unwrap_or_else(|| Camera::new(self.w));
+        let dist = cam.dist(z, t);
+        if dist < 1.0 {
+            return None;
+        }
+        let k = cam.zoom / dist;
+        let pan = cam.pan.at(t);
+        let (cx, cy) = (self.w as f32 / 2.0, self.h as f32 / 2.0);
+        let p = Xform { a: x.a * k, b: x.b * k, c: x.c * k, d: x.d * k, e: k * (x.e - cx - pan[0]) + cx, f: k * (x.f - cy - pan[1]) + cy };
+        Some((p, cam.defocus(dist) * k))
+    }
+
+    /// L'ordre de dessin, du fond vers l'avant : celui de la pile, mais les calques 3D se rangent entre eux
+    /// selon leur distance à la caméra (le plus loin d'abord)
+    pub fn draw_order(&self, t: f32) -> Vec<usize> {
+        let mut order: Vec<usize> = (0..self.layers.len()).rev().collect();
+        let cam = self.camera.clone().unwrap_or_else(|| Camera::new(self.w));
+        let slots: Vec<usize> = (0..order.len()).filter(|&k| self.layers[order[k]].depth.is_some()).collect();
+        let mut threes: Vec<usize> = slots.iter().map(|&k| order[k]).collect();
+        threes.sort_by(|&a, &b| {
+            let da = cam.dist(self.layers[a].depth.as_ref().map(|d| d.at(t)[0]).unwrap_or(0.0), t);
+            let db = cam.dist(self.layers[b].depth.as_ref().map(|d| d.at(t)[0]).unwrap_or(0.0), t);
+            db.total_cmp(&da)
+        });
+        for (k, li) in slots.into_iter().zip(threes) {
+            order[k] = li;
+        }
+        order
     }
 
     /// Le repère d'un calque dans la composition, parents compris
@@ -1453,6 +1527,32 @@ struct Bitmap {
     k: f32,
 }
 
+/// Flou de profondeur de champ : `r` px de composition, l'image s'agrandit pour que le flou déborde
+fn defocused(b: Bitmap, r: f32) -> Bitmap {
+    let rp = (r * b.k).min(80.0);
+    let pad = (rp * 2.0).ceil() as u32;
+    let (w, h) = b.img.dimensions();
+    let mut big = image::RgbaImage::new(w + pad * 2, h + pad * 2);
+    image::imageops::overlay(&mut big, &b.img, pad as i64, pad as i64);
+    // Flou en alpha prémultiplié : pas de liseré sombre autour
+    for px in big.pixels_mut() {
+        let a = px[3] as u32;
+        for c in 0..3 {
+            px[c] = ((px[c] as u32 * a + 127) / 255) as u8;
+        }
+    }
+    let mut img = image::imageops::fast_blur(&big, rp * 0.6);
+    for px in img.pixels_mut() {
+        let a = px[3] as u32;
+        if a > 0 {
+            for c in 0..3 {
+                px[c] = ((px[c] as u32 * 255 + a / 2) / a).min(255) as u8;
+            }
+        }
+    }
+    Bitmap { img, ox: b.ox - pad as f32 / b.k, oy: b.oy - pad as f32 / b.k, k: b.k }
+}
+
 fn shape_bitmap(w: f32, h: f32, k: f32, color: [u8; 3], cover: impl Fn(f32, f32) -> f32) -> Bitmap {
     let pad = 2.0 / k;
     let (bw, bh) = (((w + 2.0 * pad) * k).ceil().clamp(1.0, 8192.0) as u32, ((h + 2.0 * pad) * k).ceil().clamp(1.0, 8192.0) as u32);
@@ -1820,7 +1920,7 @@ fn prep_layer(c: &Compo, li: usize, t: f32, scale: f32, cache: &mut Cache, (w, h
     if op <= 0.0 {
         return None;
     }
-    let x = c.world(li, t);
+    let (x, defocus) = c.projected(li, t)?;
     // Le contenu est calculé à la résolution où il sera vu (net même agrandi)
     let k = (scale * x.max_scale()).clamp(0.02, 8.0);
     // Un contenu qui ne bouge pas à l'intérieur du calque se dessine une fois (l'export reste rapide)
@@ -1842,6 +1942,7 @@ fn prep_layer(c: &Compo, li: usize, t: f32, scale: f32, cache: &mut Cache, (w, h
         serde_json::to_string(&l.trim).unwrap_or_default().hash(&mut h);
         serde_json::to_string(&l.masks).unwrap_or_default().hash(&mut h);
         serde_json::to_string(&l.fx).unwrap_or_default().hash(&mut h);
+        ((defocus * 4.0).round() as i32).hash(&mut h);
         (h.finish(), k.to_bits())
     });
     let cached = key.and_then(|k| cache.bitmaps.get(&k).cloned());
@@ -1856,6 +1957,7 @@ fn prep_layer(c: &Compo, li: usize, t: f32, scale: f32, cache: &mut Cache, (w, h
                 b = e.apply(b, t - l.start);
             }
             let b = if l.style.is_plain() { b } else { styled(b, &l.style) };
+            let b = if defocus > 0.3 { defocused(b, defocus) } else { b };
             let b = Arc::new(b);
             if let Some(key) = key {
                 if cache.bitmaps.len() > 48 {
@@ -1908,7 +2010,7 @@ fn render_one(c: &Compo, t: f32, scale: f32, cache: &mut Cache) -> image::RgbaIm
     let mut out = image::RgbaImage::from_pixel(w, h, image::Rgba([c.bg[0], c.bg[1], c.bg[2], if cache.depth > 0 { 0 } else { 255 }]));
     // Les calques qui servent de cache au calque d'en dessous ne se dessinent pas eux-mêmes
     let mattes: Vec<usize> = (1..c.layers.len()).filter(|&i| c.layers[i].matte.is_some()).map(|i| i - 1).collect();
-    for li in (0..c.layers.len()).rev() {
+    for li in c.draw_order(t) {
         if mattes.contains(&li) {
             continue;
         }
@@ -2803,3 +2905,31 @@ mod fx_tests {
     }
 }
 
+#[cfg(test)]
+mod cam_tests {
+    use super::*;
+    #[test]
+    fn camera_2_5d() {
+        let mut c = Compo { layers: vec![], ..Compo::default() };
+        c.camera = Some(Camera::new(c.w));
+        let mut near = Layer::new("près", Kind::Ellipse { w: 300.0, h: 300.0, color: [255, 120, 60] }, &c);
+        near.depth = Some(Track::new(-800.0, 0.0));
+        let mut far = Layer::new("loin", Kind::Rect { w: 300.0, h: 300.0, radius: 20.0, color: [80, 140, 255] }, &c);
+        far.depth = Some(Track::new(3000.0, 0.0));
+        // Le loin est au-dessus dans la pile : il se dessine quand même derrière
+        c.layers = vec![far, near];
+        let order = c.draw_order(0.0);
+        assert_eq!(order, vec![0, 1]);
+        let (xn, _) = c.projected(1, 0.0).unwrap();
+        let (xf, _) = c.projected(0, 0.0).unwrap();
+        assert!(xn.max_scale() > 1.0 && xf.max_scale() < 1.0);
+        // Un panoramique déplace plus ce qui est près (parallaxe)
+        c.camera.as_mut().unwrap().pan = Track::new(100.0, 0.0);
+        let (xn2, _) = c.projected(1, 0.0).unwrap();
+        let (xf2, _) = c.projected(0, 0.0).unwrap();
+        assert!((xn.e - xn2.e).abs() > (xf.e - xf2.e).abs());
+        // Derrière la caméra : rien
+        c.layers[1].depth = Some(Track::new(-5000.0, 0.0));
+        assert!(c.projected(1, 0.0).is_none());
+    }
+}

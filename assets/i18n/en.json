@@ -3256,5 +3256,17 @@
   "angles": "angles",
   "Angle": "Angle",
   "Écoute des prises pour les caler…": "Listening to the takes to sync them…",
-  "prises calées au son": "takes synced by sound"
+  "prises calées au son": "takes synced by sound",
+  "Profondeur (2,5D)": "Depth (2.5D)",
+  "Calque 3D": "3D layer",
+  "Le calque a une profondeur : la caméra de la composition le voit en perspective (parallaxe, flou de profondeur de champ)": "The layer has depth: the composition camera sees it in perspective (parallax, depth of field blur)",
+  "Plus grand : plus loin ; négatif : devant le plan de la composition": "Larger: farther; negative: in front of the composition plane",
+  "Clé de profondeur à cet instant": "Depth key at this time",
+  "Caméra (2,5D) : perspective des calques 3D, travelling, profondeur de champ · clic droit : réglages": "Camera (2.5D): perspective of 3D layers, dolly, depth of field · right click: settings",
+  "Clé à cet instant": "Key at this time",
+  "travelling": "dolly",
+  "La caméra avance (positif) ou recule": "The camera moves forward (positive) or back",
+  "focale": "focal length",
+  "flou": "blur",
+  "Coche « Calque 3D » sur un calque pour lui donner une profondeur.": "Tick “3D layer” on a layer to give it depth."
 }
