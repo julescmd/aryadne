@@ -112,6 +112,24 @@ pub enum Paint {
     Solid { c: [u8; 4] },
     Linear { stops: Vec<(f32, [u8; 4])>, angle: f32 },
     Radial { stops: Vec<(f32, [u8; 4])> },
+    /// Motif répété : genre (voir `MOTIFS`), couleur du motif et du fond, taille d'une case (unités), angle
+    Pattern { motif: u8, fg: [u8; 4], bg: [u8; 4], size: f32, angle: f32 },
+}
+
+/// Les motifs proposés (dans l'ordre de `Paint::Pattern::motif`)
+pub const MOTIFS: [&str; 6] = ["pois", "rayures", "quadrillage", "damier", "vagues", "hachures croisées"];
+
+/// Le dessin d'une case de motif (SVG, case de `s` de côté)
+pub fn motif_svg(motif: u8, fg: &str, fo: f32, s: f32) -> String {
+    let lw = (s * 0.12).max(0.5);
+    match motif {
+        0 => format!(r#"<circle cx="{h}" cy="{h}" r="{r}" fill="{fg}" fill-opacity="{fo}"/>"#, h = s / 2.0, r = s * 0.22),
+        1 => format!(r#"<rect x="0" y="0" width="{w}" height="{s}" fill="{fg}" fill-opacity="{fo}"/>"#, w = s / 2.0),
+        2 => format!(r#"<path d="M0 0H{s}M0 0V{s}" stroke="{fg}" stroke-opacity="{fo}" stroke-width="{lw}" fill="none"/>"#),
+        3 => format!(r#"<rect width="{h}" height="{h}" fill="{fg}" fill-opacity="{fo}"/><rect x="{h}" y="{h}" width="{h}" height="{h}" fill="{fg}" fill-opacity="{fo}"/>"#, h = s / 2.0),
+        4 => format!(r#"<path d="M0 {h} Q{q} {a} {h} {h} T{s} {h}" stroke="{fg}" stroke-opacity="{fo}" stroke-width="{lw}" fill="none"/>"#, h = s / 2.0, q = s / 4.0, a = s * 0.2),
+        _ => format!(r#"<path d="M0 0L{s} {s}M{s} 0L0 {s}" stroke="{fg}" stroke-opacity="{fo}" stroke-width="{lw}" fill="none"/>"#),
+    }
 }
 
 impl Paint {
@@ -122,6 +140,7 @@ impl Paint {
         match self {
             Paint::Solid { c } => *c,
             Paint::Linear { stops, .. } | Paint::Radial { stops } => stops.first().map(|s| s.1).unwrap_or([0, 0, 0, 255]),
+            Paint::Pattern { fg, .. } => *fg,
         }
     }
 }
@@ -797,6 +816,7 @@ pub fn css_of(d: &Doc, s: &Shape) -> String {
             Paint::Solid { c } => rgba(*c),
             Paint::Linear { stops, angle } => format!("linear-gradient({:.0}deg, {})", angle + 90.0, stops.iter().map(|(t, c)| format!("{} {:.0}%", rgba(*c), t * 100.0)).collect::<Vec<_>>().join(", ")),
             Paint::Radial { stops } => format!("radial-gradient({})", stops.iter().map(|(t, c)| format!("{} {:.0}%", rgba(*c), t * 100.0)).collect::<Vec<_>>().join(", ")),
+            Paint::Pattern { bg, .. } => rgba(*bg),
         };
         out.push_str(&format!("{}: {v};\n", if is_text { "color" } else if matches!(f, Paint::Solid { .. }) { "background-color" } else { "background" }));
     }
@@ -1094,6 +1114,17 @@ impl Gen<'_> {
                     let _ = write!(self.defs, r#"<stop offset="{o}" stop-color="{}" stop-opacity="{}"/>"#, hex(*c), c[3] as f32 / 255.0);
                 }
                 self.defs.push_str("</radialGradient>");
+                (format!("url(#{id})"), 1.0)
+            }
+            Paint::Pattern { motif, fg, bg, size, angle } => {
+                let id = self.id("m");
+                let s = size.max(1.0);
+                let _ = write!(self.defs, r#"<pattern id="{id}" patternUnits="userSpaceOnUse" width="{s}" height="{s}" patternTransform="rotate({angle})">"#);
+                if bg[3] > 0 {
+                    let _ = write!(self.defs, r#"<rect width="{s}" height="{s}" fill="{}" fill-opacity="{}"/>"#, hex(*bg), bg[3] as f32 / 255.0);
+                }
+                self.defs.push_str(&motif_svg(*motif, &hex(*fg), fg[3] as f32 / 255.0, s));
+                self.defs.push_str("</pattern>");
                 (format!("url(#{id})"), 1.0)
             }
         }
@@ -1788,6 +1819,10 @@ impl Doc {
         let mut paint = |p: &Paint| match p {
             Paint::Solid { c } => add(*c),
             Paint::Linear { stops, .. } | Paint::Radial { stops } => stops.iter().for_each(|s| add(s.1)),
+            Paint::Pattern { fg, bg, .. } => {
+                add(*fg);
+                add(*bg);
+            }
         };
         for s in self.shapes.iter().filter(|s| set.contains(&s.id)) {
             s.fills.iter().for_each(&mut paint);
@@ -1812,6 +1847,10 @@ impl Doc {
                 match p {
                     Paint::Solid { c } => fix(c),
                     Paint::Linear { stops, .. } | Paint::Radial { stops } => stops.iter_mut().for_each(|st| fix(&mut st.1)),
+                    Paint::Pattern { fg, bg, .. } => {
+                        fix(fg);
+                        fix(bg);
+                    }
                 }
             }
         }

@@ -980,6 +980,7 @@ impl Editor {
                             rm = Some(k);
                         }
                     });
+                    ch |= pattern_ui(ui, f);
                 }
                 if let Some(k) = rm {
                     s.fills.remove(k);
@@ -999,6 +1000,7 @@ impl Editor {
                             rm = Some(k);
                         }
                     });
+                    ch |= pattern_ui(ui, &mut st.paint);
                     ui.horizontal(|ui| {
                         for (v, icon, tip) in [(0u8, "⊢", "extrémité plate"), (1, "◖", "extrémité ronde"), (2, "▭", "extrémité carrée")] {
                             if ui.selectable_label(st.cap == v, icon).on_hover_text(crate::i18n::t(tip)).clicked() {
@@ -3198,10 +3200,11 @@ fn paint_ui(ui: &mut egui::Ui, p: &mut Paint, k: usize) -> bool {
         Paint::Solid { .. } => 0,
         Paint::Linear { .. } => 1,
         Paint::Radial { .. } => 2,
+        Paint::Pattern { .. } => 3,
     };
     let mut new_kind = kind;
-    egui::ComboBox::from_id_salt(("vec-paint", k)).width(70.0).selected_text(crate::i18n::t(["uni", "linéaire", "radial"][kind])).show_ui(ui, |ui| {
-        for (v, name) in ["uni", "linéaire", "radial"].iter().enumerate() {
+    egui::ComboBox::from_id_salt(("vec-paint", k)).width(70.0).selected_text(crate::i18n::t(["uni", "linéaire", "radial", "motif"][kind])).show_ui(ui, |ui| {
+        for (v, name) in ["uni", "linéaire", "radial", "motif"].iter().enumerate() {
             ui.selectable_value(&mut new_kind, v, crate::i18n::t(name));
         }
     });
@@ -3211,7 +3214,8 @@ fn paint_ui(ui: &mut egui::Ui, p: &mut Paint, k: usize) -> bool {
         *p = match new_kind {
             0 => Paint::Solid { c },
             1 => Paint::Linear { stops, angle: 0.0 },
-            _ => Paint::Radial { stops },
+            2 => Paint::Radial { stops },
+            _ => Paint::Pattern { motif: 0, fg: c, bg: [255, 255, 255, 0], size: 24.0, angle: 0.0 },
         };
         ch = true;
     }
@@ -3242,8 +3246,88 @@ fn paint_ui(ui: &mut egui::Ui, p: &mut Paint, k: usize) -> bool {
                 }
             }
         }
+        Paint::Pattern { motif, fg, bg, size, angle } => {
+            for c in [fg, bg] {
+                let mut col = c32(*c);
+                if ui.color_edit_button_srgba(&mut col).on_hover_text(crate::i18n::t("motif, puis fond (transparent possible)")).changed() {
+                    *c = arr(col);
+                    ch = true;
+                }
+            }
+            let _ = (motif, size, angle);
+        }
     }
     ch
+}
+
+/// Les réglages d'un motif, sous la ligne de la peinture : le choix (avec un aperçu), la taille, l'angle
+fn pattern_ui(ui: &mut egui::Ui, p: &mut Paint) -> bool {
+    let Paint::Pattern { motif, size, angle, .. } = p else { return false };
+    let mut ch = false;
+    let (m, sz, an) = (motif, size, angle);
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing.x = 3.0;
+                for (v, name) in crate::vector::MOTIFS.iter().enumerate() {
+                    let (r, resp) = ui.allocate_exact_size(vec2(26.0, 26.0), egui::Sense::click());
+                    let pp = crate::theme::pal();
+                    ui.painter().rect(r, 4.0, pp.field, egui::Stroke::new(if *m == v as u8 { 2.0 } else { 1.0 }, if *m == v as u8 { pp.accent } else { pp.line }), egui::StrokeKind::Inside);
+                    draw_motif_icon(ui.painter(), r.shrink(5.0), v as u8, pp.text);
+                    if resp.on_hover_text(crate::i18n::t(name)).clicked() {
+                        *m = v as u8;
+                        ch = true;
+                    }
+                }
+            });
+            ui.horizontal(|ui| {
+                ch |= ui.add(egui::DragValue::new(sz).speed(0.5).range(2.0..=2000.0).prefix(crate::i18n::t("case ")).suffix(" px")).changed();
+                ch |= ui.add(egui::DragValue::new(an).speed(1.0).suffix("°")).changed();
+            });
+    ch
+}
+
+/// Petit dessin d'un motif dans un rectangle (pour le choisir)
+fn draw_motif_icon(p: &egui::Painter, r: Rect, motif: u8, c: Color32) {
+    let st = egui::Stroke::new(1.2, c);
+    match motif {
+        0 => {
+            for (x, y) in [(0.25, 0.25), (0.75, 0.25), (0.25, 0.75), (0.75, 0.75)] {
+                p.circle_filled(r.lerp_inside(vec2(x, y)), 2.0, c);
+            }
+        }
+        1 => {
+            for k in 0..3 {
+                let x = r.left() + r.width() * (k as f32 + 0.25) / 3.0;
+                p.rect_filled(Rect::from_min_max(pos2(x, r.top()), pos2(x + r.width() / 6.0, r.bottom())), 0.0, c);
+            }
+        }
+        2 => {
+            for k in 0..=2 {
+                let f = k as f32 / 2.0;
+                p.line_segment([r.lerp_inside(vec2(f, 0.0)), r.lerp_inside(vec2(f, 1.0))], st);
+                p.line_segment([r.lerp_inside(vec2(0.0, f)), r.lerp_inside(vec2(1.0, f))], st);
+            }
+        }
+        3 => {
+            for (x, y) in [(0.0, 0.0), (0.5, 0.5)] {
+                p.rect_filled(Rect::from_min_size(r.lerp_inside(vec2(x, y)), r.size() / 2.0), 0.0, c);
+            }
+        }
+        4 => {
+            for row in [0.3, 0.75] {
+                let pts: Vec<Pos2> = (0..=12).map(|i| {
+                    let f = i as f32 / 12.0;
+                    pos2(r.left() + r.width() * f, r.top() + r.height() * row + (f * std::f32::consts::TAU * 1.5).sin() * 2.5)
+                }).collect();
+                p.add(egui::Shape::line(pts, st));
+            }
+        }
+        _ => {
+            p.line_segment([r.left_top(), r.right_bottom()], st);
+            p.line_segment([r.right_top(), r.left_bottom()], st);
+            p.line_segment([r.center_top(), r.right_center()], st);
+            p.line_segment([r.left_center(), r.center_bottom()], st);
+        }
+    }
 }
 
 
@@ -3446,5 +3530,28 @@ mod live_paint_tests {
             super::live_paint(&mut d, [bx + 160.0, by + 450.0], [120, 200, 140, 255]).ok();
             export_png(&d, 0, "/tmp", 0.6).unwrap().save("/tmp/livepaint.png").unwrap();
         }
+    }
+}
+#[cfg(test)]
+mod pattern_demo {
+    use crate::vector::*;
+    #[test]
+    fn motifs() {
+        let mut d = Doc::starter();
+        d.shapes.clear();
+        let (bx, by) = (d.boards[0].x, d.boards[0].y);
+        for k in 0..6u8 {
+            let id = d.new_id();
+            let mut s = Shape { id, kind: Kind::Rect { w: 160.0, h: 160.0, r: [24.0; 4] }, x: bx + 40.0 + (k % 3) as f32 * 190.0, y: by + 40.0 + (k / 3) as f32 * 190.0, ..Shape::base() };
+            s.fills = vec![Paint::Pattern { motif: k, fg: [236, 108, 89, 255], bg: [252, 240, 228, 255], size: 22.0, angle: if k == 1 { 45.0 } else { 0.0 } }];
+            d.shapes.push(s);
+        }
+        let img = export_png(&d, 0, "/tmp", 0.6).unwrap();
+        // Le motif alterne bien ses deux couleurs
+        let mut cols = std::collections::HashSet::new();
+        for x in 145..225 { cols.insert(img.get_pixel(x, 70).0); }
+        if std::env::var("ARY_DEMO").is_ok() { img.save("/tmp/motifs.png").unwrap(); }
+        assert!(cols.len() >= 2, "{cols:?}");
+        if std::env::var("ARY_DEMO").is_ok() { img.save("/tmp/motifs.png").unwrap(); }
     }
 }

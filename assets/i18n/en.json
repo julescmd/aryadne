@@ -3305,5 +3305,12 @@
   "Clique dans le vide d'une zone, pas sur un trait.": "Click in the empty part of an area, not on a stroke.",
   "Cette zone n'est pas fermée : le remplissage déborderait.": "This area isn't closed: the fill would spill out.",
   "Zone trop petite.": "Area too small.",
-  "Peinture": "Paint"
+  "Peinture": "Paint",
+  "pois": "dots",
+  "rayures": "stripes",
+  "quadrillage": "grid",
+  "vagues": "waves",
+  "hachures croisées": "crosshatch",
+  "motif, puis fond (transparent possible)": "pattern, then background (can be transparent)",
+  "case ": "tile "
 }
