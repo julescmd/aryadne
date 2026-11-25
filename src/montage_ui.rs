@@ -123,10 +123,20 @@ pub struct Editor {
     drag: Option<DragState>,
     tex: Option<egui::TextureHandle>,
     preview_rx: Option<(f32, Receiver<Result<image::RgbaImage, String>>)>,
+    /// Scope affiché sur le moniteur (forme d'onde, parade, vectorscope, histogramme) et son image
+    pub(crate) scope: Option<usize>,
+    pub(crate) scope_tex: Option<egui::TextureHandle>,
+    scope_n: u32,
+    /// Dernière image du moniteur (pour recalculer un scope qu'on vient d'ouvrir)
+    pub(crate) last_frame: Option<(usize, usize, Vec<u8>)>,
     shown: Option<(f32, u64)>,
     rev: u64,
     play: Option<Playback>,
     export_rx: Option<Receiver<Result<PathBuf, String>>>,
+    /// File d'export : préréglage et fichier, faits l'un après l'autre ; le dernier préréglage choisi
+    pub(crate) export_queue: Vec<(usize, PathBuf)>,
+    pub(crate) export_done: usize,
+    pub(crate) last_preset: usize,
     message: Option<String>,
     /// Analyse en cours pour « couper les silences » ou « caler sur le rythme »
     smart_rx: Option<Receiver<Result<Smart, String>>>,
@@ -221,10 +231,17 @@ impl Editor {
             drag: None,
             tex: None,
             preview_rx: None,
+            scope: None,
+            scope_tex: None,
+            scope_n: 0,
+            last_frame: None,
             shown: None,
             rev: 0,
             play: None,
             export_rx: None,
+            export_queue: vec![],
+            export_done: 0,
+            last_preset: 0,
             message: None,
             smart_rx: None,
             curves_open: false,
@@ -738,23 +755,40 @@ impl Editor {
     }
 
     fn export_to(&mut self, ctx: &egui::Context) {
+        let preset = self.last_preset;
+        self.queue_export(ctx, preset);
+    }
+
+    /// Demande le fichier, puis ajoute l'export à la file (il part tout de suite si rien ne tourne)
+    pub(crate) fn queue_export(&mut self, ctx: &egui::Context, preset: usize) {
+        let (_, ext, _) = crate::montage::PRESETS[preset.min(crate::montage::PRESETS.len() - 1)];
         let stem = self.path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "montage".into());
-        let mut d = rfd::FileDialog::new().add_filter("MP4", &["mp4"]).set_file_name(format!("{stem}.mp4"));
+        let mut d = rfd::FileDialog::new().add_filter(ext.to_uppercase(), &[ext]).set_file_name(format!("{stem}.{ext}"));
         if let Some(dir) = self.path.parent() {
             d = d.set_directory(dir);
         }
         if let Some(mut out) = d.save_file() {
             if out.extension().is_none() {
-                out.set_extension("mp4");
+                out.set_extension(ext);
             }
-            let (tx, rx) = channel();
-            let (proj, path, c2) = (self.project.clone(), self.path.clone(), ctx.clone());
-            std::thread::spawn(move || {
-                let _ = tx.send(export(&proj, &path, &out).map(|_| out));
-                c2.request_repaint();
-            });
-            self.export_rx = Some(rx);
+            self.last_preset = preset;
+            self.export_queue.push((preset, out));
+            self.next_export(ctx);
         }
+    }
+
+    fn next_export(&mut self, ctx: &egui::Context) {
+        if self.export_rx.is_some() || self.export_queue.is_empty() {
+            return;
+        }
+        let (preset, out) = self.export_queue.remove(0);
+        let (tx, rx) = channel();
+        let (proj, path, c2) = (self.project.clone(), self.path.clone(), ctx.clone());
+        std::thread::spawn(move || {
+            let _ = tx.send(crate::montage::export_as(&proj, &path, &out, preset).map(|_| out));
+            c2.request_repaint();
+        });
+        self.export_rx = Some(rx);
     }
 
     /// Enregistre l'image affichée dans le moniteur Programme, en PNG à côté du montage.
@@ -807,7 +841,12 @@ impl Editor {
                     Err(e) => e,
                 });
                 self.export_rx = None;
+                self.export_done += 1;
+                self.next_export(&ctx);
             }
+        }
+        if self.export_rx.is_none() && self.export_queue.is_empty() {
+            self.export_done = 0;
         }
         self.keyboard(ui);
 
@@ -934,6 +973,20 @@ impl Editor {
             let got = latest.is_some();
             if let Some((n, buf)) = latest {
                 self.playhead = pb.from + n as f32 / self.project.fps.max(1.0);
+                // Le scope suit la lecture, une image sur quatre
+                self.scope_n = self.scope_n.wrapping_add(1);
+                if self.scope.is_some() && self.scope_n % 4 == 0 {
+                    let rgba: Vec<u8> = buf.chunks_exact(3).flat_map(|c| [c[0], c[1], c[2], 255]).collect();
+                    let (w, h) = (pb.size[0], pb.size[1]);
+                    if let Some(kind) = self.scope {
+                        let (sw, sh, out) = crate::scopes::render(kind, w, h, &rgba);
+                        let img = egui::ColorImage::from_rgba_unmultiplied([sw, sh], &out);
+                        match &mut self.scope_tex {
+                            Some(t) => t.set(img, egui::TextureOptions::LINEAR),
+                            None => self.scope_tex = Some(ctx.load_texture("montage-scope", img, egui::TextureOptions::LINEAR)),
+                        }
+                    }
+                }
                 let img = egui::ColorImage::from_rgb(pb.size, &buf);
                 match &mut self.tex {
                     Some(t) => t.set(img, egui::TextureOptions::LINEAR),
@@ -953,6 +1006,20 @@ impl Editor {
         }
     }
 
+    /// Recalcule l'image du scope choisi à partir d'une image RVBA
+    pub(crate) fn update_scope(&mut self, ctx: &egui::Context, w: usize, h: usize, px: &[u8]) {
+        let Some(kind) = self.scope else { return };
+        if w == 0 || h == 0 || px.len() < w * h * 4 {
+            return;
+        }
+        let (sw, sh, out) = crate::scopes::render(kind, w, h, px);
+        let img = egui::ColorImage::from_rgba_unmultiplied([sw, sh], &out);
+        match &mut self.scope_tex {
+            Some(t) => t.set(img, egui::TextureOptions::LINEAR),
+            None => self.scope_tex = Some(ctx.load_texture("montage-scope", img, egui::TextureOptions::LINEAR)),
+        }
+    }
+
     fn poll_preview(&mut self, ctx: &egui::Context) {
         if self.play.is_some() {
             return;
@@ -961,6 +1028,10 @@ impl Editor {
             if let Ok(r) = rx.try_recv() {
                 match r {
                     Ok(img) => {
+                        self.last_frame = Some((img.width() as usize, img.height() as usize, img.as_raw().clone()));
+                        if self.scope.is_some() {
+                            self.update_scope(ctx, img.width() as usize, img.height() as usize, img.as_raw());
+                        }
                         let ci = egui::ColorImage::from_rgba_unmultiplied([img.width() as usize, img.height() as usize], &img);
                         match &mut self.tex {
                             Some(tx) => tx.set(ci, egui::TextureOptions::LINEAR),

@@ -53,6 +53,9 @@ pub struct Clip {
     pub contrast: f32,
     #[serde(default = "one")]
     pub saturation: f32,
+    /// Roues de couleur (ombres, tons moyens, hautes lumières) : position du point (x, y entre -1 et 1) et luminosité
+    #[serde(default, skip_serializing_if = "wheels_neutral")]
+    pub wheels: [[f32; 3]; 3],
     /// Placement dans l'image : décalage en pixels du projet, et taille
     #[serde(default)]
     pub x: f32,
@@ -114,6 +117,22 @@ fn white() -> [u8; 3] {
 }
 
 /// Dessine un titre sur une image transparente de la taille du projet, centré.
+pub fn wheels_neutral(w: &[[f32; 3]; 3]) -> bool {
+    w.iter().all(|v| v.iter().all(|x| x.abs() < 1e-4))
+}
+
+/// Décalage RVB d'une roue : le point (x, y) donne une teinte dans le plan Cb/Cr, plus la luminosité
+pub fn wheel_rgb(v: [f32; 3]) -> [f32; 3] {
+    let (cb, cr) = (v[0] * 0.25, -v[1] * 0.25);
+    [v[2] + 1.402 * cr, v[2] - 0.344 * cb - 0.714 * cr, v[2] + 1.772 * cb].map(|x| x.clamp(-1.0, 1.0))
+}
+
+/// Filtre ffmpeg des roues : ombres (lift), tons moyens (gamma), hautes lumières (gain)
+pub fn colorbalance(w: &[[f32; 3]; 3]) -> String {
+    let [s, m, h] = [wheel_rgb(w[0]), wheel_rgb(w[1]), wheel_rgb(w[2])];
+    format!("colorbalance=rs={:.3}:gs={:.3}:bs={:.3}:rm={:.3}:gm={:.3}:bm={:.3}:rh={:.3}:gh={:.3}:bh={:.3}", s[0], s[1], s[2], m[0], m[1], m[2], h[0], h[1], h[2])
+}
+
 pub fn render_text(c: &Clip, w: u32, h: u32) -> image::RgbaImage {
     use ab_glyph::{Font, FontArc, PxScale, ScaleFont};
     let mut img = image::RgbaImage::new(w.max(1), h.max(1));
@@ -402,7 +421,7 @@ impl Clip {
     /// Clip vide pour les tests
     #[cfg(test)]
     pub fn test() -> Clip {
-        Clip { name: "c".into(), file: "c.mp4".into(), kind: "video".into(), track: 0, start: 0.0, src_in: 0.0, src_out: 1.0, media: 10.0, has_audio: false, speed: 1.0, opacity: 1.0, volume: 1.0, fade_in: 0.0, fade_out: 0.0, brightness: 0.0, contrast: 1.0, saturation: 1.0, x: 0.0, y: 0.0, scale: 1.0, grade: String::new(), keys: vec![], text: String::new(), text_size: 72.0, text_color: [255; 3], font: String::new(), outline: false, xfade: 0.0, audio: false, link: 0, fx: vec![], id: 0 }
+        Clip { name: "c".into(), file: "c.mp4".into(), kind: "video".into(), track: 0, start: 0.0, src_in: 0.0, src_out: 1.0, media: 10.0, has_audio: false, speed: 1.0, opacity: 1.0, volume: 1.0, fade_in: 0.0, fade_out: 0.0, brightness: 0.0, contrast: 1.0, saturation: 1.0, wheels: [[0.0; 3]; 3], x: 0.0, y: 0.0, scale: 1.0, grade: String::new(), keys: vec![], text: String::new(), text_size: 72.0, text_color: [255; 3], font: String::new(), outline: false, xfade: 0.0, audio: false, link: 0, fx: vec![], id: 0 }
     }
 
     /// Placement, taille et opacité à l'instant `t` de la timeline, d'après les clés (None sans clé).
@@ -740,6 +759,7 @@ impl Project {
             brightness: 0.0,
             contrast: 1.0,
             saturation: 1.0,
+        wheels: [[0.0; 3]; 3],
             x: 0.0,
             y: 0.0,
             scale: 1.0,
@@ -1022,6 +1042,7 @@ pub fn import(project: &Path, media: &Path, track: usize, start: f32) -> Result<
         brightness: 0.0,
         contrast: 1.0,
         saturation: 1.0,
+        wheels: [[0.0; 3]; 3],
         x: 0.0,
         y: 0.0,
         scale: 1.0,
@@ -1085,6 +1106,9 @@ pub fn graph(p: &Project, project: &Path, from: f32, w: u32, h: u32, realtime: b
                 let (cw, ch) = (((w as f32 * sc).round() as u32).max(2), ((h as f32 * sc).round() as u32).max(2));
                 filter += &format!(",scale=w={cw}:h={ch}:force_original_aspect_ratio=decrease");
             }
+            if !wheels_neutral(&c.wheels) {
+                filter += &format!(",{}", colorbalance(&c.wheels));
+            }
             if c.brightness != 0.0 || c.contrast != 1.0 || c.saturation != 1.0 {
                 filter += &format!(",eq=brightness={:.3}:contrast={:.3}:saturation={:.3}", c.brightness.clamp(-1.0, 1.0), c.contrast.clamp(0.0, 4.0), c.saturation.clamp(0.0, 3.0));
             }
@@ -1144,8 +1168,24 @@ pub fn graph(p: &Project, project: &Path, from: f32, w: u32, h: u32, realtime: b
     (args, filter, !audio.is_empty(), total)
 }
 
+/// Préréglages d'export : nom, extension, et ce qu'ils deviennent pour ffmpeg
+pub const PRESETS: [(&str, &str, &str); 7] = [
+    ("MP4 H.264 (YouTube, réseaux)", "mp4", "Bonne qualité, lisible partout"),
+    ("MP4 léger (envoi rapide)", "mp4", "Fichier plus petit, pour une revue ou un message"),
+    ("ProRes 422 HQ (.mov)", "mov", "Pour l'étalonnage ou un autre logiciel de montage"),
+    ("WebM VP9", "webm", "Pour le web"),
+    ("GIF animé", "gif", "15 images par seconde, 480 px de large"),
+    ("Images PNG", "png", "Une image par trame : nom_00001.png, nom_00002.png…"),
+    ("Son seul (WAV)", "wav", "Le mixage, sans l'image"),
+];
+
 /// Exporte le montage en MP4 (H.264 + AAC).
 pub fn export(p: &Project, project: &Path, out: &Path) -> Result<(), String> {
+    export_as(p, project, out, 0)
+}
+
+/// Exporte le montage avec le préréglage `preset` (voir PRESETS).
+pub fn export_as(p: &Project, project: &Path, out: &Path, preset: usize) -> Result<(), String> {
     let ff = ffmpeg::find("ffmpeg").ok_or("ffmpeg n'est pas installé.")?;
     if p.clips.is_empty() {
         return Err("Le montage est vide.".into());
@@ -1156,13 +1196,51 @@ pub fn export(p: &Project, project: &Path, out: &Path) -> Result<(), String> {
         crate::motion::render_cached(&source_file(project, &c.file), true);
     }
     bake_texts(p);
-    let (inputs, filter, has_audio, total) = graph(p, project, 0.0, w, h, false, true);
+    let (inputs, mut filter, has_audio, total) = graph(p, project, 0.0, w, h, false, true);
     let mut cmd = ffmpeg::command(ff);
-    cmd.args(["-v", "error", "-y"]).args(inputs).args(["-filter_complex", &filter, "-map", "[vout]"]);
-    if has_audio {
-        cmd.args(["-map", "[aout]", "-c:a", "aac", "-b:a", "192k"]);
+    if preset == 4 {
+        // GIF : palette calculée sur la vidéo elle-même
+        filter += ";[vout]fps=15,scale=480:-2:flags=lanczos,split[ga][gb];[ga]palettegen=stats_mode=diff[gp];[gb][gp]paletteuse=dither=bayer:bayer_scale=4[gout]";
     }
-    cmd.args(["-t", &format!("{total:.3}"), "-c:v", "libx264", "-preset", "medium", "-crf", "18", "-pix_fmt", "yuv420p", "-movflags", "+faststart"]).arg(out);
+    cmd.args(["-v", "error", "-y"]).args(inputs).args(["-filter_complex", &filter]);
+    match preset {
+        6 => {
+            if !has_audio {
+                return Err("Le montage n'a pas de son.".into());
+            }
+            cmd.args(["-map", "[aout]", "-c:a", "pcm_s24le"]);
+        }
+        4 => {
+            cmd.args(["-map", "[gout]"]);
+        }
+        5 => {
+            cmd.args(["-map", "[vout]", "-c:v", "png"]);
+        }
+        _ => {
+            cmd.args(["-map", "[vout]"]);
+            if has_audio {
+                match preset {
+                    2 => cmd.args(["-map", "[aout]", "-c:a", "pcm_s16le"]),
+                    3 => cmd.args(["-map", "[aout]", "-c:a", "libopus", "-b:a", "160k"]),
+                    _ => cmd.args(["-map", "[aout]", "-c:a", "aac", "-b:a", "192k"]),
+                };
+            }
+            match preset {
+                1 => cmd.args(["-c:v", "libx264", "-preset", "fast", "-crf", "26", "-pix_fmt", "yuv420p", "-movflags", "+faststart"]),
+                2 => cmd.args(["-c:v", "prores_ks", "-profile:v", "3", "-pix_fmt", "yuv422p10le"]),
+                3 => cmd.args(["-c:v", "libvpx-vp9", "-crf", "32", "-b:v", "0", "-pix_fmt", "yuv420p"]),
+                _ => cmd.args(["-c:v", "libx264", "-preset", "medium", "-crf", "18", "-pix_fmt", "yuv420p", "-movflags", "+faststart"]),
+            };
+        }
+    }
+    cmd.args(["-t", &format!("{total:.3}")]);
+    if preset == 5 {
+        // Séquence : nom_00001.png à côté du nom choisi
+        let stem = out.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "image".into());
+        cmd.arg(out.with_file_name(format!("{stem}_%05d.png")));
+    } else {
+        cmd.arg(out);
+    }
     let o = cmd.output().map_err(|e| e.to_string())?;
     if !o.status.success() {
         return Err(format!("ffmpeg : {}", String::from_utf8_lossy(&o.stderr).lines().last().unwrap_or("erreur")));
@@ -1410,7 +1488,7 @@ mod tests {
     #[test]
     fn coupe_et_durees() {
         let mut p = Project::default();
-        let c = Clip { name: "a".into(), file: "a.mp4".into(), kind: "video".into(), track: 1, start: 2.0, src_in: 1.0, src_out: 9.0, media: 10.0, has_audio: true, speed: 2.0, opacity: 1.0, volume: 1.0, fade_in: 0.5, fade_out: 0.5, brightness: 0.0, contrast: 1.0, saturation: 1.0, x: 0.0, y: 0.0, scale: 1.0, grade: String::new(), keys: vec![], text: String::new(), text_size: 72.0, text_color: [255; 3], font: String::new(), outline: false, xfade: 0.0, audio: false, link: 0, fx: vec![], id: 0 };
+        let c = Clip { name: "a".into(), file: "a.mp4".into(), kind: "video".into(), track: 1, start: 2.0, src_in: 1.0, src_out: 9.0, media: 10.0, has_audio: true, speed: 2.0, opacity: 1.0, volume: 1.0, fade_in: 0.5, fade_out: 0.5, brightness: 0.0, contrast: 1.0, saturation: 1.0, wheels: [[0.0; 3]; 3], x: 0.0, y: 0.0, scale: 1.0, grade: String::new(), keys: vec![], text: String::new(), text_size: 72.0, text_color: [255; 3], font: String::new(), outline: false, xfade: 0.0, audio: false, link: 0, fx: vec![], id: 0 };
         p.clips.push(c);
         // 8 s de source à vitesse 2 : 4 s sur la timeline
         assert_eq!(p.clips[0].len(), 4.0);
@@ -1501,6 +1579,37 @@ mod tests {
         let img = frame(&p, &file, 0.5, 64).unwrap();
         let px = img.get_pixel(32, 24);
         assert!(px[0] < 30 && px[1] < 30 && px[2] < 30, "{px:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn prereglages_d_export() {
+        // Chaque préréglage produit un fichier ; les roues de couleur passent dans le filtre
+        let Some(ff) = ffmpeg::find("ffmpeg") else { return };
+        let dir = std::env::temp_dir().join(format!("aryadne-presets-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let st = ffmpeg::command(ff).args(["-v", "error", "-y", "-f", "lavfi", "-i", "testsrc=duration=1:size=64x48:rate=12", "-f", "lavfi", "-i", "sine=duration=1", "-shortest", "-pix_fmt", "yuv420p"]).arg(dir.join("m.mp4")).status().unwrap();
+        assert!(st.success());
+        let file = dir.join("essai.aryav");
+        let mut p = Project { width: 64, height: 48, fps: 12.0, ..Default::default() };
+        let mut c = import(&file, &dir.join("m.mp4"), 1, 0.0).unwrap();
+        c.wheels[0] = [0.0, 0.5, 0.0];
+        assert!(colorbalance(&c.wheels).starts_with("colorbalance=rs="));
+        p.clips.push(c);
+        for (k, (name, ext, _)) in PRESETS.iter().enumerate() {
+            if k == 3 {
+                continue; // VP9 : souvent absent des ffmpeg minimaux
+            }
+            if k == 6 {
+                // Pas de clip son dans ce montage : un message clair
+                assert!(export_as(&p, &file, &dir.join("s.wav"), k).is_err());
+                continue;
+            }
+            let out = dir.join(format!("sortie{k}.{ext}"));
+            export_as(&p, &file, &out, k).unwrap_or_else(|e| panic!("{name} : {e}"));
+            let made = if k == 5 { dir.join(format!("sortie{k}_00001.png")) } else { out };
+            assert!(made.exists() && std::fs::metadata(&made).unwrap().len() > 0, "{name}");
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 

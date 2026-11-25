@@ -607,6 +607,15 @@ impl Editor {
                         ch |= row(ui, "Exposition", &mut |ui| scrub(ui, &mut c.brightness, 0.005, -0.5..=0.5, "", 3));
                         ch |= row(ui, "Contraste", &mut |ui| scrub(ui, &mut c.contrast, 0.01, 0.2..=2.5, "", 2));
                         ch |= row(ui, "Saturation", &mut |ui| scrub(ui, &mut c.saturation, 0.01, 0.0..=3.0, "", 2));
+                        // Roues de couleur, comme Resolve : glisser le point teinte la zone, la molette (ou le curseur) la règle en luminosité
+                        ui.horizontal(|ui| {
+                            ui.add_space(10.0);
+                            for (k, name) in ["Ombres", "Tons moyens", "Hautes lumières"].into_iter().enumerate() {
+                                ui.vertical(|ui| {
+                                    ch |= color_wheel(ui, &mut c.wheels[k], name);
+                                });
+                            }
+                        });
                         ui.horizontal(|ui| {
                             ui.add_space(22.0);
                             if crate::montage::is_cube(&c.grade) {
@@ -625,6 +634,7 @@ impl Editor {
                         });
                         if reset {
                             (c.brightness, c.contrast, c.saturation) = (0.0, 1.0, 1.0);
+                            c.wheels = [[0.0; 3]; 3];
                             c.fx.retain(|f| f != "lumetri");
                             ch = true;
                         }
@@ -883,11 +893,52 @@ impl Editor {
                     }
                 }
             });
+            // Scopes d'étalonnage
+            let mut pick: Option<Option<usize>> = None;
+            ui.menu_button(RichText::new(crate::lucide::ACTIVITY).size(14.0).color(if self.scope.is_some() { p.accent } else { p.muted }), |ui| {
+                ui.label(RichText::new(crate::i18n::t("Scope sur le moniteur")).size(11.0).color(p.muted));
+                if ui.add(egui::Button::new(crate::i18n::t("aucun")).selected(self.scope.is_none())).clicked() {
+                    pick = Some(None);
+                    ui.close();
+                }
+                for (k, (name, tip)) in crate::scopes::KINDS.iter().enumerate() {
+                    if ui.add(egui::Button::new(crate::i18n::t(name)).selected(self.scope == Some(k))).on_hover_text(crate::i18n::t(tip)).clicked() {
+                        pick = Some(Some(k));
+                        ui.close();
+                    }
+                }
+            })
+            .response
+            .on_hover_text(crate::i18n::t("Scopes : forme d'onde, parade RVB, vectorscope, histogramme"));
+            if let Some(k) = pick {
+                self.scope = k;
+                if let Some((w, h, px)) = self.last_frame.clone() {
+                    self.update_scope(&ctx, w, h, &px);
+                }
+            }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                // Préréglages : chacun s'ajoute à la file d'export
+                let mut pick = None;
+                ui.menu_button(RichText::new(crate::lucide::CHEVRON_DOWN).size(12.0), |ui| {
+                    ui.label(RichText::new(crate::i18n::t("Exporter en…")).size(11.0).color(p.muted));
+                    for (k, (name, _, tip)) in crate::montage::PRESETS.iter().enumerate() {
+                        if ui.add(egui::Button::new(crate::i18n::t(name)).selected(k == self.last_preset)).on_hover_text(crate::i18n::t(tip)).clicked() {
+                            pick = Some(k);
+                            ui.close();
+                        }
+                    }
+                })
+                .response
+                .on_hover_text(crate::i18n::t("Préréglages d'export ; plusieurs exports se suivent dans une file"));
+                if let Some(k) = pick {
+                    self.queue_export(&ctx, k);
+                }
                 if self.export_rx.is_some() {
                     ui.spinner();
-                    ui.label(RichText::new(crate::i18n::t("export en cours…")).color(p.muted));
-                } else if ui.add(egui::Button::new(RichText::new(crate::i18n::t("Exporter")).color(p.on_accent)).fill(p.accent).wrap_mode(egui::TextWrapMode::Extend)).on_hover_text(crate::i18n::t("MP4 H.264 ; entre les points I et O s'ils sont posés (Ctrl+M)")).clicked() {
+                    let left = self.export_queue.len();
+                    let txt = if left + self.export_done > 0 { format!("{} {}/{}", crate::i18n::t("export"), self.export_done + 1, self.export_done + 1 + left) } else { crate::i18n::t("export en cours…") };
+                    ui.label(RichText::new(txt).color(p.muted));
+                } else if ui.add(egui::Button::new(RichText::new(crate::i18n::t("Exporter")).color(p.on_accent)).fill(p.accent).wrap_mode(egui::TextWrapMode::Extend)).on_hover_text(format!("{} ; {}", crate::i18n::t(crate::montage::PRESETS[self.last_preset].0), crate::i18n::t("entre les points I et O s'ils sont posés (Ctrl+M)"))).clicked() {
                     self.export_to(&ctx);
                 }
                 let mut ch = false;
@@ -948,6 +999,15 @@ impl Editor {
         match &self.tex {
             Some(t) if !self.project.clips.is_empty() => {
                 ui.painter().image(t.id(), img, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+                // Scope par-dessus, en haut à droite de l'image
+                if let (Some(k), Some(st)) = (self.scope, &self.scope_tex) {
+                    let [sw, sh] = st.size();
+                    let w = (img.width() * 0.42).clamp(140.0, 340.0);
+                    let sr = Rect::from_min_size(pos2(img.right() - w - 6.0, img.top() + 6.0), vec2(w, w * sh as f32 / sw.max(1) as f32));
+                    ui.painter().rect_filled(sr.expand(3.0), 2.0, Color32::from_black_alpha(240));
+                    ui.painter().image(st.id(), sr, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+                    ui.painter().text(sr.left_bottom() + vec2(2.0, -2.0), egui::Align2::LEFT_BOTTOM, crate::i18n::t(crate::scopes::KINDS[k].0), egui::FontId::proportional(10.0), Color32::from_gray(170));
+                }
             }
             _ => {
                 ui.painter().text(img.center(), egui::Align2::CENTER_CENTER, crate::i18n::t("Glisse des vidéos, des images ou des sons dans la timeline"), egui::FontId::proportional(13.0), Color32::from_gray(150));
@@ -1214,6 +1274,16 @@ impl Editor {
                         ch |= ui.add(egui::Slider::new(v, r).max_decimals(2)).changed();
                     });
                 }
+                // Roues de couleur : ombres, tons moyens, hautes lumières
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 10.0;
+                    for (k, name) in ["Ombres", "Tons moyens", "Hautes lumières"].into_iter().enumerate() {
+                        ui.vertical(|ui| {
+                            ch |= color_wheel(ui, &mut c.wheels[k], name);
+                        });
+                    }
+                });
             });
         }
         if self.project.clips[i].sounds() || self.project.linked(i).iter().any(|&k| self.project.clips[k].sounds()) {
@@ -2386,6 +2456,59 @@ thread_local! {
 }
 
 /// Durée courte pour les cartes : « 0:42 », « 1:10 », « 8 s »
+/// Une roue de couleur : un disque de teintes où l'on glisse un point, et un curseur de luminosité dessous.
+/// Double-clic : remise à zéro.
+fn color_wheel(ui: &mut egui::Ui, v: &mut [f32; 3], name: &str) -> bool {
+    let p = crate::theme::pal();
+    let d = 64.0;
+    let (r, resp) = ui.allocate_exact_size(vec2(d, d), Sense::click_and_drag());
+    let c = r.center();
+    let rad = d / 2.0 - 2.0;
+    // Le disque : des parts de teinte, plus pâles au centre
+    let mut mesh = egui::Mesh::default();
+    let n = 48;
+    for k in 0..n {
+        let (a0, a1) = (k as f32 / n as f32 * std::f32::consts::TAU, (k + 1) as f32 / n as f32 * std::f32::consts::TAU);
+        // Même convention que wheel_rgb : x vers le bleu (Cb), y vers le haut = rouge (Cr)
+        let col = |a: f32| {
+            let rgb = crate::montage::wheel_rgb([a.cos() * 1.6, -a.sin() * 1.6, 0.0]);
+            Color32::from_rgb(((0.5 + rgb[0]).clamp(0.0, 1.0) * 255.0) as u8, ((0.5 + rgb[1]).clamp(0.0, 1.0) * 255.0) as u8, ((0.5 + rgb[2]).clamp(0.0, 1.0) * 255.0) as u8)
+        };
+        let i = mesh.vertices.len() as u32;
+        mesh.colored_vertex(c, Color32::from_gray(128));
+        mesh.colored_vertex(c + vec2(a0.cos(), -a0.sin()) * rad, col(a0));
+        mesh.colored_vertex(c + vec2(a1.cos(), -a1.sin()) * rad, col(a1));
+        mesh.add_triangle(i, i + 1, i + 2);
+    }
+    ui.painter().add(egui::Shape::mesh(mesh));
+    ui.painter().circle_stroke(c, rad, Stroke::new(1.0, p.line));
+    let mut ch = false;
+    if resp.double_clicked() {
+        *v = [0.0; 3];
+        ch = true;
+    } else if let (Some(q), true) = (resp.interact_pointer_pos(), resp.dragged() || resp.clicked()) {
+        let o = (q - c) / rad;
+        let o = if o.length() > 1.0 { o.normalized() } else { o };
+        (v[0], v[1]) = (o.x, -o.y);
+        ch = true;
+    }
+    let dot = c + vec2(v[0], -v[1]) * rad;
+    ui.painter().circle_filled(dot, 4.0, Color32::WHITE);
+    ui.painter().circle_stroke(dot, 4.0, Stroke::new(1.0, Color32::BLACK));
+    let resp = resp.on_hover_text(crate::i18n::t("Glisser : teinter · double-clic : remettre à zéro"));
+    if resp.hovered() {
+        let s = ui.input(|i| i.smooth_scroll_delta.y);
+        if s != 0.0 {
+            v[2] = (v[2] + s * 0.001).clamp(-0.5, 0.5);
+            ch = true;
+        }
+    }
+    ui.spacing_mut().slider_width = d;
+    ch |= ui.add(egui::Slider::new(&mut v[2], -0.5..=0.5).show_value(false)).on_hover_text(crate::i18n::t("luminosité")).changed();
+    ui.label(RichText::new(crate::i18n::t(name)).size(10.5).color(p.muted));
+    ch
+}
+
 fn short_time(t: f32) -> String {
     if t < 10.0 {
         format!("{:.0} s", t.max(0.0))

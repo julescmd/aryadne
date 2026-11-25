@@ -106,6 +106,7 @@ pub const ALIGN_END_HORIZONTAL: &str = "\u{f026e}";
 pub const ROWS_3: &str = "\u{f058a}";
 pub const COLUMNS_3: &str = "\u{f0099}";
 pub const PIN_OFF: &str = "\u{f02b6}";
+pub const ACTIVITY: &str = "\u{f0038}";
 pub const FLIP_HORIZONTAL_2: &str = "\u{f035e}";
 pub const GLOBE: &str = "\u{f00e8}";
 pub const UNDO_2: &str = "\u{f02a1}";
