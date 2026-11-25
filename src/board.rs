@@ -16,6 +16,12 @@ pub enum Kind {
         rel: String,
         #[serde(default)]
         flip: bool,
+        /// Affichée en niveaux de gris
+        #[serde(default, skip_serializing_if = "is_false")]
+        gray: bool,
+        /// Recadrage non destructif : la partie montrée de l'image (u0, v0, u1, v1 entre 0 et 1)
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        crop: Option<[f32; 4]>,
     },
     Text {
         text: String,
@@ -40,6 +46,28 @@ pub enum Kind {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         widths: Vec<f32>,
     },
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
+}
+
+/// Coordonnées de texture d'une image : son recadrage, retourné si besoin
+fn image_uv(flip: bool, crop: Option<[f32; 4]>) -> Rect {
+    let c = crop.unwrap_or([0.0, 0.0, 1.0, 1.0]);
+    if flip {
+        Rect::from_min_max(pos2(c[2], c[1]), pos2(c[0], c[3]))
+    } else {
+        Rect::from_min_max(pos2(c[0], c[1]), pos2(c[2], c[3]))
+    }
+}
+
+/// L'image entière (monde) d'un élément recadré
+fn full_rect(r: Rect, flip: bool, crop: Option<[f32; 4]>) -> Rect {
+    let c = crop.unwrap_or([0.0, 0.0, 1.0, 1.0]);
+    let (u0, u1) = if flip { (1.0 - c[2], 1.0 - c[0]) } else { (c[0], c[2]) };
+    let (sx, sy) = (r.width() / (u1 - u0).max(1e-4), r.height() / (c[3] - c[1]).max(1e-4));
+    Rect::from_min_size(pos2(r.left() - u0 * sx, r.top() - c[1] * sy), vec2(sx, sy))
 }
 
 fn text_size() -> f32 {
@@ -217,6 +245,8 @@ enum Drag {
     Move(Vec<(usize, Pos2)>),
     /// Redimensionnement : élément, coin fixe (monde), rectangle de départ.
     Resize { i: usize, anchor: Pos2, start: Rect },
+    /// Alt+glisser un coin d'image : recadrer. Coin fixe et image entière (monde)
+    Crop { i: usize, anchor: Pos2, full: Rect },
     Pan,
     Marquee(Pos2),
     Draw,
@@ -259,6 +289,9 @@ pub struct Board {
     redo: Vec<Vec<Item>>,
     /// Pointeur au dernier clic droit (pour coller au bon endroit).
     menu_at: Pos2,
+    /// Tout le board en niveaux de gris (pour juger les valeurs) et fenêtre gardée au-dessus des autres
+    pub gray_all: bool,
+    pub on_top: bool,
 }
 
 impl Default for Board {
@@ -285,6 +318,8 @@ impl Default for Board {
             undo: vec![],
             redo: vec![],
             menu_at: Pos2::ZERO,
+            gray_all: false,
+            on_top: false,
         }
     }
 }
@@ -399,7 +434,7 @@ impl Board {
                 y += row_h + gap;
                 row_h = 0.0;
             }
-            self.data.items.push(Item { kind: Kind::Image { rel, flip: false }, x, y, w, h });
+            self.data.items.push(Item { kind: Kind::Image { rel, flip: false, gray: false, crop: None }, x, y, w, h });
             x += w + gap;
             row_h = row_h.max(h);
         }
@@ -445,6 +480,71 @@ impl Board {
             let k = h / it.h.max(1.0);
             it.w *= k;
             it.h = h;
+        }
+        self.touch();
+    }
+
+    /// Aligne la sélection : 0 gauche, 1 centre, 2 droite, 3 haut, 4 milieu, 5 bas
+    pub fn align(&mut self, how: u8) {
+        let idx = self.selection.clone();
+        let Some(b) = self.bounds(Some(&idx)) else { return };
+        if idx.len() < 2 {
+            return;
+        }
+        self.checkpoint();
+        for &i in &idx {
+            let it = &mut self.data.items[i];
+            match how {
+                0 => it.x = b.left(),
+                1 => it.x = b.center().x - it.w / 2.0,
+                2 => it.x = b.right() - it.w,
+                3 => it.y = b.top(),
+                4 => it.y = b.center().y - it.h / 2.0,
+                _ => it.y = b.bottom() - it.h,
+            }
+        }
+        self.touch();
+    }
+
+    /// Range la sélection en une ligne (ou une colonne), bord à bord, dans l'ordre actuel
+    pub fn line_up(&mut self, vertical: bool) {
+        let mut idx = self.selection.clone();
+        if idx.len() < 2 {
+            return;
+        }
+        self.checkpoint();
+        idx.sort_by(|&a, &b| {
+            let (ia, ib) = (&self.data.items[a], &self.data.items[b]);
+            let (ka, kb) = if vertical { (ia.y, ib.y) } else { (ia.x, ib.x) };
+            ka.total_cmp(&kb)
+        });
+        let first = self.data.items[idx[0]].rect();
+        let (mut x, mut y) = (first.left(), first.top());
+        for &i in &idx {
+            let it = &mut self.data.items[i];
+            it.x = x;
+            it.y = y;
+            if vertical {
+                y += it.h + 16.0;
+            } else {
+                x += it.w + 16.0;
+            }
+        }
+        self.touch();
+    }
+
+    /// Empile la sélection : chaque élément décalé un peu du précédent (comme un tas de photos)
+    pub fn stack(&mut self) {
+        let idx = self.selection.clone();
+        if idx.len() < 2 {
+            return;
+        }
+        self.checkpoint();
+        let o = self.data.items[idx[0]].rect().min;
+        for (k, &i) in idx.iter().enumerate() {
+            let it = &mut self.data.items[i];
+            it.x = o.x + k as f32 * 24.0;
+            it.y = o.y + k as f32 * 24.0;
         }
         self.touch();
     }
@@ -528,7 +628,7 @@ impl Board {
         if crate::montage::is_project(rel) {
             // Un montage se pose comme une vidéo, à ses proportions, et se lit sur place
             let aspect = crate::montage::Project::read(&std::path::Path::new(images.root()).join(rel)).map(|p| p.width as f32 / p.height.max(1) as f32).unwrap_or(16.0 / 9.0);
-            self.add(Kind::Image { rel: rel.to_string(), flip: false }, at, vec2(480.0, 480.0 / aspect));
+            self.add(Kind::Image { rel: rel.to_string(), flip: false, gray: false, crop: None }, at, vec2(480.0, 480.0 / aspect));
         } else if crate::images::has_preview(rel) {
             // Une image arrive à sa taille d'origine ; un aperçu (PDF, vidéo…) garde une taille de vignette
             let size = match images.natural(rel) {
@@ -538,7 +638,7 @@ impl Board {
                     vec2(260.0 * aspect, 260.0)
                 }
             };
-            self.add(Kind::Image { rel: rel.to_string(), flip: false }, at, size);
+            self.add(Kind::Image { rel: rel.to_string(), flip: false, gray: false, crop: None }, at, size);
         } else if crate::vault::is_md(rel) {
             self.add(Kind::Note { rel: rel.to_string() }, at, vec2(300.0, 180.0));
         } else {
@@ -638,7 +738,7 @@ impl Board {
                 continue;
             }
             match &it.kind {
-                Kind::Image { rel, flip } if self.live.players.contains_key(rel) || crate::boardlive::is_model(rel) => {
+                Kind::Image { rel, flip, .. } if self.live.players.contains_key(rel) || crate::boardlive::is_model(rel) => {
                     // Vivant : la vidéo qui joue, ou le modèle 3D rendu sous l'angle choisi
                     let ctx = ui.ctx().clone();
                     let uv = if *flip { Rect::from_min_max(pos2(1.0, 0.0), pos2(0.0, 1.0)) } else { Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)) };
@@ -669,13 +769,14 @@ impl Board {
                         }
                     }
                 }
-                Kind::Image { rel, flip } => {
+                Kind::Image { rel, flip, gray, crop } => {
                     let size = if r.width().max(r.height()) > 340.0 { Size::Full } else { Size::Thumb };
-                    let slot = match images.get(rel, size) {
+                    let gray = *gray || self.gray_all;
+                    let slot = match if gray { images.get_gray(rel, size) } else { images.get(rel, size) } {
                         Slot::Loading if size == Size::Full => images.peek(rel, Size::Thumb).map(Slot::Ready).unwrap_or(Slot::Loading),
                         s => s,
                     };
-                    let uv = if *flip { Rect::from_min_max(pos2(1.0, 0.0), pos2(0.0, 1.0)) } else { Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)) };
+                    let uv = image_uv(*flip, *crop);
                     match slot {
                         Slot::Ready(l) => {
                             // Coins arrondis à 10 px comme la maquette
@@ -927,7 +1028,11 @@ impl Board {
                         self.checkpoint();
                         let r = self.data.items[i].rect();
                         let anchor = corners(r)[(k + 2) % 4];
-                        Some(Drag::Resize { i, anchor, start: r })
+                        match self.data.items[i].kind {
+                            // Alt : recadrer l'image au lieu de la mettre à l'échelle (comme PureRef)
+                            Kind::Image { flip, crop, .. } if mods.alt => Some(Drag::Crop { i, anchor, full: full_rect(r, flip, crop) }),
+                            _ => Some(Drag::Resize { i, anchor, start: r }),
+                        }
                     } else if let Some(i) = start_hit {
                         if !self.selection.contains(&i) {
                             if mods.shift {
@@ -981,6 +1086,25 @@ impl Board {
                             }
                         }
                         self.dirty_since = Some(Instant::now());
+                    }
+                    Drag::Crop { i, anchor, full } => {
+                        let (i, anchor, full) = (*i, *anchor, *full);
+                        if let Some(it) = self.data.items.get_mut(i) {
+                            let b = pos2(w.x.clamp(full.left(), full.right()), w.y.clamp(full.top(), full.bottom()));
+                            let r = Rect::from_two_pos(anchor, b);
+                            if r.width() > 8.0 && r.height() > 8.0 {
+                                if let Kind::Image { flip, crop, .. } = &mut it.kind {
+                                    let (u0, u1) = ((r.left() - full.left()) / full.width(), (r.right() - full.left()) / full.width());
+                                    let (v0, v1) = ((r.top() - full.top()) / full.height(), (r.bottom() - full.top()) / full.height());
+                                    // Les u sont comptés dans l'image (retournée à l'écran si besoin)
+                                    let (u0, u1) = if *flip { (1.0 - u1, 1.0 - u0) } else { (u0, u1) };
+                                    let c = [u0, v0, u1, v1];
+                                    *crop = (c != [0.0, 0.0, 1.0, 1.0]).then_some(c);
+                                }
+                                it.set_rect(r);
+                                self.dirty_since = Some(Instant::now());
+                            }
+                        }
                     }
                     Drag::Resize { i, anchor, start } => {
                         let (i, anchor, start) = (*i, *anchor, *start);
@@ -1076,7 +1200,7 @@ impl Board {
                 Some(Drag::Draw) => self.finish_stroke(),
                 Some(Drag::Pan) => self.touch(),
                 Some(Drag::Orbit(_)) => {}
-                Some(Drag::Move(_)) | Some(Drag::Resize { .. }) | Some(Drag::Erase) => {
+                Some(Drag::Move(_)) | Some(Drag::Resize { .. }) | Some(Drag::Crop { .. }) | Some(Drag::Erase) => {
                     // Rien n'a bougé : on retire le point d'annulation inutile.
                     if self.undo.last() == Some(&self.data.items) {
                         self.undo.pop();
@@ -1265,7 +1389,7 @@ impl Board {
                     ui.close();
                 }
                 if self.selection.iter().any(|&i| matches!(self.data.items.get(i).map(|x| &x.kind), Some(Kind::Image { .. }))) {
-                    if ui.button(crate::i18n::t("retourner horizontalement")).clicked() {
+                    if ui.button(format!("{}  {}", crate::lucide::FLIP_HORIZONTAL_2, crate::i18n::t("retourner horizontalement"))).clicked() {
                         self.checkpoint();
                         for &i in &self.selection {
                             if let Some(Item { kind: Kind::Image { flip, .. }, .. }) = self.data.items.get_mut(i) {
@@ -1274,6 +1398,34 @@ impl Board {
                         }
                         self.touch();
                         ui.close();
+                    }
+                    if ui.button(format!("{}  {}", crate::lucide::CONTRAST, crate::i18n::t("en niveaux de gris"))).clicked() {
+                        self.checkpoint();
+                        for &i in &self.selection {
+                            if let Some(Item { kind: Kind::Image { gray, .. }, .. }) = self.data.items.get_mut(i) {
+                                *gray = !*gray;
+                            }
+                        }
+                        self.touch();
+                        ui.close();
+                    }
+                    let cropped = self.selection.iter().any(|&i| matches!(self.data.items.get(i).map(|x| &x.kind), Some(Kind::Image { crop: Some(_), .. })));
+                    if cropped && ui.button(format!("{}  {}", crate::lucide::CROP, crate::i18n::t("retirer le recadrage"))).clicked() {
+                        self.checkpoint();
+                        for &i in &self.selection.clone() {
+                            if let Some(it) = self.data.items.get_mut(i) {
+                                let r = it.rect();
+                                if let Kind::Image { flip, crop, .. } = &mut it.kind {
+                                    let full = full_rect(r, *flip, *crop);
+                                    *crop = None;
+                                    it.set_rect(full);
+                                }
+                            }
+                        }
+                        self.touch();
+                        ui.close();
+                    } else if !cropped {
+                        ui.label(egui::RichText::new(crate::i18n::t("Alt+glisser un coin : recadrer")).size(11.0).color(crate::theme::pal().muted));
                     }
                     if ui.button(crate::i18n::t("taille d'origine")).clicked() {
                         self.checkpoint();

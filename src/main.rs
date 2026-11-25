@@ -4352,6 +4352,16 @@ impl App {
                 self.board.data.zoom = 1.0;
             }
             ui.separator();
+            // Tout en gris (valeurs), et la fenêtre gardée au-dessus des autres logiciels
+            if ui.add(egui::Button::new(format!("{}  {}", crate::lucide::CONTRAST, crate::i18n::t("Tout en niveaux de gris"))).selected(self.board.gray_all)).on_hover_text(crate::i18n::t("Pour juger les valeurs")).clicked() {
+                self.board.gray_all = !self.board.gray_all;
+            }
+            if ui.add(egui::Button::new(format!("{}  {}", crate::lucide::PIN, crate::i18n::t("Toujours au-dessus"))).selected(self.board.on_top)).on_hover_text(crate::i18n::t("Garder la fenêtre au-dessus des autres logiciels (Blender, Krita…), comme PureRef")).clicked() {
+                self.board.on_top = !self.board.on_top;
+                let level = if self.board.on_top { egui::WindowLevel::AlwaysOnTop } else { egui::WindowLevel::Normal };
+                ui.ctx().send_viewport_cmd(egui::ViewportCommand::WindowLevel(level));
+            }
+            ui.separator();
             if ui.add_enabled(self.board.can_undo(), egui::Button::new(format!("{}  {}", crate::lucide::UNDO_2, crate::i18n::t("Annuler   Ctrl+Z")))).clicked() {
                 self.board.undo();
             }
@@ -4411,7 +4421,27 @@ impl App {
             if ui.add_enabled(self.board.selection.len() > 1, egui::Button::new(format!("{}  {}", crate::lucide::RULER, crate::i18n::t("Même hauteur")))).clicked() {
                 self.board.same_height();
             }
+            let many = self.board.selection.len() > 1;
+            if ui.add_enabled(many, egui::Button::new(format!("{}  {}", crate::lucide::COLUMNS_3, crate::i18n::t("En une ligne")))).clicked() {
+                self.board.line_up(false);
+            }
+            if ui.add_enabled(many, egui::Button::new(format!("{}  {}", crate::lucide::ROWS_3, crate::i18n::t("En une colonne")))).clicked() {
+                self.board.line_up(true);
+            }
+            if ui.add_enabled(many, egui::Button::new(format!("{}  {}", crate::lucide::LAYERS, crate::i18n::t("Empiler")))).clicked() {
+                self.board.stack();
+            }
+            ui.separator();
+            ui.label(RichText::new(crate::i18n::t("Aligner la sélection")).size(11.0).color(p.muted));
+            ui.horizontal(|ui| {
+                for (k, icon, tip) in [(0u8, crate::lucide::ALIGN_START_VERTICAL, "à gauche"), (1, crate::lucide::ALIGN_CENTER_VERTICAL, "au centre"), (2, crate::lucide::ALIGN_END_VERTICAL, "à droite"), (3, crate::lucide::ALIGN_START_HORIZONTAL, "en haut"), (4, crate::lucide::ALIGN_CENTER_HORIZONTAL, "au milieu"), (5, crate::lucide::ALIGN_END_HORIZONTAL, "en bas")] {
+                    if ui.add_enabled(many, egui::Button::new(RichText::new(icon).size(14.0))).on_hover_text(crate::i18n::t(tip)).clicked() {
+                        self.board.align(k);
+                    }
+                }
+            });
         });
+
         // Le compte et le zoom à droite, seulement s'il reste la place
         if hui.available_width() > 150.0 {
         hui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {

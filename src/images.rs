@@ -118,6 +118,11 @@ impl Images {
         Slot::Loading
     }
 
+    /// La même image en niveaux de gris (pour juger les valeurs, comme PureRef)
+    pub fn get_gray(&mut self, rel: &str, size: Size) -> Slot {
+        self.get(&format!("{rel}{GRAY}"), size)
+    }
+
     /// Image déjà prête, sans en lancer le chargement.
     pub fn peek(&self, rel: &str, size: Size) -> Option<Arc<Loaded>> {
         let size = if is_rendered(rel) { Size::Thumb } else { size };
@@ -151,7 +156,8 @@ impl Images {
             }
             self.inflight += 1;
             let (tx, ctx) = (self.tx.clone(), ctx.clone());
-            let path = crate::vault::safe(&self.root, &key.0);
+            let real = key.0.strip_suffix(GRAY).unwrap_or(&key.0).to_string();
+            let path = crate::vault::safe(&self.root, &real);
             std::thread::spawn(move || {
                 let r = path.and_then(|path| load(&ctx, &path, &key.0, key.1));
                 let _ = tx.send((key, r));
@@ -164,8 +170,11 @@ impl Images {
     }
 }
 
+/// Suffixe des clés d'images en niveaux de gris
+const GRAY: &str = "\u{1}gris";
+
 fn load(ctx: &egui::Context, path: &Path, rel: &str, size: Size) -> Result<Loaded, String> {
-    let lower = rel.to_lowercase();
+    let lower = rel.strip_suffix(GRAY).unwrap_or(rel).to_lowercase();
     if lower.ends_with(".blend") {
         let img = crate::blend::thumbnail(path)?;
         return finish(ctx, img, rel, size);
@@ -197,6 +206,7 @@ fn load(ctx: &egui::Context, path: &Path, rel: &str, size: Size) -> Result<Loade
 fn finish(ctx: &egui::Context, img: DynamicImage, rel: &str, size: Size) -> Result<Loaded, String> {
     let dims = [img.width(), img.height()];
     let img = to_display(img);
+    let img = if rel.ends_with(GRAY) { DynamicImage::ImageLumaA8(img.to_luma_alpha8()) } else { img };
     let max = size.max_side();
     let small = if img.width() > max || img.height() > max { img.thumbnail(max, max) } else { img };
     let rgba = small.to_rgba8();
