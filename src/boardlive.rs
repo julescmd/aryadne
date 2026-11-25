@@ -153,10 +153,84 @@ impl ModelView {
     }
 }
 
+/// Un GIF animé : ses images (textures) et la durée de chacune (secondes)
+pub struct Gif {
+    pub frames: Vec<(egui::TextureHandle, f32)>,
+    pub total: f32,
+}
+
+impl Gif {
+    /// Décode le GIF (au plus 400 images, réduites à 1024 px de côté)
+    pub fn load(ctx: &egui::Context, path: &std::path::Path, rel: &str) -> Option<Gif> {
+        use image::AnimationDecoder;
+        let f = std::io::BufReader::new(std::fs::File::open(path).ok()?);
+        let dec = image::codecs::gif::GifDecoder::new(f).ok()?;
+        let mut frames = vec![];
+        let mut total = 0.0;
+        for (k, fr) in dec.into_frames().take(400).enumerate() {
+            let fr = fr.ok()?;
+            let (n, d) = fr.delay().numer_denom_ms();
+            // Les GIF sans délai passent à 10 images par seconde, comme les navigateurs
+            let secs = if n == 0 { 0.1 } else { (n as f32 / d.max(1) as f32 / 1000.0).max(0.02) };
+            let mut img = image::DynamicImage::ImageRgba8(fr.into_buffer());
+            if img.width().max(img.height()) > 1024 {
+                img = img.thumbnail(1024, 1024);
+            }
+            let rgba = img.to_rgba8();
+            let ci = egui::ColorImage::from_rgba_unmultiplied([rgba.width() as usize, rgba.height() as usize], rgba.as_raw());
+            frames.push((ctx.load_texture(format!("gif-{rel}-{k}"), ci, egui::TextureOptions::LINEAR), secs));
+            total += secs;
+        }
+        (!frames.is_empty()).then_some(Gif { frames, total })
+    }
+
+    /// L'image à montrer au temps `t` (secondes), et le temps avant la suivante
+    pub fn at(&self, t: f64) -> (&egui::TextureHandle, f32) {
+        let mut x = (t % self.total.max(0.01) as f64) as f32;
+        for (tex, d) in &self.frames {
+            if x < *d {
+                return (tex, d - x);
+            }
+            x -= d;
+        }
+        (&self.frames[0].0, self.frames[0].1)
+    }
+}
+
 /// L'état vivant d'un board : lecteurs et modèles, par fichier.
 #[derive(Default)]
 pub struct Live {
     pub players: HashMap<String, Player>,
     pub looping: HashMap<String, bool>,
     pub models: HashMap<String, ModelView>,
+    /// GIF animés (None : illisible ou une seule image)
+    pub gifs: HashMap<String, Option<Gif>>,
+}
+
+#[cfg(test)]
+mod gif_tests {
+    #[test]
+    fn gif_anime() {
+        use image::codecs::gif::{GifEncoder, Repeat};
+        let path = std::env::temp_dir().join(format!("ary-anim-{}.gif", std::process::id()));
+        {
+            let f = std::fs::File::create(&path).unwrap();
+            let mut enc = GifEncoder::new(f);
+            enc.set_repeat(Repeat::Infinite).unwrap();
+            for k in 0..3u8 {
+                let img = image::RgbaImage::from_pixel(8, 8, image::Rgba([k * 80, 0, 0, 255]));
+                enc.encode_frame(image::Frame::from_parts(img, 0, 0, image::Delay::from_numer_denom_ms(100, 1))).unwrap();
+            }
+        }
+        let ctx = eframe::egui::Context::default();
+        let g = super::Gif::load(&ctx, &path, "anim.gif").unwrap();
+        assert_eq!(g.frames.len(), 3);
+        assert!((g.total - 0.3).abs() < 1e-3);
+        // 0,15 s : la deuxième image, encore 0,05 s avant la suivante ; ça boucle
+        let (t, wait) = g.at(0.15);
+        assert_eq!(t.id(), g.frames[1].0.id());
+        assert!((wait - 0.05).abs() < 1e-3);
+        assert_eq!(g.at(0.35).0.id(), g.frames[0].0.id());
+        let _ = std::fs::remove_file(path);
+    }
 }

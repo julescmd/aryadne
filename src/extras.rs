@@ -1135,6 +1135,7 @@ fn download_image(root: &str, dir: &str, url: &str) -> Result<String, String> {
         let _ = std::fs::create_dir_all(parent);
     }
     crate::vault::atomic_write(&path, bytes).map_err(|e| e.to_string())?;
+    crate::sources::record(root, &rel, url);
     Ok(rel)
 }
 

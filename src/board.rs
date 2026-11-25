@@ -22,6 +22,9 @@ pub enum Kind {
         /// Recadrage non destructif : la partie montrée de l'image (u0, v0, u1, v1 entre 0 et 1)
         #[serde(default, skip_serializing_if = "Option::is_none")]
         crop: Option<[f32; 4]>,
+        /// Grille de composition par-dessus : 0 aucune, 1 tiers, 2 nombre d'or, 3 diagonales, 4 centre
+        #[serde(default, skip_serializing_if = "is_zero")]
+        guide: u8,
     },
     Text {
         text: String,
@@ -46,6 +49,10 @@ pub enum Kind {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         widths: Vec<f32>,
     },
+}
+
+fn is_zero(v: &u8) -> bool {
+    *v == 0
 }
 
 fn is_false(b: &bool) -> bool {
@@ -358,6 +365,10 @@ impl Board {
         crate::vault::write(root, rel, &json)
     }
 
+    pub fn mark_dirty(&mut self) {
+        self.touch();
+    }
+
     fn touch(&mut self) {
         self.dirty_since = Some(Instant::now());
     }
@@ -434,7 +445,7 @@ impl Board {
                 y += row_h + gap;
                 row_h = 0.0;
             }
-            self.data.items.push(Item { kind: Kind::Image { rel, flip: false, gray: false, crop: None }, x, y, w, h });
+            self.data.items.push(Item { kind: Kind::Image { rel, flip: false, gray: false, crop: None, guide: 0 }, x, y, w, h });
             x += w + gap;
             row_h = row_h.max(h);
         }
@@ -628,7 +639,7 @@ impl Board {
         if crate::montage::is_project(rel) {
             // Un montage se pose comme une vidéo, à ses proportions, et se lit sur place
             let aspect = crate::montage::Project::read(&std::path::Path::new(images.root()).join(rel)).map(|p| p.width as f32 / p.height.max(1) as f32).unwrap_or(16.0 / 9.0);
-            self.add(Kind::Image { rel: rel.to_string(), flip: false, gray: false, crop: None }, at, vec2(480.0, 480.0 / aspect));
+            self.add(Kind::Image { rel: rel.to_string(), flip: false, gray: false, crop: None, guide: 0 }, at, vec2(480.0, 480.0 / aspect));
         } else if crate::images::has_preview(rel) {
             // Une image arrive à sa taille d'origine ; un aperçu (PDF, vidéo…) garde une taille de vignette
             let size = match images.natural(rel) {
@@ -638,7 +649,7 @@ impl Board {
                     vec2(260.0 * aspect, 260.0)
                 }
             };
-            self.add(Kind::Image { rel: rel.to_string(), flip: false, gray: false, crop: None }, at, size);
+            self.add(Kind::Image { rel: rel.to_string(), flip: false, gray: false, crop: None, guide: 0 }, at, size);
         } else if crate::vault::is_md(rel) {
             self.add(Kind::Note { rel: rel.to_string() }, at, vec2(300.0, 180.0));
         } else {
@@ -769,7 +780,19 @@ impl Board {
                         }
                     }
                 }
-                Kind::Image { rel, flip, gray, crop } => {
+                Kind::Image { rel, flip, .. } if rel.to_lowercase().ends_with(".gif") && self.live.gifs.get(rel).is_none_or(|g| g.is_some()) => {
+                    // GIF animé : il joue en boucle sur le board
+                    let ctx = ui.ctx().clone();
+                    let root = images.root().to_string();
+                    let g = self.live.gifs.entry(rel.clone()).or_insert_with(|| crate::vault::safe(&root, rel).ok().and_then(|p| crate::boardlive::Gif::load(&ctx, &p, rel)).filter(|g| g.frames.len() > 1));
+                    if let Some(g) = g {
+                        let (tex, wait) = g.at(ui.input(|i| i.time));
+                        let uv = if *flip { Rect::from_min_max(pos2(1.0, 0.0), pos2(0.0, 1.0)) } else { Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)) };
+                        painter.add(egui::epaint::RectShape::filled(r, (10.0 * zoom).clamp(1.0, 10.0), Color32::WHITE).with_texture(tex.id(), uv));
+                        ctx.request_repaint_after(std::time::Duration::from_secs_f32(wait.max(0.016)));
+                    }
+                }
+                Kind::Image { rel, flip, gray, crop, .. } => {
                     let size = if r.width().max(r.height()) > 340.0 { Size::Full } else { Size::Thumb };
                     let gray = *gray || self.gray_all;
                     let slot = match if gray { images.get_gray(rel, size) } else { images.get(rel, size) } {
@@ -945,6 +968,17 @@ impl Board {
             drop(pl);
         }
 
+        // Grilles de composition posées sur les images
+        for it in &self.data.items {
+            if let Kind::Image { guide, .. } = &it.kind {
+                if *guide > 0 {
+                    let r = screen_rect(it.rect());
+                    if r.intersects(rect) {
+                        draw_guide(&painter, r, *guide);
+                    }
+                }
+            }
+        }
         // Trait en cours
         if !self.stroke_pts.is_empty() {
             let pts: Vec<Pos2> = self.stroke_pts.iter().map(|w| to_screen(*w)).collect();
@@ -1720,6 +1754,57 @@ impl Board {
             }
         }
         self.touch();
+    }
+}
+
+/// Noms des grilles de composition (l'indice est la valeur de `guide`)
+pub const GUIDES: [&str; 5] = ["aucune", "tiers", "nombre d'or", "diagonales", "centre"];
+
+/// Trace une grille de composition sur le cadre `r`
+pub fn draw_guide(painter: &egui::Painter, r: Rect, guide: u8) {
+    let st = Stroke::new(1.2, Color32::from_rgba_unmultiplied(255, 255, 255, 200));
+    let sh = Stroke::new(2.6, Color32::from_black_alpha(90));
+    let line = |a: Pos2, b: Pos2| {
+        painter.line_segment([a, b], sh);
+        painter.line_segment([a, b], st);
+    };
+    let vx = |f: f32| line(pos2(r.left() + r.width() * f, r.top()), pos2(r.left() + r.width() * f, r.bottom()));
+    let hy = |f: f32| line(pos2(r.left(), r.top() + r.height() * f), pos2(r.right(), r.top() + r.height() * f));
+    match guide {
+        1 => {
+            for f in [1.0 / 3.0, 2.0 / 3.0] {
+                vx(f);
+                hy(f);
+            }
+        }
+        2 => {
+            let g = 0.381_966;
+            for f in [g, 1.0 - g] {
+                vx(f);
+                hy(f);
+            }
+        }
+        3 => {
+            line(r.left_top(), r.right_bottom());
+            line(r.right_top(), r.left_bottom());
+            // Les perpendiculaires depuis les autres coins (diagonales de Baroque)
+            let (w, h) = (r.width(), r.height());
+            let d2 = w * w + h * h;
+            let foot = |a: Pos2, b: Pos2, c: Pos2| {
+                let ab = b - a;
+                a + ab * ((c - a).dot(ab) / d2)
+            };
+            line(r.right_top(), foot(r.left_top(), r.right_bottom(), r.right_top()));
+            line(r.left_bottom(), foot(r.left_top(), r.right_bottom(), r.left_bottom()));
+            line(r.left_top(), foot(r.right_top(), r.left_bottom(), r.left_top()));
+            line(r.right_bottom(), foot(r.right_top(), r.left_bottom(), r.right_bottom()));
+        }
+        4 => {
+            vx(0.5);
+            hy(0.5);
+            painter.circle_stroke(r.center(), r.width().min(r.height()) * 0.08, st);
+        }
+        _ => {}
     }
 }
 

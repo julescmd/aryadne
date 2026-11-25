@@ -81,7 +81,7 @@ pub fn import(text: &str) -> Result<BoardFile, String> {
             "file" => {
                 let rel = n["file"].as_str().unwrap_or("").trim_start_matches('/').to_string();
                 if is_image(&rel) {
-                    items.push(Item { kind: Kind::Image { rel, flip: false, gray: false, crop: None }, x, y, w, h });
+                    items.push(Item { kind: Kind::Image { rel, flip: false, gray: false, crop: None, guide: 0 }, x, y, w, h });
                 } else if rel.to_lowercase().ends_with(".md") {
                     items.push(Item { kind: Kind::Note { rel }, x, y, w, h });
                 } else {

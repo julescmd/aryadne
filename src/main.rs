@@ -23,6 +23,7 @@ mod lucide_all;
 mod mdexport;
 mod canvas;
 mod mdextra;
+mod sources;
 mod vector_ui;
 mod keymap;
 mod lucide;
@@ -5244,7 +5245,8 @@ impl App {
 
     fn board_props(&mut self, ui: &mut egui::Ui) {
         let p = theme::pal();
-        match self.board.selection.as_slice() {
+        let selection = self.board.selection.clone();
+        match selection.as_slice() {
             [] => {
                 ui.label(RichText::new(crate::i18n::t("Rien de choisi. Clique un élément du board ou d'un calque.")).size(12.0).color(p.muted));
             }
@@ -5260,9 +5262,66 @@ impl App {
                 ui.label(RichText::new(crate::i18n::t(what)).size(15.0).family(theme::bold()));
                 if let Some(rel) = &path {
                     ui.label(RichText::new(rel).size(11.0).color(p.muted));
+                    let root = self.root();
+                    // Image manquante : la re-lier à un fichier
+                    if !self.entries.iter().any(|e| e.rel == *rel) && !vault::safe(&root, rel).map(|p| p.exists()).unwrap_or(false) {
+                        ui.label(RichText::new(format!("{}  {}", crate::lucide::TRIANGLE_ALERT, crate::i18n::t("fichier introuvable"))).size(12.0).color(p.missing));
+                        if ui.button(format!("{}  {}", crate::lucide::LINK, crate::i18n::t("re-lier à un fichier…"))).on_hover_text(crate::i18n::t("Choisir le fichier : il est copié à sa place dans le coffre")).clicked() {
+                            if let Some(f) = rfd::FileDialog::new().pick_file() {
+                                let r = vault::safe(&root, rel).and_then(|dst| {
+                                    if let Some(d) = dst.parent() {
+                                        let _ = std::fs::create_dir_all(d);
+                                    }
+                                    std::fs::copy(&f, &dst).map(|_| ()).map_err(|e| e.to_string())
+                                });
+                                if self.report(r).is_some() {
+                                    sources::record(&root, rel, &f.to_string_lossy());
+                                    self.images.forget(rel);
+                                    self.refresh();
+                                }
+                            }
+                        }
+                    }
+                    // D'où vient l'image
+                    if let Some(src) = sources::get(&root, rel) {
+                        ui.label(RichText::new(crate::i18n::t("Source")).size(11.0).color(p.muted));
+                        ui.horizontal(|ui| {
+                            let short: String = if src.chars().count() > 38 { format!("…{}", src.chars().rev().take(36).collect::<Vec<_>>().into_iter().rev().collect::<String>()) } else { src.clone() };
+                            ui.label(RichText::new(short).size(11.5)).on_hover_text(&src);
+                            if ui.add(egui::Button::new(RichText::new(crate::lucide::EXTERNAL_LINK).size(13.0)).frame(false)).on_hover_text(crate::i18n::t("ouvrir la source")).clicked() {
+                                if src.starts_with("http") {
+                                    ui.ctx().open_url(egui::OpenUrl::new_tab(&src));
+                                } else {
+                                    let _ = open::that(std::path::Path::new(&src).parent().unwrap_or(std::path::Path::new(&src)));
+                                }
+                            }
+                            if ui.add(egui::Button::new(RichText::new(crate::lucide::COPY).size(13.0)).frame(false)).on_hover_text(crate::i18n::t("copier")).clicked() {
+                                ui.ctx().copy_text(src.clone());
+                            }
+                        });
+                    }
                 }
                 ui.label(RichText::new(crate::i18n::t("Taille")).size(11.0).color(p.muted));
                 ui.label(RichText::new(format!("{:.0} × {:.0}", it.w, it.h)).monospace().size(12.0));
+                // Grille de composition sur l'image
+                if let board::Kind::Image { guide, .. } = &it.kind {
+                    let mut g = *guide;
+                    ui.label(RichText::new(crate::i18n::t("Grille de composition")).size(11.0).color(p.muted));
+                    ui.horizontal_wrapped(|ui| {
+                        for (k, name) in board::GUIDES.iter().enumerate() {
+                            if ui.selectable_label(g == k as u8, crate::i18n::t(name)).clicked() {
+                                g = k as u8;
+                            }
+                        }
+                    });
+                    if g != *guide {
+                        self.board.checkpoint();
+                        if let Some(board::Item { kind: board::Kind::Image { guide, .. }, .. }) = self.board.data.items.get_mut(*i) {
+                            *guide = g;
+                        }
+                        self.board.mark_dirty();
+                    }
+                }
                 if let board::Kind::Palette { colors } = &it.kind {
                     ui.horizontal_wrapped(|ui| {
                         for c in colors {
@@ -7006,6 +7065,9 @@ impl App {
         for f in files {
             let r = if mode == "link" || f.is_dir() { vault::link_external(&root, &f) } else { vault::import(&root, dir, &f, mode == "move") };
             if let Some(rel) = self.report(r) {
+                if !f.is_dir() && mode != "link" {
+                    sources::record(&root, &rel, &f.to_string_lossy());
+                }
                 imported.push(rel);
             }
         }

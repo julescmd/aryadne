@@ -3079,5 +3079,13 @@
   "Déformation : tirer les points · Entrée : garder · Échap : annuler": "Warp: drag the points · Enter: keep · Esc: cancel",
   "Tirer les points d'une grille pour courber le calque (tissus, reflets, étiquettes sur un objet)": "Drag grid points to bend the layer (fabric, reflections, labels on an object)",
   "déformation en grille": "warp grid",
-  "remettre la grille droite": "reset the grid"
+  "remettre la grille droite": "reset the grid",
+  "Grille de composition": "Composition grid",
+  "tiers": "thirds",
+  "nombre d'or": "golden ratio",
+  "diagonales": "diagonals",
+  "fichier introuvable": "file not found",
+  "re-lier à un fichier…": "relink to a file…",
+  "Choisir le fichier : il est copié à sa place dans le coffre": "Pick the file: it is copied into its place in the vault",
+  "ouvrir la source": "open the source"
 }
