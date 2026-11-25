@@ -2487,5 +2487,8 @@
   "valeurs séparées par des virgules": "values separated by commas",
   "propriété": "property",
   "double-clic pour modifier": "double-click to edit",
-  "Pointe de flèche au bout du tracé": "Arrowhead at the end of the path"
+  "Pointe de flèche au bout du tracé": "Arrowhead at the end of the path",
+  "Vitesse : 200 % deux fois plus vite, -100 % à l'envers": "Speed: 200% twice as fast, -100% backwards",
+  "Départ : l'instant de la précomposition joué au début du calque": "Start: the precomp time played at the layer's start",
+  "En boucle au lieu de garder la dernière image": "Loop instead of holding the last frame"
 }

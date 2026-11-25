@@ -193,6 +193,14 @@ pub enum Kind {
     Compo {
         /// Chemin dans le coffre
         path: String,
+        /// Remappage du temps : vitesse (1 : normale, négative : à l'envers), départ dans la précomposition (s)
+        #[serde(default = "unit_speed")]
+        speed: f32,
+        #[serde(default)]
+        offset: f32,
+        /// Rejoue en boucle au lieu de garder la dernière image
+        #[serde(default)]
+        looped: bool,
     },
 }
 
@@ -251,6 +259,21 @@ pub struct Layer {
     /// Tracé progressif (comme les « trim paths » d'After Effects) : fin et début de la partie visible, en %
     #[serde(default = "full_trim", skip_serializing_if = "is_full_trim")]
     pub trim: Track,
+}
+
+fn unit_speed() -> f32 {
+    1.0
+}
+
+/// Le temps d'une précomposition à l'instant `local` du calque (depuis son début)
+pub fn remap_time(local: f32, speed: f32, offset: f32, looped: bool, dur: f32) -> f32 {
+    let last = (dur - 1e-3).max(0.0);
+    let t = offset + local * speed;
+    if looped && dur > 0.0 {
+        t.rem_euclid(dur)
+    } else {
+        t.clamp(0.0, last)
+    }
 }
 
 fn full_trim() -> Track {
@@ -877,7 +900,7 @@ pub fn size(l: &Layer, cache: &mut Cache) -> [f32; 2] {
         }
         Kind::Rect { w, h, .. } | Kind::Ellipse { w, h, .. } => [*w, *h],
         Kind::Image { path } => cache.image(path).map(|i| [i.width() as f32, i.height() as f32]).unwrap_or([200.0, 120.0]),
-        Kind::Compo { path } => cache.compo(path).map(|c| [c.w as f32, c.h as f32]).unwrap_or([400.0, 225.0]),
+        Kind::Compo { path, .. } => cache.compo(path).map(|c| [c.w as f32, c.h as f32]).unwrap_or([400.0, 225.0]),
         Kind::Path { points, width, arrow, .. } => {
             // Le cadre est centré sur l'origine du calque : il couvre les points les plus éloignés (et la flèche)
             let (mx, my) = points.iter().fold((0.0f32, 0.0f32), |(a, b), p| (a.max(p[0].abs()), b.max(p[1].abs())));
@@ -1132,13 +1155,13 @@ fn bitmap(l: &Layer, t: f32, k: f32, cache: &mut Cache) -> Option<Bitmap> {
             }
             Some(bm)
         }
-        Kind::Compo { path } => {
+        Kind::Compo { path, speed, offset, looped } => {
             if cache.depth >= 4 {
                 return None;
             }
             let sub = cache.compo(path)?;
             // Le temps de la précomposition part du début du calque ; après sa fin, la dernière image reste
-            let local = (t - l.start).clamp(0.0, (sub.duration - 1.0 / sub.fps.max(1.0)).max(0.0));
+            let local = remap_time(t - l.start, *speed, *offset, *looped, sub.duration);
             cache.depth += 1;
             // Rendue sur fond transparent (son fond ne recouvre pas la composition)
             let img = render(&sub, local, k, cache);
@@ -1812,7 +1835,7 @@ mod tests {
         sub.write(&root.join("sub.arymotion")).unwrap();
         let mut c = Compo { layers: vec![], ..Compo::default() };
         (c.w, c.h, c.bg) = (100, 40, [0, 0, 255]);
-        let mut l = Layer::new("p", Kind::Compo { path: "sub.arymotion".into() }, &c);
+        let mut l = Layer::new("p", Kind::Compo { path: "sub.arymotion".into(), speed: 1.0, offset: 0.0, looped: false }, &c);
         l.pos.v = [50.0, 20.0];
         c.layers = vec![l];
         let mut cache = Cache::new(&root);
@@ -1822,6 +1845,10 @@ mod tests {
         assert_eq!(img.get_pixel(35, 20).0, [0, 0, 255, 255]);
         assert_eq!(img.get_pixel(5, 5).0, [0, 0, 255, 255]);
         let _ = std::fs::remove_dir_all(&root);
+        // Remappage : deux fois plus vite, en boucle sur 2 s ; à l'envers depuis la fin
+        assert!((remap_time(1.5, 2.0, 0.0, true, 2.0) - 1.0).abs() < 1e-5);
+        assert!((remap_time(0.5, -1.0, 2.0, false, 2.0) - 1.5).abs() < 1e-5);
+        assert!(remap_time(9.0, 1.0, 0.0, false, 2.0) < 2.0);
     }
 
     #[test]

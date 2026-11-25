@@ -268,7 +268,7 @@ impl Editor {
             Kind::Rect { .. } => "Rectangle",
             Kind::Ellipse { .. } => "Ellipse",
             Kind::Image { .. } => "Image",
-            Kind::Compo { path } => path.rsplit('/').next().unwrap_or("Composition").trim_end_matches(".arymotion"),
+            Kind::Compo { path, .. } => path.rsplit('/').next().unwrap_or("Composition").trim_end_matches(".arymotion"),
             Kind::Path { .. } => "Tracé",
         };
         let name = self.compo.fresh_name(&crate::i18n::t(base));
@@ -520,7 +520,7 @@ impl Editor {
                     ui.menu_button(egui::RichText::new(l::FILM).size(14.0), |ui| {
                         for r in &others {
                             if ui.button(r).clicked() {
-                                self.add_layer(Kind::Compo { path: r.clone() }, Some([c.0, c.1]));
+                                self.add_layer(Kind::Compo { path: r.clone(), speed: 1.0, offset: 0.0, looped: false }, Some([c.0, c.1]));
                                 ui.close();
                             }
                         }
@@ -1074,9 +1074,19 @@ impl Editor {
                         changed |= ui.toggle_value(arrow, egui::RichText::new(l::MOVE_RIGHT).size(14.0)).on_hover_text(crate::i18n::t("Pointe de flèche au bout du tracé")).changed();
                     });
                 }
-                Kind::Compo { path } => {
+                Kind::Compo { path, speed, offset, looped } => {
                     section(ui, "Précomposition");
                     ui.label(egui::RichText::new(path.as_str()).size(11.5).color(p.muted));
+                    // Remappage du temps
+                    ui.horizontal(|ui| {
+                        let mut pc = *speed * 100.0;
+                        if ui.add(egui::DragValue::new(&mut pc).speed(1.0).range(-800.0..=800.0).max_decimals(0).prefix(format!("{} ", l::GAUGE)).suffix(" %")).on_hover_text(crate::i18n::t("Vitesse : 200 % deux fois plus vite, -100 % à l'envers")).changed() {
+                            *speed = pc / 100.0;
+                            changed = true;
+                        }
+                        changed |= ui.add(egui::DragValue::new(offset).speed(0.02).max_decimals(2).prefix(format!("{} ", l::SKIP_FORWARD)).suffix(" s")).on_hover_text(crate::i18n::t("Départ : l'instant de la précomposition joué au début du calque")).changed();
+                        changed |= ui.toggle_value(looped, egui::RichText::new(l::REPEAT).size(14.0)).on_hover_text(crate::i18n::t("En boucle au lieu de garder la dernière image")).changed();
+                    });
                     if ui.button(format!("{}  {}", l::EXTERNAL_LINK, crate::i18n::t("ouvrir la précomposition"))).clicked() {
                         self.open_request = Some(path.clone());
                     }
