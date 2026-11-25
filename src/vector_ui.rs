@@ -225,6 +225,8 @@ impl Editor {
 
     fn changed(&mut self) {
         self.save_due = Some(Instant::now());
+        // Les formes liées à une variable prennent la valeur du mode de leur plan
+        self.doc.apply_vars();
     }
 
     fn undo(&mut self, redo: bool) {
@@ -363,7 +365,7 @@ impl Editor {
     /// Une déclinaison du plan `src` au format w × h, posée à droite des plans existants
     fn decline_board(&mut self, src: &Board, name: &str, w: f32, h: f32) {
         let right = self.doc.boards.iter().map(|b| b.x + b.w).fold(f32::MIN, f32::max);
-        let nb = Board { name: format!("{} · {}", src.name, crate::i18n::t(name).split(" (").next().unwrap_or(name)), x: right + 120.0, y: src.y, w, h, bg: src.bg, grid: src.grid, persp: None, device: 0 };
+        let nb = Board { name: format!("{} · {}", src.name, crate::i18n::t(name).split(" (").next().unwrap_or(name)), x: right + 120.0, y: src.y, w, h, bg: src.bg, grid: src.grid, persp: None, device: 0, mode: 0 };
         // Le contenu tient dans le nouveau format (contenu entier, centré)
         let k = (w / src.w).min(h / src.h);
         let (cw, ch) = (src.w * k, src.h * k);
@@ -661,6 +663,122 @@ impl Editor {
 
     // ------------------------------------------------------------------ propriétés
 
+    /// Variables de couleur et leurs modes (comme Figma) : un tableau, une colonne par mode
+    fn vars_ui(&mut self, ui: &mut egui::Ui) {
+        let p = crate::theme::pal();
+        let before = (self.doc.vars.clone(), self.doc.modes.clone());
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new(crate::i18n::t("Variables")).size(11.5).strong().color(p.muted));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.small_button(l::PLUS).on_hover_text(crate::i18n::t("Nouvelle variable de couleur")).clicked() {
+                    let n = self.doc.mode_names().len();
+                    let c = self.doc.swatches.get(self.doc.vars.len() % self.doc.swatches.len().max(1)).copied().unwrap_or([120, 120, 130, 255]);
+                    let mut k = self.doc.vars.len() + 1;
+                    while self.doc.vars.iter().any(|v| v.name == format!("couleur {k}")) {
+                        k += 1;
+                    }
+                    self.doc.vars.push(crate::vector::Variable { name: format!("couleur {k}"), values: vec![c; n] });
+                }
+                if ui.small_button(l::COLUMNS_2).on_hover_text(crate::i18n::t("Ajouter un mode (une colonne de valeurs, ex. sombre)")).clicked() {
+                    if self.doc.modes.is_empty() {
+                        self.doc.modes.push(crate::i18n::t("clair"));
+                    }
+                    let name = if self.doc.modes.len() == 1 { crate::i18n::t("sombre") } else { format!("{} {}", crate::i18n::t("mode"), self.doc.modes.len() + 1) };
+                    self.doc.modes.push(name);
+                    for v in &mut self.doc.vars {
+                        // Le nouveau mode part des couleurs du premier, inversées en clarté pour un sombre
+                        let first = v.values.first().copied().unwrap_or([128, 128, 128, 255]);
+                        let inv = if self.doc.modes.len() == 2 { [255 - first[0], 255 - first[1], 255 - first[2], first[3]] } else { first };
+                        v.values.resize(self.doc.modes.len(), inv);
+                    }
+                }
+            });
+        });
+        if self.doc.vars.is_empty() {
+            ui.label(egui::RichText::new(crate::i18n::t("Des couleurs nommées, avec une valeur par mode (clair, sombre). Une forme liée change quand son plan change de mode.")).size(11.0).color(p.muted));
+            return;
+        }
+        let modes = self.doc.mode_names();
+        let mut del_var = None;
+        let mut del_mode = None;
+        egui::Grid::new("vec-vars").num_columns(modes.len() + 2).min_col_width(20.0).spacing([6.0, 4.0]).show(ui, |ui| {
+            ui.label("");
+            for (k, m) in modes.iter().enumerate() {
+                let mut name = m.clone();
+                let r = ui.add(egui::TextEdit::singleline(&mut name).desired_width(44.0).frame(egui::Frame::NONE).text_color(p.muted).font(egui::TextStyle::Small)).on_hover_text(crate::i18n::t("Nom du mode (clic droit : supprimer)"));
+                if r.changed() {
+                    if self.doc.modes.is_empty() {
+                        self.doc.modes = modes.clone();
+                    }
+                    self.doc.modes[k] = name;
+                }
+                if modes.len() > 1 {
+                    r.context_menu(|ui| {
+                        if ui.button(format!("{}  {}", l::TRASH_2, crate::i18n::t("Supprimer ce mode"))).clicked() {
+                            del_mode = Some(k);
+                            ui.close();
+                        }
+                    });
+                }
+            }
+            ui.label("");
+            ui.end_row();
+            for (i, v) in self.doc.vars.iter_mut().enumerate() {
+                ui.add_sized([96.0, 20.0], egui::TextEdit::singleline(&mut v.name).frame(egui::Frame::NONE));
+                v.values.resize(modes.len(), v.values.first().copied().unwrap_or([128, 128, 128, 255]));
+                for c in v.values.iter_mut() {
+                    let mut col = c32(*c);
+                    if ui.color_edit_button_srgba(&mut col).changed() {
+                        *c = arr(col);
+                    }
+                }
+                if ui.add(egui::Button::new(egui::RichText::new(l::X).color(p.muted)).frame(false)).on_hover_text(crate::i18n::t("Supprimer la variable (les formes gardent leur couleur)")).clicked() {
+                    del_var = Some(i);
+                }
+                ui.end_row();
+            }
+        });
+        if let Some(i) = del_var {
+            let name = self.doc.vars.remove(i).name;
+            for s in self.doc.shapes.iter_mut().filter(|s| s.fill_var == name) {
+                s.fill_var.clear();
+            }
+        }
+        if let Some(k) = del_mode {
+            self.doc.modes.remove(k);
+            for v in &mut self.doc.vars {
+                if k < v.values.len() {
+                    v.values.remove(k);
+                }
+            }
+            for b in &mut self.doc.boards {
+                if b.mode as usize >= k && b.mode > 0 {
+                    b.mode -= 1;
+                }
+            }
+        }
+        // Renommer une variable : les formes liées suivent
+        for (old, new) in before.0.iter().zip(self.doc.vars.iter()) {
+            if old.name != new.name {
+                let (o, n) = (old.name.clone(), new.name.clone());
+                for s in self.doc.shapes.iter_mut().filter(|s| s.fill_var == o) {
+                    s.fill_var = n.clone();
+                }
+            }
+        }
+        if (self.doc.vars.clone(), self.doc.modes.clone()) != before {
+            let mut d = self.doc.clone();
+            (d.vars, d.modes) = before;
+            // Pendant qu'on glisse dans le sélecteur de couleur, une seule étape d'annulation
+            let dragging = ui.input(|i| i.pointer.any_down()) && self.undo.last().is_some_and(|u| u.modes == d.modes && u.vars.len() == d.vars.len() && u.vars.iter().zip(&d.vars).all(|(a, b)| a.name == b.name));
+            if !dragging {
+                self.undo.push(d);
+            }
+            self.changed();
+        }
+    }
+
     fn props(&mut self, ui: &mut egui::Ui) {
         let p = crate::theme::pal();
         let head = |ui: &mut egui::Ui, t: &str| {
@@ -672,6 +790,7 @@ impl Editor {
             let bi = self.sel_board.or(if self.doc.boards.len() == 1 { Some(0) } else { None });
             if let Some(bi) = bi.filter(|&b| b < self.doc.boards.len()) {
                 head(ui, "Plan de travail");
+                let modes = self.doc.mode_names();
                 let before = self.doc.boards[bi].clone();
                 let b = &mut self.doc.boards[bi];
                 ui.text_edit_singleline(&mut b.name);
@@ -731,6 +850,16 @@ impl Editor {
                         }
                     }
                 });
+                // Mode des variables montré par ce plan (clair, sombre…)
+                if modes.len() > 1 {
+                    crate::modifiers::row(ui, &crate::i18n::t("mode"), |ui| {
+                        for (k, m) in modes.iter().enumerate() {
+                            if ui.selectable_label(b.mode as usize == k, m).on_hover_text(crate::i18n::t("Les formes liées à une variable prennent sa valeur dans ce mode")).clicked() {
+                                b.mode = k as u8;
+                            }
+                        }
+                    });
+                }
                 // Grille de perspective (deux points de fuite)
                 ui.horizontal(|ui| {
                     let mut on = b.persp.is_some();
@@ -780,6 +909,7 @@ impl Editor {
             } else {
                 ui.label(egui::RichText::new(crate::i18n::t("Choisis une forme ou un plan de travail.")).color(p.muted));
             }
+            self.vars_ui(ui);
             head(ui, "Nuances");
             // Nuances globales : changer une nuance la change partout où elle sert ; clic droit pour la retirer
             let mut edit: Option<(usize, [u8; 4], [u8; 4])> = None;
@@ -818,6 +948,7 @@ impl Editor {
             return;
         }
         let snapshot = self.doc.clone();
+        let var_names: Vec<String> = self.doc.vars.iter().map(|v| v.name.clone()).collect();
         let mut ch = false;
         let mut outline_text: Option<u64> = None;
         let single = (self.sel.len() == 1).then(|| self.sel[0]);
@@ -1043,10 +1174,34 @@ impl Editor {
             let is_group = matches!(s.kind, Kind::Group { .. });
             if !is_group {
                 head(ui, "Remplissage");
+                // Variable de couleur : la couleur suit le mode du plan (clair, sombre…)
+                if !var_names.is_empty() {
+                    crate::modifiers::row(ui, &crate::i18n::t("variable"), |ui| {
+                        egui::ComboBox::from_id_salt("vec-fill-var").width(140.0).selected_text(if s.fill_var.is_empty() { crate::i18n::t("aucune") } else { s.fill_var.clone() }).show_ui(ui, |ui| {
+                            if ui.selectable_label(s.fill_var.is_empty(), crate::i18n::t("aucune")).clicked() {
+                                s.fill_var.clear();
+                                ch = true;
+                            }
+                            for n in &var_names {
+                                if ui.selectable_label(&s.fill_var == n, n).clicked() {
+                                    s.fill_var = n.clone();
+                                    ch = true;
+                                }
+                            }
+                        })
+                        .response
+                        .on_hover_text(crate::i18n::t("Lier le remplissage à une variable : sa couleur change avec le mode du plan de travail"));
+                    });
+                }
                 let mut rm = None;
                 for (k, f) in s.fills.iter_mut().enumerate() {
                     ui.horizontal(|ui| {
-                        ch |= paint_ui(ui, f, k);
+                        let edited = paint_ui(ui, f, k);
+                        // Changer la couleur à la main détache la variable
+                        if edited && k == 0 && !s.fill_var.is_empty() {
+                            s.fill_var.clear();
+                        }
+                        ch |= edited;
                         if ui.small_button(l::X).clicked() {
                             rm = Some(k);
                         }
@@ -3160,7 +3315,7 @@ impl Editor {
                     self.checkpoint();
                     let n = self.doc.boards.len() + 1;
                     let (bw, bh) = if x1 - x0 < 4.0 { (1080.0, 1080.0) } else { (x1 - x0, y1 - y0) };
-                    self.doc.boards.push(Board { name: format!("{} {n}", crate::i18n::t("Plan de travail")), x: x0, y: y0, w: bw, h: bh, bg: Some([255, 255, 255, 255]), grid: None, persp: None, device: 0 });
+                    self.doc.boards.push(Board { name: format!("{} {n}", crate::i18n::t("Plan de travail")), x: x0, y: y0, w: bw, h: bh, bg: Some([255, 255, 255, 255]), grid: None, persp: None, device: 0, mode: 0 });
                     self.sel_board = Some(self.doc.boards.len() - 1);
                     self.sel.clear();
                     self.tool = Tool::Select;

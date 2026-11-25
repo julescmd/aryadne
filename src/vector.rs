@@ -32,6 +32,9 @@ pub struct Board {
     /// Cadre d'appareil autour du plan (0 aucun, 1 iPhone, 2 Android, 3 écran), avec barre d'état
     #[serde(default, skip_serializing_if = "is_zero_u8")]
     pub device: u8,
+    /// Mode des variables affiché dans ce plan (0 : le premier, souvent « clair »)
+    #[serde(default, skip_serializing_if = "is_zero_u8")]
+    pub mode: u8,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
@@ -264,6 +267,9 @@ pub struct Shape {
     /// Texte sur un tracé : l'identifiant du tracé (ou de l'ellipse) que suit la ligne de base (0 : aucun)
     #[serde(default, skip_serializing_if = "is_zero")]
     pub on_path: u64,
+    /// Variable de couleur du remplissage (comme Figma) : sa valeur suit le mode du plan
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub fill_var: String,
 }
 
 fn is_default_c(c: &[u8; 2]) -> bool {
@@ -340,6 +346,62 @@ pub struct Doc {
     /// Commentaires épinglés sur la toile (jamais exportés)
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub comments: Vec<Comment>,
+    /// Variables de couleur (comme Figma) : une valeur par mode
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub vars: Vec<Variable>,
+    /// Les modes des variables (« clair », « sombre »…) ; vide : un seul mode
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub modes: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct Variable {
+    pub name: String,
+    /// Une couleur par mode, dans l'ordre de `Doc::modes`
+    pub values: Vec<[u8; 4]>,
+}
+
+impl Doc {
+    /// Les noms des modes (au moins un)
+    pub fn mode_names(&self) -> Vec<String> {
+        if self.modes.is_empty() { vec!["clair".into()] } else { self.modes.clone() }
+    }
+
+    /// La valeur d'une variable dans un mode (le premier si ce mode n'a pas de valeur)
+    pub fn var_value(&self, name: &str, mode: usize) -> Option<[u8; 4]> {
+        let v = self.vars.iter().find(|v| v.name == name)?;
+        v.values.get(mode).or(v.values.first()).copied()
+    }
+
+    /// Repose les valeurs des variables sur les formes qui s'en servent, selon le mode du plan où elles sont
+    pub fn apply_vars(&mut self) -> bool {
+        if self.vars.is_empty() {
+            return false;
+        }
+        let mut changed = false;
+        for i in 0..self.shapes.len() {
+            if self.shapes[i].fill_var.is_empty() {
+                continue;
+            }
+            let b = self.bounds(&self.shapes[i]);
+            let (cx, cy) = ((b[0] + b[2]) / 2.0, (b[1] + b[3]) / 2.0);
+            let mode = self.boards.iter().find(|bd| cx >= bd.x && cy >= bd.y && cx <= bd.x + bd.w && cy <= bd.y + bd.h).map(|bd| bd.mode as usize).unwrap_or(0);
+            let Some(c) = self.var_value(&self.shapes[i].fill_var.clone(), mode) else { continue };
+            let s = &mut self.shapes[i];
+            match s.fills.first_mut() {
+                Some(Paint::Solid { c: old }) if *old == c => {}
+                Some(f) => {
+                    *f = Paint::Solid { c };
+                    changed = true;
+                }
+                None => {
+                    s.fills.push(Paint::Solid { c });
+                    changed = true;
+                }
+            }
+        }
+        changed
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -409,12 +471,14 @@ impl Doc {
 impl Doc {
     pub fn starter() -> Doc {
         Doc {
-            boards: vec![Board { name: "Plan de travail 1".into(), x: 0.0, y: 0.0, w: 1080.0, h: 1080.0, bg: Some([255, 255, 255, 255]), grid: None, persp: None, device: 0 }],
+            boards: vec![Board { name: "Plan de travail 1".into(), x: 0.0, y: 0.0, w: 1080.0, h: 1080.0, bg: Some([255, 255, 255, 255]), grid: None, persp: None, device: 0, mode: 0 }],
             shapes: vec![],
             next_id: 1,
             swatches: vec![[24, 24, 27, 255], [255, 255, 255, 255], [236, 108, 89, 255], [244, 191, 80, 255], [86, 166, 122, 255], [84, 128, 220, 255], [150, 110, 210, 255]],
             styles: vec![],
             comments: vec![],
+            vars: vec![],
+            modes: vec![],
         }
     }
 
@@ -713,7 +777,7 @@ fn union(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {
 
 impl Shape {
     pub fn base() -> Shape {
-        Shape { id: 0, name: String::new(), kind: Kind::Rect { w: 100.0, h: 100.0, r: [0.0; 4] }, x: 0.0, y: 0.0, rot: 0.0, fills: vec![], strokes: vec![], opacity: 1.0, visible: true, locked: false, parent: 0, shadow: None, blur: 0.0, blend: String::new(), layout: None, component: false, instance_of: 0, widths: vec![], constraint: [0, 0], style: String::new(), link: String::new(), on_path: 0 }
+        Shape { id: 0, name: String::new(), kind: Kind::Rect { w: 100.0, h: 100.0, r: [0.0; 4] }, x: 0.0, y: 0.0, rot: 0.0, fills: vec![], strokes: vec![], opacity: 1.0, visible: true, locked: false, parent: 0, shadow: None, blur: 0.0, blend: String::new(), layout: None, component: false, instance_of: 0, widths: vec![], constraint: [0, 0], style: String::new(), link: String::new(), on_path: 0, fill_var: String::new() }
     }
 
     pub fn kind_label(&self) -> &'static str {
@@ -2228,6 +2292,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn variables_et_modes() {
+        let mut d = Doc::default();
+        d.modes = vec!["clair".into(), "sombre".into()];
+        d.vars.push(Variable { name: "fond".into(), values: vec![[255, 255, 255, 255], [20, 20, 24, 255]] });
+        d.boards.push(Board { name: "A".into(), x: 0.0, y: 0.0, w: 100.0, h: 100.0, bg: None, grid: None, persp: None, device: 0, mode: 0 });
+        d.boards.push(Board { name: "B".into(), x: 200.0, y: 0.0, w: 100.0, h: 100.0, bg: None, grid: None, persp: None, device: 0, mode: 1 });
+        for x in [10.0, 210.0] {
+            d.shapes.push(Shape { x, y: 10.0, kind: Kind::Rect { w: 50.0, h: 50.0, r: [0.0; 4] }, fill_var: "fond".into(), ..Shape::base() });
+        }
+        assert!(d.apply_vars());
+        assert_eq!(d.shapes[0].fills[0], Paint::Solid { c: [255, 255, 255, 255] });
+        assert_eq!(d.shapes[1].fills[0], Paint::Solid { c: [20, 20, 24, 255] });
+        assert!(!d.apply_vars());
+    }
+
+
+    #[test]
     fn mode_dev_trois_styles() {
         let mut d = Doc::default();
         let mut sh = Shape { x: 10.0, y: 20.0, kind: Kind::Rect { w: 100.0, h: 40.0, r: [0.0; 4] }, ..Shape::base() };
@@ -2305,7 +2386,7 @@ mod tests {
         assert_eq!(constrain(2, 80.0, 90.0, 0.0, 100.0, 0.0, 200.0), (80.0, 190.0));
         assert_eq!(constrain(3, 45.0, 55.0, 0.0, 100.0, 0.0, 200.0), (95.0, 105.0));
         assert_eq!(constrain(4, 80.0, 90.0, 0.0, 100.0, 0.0, 200.0), (160.0, 180.0));
-        let b = Board { name: String::new(), x: 0.0, y: 0.0, w: 1000.0, h: 100.0, bg: None, grid: Some(LayoutGrid { cols: 4, gutter: 20.0, margin: 40.0 }), persp: None, device: 0 };
+        let b = Board { name: String::new(), x: 0.0, y: 0.0, w: 1000.0, h: 100.0, bg: None, grid: Some(LayoutGrid { cols: 4, gutter: 20.0, margin: 40.0 }), persp: None, device: 0, mode: 0 };
         let c = b.columns();
         assert_eq!(c.len(), 4);
         assert_eq!(c[0], (40.0, 255.0));
@@ -2991,7 +3072,7 @@ mod device_tests {
     fn cadres_d_appareil() {
         let mut d = Doc::starter();
         d.shapes.clear();
-        d.boards[0] = Board { name: "Écran".into(), x: 0.0, y: 0.0, w: 393.0, h: 852.0, bg: Some([246, 242, 238, 255]), grid: None, persp: None, device: 1 };
+        d.boards[0] = Board { name: "Écran".into(), x: 0.0, y: 0.0, w: 393.0, h: 852.0, bg: Some([246, 242, 238, 255]), grid: None, persp: None, device: 1, mode: 0 };
         let id = d.new_id();
         d.shapes.push(Shape { id, kind: Kind::Rect { w: 345.0, h: 220.0, r: [24.0; 4] }, x: 24.0, y: 120.0, fills: vec![Paint::solid([236, 108, 89, 255])], ..Shape::base() });
         let svg = to_svg(&d, [-40.0, -40.0, 473.0, 932.0], [473, 932], "/tmp", true);
@@ -3088,7 +3169,7 @@ mod smart_tests {
     fn transition_animee() {
         let mut d = Doc::starter();
         d.shapes.clear();
-        d.boards.push(Board { name: "Détail".into(), x: 1200.0, y: 0.0, w: 1080.0, h: 1080.0, bg: Some([255; 4]), grid: None, persp: None, device: 0 });
+        d.boards.push(Board { name: "Détail".into(), x: 1200.0, y: 0.0, w: 1080.0, h: 1080.0, bg: Some([255; 4]), grid: None, persp: None, device: 0, mode: 0 });
         for (bx, x, w) in [(0.0, 100.0, 200.0), (1200.0, 600.0, 400.0)] {
             let id = d.new_id();
             d.shapes.push(Shape { id, name: "Carte".into(), kind: Kind::Rect { w, h: 200.0, r: [0.0; 4] }, x: bx + x, y: 100.0, fills: vec![Paint::solid([200, 0, 0, 255])], ..Shape::base() });

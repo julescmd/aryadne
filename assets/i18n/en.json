@@ -3417,5 +3417,15 @@
   "glisser : peindre · Alt+glisser : tourner · molette enfoncée : tourner (Maj : déplacer) · [ ] : taille du pinceau · E : gomme · Ctrl+Z annuler": "drag: paint · Alt+drag: orbit · middle drag: orbit (Shift: pan) · [ ]: brush size · E: eraser · Ctrl+Z undo",
   "Copier en": "Copy as",
   "Mode Dev : copier la forme en CSS, SwiftUI ou egui (taille, position dans le plan, couleurs, coins, ombre, police)": "Dev mode: copy the shape as CSS, SwiftUI or egui (size, position in the board, colors, corners, shadow, font)",
-  "copié dans le presse-papiers.": "copied to the clipboard."
+  "copié dans le presse-papiers.": "copied to the clipboard.",
+  "Ajouter un mode (une colonne de valeurs, ex. sombre)": "Add a mode (a column of values, e.g. dark)",
+  "Des couleurs nommées, avec une valeur par mode (clair, sombre). Une forme liée change quand son plan change de mode.": "Named colors with one value per mode (light, dark). A linked shape changes when its artboard switches mode.",
+  "Les formes liées à une variable prennent sa valeur dans ce mode": "Shapes linked to a variable take its value in this mode",
+  "Lier le remplissage à une variable : sa couleur change avec le mode du plan de travail": "Link the fill to a variable: its color follows the artboard's mode",
+  "Nom du mode (clic droit : supprimer)": "Mode name (right click: delete)",
+  "Nouvelle variable de couleur": "New color variable",
+  "Supprimer ce mode": "Delete this mode",
+  "Supprimer la variable (les formes gardent leur couleur)": "Delete the variable (shapes keep their color)",
+  "Variables": "Variables",
+  "variable": "variable"
 }
