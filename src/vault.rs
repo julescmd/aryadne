@@ -636,6 +636,40 @@ pub struct GraphNode {
     pub is_dir: bool,
 }
 
+/// Le graphe local d'une note : elle et ses voisines jusqu'à `depth` liens (sans les dossiers)
+pub fn local_graph(g: Graph, center: &str, depth: usize) -> Graph {
+    let Some(c) = g.nodes.iter().position(|n| n.rel == center) else { return g };
+    let mut dist = vec![usize::MAX; g.nodes.len()];
+    dist[c] = 0;
+    let mut frontier = vec![c];
+    for d in 1..=depth {
+        let mut next = vec![];
+        for &(a, b, folder) in &g.edges {
+            if folder {
+                continue;
+            }
+            for (x, y) in [(a, b), (b, a)] {
+                if frontier.contains(&x) && dist[y] == usize::MAX {
+                    dist[y] = d;
+                    next.push(y);
+                }
+            }
+        }
+        frontier = next;
+    }
+    let keep: Vec<usize> = (0..g.nodes.len()).filter(|&i| dist[i] != usize::MAX && !g.nodes[i].is_dir).collect();
+    let map: HashMap<usize, usize> = keep.iter().enumerate().map(|(n, &o)| (o, n)).collect();
+    let edges = g.edges.iter().filter_map(|&(a, b, f)| Some((*map.get(&a)?, *map.get(&b)?, f))).collect();
+    let mut nodes = g.nodes;
+    let mut out = vec![];
+    for (i, n) in nodes.drain(..).enumerate() {
+        if map.contains_key(&i) {
+            out.push(n);
+        }
+    }
+    Graph { nodes: out, edges }
+}
+
 pub fn graph(root: &str, entries: &[Entry], with_folders: bool, with_files: bool, scope: &str) -> Graph {
     let mut nodes = Vec::new();
     let mut idx: HashMap<String, usize> = HashMap::new();

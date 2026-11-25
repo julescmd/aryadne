@@ -3033,5 +3033,9 @@
   "insuffisant": "insufficient",
   "Lisibilité (WCAG) : 4,5:1 pour un texte courant, 3:1 pour un grand titre": "Readability (WCAG): 4.5:1 for body text, 3:1 for large headings",
   "Décliner…": "Adapt…",
-  "Une copie du plan dans ce format, à côté": "A copy of the artboard in this format, next to it"
+  "Une copie du plan dans ce format, à côté": "A copy of the artboard in this format, next to it",
+  "Exporter la note": "Export the note",
+  "La dernière note ouverte et ses voisines à deux liens": "The last opened note and its neighbors up to two links",
+  "graphe local": "local graph",
+  "page HTML (images comprises)": "HTML page (images included)"
 }

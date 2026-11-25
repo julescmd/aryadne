@@ -20,6 +20,7 @@ mod sendto;
 mod aitasks;
 mod related;
 mod lucide_all;
+mod mdexport;
 mod vector_ui;
 mod keymap;
 mod lucide;
@@ -3534,6 +3535,31 @@ impl App {
                             self.flush_all();
                             self.history_dlg = Some(extras::HistoryDlg { versions: extras::history_list(&root, &rel), rel: rel.clone(), sel: 0, diff: true });
                         }
+                        // Exporter la note en page HTML ou en PDF
+                        if is_md {
+                            let mut fmt = None;
+                            egui::containers::menu::MenuButton::new(egui::RichText::new(lucide::DOWNLOAD).size(14.0)).ui(ui, |ui| {
+                                if ui.button(format!("{}  {}", lucide::GLOBE, crate::i18n::t("page HTML (images comprises)"))).clicked() {
+                                    fmt = Some("html");
+                                    ui.close();
+                                }
+                                if ui.button(format!("{}  PDF", lucide::FILE_TEXT)).clicked() {
+                                    fmt = Some("pdf");
+                                    ui.close();
+                                }
+                            }).0.on_hover_text(crate::i18n::t("Exporter la note"));
+                            if let (Some(f), Content::Text(t)) = (fmt, &self.docs[i].content) {
+                                let title = std::path::Path::new(&rel).file_stem().map(|x| x.to_string_lossy().to_string()).unwrap_or_default();
+                                let dir = std::path::Path::new(&root).join(&rel).parent().map(|p| p.to_path_buf()).unwrap_or_default();
+                                let bytes = if f == "html" { crate::mdexport::to_html(t, &title, &dir).into_bytes() } else { crate::mdexport::to_pdf(t, &title) };
+                                if let Some(out) = rfd::FileDialog::new().add_filter(f.to_uppercase(), &[f]).set_file_name(format!("{title}.{f}")).save_file() {
+                                    match std::fs::write(&out, bytes) {
+                                        Ok(()) => self.toast = Some((format!("{} {}", crate::i18n::t("exporté :"), out.to_string_lossy()), Instant::now())),
+                                        Err(e) => self.error = Some(e.to_string()),
+                                    }
+                                }
+                            }
+                        }
                         if live::is_previewable(&rel) && ui.add(egui::Button::new(egui::RichText::new(lucide::GLOBE).size(14.0)).min_size(egui::vec2(24.0, 20.0))).on_hover_text(crate::i18n::t("Ouvre la page dans ton navigateur ; elle se recharge à chaque enregistrement")).clicked() {
                             self.flush_all();
                             match live::open(&root, &rel) {
@@ -4330,7 +4356,11 @@ impl App {
         let p = theme::pal();
         if self.brain.dirty {
             self.flush_all();
-            let g = vault::graph(&self.root(), &self.entries, self.brain.with_folders, self.brain.with_files, &self.brain.scope.clone());
+            let g = match self.brain.local.clone() {
+                // Graphe local : la note et ses voisines à deux liens, sans les dossiers
+                Some(center) => vault::local_graph(vault::graph(&self.root(), &self.entries, false, self.brain.with_files, ""), &center, 2),
+                None => vault::graph(&self.root(), &self.entries, self.brain.with_folders, self.brain.with_files, &self.brain.scope.clone()),
+            };
             self.brain.set_graph(g);
         }
         egui::CentralPanel::default().frame(egui::Frame::new().fill(p.bg)).show(ui, |ui| {
@@ -4363,6 +4393,14 @@ impl App {
                     }
                     if ui.checkbox(&mut self.brain.with_files, crate::i18n::t("tous les fichiers")).changed() {
                         self.brain.dirty = true;
+                    }
+                    // Graphe local de la dernière note ouverte
+                    let note = self.selected.clone().filter(|r| vault::is_md(r));
+                    let mut local = self.brain.local.is_some();
+                    if ui.add_enabled(note.is_some() || local, egui::Checkbox::new(&mut local, crate::i18n::t("graphe local"))).on_hover_text(crate::i18n::t("La dernière note ouverte et ses voisines à deux liens")).changed() {
+                        self.brain.local = if local { note } else { None };
+                        self.brain.dirty = true;
+                        self.brain.recenter();
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui.button(format!("{}  {}", crate::lucide::SCAN, crate::i18n::t("recentrer"))).clicked() {

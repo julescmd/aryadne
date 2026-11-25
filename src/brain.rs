@@ -17,6 +17,8 @@ pub struct Brain {
     pub dirty: bool,
     /// Dossier dans lequel on est entré ("" = tout le coffre).
     pub scope: String,
+    /// Graphe local : la note au centre (ses voisines à deux liens) ; None : tout le coffre
+    pub local: Option<String>,
     /// Cadre automatiquement le graphe tant que l'utilisateur n'a pas bougé la vue.
     auto_fit: bool,
 }
@@ -35,6 +37,7 @@ impl Default for Brain {
             with_files: false,
             dirty: true,
             scope: String::new(),
+            local: None,
             auto_fit: true,
         }
     }
