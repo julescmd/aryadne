@@ -317,6 +317,9 @@ pub struct Layer {
     /// Masques (comme After Effects) : des formes, animables, qui découpent le calque
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub masks: Vec<Mask>,
+    /// Orientation automatique : le calque tourne pour suivre la direction de son mouvement
+    #[serde(default, skip_serializing_if = "is_false_b")]
+    pub auto_orient: bool,
 }
 
 /// La forme d'un tracé ou d'un masque à un instant
@@ -726,6 +729,7 @@ impl Layer {
             trim: full_trim(),
             exprs: Default::default(),
             masks: vec![],
+            auto_orient: false,
             repeat: None,
         }
     }
@@ -822,6 +826,15 @@ impl Layer {
         let mut p = self.eval_prop(Prop::Pos, t);
         let mut s = self.eval_prop(Prop::Scale, t);
         let mut r = self.eval_prop(Prop::Rot, t)[0];
+        if self.auto_orient {
+            // La direction du mouvement autour de t (un pas d'image de part et d'autre)
+            let dt = 1.0 / 60.0;
+            let (a, b) = (self.eval_prop(Prop::Pos, t - dt), self.eval_prop(Prop::Pos, t + dt));
+            let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+            if dx * dx + dy * dy > 1e-6 {
+                r += dy.atan2(dx).to_degrees();
+            }
+        }
         if let Some(w) = &self.wiggle {
             let x = t * w.freq.max(0.0);
             let seed = self.id ^ w.seed as u64;
@@ -2425,3 +2438,176 @@ mod tests {
         assert_eq!(serde_json::from_str::<Compo>(&s).unwrap(), c);
     }
 }
+
+fn is_false_b(b: &bool) -> bool {
+    !*b
+}
+
+#[cfg(test)]
+mod orient_tests {
+    use super::*;
+
+    #[test]
+    fn orientation_automatique() {
+        let c = Compo::default();
+        let mut l = Layer::new("avion", Kind::Rect { w: 10.0, h: 4.0, radius: 0.0, color: [255; 3] }, &c);
+        // De (0, 0) à (100, 100) : 45° vers le bas à droite
+        l.pos.keys = vec![Key { t: 0.0, v: [0.0, 0.0], ease: Ease::Linear, tan: vec![] }, Key { t: 1.0, v: [100.0, 100.0], ease: Ease::Linear, tan: vec![] }];
+        assert!((l.xform(0.5).angle()).abs() < 1e-3);
+        l.auto_orient = true;
+        assert!((l.xform(0.5).angle() - 45.0).abs() < 0.5, "{}", l.xform(0.5).angle());
+    }
+}
+
+/// Un SVG en calques de forme (un tracé par sous-chemin, avec son remplissage et son contour), centré dans
+/// la composition. Les courbes et les lignes sont échantillonnées serré : le tracé lissé de Motion les suit.
+pub fn svg_layers(svg: &str, compo: &Compo) -> Result<Vec<Layer>, String> {
+    use resvg::usvg;
+    let tree = usvg::Tree::from_str(svg, &usvg::Options::default()).map_err(|e| e.to_string())?;
+    // (points, fermé, remplissage, contour (largeur, couleur), nom)
+    let mut shapes: Vec<(Vec<[f32; 2]>, bool, Option<[u8; 3]>, Option<(f32, [u8; 3])>, String)> = vec![];
+    fn rgb(p: &usvg::Paint) -> Option<[u8; 3]> {
+        match p {
+            usvg::Paint::Color(c) => Some([c.red, c.green, c.blue]),
+            // Dégradés et motifs : une couleur moyenne grise faute de mieux
+            _ => Some([0x99, 0x99, 0x99]),
+        }
+    }
+    fn walk(g: &usvg::Group, out: &mut Vec<(Vec<[f32; 2]>, bool, Option<[u8; 3]>, Option<(f32, [u8; 3])>, String)>) {
+        for node in g.children() {
+            match node {
+                usvg::Node::Group(gg) => walk(gg, out),
+                usvg::Node::Path(p) => {
+                    let t = p.abs_transform();
+                    let tp = |x: f32, y: f32| [t.sx * x + t.kx * y + t.tx, t.ky * x + t.sy * y + t.ty];
+                    let fill = p.fill().and_then(|f| rgb(f.paint()));
+                    let stroke = p.stroke().and_then(|s| rgb(s.paint()).map(|c| (s.width().get() * (t.sx.abs() + t.sy.abs()) / 2.0, c)));
+                    if fill.is_none() && stroke.is_none() {
+                        continue;
+                    }
+                    let name = if p.id().is_empty() { "SVG".to_string() } else { p.id().to_string() };
+                    let mut cur: Vec<[f32; 2]> = vec![];
+                    let mut closed = false;
+                    // Points tous les 4 px environ, pour que le lissage garde les coins et les droites
+                    let push_line = |cur: &mut Vec<[f32; 2]>, e: [f32; 2]| {
+                        if let Some(&a) = cur.last() {
+                            let n = (((e[0] - a[0]).hypot(e[1] - a[1])) / 4.0).ceil().max(1.0) as usize;
+                            for k in 1..=n {
+                                let f = k as f32 / n as f32;
+                                cur.push([a[0] + (e[0] - a[0]) * f, a[1] + (e[1] - a[1]) * f]);
+                            }
+                        } else {
+                            cur.push(e);
+                        }
+                    };
+                    let mut flush = |cur: &mut Vec<[f32; 2]>, closed: &mut bool, out: &mut Vec<_>| {
+                        if cur.len() >= 2 {
+                            out.push((std::mem::take(cur), *closed || fill.is_some(), fill, stroke, name.clone()));
+                        }
+                        cur.clear();
+                        *closed = false;
+                    };
+                    for seg in p.data().segments() {
+                        use usvg::tiny_skia_path::PathSegment::*;
+                        match seg {
+                            MoveTo(a) => {
+                                flush(&mut cur, &mut closed, out);
+                                cur.push(tp(a.x, a.y));
+                            }
+                            LineTo(a) => push_line(&mut cur, tp(a.x, a.y)),
+                            QuadTo(c, a) => {
+                                let s0 = *cur.last().unwrap_or(&[0.0, 0.0]);
+                                let (c, e) = (tp(c.x, c.y), tp(a.x, a.y));
+                                let n = ((s0[0] - e[0]).hypot(s0[1] - e[1]) / 4.0).ceil().clamp(2.0, 64.0) as usize;
+                                for k in 1..=n {
+                                    let f = k as f32 / n as f32;
+                                    let u = 1.0 - f;
+                                    cur.push([u * u * s0[0] + 2.0 * u * f * c[0] + f * f * e[0], u * u * s0[1] + 2.0 * u * f * c[1] + f * f * e[1]]);
+                                }
+                            }
+                            CubicTo(c1, c2, a) => {
+                                let s0 = *cur.last().unwrap_or(&[0.0, 0.0]);
+                                let (c1, c2, e) = (tp(c1.x, c1.y), tp(c2.x, c2.y), tp(a.x, a.y));
+                                let n = ((s0[0] - e[0]).hypot(s0[1] - e[1]) / 4.0).ceil().clamp(3.0, 96.0) as usize;
+                                for k in 1..=n {
+                                    let f = k as f32 / n as f32;
+                                    let u = 1.0 - f;
+                                    let b = [u * u * u, 3.0 * u * u * f, 3.0 * u * f * f, f * f * f];
+                                    cur.push([b[0] * s0[0] + b[1] * c1[0] + b[2] * c2[0] + b[3] * e[0], b[0] * s0[1] + b[1] * c1[1] + b[2] * c2[1] + b[3] * e[1]]);
+                                }
+                            }
+                            Close => {
+                                if let Some(&f0) = cur.first() {
+                                    push_line(&mut cur, f0);
+                                    cur.pop();
+                                }
+                                closed = true;
+                                flush(&mut cur, &mut closed, out);
+                            }
+                        }
+                    }
+                    flush(&mut cur, &mut closed, out);
+                }
+                _ => {}
+            }
+        }
+    }
+    walk(tree.root(), &mut shapes);
+    if shapes.is_empty() {
+        return Err(crate::i18n::t("Aucun tracé dans ce SVG"));
+    }
+    // Tout le dessin est centré dans la composition, à une taille qui y tient
+    let (mut lo, mut hi) = ([f32::MAX; 2], [f32::MIN; 2]);
+    for (pts, ..) in &shapes {
+        for p in pts {
+            lo = [lo[0].min(p[0]), lo[1].min(p[1])];
+            hi = [hi[0].max(p[0]), hi[1].max(p[1])];
+        }
+    }
+    let size = [(hi[0] - lo[0]).max(1.0), (hi[1] - lo[1]).max(1.0)];
+    let k = (compo.w as f32 * 0.6 / size[0]).min(compo.h as f32 * 0.6 / size[1]).min(8.0);
+    let mid = [(lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0];
+    let mut layers = vec![];
+    for (i, (pts, closed, fill, stroke, name)) in shapes.into_iter().enumerate() {
+        // Chaque calque a son origine au centre de sa forme
+        let (mut a, mut b) = ([f32::MAX; 2], [f32::MIN; 2]);
+        for p in &pts {
+            a = [a[0].min(p[0]), a[1].min(p[1])];
+            b = [b[0].max(p[0]), b[1].max(p[1])];
+        }
+        let c = [(a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0];
+        let local: Vec<[f32; 2]> = pts.iter().map(|p| [(p[0] - c[0]) * k, (p[1] - c[1]) * k]).collect();
+        let (width, color) = stroke.map(|(w, c)| (w * k, c)).unwrap_or((0.0, fill.unwrap_or([255; 3])));
+        let mut l = Layer::new(&format!("{name} {}", i + 1), Kind::Path { points: local, closed, width, color, arrow: false, fill, keys: vec![] }, compo);
+        l.pos.v = [compo.w as f32 / 2.0 + (c[0] - mid[0]) * k, compo.h as f32 / 2.0 + (c[1] - mid[1]) * k];
+        layers.push(l);
+    }
+    // Le premier tracé du SVG est dessous : dans Motion, le calque 0 est au-dessus
+    layers.reverse();
+    Ok(layers)
+}
+
+#[cfg(test)]
+mod svg_tests {
+    #[test]
+    fn svg_en_calques() {
+        let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="50"><rect id="fond" x="0" y="0" width="100" height="50" fill="#ff0000"/><path d="M10 10 C 20 0, 40 0, 50 10" stroke="#0000ff" stroke-width="2" fill="none"/></svg>"##;
+        let c = super::Compo::default();
+        let l = super::svg_layers(svg, &c).unwrap();
+        assert_eq!(l.len(), 2);
+        // Le rectangle (premier du SVG) est dessous, donc en dernier
+        match &l[1].kind {
+            super::Kind::Path { points, closed, fill, .. } => {
+                assert!(*closed && *fill == Some([255, 0, 0]) && points.len() > 20);
+            }
+            _ => panic!(),
+        }
+        match &l[0].kind {
+            super::Kind::Path { closed, fill, color, width, .. } => assert!(!*closed && fill.is_none() && *color == [0, 0, 255] && *width > 2.0),
+            _ => panic!(),
+        }
+        // Centré dans la composition
+        assert!((l[1].pos.v[0] - c.w as f32 / 2.0).abs() < 1.0);
+    }
+}
+

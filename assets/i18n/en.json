@@ -3136,5 +3136,10 @@
   "glisser pour changer l'ordre": "drag to reorder",
   "influence et zone": "influence and area",
   "influence et zone ●": "influence and area ●",
-  "couleur des contours": "outline color"
+  "couleur des contours": "outline color",
+  "Trajectoire": "Path",
+  "Orientation automatique": "Auto-orient",
+  "Le calque tourne pour suivre la direction de son mouvement (une voiture sur une route, un avion en papier)": "The layer rotates to follow the direction of its motion (a car on a road, a paper plane)",
+  "Importer un SVG en calques de forme (un logo d'Illustrator, de Figma, du Vectoriel)": "Import an SVG as shape layers (a logo from Illustrator, Figma, Vector)",
+  "Aucun tracé dans ce SVG": "No path in this SVG"
 }

@@ -1395,7 +1395,7 @@ pub fn panel_with(ui: &mut egui::Ui, stack: &mut Vec<Modifier>, applied: bool, r
             ui.spacing_mut().item_spacing = egui::vec2(6.0, 8.0);
             ui.horizontal(|ui| {
                 // La poignée : glisser pour changer l'ordre, comme dans Blender
-                let grip = ui.dnd_drag_source(egui::Id::new(("mod-drag", i)), ModDrag(i), |ui| {
+                let grip = ui.dnd_drag_source(egui::Id::unique(("mod-drag", i)), ModDrag(i), |ui| {
                     ui.label(RichText::new(crate::lucide::GRIP_VERTICAL).size(14.0).color(p.muted));
                 });
                 grip.response.on_hover_cursor(egui::CursorIcon::Grab).on_hover_text(crate::i18n::t("glisser pour changer l'ordre"));

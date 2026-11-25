@@ -5491,7 +5491,7 @@ impl Viewer {
             if let Some((text, height, depth, bevel)) = self.text3d.as_mut() {
                 let mut open = true;
                 let mut make = false;
-                egui::Window::new(crate::i18n::t("Texte 3D")).id(egui::Id::new("text3d-win")).collapsible(false).resizable(false).open(&mut open).show(ui.ctx(), |ui| {
+                egui::Window::new(crate::i18n::t("Texte 3D")).id(egui::Id::unique("text3d-win")).collapsible(false).resizable(false).open(&mut open).show(ui.ctx(), |ui| {
                     ui.add(egui::TextEdit::multiline(text).hint_text(crate::i18n::t("le texte (Entrée : nouvelle ligne)")).desired_rows(2).desired_width(260.0));
                     ui.add(egui::Slider::new(height, 0.1..=10.0).logarithmic(true).text(crate::i18n::t("hauteur d'une ligne")));
                     ui.add(egui::Slider::new(depth, 0.01..=2.0).logarithmic(true).text(crate::i18n::t("épaisseur")));

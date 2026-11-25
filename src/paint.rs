@@ -3558,7 +3558,7 @@ impl Editor {
                 clip.add(egui::Shape::mesh(mesh));
                 // La séparation, qu'on glisse
                 let handle = Rect::from_center_size(pos2(sx, rect.center().y), vec2(14.0, rect.height()));
-                let hr = ui.interact(handle, ui.id().with("split-handle"), egui::Sense::drag());
+                let hr = ui.interact(handle, ui.scope_id().with("split-handle"), egui::Sense::drag());
                 if hr.dragged() {
                     if let Some(q) = hr.interact_pointer_pos() {
                         self.split = Some(((q.x - rect.left()) / rect.width()).clamp(0.02, 0.98));

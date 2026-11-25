@@ -4908,7 +4908,7 @@ impl App {
         let painter = ui.painter_at(canvas);
         painter.rect_filled(canvas, 0.0, egui::Color32::from_gray(12));
         // Le board dessous ne reçoit pas les clics
-        let _ = ui.interact(canvas, ui.id().with("slideshow-block"), egui::Sense::click_and_drag());
+        let _ = ui.interact(canvas, ui.scope_id().with("slideshow-block"), egui::Sense::click_and_drag());
         let area = canvas.shrink2(egui::vec2(24.0, 56.0));
         match self.images.get(&rel, images::Size::Full) {
             images::Slot::Ready(l) => {

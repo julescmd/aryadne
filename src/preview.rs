@@ -338,7 +338,7 @@ fn quote(ui: &mut egui::Ui, body: &[&str], ctx: &Ctx, out: &mut Option<Out>) {
     let fill = if callout.is_some() { color.gamma_multiply(0.1) } else { Color32::TRANSPARENT };
     let resp = egui::Frame::new().fill(fill).corner_radius(4).inner_margin(egui::Margin { left: 14, right: 10, top: 6, bottom: 6 }).show(ui, |ui| {
         ui.set_width(ui.available_width());
-        let fid = ui.id().with(("callout", title.clone(), rest.first().copied().unwrap_or("")));
+        let fid = ui.scope_id().with(("callout", title.clone(), rest.first().copied().unwrap_or("")));
         let mut open = fold.as_deref() != Some("-");
         if fold.is_some() {
             open = ui.ctx().data(|d| d.get_temp::<bool>(fid)).unwrap_or(open);

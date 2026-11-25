@@ -296,6 +296,32 @@ impl Editor {
         self.changed();
     }
 
+    /// Un SVG devient des calques de forme, tous rattachés à un objet nul pour les déplacer ensemble
+    fn import_svg(&mut self) {
+        let Some(f) = rfd::FileDialog::new().add_filter("SVG", &["svg"]).pick_file() else { return };
+        let r = std::fs::read_to_string(&f).map_err(|e| e.to_string()).and_then(|t| motion::svg_layers(&t, &self.compo));
+        match r {
+            Ok(mut layers) => {
+                let name = f.file_stem().map(|x| x.to_string_lossy().to_string()).unwrap_or_else(|| "SVG".into());
+                let mut null = Layer::new(&self.compo.fresh_name(&name), Kind::Null, &self.compo);
+                null.pos.v = [self.compo.w as f32 / 2.0, self.compo.h as f32 / 2.0];
+                for l in &mut layers {
+                    l.parent = Some(null.id);
+                    l.pos.v = [l.pos.v[0] - null.pos.v[0], l.pos.v[1] - null.pos.v[1]];
+                }
+                let n = layers.len();
+                layers.push(null);
+                for (k, l) in layers.into_iter().enumerate() {
+                    self.compo.layers.insert(k, l);
+                }
+                self.sel = Some(n);
+                self.sel_key = None;
+                self.changed();
+            }
+            Err(e) => self.message = Some(e),
+        }
+    }
+
     fn add_image(&mut self) {
         let Some(f) = rfd::FileDialog::new().add_filter("image", &["png", "jpg", "jpeg", "webp", "gif", "bmp", "tga"]).pick_file() else { return };
         match self.vault_path(&f) {
@@ -529,6 +555,9 @@ impl Editor {
                 }
                 if ui.add(egui::Button::new(egui::RichText::new(l::IMAGE_PLUS).size(14.0)).min_size(egui::vec2(24.0, 20.0))).on_hover_text(crate::i18n::t("Image…")).clicked() {
                     self.add_image();
+                }
+                if ui.add(egui::Button::new(egui::RichText::new(l::SPLINE).size(14.0)).min_size(egui::vec2(24.0, 20.0))).on_hover_text(crate::i18n::t("Importer un SVG en calques de forme (un logo d'Illustrator, de Figma, du Vectoriel)")).clicked() {
+                    self.import_svg();
                 }
                 if ui.add(egui::Button::new(egui::RichText::new(l::CIRCLE_DASHED).size(14.0)).min_size(egui::vec2(24.0, 20.0))).on_hover_text(crate::i18n::t("Objet nul : invisible, sert de parent pour piloter plusieurs calques")).clicked() {
                     self.add_layer(Kind::Null, Some([c.0, c.1]));
@@ -1548,6 +1577,8 @@ impl Editor {
                     changed |= ui.color_edit_button_srgb(&mut g.color).changed();
                 });
             }
+            section(ui, "Trajectoire");
+            changed |= ui.checkbox(&mut lay.auto_orient, crate::i18n::t("Orientation automatique")).on_hover_text(crate::i18n::t("Le calque tourne pour suivre la direction de son mouvement (une voiture sur une route, un avion en papier)")).changed();
             section(ui, "Tremblement");
             let mut on = lay.wiggle.is_some();
             if ui.checkbox(&mut on, crate::i18n::t("Bouger tout seul")).on_hover_text(crate::i18n::t("Petits mouvements au hasard, doux, en plus de l'animation (caméra à l'épaule, objet qui flotte)")).changed() {
