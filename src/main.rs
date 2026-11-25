@@ -3561,7 +3561,7 @@ impl App {
                         .on_hover_text(crate::i18n::t("Versions publiées (v001, v002…)"));
                         if matches!(self.docs[i].content, Content::Text(_)) && ui.add(egui::Button::new(egui::RichText::new(lucide::HISTORY).size(14.0)).min_size(egui::vec2(24.0, 20.0))).on_hover_text(crate::i18n::t("Versions précédentes de ce fichier")).clicked() {
                             self.flush_all();
-                            self.history_dlg = Some(extras::HistoryDlg { versions: extras::history_list(&root, &rel), rel: rel.clone(), sel: 0, diff: true });
+                            self.history_dlg = Some(extras::HistoryDlg { versions: extras::history_list(&root, &rel), rel: rel.clone(), sel: 0, diff: true, compare: false });
                         }
                         // Exporter la note en page HTML ou en PDF
                         if is_md {

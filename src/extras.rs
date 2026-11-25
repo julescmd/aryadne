@@ -56,6 +56,7 @@ pub fn fuzzy(q: &str, s: &str) -> Option<i32> {
 #[derive(Clone, Copy, PartialEq)]
 pub enum Cmd {
     View(View),
+    Compare,
     NewNote,
     Daily,
     FromTemplate,
@@ -167,6 +168,7 @@ impl App {
         if self.current().is_some() && self.view() == View::Files {
             v.insert(0, ("fichier : historique des versions", "", Cmd::History));
             v.insert(1, ("fichier : résumer avec l'IA", "", Cmd::Summarize));
+            v.insert(2, ("fichier : comparer avec un autre fichier…", "", Cmd::Compare));
             v.insert(2, ("fichier : fermer l'onglet", "Ctrl+W", Cmd::CloseTab));
             if self.current().is_some_and(|d| runner_for(&d.rel).is_some()) {
                 v.insert(0, ("fichier : exécuter le script", "F5", Cmd::RunFile));
@@ -201,7 +203,16 @@ impl App {
             Cmd::History => {
                 if let Some(rel) = self.current().map(|d| d.rel.clone()) {
                     self.flush_all();
-                    self.history_dlg = Some(HistoryDlg { versions: history_list(&self.root(), &rel), rel, sel: 0, diff: true });
+                    self.history_dlg = Some(HistoryDlg { versions: history_list(&self.root(), &rel), rel, sel: 0, diff: true, compare: false });
+                }
+            }
+            Cmd::Compare => {
+                if let Some(rel) = self.current().map(|d| d.rel.clone()) {
+                    self.flush_all();
+                    if let Some(f) = rfd::FileDialog::new().set_title(crate::i18n::t("comparer avec…")).pick_file() {
+                        let label = f.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                        self.history_dlg = Some(HistoryDlg { versions: vec![(label, f)], rel, sel: 0, diff: true, compare: true });
+                    }
                 }
             }
             Cmd::LivePreview => {
@@ -500,7 +511,7 @@ impl App {
         let mut restore: Option<String> = None;
         egui::Modal::new(egui::Id::unique("history")).frame(egui::Frame::new().fill(p.bg).stroke(egui::Stroke::new(1.0, p.text)).inner_margin(16)).show(ctx, |ui| {
             ui.set_width(820.0);
-            ui.label(caps(&format!("historique · {}", vault::display_rel(&d.rel))));
+            ui.label(caps(&if d.compare { format!("{} · {} ↔ {}", crate::i18n::t("comparer"), vault::display_rel(&d.rel), d.versions.first().map(|v| v.0.as_str()).unwrap_or("")) } else { format!("historique · {}", vault::display_rel(&d.rel)) }));
             ui.add_space(6.0);
             if d.versions.is_empty() {
                 ui.label(RichText::new(crate::i18n::t("Aucune version enregistrée pour l'instant. Aryadne en garde une à chaque enregistrement (au plus une toutes les 2 minutes, les 40 dernières).")).color(p.muted));
@@ -520,7 +531,7 @@ impl App {
                         let current = self.docs.iter().find(|x| x.rel == d.rel).and_then(|x| if let Content::Text(t) = &x.content { Some(t.clone()) } else { None }).unwrap_or_default();
                         let (added, removed) = line_diff(&current, &text);
                         ui.horizontal(|ui| {
-                            ui.label(RichText::new(format!("par rapport à maintenant : +{added} / −{removed} lignes")).color(p.muted).size(11.0));
+                            ui.label(RichText::new(if d.compare { format!("− {} · + {} : +{added} / −{removed} lignes", crate::i18n::t("seulement dans l'autre"), crate::i18n::t("seulement dans celui-ci")) } else { format!("par rapport à maintenant : +{added} / −{removed} lignes") }).color(p.muted).size(11.0));
                             ui.checkbox(&mut d.diff, crate::i18n::t("voir les différences"));
                         });
                         egui::ScrollArea::both().id_salt("hist-view").max_height(400.0).show(ui, |ui| {
@@ -540,7 +551,7 @@ impl App {
                                 ui.add(egui::Label::new(RichText::new(&text).monospace().size(12.0)).wrap_mode(egui::TextWrapMode::Extend));
                             }
                         });
-                        if ui.button(format!("{}  {}", crate::lucide::HISTORY, crate::i18n::t("restaurer cette version"))).clicked() {
+                        if !d.compare && ui.button(format!("{}  {}", crate::lucide::HISTORY, crate::i18n::t("restaurer cette version"))).clicked() {
                             restore = Some(text);
                         }
                     });
@@ -856,6 +867,8 @@ pub struct HistoryDlg {
     pub versions: Vec<(String, PathBuf)>,
     pub sel: usize,
     pub diff: bool,
+    /// Comparaison avec un autre fichier (pas une version) : pas de restauration
+    pub compare: bool,
 }
 
 /// Différence ligne par ligne (plus longue sous-séquence commune) : -1 retiré, 0 identique, 1 ajouté.

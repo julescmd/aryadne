@@ -3193,5 +3193,10 @@
   "régions exportées": "regions exported",
   "problème": "problem",
   "problèmes": "problems",
-  "Toutes les erreurs et alertes du projet (clic pour la liste)": "All errors and warnings of the project (click for the list)"
+  "Toutes les erreurs et alertes du projet (clic pour la liste)": "All errors and warnings of the project (click for the list)",
+  "fichier : comparer avec un autre fichier…": "file: compare with another file…",
+  "comparer avec…": "compare with…",
+  "comparer": "compare",
+  "seulement dans l'autre": "only in the other",
+  "seulement dans celui-ci": "only in this one"
 }
