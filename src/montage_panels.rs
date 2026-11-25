@@ -1475,7 +1475,6 @@ impl Editor {
             "",
             "Crée une copie verticale du montage pour Reels, TikTok et Shorts : chaque plan remplit le cadre 9:16",
         ];
-        let soon = crate::i18n::t("Pas encore branché : viendra avec l'Assistant qui agit dans l'application");
         let mut run: Option<usize> = None;
         if hui.available_width() > 640.0 {
             for (k, label) in ["Couper les silences", "Couper sur le rythme", "Sous-titres", "Version 9:16"].into_iter().enumerate() {
@@ -1486,7 +1485,7 @@ impl Editor {
                         run = Some(k);
                     }
                 } else {
-                    hui.add_enabled(false, b).on_disabled_hover_text(&soon);
+                    egui::containers::menu::MenuButton::from_button(b).ui(&mut hui, |ui| self.subtitle_menu(ui));
                 }
             }
         } else {
@@ -1502,7 +1501,7 @@ impl Editor {
                     run = Some(3);
                     ui.close();
                 }
-                ui.add_enabled(false, egui::Button::new(crate::i18n::t("Sous-titres"))).on_disabled_hover_text(&soon);
+                ui.menu_button(crate::i18n::t("Sous-titres"), |ui| self.subtitle_menu(ui));
             });
         }
         match run {
@@ -2576,6 +2575,64 @@ impl Editor {
         self.message = Some(crate::i18n::t("Analyse du son…"));
     }
 
+    /// Sous-titres : transcrire la parole du montage, importer ou exporter un SRT.
+    fn subtitle_menu(&mut self, ui: &mut egui::Ui) {
+        ui.set_min_width(250.0);
+        let engine = crate::transcribe::engine();
+        let tip = match &engine {
+            Ok(e) => format!("{} ({e})", crate::i18n::t("Écoute le mixage du montage et pose une réplique par titre, en bas de l'image")),
+            Err(e) => e.clone(),
+        };
+        if ui.add_enabled(engine.is_ok() && self.smart_rx.is_none(), egui::Button::new(format!("{}  {}", crate::lucide::AUDIO_LINES, crate::i18n::t("transcrire la parole")))).on_hover_text(&tip).on_disabled_hover_text(&tip).clicked() {
+            self.start_subtitles(ui.ctx());
+            ui.close();
+        }
+        if ui.button(format!("{}  {}", crate::lucide::FOLDER_OPEN, crate::i18n::t("importer un fichier SRT…"))).clicked() {
+            if let Some(f) = rfd::FileDialog::new().add_filter("SRT, VTT", &["srt", "vtt"]).pick_file() {
+                match std::fs::read_to_string(&f) {
+                    Ok(t) => {
+                        let cues = crate::transcribe::parse_srt(&t);
+                        let n = self.project.set_subtitles(&cues);
+                        self.message = Some(format!("{n} {}", crate::i18n::t_mid("sous-titres posés")));
+                        self.changed();
+                    }
+                    Err(e) => self.message = Some(e.to_string()),
+                }
+            }
+            ui.close();
+        }
+        let subs = self.project.subtitles();
+        if ui.add_enabled(!subs.is_empty(), egui::Button::new(format!("{}  {}", crate::lucide::DOWNLOAD, crate::i18n::t("exporter en SRT")))).on_hover_text(crate::i18n::t("À côté du montage, pour YouTube ou un lecteur vidéo")).clicked() {
+            let f = self.path.with_extension("srt");
+            self.message = Some(match crate::vault::atomic_write(&f, crate::transcribe::to_srt(&subs)) {
+                Ok(_) => format!("{} {}", crate::i18n::t("exporté :"), f.file_name().map(|x| x.to_string_lossy().to_string()).unwrap_or_default()),
+                Err(e) => e.to_string(),
+            });
+            ui.close();
+        }
+        if ui.add_enabled(!subs.is_empty(), egui::Button::new(format!("{}  {}", crate::lucide::TRASH_2, crate::i18n::t("retirer les sous-titres")))).clicked() {
+            self.project.set_subtitles(&[]);
+            self.changed();
+            ui.close();
+        }
+    }
+
+    fn start_subtitles(&mut self, ctx: &egui::Context) {
+        let (project, path) = (self.project.clone(), self.path.clone());
+        let (tx, rx) = std::sync::mpsc::channel();
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let tmp = std::env::temp_dir().join(format!("aryadne-mixage-{}.wav", std::process::id()));
+            // Le mixage du montage (préréglage « son seul »), puis la transcription
+            let r = crate::montage::export_as(&project, &path, &tmp, 6).and_then(|_| crate::transcribe::transcribe(&tmp, "")).map(Smart::Subtitles);
+            let _ = std::fs::remove_file(&tmp);
+            let _ = tx.send(r);
+            ctx.request_repaint();
+        });
+        self.smart_rx = Some(rx);
+        self.message = Some(crate::i18n::t("Transcription de la parole…"));
+    }
+
     fn poll_smart(&mut self) {
         let Some(rx) = &self.smart_rx else { return };
         let Ok(r) = rx.try_recv() else { return };
@@ -2586,6 +2643,15 @@ impl Editor {
                 let Some(i) = self.project.index(id) else { return };
                 let saved = self.project.cut_silences(i, &buf);
                 self.message = Some(if saved > 0.05 { format!("{} {saved:.1} s", crate::i18n::t("Silences retirés :")) } else { crate::i18n::t("Aucun silence assez long dans ce clip.") });
+                self.changed();
+            }
+            Ok(Smart::Subtitles(cues)) => {
+                if cues.is_empty() {
+                    self.message = Some(crate::i18n::t("Aucune parole entendue dans le montage."));
+                    return;
+                }
+                let n = self.project.set_subtitles(&cues);
+                self.message = Some(format!("{n} {}", crate::i18n::t_mid("sous-titres posés")));
                 self.changed();
             }
             Ok(Smart::Beats(beats)) => {

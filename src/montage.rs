@@ -502,6 +502,9 @@ pub struct Chapter {
 
 
 
+/// Nom des titres qui sont des sous-titres
+pub const SUBTITLE: &str = "sous-titre";
+
 impl Default for Project {
     fn default() -> Self {
         Project { version: 2, width: 1920, height: 1080, fps: 24.0, tracks: 3, clips: vec![], atracks: 3, vstate: vec![], astate: vec![], markers: vec![], mark_in: None, mark_out: None, bin: vec![], magnetic: true, chapters: vec![] }
@@ -778,6 +781,32 @@ impl Project {
         });
         self.ensure_ids();
         self.clips.len() - 1
+    }
+
+    /// Sous-titres : un titre par réplique sur la piste du haut, en bas de l'image ; les anciens sous-titres partent.
+    pub fn set_subtitles(&mut self, cues: &[crate::transcribe::Cue]) -> usize {
+        self.clips.retain(|c| !(c.kind == "text" && c.name == SUBTITLE));
+        let top = self.tracks.saturating_sub(1);
+        for cue in cues {
+            let i = self.add_text(cue.start);
+            let c = &mut self.clips[i];
+            c.name = SUBTITLE.into();
+            c.track = top;
+            c.src_out = (cue.end - cue.start).max(0.2);
+            c.text = cue.text.clone();
+            c.text_size = (self.height as f32 / 22.0).round().max(14.0);
+            c.y = self.height as f32 * 0.38;
+            c.fade_in = 0.0;
+            c.fade_out = 0.0;
+        }
+        cues.len()
+    }
+
+    /// Les sous-titres du montage, dans l'ordre.
+    pub fn subtitles(&self) -> Vec<crate::transcribe::Cue> {
+        let mut v: Vec<crate::transcribe::Cue> = self.clips.iter().filter(|c| c.kind == "text" && c.name == SUBTITLE).map(|c| crate::transcribe::Cue { start: c.start, end: c.end(), text: c.text.clone() }).collect();
+        v.sort_by(|a, b| a.start.total_cmp(&b.start));
+        v
     }
 
     /// Coupe le clip `i` en deux à l'instant `t` de la timeline. Renvoie l'indice de la seconde moitié.
@@ -1580,6 +1609,18 @@ mod tests {
         let px = img.get_pixel(32, 24);
         assert!(px[0] < 30 && px[1] < 30 && px[2] < 30, "{px:?}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sous_titres_du_montage() {
+        let mut p = Project::default();
+        let cues = vec![crate::transcribe::Cue { start: 1.0, end: 2.5, text: "Bonjour".into() }, crate::transcribe::Cue { start: 3.0, end: 4.0, text: "Salut".into() }];
+        assert_eq!(p.set_subtitles(&cues), 2);
+        assert_eq!(p.subtitles(), cues);
+        assert!(p.clips.iter().all(|c| c.track == p.tracks - 1 && c.y > 0.0));
+        // Refaire remplace, sans doubler
+        p.set_subtitles(&cues[..1]);
+        assert_eq!(p.subtitles().len(), 1);
     }
 
     #[test]

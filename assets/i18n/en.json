@@ -2766,5 +2766,17 @@
   "nouveau storyboard": "new storyboard",
   "Nouveau storyboard": "New storyboard",
   "Dessiner le film case par case : plan, caméra, action et dialogue, puis lire l'animatique et l'envoyer au montage.": "Draw the film panel by panel: shot, camera, action and dialogue, then play the animatic and send it to the edit.",
-  "Cases dessinées avec plan, action et dialogue ; l'animatique se lit et part au montage": "Drawn panels with shot, action and dialogue; the animatic plays and goes to the edit"
+  "Cases dessinées avec plan, action et dialogue ; l'animatique se lit et part au montage": "Drawn panels with shot, action and dialogue; the animatic plays and goes to the edit",
+  "Aucune parole entendue dans le montage.": "No speech heard in the edit.",
+  "Le son est trop long pour l'API (plus de 25 Mo) : coupe-le en parties, ou installe whisper.cpp.": "The audio is too long for the API (over 25 MB): split it, or install whisper.cpp.",
+  "Pour transcrire : installe whisper.cpp et un modèle (ggml-*.bin dans ~/.cache/whisper), ou enregistre une clé OpenAI dans les réglages de l'IA.": "To transcribe: install whisper.cpp and a model (ggml-*.bin in ~/.cache/whisper), or save an OpenAI key in the AI settings.",
+  "Transcription de la parole…": "Transcribing speech…",
+  "Transcription refusée :": "Transcription refused:",
+  "exporter en SRT": "export as SRT",
+  "importer un fichier SRT…": "import an SRT file…",
+  "retirer les sous-titres": "remove subtitles",
+  "sous-titres posés": "subtitles placed",
+  "transcrire la parole": "transcribe speech",
+  "À côté du montage, pour YouTube ou un lecteur vidéo": "Next to the edit, for YouTube or a video player",
+  "Écoute le mixage du montage et pose une réplique par titre, en bas de l'image": "Listens to the edit's mix and places one line per title, at the bottom of the frame"
 }

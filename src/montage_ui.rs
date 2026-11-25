@@ -199,6 +199,8 @@ enum Smart {
     Silences(u64, crate::audio::Buffer),
     /// Temps forts de la musique, en temps de la timeline
     Beats(Vec<f32>),
+    /// Répliques transcrites, en temps de la timeline
+    Subtitles(Vec<crate::transcribe::Cue>),
 }
 
 impl Drop for Editor {

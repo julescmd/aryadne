@@ -6,6 +6,7 @@ mod scopes;
 mod story;
 mod story_ui;
 mod sculpt;
+mod transcribe;
 mod expr;
 mod bases;
 mod vector;
