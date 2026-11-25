@@ -131,6 +131,7 @@ pub const GRID_3X3: &str = "\u{f00e9}";
 pub const LAYOUT_PANEL_LEFT: &str = "\u{f0470}";
 pub const RULER_DIMENSION_LINE: &str = "\u{f0662}";
 pub const USERS: &str = "\u{f01a4}";
+pub const GIT_COMMIT_VERTICAL: &str = "\u{f0552}";
 pub const FLIP_HORIZONTAL_2: &str = "\u{f035e}";
 pub const GLOBE: &str = "\u{f00e8}";
 pub const UNDO_2: &str = "\u{f02a1}";

@@ -2104,3 +2104,67 @@ pub fn production_starter(root: &str) -> Result<String, String> {
     }
     Ok(format!("{dir}/Suivi.md"))
 }
+
+// ---------- versions publiées (v001, v002…) ----------
+
+/// Les versions publiées d'un fichier : dossier « versions » à côté, « nom_v003.ext ». (numéro, chemin dans le coffre)
+pub fn published(root: &str, rel: &str) -> Vec<(u32, String)> {
+    let p = std::path::Path::new(rel);
+    let dir = p.parent().map(|d| d.to_string_lossy().replace('\\', "/")).unwrap_or_default();
+    let stem = p.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+    let ext = p.extension().map(|s| format!(".{}", s.to_string_lossy())).unwrap_or_default();
+    let vdir = if dir.is_empty() { "versions".to_string() } else { format!("{dir}/versions") };
+    let mut out: Vec<(u32, String)> = std::fs::read_dir(std::path::Path::new(root).join(&vdir))
+        .map(|rd| {
+            rd.flatten()
+                .filter_map(|e| {
+                    let name = e.file_name().to_string_lossy().to_string();
+                    let rest = name.strip_prefix(&format!("{stem}_v"))?.strip_suffix(&ext)?;
+                    Some((rest.parse().ok()?, format!("{vdir}/{name}")))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    out.sort();
+    out
+}
+
+/// Publie la version suivante du fichier (une copie figée). Renvoie son numéro.
+pub fn publish(root: &str, rel: &str) -> Result<u32, String> {
+    let n = published(root, rel).last().map(|v| v.0 + 1).unwrap_or(1);
+    let p = std::path::Path::new(rel);
+    let dir = p.parent().map(|d| d.to_string_lossy().replace('\\', "/")).unwrap_or_default();
+    let stem = p.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+    let ext = p.extension().map(|s| format!(".{}", s.to_string_lossy())).unwrap_or_default();
+    let vdir = std::path::Path::new(root).join(if dir.is_empty() { "versions".to_string() } else { format!("{dir}/versions") });
+    std::fs::create_dir_all(&vdir).map_err(|e| e.to_string())?;
+    std::fs::copy(std::path::Path::new(root).join(rel), vdir.join(format!("{stem}_v{n:03}{ext}"))).map_err(|e| e.to_string())?;
+    Ok(n)
+}
+
+/// Revient à une version publiée : l'état actuel est d'abord publié, pour pouvoir revenir.
+pub fn restore_version(root: &str, rel: &str, version_rel: &str) -> Result<u32, String> {
+    let saved = publish(root, rel)?;
+    std::fs::copy(std::path::Path::new(root).join(version_rel), std::path::Path::new(root).join(rel)).map_err(|e| e.to_string())?;
+    Ok(saved)
+}
+
+#[cfg(test)]
+mod versions_tests {
+    #[test]
+    fn versions_publiees() {
+        let dir = std::env::temp_dir().join(format!("aryadne-versions-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("plans")).unwrap();
+        let root = dir.to_string_lossy().to_string();
+        std::fs::write(dir.join("plans/SH010.aryscene"), "un").unwrap();
+        assert_eq!(super::publish(&root, "plans/SH010.aryscene").unwrap(), 1);
+        std::fs::write(dir.join("plans/SH010.aryscene"), "deux").unwrap();
+        assert_eq!(super::publish(&root, "plans/SH010.aryscene").unwrap(), 2);
+        let v = super::published(&root, "plans/SH010.aryscene");
+        assert_eq!(v, vec![(1, "plans/versions/SH010_v001.aryscene".into()), (2, "plans/versions/SH010_v002.aryscene".into())]);
+        std::fs::write(dir.join("plans/SH010.aryscene"), "trois").unwrap();
+        assert_eq!(super::restore_version(&root, "plans/SH010.aryscene", &v[0].1).unwrap(), 3);
+        assert_eq!(std::fs::read_to_string(dir.join("plans/SH010.aryscene")).unwrap(), "un");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

@@ -3378,6 +3378,46 @@ impl App {
                         if extras::runner_for(&rel).is_some() && ui.add(egui::Button::new(egui::RichText::new(crate::lucide::PLAY).size(14.0)).min_size(egui::vec2(24.0, 20.0))).on_hover_text(crate::i18n::t("Lance le script et affiche sa sortie (F5)")).clicked() {
                             *run_now = true;
                         }
+                        // Versions publiées (v001, v002…) : pour tout fichier
+                        egui::containers::menu::MenuButton::new(egui::RichText::new(lucide::GIT_COMMIT_VERTICAL).size(14.0)).ui(ui, |ui| {
+                            ui.set_min_width(240.0);
+                            let list = extras::published(&root, &rel);
+                            if ui.button(format!("{}  {} v{:03}", lucide::UPLOAD, crate::i18n::t("publier la version"), list.last().map(|v| v.0 + 1).unwrap_or(1))).on_hover_text(crate::i18n::t("Une copie figée dans le dossier « versions » à côté du fichier")).clicked() {
+                                self.flush_all();
+                                match extras::publish(&root, &rel) {
+                                    Ok(n) => self.toast = Some((format!("{} v{n:03}", crate::i18n::t("publié :")), Instant::now())),
+                                    Err(e) => self.error = Some(e),
+                                }
+                                self.refresh();
+                                ui.close();
+                            }
+                            if !list.is_empty() {
+                                ui.separator();
+                            }
+                            for (n, vrel) in list.iter().rev() {
+                                ui.horizontal(|ui| {
+                                    ui.label(format!("v{n:03}"));
+                                    if ui.small_button(lucide::EXTERNAL_LINK).on_hover_text(crate::i18n::t("ouvrir cette version")).clicked() {
+                                        self.actions.push(Action::Open(vrel.clone()));
+                                        ui.close();
+                                    }
+                                    if ui.small_button(lucide::UNDO_2).on_hover_text(crate::i18n::t("revenir à cette version (l'état actuel est publié avant)")).clicked() {
+                                        self.flush_all();
+                                        match extras::restore_version(&root, &rel, vrel) {
+                                            Ok(saved) => {
+                                                self.toast = Some((format!("{} v{n:03} · {} v{saved:03}", crate::i18n::t("revenu à"), crate::i18n::t_mid("état précédent gardé en")), Instant::now()));
+                                                self.actions.push(Action::Reload(rel.clone()));
+                                            }
+                                            Err(e) => self.error = Some(e),
+                                        }
+                                        self.refresh();
+                                        ui.close();
+                                    }
+                                });
+                            }
+                        })
+                        .0
+                        .on_hover_text(crate::i18n::t("Versions publiées (v001, v002…)"));
                         if matches!(self.docs[i].content, Content::Text(_)) && ui.add(egui::Button::new(egui::RichText::new(lucide::HISTORY).size(14.0)).min_size(egui::vec2(24.0, 20.0))).on_hover_text(crate::i18n::t("Versions précédentes de ce fichier")).clicked() {
                             self.flush_all();
                             self.history_dlg = Some(extras::HistoryDlg { versions: extras::history_list(&root, &rel), rel: rel.clone(), sel: 0, diff: true });

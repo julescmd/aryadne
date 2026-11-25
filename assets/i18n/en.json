@@ -2831,5 +2831,13 @@
   "Crée une note par personnage et par décor (s'ils n'existent pas), liées au scénario": "Creates a note per character and location (if missing), linked to the screenplay",
   "notes créées (personnages et décors)": "notes created (characters and locations)",
   "nouveau scénario (Fountain)": "new screenplay (Fountain)",
-  "séquence": "scene"
+  "séquence": "scene",
+  "publier la version": "publish version",
+  "Une copie figée dans le dossier « versions » à côté du fichier": "A frozen copy in the “versions” folder next to the file",
+  "publié :": "published:",
+  "ouvrir cette version": "open this version",
+  "revenir à cette version (l'état actuel est publié avant)": "go back to this version (the current state is published first)",
+  "revenu à": "back to",
+  "état précédent gardé en": "previous state kept as",
+  "Versions publiées (v001, v002…)": "Published versions (v001, v002…)"
 }
