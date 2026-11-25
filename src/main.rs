@@ -1904,6 +1904,17 @@ impl App {
     fn refresh(&mut self) {
         self.entries = vault::scan(&self.root());
         self.md = vault::md_index(&self.entries);
+        // Les alias de l'en-tête (aliases:) mènent aussi à la note
+        let rels: Vec<String> = self.entries.iter().filter(|e| !e.is_dir && e.rel.ends_with(".md")).map(|e| e.rel.clone()).collect();
+        for r in crate::bases::rows(&self.root(), &rels) {
+            for (k, vals) in &r.props {
+                if k.eq_ignore_ascii_case("aliases") || k.eq_ignore_ascii_case("alias") {
+                    for a in vals.iter().map(|a| a.trim().trim_matches(['[', ']', '"'])).filter(|a| !a.is_empty()) {
+                        self.md.entry(a.to_lowercase()).or_insert_with(|| r.rel.clone());
+                    }
+                }
+            }
+        }
         self.brain.dirty = true;
         self.update_backlinks();
     }
