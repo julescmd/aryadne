@@ -5155,7 +5155,7 @@ impl Viewer {
         }
         let (mut close, mut save) = (false, false);
         let mut open = true;
-        egui::Window::new(crate::i18n::t("rendu")).open(&mut open).default_size([720.0, 480.0]).resizable(true).show(ctx, |ui| {
+        open = crate::dock::os_window(ctx, "render-3d", &crate::i18n::t("rendu"), egui::vec2(720.0, 480.0), |ui| {
             ui.horizontal(|ui| {
                 ui.add(egui::ProgressBar::new(job.spp as f32 / job.target.max(1) as f32).desired_width(260.0).fill(p.accent).text(format!("{} / {} · {:.0} s", job.spp, job.target, job.elapsed)));
                 if !done && ui.add(egui::Button::new(egui::RichText::new(crate::lucide::SQUARE).size(14.0)).min_size(egui::vec2(24.0, 20.0))).on_hover_text(crate::i18n::t("arrêter")).clicked() {
@@ -5748,7 +5748,7 @@ impl Viewer {
             if let Some((text, height, depth, bevel)) = self.text3d.as_mut() {
                 let mut open = true;
                 let mut make = false;
-                egui::Window::new(crate::i18n::t("Texte 3D")).id(egui::Id::unique("text3d-win")).collapsible(false).resizable(false).open(&mut open).show(ui.ctx(), |ui| {
+                open = crate::dock::os_window(&ui.ctx().clone(), "text3d-win", &crate::i18n::t("Texte 3D"), egui::vec2(340.0, 260.0), |ui| {
                     ui.add(egui::TextEdit::multiline(text).hint_text(crate::i18n::t("le texte (Entrée : nouvelle ligne)")).desired_rows(2).desired_width(260.0));
                     ui.add(egui::Slider::new(height, 0.1..=10.0).logarithmic(true).text(crate::i18n::t("hauteur d'une ligne")));
                     ui.add(egui::Slider::new(depth, 0.01..=2.0).logarithmic(true).text(crate::i18n::t("épaisseur")));

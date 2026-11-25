@@ -5433,7 +5433,7 @@ impl Editor {
             let mut open = true;
             let mut ch = false;
             let name = self.doc.layers[i].name.clone();
-            egui::Window::new(format!("{} · {name}", crate::i18n::t("Style de calque"))).id(egui::Id::unique("paint-fx")).pivot(egui::Align2::RIGHT_TOP).default_pos(ctx.content_rect().right_top() + vec2(-300.0, 140.0)).open(&mut open).resizable(false).collapsible(false).show(&ctx, |ui| {
+            open = crate::dock::os_window(&ctx, "paint-fx", &format!("{} · {name}", crate::i18n::t("Style de calque")), vec2(320.0, 520.0), |ui| {
                 let fx = &mut self.doc.layers[i].fx;
                 ch |= ui.checkbox(&mut fx.on, crate::i18n::t("Styles actifs")).changed();
                 ui.separator();

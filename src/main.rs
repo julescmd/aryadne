@@ -4882,7 +4882,7 @@ impl App {
         let Some(mut period) = self.time_report else { return };
         let p = theme::pal();
         let mut open = true;
-        egui::Window::new(crate::i18n::t("Temps passé")).id(egui::Id::unique("time-report")).default_size(egui::vec2(460.0, 520.0)).open(&mut open).show(ctx, |ui| {
+        open = crate::dock::os_window(ctx, "time-report", &crate::i18n::t("Temps passé"), egui::vec2(460.0, 520.0), |ui| {
             ui.horizontal(|ui| {
                 for (k, l) in [(0u8, "aujourd'hui"), (1, "7 jours"), (2, "30 jours"), (3, "tout")] {
                     ui.selectable_value(&mut period, k, crate::i18n::t(l));

@@ -1810,7 +1810,7 @@ impl Editor {
         let Some(q) = self.icon_pick.as_mut() else { return };
         let mut open = true;
         let mut pick = None;
-        egui::Window::new(crate::i18n::t("icônes Lucide")).open(&mut open).default_size([360.0, 420.0]).show(ctx, |ui| {
+        open = crate::dock::os_window(ctx, "lucide-icons", &crate::i18n::t("icônes Lucide"), egui::vec2(360.0, 420.0), |ui| {
             ui.add(egui::TextEdit::singleline(q).hint_text(crate::i18n::t("chercher (en anglais : heart, arrow, user…)")).desired_width(f32::INFINITY)).request_focus();
             let ql = q.trim().to_lowercase();
             let hits: Vec<&(&str, char)> = crate::lucide_all::ALL.iter().filter(|x| ql.is_empty() || x.0.contains(&ql)).take(240).collect();

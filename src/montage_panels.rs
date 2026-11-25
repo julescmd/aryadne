@@ -3041,7 +3041,7 @@ impl Editor {
         let mut open = true;
         let mut go = None;
         let mut cut = None;
-        egui::Window::new(crate::i18n::t("Montage par le texte")).id(egui::Id::unique("montage-text-edit")).default_size(vec2(420.0, 480.0)).open(&mut open).show(ctx, |ui| {
+        open = crate::dock::os_window(ctx, "montage-text-edit", &crate::i18n::t("Montage par le texte"), vec2(420.0, 480.0), |ui| {
             ui.label(RichText::new(crate::i18n::t("Clic sur une ligne : la tête de lecture y va. La poubelle retire le passage de toutes les pistes, et la suite se rapproche.")).size(11.5).color(p.muted));
             ui.add_space(6.0);
             egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
