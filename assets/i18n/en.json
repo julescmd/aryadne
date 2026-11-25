@@ -2778,5 +2778,7 @@
   "sous-titres posés": "subtitles placed",
   "transcrire la parole": "transcribe speech",
   "À côté du montage, pour YouTube ou un lecteur vidéo": "Next to the edit, for YouTube or a video player",
-  "Écoute le mixage du montage et pose une réplique par titre, en bas de l'image": "Listens to the edit's mix and places one line per title, at the bottom of the frame"
+  "Écoute le mixage du montage et pose une réplique par titre, en bas de l'image": "Listens to the edit's mix and places one line per title, at the bottom of the frame",
+  "Proxies prêts : la lecture se sert des copies légères.": "Proxies ready: playback uses the light copies.",
+  "Proxies : la lecture se sert de copies légères (540p) des vidéos, fabriquées en arrière-plan ; l'export garde toujours les originaux": "Proxies: playback uses light copies (540p) of the videos, made in the background; export always uses the originals"
 }

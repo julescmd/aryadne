@@ -140,6 +140,8 @@ pub struct Editor {
     message: Option<String>,
     /// Analyse en cours pour « couper les silences » ou « caler sur le rythme »
     smart_rx: Option<Receiver<Result<Smart, String>>>,
+    /// Proxies en fabrication : (faits, total) reçus au fil de l'eau
+    proxy_rx: Option<(Receiver<(usize, usize, Option<String>)>, usize, usize)>,
     /// Éditeur de courbes (fenêtre) pour les clés du clip choisi
     curves_open: bool,
     curve_ed: crate::curves::Editor,
@@ -246,6 +248,7 @@ impl Editor {
             last_preset: 0,
             message: None,
             smart_rx: None,
+            proxy_rx: None,
             curves_open: false,
             curve_ed: Default::default(),
             add: vec![],

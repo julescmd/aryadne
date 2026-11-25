@@ -1468,6 +1468,52 @@ impl Editor {
         }
         // Actions automatiques : les deux premières analysent le son, les deux autres attendent l'Assistant
         self.poll_smart();
+        // Proxies : la lecture se sert de copies légères des vidéos
+        if let Some((rx, done, total)) = &mut self.proxy_rx {
+            while let Ok((d, t, err)) = rx.try_recv() {
+                (*done, *total) = (d, t);
+                if let Some(e) = err {
+                    self.message = Some(e);
+                }
+            }
+            if *done >= *total {
+                self.proxy_rx = None;
+                self.message = Some(crate::i18n::t("Proxies prêts : la lecture se sert des copies légères."));
+            } else {
+                hui.ctx().request_repaint_after(std::time::Duration::from_millis(300));
+            }
+        }
+        {
+            let on = self.project.proxies;
+            let label = match &self.proxy_rx {
+                Some((_, d, t)) => format!("{} {d}/{t}", crate::lucide::LOADER),
+                None => crate::lucide::GAUGE.to_string(),
+            };
+            let b = egui::Button::new(RichText::new(label).size(13.0).color(if on { p.on_accent } else { p.text })).fill(if on { p.accent } else { Color32::TRANSPARENT }).min_size(vec2(26.0, 24.0));
+            if hui.add(b).on_hover_text(crate::i18n::t("Proxies : la lecture se sert de copies légères (540p) des vidéos, fabriquées en arrière-plan ; l'export garde toujours les originaux")).clicked() {
+                self.project.proxies = !self.project.proxies;
+                if self.project.proxies && self.proxy_rx.is_none() {
+                    let mut files: Vec<PathBuf> = self.project.clips.iter().filter(|c| c.kind == "video" && !crate::motion::is_compo(&c.file)).map(|c| resolve(&self.path, &c.file)).collect();
+                    files.sort();
+                    files.dedup();
+                    files.retain(|f| crate::montage::proxy_ready(f).is_none());
+                    if !files.is_empty() {
+                        let (tx, rx) = std::sync::mpsc::channel();
+                        let total = files.len();
+                        let ctx = hui.ctx().clone();
+                        std::thread::spawn(move || {
+                            for (k, f) in files.iter().enumerate() {
+                                let err = crate::montage::make_proxy(f).err();
+                                let _ = tx.send((k + 1, total, err));
+                                ctx.request_repaint();
+                            }
+                        });
+                        self.proxy_rx = Some((rx, 0, total));
+                    }
+                }
+                self.changed();
+            }
+        }
         let busy = self.smart_rx.is_some();
         let tips = [
             "Retire les passages sans voix du clip choisi (et de son son lié) ; la suite de ces pistes se resserre",

@@ -492,6 +492,38 @@ pub struct Project {
     /// Chapitres (bandes nommées au-dessus de la règle), triés par début
     #[serde(default)]
     pub chapters: Vec<Chapter>,
+    /// Lecture avec des copies légères des vidéos (proxies), quand elles sont prêtes
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub proxies: bool,
+}
+
+/// Le proxy d'une vidéo : une copie en 540p dans le cache, propre à son contenu (chemin, taille, date).
+pub fn proxy_path(media: &Path) -> Option<PathBuf> {
+    let k = crate::bridge::key(media)?;
+    Some(dirs::cache_dir().unwrap_or_else(std::env::temp_dir).join("aryadne").join("proxies").join(format!("{k:016x}.mp4")))
+}
+
+/// Le proxy s'il est prêt.
+pub fn proxy_ready(media: &Path) -> Option<PathBuf> {
+    proxy_path(media).filter(|p| p.is_file())
+}
+
+/// Fabrique le proxy d'une vidéo : 540 px de haut, images clés serrées pour sauter vite dans la timeline.
+pub fn make_proxy(media: &Path) -> Result<PathBuf, String> {
+    let out = proxy_path(media).ok_or("média introuvable")?;
+    if out.is_file() {
+        return Ok(out);
+    }
+    let ff = ffmpeg::find("ffmpeg").ok_or("ffmpeg n'est pas installé.")?;
+    std::fs::create_dir_all(out.parent().unwrap()).map_err(|e| e.to_string())?;
+    let tmp = out.with_extension("part.mp4");
+    let o = ffmpeg::command(ff).args(["-v", "error", "-y", "-i"]).arg(media).args(["-vf", "scale=-2:'min(540,ih)'", "-c:v", "libx264", "-preset", "veryfast", "-crf", "26", "-g", "12", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "96k"]).arg(&tmp).output().map_err(|e| e.to_string())?;
+    if !o.status.success() {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(String::from_utf8_lossy(&o.stderr).lines().last().unwrap_or("échec du proxy").to_string());
+    }
+    std::fs::rename(&tmp, &out).map_err(|e| e.to_string())?;
+    Ok(out)
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
@@ -507,7 +539,7 @@ pub const SUBTITLE: &str = "sous-titre";
 
 impl Default for Project {
     fn default() -> Self {
-        Project { version: 2, width: 1920, height: 1080, fps: 24.0, tracks: 3, clips: vec![], atracks: 3, vstate: vec![], astate: vec![], markers: vec![], mark_in: None, mark_out: None, bin: vec![], magnetic: true, chapters: vec![] }
+        Project { version: 2, width: 1920, height: 1080, fps: 24.0, tracks: 3, clips: vec![], atracks: 3, vstate: vec![], astate: vec![], markers: vec![], mark_in: None, mark_out: None, bin: vec![], magnetic: true, chapters: vec![], proxies: false }
     }
 }
 
@@ -1110,7 +1142,18 @@ pub fn graph(p: &Project, project: &Path, from: f32, w: u32, h: u32, realtime: b
         let skipped = (from - c.start).max(0.0);
         let (st, en) = ((c.start - from).max(0.0), c.end() - from);
         let (src_in, src_len) = (c.src_in + skipped * c.speed, (c.src_out - c.src_in) - skipped * c.speed);
-        let path = if c.kind == "text" { text_file(c, p) } else { crate::bridge::media(&resolve(project, &c.file)) }.to_string_lossy().to_string();
+        let path = if c.kind == "text" {
+            text_file(c, p)
+        } else {
+            let m = resolve(project, &c.file);
+            // Aperçu de l'image seule : le proxy s'il est prêt (l'export et le son gardent l'original)
+            match (realtime && !with_audio && p.proxies && c.kind == "video").then(|| proxy_ready(&m)).flatten() {
+                Some(px) => px,
+                None => crate::bridge::media(&m),
+            }
+        }
+        .to_string_lossy()
+        .to_string();
         if c.kind == "image" || c.kind == "text" {
             args.extend(["-loop".into(), "1".into(), "-t".into(), format!("{:.3}", en - st), "-i".into(), path]);
         } else {
@@ -1608,6 +1651,35 @@ mod tests {
         let img = frame(&p, &file, 0.5, 64).unwrap();
         let px = img.get_pixel(32, 24);
         assert!(px[0] < 30 && px[1] < 30 && px[2] < 30, "{px:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn proxies() {
+        let Some(ff) = ffmpeg::find("ffmpeg") else { return };
+        let dir = std::env::temp_dir().join(format!("aryadne-proxy-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("grand.mp4");
+        let ok = ffmpeg::command(ff).args(["-v", "error", "-y", "-f", "lavfi", "-i", "testsrc=s=1920x1080:d=1:r=24"]).arg(&src).status().map(|s| s.success()).unwrap_or(false);
+        if !ok {
+            return;
+        }
+        assert!(proxy_ready(&src).is_none());
+        let px = make_proxy(&src).unwrap();
+        assert_eq!(proxy_ready(&src), Some(px.clone()));
+        let img = std::process::Command::new(ffmpeg::find("ffprobe").unwrap()).args(["-v", "error", "-show_entries", "stream=height", "-of", "csv=p=0"]).arg(&px).output().unwrap();
+        assert_eq!(String::from_utf8_lossy(&img.stdout).trim(), "540");
+        // L'aperçu s'en sert, l'export non
+        let mut p = Project::default();
+        let mut c = import(&dir.join("m.aryseq"), &src, 0, 0.0).unwrap();
+        c.file = "grand.mp4".into();
+        p.clips.push(c);
+        p.proxies = true;
+        let (live, _, _, _) = graph(&p, &dir.join("m.aryseq"), 0.0, 640, 360, true, false);
+        assert!(live.iter().any(|a| a == &px.to_string_lossy()));
+        let (out, _, _, _) = graph(&p, &dir.join("m.aryseq"), 0.0, 640, 360, false, false);
+        assert!(!out.iter().any(|a| a == &px.to_string_lossy()));
+        let _ = std::fs::remove_file(&px);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

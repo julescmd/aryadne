@@ -14,7 +14,7 @@ fn cache_dir() -> PathBuf {
 }
 
 /// Clé du cache : chemin, taille et date de modification.
-fn key(path: &Path) -> Option<u64> {
+pub fn key(path: &Path) -> Option<u64> {
     use std::hash::{Hash, Hasher};
     let m = std::fs::metadata(path).ok()?;
     let mut h = std::collections::hash_map::DefaultHasher::new();
