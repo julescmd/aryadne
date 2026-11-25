@@ -211,6 +211,7 @@ struct Rec {
     pass: bool,
     fill: u8,
     adj: Option<Adj>,
+    fx: Option<crate::paint::Fx>,
 }
 
 pub fn read(bytes: &[u8]) -> Result<Doc, String> {
@@ -275,6 +276,7 @@ pub fn read(bytes: &[u8]) -> Result<Doc, String> {
                 r.take(pad)?;
                 let (mut section, mut pass, mut fill) = (0, false, 255u8);
                 let mut adj = None;
+                let mut fx = None;
                 while r.at + 12 <= end {
                     let sig = r.take(4)?;
                     if sig != b"8BIM" && sig != b"8B64" {
@@ -297,6 +299,7 @@ pub fn read(bytes: &[u8]) -> Result<Doc, String> {
                             }
                         }
                         b"iOpa" => fill = r.u8()?,
+                        b"lfx2" | b"lmfx" => fx = fx_of(r.b.get(r.at..data_end).unwrap_or(&[])).or(fx),
                         k => {
                             if let Some(a) = adj_of(k, r.b.get(r.at..data_end).unwrap_or(&[])) {
                                 adj = Some(a);
@@ -306,7 +309,7 @@ pub fn read(bytes: &[u8]) -> Result<Doc, String> {
                     r.at = data_end;
                 }
                 r.at = end;
-                recs.push(Rec { rect, chans, blend: blend_of(&key).unwrap_or_default(), opacity, clip, hidden: flags & 2 != 0, name, mask, section, pass, fill, adj });
+                recs.push(Rec { rect, chans, blend: blend_of(&key).unwrap_or_default(), opacity, clip, hidden: flags & 2 != 0, name, mask, section, pass, fill, adj, fx });
             }
             // Pixels de chaque calque, dans l'ordre des enregistrements
             let mut stack: Vec<u32> = vec![];
@@ -374,6 +377,9 @@ pub fn read(bytes: &[u8]) -> Result<Doc, String> {
                         layer.blend = rec.blend;
                         layer.clip = rec.clip;
                         layer.group = *stack.last().unwrap_or(&0);
+                        if let Some(fx) = rec.fx.clone() {
+                            layer.fx = fx;
+                        }
                         if rec.adj.is_some() {
                             layer.adj = rec.adj;
                             layer.px = vec![0; 4];
@@ -478,6 +484,7 @@ struct Out {
     mask: Option<([i32; 4], bool)>,
     section: Option<(u32, bool, Blend)>,
     adj: Option<([u8; 4], Vec<u8>)>,
+    fx: Option<Vec<u8>>,
 }
 
 fn record(w: &mut W, o: &Out) {
@@ -541,6 +548,14 @@ fn record(w: &mut W, o: &Out) {
             extra.u8(0);
         }
     }
+    if let Some(data) = &o.fx {
+        extra.bytes(b"8BIMlfx2");
+        extra.u32((data.len() + data.len() % 2) as u32);
+        extra.bytes(data);
+        if data.len() % 2 == 1 {
+            extra.u8(0);
+        }
+    }
     if let Some((kind, pass, b)) = o.section {
         extra.bytes(b"8BIMlsct");
         extra.u32(12);
@@ -580,9 +595,10 @@ pub fn write(doc: &Doc) -> (Vec<u8>, Vec<String>) {
             mask,
             section: None,
             adj: None,
+            fx: l.fx.active().then(|| fx_block(&l.fx)),
         }
     };
-    let empty = |name: &str, section: (u32, bool, Blend), hidden: bool, opacity: u8| Out { rect: [0; 4], chans: vec![(-1, vec![]), (0, vec![]), (1, vec![]), (2, vec![])], blend: section.2, opacity, fill: 255, clip: false, hidden, name: name.to_string(), mask: None, section: Some(section), adj: None };
+    let empty = |name: &str, section: (u32, bool, Blend), hidden: bool, opacity: u8| Out { rect: [0; 4], chans: vec![(-1, vec![]), (0, vec![]), (1, vec![]), (2, vec![])], blend: section.2, opacity, fill: 255, clip: false, hidden, name: name.to_string(), mask: None, section: Some(section), adj: None, fx: None };
     while i < doc.layers.len() {
         let gid = doc.layers[i].group;
         let mut j = i + 1;
@@ -609,9 +625,6 @@ pub fn write(doc: &Doc) -> (Vec<u8>, Vec<String>) {
                     None => lost.push(format!("{} ({})", l.name, crate::i18n::t("calque de réglage"))),
                 }
                 continue;
-            }
-            if l.fx.active() {
-                lost.push(format!("{} ({})", l.name, crate::i18n::t("styles")));
             }
             outs.push(to_out(l));
         }
@@ -675,6 +688,13 @@ mod tests {
         top.mask = Some(Layer::new_mask(6, 4, 255));
         top.mask_on = false;
         top.group = 3;
+        top.fx = crate::paint::Fx {
+            on: true,
+            shadow: Some(crate::paint::FxShadow { dx: 3.0, dy: 4.0, blur: 6.0, color: [10, 20, 30], opacity: 0.6 }),
+            glow: Some(crate::paint::FxGlow { size: 9.0, color: [255, 236, 170], opacity: 0.75 }),
+            overlay: Some(crate::paint::FxOverlay { color: [220, 60, 60], opacity: 0.5 }),
+            stroke: Some(crate::paint::FxStroke { size: 2.0, color: [0, 0, 255], opacity: 1.0 }),
+        };
         d.layers.push(top);
         d.groups.push(Group { id: 3, name: "Dossier".into(), visible: true, opacity: 1.0, blend: None, collapsed: false });
         d.layers.push(Layer { adj: Some(Adj::HueSat { h: 0.25, s: 0.5, l: 0.0 }), mask: Some(Layer::new_mask(6, 4, 255)), ..Layer::blank("Teinte", 1, 1) });
@@ -697,6 +717,14 @@ mod tests {
         assert_eq!(l.blend, Blend::Multiply);
         assert!((l.opacity - 0.5).abs() < 0.01);
         assert!(l.mask.is_some() && !l.mask_on);
+        // Styles : l'ombre passe par un angle et une distance, et revient au même décalage
+        let (fx, want) = (&l.fx, &d.layers[1].fx);
+        assert!(fx.on);
+        let (s, w) = (fx.shadow.unwrap(), want.shadow.unwrap());
+        assert!((s.dx - w.dx).abs() < 1e-3 && (s.dy - w.dy).abs() < 1e-3 && s.blur == w.blur && s.color == w.color && (s.opacity - w.opacity).abs() < 1e-4);
+        assert_eq!(fx.glow, want.glow);
+        assert_eq!(fx.overlay, want.overlay);
+        assert_eq!(fx.stroke, want.stroke);
         assert_eq!(back.groups.len(), 1);
         assert_eq!(back.groups[0].name, "Dossier");
         assert_eq!(l.group, back.groups[0].id);
@@ -721,4 +749,250 @@ mod im_tests {
         assert_eq!(img.get_pixel(25, 20).0, [255, 0, 0, 255]);
         assert_eq!(img.get_pixel(1, 1).0, [255, 255, 255, 255]);
     }
+}
+
+// ------------------------------------------------------------------ styles de calque (lfx2)
+
+/// Une valeur de descripteur Photoshop (le sous-ensemble des styles de calque)
+#[derive(Clone, Debug, PartialEq)]
+enum Val {
+    Obj(String, Vec<(String, Val)>),
+    Num(f64),
+    Unit(String, f64),
+    Bool(bool),
+    Enum(String, String),
+    Long(i32),
+    Text(String),
+    List(Vec<Val>),
+}
+
+impl Val {
+    fn get(&self, key: &str) -> Option<&Val> {
+        match self {
+            Val::Obj(_, items) => items.iter().find(|(k, _)| k == key).map(|(_, v)| v),
+            _ => None,
+        }
+    }
+
+    fn num(&self, key: &str) -> Option<f64> {
+        match self.get(key)? {
+            Val::Num(v) | Val::Unit(_, v) => Some(*v),
+            Val::Long(v) => Some(*v as f64),
+            _ => None,
+        }
+    }
+
+    fn on(&self) -> bool {
+        !matches!(self.get("enab"), Some(Val::Bool(false)))
+    }
+
+    fn color(&self) -> [u8; 3] {
+        let c = self.get("Clr ");
+        let ch = |k: &str| c.and_then(|c| c.num(k)).unwrap_or(0.0).round().clamp(0.0, 255.0) as u8;
+        [ch("Rd  "), ch("Grn "), ch("Bl  ")]
+    }
+}
+
+/// Un identifiant de descripteur : longueur puis texte, ou 0 puis quatre caractères
+fn read_id(r: &mut R) -> Result<String, String> {
+    let n = r.u32()? as usize;
+    let n = if n == 0 { 4 } else { n };
+    Ok(String::from_utf8_lossy(r.take(n)?).to_string())
+}
+
+fn read_ustr(r: &mut R) -> Result<String, String> {
+    let n = r.u32()? as usize;
+    let u: Vec<u16> = (0..n).map(|_| r.u16()).collect::<Result<_, _>>()?;
+    Ok(String::from_utf16_lossy(&u).trim_end_matches('\0').to_string())
+}
+
+fn read_f64(r: &mut R) -> Result<f64, String> {
+    let b = r.take(8)?;
+    Ok(f64::from_be_bytes(b.try_into().map_err(|_| "f64")?))
+}
+
+fn read_val(r: &mut R, ty: &[u8], depth: u32) -> Result<Val, String> {
+    if depth > 16 {
+        return Err("descripteur trop profond".into());
+    }
+    Ok(match ty {
+        b"Objc" | b"GlbO" => read_desc(r, depth + 1)?,
+        b"doub" => Val::Num(read_f64(r)?),
+        b"UntF" => {
+            let u = String::from_utf8_lossy(r.take(4)?).to_string();
+            Val::Unit(u, read_f64(r)?)
+        }
+        b"bool" => Val::Bool(r.u8()? != 0),
+        b"enum" => {
+            let t = read_id(r)?;
+            Val::Enum(t, read_id(r)?)
+        }
+        b"long" => Val::Long(r.i32()?),
+        b"TEXT" => Val::Text(read_ustr(r)?),
+        b"VlLs" => {
+            let n = r.u32()? as usize;
+            let mut v = Vec::with_capacity(n.min(256));
+            for _ in 0..n {
+                let t = r.take(4)?.to_vec();
+                v.push(read_val(r, &t, depth + 1)?);
+            }
+            Val::List(v)
+        }
+        b"UnFl" => {
+            r.take(4)?;
+            let n = r.u32()? as usize;
+            r.take(n.checked_mul(8).ok_or("UnFl")?)?;
+            Val::List(vec![])
+        }
+        b"tdta" | b"alis" => {
+            let n = r.u32()? as usize;
+            r.take(n)?;
+            Val::Text(String::new())
+        }
+        t => return Err(format!("type de descripteur inconnu {}", String::from_utf8_lossy(t))),
+    })
+}
+
+fn read_desc(r: &mut R, depth: u32) -> Result<Val, String> {
+    let _name = read_ustr(r)?;
+    let class = read_id(r)?;
+    let n = r.u32()? as usize;
+    let mut items = Vec::with_capacity(n.min(256));
+    for _ in 0..n {
+        let k = read_id(r)?;
+        let t = r.take(4)?.to_vec();
+        items.push((k, read_val(r, &t, depth)?));
+    }
+    Ok(Val::Obj(class, items))
+}
+
+/// Les styles d'un bloc lfx2 (ou lmfx) : ombre portée, lueur externe, incrustation de couleur, contour
+fn fx_of(d: &[u8]) -> Option<crate::paint::Fx> {
+    use crate::paint::{Fx, FxGlow, FxOverlay, FxShadow, FxStroke};
+    let mut r = R { b: d, at: 0 };
+    r.u32().ok()?;
+    if r.u32().ok()? != 16 {
+        return None;
+    }
+    let root = read_desc(&mut r, 0).ok()?;
+    // Un style peut aussi venir en liste (plusieurs ombres…) : on garde la première
+    let pick = |a: &str, multi: &str| -> Option<Val> {
+        root.get(a).cloned().or_else(|| match root.get(multi) {
+            Some(Val::List(l)) => l.first().cloned(),
+            _ => None,
+        })
+    };
+    let op = |v: &Val| (v.num("Opct").unwrap_or(100.0) / 100.0).clamp(0.0, 1.0) as f32;
+    let mut fx = Fx { on: !matches!(root.get("masterFXSwitch"), Some(Val::Bool(false))), ..Default::default() };
+    if let Some(v) = pick("DrSh", "dropShadowMulti").filter(|v| v.on()) {
+        let a = v.num("lagl").unwrap_or(120.0).to_radians();
+        let dist = v.num("Dstn").unwrap_or(5.0);
+        fx.shadow = Some(FxShadow { dx: (-dist * a.cos()) as f32, dy: (dist * a.sin()) as f32, blur: v.num("blur").unwrap_or(5.0) as f32, color: v.color(), opacity: op(&v) });
+    }
+    if let Some(v) = pick("OrGl", "outerGlowMulti").filter(|v| v.on()) {
+        fx.glow = Some(FxGlow { size: v.num("blur").unwrap_or(10.0) as f32, color: v.color(), opacity: op(&v) });
+    }
+    if let Some(v) = pick("SoFi", "solidFillMulti").filter(|v| v.on()) {
+        fx.overlay = Some(FxOverlay { color: v.color(), opacity: op(&v) });
+    }
+    if let Some(v) = pick("FrFX", "frameFXMulti").filter(|v| v.on()) {
+        fx.stroke = Some(FxStroke { size: v.num("Sz  ").unwrap_or(3.0) as f32, color: v.color(), opacity: op(&v) });
+    }
+    (fx.shadow.is_some() || fx.glow.is_some() || fx.overlay.is_some() || fx.stroke.is_some()).then_some(fx)
+}
+
+fn put_id(w: &mut W, id: &str) {
+    if id.len() == 4 {
+        w.u32(0);
+    } else {
+        w.u32(id.len() as u32);
+    }
+    w.bytes(id.as_bytes());
+}
+
+fn put_val(w: &mut W, v: &Val) {
+    match v {
+        Val::Obj(..) => {
+            w.bytes(b"Objc");
+            put_desc(w, v);
+        }
+        Val::Num(x) => {
+            w.bytes(b"doub");
+            w.bytes(&x.to_be_bytes());
+        }
+        Val::Unit(u, x) => {
+            w.bytes(b"UntF");
+            w.bytes(u.as_bytes());
+            w.bytes(&x.to_be_bytes());
+        }
+        Val::Bool(b) => {
+            w.bytes(b"bool");
+            w.u8(*b as u8);
+        }
+        Val::Enum(t, e) => {
+            w.bytes(b"enum");
+            put_id(w, t);
+            put_id(w, e);
+        }
+        Val::Long(x) => {
+            w.bytes(b"long");
+            w.i32(*x);
+        }
+        Val::Text(t) => {
+            w.bytes(b"TEXT");
+            let u: Vec<u16> = t.encode_utf16().chain(std::iter::once(0)).collect();
+            w.u32(u.len() as u32);
+            for c in u {
+                w.u16(c);
+            }
+        }
+        Val::List(l) => {
+            w.bytes(b"VlLs");
+            w.u32(l.len() as u32);
+            for x in l {
+                put_val(w, x);
+            }
+        }
+    }
+}
+
+fn put_desc(w: &mut W, v: &Val) {
+    let Val::Obj(class, items) = v else { return };
+    w.u32(1);
+    w.u16(0);
+    put_id(w, class);
+    w.u32(items.len() as u32);
+    for (k, x) in items {
+        put_id(w, k);
+        put_val(w, x);
+    }
+}
+
+/// Le bloc lfx2 des styles d'un calque
+fn fx_block(fx: &crate::paint::Fx) -> Vec<u8> {
+    let o = |c: &str, items: Vec<(&str, Val)>| Val::Obj(c.into(), items.into_iter().map(|(k, v)| (k.to_string(), v)).collect());
+    let px = |x: f32| Val::Unit("#Pxl".into(), x as f64);
+    let pc = |x: f32| Val::Unit("#Prc".into(), (x * 100.0) as f64);
+    let clr = |c: [u8; 3]| o("RGBC", vec![("Rd  ", Val::Num(c[0] as f64)), ("Grn ", Val::Num(c[1] as f64)), ("Bl  ", Val::Num(c[2] as f64))]);
+    let mode = |m: &str| Val::Enum("BlnM".into(), m.into());
+    let mut items = vec![("Scl ", Val::Unit("#Prc".into(), 100.0)), ("masterFXSwitch", Val::Bool(fx.on))];
+    if let Some(s) = fx.shadow {
+        let dist = s.dx.hypot(s.dy);
+        let ang = if dist > 0.0 { s.dy.atan2(-s.dx).to_degrees() } else { 120.0 };
+        items.push(("DrSh", o("DrSh", vec![("enab", Val::Bool(true)), ("present", Val::Bool(true)), ("showInDialog", Val::Bool(true)), ("Md  ", mode("Mltp")), ("Clr ", clr(s.color)), ("Opct", pc(s.opacity)), ("uglg", Val::Bool(false)), ("lagl", Val::Unit("#Ang".into(), ang as f64)), ("Dstn", px(dist)), ("Ckmt", px(0.0)), ("blur", px(s.blur)), ("Nose", pc(0.0)), ("AntA", Val::Bool(false)), ("layerConceals", Val::Bool(true))])));
+    }
+    if let Some(g) = fx.glow {
+        items.push(("OrGl", o("OrGl", vec![("enab", Val::Bool(true)), ("present", Val::Bool(true)), ("showInDialog", Val::Bool(true)), ("Md  ", mode("Scrn")), ("Clr ", clr(g.color)), ("Opct", pc(g.opacity)), ("GlwT", Val::Enum("BETE".into(), "SfBL".into())), ("Ckmt", px(0.0)), ("blur", px(g.size)), ("Nose", pc(0.0)), ("ShdN", pc(0.0)), ("AntA", Val::Bool(false)), ("Inpr", pc(0.5))])));
+    }
+    if let Some(f) = fx.overlay {
+        items.push(("SoFi", o("SoFi", vec![("enab", Val::Bool(true)), ("present", Val::Bool(true)), ("showInDialog", Val::Bool(true)), ("Md  ", mode("Nrml")), ("Opct", pc(f.opacity)), ("Clr ", clr(f.color))])));
+    }
+    if let Some(st) = fx.stroke {
+        items.push(("FrFX", o("FrFX", vec![("enab", Val::Bool(true)), ("present", Val::Bool(true)), ("showInDialog", Val::Bool(true)), ("Styl", Val::Enum("FStl".into(), "OutF".into())), ("PntT", Val::Enum("FrFl".into(), "SClr".into())), ("Md  ", mode("Nrml")), ("Opct", pc(st.opacity)), ("Sz  ", px(st.size)), ("Clr ", clr(st.color))])));
+    }
+    let mut w = W(vec![]);
+    w.u32(0);
+    w.u32(16);
+    put_desc(&mut w, &o("null", items));
+    w.0
 }
