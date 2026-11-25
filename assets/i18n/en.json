@@ -3037,5 +3037,9 @@
   "Exporter la note": "Export the note",
   "La dernière note ouverte et ses voisines à deux liens": "The last opened note and its neighbors up to two links",
   "graphe local": "local graph",
-  "page HTML (images comprises)": "HTML page (images included)"
+  "page HTML (images comprises)": "HTML page (images included)",
+  "Exporter en .canvas…": "Export as .canvas…",
+  "Images, notes, textes et palettes ; les traits à main levée restent dans le board": "Images, notes, texts and palettes; freehand strokes stay in the board",
+  "Importer un .canvas (Obsidian)…": "Import a .canvas (Obsidian)…",
+  "canvas importé en board (le .canvas reste tel quel)": "canvas imported as a board (the .canvas stays as is)"
 }

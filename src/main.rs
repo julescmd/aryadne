@@ -21,6 +21,7 @@ mod aitasks;
 mod related;
 mod lucide_all;
 mod mdexport;
+mod canvas;
 mod vector_ui;
 mod keymap;
 mod lucide;
@@ -2106,6 +2107,11 @@ impl App {
         } else {
             if board::is_board(&rel) {
                 self.open_board(rel);
+                return;
+            }
+            // Un .canvas d'Obsidian s'ouvre en board (copie à côté ; l'original ne change pas)
+            if ext(&rel) == "canvas" {
+                self.import_canvas(&rel);
                 return;
             }
             let content = if model3d::is_model(&rel) {
@@ -4570,6 +4576,27 @@ impl App {
         self.view = Some(View::Boards);
     }
 
+    /// Convertit un .canvas du coffre en board (à côté, même nom) et l'ouvre
+    fn import_canvas(&mut self, rel: &str) {
+        let root = self.root();
+        let data = vault::read(&root, rel).and_then(|t| canvas::import(&t));
+        let Some(data) = self.report(data) else { return };
+        let stem = rel.strip_suffix(".canvas").unwrap_or(rel);
+        let mut out = format!("{stem}.{}", formats::ext("board"));
+        let mut i = 2;
+        while self.entries.iter().any(|e| e.rel == out) {
+            out = format!("{stem} {i}.{}", formats::ext("board"));
+            i += 1;
+        }
+        let json = serde_json::to_string_pretty(&data).unwrap_or_default();
+        if self.report(vault::write(&root, &out, &json)).is_some() {
+            self.refresh();
+            self.open_board(out);
+            self.board.fit();
+            self.toast = Some((crate::i18n::t("canvas importé en board (le .canvas reste tel quel)").to_string(), Instant::now()));
+        }
+    }
+
     fn new_board(&mut self, name: &str) -> Option<String> {
         let dir = if self.entries.iter().any(|e| e.rel == "boards") { "boards" } else { "" };
         let mut rel = vault::join(dir, &format!("{name}.{}", formats::ext("board")));
@@ -4799,6 +4826,7 @@ impl App {
         let current = self.board.rel.clone().unwrap_or_default();
         let mut pick = None;
         let mut new_board = false;
+        let mut canvas_io: Option<bool> = None;
         egui::containers::menu::MenuButton::new(RichText::new(format!("{}  {} {}", lucide::LAYOUT_DASHBOARD, board::board_name(&current), lucide::CHEVRON_DOWN)).strong()).ui(&mut hui, |ui| {
             for b in &boards {
                 if ui.selectable_label(*b == current, board::board_name(b)).clicked() {
@@ -4809,7 +4837,45 @@ impl App {
             if ui.button(format!("{} {}", lucide::PLUS, crate::i18n::t("Nouveau board"))).clicked() {
                 new_board = true;
             }
+            ui.separator();
+            if ui.button(format!("{} {}", lucide::DOWNLOAD, crate::i18n::t("Importer un .canvas (Obsidian)…"))).clicked() {
+                canvas_io = Some(true);
+            }
+            if ui.button(format!("{} {}", lucide::UPLOAD, crate::i18n::t("Exporter en .canvas…"))).on_hover_text(crate::i18n::t("Images, notes, textes et palettes ; les traits à main levée restent dans le board")).clicked() {
+                canvas_io = Some(false);
+            }
         });
+        match canvas_io {
+            Some(true) => {
+                if let Some(f) = rfd::FileDialog::new().add_filter("JSON Canvas", &["canvas"]).pick_file() {
+                    let root = std::path::PathBuf::from(self.root());
+                    if let Ok(rel) = f.strip_prefix(&root) {
+                        // Dans le coffre : les chemins des fichiers restent valides
+                        self.import_canvas(&rel.to_string_lossy().replace('\\', "/"));
+                    } else if let Some(text) = self.report(std::fs::read_to_string(&f).map_err(|e| e.to_string())) {
+                        let name = f.file_stem().map(|x| x.to_string_lossy().to_string()).unwrap_or("Canvas".into());
+                        let data = canvas::import(&text);
+                        if let (Some(data), Some(_)) = (self.report(data), self.new_board(&name)) {
+                            self.board.data = data;
+                            self.board.checkpoint();
+                            let root = self.root();
+                            let _ = self.board.save(&root);
+                            self.board.fit();
+                        }
+                    }
+                }
+            }
+            Some(false) => {
+                let name = board::board_name(&current);
+                if let Some(out) = rfd::FileDialog::new().add_filter("JSON Canvas", &["canvas"]).set_file_name(format!("{name}.canvas")).save_file() {
+                    match std::fs::write(&out, canvas::export(&self.board.data)) {
+                        Ok(()) => self.toast = Some((format!("{} {}", crate::i18n::t("exporté :"), out.to_string_lossy()), Instant::now())),
+                        Err(e) => self.error = Some(e.to_string()),
+                    }
+                }
+            }
+            None => {}
+        }
         if let Some(b) = pick {
             self.open_board(b);
         }
