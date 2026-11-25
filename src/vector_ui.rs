@@ -118,6 +118,9 @@ pub struct Editor {
     warp_kind: usize,
     /// PDF d'impression : fonds perdus, traits de coupe, CMJN
     print: crate::vector::PrintOpts,
+    /// Animation des plans à exporter : images par seconde, secondes sur chaque plan ; et l'export en cours
+    anim: (f32, f32),
+    anim_rx: Option<std::sync::mpsc::Receiver<String>>,
     warp_bend: f32,
     /// Bibliothèque d'icônes ouverte : la recherche
     icon_pick: Option<String>,
@@ -177,6 +180,8 @@ impl Editor {
             blend_steps: 5,
             warp_kind: 0,
             print: crate::vector::PrintOpts::default(),
+            anim: (24.0, 1.2),
+            anim_rx: None,
             warp_bend: 50.0,
             icon_pick: None,
             present: None,
@@ -443,6 +448,17 @@ impl Editor {
     pub fn show(&mut self, ui: &mut egui::Ui) {
         let p = crate::theme::pal();
         let key = (self.path.to_string_lossy().to_string(), "vec");
+        // Export d'animation en arrière-plan
+        if let Some(rx) = &self.anim_rx {
+            match rx.try_recv() {
+                Ok(m) => {
+                    self.message = Some(m);
+                    self.anim_rx = None;
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => self.anim_rx = None,
+                Err(_) => ui.ctx().request_repaint_after(std::time::Duration::from_millis(200)),
+            }
+        }
         // Présentation du prototype : seul le plan de travail, les liens se cliquent
         if self.present.is_some() {
             self.present_ui(ui);
@@ -2225,6 +2241,39 @@ impl Editor {
                     self.export(bi, "pdf");
                 }
             });
+            // Animation : les plans de même taille à la suite, avec les transitions de la présentation
+            if self.doc.boards.len() > 1 {
+                ui.menu_button(egui::RichText::new(format!("{}  {}", l::CLAPPERBOARD, crate::i18n::t("animation"))), |ui| {
+                    ui.set_width(250.0);
+                    ui.spacing_mut().item_spacing = vec2(6.0, 8.0);
+                    ui.label(egui::RichText::new(crate::i18n::t("Les plans de même taille à la suite ; les formes de même nom glissent de l'un à l'autre.")).size(11.0).color(p.muted));
+                    crate::modifiers::row(ui, &crate::i18n::t("images/s"), |ui| {
+                        for f in [12.0f32, 24.0, 30.0] {
+                            if ui.selectable_label(self.anim.0 == f, format!("{f:.0}")).clicked() {
+                                self.anim.0 = f;
+                            }
+                        }
+                    });
+                    crate::modifiers::row(ui, &crate::i18n::t("sur chaque plan"), |ui| {
+                        ui.add(egui::DragValue::new(&mut self.anim.1).range(0.2..=10.0).speed(0.05).suffix(" s"));
+                    });
+                    if self.anim_rx.is_some() {
+                        ui.horizontal(|ui| {
+                            ui.spinner();
+                            ui.label(crate::i18n::t("export en cours…"));
+                        });
+                    } else {
+                        ui.horizontal(|ui| {
+                            for ext in ["gif", "mp4"] {
+                                if ui.button(format!("{}  {}", l::DOWNLOAD, ext.to_uppercase())).clicked() {
+                                    ui.close();
+                                    self.export_anim(ext);
+                                }
+                            }
+                        });
+                    }
+                });
+            }
             // Le plan de travail devient une composition Motion, chaque forme un calque qu'on anime
             if ui.button(l::FILM).on_hover_text(crate::i18n::t("Animer dans Motion : chaque forme du plan devient un calque modifiable")).clicked() {
                 match self.board_to_motion(bi) {
@@ -2260,6 +2309,27 @@ impl Editor {
         self.doc.shapes.push(Shape { id, name, kind: Kind::Image { path: rel.to_string(), w, h }, x: b[0] + (b[2] - w) / 2.0, y: b[1] + (b[3] - h) / 2.0, ..Shape::base() });
         self.sel = vec![id];
         self.changed();
+    }
+
+    /// L'animation des plans en GIF ou MP4, calculée en arrière-plan
+    fn export_anim(&mut self, ext: &str) {
+        let name = format!("{}.{ext}", self.path.file_stem().map(|s| crate::formats::strip(&s.to_string_lossy()).to_string()).unwrap_or_else(|| "animation".into()));
+        let mut d = rfd::FileDialog::new().add_filter(ext.to_uppercase(), &[ext]).set_file_name(&name);
+        if let Some(dir) = self.path.parent() {
+            d = d.set_directory(dir);
+        }
+        let Some(out) = d.save_file() else { return };
+        let (doc, root, scale, (fps, hold), ext) = (self.doc.clone(), self.root.clone(), self.export_scale, self.anim, ext.to_string());
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.anim_rx = Some(rx);
+        std::thread::spawn(move || {
+            let frames = crate::vector::anim_frames(&doc, &root, scale, fps, hold, 0.45);
+            let r = if frames.is_empty() { Err(crate::i18n::t("rien à animer")) } else if ext == "gif" { crate::vector::write_gif(&frames, fps, &out) } else { crate::vector::write_mp4(&frames, fps, &out) };
+            let _ = tx.send(match r {
+                Ok(()) => format!("{} : {} ({} {})", crate::i18n::t("exporté"), out.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(), frames.len(), crate::i18n::t("images")),
+                Err(e) => e,
+            });
+        });
     }
 
     fn export(&mut self, bi: usize, ext: &str) {

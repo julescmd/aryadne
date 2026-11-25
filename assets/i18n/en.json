@@ -3427,5 +3427,9 @@
   "Supprimer ce mode": "Delete this mode",
   "Supprimer la variable (les formes gardent leur couleur)": "Delete the variable (shapes keep their color)",
   "Variables": "Variables",
-  "variable": "variable"
+  "variable": "variable",
+  "Les plans de même taille à la suite ; les formes de même nom glissent de l'un à l'autre.": "Artboards of the same size in sequence; shapes with the same name glide from one to the next.",
+  "rien à animer": "nothing to animate",
+  "sur chaque plan": "on each artboard",
+  "animation": "animation"
 }

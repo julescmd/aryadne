@@ -2292,6 +2292,30 @@ mod tests {
     use super::*;
 
     #[test]
+    fn animation_des_plans() {
+        let mut d = Doc::default();
+        for (i, x) in [0.0f32, 200.0].iter().enumerate() {
+            d.boards.push(Board { name: format!("P{i}"), x: *x, y: 0.0, w: 40.0, h: 30.0, bg: Some([255; 4]), grid: None, persp: None, device: 0, mode: 0 });
+            d.shapes.push(Shape { id: i as u64 + 1, name: "carré".into(), x: x + 5.0 + i as f32 * 20.0, y: 5.0, kind: Kind::Rect { w: 10.0, h: 10.0, r: [0.0; 4] }, fills: vec![Paint::Solid { c: [200, 0, 0, 255] }], ..Shape::base() });
+        }
+        let fr = anim_frames(&d, "", 1.0, 10.0, 0.5, 0.5);
+        // 5 images tenues par plan, 4 de transition
+        assert_eq!(fr.len(), 14);
+        assert_eq!((fr[0].width(), fr[0].height()), (40, 30));
+        let gif = std::env::temp_dir().join("aryadne-anim-test.gif");
+        write_gif(&fr, 10.0, &gif).unwrap();
+        assert!(std::fs::metadata(&gif).unwrap().len() > 100);
+        let _ = std::fs::remove_file(&gif);
+        if crate::ffmpeg::find("ffmpeg").is_some() {
+            let mp4 = std::env::temp_dir().join("aryadne-anim-test.mp4");
+            write_mp4(&fr, 10.0, &mp4).unwrap();
+            assert!(std::fs::metadata(&mp4).unwrap().len() > 100);
+            let _ = std::fs::remove_file(&mp4);
+        }
+    }
+
+
+    #[test]
     fn variables_et_modes() {
         let mut d = Doc::default();
         d.modes = vec!["clair".into(), "sombre".into()];
@@ -3082,6 +3106,68 @@ mod device_tests {
             image::RgbaImage::from_raw(473, 932, px).unwrap().save("/tmp/device.png").unwrap();
         }
     }
+}
+
+// ---------- Animation exportée : les plans à la suite, avec leurs transitions ----------
+
+/// Les images de l'animation : chaque plan de la taille du premier reste `hold` secondes, puis glisse vers
+/// le suivant en `trans` secondes (formes de même nom animées, comme en présentation)
+pub fn anim_frames(doc: &Doc, root: &str, scale: f32, fps: f32, hold: f32, trans: f32) -> Vec<image::RgbaImage> {
+    let Some(first) = doc.boards.first() else { return vec![] };
+    let order: Vec<usize> = (0..doc.boards.len()).filter(|&i| (doc.boards[i].w - first.w).abs() < 0.5 && (doc.boards[i].h - first.h).abs() < 0.5).collect();
+    let mut out = vec![];
+    let n_hold = (hold * fps).round().max(1.0) as usize;
+    let n_trans = (trans * fps).round().max(1.0) as usize;
+    for (k, &a) in order.iter().enumerate() {
+        let Some(img) = export_png(doc, a, root, scale) else { continue };
+        for _ in 0..n_hold {
+            out.push(img.clone());
+        }
+        if let Some(&b) = order.get(k + 1) {
+            for j in 1..n_trans {
+                if let Some(img) = smart_frame(doc, a, b, j as f32 / n_trans as f32).and_then(|d| export_png(&d, 0, root, scale)) {
+                    out.push(img);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// GIF animé, en boucle
+pub fn write_gif(frames: &[image::RgbaImage], fps: f32, out: &Path) -> Result<(), String> {
+    use image::codecs::gif::{GifEncoder, Repeat};
+    let f = std::fs::File::create(out).map_err(|e| e.to_string())?;
+    let mut enc = GifEncoder::new_with_speed(std::io::BufWriter::new(f), 10);
+    enc.set_repeat(Repeat::Infinite).map_err(|e| e.to_string())?;
+    let delay = image::Delay::from_numer_denom_ms((1000.0 / fps).round() as u32, 1);
+    for fr in frames {
+        enc.encode_frame(image::Frame::from_parts(fr.clone(), 0, 0, delay)).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// Vidéo MP4 (H.264) par ffmpeg, les images passées en PNG dans un tuyau
+pub fn write_mp4(frames: &[image::RgbaImage], fps: f32, out: &Path) -> Result<(), String> {
+    use std::io::Write;
+    let ff = crate::ffmpeg::find("ffmpeg").ok_or("ffmpeg n'est pas installé.")?;
+    let mut child = crate::ffmpeg::command(ff)
+        .args(["-y", "-v", "error", "-f", "image2pipe", "-framerate", &format!("{fps}"), "-i", "-", "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p", "-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2", "-movflags", "+faststart"])
+        .arg(out)
+        .stdin(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    {
+        let mut si = child.stdin.take().ok_or("ffmpeg")?;
+        for fr in frames {
+            let mut buf = std::io::Cursor::new(vec![]);
+            fr.write_to(&mut buf, image::ImageFormat::Png).map_err(|e| e.to_string())?;
+            si.write_all(buf.get_ref()).map_err(|e| e.to_string())?;
+        }
+    }
+    let o = child.wait_with_output().map_err(|e| e.to_string())?;
+    if o.status.success() { Ok(()) } else { Err(format!("ffmpeg : {}", String::from_utf8_lossy(&o.stderr).lines().last().unwrap_or("erreur"))) }
 }
 
 // ---------- Transitions animées entre plans (comme Smart Animate) ----------
