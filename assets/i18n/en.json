@@ -3024,5 +3024,14 @@
   "rien à animer sur ce plan de travail": "nothing to animate on this artboard",
   "plan introuvable": "artboard not found",
   "Texte sur un tracé : les lettres suivent la forme choisie": "Text on a path: the letters follow the chosen shape",
-  "aucun tracé": "no path"
+  "aucun tracé": "no path",
+  "Pair-impair : les formes qui se recouvrent font des trous": "Even-odd: overlapping shapes make holes",
+  "Masque d'écrêtage : la forme du dessous découpe celles du dessus": "Clipping mask: the bottom shape clips the ones above",
+  "Copier en CSS (taille, position dans le plan, couleurs, coins, ombre, police)": "Copy as CSS (size, position in the artboard, colors, corners, shadow, font)",
+  "CSS copié.": "CSS copied.",
+  "AA grand texte": "AA large text",
+  "insuffisant": "insufficient",
+  "Lisibilité (WCAG) : 4,5:1 pour un texte courant, 3:1 pour un grand titre": "Readability (WCAG): 4.5:1 for body text, 3:1 for large headings",
+  "Décliner…": "Adapt…",
+  "Une copie du plan dans ce format, à côté": "A copy of the artboard in this format, next to it"
 }

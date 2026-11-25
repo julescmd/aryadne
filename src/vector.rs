@@ -594,6 +594,7 @@ impl Doc {
             3 => "Intersection",
             4 => "Exclusion",
             5 => "Pair-impair",
+            6 => "Masque",
             _ => "Groupe",
         };
         let children: Vec<u64> = members.iter().map(|&k| self.shapes[k].id).collect();
@@ -768,6 +769,68 @@ pub fn nodes_data(nodes: &[Node], closed: bool) -> String {
         d.push('Z');
     }
     d
+}
+
+/// Rapport de contraste (WCAG) entre deux couleurs : de 1 à 21 ; 4,5 suffit pour un texte courant (AA)
+pub fn contrast(a: [u8; 4], b: [u8; 4]) -> f32 {
+    let lum = |c: [u8; 4]| {
+        let ch = |v: u8| {
+            let x = v as f32 / 255.0;
+            if x <= 0.039_28 { x / 12.92 } else { ((x + 0.055) / 1.055).powf(2.4) }
+        };
+        0.2126 * ch(c[0]) + 0.7152 * ch(c[1]) + 0.0722 * ch(c[2])
+    };
+    let (l1, l2) = (lum(a), lum(b));
+    (l1.max(l2) + 0.05) / (l1.min(l2) + 0.05)
+}
+
+/// La forme en CSS (mode Dev de Figma) : taille, position dans son plan, fond, bordure, coins, ombre, police
+pub fn css_of(d: &Doc, s: &Shape) -> String {
+    let b = d.bounds(s);
+    let board = d.boards.iter().find(|bd| b[0] >= bd.x && b[1] >= bd.y && b[0] <= bd.x + bd.w && b[1] <= bd.y + bd.h);
+    let (ox, oy) = board.map(|bd| (bd.x, bd.y)).unwrap_or((0.0, 0.0));
+    let rgba = |c: [u8; 4]| if c[3] == 255 { format!("#{:02x}{:02x}{:02x}", c[0], c[1], c[2]) } else { format!("rgba({}, {}, {}, {:.2})", c[0], c[1], c[2], c[3] as f32 / 255.0) };
+    let mut out = format!("/* {} */\nposition: absolute;\nleft: {:.0}px;\ntop: {:.0}px;\nwidth: {:.0}px;\nheight: {:.0}px;\n", s.name, b[0] - ox, b[1] - oy, b[2] - b[0], b[3] - b[1]);
+    let is_text = matches!(s.kind, Kind::Text { .. });
+    if let Some(f) = s.fills.first() {
+        let v = match f {
+            Paint::Solid { c } => rgba(*c),
+            Paint::Linear { stops, angle } => format!("linear-gradient({:.0}deg, {})", angle + 90.0, stops.iter().map(|(t, c)| format!("{} {:.0}%", rgba(*c), t * 100.0)).collect::<Vec<_>>().join(", ")),
+            Paint::Radial { stops } => format!("radial-gradient({})", stops.iter().map(|(t, c)| format!("{} {:.0}%", rgba(*c), t * 100.0)).collect::<Vec<_>>().join(", ")),
+        };
+        out.push_str(&format!("{}: {v};\n", if is_text { "color" } else if matches!(f, Paint::Solid { .. }) { "background-color" } else { "background" }));
+    }
+    if let Some(k) = s.strokes.first() {
+        out.push_str(&format!("border: {:.0}px {} {};\n", k.width, if k.dash.is_empty() { "solid" } else { "dashed" }, rgba(k.paint.first())));
+    }
+    match &s.kind {
+        Kind::Rect { r, .. } if r.iter().any(|x| *x > 0.0) => out.push_str(&if r.iter().all(|x| *x == r[0]) { format!("border-radius: {:.0}px;\n", r[0]) } else { format!("border-radius: {:.0}px {:.0}px {:.0}px {:.0}px;\n", r[0], r[1], r[2], r[3]) }),
+        Kind::Ellipse { .. } => out.push_str("border-radius: 50%;\n"),
+        Kind::Text { size, font, align, spacing, leading, .. } => {
+            out.push_str(&format!("font-family: \"{font}\";\nfont-size: {size:.0}px;\nline-height: {leading:.2};\n"));
+            if *spacing != 0.0 {
+                out.push_str(&format!("letter-spacing: {spacing:.1}px;\n"));
+            }
+            out.push_str(&format!("text-align: {};\n", ["left", "center", "right"][(*align).min(2) as usize]));
+        }
+        _ => {}
+    }
+    if let Some(sh) = &s.shadow {
+        out.push_str(&format!("box-shadow: {:.0}px {:.0}px {:.0}px {};\n", sh.dx, sh.dy, sh.blur, rgba(sh.c)));
+    }
+    if s.opacity < 1.0 {
+        out.push_str(&format!("opacity: {:.2};\n", s.opacity));
+    }
+    if s.blur > 0.0 {
+        out.push_str(&format!("filter: blur({:.0}px);\n", s.blur / 2.0));
+    }
+    if s.rot != 0.0 {
+        out.push_str(&format!("transform: rotate({:.1}deg);\n", s.rot));
+    }
+    if !s.blend.is_empty() && s.blend != "normal" {
+        out.push_str(&format!("mix-blend-mode: {};\n", s.blend));
+    }
+    out
 }
 
 /// La ligne que suit un texte sur un tracé : ses points (monde) et leur abscisse curviligne
@@ -1073,6 +1136,19 @@ impl Gen<'_> {
             }
             match (op, kids.split_first()) {
                 // Pair-impair : tous les contours en un seul tracé (les trous dans les formes restent vides)
+                // Masque d'écrêtage (comme Figma) : la forme du dessous découpe celles du dessus
+                (6, Some((first, rest))) if !rest.is_empty() => {
+                    let mid = self.id("m");
+                    let mut mask = format!(r#"<mask id="{mid}" maskUnits="userSpaceOnUse" x="-100000" y="-100000" width="200000" height="200000">"#);
+                    self.silhouette(&mut mask, first, "white");
+                    mask.push_str("</mask>");
+                    self.defs.push_str(&mask);
+                    let _ = write!(out, r#"<g mask="url(#{mid})">"#);
+                    for k in rest {
+                        self.shape(out, k);
+                    }
+                    out.push_str("</g>");
+                }
                 (5, Some((first, _))) => {
                     let mut d = String::new();
                     for k in &kids {
@@ -1954,6 +2030,23 @@ mod tests {
         let b = d.bounds(d.get(t).unwrap());
         assert!(b[0] < 0.0 && b[2] > 400.0);
         assert!(to_svg(&d, [0.0, 0.0, 500.0, 300.0], [100, 60], ".", false).contains(&path[..20]));
+    }
+
+    #[test]
+    fn contraste_css_masque() {
+        assert!((contrast([0, 0, 0, 255], [255, 255, 255, 255]) - 21.0).abs() < 0.01);
+        assert!(contrast([119, 119, 119, 255], [255, 255, 255, 255]) > 4.4);
+        let mut d = Doc::starter();
+        let id = d.new_id();
+        d.shapes.push(Shape { id, name: "Bouton".into(), kind: Kind::Rect { w: 120.0, h: 40.0, r: [8.0; 4] }, x: 10.0, y: 20.0, fills: vec![Paint::solid([236, 108, 89, 255])], ..Shape::base() });
+        let css = css_of(&d, d.get(id).unwrap());
+        assert!(css.contains("left: 10px;") && css.contains("width: 120px;") && css.contains("background-color: #ec6c59;") && css.contains("border-radius: 8px;"), "{css}");
+        // Masque : un cercle qui découpe un rectangle
+        let c = d.new_id();
+        d.shapes.push(Shape { id: c, kind: Kind::Ellipse { w: 50.0, h: 50.0 }, fills: vec![Paint::solid([0, 0, 0, 255])], ..Shape::base() });
+        let g = d.group(&[c, id], 6).unwrap();
+        assert!(to_svg(&d, [0.0, 0.0, 200.0, 200.0], [50, 50], ".", false).contains("mask="));
+        assert_eq!(d.get(g).unwrap().name, "Masque");
     }
 
     #[test]

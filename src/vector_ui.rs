@@ -313,6 +313,36 @@ impl Editor {
         self.doc.shapes.iter_mut().find(|s| s.id == id)
     }
 
+    /// Une déclinaison du plan `src` au format w × h, posée à droite des plans existants
+    fn decline_board(&mut self, src: &Board, name: &str, w: f32, h: f32) {
+        let right = self.doc.boards.iter().map(|b| b.x + b.w).fold(f32::MIN, f32::max);
+        let nb = Board { name: format!("{} · {}", src.name, crate::i18n::t(name).split(" (").next().unwrap_or(name)), x: right + 120.0, y: src.y, w, h, bg: src.bg, grid: src.grid };
+        // Le contenu tient dans le nouveau format (contenu entier, centré)
+        let k = (w / src.w).min(h / src.h);
+        let (cw, ch) = (src.w * k, src.h * k);
+        let dst = [nb.x + (w - cw) / 2.0, nb.y + (h - ch) / 2.0, nb.x + (w + cw) / 2.0, nb.y + (h + ch) / 2.0];
+        let from = [src.x, src.y, src.x + src.w, src.y + src.h];
+        let inside: Vec<u64> = self.doc.shapes.iter().filter(|s| s.parent == 0).filter(|s| {
+            let b = self.doc.bounds(s);
+            let c = [(b[0] + b[2]) / 2.0, (b[1] + b[3]) / 2.0];
+            c[0] >= from[0] && c[0] <= from[2] && c[1] >= from[1] && c[1] <= from[3]
+        }).map(|s| s.id).collect();
+        self.doc.boards.push(nb);
+        for id in inside {
+            if let Some(copy) = self.clone_tree(id, 0.0) {
+                let mut ids = vec![copy];
+                ids.extend(self.doc.descendants(copy));
+                for i in ids {
+                    if let Some(o) = self.doc.get(i).cloned() {
+                        self.rescale(&o, from, dst);
+                    }
+                }
+            }
+        }
+        self.sel_board = Some(self.doc.boards.len() - 1);
+        self.fit = true;
+    }
+
     /// Le plan de travail passe de `a` à `b` : chaque forme posée dessus suit sa contrainte
     fn apply_constraints(&mut self, a: &Board, b: &Board) {
         let inside = |s: &Shape, d: &Doc| {
@@ -618,6 +648,15 @@ impl Editor {
                         }
                     }
                 });
+                // Déclinaisons : le plan dans un autre format, son contenu mis à l'échelle et centré
+                let mut decline = None;
+                egui::ComboBox::from_id_salt("vec-board-decline").selected_text(format!("{} {}", l::COPY, crate::i18n::t("Décliner…"))).show_ui(ui, |ui| {
+                    for (name, w, h) in BOARD_PRESETS {
+                        if ui.button(crate::i18n::t(name)).on_hover_text(crate::i18n::t("Une copie du plan dans ce format, à côté")).clicked() {
+                            decline = Some((name, w, h));
+                        }
+                    }
+                });
                 // Grille de mise en page
                 ui.horizontal(|ui| {
                     let mut on = b.grid.is_some();
@@ -631,6 +670,13 @@ impl Editor {
                         ui.add(egui::DragValue::new(&mut g.gutter).range(0.0..=400.0).prefix(format!("{} ", crate::i18n::t("gouttière")))).on_hover_text(crate::i18n::t("espace entre deux colonnes"));
                         ui.add(egui::DragValue::new(&mut g.margin).range(0.0..=2000.0).prefix(format!("{} ", crate::i18n::t("marge"))));
                     });
+                }
+                if let Some((name, w, h)) = decline {
+                    let src = self.doc.boards[bi].clone();
+                    self.checkpoint();
+                    self.decline_board(&src, name, w, h);
+                    self.changed();
+                    return;
                 }
                 // Le plan change de place ou de taille : ses formes suivent leurs contraintes
                 let after = self.doc.boards[bi].clone();
@@ -697,6 +743,22 @@ impl Editor {
         let mut outline_text: Option<u64> = None;
         let single = (self.sel.len() == 1).then(|| self.sel[0]);
         let mut path_act: Option<&'static str> = None;
+        let mut css_copy = false;
+        // Contraste d'un texte avec ce qu'il y a derrière (accessibilité)
+        let text_contrast = single.and_then(|id| {
+            let t = self.doc.get(id)?;
+            let Kind::Text { .. } = t.kind else { return None };
+            let fg = t.fills.first()?.first();
+            let b = self.doc.bounds(t);
+            let c = [(b[0] + b[2]) / 2.0, (b[1] + b[3]) / 2.0];
+            let ti = self.doc.index(id)?;
+            let behind = self.doc.shapes[..ti].iter().rev().filter(|s| s.visible && s.parent == 0 && !matches!(s.kind, Kind::Text { .. } | Kind::Group { .. })).find(|s| {
+                let bb = self.doc.bounds(s);
+                c[0] >= bb[0] && c[0] <= bb[2] && c[1] >= bb[1] && c[1] <= bb[3] && !s.fills.is_empty()
+            }).and_then(|s| s.fills.first().map(|f| f.first()));
+            let bg = behind.or_else(|| self.doc.boards.iter().find(|bd| c[0] >= bd.x && c[0] <= bd.x + bd.w && c[1] >= bd.y && c[1] <= bd.y + bd.h).and_then(|bd| bd.bg)).unwrap_or([255, 255, 255, 255]);
+            Some(crate::vector::contrast(fg, bg))
+        });
         let guides_list: Vec<(u64, String)> = self.doc.shapes.iter().filter(|s| matches!(s.kind, Kind::Path { .. } | Kind::Ellipse { .. } | Kind::Line { .. })).map(|s| (s.id, s.name.clone())).collect();
         if let Some(id) = single {
             let root = self.root.clone();
@@ -704,6 +766,10 @@ impl Editor {
             let s = self.doc.shapes.iter_mut().find(|s| s.id == id).unwrap();
             ui.horizontal(|ui| {
                 ui.label(egui::RichText::new(crate::i18n::t(s.kind_label())).size(11.0).color(p.muted));
+                // Mode Dev : la forme en CSS, copiée
+                if ui.small_button(l::CODE_XML).on_hover_text(crate::i18n::t("Copier en CSS (taille, position dans le plan, couleurs, coins, ombre, police)")).clicked() {
+                    css_copy = true;
+                }
                 ch |= ui.add(egui::TextEdit::singleline(&mut s.name).desired_width(f32::INFINITY)).changed();
             });
             head(ui, "Position");
@@ -811,6 +877,11 @@ impl Editor {
                 }
                 Kind::Text { text, size, font, align, width, spacing, leading } => {
                     head(ui, "Texte");
+                    if let Some(r) = text_contrast {
+                        let (ok, label) = if r >= 7.0 { (true, "AAA") } else if r >= 4.5 { (true, "AA") } else if r >= 3.0 { (false, "AA grand texte") } else { (false, "insuffisant") };
+                        ui.label(egui::RichText::new(format!("{} {} {:.1}:1 · {}", if ok { l::CIRCLE_CHECK } else { l::TRIANGLE_ALERT }, crate::i18n::t("contraste"), r, crate::i18n::t(label))).size(11.0).color(if ok { Color32::from_rgb(90, 190, 120) } else { Color32::from_rgb(230, 150, 60) }))
+                            .on_hover_text(crate::i18n::t("Lisibilité (WCAG) : 4,5:1 pour un texte courant, 3:1 pour un grand titre"));
+                    }
                     // Texte sur un tracé (Illustrator) : la ligne de base suit un tracé, une ellipse ou une ligne
                     let guides: Vec<(u64, String)> = guides_list.clone();
                     if !guides.is_empty() {
@@ -1299,6 +1370,12 @@ impl Editor {
         if let Some(id) = outline_text {
             self.outline_text(id);
             ch = true;
+        }
+        if css_copy {
+            if let Some(s) = single.and_then(|i| self.doc.get(i)) {
+                ui.ctx().copy_text(crate::vector::css_of(&self.doc, s));
+                self.message = Some(crate::i18n::t("CSS copié."));
+            }
         }
         // Outils de tracé : simplifier, couper au point choisi
         if let (Some(act), Some(id)) = (path_act, single) {
@@ -3025,12 +3102,14 @@ fn handles(r: Rect) -> [Pos2; 8] {
 /// Pour chaque poignée : quel côté elle déplace (-1 gauche/haut, 1 droite/bas, 0 aucun)
 const HANDLE_SIDES: [(i8, i8); 8] = [(-1, -1), (1, -1), (1, 1), (-1, 1), (0, -1), (1, 0), (0, 1), (-1, 0)];
 
-const BOOLS: [(&str, &str); 5] = [
+const BOOLS: [(&str, &str); 7] = [
     (l::GROUP, "Grouper (Ctrl+G)"),
     (l::SQUARES_UNITE, "Union : une seule forme, la couleur de celle du dessous"),
     (l::SQUARES_SUBTRACT, "Soustraire : les formes du dessus creusent celle du dessous"),
     (l::SQUARES_INTERSECT, "Intersection : seulement la partie commune"),
     (l::SQUARES_EXCLUDE, "Exclure : tout sauf la partie commune"),
+    (l::SQUARE_DASHED_BOTTOM, "Pair-impair : les formes qui se recouvrent font des trous"),
+    (l::SQUARE_DASHED_MOUSE_POINTER, "Masque d'écrêtage : la forme du dessous découpe celles du dessus"),
 ];
 
 const BLENDS: [(&str, &str); 9] = [("normal", "Normal"), ("multiply", "Produit"), ("screen", "Superposition"), ("overlay", "Incrustation"), ("darken", "Obscurcir"), ("lighten", "Éclaircir"), ("color-dodge", "Densité couleur −"), ("difference", "Différence"), ("color", "Couleur")];
