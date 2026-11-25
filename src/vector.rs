@@ -276,6 +276,7 @@ impl Doc {
             2 => "Soustraction",
             3 => "Intersection",
             4 => "Exclusion",
+            5 => "Pair-impair",
             _ => "Groupe",
         };
         let children: Vec<u64> = members.iter().map(|&k| self.shapes[k].id).collect();
@@ -647,6 +648,31 @@ impl Gen<'_> {
             let kids: Vec<&Shape> = children.iter().filter_map(|c| self.doc.get(*c)).filter(|c| c.visible).collect();
             let _ = write!(out, r#"<g opacity="{}">"#, sh.opacity);
             match (op, kids.split_first()) {
+                // Pair-impair : tous les contours en un seul tracé (les trous dans les formes restent vides)
+                (5, Some((first, _))) => {
+                    let mut d = String::new();
+                    for k in &kids {
+                        if let Kind::Path { nodes, .. } = &k.kind {
+                            let (s, c) = k.rot.to_radians().sin_cos();
+                            let tp = |p: [f32; 2]| [k.x + p[0] * c - p[1] * s, k.y + p[0] * s + p[1] * c];
+                            if let Some(n0) = nodes.first() {
+                                let a = tp(n0.p);
+                                let _ = write!(d, "M{:.2} {:.2}", a[0], a[1]);
+                                for w in 0..nodes.len() {
+                                    let (n1, n2) = (&nodes[w], &nodes[(w + 1) % nodes.len()]);
+                                    let (o, i, p) = (tp(n1.o), tp(n2.i), tp(n2.p));
+                                    let _ = write!(d, "C{:.2} {:.2} {:.2} {:.2} {:.2} {:.2}", o[0], o[1], i[0], i[1], p[0], p[1]);
+                                }
+                                d.push('Z');
+                            }
+                        }
+                    }
+                    let col = match first.fills.first() {
+                        Some(Paint::Solid { c }) => *c,
+                        _ => [0, 0, 0, 255],
+                    };
+                    let _ = write!(out, r#"<path d="{d}" fill-rule="evenodd" fill="rgb({},{},{})" fill-opacity="{:.3}"/>"#, col[0], col[1], col[2], col[3] as f32 / 255.0);
+                }
                 // Booléens : la première forme (la plus en arrière), masquée par les autres
                 (2..=4, Some((first, rest))) if !rest.is_empty() => {
                     let mid = self.id("m");
@@ -793,7 +819,48 @@ pub fn rasterize(svg: &str, w: u32, h: u32) -> Option<Vec<u8>> {
     let opt = usvg::Options::default();
     let tree = usvg::Tree::from_str(svg, &opt).ok()?;
     let mut pm = tiny_skia::Pixmap::new(w.max(1), h.max(1))?;
-    resvg::render(&tree, tiny_skia::Transform::identity(), &mut pm.as_mut());
+    // Les images (PNG, JPEG, WebP) se décodent ici (resvg est compilé sans) : on dessine nœud par nœud,
+    // dans l'ordre, chaque image à sa place entre les formes
+    fn has_image(g: &usvg::Group) -> bool {
+        g.children().iter().any(|n| match n {
+            usvg::Node::Image(_) => true,
+            usvg::Node::Group(gg) => has_image(gg),
+            _ => false,
+        })
+    }
+    fn draw(g: &usvg::Group, pm: &mut tiny_skia::Pixmap) {
+        for node in g.children() {
+            match node {
+                usvg::Node::Group(gg) if has_image(gg) => draw(gg, pm),
+                usvg::Node::Image(im) if im.is_visible() => {
+                    let data: &[u8] = match im.kind() {
+                        usvg::ImageKind::PNG(d) | usvg::ImageKind::JPEG(d) | usvg::ImageKind::WEBP(d) | usvg::ImageKind::GIF(d) => d,
+                        _ => continue,
+                    };
+                    let Ok(img) = image::load_from_memory(data) else { continue };
+                    let rgba = img.to_rgba8();
+                    let Some(mut src) = tiny_skia::Pixmap::new(rgba.width(), rgba.height()) else { continue };
+                    for (d, s) in src.pixels_mut().iter_mut().zip(rgba.pixels()) {
+                        *d = tiny_skia::ColorU8::from_rgba(s[0], s[1], s[2], s[3]).premultiply();
+                    }
+                    let sz = im.size();
+                    let t = im.abs_transform().pre_scale(sz.width() / rgba.width() as f32, sz.height() / rgba.height() as f32);
+                    pm.draw_pixmap(0, 0, src.as_ref(), &tiny_skia::PixmapPaint { quality: tiny_skia::FilterQuality::Bilinear, ..Default::default() }, t, None);
+                }
+                n => {
+                    if let Some(b) = n.abs_layer_bounding_box() {
+                        // render_node retire le coin du cadre ; on le rend, et on ajoute le repère du parent
+                        resvg::render_node(n, g.abs_transform().pre_translate(b.x(), b.y()), &mut pm.as_mut());
+                    }
+                }
+            }
+        }
+    }
+    if has_image(tree.root()) {
+        draw(tree.root(), &mut pm);
+    } else {
+        resvg::render(&tree, tiny_skia::Transform::identity(), &mut pm.as_mut());
+    }
     let mut px = pm.take();
     for c in px.chunks_exact_mut(4) {
         let a = c[3] as f32 / 255.0;
@@ -918,9 +985,182 @@ pub fn import_svg(doc: &mut Doc, svg: &str, at: [f32; 2]) -> Result<usize, Strin
     Ok(n)
 }
 
+// ---------- vectorisation d'une image ----------
+
+/// Vectorise une image en noir et blanc : les zones plus sombres que `threshold` (0 à 1) deviennent des tracés.
+/// `detail` : tolérance de simplification en pixels (petit : fidèle, grand : peu de points).
+/// Renvoie les contours (en pixels de l'image) et la couleur moyenne des zones.
+pub fn trace(img: &image::RgbaImage, threshold: f32, detail: f32) -> (Vec<Vec<Node>>, [u8; 3]) {
+    let (w, h) = (img.width() as i32, img.height() as i32);
+    let inside = |x: i32, y: i32| -> bool {
+        if x < 0 || y < 0 || x >= w || y >= h {
+            return false;
+        }
+        let p = img.get_pixel(x as u32, y as u32);
+        let l = (0.2126 * p[0] as f32 + 0.7152 * p[1] as f32 + 0.0722 * p[2] as f32) / 255.0;
+        p[3] > 127 && l < threshold
+    };
+    // Couleur moyenne de l'encre
+    let (mut acc, mut cnt) = ([0u64; 3], 0u64);
+    for y in 0..h {
+        for x in 0..w {
+            if inside(x, y) {
+                let p = img.get_pixel(x as u32, y as u32);
+                for k in 0..3 {
+                    acc[k] += p[k] as u64;
+                }
+                cnt += 1;
+            }
+        }
+    }
+    let color = if cnt == 0 { [0, 0, 0] } else { [0, 1, 2].map(|k| (acc[k] / cnt) as u8) };
+    // Arêtes du bord des pixels, orientées (l'intérieur à gauche) : départ → arrivée
+    let mut next: std::collections::HashMap<(i32, i32), Vec<(i32, i32)>> = std::collections::HashMap::new();
+    for y in 0..h {
+        for x in 0..w {
+            if !inside(x, y) {
+                continue;
+            }
+            if !inside(x, y - 1) {
+                next.entry((x, y)).or_default().push((x + 1, y));
+            }
+            if !inside(x + 1, y) {
+                next.entry((x + 1, y)).or_default().push((x + 1, y + 1));
+            }
+            if !inside(x, y + 1) {
+                next.entry((x + 1, y + 1)).or_default().push((x, y + 1));
+            }
+            if !inside(x - 1, y) {
+                next.entry((x, y + 1)).or_default().push((x, y));
+            }
+        }
+    }
+    // Enchaîne les arêtes en boucles
+    let mut loops: Vec<Vec<[f32; 2]>> = vec![];
+    let mut starts: Vec<(i32, i32)> = next.keys().copied().collect();
+    starts.sort();
+    for s0 in starts {
+        while let Some(list) = next.get_mut(&s0) {
+            let Some(mut cur) = list.pop() else { break };
+            if list.is_empty() {
+                next.remove(&s0);
+            }
+            let mut pts = vec![[s0.0 as f32, s0.1 as f32]];
+            let mut guard = 0;
+            while cur != s0 && guard < 4_000_000 {
+                guard += 1;
+                pts.push([cur.0 as f32, cur.1 as f32]);
+                let Some(l) = next.get_mut(&cur) else { break };
+                let Some(n) = l.pop() else { break };
+                if l.is_empty() {
+                    next.remove(&cur);
+                }
+                cur = n;
+            }
+            if pts.len() >= 4 {
+                loops.push(pts);
+            }
+        }
+    }
+    // Simplifie (Ramer-Douglas-Peucker) puis arrondit les angles doux en courbes
+    fn rdp(pts: &[[f32; 2]], eps: f32, out: &mut Vec<[f32; 2]>) {
+        if pts.len() < 3 {
+            out.extend_from_slice(&pts[..pts.len().saturating_sub(1)]);
+            return;
+        }
+        let (a, b) = (pts[0], pts[pts.len() - 1]);
+        let ab = [b[0] - a[0], b[1] - a[1]];
+        let len = (ab[0] * ab[0] + ab[1] * ab[1]).sqrt().max(1e-6);
+        let (mut far, mut fi) = (0.0f32, 0);
+        for (i, p) in pts.iter().enumerate().skip(1).take(pts.len() - 2) {
+            let d = ((p[0] - a[0]) * ab[1] - (p[1] - a[1]) * ab[0]).abs() / len;
+            if d > far {
+                far = d;
+                fi = i;
+            }
+        }
+        if far > eps {
+            rdp(&pts[..=fi], eps, out);
+            rdp(&pts[fi..], eps, out);
+        } else {
+            out.push(a);
+        }
+    }
+    let mut out = vec![];
+    for lp in loops {
+        // Les toutes petites taches (poussière du scan) disparaissent
+        let area: f32 = lp.iter().zip(lp.iter().cycle().skip(1)).map(|(a, b)| a[0] * b[1] - b[0] * a[1]).sum::<f32>().abs() / 2.0;
+        if area < (detail * detail * 2.0).max(4.0) {
+            continue;
+        }
+        let mut closed = lp.clone();
+        closed.push(lp[0]);
+        // Boucle fermée : on la coupe au point le plus loin du départ, chaque moitié se simplifie
+        let m = (0..closed.len()).max_by(|&a, &b| {
+            let d = |k: usize| (closed[k][0] - lp[0][0]).powi(2) + (closed[k][1] - lp[0][1]).powi(2);
+            d(a).total_cmp(&d(b))
+        }).unwrap_or(0);
+        let mut simp = vec![];
+        rdp(&closed[..=m], detail.max(0.3), &mut simp);
+        rdp(&closed[m..], detail.max(0.3), &mut simp);
+        if simp.len() < 3 {
+            continue;
+        }
+        let n = simp.len();
+        let nodes: Vec<Node> = (0..n)
+            .map(|k| {
+                let (a, p, b) = (simp[(k + n - 1) % n], simp[k], simp[(k + 1) % n]);
+                let (d1, d2) = ([p[0] - a[0], p[1] - a[1]], [b[0] - p[0], b[1] - p[1]]);
+                let (l1, l2) = ((d1[0] * d1[0] + d1[1] * d1[1]).sqrt().max(1e-6), (d2[0] * d2[0] + d2[1] * d2[1]).sqrt().max(1e-6));
+                let cos = (d1[0] * d2[0] + d1[1] * d2[1]) / (l1 * l2);
+                if cos < 0.3 {
+                    // Angle franc : un coin
+                    return Node::corner(p);
+                }
+                let t = [(b[0] - a[0]) / (l1 + l2), (b[1] - a[1]) / (l1 + l2)];
+                Node { p, i: [p[0] - t[0] * l1 / 3.0, p[1] - t[1] * l1 / 3.0], o: [p[0] + t[0] * l2 / 3.0, p[1] + t[1] * l2 / 3.0] }
+            })
+            .collect();
+        out.push(nodes);
+    }
+    (out, color)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn images_rendues() {
+        let mut png = vec![];
+        image::RgbaImage::from_pixel(4, 4, image::Rgba([255, 0, 0, 255])).write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
+        use base64::Engine;
+        let svg = format!(r#"<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="20" height="20" viewBox="0 0 40 40"><g transform="translate(0 0)"><rect x="4" y="4" width="36" height="36" fill="white"/></g><image x="10" y="10" width="20" height="20" preserveAspectRatio="none" xlink:href="data:image/png;base64,{}"/><rect x="24" y="24" width="8" height="8" fill="blue"/></svg>"#, base64::engine::general_purpose::STANDARD.encode(&png));
+        let px = rasterize(&svg, 20, 20).unwrap();
+        let at = |x: usize, y: usize| px[(y * 20 + x) * 4..(y * 20 + x) * 4 + 4].to_vec();
+        assert_eq!(at(7, 7), vec![255, 0, 0, 255]);
+        assert_eq!(at(13, 13), vec![0, 0, 255, 255]);
+        assert_eq!(at(3, 3), vec![255, 255, 255, 255]);
+        assert_eq!(at(0, 0)[3], 0);
+    }
+
+    #[test]
+    fn vectoriser() {
+        // Un disque noir avec un trou : un contour extérieur et un intérieur
+        let mut img = image::RgbaImage::from_pixel(100, 100, image::Rgba([255, 255, 255, 255]));
+        for y in 0..100 {
+            for x in 0..100 {
+                let d = ((x as f32 - 50.0).powi(2) + (y as f32 - 50.0).powi(2)).sqrt();
+                if d < 40.0 && d > 15.0 {
+                    img.put_pixel(x, y, image::Rgba([10, 10, 10, 255]));
+                }
+            }
+        }
+        let (loops, col) = trace(&img, 0.5, 1.0);
+        assert_eq!(loops.len(), 2);
+        assert!(col[0] < 20);
+        assert!(loops.iter().all(|l| l.len() > 8 && l.len() < 120));
+    }
 
     #[test]
     fn rendu_et_svg() {

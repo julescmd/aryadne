@@ -80,6 +80,9 @@ pub struct Editor {
     focus_text: bool,
     clip: Vec<Shape>,
     export_scale: f32,
+    /// Vectorisation d'une image : seuil (0 à 1) et tolérance (px)
+    trace_thr: f32,
+    trace_detail: f32,
 }
 
 fn c32(c: [u8; 4]) -> Color32 {
@@ -116,6 +119,8 @@ impl Editor {
             focus_text: false,
             clip: vec![],
             export_scale: 2.0,
+            trace_thr: 0.5,
+            trace_detail: 1.5,
         })
     }
 
@@ -819,6 +824,23 @@ impl Editor {
                 }
             });
         }
+        // Vectoriser une image (croquis, logo scanné) en tracés
+        let image_sel = single.and_then(|i| self.doc.get(i)).filter(|s| matches!(s.kind, Kind::Image { .. })).map(|s| s.id);
+        if let Some(id) = image_sel {
+            head(ui, "Vectoriser");
+            ui.add(egui::Slider::new(&mut self.trace_thr, 0.05..=0.95).text(crate::i18n::t("seuil"))).on_hover_text(crate::i18n::t("Plus haut : les gris clairs deviennent aussi des formes"));
+            ui.add(egui::Slider::new(&mut self.trace_detail, 0.3..=8.0).logarithmic(true).text(crate::i18n::t("simplifier"))).on_hover_text(crate::i18n::t("Plus haut : moins de points, des courbes plus lisses"));
+            if ui.button(format!("{}  {}", l::PEN_TOOL, crate::i18n::t("vectoriser l'image"))).on_hover_text(crate::i18n::t("Les zones sombres de l'image deviennent des tracés, posés par-dessus")).clicked() {
+                self.doc = snapshot.clone();
+                match self.trace_image(id) {
+                    Ok(n) => {
+                        self.message = Some(format!("{n} {}", crate::i18n::t_mid("tracés")));
+                        ch = true;
+                    }
+                    Err(e) => self.message = Some(e),
+                }
+            }
+        }
         head(ui, "Combiner");
         ui.horizontal(|ui| {
             for (k, (icon, tip)) in BOOLS.iter().enumerate() {
@@ -850,6 +872,42 @@ impl Editor {
         if let Some(bi) = self.board_of_selection() {
             self.export_ui(ui, bi);
         }
+    }
+
+    /// Vectorise l'image `id` : ses contours sombres deviennent des tracés (un groupe pair-impair pour les trous).
+    fn trace_image(&mut self, id: u64) -> Result<usize, String> {
+        let s = self.doc.get(id).cloned().ok_or("image introuvable")?;
+        let Kind::Image { path, w, h } = &s.kind else { return Err("pas une image".into()) };
+        let full = std::path::Path::new(&self.root).join(path);
+        let img = image::open(&full).map_err(|e| e.to_string())?;
+        // Au plus 1200 px : la vectorisation reste rapide, le détail suffit
+        let img = if img.width().max(img.height()) > 1200 { img.thumbnail(1200, 1200) } else { img };
+        let img = img.to_rgba8();
+        let (kx, ky) = (w / img.width().max(1) as f32, h / img.height().max(1) as f32);
+        let (loops, col) = crate::vector::trace(&img, self.trace_thr, self.trace_detail);
+        if loops.is_empty() {
+            return Err(crate::i18n::t("rien à vectoriser : baisse ou monte le seuil"));
+        }
+        let map = |p: [f32; 2]| [p[0] * kx, p[1] * ky];
+        let mut ids = vec![];
+        for lp in &loops {
+            let nodes: Vec<Node> = lp.iter().map(|n| Node { p: map(n.p), i: map(n.i), o: map(n.o) }).collect();
+            let nid = self.doc.new_id();
+            self.doc.shapes.push(Shape { id: nid, name: format!("{} {nid}", crate::i18n::t("Tracé")), kind: Kind::Path { nodes, closed: true }, x: s.x, y: s.y, rot: s.rot, fills: vec![crate::vector::Paint::solid([col[0], col[1], col[2], 255])], parent: s.parent, ..Shape::base() });
+            ids.push(nid);
+        }
+        let n = ids.len();
+        // Plusieurs contours : un groupe pair-impair, les trous restent vides
+        self.sel = match if n > 1 { self.doc.group(&ids, 5) } else { None } {
+            Some(g) => {
+                if let Some(gs) = self.doc.shapes.iter_mut().find(|x| x.id == g) {
+                    gs.name = crate::i18n::t("Vectorisation");
+                }
+                vec![g]
+            }
+            None => ids,
+        };
+        Ok(n)
     }
 
     /// Un texte devient un groupe de tracés (un par contour de lettre), à la même place

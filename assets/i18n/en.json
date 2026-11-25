@@ -2865,5 +2865,14 @@
   "Objet nul : invisible, sert de parent pour piloter plusieurs calques": "Null object: invisible, a parent to drive several layers",
   "Invisible au rendu. Les calques dont il est le parent suivent ses mouvements.": "Invisible in the render. Layers it parents follow its moves.",
   "Nul": "Null",
-  "nul": "null"
+  "nul": "null",
+  "Vectoriser": "Vectorize",
+  "simplifier": "simplify",
+  "Plus haut : les gris clairs deviennent aussi des formes": "Higher: light grays become shapes too",
+  "Plus haut : moins de points, des courbes plus lisses": "Higher: fewer points, smoother curves",
+  "vectoriser l'image": "vectorize the image",
+  "Les zones sombres de l'image deviennent des tracés, posés par-dessus": "The image's dark areas become paths, placed on top",
+  "tracés": "paths",
+  "rien à vectoriser : baisse ou monte le seuil": "nothing to vectorize: lower or raise the threshold",
+  "Vectorisation": "Vectorization"
 }
