@@ -2848,3 +2848,105 @@ mod device_tests {
         }
     }
 }
+
+// ---------- Transitions animées entre plans (comme Smart Animate) ----------
+
+/// Le document à l'instant `t` (0..1) du passage du plan `a` au plan `b` : les formes de même nom glissent
+/// et changent de taille et d'opacité, les autres apparaissent ou s'effacent. Rend un document à un seul plan.
+pub fn smart_frame(doc: &Doc, a: usize, b: usize, t: f32) -> Option<Doc> {
+    let (ba, bb) = (doc.boards.get(a)?.clone(), doc.boards.get(b)?.clone());
+    let t = t.clamp(0.0, 1.0);
+    let e = t * t * (3.0 - 2.0 * t);
+    let center = |d: &Doc, s: &Shape| {
+        let r = d.bounds(s);
+        [(r[0] + r[2]) / 2.0, (r[1] + r[3]) / 2.0]
+    };
+    let on = |d: &Doc, bd: &Board| -> Vec<u64> {
+        d.shapes.iter().filter(|s| s.parent == 0 && s.visible).filter(|s| {
+            let c = center(d, s);
+            c[0] >= bd.x && c[0] <= bd.x + bd.w && c[1] >= bd.y && c[1] <= bd.y + bd.h
+        }).map(|s| s.id).collect()
+    };
+    let (ia, ib) = (on(doc, &ba), on(doc, &bb));
+    let mut out = doc.clone();
+    out.boards = vec![bb.clone()];
+    let shift = |out: &mut Doc, id: u64, dx: f32, dy: f32| {
+        for k in out.deep(&[id]) {
+            if let Some(s) = out.shapes.iter_mut().find(|s| s.id == k) {
+                s.x += dx;
+                s.y += dy;
+            }
+        }
+    };
+    let fade = |out: &mut Doc, id: u64, f: f32| {
+        if let Some(s) = out.shapes.iter_mut().find(|s| s.id == id) {
+            s.opacity *= f;
+        }
+    };
+    let mut matched_a = vec![];
+    for &idb in &ib {
+        let sb = doc.get(idb)?.clone();
+        let twin = ia.iter().copied().find(|ida| doc.get(*ida).is_some_and(|sa| !sa.name.is_empty() && sa.name == sb.name));
+        match twin {
+            Some(ida) => {
+                matched_a.push(ida);
+                let sa = doc.get(ida)?;
+                let (ca, cb) = (center(doc, sa), center(doc, &sb));
+                // Où la forme était sur l'autre plan, ramené sur celui-ci
+                let from = [ca[0] - ba.x + bb.x, ca[1] - ba.y + bb.y];
+                shift(&mut out, idb, (from[0] - cb[0]) * (1.0 - e), (from[1] - cb[1]) * (1.0 - e));
+                if let Some(s) = out.shapes.iter_mut().find(|s| s.id == idb) {
+                    s.opacity = sa.opacity + (sb.opacity - sa.opacity) * e;
+                    s.rot = sa.rot + (sb.rot - sa.rot) * e;
+                    // Taille : pour les rectangles et ellipses, gardée centrée
+                    if let (Kind::Rect { w: wa, h: ha, .. } | Kind::Ellipse { w: wa, h: ha }, Kind::Rect { w, h, .. } | Kind::Ellipse { w, h }) = (&sa.kind, &mut s.kind) {
+                        let (nw, nh) = (wa + (*w - wa) * e, ha + (*h - ha) * e);
+                        s.x += (*w - nw) / 2.0;
+                        s.y += (*h - nh) / 2.0;
+                        (*w, *h) = (nw, nh);
+                    }
+                    if let (Some(fa), Some(Paint::Solid { c })) = (sa.fills.first().map(|f| f.first()), s.fills.first_mut()) {
+                        *c = [0, 1, 2, 3].map(|i| (fa[i] as f32 + (c[i] as f32 - fa[i] as f32) * e).round() as u8);
+                    }
+                }
+            }
+            None => fade(&mut out, idb, e),
+        }
+    }
+    for &ida in &ia {
+        if matched_a.contains(&ida) {
+            if let Some(s) = out.shapes.iter_mut().find(|s| s.id == ida) {
+                s.visible = false;
+            }
+            continue;
+        }
+        // Ce qui n'existe que sur le premier plan s'efface sur place
+        shift(&mut out, ida, bb.x - ba.x, bb.y - ba.y);
+        fade(&mut out, ida, 1.0 - e);
+    }
+    Some(out)
+}
+
+#[cfg(test)]
+mod smart_tests {
+    use super::*;
+    #[test]
+    fn transition_animee() {
+        let mut d = Doc::starter();
+        d.shapes.clear();
+        d.boards.push(Board { name: "Détail".into(), x: 1200.0, y: 0.0, w: 1080.0, h: 1080.0, bg: Some([255; 4]), grid: None, persp: None, device: 0 });
+        for (bx, x, w) in [(0.0, 100.0, 200.0), (1200.0, 600.0, 400.0)] {
+            let id = d.new_id();
+            d.shapes.push(Shape { id, name: "Carte".into(), kind: Kind::Rect { w, h: 200.0, r: [0.0; 4] }, x: bx + x, y: 100.0, fills: vec![Paint::solid([200, 0, 0, 255])], ..Shape::base() });
+        }
+        let half = smart_frame(&d, 0, 1, 0.5).unwrap();
+        let card = half.shapes.iter().find(|s| s.visible && s.x >= 1200.0).unwrap();
+        // À mi-chemin : entre les deux places et les deux tailles
+        let Kind::Rect { w, .. } = card.kind else { panic!() };
+        assert!(w > 200.0 && w < 400.0, "{w}");
+        let cx = card.x + w / 2.0 - 1200.0;
+        assert!(cx > 200.0 && cx < 800.0, "{cx}");
+        let end = smart_frame(&d, 0, 1, 1.0).unwrap();
+        assert_eq!(end.shapes.iter().filter(|s| s.visible && s.x >= 1200.0).count(), 1);
+    }
+}

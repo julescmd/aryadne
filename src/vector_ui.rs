@@ -124,6 +124,8 @@ pub struct Editor {
     /// Présentation du prototype : le plan affiché et son image (clé, texture)
     present: Option<usize>,
     present_tex: Option<(u64, egui::TextureHandle)>,
+    /// Transition en cours dans la présentation : le plan d'où l'on vient, et quand elle a commencé
+    present_anim: Option<(usize, Instant)>,
     /// Un fichier à ouvrir (la composition Motion tirée d'un plan de travail)
     pub open_request: Option<PathBuf>,
 }
@@ -179,6 +181,7 @@ impl Editor {
             icon_pick: None,
             present: None,
             present_tex: None,
+            present_anim: None,
             open_request: None,
         })
     }
@@ -1698,7 +1701,21 @@ impl Editor {
             (k * 100.0).round().to_bits().hash(&mut h);
             h.finish()
         };
-        if self.present_tex.as_ref().is_none_or(|t| t.0 != key) {
+        // Transition animée (formes de même nom qui glissent, les autres en fondu) : une image par instant
+        const DUR: f32 = 0.45;
+        let anim = self.present_anim.filter(|(from, at)| *from != bi && at.elapsed().as_secs_f32() < DUR);
+        if anim.is_none() {
+            self.present_anim = None;
+        }
+        if let Some((from, at)) = anim {
+            let tt = at.elapsed().as_secs_f32() / DUR;
+            let scale = (k * ui.ctx().pixels_per_point() * 0.6).clamp(0.05, 2.0);
+            if let Some(img) = crate::vector::smart_frame(&self.doc, from, bi, tt).and_then(|d| crate::vector::export_png(&d, 0, &self.root, scale)) {
+                let ci = egui::ColorImage::from_rgba_unmultiplied([img.width() as usize, img.height() as usize], img.as_raw());
+                self.present_tex = Some((0, ui.ctx().load_texture("vec-present", ci, egui::TextureOptions::LINEAR)));
+            }
+            ui.ctx().request_repaint();
+        } else if self.present_tex.as_ref().is_none_or(|t| t.0 != key) {
             let scale = (k * ui.ctx().pixels_per_point()).clamp(0.05, 4.0);
             if let Some(img) = crate::vector::export_png(&self.doc, bi, &self.root, scale) {
                 let ci = egui::ColorImage::from_rgba_unmultiplied([img.width() as usize, img.height() as usize], img.as_raw());
@@ -1727,18 +1744,27 @@ impl Editor {
         }
         ui.painter().text(rect.center_bottom() - vec2(0.0, 16.0), egui::Align2::CENTER_CENTER, format!("{}  ·  {} / {}  ·  {}", b.name, bi + 1, self.doc.boards.len(), crate::i18n::t("Échap : quitter, flèches : plans")), egui::FontId::proportional(12.0), Color32::from_gray(150));
         let (left, right, esc) = ui.input(|i| (i.key_pressed(egui::Key::ArrowLeft), i.key_pressed(egui::Key::ArrowRight), i.key_pressed(egui::Key::Escape)));
-        if esc {
+        let next = if esc {
             self.present = None;
+            None
         } else if let Some(g) = go {
-            self.present = Some(g);
+            Some(g)
         } else if right {
-            self.present = Some((bi + 1) % self.doc.boards.len());
+            Some((bi + 1) % self.doc.boards.len())
         } else if left {
-            self.present = Some((bi + self.doc.boards.len() - 1) % self.doc.boards.len());
+            Some((bi + self.doc.boards.len() - 1) % self.doc.boards.len())
+        } else {
+            None
+        };
+        if let Some(n) = next.filter(|n| *n != bi) {
+            // Même format : transition animée ; sinon on change d'écran directement
+            if (self.doc.boards[n].w - b.w).abs() < 1.0 && (self.doc.boards[n].h - b.h).abs() < 1.0 {
+                self.present_anim = Some((bi, Instant::now()));
+            }
+            self.present = Some(n);
         }
     }
 
-    /// La bibliothèque d'icônes : recherche par nom (en anglais), un clic pose l'icône au centre de la vue
     /// Le commentaire ouvert : son texte, résolu ou pas, le retirer
     fn comment_window(&mut self, ctx: &egui::Context) {
         let Some(i) = self.comment_open.filter(|i| *i < self.doc.comments.len()) else {
@@ -1779,6 +1805,7 @@ impl Editor {
         }
     }
 
+    /// La bibliothèque d'icônes : recherche par nom (en anglais), un clic pose l'icône au centre de la vue
     fn icon_window(&mut self, ctx: &egui::Context) {
         let Some(q) = self.icon_pick.as_mut() else { return };
         let mut open = true;
