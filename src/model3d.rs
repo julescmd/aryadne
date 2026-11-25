@@ -484,12 +484,29 @@ pub struct Camera {
     pub dist: f32,
     pub pan: [f32; 2],
     pub ortho: bool,
+    /// Roulis (autour de l'axe de visée), pour une caméra de scène penchée
+    pub roll: f32,
+    /// Focale par rapport à celle de la vue (1 : environ 45° sur le petit côté)
+    pub zoom: f32,
 }
 
 impl Default for Camera {
     fn default() -> Self {
-        Self { yaw: 0.6, pitch: 0.35, dist: 2.2, pan: [0.0, 0.0], ortho: false }
+        Self { yaw: 0.6, pitch: 0.35, dist: 2.2, pan: [0.0, 0.0], ortho: false, roll: 0.0, zoom: 1.0 }
     }
+}
+
+/// Focale de la vue quand le zoom vaut 1, en part du petit côté de l'image
+pub const BASE_FOCAL: f32 = 1.2;
+
+/// Zoom d'une caméra dont le champ sur le petit côté de l'image est `fov` degrés (0 : celui de la vue)
+pub fn zoom_of_fov(fov: f32) -> f32 {
+    if fov.is_finite() && fov > 0.5 && fov < 175.0 { 0.5 / (fov.to_radians() * 0.5).tan() / BASE_FOCAL } else { 1.0 }
+}
+
+/// Champ (degrés, sur le petit côté) d'une focale donnée en part du petit côté de l'image
+pub fn fov_of_focal(focal: f32) -> f32 {
+    (2.0 * (0.5 / focal.max(1e-6)).atan()).to_degrees()
 }
 
 impl Camera {
@@ -500,12 +517,18 @@ impl Camera {
         let z = -v[0] * sy + v[2] * cy;
         let y = v[1] * cp - z * sp;
         let z = v[1] * sp + z * cp;
-        [x, y, z]
+        if self.roll == 0.0 {
+            return [x, y, z];
+        }
+        let (sr, cr) = self.roll.sin_cos();
+        [x * cr - y * sr, x * sr + y * cr, z]
     }
     /// Inverse de `rotate` : de l'espace caméra vers le monde.
     fn unrotate(&self, v: V3) -> V3 {
         let (sy, cy) = self.yaw.sin_cos();
         let (sp, cp) = self.pitch.sin_cos();
+        let (sr, cr) = self.roll.sin_cos();
+        let v = [v[0] * cr + v[1] * sr, -v[0] * sr + v[1] * cr, v[2]];
         let y = v[1] * cp + v[2] * sp;
         let z1 = -v[1] * sp + v[2] * cp;
         [v[0] * cy - z1 * sy, y, v[0] * sy + z1 * cy]
@@ -534,8 +557,11 @@ impl Proj {
     pub(crate) fn new(cam: &Camera, w: f32, h: f32) -> Proj {
         let (sy, cy) = cam.yaw.sin_cos();
         let (sp, cp) = cam.pitch.sin_cos();
-        let focal = w.min(h) * 1.2;
-        Proj { r: [[cy, 0.0, sy], [sy * sp, cp, -cy * sp], [-sy * cp, sp, cy * cp]], pan: cam.pan, dist: cam.dist, ortho: cam.ortho, cx: w / 2.0, cy: h / 2.0, focal, scale: focal / cam.dist }
+        let focal = w.min(h) * 1.2 * cam.zoom;
+        let (sr, cr) = cam.roll.sin_cos();
+        let (a, b) = ([cy, 0.0, sy], [sy * sp, cp, -cy * sp]);
+        let mix = |k: f32, l: f32| [a[0] * k + b[0] * l, a[1] * k + b[1] * l, a[2] * k + b[2] * l];
+        Proj { r: [mix(cr, -sr), mix(sr, cr), [-sy * cp, sp, cy * cp]], pan: cam.pan, dist: cam.dist, ortho: cam.ortho, cx: w / 2.0, cy: h / 2.0, focal, scale: focal / cam.dist }
     }
     /// Espace caméra (la caméra regarde vers -Z)
     #[inline]
@@ -1131,12 +1157,26 @@ fn camera_view(sc: &crate::scene::Scene, k: usize, (lo, hi): (V3, V3), base: Cam
     let wpos = sc.world(k, [0.0; 3]);
     let o = &sc.objects[k];
     let mut cam = base;
-    cam.yaw = -o.rot[1].to_radians();
-    cam.pitch = -o.rot[0].to_radians();
+    // La vue est l'inverse de l'orientation de l'objet dans la scène (parents compris) : ses axes
+    // sont les lignes de la rotation de vue, d'où le lacet, le tangage et le roulis
+    let (ax, _) = object_affine(sc, k);
+    let (rx, ry, rz) = (norm(ax[0]), norm(ax[1]), norm(ax[2]));
+    if [rx, ry, rz].iter().flatten().all(|x| x.is_finite()) && dot(rz, rz) > 0.5 {
+        cam.pitch = rz[1].clamp(-1.0, 1.0).asin();
+        cam.yaw = (-rz[0]).atan2(rz[2]);
+        cam.roll = (-rx[1]).atan2(ry[1]);
+    } else {
+        cam.yaw = -o.rot[1].to_radians();
+        cam.pitch = -o.rot[0].to_radians();
+        cam.roll = 0.0;
+    }
+    cam.zoom = zoom_of_fov(o.fov);
     cam.ortho = false;
     let r = cam.rotate([(wpos[0] - c[0]) / longest, (wpos[1] - c[1]) / longest, (wpos[2] - c[2]) / longest]);
     cam.pan = [-r[0], -r[1]];
-    cam.dist = r[2].max(0.05);
+    // Le centre de la scène peut être derrière la caméra (caméra suivie qui regarde ailleurs) : la
+    // distance devient négative, ce que la perspective accepte
+    cam.dist = if r[2].abs() < 1e-4 { 1e-4 } else { r[2] };
     cam
 }
 
@@ -1518,7 +1558,7 @@ fn checker(uv: [f32; 2], tint: Option<[f32; 3]>) -> [f32; 3] {
 /// (triangle, coordonnées barycentriques).
 /// Un point de la vue (repère du modèle préparé) à l'écran, dans une vue de `w` × `h`
 pub fn project_point(cam: &Camera, w: f32, h: f32, v: V3) -> Option<[f32; 2]> {
-    let focal = w.min(h) * 1.2;
+    let focal = w.min(h) * 1.2 * cam.zoom;
     let c = cam.view(v);
     if cam.ortho {
         let k = focal / cam.dist;
@@ -1608,7 +1648,7 @@ fn persp_bary(w: [f32; 3], inv_depth: [f32; 3]) -> (f32, [f32; 2]) {
 
 pub fn render(m: &Prepared, cam: &Camera, look: &Look, w: usize, h: usize) -> Frame {
     use rayon::prelude::*;
-    let focal = w.min(h) as f32 * 1.2;
+    let focal = w.min(h) as f32 * 1.2 * cam.zoom;
     let ortho_scale = focal / cam.dist;
     let (cx, cy) = (w as f32 / 2.0, h as f32 / 2.0);
     let pr = Proj::new(cam, w as f32, h as f32);
@@ -2188,7 +2228,22 @@ fn encode_animation(ff: std::path::PathBuf, scene: crate::scene::Scene, path: &s
     let longest = (hi[0] - lo[0]).max(hi[1] - lo[1]).max(hi[2] - lo[2]).max(1e-9);
     let c = [(lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0, (lo[2] + hi[2]) / 2.0];
     let floor = -((lo[1] + hi[1]) / 2.0) / longest;
-    let cam_obj = scene.objects.iter().position(|o| crate::scene::kind(o) == crate::scene::Kind::Camera);
+    let cam_obj = scene.active_camera();
+    // La vidéo de fond, lue image après image à la taille du rendu
+    let mut back = match (&scene.backdrop, cam_obj) {
+        (Some(b), Some(_)) => crate::ffmpeg::find("ffmpeg").and_then(|ff| {
+            crate::ffmpeg::command(ff)
+                .args(["-v", "error", "-ss", &format!("{:.3}", b.from.max(0.0)), "-i"])
+                .arg(crate::scene::resolve(path, &b.file))
+                .args(["-vf", &format!("fps={},scale={w}:{h}", b.fps.max(1.0)), "-pix_fmt", "rgb24", "-f", "rawvideo", "-"])
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .ok()
+                .map(|c| (c, b.clone(), 0usize, vec![0u8; w * h * 3], false))
+        }),
+        _ => None,
+    };
     let mut sc = scene;
     for f in start..=end {
         sc.apply_frame(f as f32);
@@ -2216,7 +2271,22 @@ fn encode_animation(ff: std::path::PathBuf, scene: crate::scene::Scene, path: &s
             Some(k) => camera_view(&sc, k, (lo, hi), view_cam),
             None => view_cam,
         };
-        let frame = render(&prep, &cam, &lk, w, h);
+        let mut frame = render(&prep, &cam, &lk, w, h);
+        if let Some((child, b, next, buf, have)) = back.as_mut() {
+            // On avance dans la vidéo jusqu'à l'image voulue ; au-delà de sa fin, la dernière image reste
+            if let (Some(want), Some(out)) = (b.frame_at(f as f32), child.stdout.as_mut()) {
+                while *next <= want {
+                    if std::io::Read::read_exact(out, buf).is_err() {
+                        break;
+                    }
+                    *next += 1;
+                    *have = true;
+                }
+                if *have {
+                    crate::matchmove::composite(&mut frame.rgba, &frame.ids, w, h, (0.0, 0.0, w as f32, h as f32), buf, w, h);
+                }
+            }
+        }
         if stdin.write_all(&frame.rgba).is_err() {
             let mut msg = String::new();
             if let Some(mut e) = child.stderr.take() {
@@ -2227,6 +2297,10 @@ fn encode_animation(ff: std::path::PathBuf, scene: crate::scene::Scene, path: &s
         tick();
     }
     drop(stdin);
+    if let Some((mut c, ..)) = back {
+        let _ = c.kill();
+        let _ = c.wait();
+    }
     match child.wait() {
         Ok(s) if s.success() => Ok(()),
         _ => Err(crate::i18n::t("ffmpeg n'a pas pu écrire la vidéo")),
@@ -2244,7 +2318,7 @@ struct AnimJob {
 
 /// Projection de l'espace normalisé de la vue vers l'écran.
 fn projector(cam: Camera, rect: egui::Rect) -> impl Fn(V3) -> Option<Pos2> {
-    let focal = rect.height().min(rect.width()) * 1.2;
+    let focal = rect.height().min(rect.width()) * 1.2 * cam.zoom;
     let rc = rect.center();
     move |v: V3| {
         let q = cam.view(v);
@@ -2547,7 +2621,7 @@ pub fn draw_refs(frame: &mut Frame, cam: &Camera, refs: &[RefPlane]) {
         return;
     }
     let (w, h) = (frame.w, frame.h);
-    let focal = w.min(h) as f32 * 1.2;
+    let focal = w.min(h) as f32 * 1.2 * cam.zoom;
     let (cx, cy) = (w as f32 / 2.0, h as f32 / 2.0);
     let ortho_scale = focal / cam.dist;
     for r in refs {
@@ -2790,6 +2864,10 @@ pub struct Viewer {
     xray: bool,
     want_anim: bool,
     anim_job: Option<AnimJob>,
+    /// Suivi de caméra : demandé depuis le menu, en cours, et les images de la vidéo de fond (avec leur clé)
+    want_matchmove: bool,
+    mm_job: Option<crate::matchmove::Job>,
+    backdrop: Option<(String, crate::matchmove::BackdropSlot)>,
     /// La vue de la frame précédente (l'en-tête et les outils flottent par-dessus)
     vp_rect: Option<egui::Rect>,
     hdr_h: f32,
@@ -3018,6 +3096,9 @@ impl Viewer {
             tight_frame: false,
             want_anim: false,
             anim_job: None,
+            want_matchmove: false,
+            mm_job: None,
+            backdrop: None,
             vp_rect: None,
             hdr_h: 30.0,
             scene_refs: None,
@@ -3469,7 +3550,9 @@ impl Viewer {
         let (look, _, _) = self.render_setup();
         let view_cam = self.cam;
         let path = self.path.clone();
-        let (w, h) = (1280usize, 720usize);
+        // 720 lignes, au format de la vidéo de fond s'il y en a une (16:9 sinon)
+        let aspect = scene.frame_aspect();
+        let (w, h) = if aspect >= 1.0 { ((720.0 * aspect / 2.0).round() as usize * 2, 720usize) } else { (720usize, (720.0 / aspect / 2.0).round() as usize * 2) };
         let job = AnimJob { done: Default::default(), finished: Default::default(), error: Default::default(), total: (scene.end.max(scene.start) - scene.start + 1) as usize, out: out.clone() };
         let (done, finished, error) = (job.done.clone(), job.finished.clone(), job.error.clone());
         let ctx = ctx.clone();
@@ -3489,6 +3572,26 @@ impl Viewer {
             ctx.request_repaint();
         });
         self.anim_job = Some(job);
+    }
+
+    /// L'image de la vidéo de fond à montrer maintenant (images décodées, indice, format du cadre) ;
+    /// lance leur décodage la première fois qu'on regarde par la caméra.
+    fn backdrop_frame(&mut self, ctx: &egui::Context) -> Option<(std::sync::Arc<crate::matchmove::BackdropFrames>, usize, f32)> {
+        let b = self.scene.as_ref().and_then(|s| s.backdrop.clone()).filter(|_| self.look_through);
+        let Some(b) = b else {
+            if self.scene.as_ref().is_some_and(|s| s.backdrop.is_none()) {
+                self.backdrop = None;
+            }
+            return None;
+        };
+        let key = format!("{}|{}|{}|{}", b.file, b.from, b.fps, b.frames);
+        if self.backdrop.as_ref().map(|x| &x.0) != Some(&key) {
+            let ctx = ctx.clone();
+            self.backdrop = Some((key, crate::matchmove::load_backdrop(crate::scene::resolve(&self.path, &b.file), b.clone(), move || ctx.request_repaint())));
+        }
+        let frames = self.backdrop.as_ref()?.1.lock().ok()?.as_ref()?.as_ref().ok()?.clone();
+        let k = b.frame_at(self.anim_frame)?.min(frames.px.len().checked_sub(1)?);
+        Some((frames, k, self.scene.as_ref()?.frame_aspect()))
     }
 
     fn mods_file(&self) -> std::path::PathBuf {
@@ -4021,7 +4124,7 @@ impl Viewer {
         let to_local = |w: V3| crate::meshedit::apply(&inv, sub(w, origin));
         let longest = (hi[0] - lo[0]).max(hi[1] - lo[1]).max(hi[2] - lo[2]).max(1e-9);
         let c = [(lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0, (lo[2] + hi[2]) / 2.0];
-        let focal = rect.height().min(rect.width()) * 1.2;
+        let focal = rect.height().min(rect.width()) * 1.2 * self.cam.zoom;
         let (cam, rc) = (self.cam, rect.center());
         // Rotation de la caméra préparée une fois : ces projections tournent sur tous les sommets, à chaque image
         let cam_proj = Proj::new(&cam, rect.width(), rect.height());
@@ -5691,6 +5794,41 @@ impl Viewer {
                 }
             }
         }
+        // Suivi de caméra : choisir la vidéo, puis suivre son avancement ; à la fin, la caméra est posée dans la scène
+        if std::mem::take(&mut self.want_matchmove) && self.mm_job.is_none() {
+            if let Some(f) = rfd::FileDialog::new().add_filter(crate::i18n::t("vidéo"), &["mp4", "mov", "mkv", "webm", "avi", "m4v"]).pick_file() {
+                let ctx = ui.ctx().clone();
+                self.mm_job = Some(crate::matchmove::start(f, None, move || ctx.request_repaint()));
+            }
+        }
+        if let Some(job) = &self.mm_job {
+            let done = job.result.lock().ok().and_then(|mut g| g.take());
+            match done {
+                Some(Ok(s)) => {
+                    let dir = path.parent().unwrap_or(std::path::Path::new(""));
+                    let file = s.video.strip_prefix(dir).map(|p| p.to_string_lossy().replace('\\', "/")).unwrap_or_else(|_| s.video.to_string_lossy().to_string());
+                    let cam = crate::matchmove::to_scene(scene, &s.sol, &s.tracks, s.size, &file, s.fps, s.from, 40);
+                    scene.camera = scene.objects[cam].name.clone();
+                    self.scene_sel = Some(cam);
+                    self.scene_multi.clear();
+                    self.look_through = true;
+                    self.anim_frame = 0.0;
+                    changed = true;
+                    let solved = s.sol.poses.iter().flatten().count();
+                    crate::notify(format!("{} : {} {} / {}, {} {:.2} px", crate::i18n::t("caméra suivie"), crate::i18n::t("images"), solved, s.sol.poses.len(), crate::i18n::t("erreur moyenne"), s.sol.error));
+                    self.capture_msg = None;
+                    self.mm_job = None;
+                }
+                Some(Err(e)) => {
+                    self.capture_msg = Some(e);
+                    self.mm_job = None;
+                }
+                None => {
+                    let (v, what) = job.progress.lock().map(|g| *g).unwrap_or((0.0, ""));
+                    self.capture_msg = Some(format!("{} {:.0} %", crate::i18n::t(what), v * 100.0));
+                }
+            }
+        }
         // Menu « ajouter » de l'en-tête
         if let Some(id) = self.hdr_add.take() {
             let k = match id {
@@ -5998,6 +6136,10 @@ impl Viewer {
                         });
                         if ui.button(format!("{}  {}", crate::lucide::TYPE, crate::i18n::t("texte 3D…"))).clicked() {
                             self.text3d = Some((String::new(), 1.0, 0.25, 1));
+                            ui.close();
+                        }
+                        if ui.add_enabled(self.mm_job.is_none(), egui::Button::new(format!("{}  {}", crate::lucide::VIDEO, crate::i18n::t("caméra suivie depuis une vidéo…")))).on_hover_text(crate::i18n::t("Suivi de caméra : retrouve le mouvement de la caméra d'une vidéo et des repères de la scène filmée, avec la vidéo en fond")).clicked() {
+                            self.want_matchmove = true;
                             ui.close();
                         }
                         if ui.button(format!("{}  {}", crate::lucide::FOLDER_OPEN, crate::i18n::t("choisir un fichier…"))).clicked() {
@@ -6677,6 +6819,19 @@ impl Viewer {
                                                     }
                                                     if ui.button(format!("{}  {}", crate::lucide::CAMERA, crate::i18n::t("poser sur la vue"))).on_hover_text(crate::i18n::t("Enregistre la vue actuelle dans cette caméra")).clicked() {
                                                         set_camera = self.scene_sel;
+                                                    }
+                                                });
+                                                ui.horizontal(|ui| {
+                                                    ui.label(egui::RichText::new(crate::i18n::t("champ")).size(11.0).color(p.muted));
+                                                    let mut auto = o.fov <= 0.0;
+                                                    let mut fov = if auto { fov_of_focal(BASE_FOCAL) } else { o.fov };
+                                                    if ui.add_enabled(!auto, egui::DragValue::new(&mut fov).speed(0.2).range(2.0..=160.0).suffix("°")).on_hover_text(crate::i18n::t("Champ de vision sur le petit côté de l'image")).changed() {
+                                                        o.fov = fov;
+                                                        changed = true;
+                                                    }
+                                                    if ui.checkbox(&mut auto, crate::i18n::t("celui de la vue")).changed() {
+                                                        o.fov = if auto { 0.0 } else { fov };
+                                                        changed = true;
                                                     }
                                                 });
                                             }
@@ -7395,14 +7550,13 @@ impl Viewer {
                 changed = true;
             }
             if let Some(k) = look_through.filter(|&k| k < scene.objects.len()) {
-                let w = scene.world(k, [0.0; 3]);
-                let o = &scene.objects[k];
-                self.cam.yaw = -o.rot[1].to_radians();
-                self.cam.pitch = -o.rot[0].to_radians();
-                self.cam.ortho = false;
-                let r = self.cam.rotate([(w[0] - c[0]) / longest, (w[1] - c[1]) / longest, (w[2] - c[2]) / longest]);
-                self.cam.pan = [-r[0], -r[1]];
-                self.cam.dist = r[2].max(0.05);
+                // Cette caméra devient celle de la scène (vue, rendu d'animation), et la vue la suit
+                let name = scene.objects[k].name.clone();
+                if scene.camera != name {
+                    scene.camera = name;
+                    changed = true;
+                }
+                self.look_through = true;
             }
         }
         if let Some((old, new)) = renamed {
@@ -8739,7 +8893,7 @@ impl Viewer {
             if let Some((lo, hi)) = self.scene_frame {
                 let longest = (hi[0] - lo[0]).max(hi[1] - lo[1]).max(hi[2] - lo[2]).max(1e-9);
                 let c = [(lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0, (lo[2] + hi[2]) / 2.0];
-                let focal = rect.height().min(rect.width()) * 1.2;
+                let focal = rect.height().min(rect.width()) * 1.2 * self.cam.zoom;
                 let cam = self.cam;
                 let to_screen = |w: V3| -> Option<Pos2> {
                     let q = cam.view([(w[0] - c[0]) / longest, (w[1] - c[1]) / longest, (w[2] - c[2]) / longest]);
@@ -8837,7 +8991,7 @@ impl Viewer {
             if let (Some((kind, axis, orig, from)), Some(sel), Some((lo, hi))) = (self.modal, self.scene_sel, self.scene_frame) {
                 let longest = (hi[0] - lo[0]).max(hi[1] - lo[1]).max(hi[2] - lo[2]).max(1e-9);
                 let c = [(lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0, (lo[2] + hi[2]) / 2.0];
-                let focal = rect.height().min(rect.width()) * 1.2;
+                let focal = rect.height().min(rect.width()) * 1.2 * self.cam.zoom;
                 let cam = self.cam;
                 // X, Y, Z imposent un axe (le même une seconde fois le libère)
                 let mut axis = axis;
@@ -8986,7 +9140,7 @@ impl Viewer {
                     let longest = (hi[0] - lo[0]).max(hi[1] - lo[1]).max(hi[2] - lo[2]).max(1e-9);
                     let c = [(lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0, (lo[2] + hi[2]) / 2.0];
                     let origin = [(base[0] - c[0]) / longest, (base[1] - c[1]) / longest, (base[2] - c[2]) / longest];
-                    let focal = rect.height().min(rect.width()) * 1.2;
+                    let focal = rect.height().min(rect.width()) * 1.2 * self.cam.zoom;
                     let (ortho, dist, rc) = (self.cam.ortho, self.cam.dist, rect.center());
                     let cam = &self.cam;
                     let project = |v: V3| -> Option<Pos2> {
@@ -9135,7 +9289,7 @@ impl Viewer {
                         let n = chosen.len() as f32;
                         let cen = chosen.iter().fold([0.0f32; 3], |a, &i| add3(a, to_world(me.mesh.pos[i]).map(|x| x / n)));
                         let origin = [(cen[0] - c[0]) / longest, (cen[1] - c[1]) / longest, (cen[2] - c[2]) / longest];
-                        let focal = rect.height().min(rect.width()) * 1.2;
+                        let focal = rect.height().min(rect.width()) * 1.2 * self.cam.zoom;
                         let project = projector(self.cam, rect);
                         let (toward, right, up, per_px) = gizmo_basis(&self.cam, origin, focal);
                         let axes = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
@@ -9237,7 +9391,7 @@ impl Viewer {
                 if right {
                     self.cam.dist = (self.cam.dist * ((d.y - d.x) * 0.01).exp()).clamp(0.2, 50.0);
                 } else {
-                    let k = self.cam.dist / (rect.height().min(rect.width()) * 1.2);
+                    let k = self.cam.dist / (rect.height().min(rect.width()) * 1.2 * self.cam.zoom);
                     self.cam.pan[0] += d.x * k;
                     self.cam.pan[1] -= d.y * k;
                 }
@@ -9249,7 +9403,7 @@ impl Viewer {
             } else if mods.ctrl || mods.command {
                 self.cam.dist = (self.cam.dist * (d.y * 0.01).exp()).clamp(0.2, 50.0);
             } else if mods.shift || right {
-                let k = self.cam.dist / (rect.height().min(rect.width()) * 1.2);
+                let k = self.cam.dist / (rect.height().min(rect.width()) * 1.2 * self.cam.zoom);
                 self.cam.pan[0] += d.x * k;
                 self.cam.pan[1] -= d.y * k;
             } else {
@@ -9314,14 +9468,24 @@ impl Viewer {
             if dragging {
                 self.look_through = false;
             } else if let (Some(scene), Some(fr)) = (self.scene.as_ref(), self.scene_frame) {
-                match scene.objects.iter().position(|o| crate::scene::kind(o) == crate::scene::Kind::Camera) {
-                    Some(k) => self.cam = camera_view(scene, k, fr, self.cam),
+                match scene.active_camera() {
+                    Some(k) => {
+                        self.cam = camera_view(scene, k, fr, self.cam);
+                        // Le champ de la caméra vaut pour son cadre, pas pour toute la vue
+                        let (_, _, fw, fh) = crate::matchmove::camera_frame(rect.width(), rect.height(), scene.frame_aspect());
+                        self.cam.zoom *= fw.min(fh) / rect.width().min(rect.height()).max(1.0);
+                    }
                     None => {
                         self.look_through = false;
                         self.capture_msg = Some(crate::i18n::t("La scène n'a pas de caméra (Ajouter › Caméra)"));
                     }
                 }
             }
+        }
+        if !self.look_through {
+            // Le roulis et la focale appartiennent à la caméra de la scène, pas à la vue libre
+            self.cam.roll = 0.0;
+            self.cam.zoom = 1.0;
         }
         if self.turntable && !dragging {
             let dt = ui.input(|i| i.stable_dt).min(0.1);
@@ -9343,7 +9507,9 @@ impl Viewer {
         if interacting {
             look.shadow_samples = look.shadow_samples.min(2);
         }
-        let look_key = format!("{:?}|{refs_key}", look.key());
+        // Vue par la caméra : l'image de la vidéo de fond à cette image de l'animation, une fois décodée
+        let backdrop = self.backdrop_frame(ui.ctx());
+        let look_key = format!("{:?}|{refs_key}|{:?}", look.key(), backdrop.as_ref().map(|b| b.1));
         let key = (self.cam, size, z_up, self.prepared.as_ref().map(|p| p.1).unwrap_or(0), look_key);
         let trace_key = key.clone();
         if self.last.as_ref() != Some(&key) || self.tex.is_none() {
@@ -9355,6 +9521,10 @@ impl Viewer {
             let prep = &prepared.2;
             let mut frame = render(prep, &self.cam, &look, size[0], size[1]);
             draw_refs(&mut frame, &self.cam, &refs);
+            if let Some((b, k, aspect)) = &backdrop {
+                let fr = crate::matchmove::camera_frame(frame.w as f32, frame.h as f32, *aspect);
+                crate::matchmove::composite(&mut frame.rgba, &frame.ids, frame.w, frame.h, fr, &b.px[*k], b.w, b.h);
+            }
             let img = egui::ColorImage::from_rgba_unmultiplied([frame.w, frame.h], &frame.rgba);
             self.ids = Some((frame.w, frame.h, frame.ids));
             self.ids_rev += 1;
@@ -9435,7 +9605,7 @@ impl Viewer {
         // Grille du sol (sous le modèle)
         if let Some((_, _, prep)) = &self.prepared {
             if !self.look.show_bg {
-                let focal = rect.height().min(rect.width()) * 1.2;
+                let focal = rect.height().min(rect.width()) * 1.2 * self.cam.zoom;
                 let ortho_scale = focal / self.cam.dist;
                 let c = rect.center();
                 let project = |v: V3| -> Option<Pos2> {
@@ -9485,7 +9655,7 @@ impl Viewer {
         if let (Some(scene), Some((lo, hi)), true) = (self.scene.as_ref(), self.scene_frame, self.edit.is_none()) {
             let longest = (hi[0] - lo[0]).max(hi[1] - lo[1]).max(hi[2] - lo[2]).max(1e-9);
             let c = [(lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0, (lo[2] + hi[2]) / 2.0];
-            let focal = rect.height().min(rect.width()) * 1.2;
+            let focal = rect.height().min(rect.width()) * 1.2 * self.cam.zoom;
             let (cam, rc) = (self.cam, rect.center());
             let project = |v: V3| -> Option<Pos2> {
                 let q = cam.view([(v[0] - c[0]) / longest, (v[1] - c[1]) / longest, (v[2] - c[2]) / longest]);
@@ -9498,8 +9668,8 @@ impl Viewer {
             let over = ui.painter_at(rect);
             // Vue par la caméra : le cadre 16:9 de l'export d'animation, le reste assombri
             if self.look_through {
-                let h = rect.height().min(rect.width() * 9.0 / 16.0);
-                let f = egui::Rect::from_center_size(rect.center(), egui::vec2(h * 16.0 / 9.0, h));
+                let (_, _, fw, fh) = crate::matchmove::camera_frame(rect.width(), rect.height(), self.scene.as_ref().map(|s| s.frame_aspect()).unwrap_or(16.0 / 9.0));
+                let f = egui::Rect::from_center_size(rect.center(), egui::vec2(fw, fh));
                 let shade = Color32::from_black_alpha(150);
                 for r in [egui::Rect::from_min_max(rect.min, egui::pos2(rect.max.x, f.min.y)), egui::Rect::from_min_max(egui::pos2(rect.min.x, f.max.y), rect.max), egui::Rect::from_min_max(egui::pos2(rect.min.x, f.min.y), egui::pos2(f.min.x, f.max.y)), egui::Rect::from_min_max(egui::pos2(f.max.x, f.min.y), egui::pos2(rect.max.x, f.max.y))] {
                     over.rect_filled(r, 0.0, shade);
@@ -9767,7 +9937,7 @@ impl Viewer {
         }
         if let (Some((origin, gaxes)), Some((lo, hi))) = (gizmo, self.scene_frame) {
             let _ = (lo, hi);
-            let focal = rect.height().min(rect.width()) * 1.2;
+            let focal = rect.height().min(rect.width()) * 1.2 * self.cam.zoom;
             let project = projector(self.cam, rect);
             let (toward, right, up, per_px) = gizmo_basis(&self.cam, origin, focal);
             let mode = crate::gizmo::Mode::from_u8(self.gizmo_mode);
@@ -9793,7 +9963,7 @@ impl Viewer {
         }
         // Coutures (mode édition), en rouge par-dessus le modèle
         if let (Some(e), Some((_, _, prep))) = (&self.edit, &self.prepared) {
-            let focal = rect.height().min(rect.width()) * 1.2;
+            let focal = rect.height().min(rect.width()) * 1.2 * self.cam.zoom;
             let ortho_scale = focal / self.cam.dist;
             let c = rect.center();
             let project = |v: V3| -> Option<Pos2> {
@@ -10016,6 +10186,54 @@ mod tests {
         assert_eq!(n.load(std::sync::atomic::Ordering::Relaxed), 6);
         assert!(std::fs::metadata(&out).map(|m| m.len() > 0).unwrap_or(false));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn vue_par_une_camera_penchee() {
+        // Une caméra tournée sur ses trois axes, avec son propre champ, où que soit le centre de la scène
+        for (bounds, pos) in [(([-4.0f32, -1.0, -6.0], [4.0f32, 3.0, 2.0]), [1.0f32, 2.0, 5.0]), (([10.0, 0.0, 10.0], [30.0, 5.0, 40.0]), [1.0, 2.0, 5.0])] {
+            let mut sc = crate::scene::Scene::default();
+            let k = sc.add_role("caméra", "camera");
+            (sc.objects[k].pos, sc.objects[k].rot, sc.objects[k].fov) = (pos, [-20.0, 35.0, 25.0], 30.0);
+            let cam = camera_view(&sc, k, bounds, Camera::default());
+            assert!((cam.zoom - zoom_of_fov(30.0)).abs() < 1e-6 && cam.zoom > 1.0);
+            let (lo, hi) = bounds;
+            let longest = (hi[0] - lo[0]).max(hi[1] - lo[1]).max(hi[2] - lo[2]);
+            let c = [(lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0, (lo[2] + hi[2]) / 2.0];
+            let to_view = |w: V3| [(w[0] - c[0]) / longest, (w[1] - c[1]) / longest, (w[2] - c[2]) / longest];
+            // Un point droit devant la caméra (son axe −Z) tombe au centre de l'image
+            let m = crate::scene::rot_matrix(sc.objects[k].rot);
+            let axis = |i: usize| [m[0][i], m[1][i], m[2][i]];
+            let (right, up, back) = (axis(0), axis(1), axis(2));
+            let ahead = [pos[0] - back[0] * 3.0, pos[1] - back[1] * 3.0, pos[2] - back[2] * 3.0];
+            let q = project_point(&cam, 400.0, 300.0, to_view(ahead)).unwrap();
+            assert!((q[0] - 200.0).abs() < 0.01 && (q[1] - 150.0).abs() < 0.01, "{q:?}");
+            // Un point vers le haut de la caméra monte tout droit à l'image, un point à sa droite part à droite : le roulis est respecté
+            let q = project_point(&cam, 400.0, 300.0, to_view([ahead[0] + up[0] * 0.3, ahead[1] + up[1] * 0.3, ahead[2] + up[2] * 0.3])).unwrap();
+            assert!((q[0] - 200.0).abs() < 0.01 && q[1] < 140.0, "{q:?}");
+            // 0,3 de côté à 3 de distance, champ de 30° sur 300 pixels : 0,1 / tan(15°) × 150
+            assert!((150.0 - q[1] - 0.1 / 15f32.to_radians().tan() * 150.0).abs() < 0.05, "{q:?}");
+            let q = project_point(&cam, 400.0, 300.0, to_view([ahead[0] + right[0] * 0.3, ahead[1] + right[1] * 0.3, ahead[2] + right[2] * 0.3])).unwrap();
+            assert!((q[1] - 150.0).abs() < 0.01 && q[0] > 210.0, "{q:?}");
+            // rotate et unrotate restent inverses avec le roulis
+            let v = [0.3, -0.7, 0.2];
+            let back = cam.unrotate(cam.rotate(v));
+            assert!((0..3).all(|i| (back[i] - v[i]).abs() < 1e-5));
+        }
+        assert_eq!(zoom_of_fov(0.0), 1.0);
+        assert_eq!(zoom_of_fov(f32::NAN), 1.0);
+        assert!((fov_of_focal(BASE_FOCAL) - 45.24).abs() < 0.01);
+        // La caméra active : celle qu'on a nommée, sinon la première ; renommer la suit
+        let mut sc = crate::scene::Scene::starter();
+        let first = sc.active_camera().unwrap();
+        let second = sc.add_role("caméra suivie", "camera");
+        assert_eq!(sc.active_camera(), Some(first));
+        sc.camera = "caméra suivie".into();
+        assert_eq!(sc.active_camera(), Some(second));
+        sc.rename(second, "plan 1");
+        assert_eq!((sc.active_camera(), sc.camera.as_str()), (Some(second), "plan 1"));
+        sc.camera = "absente".into();
+        assert_eq!(sc.active_camera(), Some(first));
     }
 
     #[test]
@@ -10508,7 +10726,7 @@ mod pointage {
     fn arbre_et_parcours_d_accord() {
         let s = preview_sphere();
         for ortho in [false, true] {
-            let cam = Camera { yaw: 0.7, pitch: 0.3, dist: 2.4, pan: [0.1, -0.05], ortho };
+            let cam = Camera { yaw: 0.7, pitch: 0.3, dist: 2.4, pan: [0.1, -0.05], ortho, roll: 0.35, zoom: 1.3 };
             let pr = Proj::new(&cam, 320.0, 240.0);
             let mut seen = 0;
             for k in 0..60 {

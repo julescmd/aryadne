@@ -621,7 +621,7 @@ pub fn passes(s: &mut Scene, m: &Prepared, cam: &Camera, look: &Look, set: &Sett
         let v4 = |v: [f32; 3]| [v[0], v[1], v[2], 0.0];
         gl[k] = GLamp { at: [l.at[0], l.at[1], l.at[2], if l.point { 1.0 } else { 0.0 }], color: [l.color[0], l.color[1], l.color[2], l.intensity], extra: [l.range, if l.point { l.shape.max(1) as f32 } else { 0.0 }, l.cone[0], l.cone[1]], axis: v4(l.axis), h0: v4(l.half[0]), h1: v4(l.half[1]) };
     }
-    let focal = w.min(h) as f32 * 1.2;
+    let focal = w.min(h) as f32 * 1.2 * cam.zoom;
     let col = |v: V3| {
         let r = cam.unrotate(v);
         [r[0], r[1], r[2], 0.0]

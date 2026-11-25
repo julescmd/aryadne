@@ -222,7 +222,7 @@ pub fn write_passes_exr(acc: &Accum, m: &Prepared, cam: &Camera, denoise: bool, 
     let n = acc.spp.max(1) as f32;
     // Profondeur et position : un rayon par centre de pixel
     let bvh = m.bvh.get_or_init(|| crate::bvh::Bvh::new(&m.pos, &m.tris));
-    let focal = w.min(h) as f32 * 1.2;
+    let focal = w.min(h) as f32 * 1.2 * cam.zoom;
     let ortho_scale = focal / cam.dist;
     let (cx, cy) = (w as f32 / 2.0, h as f32 / 2.0);
     let fwd = cam.unrotate([0.0, 0.0, -1.0]);
@@ -834,7 +834,7 @@ pub fn pass(m: &Prepared, cam: &Camera, look: &Look, set: &Settings, acc: &mut A
     let (w, h) = (acc.w, acc.h);
     let bvh = m.bvh.get_or_init(|| crate::bvh::Bvh::new(&m.pos, &m.tris));
     let lamps: Vec<Lamp> = if look.lamps.is_empty() { rig_lamps(set.rig, look) } else { look.lamps.clone() };
-    let focal = w.min(h) as f32 * 1.2;
+    let focal = w.min(h) as f32 * 1.2 * cam.zoom;
     let ortho_scale = focal / cam.dist;
     let (cx, cy) = (w as f32 / 2.0, h as f32 / 2.0);
     let spp = acc.spp;

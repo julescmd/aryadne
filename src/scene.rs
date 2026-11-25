@@ -128,6 +128,39 @@ pub struct Object {
     /// Calques d'animation : des clés de décalage par calque, ajoutées à l'animation de base
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub layer_keys: Vec<LayerKeys>,
+    /// Caméra : champ de vision sur le petit côté de l'image, en degrés (0 : celui de la vue)
+    #[serde(default, skip_serializing_if = "zero_f32")]
+    pub fov: f32,
+}
+
+fn zero_f32(x: &f32) -> bool {
+    *x == 0.0
+}
+
+/// Vidéo affichée derrière la scène quand on regarde par la caméra (suivi de caméra, rotoscopie)
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct Backdrop {
+    /// Fichier vidéo, relatif au dossier de la scène quand c'est possible
+    pub file: String,
+    /// Images par seconde auxquelles la vidéo a été suivie, et seconde de la source à l'image `first` de la scène
+    pub fps: f32,
+    #[serde(default)]
+    pub from: f32,
+    #[serde(default)]
+    pub first: i32,
+    #[serde(default)]
+    pub frames: u32,
+    /// Taille de l'image (seul le rapport largeur / hauteur compte : c'est le cadre de la caméra)
+    #[serde(default)]
+    pub size: [u32; 2],
+}
+
+impl Backdrop {
+    /// L'image de la vidéo (comptée depuis `from`) à montrer à l'image `f` de la scène
+    pub fn frame_at(&self, f: f32) -> Option<usize> {
+        let k = (f - self.first as f32).round();
+        (k >= 0.0 && (k as u32) < self.frames.max(1)).then_some(k as usize)
+    }
 }
 
 /// Un calque d'animation de la scène (comme Maya) : ses décalages s'ajoutent à la base, selon son poids
@@ -458,7 +491,7 @@ impl Object {
     }
 
     pub fn new(name: String, file: String) -> Object {
-        Object { name, file, pos: [0.0; 3], rot: [0.0; 3], scale: [1.0; 3], visible: true, color: None, mods: vec![], material: String::new(), paint: String::new(), parent: String::new(), opacity: 0.5, role: String::new(), energy: 1.2, point: false, range: 8.0, shape: 0, spot: spot_deg(), blend: spot_blend(), size: area_size(), keys: vec![], cycle: Default::default(), aim: String::new(), length: 1.0, rest: None, skin: String::new(), ik: String::new(), ik_chain: 2, reach: 1.0, morphs: vec![], copy_loc: String::new(), copy_rot: String::new(), limit: None, layer_keys: vec![] }
+        Object { name, file, pos: [0.0; 3], rot: [0.0; 3], scale: [1.0; 3], visible: true, color: None, mods: vec![], material: String::new(), paint: String::new(), parent: String::new(), opacity: 0.5, role: String::new(), energy: 1.2, point: false, range: 8.0, shape: 0, spot: spot_deg(), blend: spot_blend(), size: area_size(), keys: vec![], cycle: Default::default(), aim: String::new(), length: 1.0, rest: None, skin: String::new(), ik: String::new(), ik_chain: 2, reach: 1.0, morphs: vec![], copy_loc: String::new(), copy_rot: String::new(), limit: None, layer_keys: vec![], fov: 0.0 }
     }
 }
 
@@ -518,7 +551,7 @@ pub fn kind(o: &Object) -> Kind {
 
 impl Default for Scene {
     fn default() -> Scene {
-        Scene { version: 1, objects: vec![], fps: 24.0, start: 0, end: 120, layers: vec![], active_layer: String::new() }
+        Scene { version: 1, objects: vec![], fps: 24.0, start: 0, end: 120, layers: vec![], active_layer: String::new(), backdrop: None, camera: String::new() }
     }
 }
 
@@ -540,6 +573,11 @@ pub struct Scene {
     pub layers: Vec<AnimLayer>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub active_layer: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backdrop: Option<Backdrop>,
+    /// Nom de la caméra par laquelle on regarde et on rend (vide : la première de la scène)
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub camera: String,
 }
 
 fn fps() -> f32 {
@@ -677,6 +715,20 @@ impl Scene {
             }
         }
         moved
+    }
+
+    /// La caméra par laquelle on regarde : celle qu'on a choisie, sinon la première
+    pub fn active_camera(&self) -> Option<usize> {
+        let is_cam = |o: &Object| kind(o) == Kind::Camera;
+        self.objects.iter().position(|o| !self.camera.is_empty() && o.name == self.camera && is_cam(o)).or_else(|| self.objects.iter().position(is_cam))
+    }
+
+    /// Format de l'image de la caméra (largeur / hauteur) : celui de la vidéo de fond, sinon 16:9
+    pub fn frame_aspect(&self) -> f32 {
+        match &self.backdrop {
+            Some(b) if b.size[0] > 0 && b.size[1] > 0 => b.size[0] as f32 / b.size[1] as f32,
+            _ => 16.0 / 9.0,
+        }
     }
 
     /// Ajoute un modèle à la scène, posé à l'origine.
@@ -859,6 +911,9 @@ impl Scene {
     /// Renomme un objet sans perdre ses enfants.
     pub fn rename(&mut self, k: usize, name: &str) {
         let old = std::mem::replace(&mut self.objects[k].name, name.to_string());
+        if self.camera == old && !old.is_empty() {
+            self.camera = name.to_string();
+        }
         for o in &mut self.objects {
             if o.parent == old && !old.is_empty() {
                 o.parent = name.to_string();
