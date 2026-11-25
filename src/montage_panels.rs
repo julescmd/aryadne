@@ -2224,11 +2224,13 @@ impl Editor {
                 lx += 17.0;
             }
             // Nom dans une pastille sombre, lisible sur l'image comme sur la couleur
-            let gl = np.layout_no_wrap(label, egui::FontId::proportional(11.0), p.text);
+            // Texte toujours clair : la pastille est sombre dans tous les thèmes (les thèmes clairs aussi)
+            let ink = Color32::from_gray(242);
+            let gl = np.layout_no_wrap(label, egui::FontId::proportional(11.0), ink);
             let chip = Rect::from_min_size(pos2(lx + 2.0, r.top() + 4.0), gl.size() + vec2(10.0, 2.0));
             if r.width() > 24.0 {
                 np.rect_filled(chip, 2.0, Color32::from_rgba_unmultiplied(16, 10, 13, 170));
-                np.galley(chip.min + vec2(5.0, 1.0), gl, p.text);
+                np.galley(chip.min + vec2(5.0, 1.0), gl, ink);
             }
         }
 
