@@ -57,6 +57,7 @@ pub fn fuzzy(q: &str, s: &str) -> Option<i32> {
 pub enum Cmd {
     View(View),
     Compare,
+    GitHistory,
     NewNote,
     Daily,
     FromTemplate,
@@ -169,6 +170,7 @@ impl App {
             v.insert(0, ("fichier : historique des versions", "", Cmd::History));
             v.insert(1, ("fichier : résumer avec l'IA", "", Cmd::Summarize));
             v.insert(2, ("fichier : comparer avec un autre fichier…", "", Cmd::Compare));
+            v.insert(3, ("fichier : historique git", "", Cmd::GitHistory));
             v.insert(2, ("fichier : fermer l'onglet", "Ctrl+W", Cmd::CloseTab));
             if self.current().is_some_and(|d| runner_for(&d.rel).is_some()) {
                 v.insert(0, ("fichier : exécuter le script", "F5", Cmd::RunFile));
@@ -204,6 +206,27 @@ impl App {
                 if let Some(rel) = self.current().map(|d| d.rel.clone()) {
                     self.flush_all();
                     self.history_dlg = Some(HistoryDlg { versions: history_list(&self.root(), &rel), rel, sel: 0, diff: true, compare: false });
+                }
+            }
+            Cmd::GitHistory => {
+                if let Some(rel) = self.current().map(|d| d.rel.clone()) {
+                    self.flush_all();
+                    let Ok(path) = vault::safe(&self.root(), &rel) else { return };
+                    let log = crate::code::git_log(&path, 30);
+                    if log.is_empty() {
+                        self.toast = Some((crate::i18n::t("Ce fichier n'est pas suivi par git (ou n'a pas de commit)."), Instant::now()));
+                        return;
+                    }
+                    // Chaque version dans un fichier temporaire : la vue de l'historique les compare
+                    let dir = std::env::temp_dir().join(format!("aryadne-git-{}", std::process::id()));
+                    let _ = std::fs::create_dir_all(&dir);
+                    let versions: Vec<(String, PathBuf)> = log.iter().filter_map(|(h, label)| {
+                        let text = crate::code::git_show(&path, h)?;
+                        let f = dir.join(format!("{h}.txt"));
+                        std::fs::write(&f, text).ok()?;
+                        Some((format!("{h} · {label}"), f))
+                    }).collect();
+                    self.history_dlg = Some(HistoryDlg { versions, rel, sel: 0, diff: true, compare: false });
                 }
             }
             Cmd::Compare => {

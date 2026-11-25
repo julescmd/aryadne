@@ -3198,5 +3198,7 @@
   "comparer avec…": "compare with…",
   "comparer": "compare",
   "seulement dans l'autre": "only in the other",
-  "seulement dans celui-ci": "only in this one"
+  "seulement dans celui-ci": "only in this one",
+  "fichier : historique git": "file: git history",
+  "Ce fichier n'est pas suivi par git (ou n'a pas de commit).": "This file is not tracked by git (or has no commit)."
 }

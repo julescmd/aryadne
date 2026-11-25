@@ -159,6 +159,37 @@ pub fn git_base(path: &std::path::Path) -> Option<String> {
     out.status.success().then(|| String::from_utf8_lossy(&out.stdout).replace("\r\n", "\n"))
 }
 
+/// Les commits qui ont touché ce fichier (au plus `max`), du plus récent : (hash, « date · auteur · titre »)
+pub fn git_log(path: &std::path::Path, max: usize) -> Vec<(String, String)> {
+    let (Some(dir), Some(name)) = (path.parent(), path.file_name()) else { return vec![] };
+    let mut cmd = std::process::Command::new("git");
+    cmd.arg("-C").arg(dir).args(["log", "--follow", &format!("-n{max}"), "--format=%h%x09%ad%x09%an%x09%s", "--date=short", "--"]).arg(name);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000);
+    }
+    let Ok(o) = cmd.stderr(std::process::Stdio::null()).output() else { return vec![] };
+    String::from_utf8_lossy(&o.stdout)
+        .lines()
+        .filter_map(|l| {
+            let mut it = l.splitn(4, '\t');
+            let (h, d, a, t) = (it.next()?, it.next()?, it.next()?, it.next().unwrap_or(""));
+            Some((h.to_string(), format!("{d} · {a} · {t}")))
+        })
+        .collect()
+}
+
+/// Le fichier tel qu'il était au commit `hash`
+pub fn git_show(path: &std::path::Path, hash: &str) -> Option<String> {
+    let dir = path.parent()?;
+    let top = std::process::Command::new("git").arg("-C").arg(dir).args(["rev-parse", "--show-prefix"]).output().ok()?;
+    let prefix = String::from_utf8_lossy(&top.stdout).trim().to_string();
+    let name = path.file_name()?.to_string_lossy().to_string();
+    let o = std::process::Command::new("git").arg("-C").arg(dir).arg("show").arg(format!("{hash}:{prefix}{name}")).stderr(std::process::Stdio::null()).output().ok()?;
+    o.status.success().then(|| String::from_utf8_lossy(&o.stdout).replace("\r\n", "\n"))
+}
+
 #[cfg(test)]
 mod diff_tests {
     use super::*;
@@ -213,6 +244,11 @@ mod diff_tests {
         std::fs::write(dir.join("a.py"), "x = 2\n").unwrap();
         assert_eq!(git_base(&dir.join("a.py")).as_deref(), Some("x = 1\n"));
         assert_eq!(git_base(&dir.join("b.py")), None);
+        let _ = git(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", "deux"]);
+        let log = git_log(&dir.join("a.py"), 10);
+        assert_eq!(log.len(), 2);
+        assert!(log[0].1.ends_with("deux"));
+        assert_eq!(git_show(&dir.join("a.py"), &log[1].0).as_deref(), Some("x = 1\n"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
