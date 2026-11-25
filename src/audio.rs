@@ -215,11 +215,106 @@ pub struct Session {
     pub tracks: Vec<Track>,
     #[serde(default)]
     pub markers: Vec<Marker>,
+    /// Tempo de la session (grille en mesures, métronome, aimantation sur les temps)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tempo: Option<Tempo>,
+}
+
+/// Carte de tempo : un tempo de départ et des changements, chacun commence une mesure
+#[derive(Clone, PartialEq, Serialize, Deserialize, Debug)]
+pub struct Tempo {
+    pub bpm: f32,
+    pub beats_per_bar: u32,
+    #[serde(default)]
+    pub changes: Vec<TempoChange>,
+    /// Le clic du métronome à l'écoute (jamais dans l'export)
+    #[serde(default)]
+    pub click: bool,
+    /// Les clips s'aimantent aux temps
+    #[serde(default)]
+    pub snap: bool,
+}
+
+#[derive(Clone, PartialEq, Serialize, Deserialize, Debug)]
+pub struct TempoChange {
+    pub t: f64,
+    pub bpm: f32,
+}
+
+impl Default for Tempo {
+    fn default() -> Tempo {
+        Tempo { bpm: 120.0, beats_per_bar: 4, changes: vec![], click: true, snap: true }
+    }
+}
+
+impl Tempo {
+    /// Les segments de tempo : (début, bpm), triés
+    fn segments(&self) -> Vec<(f64, f32)> {
+        let mut v = vec![(0.0, self.bpm)];
+        let mut ch: Vec<&TempoChange> = self.changes.iter().filter(|c| c.t > 0.0).collect();
+        ch.sort_by(|a, b| a.t.total_cmp(&b.t));
+        v.extend(ch.into_iter().map(|c| (c.t, c.bpm)));
+        v
+    }
+
+    /// Les temps entre `a` et `b` : (instant, numéro de mesure si c'est le premier temps)
+    pub fn beats(&self, a: f64, b: f64) -> Vec<(f64, Option<u32>)> {
+        let seg = self.segments();
+        let bpb = self.beats_per_bar.max(1) as u64;
+        let mut out = vec![];
+        let mut bar0 = 0u64;
+        for (k, &(t0, bpm)) in seg.iter().enumerate() {
+            let end = seg.get(k + 1).map(|s| s.0).unwrap_or(f64::INFINITY);
+            let spb = 60.0 / bpm.clamp(20.0, 400.0) as f64;
+            // Le premier temps visible du segment
+            let first = if a > t0 { ((a - t0) / spb).ceil() as u64 } else { 0 };
+            let mut i = first;
+            loop {
+                let t = t0 + i as f64 * spb;
+                if t >= end - 1e-9 || t > b {
+                    break;
+                }
+                out.push((t, (i % bpb == 0).then_some((bar0 + i / bpb) as u32 + 1)));
+                i += 1;
+            }
+            if end.is_finite() {
+                bar0 += ((end - t0) / spb / bpb as f64).ceil() as u64;
+            }
+        }
+        out
+    }
+
+    /// Le tempo à l'instant `t`
+    pub fn bpm_at(&self, t: f64) -> f32 {
+        self.segments().into_iter().rev().find(|s| s.0 <= t).map(|s| s.1).unwrap_or(self.bpm)
+    }
+}
+
+/// Ajoute le clic du métronome à un mixage stéréo qui commence à `a`
+pub fn add_clicks(out: &mut [f32], tempo: &Tempo, a: f64) {
+    let n = out.len() / 2;
+    let b = a + n as f64 / RATE as f64;
+    let len = (RATE as f64 * 0.035) as usize;
+    for (t, bar) in tempo.beats(a, b) {
+        let f = if bar.is_some() { 1760.0 } else { 1175.0 };
+        let g = if bar.is_some() { 0.5 } else { 0.32 };
+        let off = ((t - a) * RATE as f64).round() as usize;
+        for k in 0..len {
+            let i = off + k;
+            if i >= n {
+                break;
+            }
+            let x = k as f32 / RATE as f32;
+            let v = (x * f * std::f32::consts::TAU).sin() * g * (-x * 140.0).exp();
+            out[i * 2] += v;
+            out[i * 2 + 1] += v;
+        }
+    }
 }
 
 impl Session {
     pub fn starter() -> Session {
-        Session { tracks: vec![Session::new_track(0), Session::new_track(1)], markers: vec![] }
+        Session { tracks: vec![Session::new_track(0), Session::new_track(1)], markers: vec![], tempo: None }
     }
 
     pub fn new_track(i: usize) -> Track {
@@ -1070,5 +1165,30 @@ mod region_tests {
         assert_eq!(r.len(), 2);
         assert_eq!(r[0], ("Porte".to_string(), 1.0, 6.0));
         assert!((r[1].2 - s.duration()).abs() < 1e-6);
+    }
+}
+
+#[cfg(test)]
+mod tempo_tests {
+    use super::*;
+    #[test]
+    fn carte_de_tempo() {
+        let mut t = Tempo { bpm: 120.0, beats_per_bar: 4, ..Tempo::default() };
+        let b = t.beats(0.0, 4.0);
+        // 120 bpm : un temps par demi-seconde, mesures 1 et 2 sur 0 s et 2 s
+        assert_eq!(b.len(), 9);
+        assert_eq!(b[0], (0.0, Some(1)));
+        assert_eq!(b[4], (2.0, Some(2)));
+        assert_eq!(b[1].1, None);
+        // Passage à 60 bpm à 4 s : la mesure 3 y commence, puis un temps par seconde
+        t.changes.push(TempoChange { t: 4.0, bpm: 60.0 });
+        let b = t.beats(3.9, 9.0);
+        assert_eq!(b[0], (4.0, Some(3)));
+        assert_eq!(b[1].0, 5.0);
+        assert_eq!(b[4], (8.0, Some(4)));
+        assert_eq!(t.bpm_at(5.0), 60.0);
+        let mut out = vec![0.0f32; RATE as usize * 2];
+        add_clicks(&mut out, &t, 0.0);
+        assert!(out[10].abs() > 0.01 && out[RATE as usize / 2 * 2 + 10].abs() > 0.01);
     }
 }

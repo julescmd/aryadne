@@ -202,7 +202,11 @@ impl Editor {
         let (a, b) = match (self.looping, self.range) {
             (true, Some((a, b, ..))) => (a, b),
             _ => {
-                let end = self.session.duration();
+                let mut end = self.session.duration();
+                // Avec le métronome, on peut écouter (et jouer par-dessus) même une session vide
+                if self.session.tempo.as_ref().is_some_and(|t| t.click) {
+                    end = end.max(self.time + 120.0);
+                }
                 if self.time >= end - 0.01 {
                     self.time = 0.0;
                 }
@@ -213,7 +217,11 @@ impl Editor {
             return;
         }
         self.time = a;
-        let data = Arc::new(audio::mix(&self.session, &self.sounds, a, b, false));
+        let mut data = audio::mix(&self.session, &self.sounds, a, b, false);
+        if let Some(t) = self.session.tempo.as_ref().filter(|t| t.click) {
+            audio::add_clicks(&mut data, t, a);
+        }
+        let data = Arc::new(data);
         self.playing = Some((Instant::now(), a, data.clone()));
         let Some(fp) = crate::ffmpeg::find("ffplay") else {
             self.say(crate::i18n::t("ffplay manque pour écouter (il vient avec ffmpeg)."));
@@ -609,14 +617,75 @@ impl Editor {
         }
         ui.add_space(6.0);
         ui.separator();
-        ui.add_space(4.0);
-        let (cr, _) = ui.allocate_exact_size(vec2(118.0, 30.0), Sense::hover());
+        // Tempo : le métronome (clic) et la carte de tempo dans son menu
+        let click = self.session.tempo.as_ref().is_some_and(|t| t.click);
+        if ib(&mut ui, l::METRONOME, "Métronome : un clic à chaque temps pendant l'écoute (jamais dans l'export)", click, None) {
+            let t = self.session.tempo.get_or_insert_with(audio::Tempo::default);
+            t.click = !click;
+            self.changed();
+        }
+        let label = match &self.session.tempo {
+            Some(t) => format!("{:.0} · {}/4", t.bpm_at(self.time), t.beats_per_bar),
+            None => crate::i18n::t("tempo"),
+        };
+        let mut tempo_changed = false;
+        ui.menu_button(egui::RichText::new(label).monospace().size(12.0), |ui| {
+            ui.set_width(260.0);
+            ui.spacing_mut().item_spacing = vec2(6.0, 8.0);
+            let mut on = self.session.tempo.is_some();
+            if ui.checkbox(&mut on, crate::i18n::t("Grille en mesures")).on_hover_text(crate::i18n::t("Une règle en mesures et en temps sur la session")).changed() {
+                self.session.tempo = on.then(|| audio::Tempo { click: false, ..audio::Tempo::default() });
+                tempo_changed = true;
+            }
+            let time = self.time;
+            let Some(t) = self.session.tempo.as_mut() else { return };
+            crate::modifiers::row(ui, &crate::i18n::t("tempo"), |ui| {
+                tempo_changed |= ui.add(egui::DragValue::new(&mut t.bpm).range(20.0..=400.0).speed(0.5).max_decimals(1).suffix(" bpm")).changed();
+            });
+            crate::modifiers::row(ui, &crate::i18n::t("mesure"), |ui| {
+                for n in [2u32, 3, 4, 5, 6, 7] {
+                    if ui.selectable_label(t.beats_per_bar == n, format!("{n}/4")).clicked() {
+                        t.beats_per_bar = n;
+                        tempo_changed = true;
+                    }
+                }
+            });
+            tempo_changed |= ui.checkbox(&mut t.click, crate::i18n::t("Clic du métronome")).changed();
+            tempo_changed |= ui.checkbox(&mut t.snap, crate::i18n::t("Aimanter les clips aux temps")).changed();
+            ui.separator();
+            ui.label(egui::RichText::new(crate::i18n::t("Changements de tempo")).strong());
+            let mut del = None;
+            for (k, c) in t.changes.iter_mut().enumerate() {
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new(clock(c.t)).monospace().size(11.5));
+                    tempo_changed |= ui.add(egui::DragValue::new(&mut c.bpm).range(20.0..=400.0).speed(0.5).max_decimals(1).suffix(" bpm")).changed();
+                    if ui.small_button(l::X).on_hover_text(crate::i18n::t("Retirer")).clicked() {
+                        del = Some(k);
+                    }
+                });
+            }
+            if let Some(k) = del {
+                t.changes.remove(k);
+                tempo_changed = true;
+            }
+            if ui.add_enabled(time > 0.01, egui::Button::new(format!("{}  {}", l::PLUS, crate::i18n::t("changement à la tête de lecture")))).on_hover_text(crate::i18n::t("Le nouveau tempo commence une mesure à cet instant")).clicked() {
+                let bpm = t.bpm_at(time);
+                t.changes.push(audio::TempoChange { t: time, bpm });
+                t.changes.sort_by(|a, b| a.t.total_cmp(&b.t));
+                tempo_changed = true;
+            }
+        });
+        if tempo_changed {
+            self.changed();
+        }
+        ui.separator();
+        let (cr, _) = ui.allocate_exact_size(vec2(100.0, 30.0), Sense::hover());
         ui.painter().rect(cr, 2.0, p.code_bg, Stroke::new(1.0, p.line), egui::StrokeKind::Inside);
         let (now, tc) = match &self.rec {
             Some(r) => (r.at + r.started.elapsed().as_secs_f64(), Color32::from_rgb(230, 70, 70)),
             None => (self.time, p.text),
         };
-        ui.painter().text(cr.center(), egui::Align2::CENTER_CENTER, clock(now), egui::FontId::monospace(17.0), tc);
+        ui.painter().text(cr.center(), egui::Align2::CENTER_CENTER, clock(now), egui::FontId::monospace(15.0), tc);
         if self.rec.is_some() {
             ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
             if self.rec.as_mut().is_some_and(|r| r.failed()) {
@@ -629,7 +698,8 @@ impl Editor {
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let busy = self.export_rx.is_some();
-            ui.menu_button(format!("{}  {}", l::DOWNLOAD, crate::i18n::t(if busy { "Export…" } else { "Exporter" })), |ui| {
+            // Exporter : une icône, le menu donne les formats (le texte prenait la place de l'horloge)
+            let er = ui.menu_button(egui::RichText::new(if busy { l::LOADER } else { l::DOWNLOAD }).size(15.0), |ui| {
                 for (ext, label) in [("wav", "WAV 24 bits"), ("mp3", "MP3 256 kb/s"), ("flac", "FLAC")] {
                     if ui.add_enabled(!busy, egui::Button::new(label)).clicked() {
                         let out = self.export_path(ext);
@@ -658,6 +728,7 @@ impl Editor {
                     ui.close();
                 }
             });
+            er.response.on_hover_text(crate::i18n::t(if busy { "Export…" } else { "Exporter" }));
             ui.add_space(8.0);
             if ui.available_width() < 300.0 {
                 return;
@@ -745,6 +816,29 @@ impl Editor {
                 painter.text(pos2(x + 4.0, ruler.center().y + 1.0), egui::Align2::LEFT_CENTER, label, egui::FontId::monospace(10.5), p.muted);
             }
             s += step;
+        }
+        // Mesures et temps : traits dans le haut de la règle, numéros de mesure, lignes de mesure discrètes
+        if let Some(tempo) = &self.session.tempo {
+            let (a, b) = (scroll.max(0.0), scroll + (full.right() - ruler.left()) as f64 / zoom);
+            let beats = tempo.beats(a, b);
+            let dense = beats.len() as f32 > (full.right() - ruler.left()) / 6.0;
+            for (t, bar) in beats {
+                let x = x_of(t);
+                if x < ruler.left() {
+                    continue;
+                }
+                match bar {
+                    Some(n) => {
+                        painter.vline(x, ruler.top()..=ruler.top() + 7.0, Stroke::new(1.5, p.accent));
+                        painter.vline(x, ruler.bottom()..=full.bottom(), Stroke::new(1.0, p.line.gamma_multiply(0.55)));
+                        painter.text(pos2(x + 3.0, ruler.top() + 1.0), egui::Align2::LEFT_TOP, n.to_string(), egui::FontId::proportional(9.5), p.accent);
+                    }
+                    None if !dense => {
+                        painter.vline(x, ruler.top()..=ruler.top() + 3.0, Stroke::new(1.0, p.accent.gamma_multiply(0.6)));
+                    }
+                    None => {}
+                }
+            }
         }
         for m in &self.session.markers {
             let x = x_of(m.t);
@@ -1091,7 +1185,9 @@ impl Editor {
             let t = t_of(m.x);
             let track_at = |y: f32| (((y - ruler.bottom()) / TRACK_H).floor().max(0.0) as usize).min(n.saturating_sub(1));
             // Aimant : bords des autres clips, tête de lecture, repères (8 px)
-            let edges: Vec<f64> = self.session.tracks.iter().flat_map(|t| t.clips.iter().flat_map(|c| [c.start, c.end()])).chain([self.time, 0.0]).chain(self.session.markers.iter().map(|m| m.t)).collect();
+            let edges: Vec<f64> = self.session.tracks.iter().flat_map(|t| t.clips.iter().flat_map(|c| [c.start, c.end()])).chain([self.time, 0.0]).chain(self.session.markers.iter().map(|m| m.t))
+                .chain(self.session.tempo.iter().filter(|t| t.snap).flat_map(|t| t.beats(0.0, self.session.duration() + 120.0).into_iter().map(|b| b.0)))
+                .collect();
             let snap = |v: f64, skip: (f64, f64)| edges.iter().cloned().filter(|e| (*e - skip.0).abs() > 1e-9 && (*e - skip.1).abs() > 1e-9).find(|e| ((e - v) * zoom).abs() < 8.0);
             let next = match &d {
                 Drag::Scrub => {

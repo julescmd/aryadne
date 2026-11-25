@@ -3226,5 +3226,15 @@
   "Des formes intermédiaires de l'une à l'autre : contour et couleur passent en douceur (comme la fusion d'Illustrator)": "In-between shapes from one to the other: outline and color change smoothly (like Illustrator blend)",
   "Fusion": "Blend",
   "Fusion impossible : il faut deux formes pleines.": "Can't blend: two filled shapes are needed.",
-  "fusion entre les deux": "blend between them"
+  "fusion entre les deux": "blend between them",
+  "Aimanter les clips aux temps": "Snap clips to beats",
+  "Changements de tempo": "Tempo changes",
+  "Clic du métronome": "Metronome click",
+  "Grille en mesures": "Bar grid",
+  "Le nouveau tempo commence une mesure à cet instant": "The new tempo starts a bar at this point",
+  "Retirer": "Remove",
+  "Une règle en mesures et en temps sur la session": "A ruler in bars and beats over the session",
+  "changement à la tête de lecture": "change at the playhead",
+  "tempo": "tempo",
+  "Métronome : un clic à chaque temps pendant l'écoute (jamais dans l'export)": "Metronome: a click on every beat while playing (never in the export)"
 }
