@@ -617,9 +617,104 @@ pub struct Group {
     pub blend: Option<Blend>,
     #[serde(default)]
     pub collapsed: bool,
+    /// Groupe parent (0 : à la racine) : les groupes s'emboîtent comme les dossiers de Photoshop
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub parent: u32,
+    /// Masque du groupe (à la taille du document) ; dans le fichier, son PNG suit ceux des calques
+    #[serde(skip)]
+    pub mask: GroupMask,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub has_mask: bool,
+    #[serde(default = "yes")]
+    pub mask_on: bool,
+}
+
+fn is_zero(v: &u32) -> bool {
+    *v == 0
+}
+
+/// Le masque d'un groupe (une enveloppe : comparée et affichée sans ses pixels)
+#[derive(Clone, Default)]
+pub struct GroupMask(pub Option<Box<Layer>>);
+
+impl PartialEq for GroupMask {
+    fn eq(&self, o: &Self) -> bool {
+        match (&self.0, &o.0) {
+            (None, None) => true,
+            (Some(a), Some(b)) => a.px == b.px,
+            _ => false,
+        }
+    }
+}
+
+impl std::fmt::Debug for GroupMask {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "{}", if self.0.is_some() { "masque" } else { "-" })
+    }
+}
+
+impl Group {
+    pub fn new(id: u32, name: String, parent: u32) -> Group {
+        Group { id, name, visible: true, opacity: 1.0, blend: None, collapsed: false, parent, mask: GroupMask(None), has_mask: false, mask_on: true }
+    }
 }
 
 impl Doc {
+    /// Les groupes d'un calque, du plus extérieur au plus intérieur
+    pub fn chain(&self, gid: u32) -> Vec<u32> {
+        let mut v = vec![];
+        let mut g = gid;
+        while g != 0 && v.len() < 64 && !v.contains(&g) {
+            v.push(g);
+            g = self.groups.iter().find(|x| x.id == g).map(|x| x.parent).unwrap_or(0);
+        }
+        v.reverse();
+        v
+    }
+
+    /// `g` est-il `anc` ou l'un de ses sous-groupes ?
+    pub fn within(&self, g: u32, anc: u32) -> bool {
+        anc == 0 || self.chain(g).contains(&anc)
+    }
+
+    /// Mélange les calques `idx` (tous dans le groupe `level` ou ses sous-groupes) sur le pixel `d`
+    fn comp_level(&self, d: &mut [f32; 4], idx: &[usize], chains: &[Vec<u32>], level: usize, x: i32, y: i32, mul: f32) {
+        let mut i = 0;
+        while i < idx.len() {
+            // Le groupe enfant de ce niveau où se trouve ce calque (None : calque direct)
+            let child = |k: usize| chains[idx[k]].get(level).copied();
+            let c = child(i);
+            let mut j = i + 1;
+            while j < idx.len() && child(j) == c {
+                j += 1;
+            }
+            match c.and_then(|g| self.groups.iter().find(|x| x.id == g)) {
+                None => {
+                    let run: Vec<&Layer> = idx[i..j].iter().map(|&k| &self.layers[k]).collect();
+                    stack(d, &run, x, y, mul);
+                }
+                Some(g) if !g.visible => {}
+                Some(g) => {
+                    let m = match (&g.mask.0, g.mask_on) {
+                        (Some(mk), true) => mk.at(x, y)[0] as f32 / 255.0,
+                        _ => 1.0,
+                    };
+                    match g.blend {
+                        // Traverser : ses calques se mélangent avec le dessous, dosés par l'opacité et le masque
+                        None => self.comp_level(d, &idx[i..j], chains, level + 1, x, y, mul * g.opacity * m),
+                        // Isolé : mélangé à part, puis posé comme un seul calque
+                        Some(b) => {
+                            let mut t = [0.0f32; 4];
+                            self.comp_level(&mut t, &idx[i..j], chains, level + 1, x, y, 1.0);
+                            over(d, [t[0], t[1], t[2]], t[3] * g.opacity * m * mul, b);
+                        }
+                    }
+                }
+            }
+            i = j;
+        }
+    }
+
     pub fn new(w: usize, h: usize, white: bool) -> Doc {
         let base = if white { Layer::filled("fond", w, h, [255, 255, 255, 255]) } else { Layer::blank("calque 1", w, h) };
         Doc { w, h, layers: vec![base], active: 0, groups: vec![] }
@@ -639,7 +734,7 @@ impl Doc {
             h: self.h,
             active: self.active,
             layers: self.layers.iter().map(|l| LayerHead { name: l.name.clone(), visible: l.visible, opacity: l.opacity, blend: l.blend, off: l.off, w: l.w, h: l.h, mask: l.mask.is_some(), mask_on: l.mask_on, fill: l.fill, lock_alpha: l.lock_alpha, lock_all: l.lock_all, clip: l.clip, adj: l.adj, group: l.group, fx: l.fx.clone() }).collect(),
-            groups: self.groups.clone(),
+            groups: self.groups.iter().map(|g| Group { has_mask: g.mask.0.is_some(), mask: GroupMask(None), ..g.clone() }).collect(),
         };
         let json = serde_json::to_vec(&head).map_err(|e| e.to_string())?;
         let mut out = b"ARYIMG1\n".to_vec();
@@ -654,6 +749,14 @@ impl Doc {
                 out.extend((png.len() as u32).to_le_bytes());
                 out.extend(png);
             }
+        }
+        // Puis les masques des groupes, dans l'ordre des groupes
+        for m in self.groups.iter().filter_map(|g| g.mask.0.as_deref()) {
+            let mut png = vec![];
+            let img = image::RgbaImage::from_raw(m.w as u32, m.h as u32, m.px.clone()).ok_or("masque invalide")?;
+            img.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).map_err(|e| e.to_string())?;
+            out.extend((png.len() as u32).to_le_bytes());
+            out.extend(png);
         }
         // Écrit à côté puis remplace : un plantage pendant l'écriture ne casse pas le fichier
         let tmp = path.with_extension("aryimg.tmp");
@@ -704,38 +807,25 @@ impl Doc {
         if layers.is_empty() {
             layers.push(Layer::blank("calque 1", head.w, head.h));
         }
-        Ok(Doc { w: head.w, h: head.h, active: head.active.min(layers.len() - 1), layers, groups: head.groups })
+        let mut groups = head.groups;
+        for g in groups.iter_mut().filter(|g| g.has_mask) {
+            if let Ok((mw, mh, mpx)) = png(&mut at) {
+                g.mask = GroupMask(Some(Box::new(Layer { px: mpx, ..Layer::blank("masque", mw, mh) })));
+            }
+        }
+        Ok(Doc { w: head.w, h: head.h, active: head.active.min(layers.len() - 1), layers, groups })
     }
 
     /// Mélange les calques visibles dans `out` (RGBA du document) pour la zone `r` (x0, y0, x1, y1) :
     /// opacité × fond × masque, masques d'écrêtage, calques de réglage, groupes, modes de Photoshop.
     pub fn composite(&self, out: &mut [u8], r: [usize; 4]) {
         let [x0, y0, x1, y1] = r;
+        let chains: Vec<Vec<u32>> = self.layers.iter().map(|l| self.chain(l.group)).collect();
+        let idx: Vec<usize> = (0..self.layers.len()).collect();
         for y in y0..y1.min(self.h) {
             for x in x0..x1.min(self.w) {
                 let mut d = [0.0f32; 4];
-                let mut i = 0;
-                while i < self.layers.len() {
-                    let gid = self.layers[i].group;
-                    let mut j = i + 1;
-                    while j < self.layers.len() && self.layers[j].group == gid {
-                        j += 1;
-                    }
-                    let run: Vec<&Layer> = self.layers[i..j].iter().collect();
-                    match self.groups.iter().find(|g| g.id == gid).filter(|_| gid != 0) {
-                        None => stack(&mut d, &run, x as i32, y as i32, 1.0),
-                        Some(g) if !g.visible => {}
-                        // Traverser : les calques se mélangent avec le dessous, dosés par l'opacité du groupe
-                        Some(Group { blend: None, opacity, .. }) => stack(&mut d, &run, x as i32, y as i32, *opacity),
-                        // Groupe isolé : mélangé à part, puis posé comme un seul calque
-                        Some(Group { blend: Some(b), opacity, .. }) => {
-                            let mut t = [0.0f32; 4];
-                            stack(&mut t, &run, x as i32, y as i32, 1.0);
-                            over(&mut d, [t[0], t[1], t[2]], t[3] * opacity, *b);
-                        }
-                    }
-                    i = j;
-                }
+                self.comp_level(&mut d, &idx, &chains, 0, x as i32, y as i32, 1.0);
                 let i = (y * self.w + x) * 4;
                 for k in 0..4 {
                     out[i + k] = (d[k].clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
@@ -1461,11 +1551,18 @@ impl Editor {
         let edit_mask = self.painting_mask();
         let lock_alpha = !edit_mask && self.doc.layers[self.doc.active].lock_alpha;
         let col = self.paint_color();
+        let gm = self.group_mask_target();
         let Some((start, cover, _)) = self.stroke.as_mut() else { return };
-        let la = &mut self.doc.layers[self.doc.active];
-        let l: &mut Layer = match la.mask.as_deref_mut() {
-            Some(m) if edit_mask => m,
-            _ => la,
+        let l: &mut Layer = match gm {
+            // Le masque d'un groupe
+            Some(gi) => self.doc.groups[gi].mask.0.as_deref_mut().unwrap(),
+            None => {
+                let la = &mut self.doc.layers[self.doc.active];
+                match la.mask.as_deref_mut() {
+                    Some(m) if edit_mask => m,
+                    _ => la,
+                }
+            }
         };
         let r = self.size / 2.0;
         let (x0, y0) = ((c.x - r).floor() as i32, (c.y - r).floor() as i32);
@@ -2583,9 +2680,8 @@ impl Editor {
             } else if cmd && shift && k(egui::Key::I) {
                 self.sel = self.sel.as_ref().map(|s| s.invert(self.doc.w, self.doc.h));
             } else if cmd && k(egui::Key::G) {
-                if self.doc.layers[self.doc.active].group == 0 {
-                    self.group_active();
-                }
+                // Dans un groupe, le nouveau s'y emboîte
+                self.group_active();
             } else if cmd && k(egui::Key::J) {
                 self.duplicate_layer();
             } else if cmd && k(egui::Key::E) {
@@ -2717,7 +2813,16 @@ impl Editor {
     }
 
     /// Le calque où l'on peint : le masque du calque actif s'il est choisi, sinon ses pixels
+    /// Le groupe dont on peint le masque (groupe choisi, mode masque, et il en a un)
+    fn group_mask_target(&self) -> Option<usize> {
+        let g = self.sel_group.filter(|_| self.edit_mask)?;
+        self.doc.groups.iter().position(|x| x.id == g && x.mask.0.is_some())
+    }
+
     fn target(&mut self) -> &mut Layer {
+        if let Some(gi) = self.group_mask_target() {
+            return self.doc.groups[gi].mask.0.as_deref_mut().unwrap();
+        }
         let a = self.doc.active;
         let edit_mask = self.edit_mask && self.doc.layers[a].mask.is_some();
         let l = &mut self.doc.layers[a];
@@ -2729,6 +2834,9 @@ impl Editor {
     }
 
     fn target_ref(&self) -> &Layer {
+        if let Some(gi) = self.group_mask_target() {
+            return self.doc.groups[gi].mask.0.as_deref().unwrap();
+        }
         let l = &self.doc.layers[self.doc.active];
         match (&l.mask, self.edit_mask) {
             (Some(m), true) => m,
@@ -2776,7 +2884,7 @@ impl Editor {
     }
 
     fn painting_mask(&self) -> bool {
-        self.edit_mask && self.doc.layers[self.doc.active].mask.is_some()
+        self.group_mask_target().is_some() || (self.edit_mask && self.sel_group.is_none() && self.doc.layers[self.doc.active].mask.is_some())
     }
 
     /// Ajoute un masque au calque actif : tout montrer, ou montrer (ou cacher) la sélection
@@ -2883,7 +2991,9 @@ impl Editor {
         self.checkpoint();
         let id = self.doc.groups.iter().map(|g| g.id).max().unwrap_or(0) + 1;
         let n = self.doc.groups.len() + 1;
-        self.doc.groups.push(Group { id, name: format!("{} {n}", crate::i18n::t("Groupe")), visible: true, opacity: 1.0, blend: None, collapsed: false });
+        // Dans le groupe du calque : le nouveau dossier s'y emboîte
+        let parent = self.doc.layers[self.doc.active].group;
+        self.doc.groups.push(Group::new(id, format!("{} {n}", crate::i18n::t("Groupe")), parent));
         self.doc.layers[self.doc.active].group = id;
         self.sel_group = Some(id);
         self.all();
@@ -2892,12 +3002,34 @@ impl Editor {
     /// Dissout un groupe ; avec `delete`, ses calques partent aussi
     fn ungroup(&mut self, id: u32, delete: bool) {
         self.checkpoint();
-        if delete && self.doc.layers.iter().any(|l| l.group != id) {
-            self.doc.layers.retain(|l| l.group != id);
+        let parent = self.doc.groups.iter().find(|g| g.id == id).map(|g| g.parent).unwrap_or(0);
+        if delete {
+            // Le groupe, ses sous-groupes et tous leurs calques (il reste au moins un calque)
+            let inside: Vec<bool> = self.doc.layers.iter().map(|l| l.group != 0 && self.doc.chain(l.group).contains(&id)).collect();
+            if inside.iter().any(|x| !x) {
+                let mut k = 0;
+                self.doc.layers.retain(|_| {
+                    k += 1;
+                    !inside[k - 1]
+                });
+            }
+            let gone: Vec<u32> = self.doc.groups.iter().filter(|g| self.doc.chain(g.id).contains(&id)).map(|g| g.id).collect();
+            self.doc.groups.retain(|g| !gone.contains(&g.id));
+            for l in &mut self.doc.layers {
+                if gone.contains(&l.group) {
+                    l.group = parent;
+                }
+            }
         }
+        // Ses calques et sous-groupes remontent d'un cran
         for l in &mut self.doc.layers {
             if l.group == id {
-                l.group = 0;
+                l.group = parent;
+            }
+        }
+        for g in &mut self.doc.groups {
+            if g.parent == id {
+                g.parent = parent;
             }
         }
         self.doc.groups.retain(|g| g.id != id);
@@ -3025,46 +3157,91 @@ impl Editor {
         egui::ScrollArea::vertical().id_salt("paint-layer-list").max_height(ui.available_height() - 40.0).show(ui, |ui| {
             for i in (0..n).rev() {
                 let gid = self.doc.layers[i].group;
-                // En tête d'un groupe (son calque le plus haut) : la ligne du dossier
-                if gid != 0 && (i + 1 == n || self.doc.layers[i + 1].group != gid) {
-                    if let Some(g) = self.doc.groups.iter().find(|g| g.id == gid).cloned() {
-                        let (row, gresp) = ui.allocate_exact_size(vec2(ui.available_width(), 30.0), egui::Sense::click());
-                        let painter = ui.painter_at(row);
-                        let gon = self.sel_group == Some(gid);
-                        painter.rect_filled(row, 2.0, if gon { p.accent.gamma_multiply(0.28) } else if gresp.hovered() { p.raised } else { p.panel });
-                        painter.hline(row.x_range(), row.bottom() - 0.5, Stroke::new(1.0, p.line.gamma_multiply(0.7)));
-                        let eye = egui::Rect::from_min_size(egui::pos2(row.left() + 4.0, row.center().y - 10.0), vec2(20.0, 20.0));
-                        painter.text(eye.center(), egui::Align2::CENTER_CENTER, if g.visible { crate::lucide::EYE } else { "" }, egui::FontId::proportional(13.0), p.muted);
-                        painter.rect_stroke(eye.shrink(1.0), 1.0, Stroke::new(1.0, p.line), egui::StrokeKind::Inside);
-                        if ui.interact(eye, ui.scope_id().with(("geye", gid)), egui::Sense::click()).clicked() {
-                            group_act = Some((gid, "eye"));
-                        }
-                        let caret = egui::Rect::from_min_size(egui::pos2(row.left() + 30.0, row.center().y - 10.0), vec2(16.0, 20.0));
-                        painter.text(caret.center(), egui::Align2::CENTER_CENTER, if g.collapsed { crate::lucide::CHEVRON_RIGHT } else { crate::lucide::CHEVRON_DOWN }, egui::FontId::proportional(12.0), p.text);
-                        if ui.interact(caret, ui.scope_id().with(("gcaret", gid)), egui::Sense::click()).clicked() {
-                            group_act = Some((gid, "fold"));
-                        }
-                        painter.text(egui::pos2(row.left() + 50.0, row.center().y), egui::Align2::LEFT_CENTER, crate::lucide::FOLDER, egui::FontId::proportional(14.0), p.text);
-                        painter.text(egui::pos2(row.left() + 72.0, row.center().y), egui::Align2::LEFT_CENTER, &g.name, egui::FontId::proportional(12.5), if g.visible { p.text } else { p.muted });
-                        if gresp.clicked() && group_act.is_none() {
-                            group_act = Some((gid, "pick"));
-                        }
-                        gresp.context_menu(|ui| {
-                            if ui.button(format!("{}  {}", crate::lucide::UNGROUP, crate::i18n::t("Dissocier le groupe"))).clicked() {
-                                group_act = Some((gid, "ungroup"));
-                                ui.close();
-                            }
-                            if ui.button(format!("{}  {}", crate::lucide::TRASH_2, crate::i18n::t("Supprimer le groupe et ses calques"))).clicked() {
-                                group_act = Some((gid, "delete"));
-                                ui.close();
-                            }
-                        });
+                // Les dossiers où l'on entre à ce calque (en lisant de haut en bas) : une ligne chacun, en retrait
+                let chain = self.doc.chain(gid);
+                let above = if i + 1 < n { self.doc.chain(self.doc.layers[i + 1].group) } else { vec![] };
+                let common = chain.iter().zip(above.iter()).take_while(|(a, b)| a == b).count();
+                let folded = |id: u32| self.doc.groups.iter().any(|g| g.id == id && g.collapsed);
+                for depth in common..chain.len() {
+                    if chain[..depth].iter().any(|&c| folded(c)) {
+                        break;
                     }
+                    let hg = chain[depth];
+                    let Some(g) = self.doc.groups.iter().find(|g| g.id == hg).cloned() else { continue };
+                    let dx = depth as f32 * 18.0;
+                    let (row, gresp) = ui.allocate_exact_size(vec2(ui.available_width(), 30.0), egui::Sense::click());
+                    let painter = ui.painter_at(row);
+                    let gon = self.sel_group == Some(hg);
+                    painter.rect_filled(row, 2.0, if gon { p.accent.gamma_multiply(0.28) } else if gresp.hovered() { p.raised } else { p.panel });
+                    painter.hline(row.x_range(), row.bottom() - 0.5, Stroke::new(1.0, p.line.gamma_multiply(0.7)));
+                    let eye = egui::Rect::from_min_size(egui::pos2(row.left() + 4.0, row.center().y - 10.0), vec2(20.0, 20.0));
+                    painter.text(eye.center(), egui::Align2::CENTER_CENTER, if g.visible { crate::lucide::EYE } else { "" }, egui::FontId::proportional(13.0), p.muted);
+                    painter.rect_stroke(eye.shrink(1.0), 1.0, Stroke::new(1.0, p.line), egui::StrokeKind::Inside);
+                    if ui.interact(eye, ui.scope_id().with(("geye", hg)), egui::Sense::click()).clicked() {
+                        group_act = Some((hg, "eye"));
+                    }
+                    let caret = egui::Rect::from_min_size(egui::pos2(row.left() + 30.0 + dx, row.center().y - 10.0), vec2(16.0, 20.0));
+                    painter.text(caret.center(), egui::Align2::CENTER_CENTER, if g.collapsed { crate::lucide::CHEVRON_RIGHT } else { crate::lucide::CHEVRON_DOWN }, egui::FontId::proportional(12.0), p.text);
+                    if ui.interact(caret, ui.scope_id().with(("gcaret", hg)), egui::Sense::click()).clicked() {
+                        group_act = Some((hg, "fold"));
+                    }
+                    painter.text(egui::pos2(row.left() + 50.0 + dx, row.center().y), egui::Align2::LEFT_CENTER, crate::lucide::FOLDER, egui::FontId::proportional(14.0), p.text);
+                    painter.text(egui::pos2(row.left() + 72.0 + dx, row.center().y), egui::Align2::LEFT_CENTER, &g.name, egui::FontId::proportional(12.5), if g.visible { p.text } else { p.muted });
+                    // Masque du groupe : sa vignette, cliquable pour le peindre ; barrée s'il est désactivé
+                    if let Some(m) = g.mask.0.as_deref() {
+                        let mr = egui::Rect::from_min_size(egui::pos2(row.right() - 34.0, row.center().y - 10.0), vec2(28.0, 20.0));
+                        let editing = gon && self.edit_mask;
+                        painter.rect_filled(mr, 1.0, Color32::BLACK);
+                        // Aperçu en 8 × 4 cases du masque
+                        for cy in 0..4 {
+                            for cx in 0..8 {
+                                let (sx, sy) = ((cx * m.w / 8 + m.w / 16) as i32, (cy * m.h / 4 + m.h / 8) as i32);
+                                let v = m.at(sx + m.off[0], sy + m.off[1])[0];
+                                let cell = egui::Rect::from_min_size(mr.min + vec2(cx as f32 * mr.width() / 8.0, cy as f32 * mr.height() / 4.0), vec2(mr.width() / 8.0, mr.height() / 4.0));
+                                painter.rect_filled(cell, 0.0, Color32::from_gray(v));
+                            }
+                        }
+                        painter.rect_stroke(mr, 1.0, Stroke::new(if editing { 2.0 } else { 1.0 }, if editing { p.accent } else { p.line }), egui::StrokeKind::Outside);
+                        if !g.mask_on {
+                            painter.line_segment([mr.left_top(), mr.right_bottom()], Stroke::new(1.5, Color32::from_rgb(220, 60, 60)));
+                        }
+                        let mresp = ui.interact(mr, ui.scope_id().with(("gmask", hg)), egui::Sense::click()).on_hover_text(crate::i18n::t("Masque du groupe : cliquer pour le peindre, Maj+clic pour l'activer ou le désactiver"));
+                        if mresp.clicked() {
+                            group_act = Some((hg, if ui.input(|k| k.modifiers.shift) { "mask_toggle" } else { "mask_edit" }));
+                        }
+                    }
+                    if gresp.clicked() && group_act.is_none() {
+                        group_act = Some((hg, "pick"));
+                    }
+                    let has_mask = g.mask.0.is_some();
+                    gresp.context_menu(|ui| {
+                        if !has_mask && ui.button(format!("{}  {}", crate::lucide::SQUARE_DASHED, crate::i18n::t("Ajouter un masque au groupe"))).clicked() {
+                            group_act = Some((hg, "mask_add"));
+                            ui.close();
+                        }
+                        if has_mask && ui.button(format!("{}  {}", crate::lucide::EYE_OFF, crate::i18n::t("Activer / désactiver le masque"))).clicked() {
+                            group_act = Some((hg, "mask_toggle"));
+                            ui.close();
+                        }
+                        if has_mask && ui.button(format!("{}  {}", crate::lucide::TRASH_2, crate::i18n::t("Supprimer le masque"))).clicked() {
+                            group_act = Some((hg, "mask_del"));
+                            ui.close();
+                        }
+                        ui.separator();
+                        if ui.button(format!("{}  {}", crate::lucide::UNGROUP, crate::i18n::t("Dissocier le groupe"))).clicked() {
+                            group_act = Some((hg, "ungroup"));
+                            ui.close();
+                        }
+                        if ui.button(format!("{}  {}", crate::lucide::TRASH_2, crate::i18n::t("Supprimer le groupe et ses calques"))).clicked() {
+                            group_act = Some((hg, "delete"));
+                            ui.close();
+                        }
+                    });
                 }
-                if gid != 0 && self.doc.groups.iter().any(|g| g.id == gid && g.collapsed) {
+                if chain.iter().any(|&c| folded(c)) {
                     continue;
                 }
-                let indent = if gid != 0 { 18.0 } else { 0.0 };
+                let indent = chain.len() as f32 * 18.0;
                 let on = i == self.doc.active && self.sel_group.is_none();
                 let (row, resp) = ui.allocate_exact_size(vec2(ui.available_width(), row_h), egui::Sense::click_and_drag());
                 let painter = ui.painter_at(row);
@@ -3213,7 +3390,7 @@ impl Editor {
                         (if self.doc.layers[i].clip { "Annuler le masque d'écrêtage" } else { "Créer un masque d'écrêtage" }, i > 0),
                         ("Options de fusion (styles)…", self.doc.layers[i].adj.is_none()),
                         ("", true),
-                        ("Grouper le calque (Ctrl+G)", self.doc.layers[i].group == 0),
+                        ("Grouper le calque (Ctrl+G)", true),
                         ("Sortir du groupe", self.doc.layers[i].group != 0),
                     ];
                     for (label, enabled) in items {
@@ -3270,7 +3447,40 @@ impl Editor {
                         g.collapsed = !g.collapsed;
                     }
                 }
-                "pick" => self.sel_group = Some(gid),
+                "pick" => {
+                    self.sel_group = Some(gid);
+                    self.edit_mask = false;
+                }
+                "mask_add" => {
+                    self.checkpoint();
+                    let (w, h) = (self.doc.w, self.doc.h);
+                    if let Some(g) = self.doc.groups.iter_mut().find(|g| g.id == gid) {
+                        g.mask = GroupMask(Some(Layer::new_mask(w, h, 255)));
+                        g.mask_on = true;
+                    }
+                    self.sel_group = Some(gid);
+                    self.edit_mask = true;
+                    self.all();
+                }
+                "mask_edit" => {
+                    self.sel_group = Some(gid);
+                    self.edit_mask = true;
+                }
+                "mask_toggle" => {
+                    self.checkpoint();
+                    if let Some(g) = self.doc.groups.iter_mut().find(|g| g.id == gid) {
+                        g.mask_on = !g.mask_on;
+                    }
+                    self.all();
+                }
+                "mask_del" => {
+                    self.checkpoint();
+                    if let Some(g) = self.doc.groups.iter_mut().find(|g| g.id == gid) {
+                        g.mask = GroupMask(None);
+                    }
+                    self.edit_mask = false;
+                    self.all();
+                }
                 "ungroup" => self.ungroup(gid, false),
                 _ => self.ungroup(gid, true),
             }
@@ -3319,13 +3529,14 @@ impl Editor {
                     self.checkpoint();
                     // Il sort au-dessus du groupe pour que le groupe reste d'un seul tenant
                     let gid = self.doc.layers[i].group;
-                    let top = (0..self.doc.layers.len()).rev().find(|&k| self.doc.layers[k].group == gid).unwrap_or(i);
+                    let parent = self.doc.groups.iter().find(|g| g.id == gid).map(|g| g.parent).unwrap_or(0);
+                    let top = (0..self.doc.layers.len()).rev().find(|&k| self.doc.chain(self.doc.layers[k].group).contains(&gid)).unwrap_or(i);
                     let mut l = self.doc.layers.remove(i);
-                    l.group = 0;
+                    l.group = parent;
                     let at = top.min(self.doc.layers.len());
                     self.doc.layers.insert(at, l);
                     self.doc.active = at;
-                    if !self.doc.layers.iter().any(|x| x.group == gid) {
+                    if !self.doc.layers.iter().any(|x| x.group != 0 && self.doc.chain(x.group).contains(&gid)) {
                         self.doc.groups.retain(|g| g.id != gid);
                     }
                     self.all();
@@ -3434,7 +3645,7 @@ impl Editor {
                 if ui.add(egui::Button::new(egui::RichText::new("fx").size(12.0).italics().strong()).frame(false).min_size(vec2(24.0, 22.0))).on_hover_text(crate::i18n::t("Styles de calque : ombre portée, lueur, incrustation, contour")).clicked() && self.doc.layers[self.doc.active].adj.is_none() {
                     self.fx_window = Some(self.doc.active);
                 }
-                if b(ui, crate::lucide::FOLDER, "Grouper le calque (Ctrl+G)").clicked() && self.doc.layers[self.doc.active].group == 0 {
+                if b(ui, crate::lucide::FOLDER, "Grouper le calque (Ctrl+G)").clicked() {
                     self.group_active();
                 }
                 if b(ui, crate::lucide::SQUARE_PLUS, "Nouveau calque (Ctrl+Maj+N)").clicked() {
@@ -3520,7 +3731,7 @@ mod tests {
         // Groupe isolé à 50 % : le rouge du groupe est mélangé à moitié sur le blanc
         let mut h = Doc::new(1, 1, true);
         h.layers.push(Layer { group: 7, ..Layer::filled("r", 1, 1, [255, 0, 0, 255]) });
-        h.groups.push(Group { id: 7, name: "g".into(), visible: true, opacity: 0.5, blend: Some(Blend::Normal), collapsed: false });
+        h.groups.push(Group { opacity: 0.5, blend: Some(Blend::Normal), ..Group::new(7, "g".into(), 0) });
         assert_eq!(h.flatten().get_pixel(0, 0).0, [255, 128, 128, 255]);
         h.groups[0].visible = false;
         assert_eq!(h.flatten().get_pixel(0, 0).0, [255, 255, 255, 255]);
@@ -3636,6 +3847,47 @@ mod tests {
 
 #[cfg(test)]
 mod text_tests {
+    #[test]
+    fn groupes_imbriques() {
+        use super::*;
+        // Blanc dessous ; un groupe A (traverser, masque qui cache la moitié gauche) contient B (isolé, 50 %) avec du rouge
+        let mut d = Doc::new(4, 1, true);
+        let mut red = Layer::filled("rouge", 4, 1, [255, 0, 0, 255]);
+        red.group = 2;
+        d.layers.push(red);
+        let mut m = Layer::new_mask(4, 1, 255);
+        for x in 0..2 {
+            m.px[x * 4..x * 4 + 3].copy_from_slice(&[0, 0, 0]);
+        }
+        d.groups.push(Group { mask: GroupMask(Some(m)), ..Group::new(1, "A".into(), 0) });
+        d.groups.push(Group { opacity: 0.5, blend: Some(Blend::Normal), ..Group::new(2, "B".into(), 1) });
+        assert_eq!(d.chain(2), vec![1, 2]);
+        let img = d.flatten();
+        assert_eq!(img.get_pixel(0, 0).0, [255, 255, 255, 255]);
+        let p = img.get_pixel(3, 0).0;
+        assert!((p[1] as i32 - 128).abs() <= 2 && p[0] == 255, "{p:?}");
+        // Aller-retour .aryimg : parent et masque reviennent
+        let path = std::env::temp_dir().join(format!("ary-nest-{}.aryimg", std::process::id()));
+        d.save(&path).unwrap();
+        let back = Doc::load(&path).unwrap();
+        assert_eq!(back.groups.iter().find(|g| g.id == 2).unwrap().parent, 1);
+        assert!(back.groups.iter().find(|g| g.id == 1).unwrap().mask.0.is_some());
+        assert_eq!(back.flatten().get_pixel(3, 0).0, p);
+        // Aller-retour PSD : les dossiers restent emboîtés, le masque du dossier aussi
+        let (bytes, _) = crate::psd::write(&d);
+        if let Ok(o) = std::env::var("PSD_OUT_NEST") {
+            std::fs::write(o, &bytes).unwrap();
+        }
+        let back = crate::psd::read(&bytes).unwrap();
+        let (gb, ga) = (back.groups.iter().find(|g| g.name == "B").unwrap(), back.groups.iter().find(|g| g.name == "A").unwrap());
+        assert_eq!(gb.parent, ga.id);
+        assert!(ga.mask.0.is_some());
+        let q = back.flatten().get_pixel(3, 0).0;
+        assert!(q.iter().zip(p.iter()).all(|(a, b)| (*a as i32 - *b as i32).abs() <= 2), "{q:?} {p:?}");
+        assert_eq!(back.flatten().get_pixel(0, 0).0, [255, 255, 255, 255]);
+        let _ = std::fs::remove_file(&path);
+    }
+
     #[test]
     fn tampon() {
         use super::*;

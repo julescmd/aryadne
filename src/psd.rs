@@ -382,7 +382,14 @@ pub fn read(bytes: &[u8]) -> Result<Doc, String> {
                     }
                     1 | 2 => {
                         if let Some(id) = stack.pop() {
-                            groups.push(Group { id, name: rec.name, visible: !rec.hidden, opacity: rec.opacity as f32 / 255.0, blend: if rec.pass { None } else { Some(rec.blend) }, collapsed: rec.section == 2 });
+                            // Dossier dans un dossier : son parent est celui qui reste en haut de la pile
+                            let mut g = Group { opacity: rec.opacity as f32 / 255.0, blend: if rec.pass { None } else { Some(rec.blend) }, collapsed: rec.section == 2, visible: !rec.hidden, ..Group::new(id, rec.name, *stack.last().unwrap_or(&0)) };
+                            if let Some(m) = mask_px.take() {
+                                g.mask_on = !rec.mask.is_some_and(|m| m.2);
+                                g.has_mask = true;
+                                g.mask = crate::paint::GroupMask(Some(Box::new(m)));
+                            }
+                            groups.push(g);
                         }
                     }
                     _ => {
@@ -621,39 +628,54 @@ pub fn write(doc: &Doc) -> (Vec<u8>, Vec<String>) {
         }
     };
     let empty = |name: &str, section: (u32, bool, Blend), hidden: bool, opacity: u8| Out { rect: [0; 4], chans: vec![(-1, vec![]), (0, vec![]), (1, vec![]), (2, vec![])], blend: section.2, opacity, fill: 255, clip: false, hidden, name: name.to_string(), mask: None, section: Some(section), adj: None, fx: None };
+    // En-tête de dossier (au-dessus de son contenu), avec son masque s'il en a un
+    let header = |g: &crate::paint::Group| -> Out {
+        let mut o = empty(&g.name, (if g.collapsed { 2 } else { 1 }, g.blend.is_none(), g.blend.unwrap_or_default()), !g.visible, (g.opacity * 255.0).round() as u8);
+        if let Some(m) = g.mask.0.as_deref() {
+            o.chans.push((-2, (0..m.w * m.h).map(|p| m.px[p * 4]).collect()));
+            o.mask = Some(([m.off[1], m.off[0], m.off[1] + m.h as i32, m.off[0] + m.w as i32], !g.mask_on));
+        }
+        o
+    };
+    // Les dossiers ouverts au fil des calques (de bas en haut) : on ferme ceux qu'on quitte, on ouvre les nouveaux
+    let mut open: Vec<u32> = vec![];
     while i < doc.layers.len() {
-        let gid = doc.layers[i].group;
-        let mut j = i + 1;
-        while j < doc.layers.len() && doc.layers[j].group == gid {
-            j += 1;
-        }
-        let g = group(gid).filter(|_| gid != 0);
-        if g.is_some() {
-            outs.push(empty("</Layer group>", (3, false, Blend::Normal), false, 255));
-        }
-        for l in &doc.layers[i..j] {
-            if let Some(a) = &l.adj {
-                match adj_block(a) {
-                    Some(block) => {
-                        // Calque de réglage : pas de pixels, son masque et son bloc de réglage
-                        let mut o = to_out(l);
-                        o.rect = [0; 4];
-                        for c in o.chans.iter_mut().filter(|c| c.0 != -2) {
-                            c.1.clear();
-                        }
-                        o.adj = Some(block);
-                        outs.push(o);
-                    }
-                    None => lost.push(format!("{} ({})", l.name, crate::i18n::t("calque de réglage"))),
-                }
-                continue;
+        let l = &doc.layers[i];
+        let chain: Vec<u32> = doc.chain(l.group).into_iter().filter(|&g| group(g).is_some()).collect();
+        let keep = open.iter().zip(chain.iter()).take_while(|(a, b)| a == b).count();
+        while open.len() > keep {
+            let g = open.pop().unwrap_or(0);
+            if let Some(g) = group(g) {
+                outs.push(header(g));
             }
+        }
+        for g in &chain[keep..] {
+            outs.push(empty("</Layer group>", (3, false, Blend::Normal), false, 255));
+            open.push(*g);
+        }
+        if let Some(a) = &l.adj {
+            match adj_block(a) {
+                Some(block) => {
+                    // Calque de réglage : pas de pixels, son masque et son bloc de réglage
+                    let mut o = to_out(l);
+                    o.rect = [0; 4];
+                    for c in o.chans.iter_mut().filter(|c| c.0 != -2) {
+                        c.1.clear();
+                    }
+                    o.adj = Some(block);
+                    outs.push(o);
+                }
+                None => lost.push(format!("{} ({})", l.name, crate::i18n::t("calque de réglage"))),
+            }
+        } else {
             outs.push(to_out(l));
         }
-        if let Some(g) = g {
-            outs.push(empty(&g.name, (if g.collapsed { 2 } else { 1 }, g.blend.is_none(), g.blend.unwrap_or_default()), !g.visible, (g.opacity * 255.0).round() as u8));
+        i += 1;
+    }
+    while let Some(g) = open.pop() {
+        if let Some(g) = group(g) {
+            outs.push(header(g));
         }
-        i = j;
     }
     let mut w = W(vec![]);
     w.bytes(b"8BPS");
@@ -718,7 +740,7 @@ mod tests {
             stroke: Some(crate::paint::FxStroke { size: 2.0, color: [0, 0, 255], opacity: 1.0 }),
         };
         d.layers.push(top);
-        d.groups.push(Group { id: 3, name: "Dossier".into(), visible: true, opacity: 1.0, blend: None, collapsed: false });
+        d.groups.push(Group::new(3, "Dossier".into(), 0));
         d.layers.push(Layer { adj: Some(Adj::HueSat { h: 0.25, s: 0.5, l: 0.0 }), mask: Some(Layer::new_mask(6, 4, 255)), ..Layer::blank("Teinte", 1, 1) });
         d.layers.push(Layer { adj: Some(Adj::Levels { black: 0.1, white: 0.9, gamma: 1.2 }), ..Layer::blank("Niveaux", 1, 1) });
         let (nb, _) = write(&Doc { layers: vec![Layer { adj: Some(Adj::BlackWhite), ..Layer::blank("NB", 1, 1) }], ..Doc::new(6, 4, true) });

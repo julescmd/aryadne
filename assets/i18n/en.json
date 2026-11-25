@@ -2496,5 +2496,7 @@
   "nouveau matériau…": "new material…",
   "média": "media",
   "piste": "track",
-  "étalonnage en nodes": "node grading"
+  "étalonnage en nodes": "node grading",
+  "Ajouter un masque au groupe": "Add group mask",
+  "Masque du groupe : cliquer pour le peindre, Maj+clic pour l'activer ou le désactiver": "Group mask: click to paint it, Shift+click to enable or disable it"
 }
