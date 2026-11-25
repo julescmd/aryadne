@@ -3357,5 +3357,20 @@
   "Commentaire": "Comment",
   "Ce qui est à revoir ici…": "What needs another look here…",
   "résolu": "resolved",
-  "retirer le commentaire": "remove comment"
+  "retirer le commentaire": "remove comment",
+  "(copie)": "(copy)",
+  "Ajouter en calque (double-clic sur le calque : ouvrir le maître)": "Add as a layer (double-click the layer: open the master)",
+  "Clique un matériau à gauche : il devient un calque, posé partout ou selon un masque (usure, saleté, poussière…).": "Click a material on the left: it becomes a layer, everywhere or through a mask (wear, dirt, dust…).",
+  "Matériau intelligent : ajoute tous ses calques, avec leurs masques": "Smart material: adds all its layers, with their masks",
+  "Préréglage : devient un matériau maître du coffre, puis un calque": "Preset: becomes a master material in the vault, then a layer",
+  "masques intelligents": "smart masks",
+  "nouveau matériau maître": "new master material",
+  "MATÉRIAUX": "MATERIALS",
+  "PROPRIÉTÉS": "PROPERTIES",
+  "Paramètres": "Parameters",
+  "Masque": "Mask",
+  "dupliquer le calque": "duplicate layer",
+  "préréglages": "presets",
+  "matériaux maîtres du coffre": "vault master materials",
+  "échelle cassure": "breakup scale"
 }

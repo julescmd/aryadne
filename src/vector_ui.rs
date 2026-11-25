@@ -1773,7 +1773,7 @@ impl Editor {
         };
         let mut open = true;
         let (mut del, mut ch) = (false, false);
-        let mut win = egui::Window::new(format!("{} {}", crate::i18n::t("Commentaire"), i + 1)).id(egui::Id::new(("vec-comment", &self.path, i))).open(&mut open);
+        let mut win = egui::Window::new(format!("{} {}", crate::i18n::t("Commentaire"), i + 1)).id(egui::Id::unique(("vec-comment", &self.path, i))).open(&mut open);
         if let Some(at) = self.comment_at {
             win = win.default_pos(at);
         }

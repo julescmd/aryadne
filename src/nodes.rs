@@ -2611,6 +2611,12 @@ pub struct Editor {
     layer_sel: Option<usize>,
     mat_list: Option<(std::time::Instant, Vec<String>)>,
     masters_seen: u64,
+    /// Atelier : vignettes des matériaux (maîtres, intelligents, préréglages), calculées en arrière-plan
+    mthumb: HashMap<String, egui::TextureHandle>,
+    mthumb_rx: Option<std::sync::mpsc::Receiver<(String, Img)>>,
+    /// Atelier : recherche et rayon de la bibliothèque (0 tout, 1 maîtres, 2 intelligents, 3 préréglages)
+    lib_search: String,
+    lib_shelf: u8,
 }
 
 enum Act {
@@ -2686,6 +2692,10 @@ impl Editor {
             preset_rx: None,
             strip_open: true,
             layer_sel: None,
+            mthumb: HashMap::new(),
+            mthumb_rx: None,
+            lib_search: String::new(),
+            lib_shelf: 0,
             mat_list: None,
             masters_seen: 0,
             frame_sel: false,
@@ -4456,108 +4466,249 @@ impl Editor {
         let p = theme::pal();
         let mut changed = false;
         let mats = self.vault_materials();
+        let me = self.path.strip_prefix(&self.root).map(|r| r.to_string_lossy().replace('\\', "/")).unwrap_or_default();
+        let masters: Vec<String> = mats.into_iter().filter(|m| *m != me && crate::atelier::load_master(&self.root, m).is_some_and(|g| g.stack.is_none())).collect();
+        let smart = crate::atelier::smart_materials(&self.root);
         let Some(stack) = self.graph.stack.clone() else { return };
         let mut stack = stack;
-        // Barre : ajouter un calque
-        ui.horizontal(|ui| {
-            ui.label(theme::section(&crate::i18n::t("atelier")));
-            egui::containers::menu::MenuButton::new(crate::i18n::t("＋ calque ▾")).ui(ui, |ui| {
-                ui.set_min_width(260.0);
-                ui.label(RichText::new(crate::i18n::t("depuis un matériau maître du coffre")).color(p.muted).size(11.0));
-                egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
-                    for m in &mats {
-                        let name = std::path::Path::new(m).file_name().map(|s| crate::formats::strip(&s.to_string_lossy()).to_string()).unwrap_or_default();
-                        if ui.button(&name).on_hover_text(m).clicked() {
-                            stack.layers.push(crate::atelier::Layer { name, master: m.clone(), params: Default::default(), mask: Default::default(), opacity: 1.0, visible: true });
-                            self.layer_sel = Some(stack.layers.len() - 1);
-                            changed = true;
-                            ui.close();
-                        }
+        // Les vignettes : un fil calcule celles qui manquent (une sphère par matériau)
+        self.atelier_thumbs(ctx, &masters, &smart);
+
+        let avail = ui.available_rect_before_wrap();
+        let left_w = 236.0f32.min(avail.width() * 0.24);
+        let right_w = 330.0f32.min(avail.width() * 0.34);
+        let lib = Rect::from_min_max(avail.min, pos2(avail.min.x + left_w, avail.max.y));
+        let panel = Rect::from_min_max(pos2(avail.max.x - right_w, avail.min.y), avail.max);
+        let prev = Rect::from_min_max(pos2(lib.right() + 1.0, avail.min.y), pos2(panel.left() - 1.0, avail.max.y));
+        self.preview_ui(ui, prev, ctx);
+        if let Err((_, e)) = &self.program {
+            ui.painter().text(prev.left_bottom() + vec2(12.0, -14.0), egui::Align2::LEFT_BOTTOM, format!("⚠ {e}"), egui::FontId::proportional(11.5), p.missing);
+        }
+        if let Some(m) = &self.message {
+            ui.painter().text(prev.left_top() + vec2(12.0, 12.0), egui::Align2::LEFT_TOP, m, egui::FontId::proportional(11.5), p.muted);
+        }
+        let head = |ui: &mut egui::Ui, title: &str| {
+            ui.label(RichText::new(crate::i18n::t(title)).size(11.0).strong().color(p.muted));
+        };
+
+        // ---------- Bibliothèque (à gauche) ----------
+        ui.painter().rect_filled(lib, 0.0, p.panel);
+        ui.painter().vline(lib.right(), lib.y_range(), egui::Stroke::new(1.0, p.line));
+        let mut add_master: Option<String> = None;
+        let mut add_smart: Option<String> = None;
+        let mut add_preset: Option<&'static str> = None;
+        let mut new_master = false;
+        {
+            let mut lui = ui.new_child(egui::UiBuilder::new().max_rect(lib.shrink2(vec2(10.0, 10.0))));
+            head(&mut lui, "MATÉRIAUX");
+            lui.add_space(4.0);
+            lui.add(egui::TextEdit::singleline(&mut self.lib_search).hint_text(format!("{}  {}", crate::lucide::SEARCH, crate::i18n::t("chercher"))).desired_width(f32::INFINITY));
+            lui.add_space(4.0);
+            lui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                for (k, (icon, tip)) in [(crate::lucide::LAYERS, "tout"), (crate::lucide::BLEND, "matériaux maîtres du coffre"), (crate::lucide::SPARKLES, "matériaux intelligents"), (crate::lucide::PALETTE, "préréglages")].into_iter().enumerate() {
+                    let on = self.lib_shelf == k as u8;
+                    let b = egui::Button::new(RichText::new(icon).size(13.0).color(if on { p.on_accent } else { p.text })).fill(if on { p.accent } else { Color32::TRANSPARENT }).corner_radius(10).min_size(vec2(30.0, 24.0));
+                    if ui.add(b).on_hover_text(crate::i18n::t(tip)).clicked() {
+                        self.lib_shelf = k as u8;
                     }
-                });
-                // Matériaux intelligents : des piles entières enregistrées, posées d'un coup
-                let smart = crate::atelier::smart_materials(&self.root);
-                if !smart.is_empty() {
-                    ui.separator();
-                    ui.label(RichText::new(crate::i18n::t("matériaux intelligents")).color(p.muted).size(11.0));
-                    for name in smart {
-                        if ui.button(format!("{}  {name}", crate::lucide::SPARKLES)).on_hover_text(crate::i18n::t("Ajoute tous ses calques, avec leurs masques")).clicked() {
-                            if let Some(st) = crate::atelier::load_smart(&self.root, &name) {
-                                stack.layers.extend(st.layers);
-                                self.layer_sel = Some(stack.layers.len().saturating_sub(1));
-                                changed = true;
-                            }
-                            ui.close();
-                        }
-                    }
-                }
-                ui.separator();
-                if ui.button(crate::i18n::t("nouveau matériau maître…")).on_hover_text(crate::i18n::t("Crée un .arymat à côté, l'ajoute comme calque et l'ouvre en nodes")).clicked() {
-                    // Un atelier pas encore enregistré : le maître va dans « nodes/ » du coffre (pas dans le dossier caché)
-                    let untitled = self.path.strip_prefix(&self.root).is_ok_and(|r| r.to_string_lossy().replace('\\', "/").starts_with(crate::untitled::DIR));
-                    let dir = if untitled { std::path::Path::new(&self.root).join("nodes") } else { self.path.parent().unwrap_or(std::path::Path::new("")).to_path_buf() };
-                    let _ = std::fs::create_dir_all(&dir);
-                    let stem = self.path.file_stem().map(|s| crate::formats::strip(&s.to_string_lossy()).to_string()).unwrap_or_else(|| "matériau".into());
-                    let mut n = stack.layers.len() + 1;
-                    let mut file = dir.join(format!("{stem} - calque {n}.{}", crate::formats::ext("mat")));
-                    while file.exists() {
-                        n += 1;
-                        file = dir.join(format!("{stem} - calque {n}.{}", crate::formats::ext("mat")));
-                    }
-                    if Graph::new_material().save(&file).is_ok() {
-                        let rel = file.strip_prefix(&self.root).map(|r| r.to_string_lossy().replace('\\', "/")).unwrap_or_else(|_| file.to_string_lossy().to_string());
-                        stack.layers.push(crate::atelier::Layer { name: format!("calque {n}"), master: rel, params: Default::default(), mask: Default::default(), opacity: 1.0, visible: true });
-                        self.layer_sel = Some(stack.layers.len() - 1);
-                        self.open_request = Some(file);
-                        self.mat_list = None;
-                        changed = true;
-                    }
-                    ui.close();
                 }
             });
-            // Enregistrer la pile comme matériau intelligent (réutilisable sur d'autres objets)
-            if !stack.layers.is_empty() && ui.button(crate::lucide::SPARKLES).on_hover_text(crate::i18n::t("Enregistrer la pile comme matériau intelligent (dans « matériaux intelligents » du coffre)")).clicked() {
-                let name = self.path.file_stem().map(|s| crate::formats::strip(&s.to_string_lossy()).to_string()).unwrap_or_else(|| "matériau".into());
-                self.message = Some(match crate::atelier::save_smart(&self.root, &name, &stack) {
-                    Ok(_) => format!("{} « {name} »", crate::i18n::t("Matériau intelligent enregistré :")),
-                    Err(e) => e,
+            lui.add_space(6.0);
+            let q = self.lib_search.to_lowercase();
+            let fits = |name: &str| q.is_empty() || name.to_lowercase().contains(&q);
+            // (clé de vignette, nom, genre)
+            let mut items: Vec<(String, String, u8)> = vec![];
+            if self.lib_shelf == 0 || self.lib_shelf == 1 {
+                for m in &masters {
+                    let name = std::path::Path::new(m).file_name().map(|s| crate::formats::strip(&s.to_string_lossy()).to_string()).unwrap_or_default();
+                    if fits(&name) {
+                        items.push((format!("m:{m}"), name, 1));
+                    }
+                }
+            }
+            if self.lib_shelf == 0 || self.lib_shelf == 2 {
+                for n in &smart {
+                    if fits(n) {
+                        items.push((format!("s:{n}"), n.clone(), 2));
+                    }
+                }
+            }
+            if self.lib_shelf == 0 || self.lib_shelf == 3 {
+                for n in MATERIAL_PRESETS {
+                    if fits(n) {
+                        items.push((format!("p:{n}"), crate::i18n::t(n), 3));
+                    }
+                }
+            }
+            egui::ScrollArea::vertical().id_salt("atelier-lib").auto_shrink([false, false]).show(&mut lui, |ui| {
+                let cols = ((ui.available_width() + 6.0) / 70.0).floor().max(2.0) as usize;
+                let cell = (ui.available_width() - 6.0 * (cols as f32 - 1.0)) / cols as f32;
+                egui::Grid::new("atelier-lib-grid").spacing(vec2(6.0, 8.0)).show(ui, |ui| {
+                    for (k, (key, name, kind)) in items.iter().enumerate() {
+                        let (r, resp) = ui.allocate_exact_size(vec2(cell, cell + 16.0), Sense::click());
+                        let disc = Rect::from_center_size(pos2(r.center().x, r.top() + cell / 2.0), vec2(cell - 6.0, cell - 6.0));
+                        if resp.hovered() {
+                            ui.painter().rect_filled(r.expand(2.0), 6.0, p.raised);
+                        }
+                        match self.mthumb.get(key) {
+                            Some(t) => {
+                                ui.painter().image(t.id(), disc, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+                            }
+                            None => {
+                                ui.painter().circle_filled(disc.center(), disc.width() / 2.0 - 4.0, p.field);
+                            }
+                        }
+                        // Le genre, en petit badge : intelligent ou préréglage
+                        if *kind != 1 {
+                            let icon = if *kind == 2 { crate::lucide::SPARKLES } else { crate::lucide::PALETTE };
+                            ui.painter().text(disc.right_bottom() - vec2(4.0, 4.0), egui::Align2::RIGHT_BOTTOM, icon, egui::FontId::proportional(11.0), p.accent);
+                        }
+                        let short: String = if name.chars().count() > 11 { format!("{}…", name.chars().take(10).collect::<String>()) } else { name.clone() };
+                        ui.painter().text(pos2(r.center().x, r.bottom() - 7.0), egui::Align2::CENTER_CENTER, short, egui::FontId::proportional(10.5), p.text);
+                        let tip = match kind {
+                            1 => crate::i18n::t("Ajouter en calque (double-clic sur le calque : ouvrir le maître)"),
+                            2 => crate::i18n::t("Matériau intelligent : ajoute tous ses calques, avec leurs masques"),
+                            _ => crate::i18n::t("Préréglage : devient un matériau maître du coffre, puis un calque"),
+                        };
+                        if resp.on_hover_text(format!("{name}\n{tip}")).clicked() {
+                            match kind {
+                                1 => add_master = Some(key[2..].to_string()),
+                                2 => add_smart = Some(key[2..].to_string()),
+                                _ => add_preset = MATERIAL_PRESETS.iter().copied().find(|n| *n == &key[2..]),
+                            }
+                        }
+                        if (k + 1) % cols == 0 {
+                            ui.end_row();
+                        }
+                    }
                 });
-            }
-            if let Some(m) = &self.message {
-                ui.label(RichText::new(m).color(p.muted).size(11.0));
-            }
-        });
-        if let Err((_, e)) = &self.program {
-            ui.label(RichText::new(format!("⚠ {e}")).color(p.missing).size(11.5));
+                ui.add_space(8.0);
+                if ui.add(egui::Button::new(format!("{}  {}", crate::lucide::PLUS, crate::i18n::t("nouveau matériau maître"))).corner_radius(10)).on_hover_text(crate::i18n::t("Crée un .arymat à côté, l'ajoute comme calque et l'ouvre en nodes")).clicked() {
+                    new_master = true;
+                }
+            });
         }
-        let avail = ui.available_rect_before_wrap();
-        let side = 330.0f32.min(avail.width() * 0.45);
-        let prev = Rect::from_min_max(avail.min, pos2(avail.max.x - side - 8.0, avail.max.y));
-        let panel = Rect::from_min_max(pos2(avail.max.x - side, avail.min.y), avail.max);
-        self.preview_ui(ui, prev, ctx);
-        ui.painter().rect_filled(panel, 0.0, p.panel);
-        let mut child = ui.new_child(egui::UiBuilder::new().max_rect(panel.shrink(8.0)));
-        let ui = &mut child;
-        // La pile : le calque du dessus en haut, comme dans Painter
-        ui.label(theme::section(&crate::i18n::t("calques")));
-        let n = stack.layers.len();
-        let (mut del, mut up, mut down) = (None, None, None);
-        egui::ScrollArea::vertical().id_salt("atelier-layers").max_height((panel.height() * 0.4).max(120.0)).show(ui, |ui| {
-            if n == 0 {
-                ui.label(RichText::new(crate::i18n::t("Ajoute un calque : un matériau maître du coffre, posé partout ou selon un masque (usure, saleté, poussière…).")).color(p.muted).size(11.0));
+        if let Some(m) = add_master {
+            let name = std::path::Path::new(&m).file_name().map(|s| crate::formats::strip(&s.to_string_lossy()).to_string()).unwrap_or_default();
+            stack.layers.push(crate::atelier::Layer { name, master: m, params: Default::default(), mask: Default::default(), opacity: 1.0, visible: true });
+            self.layer_sel = Some(stack.layers.len() - 1);
+            changed = true;
+        }
+        if let Some(n) = add_smart {
+            if let Some(st) = crate::atelier::load_smart(&self.root, &n) {
+                stack.layers.extend(st.layers);
+                self.layer_sel = Some(stack.layers.len().saturating_sub(1));
+                changed = true;
             }
+        }
+        if let Some(n) = add_preset {
+            // Le préréglage devient un maître du coffre (« nodes/matériaux »), réutilisé s'il existe déjà
+            let dir = std::path::Path::new(&self.root).join("nodes").join("matériaux");
+            let _ = std::fs::create_dir_all(&dir);
+            let file = dir.join(format!("{n}.{}", crate::formats::ext("mat")));
+            let ok = file.exists() || material_preset(n).is_some_and(|g| g.save(&file).is_ok());
+            if ok {
+                let rel = file.strip_prefix(&self.root).map(|r| r.to_string_lossy().replace('\\', "/")).unwrap_or_default();
+                stack.layers.push(crate::atelier::Layer { name: crate::i18n::t(n), master: rel, params: Default::default(), mask: Default::default(), opacity: 1.0, visible: true });
+                self.layer_sel = Some(stack.layers.len() - 1);
+                self.mat_list = None;
+                changed = true;
+            }
+        }
+        if new_master {
+            // Un atelier pas encore enregistré : le maître va dans « nodes/ » du coffre (pas dans le dossier caché)
+            let untitled = self.path.strip_prefix(&self.root).is_ok_and(|r| r.to_string_lossy().replace('\\', "/").starts_with(crate::untitled::DIR));
+            let dir = if untitled { std::path::Path::new(&self.root).join("nodes") } else { self.path.parent().unwrap_or(std::path::Path::new("")).to_path_buf() };
+            let _ = std::fs::create_dir_all(&dir);
+            let stem = self.path.file_stem().map(|s| crate::formats::strip(&s.to_string_lossy()).to_string()).unwrap_or_else(|| "matériau".into());
+            let mut n = stack.layers.len() + 1;
+            let mut file = dir.join(format!("{stem} - calque {n}.{}", crate::formats::ext("mat")));
+            while file.exists() {
+                n += 1;
+                file = dir.join(format!("{stem} - calque {n}.{}", crate::formats::ext("mat")));
+            }
+            if Graph::new_material().save(&file).is_ok() {
+                let rel = file.strip_prefix(&self.root).map(|r| r.to_string_lossy().replace('\\', "/")).unwrap_or_else(|_| file.to_string_lossy().to_string());
+                stack.layers.push(crate::atelier::Layer { name: format!("calque {n}"), master: rel, params: Default::default(), mask: Default::default(), opacity: 1.0, visible: true });
+                self.layer_sel = Some(stack.layers.len() - 1);
+                self.open_request = Some(file);
+                self.mat_list = None;
+                changed = true;
+            }
+        }
+
+        // ---------- Calques et propriétés (à droite) ----------
+        ui.painter().rect_filled(panel, 0.0, p.panel);
+        ui.painter().vline(panel.left(), panel.y_range(), egui::Stroke::new(1.0, p.line));
+        let mut child = ui.new_child(egui::UiBuilder::new().max_rect(panel.shrink2(vec2(10.0, 10.0))));
+        let ui = &mut child;
+        let n = stack.layers.len();
+        let (mut del, mut up, mut down, mut dup) = (None, None, None, None);
+        // En-tête des calques : le titre, et les actions en icônes (comme Painter)
+        ui.horizontal(|ui| {
+            head(ui, "CALQUES");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.spacing_mut().item_spacing.x = 2.0;
+                let ib = |ui: &mut egui::Ui, icon: &str, tip: &str, ok: bool| ui.add_enabled(ok, egui::Button::new(RichText::new(icon).size(14.0)).frame(false).min_size(vec2(24.0, 22.0))).on_hover_text(crate::i18n::t(tip)).clicked();
+                let sel = self.layer_sel.filter(|&i| i < n);
+                if ib(ui, crate::lucide::TRASH_2, "supprimer le calque", sel.is_some()) {
+                    del = sel;
+                }
+                if ib(ui, crate::lucide::COPY, "dupliquer le calque", sel.is_some()) {
+                    dup = sel;
+                }
+                if ib(ui, crate::lucide::ARROW_DOWN, "descendre", sel.is_some_and(|i| i > 0)) {
+                    down = sel;
+                }
+                if ib(ui, crate::lucide::ARROW_UP, "monter", sel.is_some_and(|i| i + 1 < n)) {
+                    up = sel;
+                }
+                if ib(ui, crate::lucide::SPARKLES, "Enregistrer la pile comme matériau intelligent (dans « matériaux intelligents » du coffre)", n > 0) {
+                    let name = self.path.file_stem().map(|s| crate::formats::strip(&s.to_string_lossy()).to_string()).unwrap_or_else(|| "matériau".into());
+                    self.message = Some(match crate::atelier::save_smart(&self.root, &name, &stack) {
+                        Ok(_) => format!("{} « {name} »", crate::i18n::t("Matériau intelligent enregistré :")),
+                        Err(e) => e,
+                    });
+                    self.mthumb.remove(&format!("s:{name}"));
+                }
+            });
+        });
+        ui.add_space(4.0);
+        egui::ScrollArea::vertical().id_salt("atelier-layers").max_height((panel.height() * 0.38).max(140.0)).show(ui, |ui| {
+            if n == 0 {
+                ui.label(RichText::new(crate::i18n::t("Clique un matériau à gauche : il devient un calque, posé partout ou selon un masque (usure, saleté, poussière…).")).color(p.muted).size(11.0));
+            }
+            // Le calque du dessus en haut, comme dans Painter
             for i in (0..n).rev() {
                 let l = &mut stack.layers[i];
                 let on = self.layer_sel == Some(i);
-                let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 30.0), Sense::click());
-                ui.painter().rect_filled(r, 2.0, if on { p.accent.gamma_multiply(0.22) } else if resp.hovered() { p.line } else { p.field });
-                let eye = Rect::from_min_size(r.min + vec2(4.0, 6.0), vec2(18.0, 18.0));
-                crate::icons::draw(ui.painter(), eye.shrink(2.0), if l.visible { crate::icons::I::Eye } else { crate::icons::I::EyeOff }, if l.visible { p.text } else { p.muted });
-                ui.painter().text(pos2(r.left() + 30.0, r.center().y), egui::Align2::LEFT_CENTER, &l.name, egui::FontId::proportional(12.5), p.text);
+                let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 42.0), Sense::click());
+                ui.painter().rect(r, 6.0, if on { p.accent.gamma_multiply(0.16) } else if resp.hovered() { p.raised } else { p.field }, egui::Stroke::new(1.0, if on { p.accent } else { p.line }), egui::StrokeKind::Inside);
+                let eye = Rect::from_center_size(pos2(r.left() + 16.0, r.center().y), vec2(18.0, 18.0));
+                ui.painter().text(eye.center(), egui::Align2::CENTER_CENTER, if l.visible { crate::lucide::EYE } else { crate::lucide::EYE_OFF }, egui::FontId::proportional(13.0), if l.visible { p.text } else { p.muted });
+                // Vignette du matériau, puis celle du masque (comme les deux pastilles de Painter)
+                let th = Rect::from_center_size(pos2(r.left() + 46.0, r.center().y), vec2(30.0, 30.0));
+                match self.mthumb.get(&format!("m:{}", l.master)) {
+                    Some(t) => {
+                        ui.painter().image(t.id(), th, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+                    }
+                    None => {
+                        ui.painter().circle_filled(th.center(), 13.0, p.raised);
+                    }
+                }
+                let masked = l.mask.kind != "plein";
+                let mk = Rect::from_center_size(pos2(r.left() + 78.0, r.center().y), vec2(22.0, 22.0));
+                ui.painter().rect(mk, 3.0, if masked { Color32::from_gray(200) } else { p.raised }, egui::Stroke::new(1.0, p.line), egui::StrokeKind::Inside);
+                if masked {
+                    ui.painter().text(mk.center(), egui::Align2::CENTER_CENTER, crate::lucide::WAND_SPARKLES, egui::FontId::proportional(11.0), Color32::from_gray(40));
+                }
+                ui.painter().text(pos2(r.left() + 96.0, r.center().y - 7.0), egui::Align2::LEFT_CENTER, &l.name, egui::FontId::proportional(12.5), if l.visible { p.text } else { p.muted });
                 let mask = crate::atelier::MASKS.iter().find(|m| m.0 == l.mask.kind).map(|m| m.1).unwrap_or("");
-                ui.painter().text(pos2(r.right() - 6.0, r.center().y), egui::Align2::RIGHT_CENTER, crate::i18n::t(mask), egui::FontId::proportional(10.5), p.muted);
+                ui.painter().text(pos2(r.left() + 96.0, r.center().y + 8.0), egui::Align2::LEFT_CENTER, crate::i18n::t(mask), egui::FontId::proportional(10.5), p.muted);
+                ui.painter().text(pos2(r.right() - 10.0, r.center().y), egui::Align2::RIGHT_CENTER, format!("{:.0}", l.opacity * 100.0), egui::FontId::monospace(11.0), p.muted);
                 if resp.clicked() {
-                    if ui.input(|i| i.pointer.interact_pos()).is_some_and(|at| eye.contains(at)) {
+                    if ui.input(|i| i.pointer.interact_pos()).is_some_and(|at| eye.expand(4.0).contains(at)) {
                         l.visible = !l.visible;
                         changed = true;
                     } else {
@@ -4567,24 +4718,8 @@ impl Editor {
                 if resp.double_clicked() {
                     self.open_request = Some(std::path::Path::new(&self.root).join(&l.master));
                 }
-                resp.on_hover_text(crate::i18n::t("double-clic : ouvrir le matériau maître en nodes")).context_menu(|ui| {
-                    if ui.button(format!("{}  {}", crate::lucide::ARROW_UP, crate::i18n::t("monter"))).clicked() {
-                        up = Some(i);
-                        ui.close();
-                    }
-                    if ui.button(format!("{}  {}", crate::lucide::ARROW_DOWN, crate::i18n::t("descendre"))).clicked() {
-                        down = Some(i);
-                        ui.close();
-                    }
-                    if ui.button(format!("{}  {}", crate::lucide::FOLDER_OPEN, crate::i18n::t("ouvrir le maître en nodes"))).clicked() {
-                        self.open_request = Some(std::path::Path::new(&self.root).join(&l.master));
-                        ui.close();
-                    }
-                    if ui.button(RichText::new(crate::i18n::t("supprimer le calque")).color(p.missing)).clicked() {
-                        del = Some(i);
-                        ui.close();
-                    }
-                });
+                resp.on_hover_text(crate::i18n::t("double-clic : ouvrir le matériau maître en nodes"));
+                ui.add_space(3.0);
             }
         });
         if let Some(i) = up.filter(|&i| i + 1 < n) {
@@ -4597,59 +4732,93 @@ impl Editor {
             self.layer_sel = Some(i - 1);
             changed = true;
         }
+        if let Some(i) = dup {
+            let mut c = stack.layers[i].clone();
+            c.name = format!("{} {}", c.name, crate::i18n::t("(copie)"));
+            stack.layers.insert(i + 1, c);
+            self.layer_sel = Some(i + 1);
+            changed = true;
+        }
         if let Some(i) = del {
             stack.layers.remove(i);
             self.layer_sel = None;
             changed = true;
         }
-        // Le calque choisi : son instance (paramètres du maître) et son masque
+        // ---------- Propriétés du calque choisi : des cartes, libellés à gauche ----------
         if let Some(i) = self.layer_sel.filter(|&i| i < stack.layers.len()) {
-            ui.separator();
+            ui.add_space(8.0);
+            ui.painter().hline(ui.max_rect().x_range(), ui.cursor().top(), egui::Stroke::new(1.0, p.line));
+            ui.add_space(8.0);
+            head(ui, "PROPRIÉTÉS");
+            ui.add_space(4.0);
             let l = &mut stack.layers[i];
-            ui.horizontal(|ui| {
-                changed |= ui.add(egui::TextEdit::singleline(&mut l.name).desired_width(160.0)).changed();
-                if ui.button(crate::i18n::t("maître ✎")).on_hover_text(&l.master).clicked() {
-                    self.open_request = Some(std::path::Path::new(&self.root).join(&l.master));
-                }
-            });
-            egui::ScrollArea::vertical().id_salt("atelier-props").show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label(crate::i18n::t("opacité"));
-                    changed |= ui.add(egui::Slider::new(&mut l.opacity, 0.0..=1.0)).changed();
+            let card = |ui: &mut egui::Ui, title: &str, body: &mut dyn FnMut(&mut egui::Ui)| {
+                egui::Frame::new().fill(p.field).stroke(egui::Stroke::new(1.0, p.line)).corner_radius(8).inner_margin(egui::Margin::symmetric(10, 8)).show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.spacing_mut().item_spacing = vec2(6.0, 8.0);
+                    ui.label(RichText::new(crate::i18n::t(title)).strong().size(12.0));
+                    body(ui);
                 });
-                ui.add_space(4.0);
-                ui.label(theme::section(&crate::i18n::t("instance")));
+                ui.add_space(8.0);
+            };
+            egui::ScrollArea::vertical().id_salt("atelier-props").auto_shrink([false, false]).show(ui, |ui| {
+                card(ui, "Calque", &mut |ui| {
+                    crate::modifiers::row(ui, &crate::i18n::t("nom"), |ui| {
+                        changed |= ui.add(egui::TextEdit::singleline(&mut l.name).desired_width(ui.available_width() - 30.0)).changed();
+                        if ui.add(egui::Button::new(RichText::new(crate::lucide::WORKFLOW).size(13.0)).frame(false)).on_hover_text(format!("{}\n{}", crate::i18n::t("ouvrir le maître en nodes"), l.master)).clicked() {
+                            self.open_request = Some(std::path::Path::new(&self.root).join(&l.master));
+                        }
+                    });
+                    let mut o = l.opacity * 100.0;
+                    if crate::modifiers::row_slider(ui, "opacité", egui::Slider::new(&mut o, 0.0..=100.0).suffix(" %").max_decimals(0)) {
+                        l.opacity = o / 100.0;
+                        changed = true;
+                    }
+                });
                 let ex = crate::atelier::load_master(&self.root, &l.master).map(|g| crate::atelier::exposed(&g)).unwrap_or_default();
-                if ex.is_empty() {
-                    ui.label(RichText::new(crate::i18n::t("Ce maître n'expose aucun paramètre. Dans ses nodes, ajoute un « Paramètre exposé » (et renomme-le) pour le régler d'ici.")).color(p.muted).size(10.5));
-                }
-                for e in ex {
-                    let mut v = l.params.get(&e.name).copied().unwrap_or(e.default);
-                    ui.horizontal(|ui| {
-                        ui.label(&e.name);
-                        let ch = if e.color {
-                            let mut c = [v[0], v[1], v[2]];
-                            let r = ui.color_edit_button_rgb(&mut c).changed();
-                            v = [c[0], c[1], c[2], 1.0];
+                card(ui, "Paramètres", &mut |ui| {
+                    if ex.is_empty() {
+                        ui.label(RichText::new(crate::i18n::t("Ce maître n'expose aucun paramètre. Dans ses nodes, ajoute un « Paramètre exposé » (et renomme-le) pour le régler d'ici.")).color(p.muted).size(10.5));
+                    }
+                    for e in &ex {
+                        let mut v = l.params.get(&e.name).copied().unwrap_or(e.default);
+                        let overridden = l.params.contains_key(&e.name);
+                        let ch = crate::modifiers::row(ui, &e.name, |ui| {
+                            let r = if e.color {
+                                let mut c = [v[0], v[1], v[2]];
+                                let r = ui.color_edit_button_rgb(&mut c).changed();
+                                v = [c[0], c[1], c[2], 1.0];
+                                r
+                            } else {
+                                ui.spacing_mut().slider_width = (ui.available_width() - 70.0).max(60.0);
+                                ui.add(egui::Slider::new(&mut v[0], 0.0..=1.0)).changed()
+                            };
+                            if overridden && ui.add(egui::Button::new(RichText::new(crate::lucide::ROTATE_CCW).size(12.0)).frame(false)).on_hover_text(crate::i18n::t("revenir à la valeur du maître")).clicked() {
+                                l.params.remove(&e.name);
+                                changed = true;
+                            }
                             r
-                        } else {
-                            ui.add(egui::Slider::new(&mut v[0], 0.0..=1.0)).changed()
-                        };
+                        });
                         if ch {
                             l.params.insert(e.name.clone(), v);
                             changed = true;
                         }
-                        if l.params.contains_key(&e.name) && ui.small_button("↺").on_hover_text(crate::i18n::t("revenir à la valeur du maître")).clicked() {
-                            l.params.remove(&e.name);
-                            changed = true;
+                    }
+                });
+                card(ui, "Masque", &mut |ui| {
+                    // Les masques en pastilles, comme les générateurs de Painter
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
+                        for (id, label, _) in crate::atelier::MASKS {
+                            let on = l.mask.kind == id;
+                            let b = egui::Button::new(RichText::new(crate::i18n::t(label)).size(11.5).color(if on { p.on_accent } else { p.text })).fill(if on { p.accent } else { Color32::TRANSPARENT }).stroke(egui::Stroke::new(1.0, p.line)).corner_radius(10);
+                            if ui.add(b).clicked() {
+                                l.mask.kind = id.to_string();
+                                changed = true;
+                            }
                         }
                     });
-                }
-                ui.add_space(4.0);
-                ui.horizontal(|ui| {
-                    ui.label(theme::section(&crate::i18n::t("masque")));
-                    // Masques intelligents tout prêts
-                    egui::containers::menu::MenuButton::new(format!("{} {}", crate::lucide::WAND_SPARKLES, crate::i18n::t("intelligent ▾"))).ui(ui, |ui| {
+                    egui::containers::menu::MenuButton::new(RichText::new(format!("{}  {}", crate::lucide::WAND_SPARKLES, crate::i18n::t("masques intelligents"))).size(12.0)).ui(ui, |ui| {
                         ui.set_min_width(240.0);
                         for (name, m) in crate::atelier::smart_masks() {
                             if ui.button(crate::i18n::t(name)).clicked() {
@@ -4659,42 +4828,33 @@ impl Editor {
                             }
                         }
                     });
-                });
-                egui::ComboBox::from_id_salt("atelier-mask").selected_text(crate::i18n::t(crate::atelier::MASKS.iter().find(|m| m.0 == l.mask.kind).map(|m| m.1).unwrap_or("partout"))).show_ui(ui, |ui| {
-                    for (id, label, _) in crate::atelier::MASKS {
-                        if ui.selectable_label(l.mask.kind == id, crate::i18n::t(label)).clicked() {
-                            l.mask.kind = id.to_string();
-                            changed = true;
+                    if l.mask.kind != "plein" {
+                        changed |= crate::modifiers::row_slider(ui, "quantité", egui::Slider::new(&mut l.mask.amount, 0.0..=1.0));
+                        changed |= crate::modifiers::row_slider(ui, "contraste", egui::Slider::new(&mut l.mask.contrast, 0.0..=1.0));
+                        changed |= crate::modifiers::row_slider(ui, "échelle", egui::Slider::new(&mut l.mask.scale, 0.5..=40.0).clamping(egui::SliderClamping::Never).logarithmic(true));
+                        changed |= ui.checkbox(&mut l.mask.invert, crate::i18n::t("inverser")).changed();
+                        // Cassure : un second motif découpe le masque, pour un résultat moins régulier
+                        crate::modifiers::row(ui, &crate::i18n::t("cassure"), |ui| {
+                            let cur = if l.mask.breakup.is_empty() { "aucune" } else { crate::atelier::MASKS.iter().find(|m| m.0 == l.mask.breakup).map(|m| m.1).unwrap_or("aucune") };
+                            egui::ComboBox::from_id_salt("atelier-breakup").width(ui.available_width() - 4.0).selected_text(crate::i18n::t(cur)).show_ui(ui, |ui| {
+                                if ui.selectable_label(l.mask.breakup.is_empty(), crate::i18n::t("aucune")).clicked() {
+                                    l.mask.breakup.clear();
+                                    changed = true;
+                                }
+                                for (id, label, op) in crate::atelier::MASKS {
+                                    if !op.is_empty() && ui.selectable_label(l.mask.breakup == id, crate::i18n::t(label)).clicked() {
+                                        l.mask.breakup = id.to_string();
+                                        changed = true;
+                                    }
+                                }
+                            });
+                        });
+                        if !l.mask.breakup.is_empty() {
+                            changed |= crate::modifiers::row_slider(ui, "force", egui::Slider::new(&mut l.mask.breakup_amount, 0.0..=1.0));
+                            changed |= crate::modifiers::row_slider(ui, "échelle cassure", egui::Slider::new(&mut l.mask.breakup_scale, 0.5..=40.0).logarithmic(true));
                         }
                     }
                 });
-                if l.mask.kind != "plein" {
-                    changed |= ui.add(egui::Slider::new(&mut l.mask.amount, 0.0..=1.0).text(crate::i18n::t("quantité"))).changed();
-                    changed |= ui.add(egui::Slider::new(&mut l.mask.contrast, 0.0..=1.0).text(crate::i18n::t("contraste"))).changed();
-                    changed |= ui.add(egui::Slider::new(&mut l.mask.scale, 0.5..=40.0).clamping(egui::SliderClamping::Never).logarithmic(true).text(crate::i18n::t("échelle"))).changed();
-                    changed |= ui.checkbox(&mut l.mask.invert, crate::i18n::t("inverser")).changed();
-                    // Cassure : un second motif découpe le masque, pour un résultat moins régulier
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new(crate::i18n::t("cassure")).color(p.muted)).on_hover_text(crate::i18n::t("Un second motif découpe le masque : l'usure devient irrégulière"));
-                        let cur = if l.mask.breakup.is_empty() { "aucune" } else { crate::atelier::MASKS.iter().find(|m| m.0 == l.mask.breakup).map(|m| m.1).unwrap_or("aucune") };
-                        egui::ComboBox::from_id_salt("atelier-breakup").selected_text(crate::i18n::t(cur)).show_ui(ui, |ui| {
-                            if ui.selectable_label(l.mask.breakup.is_empty(), crate::i18n::t("aucune")).clicked() {
-                                l.mask.breakup.clear();
-                                changed = true;
-                            }
-                            for (id, label, op) in crate::atelier::MASKS {
-                                if !op.is_empty() && ui.selectable_label(l.mask.breakup == id, crate::i18n::t(label)).clicked() {
-                                    l.mask.breakup = id.to_string();
-                                    changed = true;
-                                }
-                            }
-                        });
-                    });
-                    if !l.mask.breakup.is_empty() {
-                        changed |= ui.add(egui::Slider::new(&mut l.mask.breakup_amount, 0.0..=1.0).text(crate::i18n::t("force"))).changed();
-                        changed |= ui.add(egui::Slider::new(&mut l.mask.breakup_scale, 0.5..=40.0).logarithmic(true).text(crate::i18n::t("échelle de la cassure"))).changed();
-                    }
-                }
             });
         }
         if changed || self.graph.stack.as_ref() != Some(&stack) {
@@ -4715,6 +4875,75 @@ impl Editor {
             self.version += 1;
         }
         ctx.request_repaint_after(std::time::Duration::from_millis(500));
+    }
+
+    /// Les vignettes de la bibliothèque de l'atelier : une sphère rendue par matériau, en arrière-plan
+    fn atelier_thumbs(&mut self, ctx: &egui::Context, masters: &[String], smart: &[String]) {
+        if let Some(rx) = &self.mthumb_rx {
+            let mut done = false;
+            loop {
+                match rx.try_recv() {
+                    Ok((key, img)) => {
+                        let ci = to_texture(ctx, "mthumb", &img);
+                        self.mthumb.insert(key.clone(), ctx.load_texture(format!("mthumb-{key}"), ci, egui::TextureOptions::LINEAR));
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                    Err(_) => {
+                        done = true;
+                        break;
+                    }
+                }
+            }
+            if done {
+                self.mthumb_rx = None;
+            } else {
+                ctx.request_repaint_after(std::time::Duration::from_millis(150));
+                return;
+            }
+        }
+        let mut todo: Vec<(String, Graph)> = vec![];
+        for m in masters {
+            let k = format!("m:{m}");
+            if !self.mthumb.contains_key(&k) {
+                if let Some(g) = crate::atelier::load_master(&self.root, m) {
+                    todo.push((k, g));
+                }
+            }
+        }
+        for n in smart {
+            let k = format!("s:{n}");
+            if !self.mthumb.contains_key(&k) {
+                if let Some(st) = crate::atelier::load_smart(&self.root, n) {
+                    todo.push((k, crate::atelier::flatten(&st, &self.root)));
+                }
+            }
+        }
+        for n in MATERIAL_PRESETS {
+            let k = format!("p:{n}");
+            if !self.mthumb.contains_key(&k) {
+                if let Some(g) = material_preset(n) {
+                    todo.push((k, g));
+                }
+            }
+        }
+        if todo.is_empty() {
+            return;
+        }
+        let root = self.root.clone();
+        let sphere = self.sphere.get_or_insert_with(|| std::sync::Arc::new(crate::model3d::preview_sphere())).clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let c2 = ctx.clone();
+        std::thread::spawn(move || {
+            for (k, g) in todo {
+                let Ok(prog) = Program::compile(&g, &root, 256) else { continue };
+                let img = crate::model3d::render_material_preview(&sphere, std::sync::Arc::new(prog), 96);
+                if tx.send((k, img)).is_err() {
+                    return;
+                }
+                c2.request_repaint();
+            }
+        });
+        self.mthumb_rx = Some(rx);
     }
 
     /// Tracé roto du node choisi, sur l'aperçu : clic pour ajouter un point, glisser pour le déplacer,
