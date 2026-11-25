@@ -467,6 +467,8 @@ pub struct Layer {
     /// Styles de calque, et leurs couvertures précalculées
     pub fx: Fx,
     pub fx_maps: Option<std::sync::Arc<FxMaps>>,
+    /// Animation : nombre d'images à la suite où ce dessin reste à l'écran (1 : « en 1 », 2 : « en 2 »…)
+    pub hold: u32,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -496,6 +498,15 @@ struct LayerHead {
     group: u32,
     #[serde(default, skip_serializing_if = "Fx::is_plain")]
     fx: Fx,
+    #[serde(default = "one_u32", skip_serializing_if = "is_one_u32")]
+    hold: u32,
+}
+
+fn one_u32() -> u32 {
+    1
+}
+fn is_one_u32(v: &u32) -> bool {
+    *v == 1
 }
 
 fn yes() -> bool {
@@ -523,7 +534,7 @@ struct Head {
 
 impl Layer {
     pub fn blank(name: &str, w: usize, h: usize) -> Layer {
-        Layer { name: name.to_string(), visible: true, opacity: 1.0, blend: Blend::Normal, off: [0, 0], w, h, px: vec![0; w * h * 4], mask: None, mask_on: true, fill: 1.0, lock_alpha: false, lock_all: false, clip: false, adj: None, group: 0, fx: Fx::default(), fx_maps: None }
+        Layer { name: name.to_string(), visible: true, opacity: 1.0, blend: Blend::Normal, off: [0, 0], w, h, px: vec![0; w * h * 4], mask: None, mask_on: true, fill: 1.0, lock_alpha: false, lock_all: false, clip: false, adj: None, group: 0, fx: Fx::default(), fx_maps: None, hold: 1 }
     }
 
     pub fn filled(name: &str, w: usize, h: usize, c: [u8; 4]) -> Layer {
@@ -920,7 +931,7 @@ impl Doc {
             w: self.w,
             h: self.h,
             active: self.active,
-            layers: self.layers.iter().map(|l| LayerHead { name: l.name.clone(), visible: l.visible, opacity: l.opacity, blend: l.blend, off: l.off, w: l.w, h: l.h, mask: l.mask.is_some(), mask_on: l.mask_on, fill: l.fill, lock_alpha: l.lock_alpha, lock_all: l.lock_all, clip: l.clip, adj: l.adj, group: l.group, fx: l.fx.clone() }).collect(),
+            layers: self.layers.iter().map(|l| LayerHead { name: l.name.clone(), visible: l.visible, opacity: l.opacity, blend: l.blend, off: l.off, w: l.w, h: l.h, mask: l.mask.is_some(), mask_on: l.mask_on, fill: l.fill, lock_alpha: l.lock_alpha, lock_all: l.lock_all, clip: l.clip, adj: l.adj, group: l.group, fx: l.fx.clone(), hold: l.hold }).collect(),
             groups: self.groups.iter().map(|g| Group { has_mask: g.mask.0.is_some(), mask: GroupMask(None), ..g.clone() }).collect(),
             guides: self.guides.clone(),
             anim: self.anim.clone(),
@@ -991,7 +1002,7 @@ impl Doc {
             } else {
                 None
             };
-            layers.push(Layer { name: lh.name, visible: lh.visible, opacity: lh.opacity, blend: lh.blend, off: lh.off, w, h, px, mask, mask_on: lh.mask_on, fill: lh.fill, lock_alpha: lh.lock_alpha, lock_all: lh.lock_all, clip: lh.clip, adj: lh.adj, group: lh.group, fx: lh.fx, fx_maps: None });
+            layers.push(Layer { name: lh.name, visible: lh.visible, opacity: lh.opacity, blend: lh.blend, off: lh.off, w, h, px, mask, mask_on: lh.mask_on, fill: lh.fill, lock_alpha: lh.lock_alpha, lock_all: lh.lock_all, clip: lh.clip, adj: lh.adj, group: lh.group, fx: lh.fx, fx_maps: None, hold: lh.hold.max(1) });
         }
         if layers.is_empty() {
             layers.push(Layer::blank("calque 1", head.w, head.h));
@@ -4461,14 +4472,20 @@ impl Editor {
         let r = (|| -> Result<(), String> {
             std::fs::create_dir_all(&tmp).map_err(|e| e.to_string())?;
             let frames = self.doc.frames();
-            for (k, &li) in frames.iter().enumerate() {
+            let mut k = 0usize;
+            for &li in frames.iter() {
                 for &f in &frames {
                     self.doc.layers[f].visible = f == li;
                 }
                 let img = self.doc.flatten();
                 // Dimensions paires pour l'encodeur vidéo
                 let (w, h) = (img.width() & !1, img.height() & !1);
-                image::imageops::crop_imm(&img, 0, 0, w.max(2), h.max(2)).to_image().save(tmp.join(format!("{k:05}.png"))).map_err(|e| e.to_string())?;
+                let img = image::imageops::crop_imm(&img, 0, 0, w.max(2), h.max(2)).to_image();
+                // Le dessin répété autant d'images que son exposition
+                for _ in 0..self.doc.layers[li].hold.max(1) {
+                    img.save(tmp.join(format!("{k:05}.png"))).map_err(|e| e.to_string())?;
+                    k += 1;
+                }
             }
             let ff = crate::ffmpeg::find("ffmpeg").ok_or("ffmpeg introuvable")?;
             let mut cmd = crate::ffmpeg::command(ff);
@@ -4507,7 +4524,16 @@ impl Editor {
         // Lecture
         if let Some((t0, from)) = self.anim_play {
             let fps = self.doc.anim.as_ref().map(|a| a.fps).unwrap_or(12.0).max(1.0);
-            let k = (from + (t0.elapsed().as_secs_f32() * fps) as usize) % frames.len();
+            // Chaque dessin reste `hold` images (feuille d'exposition) ; la lecture compte en images
+            let holds: Vec<usize> = frames.iter().map(|&li| self.doc.layers[li].hold.max(1) as usize).collect();
+            let total: usize = holds.iter().sum();
+            let start: usize = holds.iter().take(from).sum();
+            let mut at = (start + (t0.elapsed().as_secs_f32() * fps) as usize) % total.max(1);
+            let mut k = 0;
+            while k + 1 < holds.len() && at >= holds[k] {
+                at -= holds[k];
+                k += 1;
+            }
             if k != self.cur_frame() {
                 self.set_frame(k);
             }
@@ -4553,7 +4579,22 @@ impl Editor {
                         self.all();
                     }
                 }
-                ui.label(egui::RichText::new(format!("{} / {}", self.cur_frame() + 1, frames.len())).monospace().size(11.0).color(p.muted)).on_hover_text(crate::i18n::t(", et . : image précédente, suivante"));
+                // Feuille d'exposition : tout le plan en 1, en 2 ou en 3 (chaque dessin tenu 1, 2 ou 3 images)
+                ui.separator();
+                ui.label(egui::RichText::new(crate::i18n::t("en")).size(11.0).color(p.muted));
+                let all_hold = frames.iter().map(|&li| self.doc.layers[li].hold.max(1)).fold(None, |acc: Option<Option<u32>>, h| Some(match acc { None => Some(h), Some(Some(x)) if x == h => Some(h), _ => None })).flatten();
+                for n in [1u32, 2, 3] {
+                    if ui.add(egui::Button::new(egui::RichText::new(n.to_string()).size(12.0)).selected(all_hold == Some(n)).min_size(vec2(22.0, 22.0))).on_hover_text(crate::i18n::t("Chaque dessin tenu ce nombre d'images (animation en 1, en 2, en 3)")).clicked() {
+                        self.checkpoint();
+                        for &li in &frames {
+                            self.doc.layers[li].hold = n;
+                        }
+                        self.all();
+                    }
+                }
+                let total: u32 = frames.iter().map(|&li| self.doc.layers[li].hold.max(1)).sum();
+                let fps = self.doc.anim.as_ref().map(|a| a.fps).unwrap_or(12.0).max(1.0);
+                ui.label(egui::RichText::new(format!("{} / {} · {total} {} · {:.1} s", self.cur_frame() + 1, frames.len(), crate::i18n::t("images d'animation"), total as f32 / fps)).monospace().size(11.0).color(p.muted)).on_hover_text(crate::i18n::t(", et . : image précédente, suivante"));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.button(crate::i18n::t("MP4…")).on_hover_text(crate::i18n::t("exporter l'animation en vidéo")).clicked() {
                         self.anim_export(false);
@@ -4570,6 +4611,7 @@ impl Editor {
                     let tw = th * self.doc.w as f32 / self.doc.h.max(1) as f32;
                     let cur = self.cur_frame();
                     let mut pick = None;
+                    let mut set_hold: Option<(usize, u32)> = None;
                     for (k, &li) in frames.iter().enumerate() {
                         // Vignette refaite quand le calque change (clé : taille et quelques pixels)
                         let l = &self.doc.layers[li];
@@ -4599,14 +4641,35 @@ impl Editor {
                             ui.painter().image(t.id(), img, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
                         }
                         ui.painter().rect_stroke(img, 2.0, Stroke::new(if k == cur { 2.0 } else { 1.0 }, if k == cur { p.accent } else { p.line }), egui::StrokeKind::Outside);
-                        ui.painter().text(pos2(img.center().x, img.bottom() + 1.0), egui::Align2::CENTER_TOP, (k + 1).to_string(), egui::FontId::proportional(10.0), if k == cur { p.text } else { p.muted });
+                        let hold = self.doc.layers[li].hold.max(1);
+                        let label = if hold > 1 { format!("{}  ×{hold}", k + 1) } else { (k + 1).to_string() };
+                        ui.painter().text(pos2(img.center().x, img.bottom() + 1.0), egui::Align2::CENTER_TOP, label, egui::FontId::proportional(10.0), if k == cur { p.text } else { p.muted });
+                        // Exposition du dessin : une barre par image tenue, sous la vignette
+                        for j in 0..hold.min(8) {
+                            let x = img.left() + 3.0 + j as f32 * 5.0;
+                            ui.painter().rect_filled(Rect::from_min_size(pos2(x, img.bottom() - 6.0), vec2(3.0, 3.0)), 1.0, p.accent);
+                        }
                         if resp.clicked() {
                             pick = Some(k);
                         }
+                        let resp = resp.on_hover_text(crate::i18n::t("Clic droit : combien d'images ce dessin reste à l'écran"));
+                        resp.context_menu(|ui| {
+                            for n in 1..=6u32 {
+                                if ui.selectable_label(hold == n, format!("{} {n}", crate::i18n::t("tenu"))).clicked() {
+                                    set_hold = Some((li, n));
+                                    ui.close();
+                                }
+                            }
+                        });
                     }
                     if let Some(k) = pick {
                         self.anim_play = None;
                         self.set_frame(k);
+                    }
+                    if let Some((li, n)) = set_hold {
+                        self.checkpoint();
+                        self.doc.layers[li].hold = n;
+                        self.all();
                     }
                 });
             });
@@ -5676,11 +5739,14 @@ mod tests {
         let mut top = Layer::filled("rouge", 4, 4, [255, 0, 0, 255]);
         top.off = [2, 1];
         top.opacity = 0.5;
+        top.hold = 2;
         d.layers.push(top);
         let path = std::env::temp_dir().join(format!("aryadne-paint-{}.aryimg", std::process::id()));
         d.save(&path).unwrap();
         let back = Doc::load(&path).unwrap();
         assert_eq!((back.w, back.h, back.layers.len()), (8, 6, 2));
+        // Exposition d'un dessin d'animation (en 2) gardée
+        assert_eq!((back.layers[0].hold, back.layers[1].hold), (1, 2));
         assert_eq!(back.layers[1].off, [2, 1]);
         let img = back.flatten();
         // Hors du calque rouge : blanc ; dedans : rose (rouge à moitié sur blanc)

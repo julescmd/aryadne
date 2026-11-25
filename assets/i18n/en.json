@@ -3454,5 +3454,9 @@
   "Script Python d'exemple (API)": "Example Python script (API)",
   "caméra 2D": "2D camera",
   "Pano, zoom ou travelling sur le dessin : le cadre passe de A à B pendant la case (lecture, MP4, montage)": "Pan, zoom or track over the drawing: the frame moves from A to B during the panel (playback, MP4, edit)",
-  "Régler les cadres sur la case : glisser pour déplacer, molette pour zoomer": "Set the frames on the panel: drag to move, scroll to zoom"
+  "Régler les cadres sur la case : glisser pour déplacer, molette pour zoomer": "Set the frames on the panel: drag to move, scroll to zoom",
+  "Chaque dessin tenu ce nombre d'images (animation en 1, en 2, en 3)": "Each drawing held this many frames (animating on 1s, 2s, 3s)",
+  "Clic droit : combien d'images ce dessin reste à l'écran": "Right click: how many frames this drawing stays on screen",
+  "tenu": "held",
+  "images d'animation": "frames"
 }
