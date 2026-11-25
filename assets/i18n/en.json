@@ -2498,5 +2498,22 @@
   "piste": "track",
   "étalonnage en nodes": "node grading",
   "Ajouter un masque au groupe": "Add group mask",
-  "Masque du groupe : cliquer pour le peindre, Maj+clic pour l'activer ou le désactiver": "Group mask: click to paint it, Shift+click to enable or disable it"
+  "Masque du groupe : cliquer pour le peindre, Maj+clic pour l'activer ou le désactiver": "Group mask: click to paint it, Shift+click to enable or disable it",
+  "recadrage": "crop",
+  "libre": "free",
+  "format de l'image": "image ratio",
+  "Stabilisateur : le trait suit la souris avec du retard, pour des lignes propres": "Stabilizer: the stroke trails the mouse for clean lines",
+  "La pression de la tablette règle le diamètre": "Tablet pressure controls size",
+  "La pression de la tablette règle l'opacité": "Tablet pressure controls opacity",
+  "Appliquer le recadrage (Entrée)": "Apply crop (Enter)",
+  "Annuler (Échap)": "Cancel (Esc)",
+  "glisser pour tracer le cadre · Entrée : appliquer": "drag to draw the frame · Enter: apply",
+  "Tourner la vue de 15° (4) ; 5 la remet droite": "Rotate view 15° (4); 5 resets",
+  "Tourner la vue de 15° (6)": "Rotate view 15° (6)",
+  "Vue en miroir : l'image ne change pas": "Mirror view: the image is unchanged",
+  "Règles et repères (Ctrl+R) : tirer depuis une règle pour poser un repère": "Rulers and guides (Ctrl+R): drag from a ruler to add a guide",
+  "Historique": "History",
+  "Cliquer un état pour y revenir": "Click a state to go back to it",
+  "état actuel": "current state",
+  "modification": "edit"
 }

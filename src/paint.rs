@@ -433,6 +433,8 @@ struct Head {
     layers: Vec<LayerHead>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     groups: Vec<Group>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    guides: Vec<Guide>,
 }
 
 impl Layer {
@@ -593,6 +595,20 @@ fn stack(d: &mut [f32; 4], layers: &[&Layer], x: i32, y: i32, mul: f32) {
     }
 }
 
+/// Un état de l'historique : le document entier sauf les pixels partagés, et son nom
+#[derive(Clone)]
+struct Snap {
+    layers: Vec<Layer>,
+    active: usize,
+    groups: Vec<Group>,
+    w: usize,
+    h: usize,
+    label: String,
+}
+
+/// Formats proposés au recadrage (0 : libre, 1 : celui de l'image)
+const CROP_RATIOS: [(&str, f32); 7] = [("libre", 0.0), ("format de l'image", -1.0), ("1:1", 1.0), ("4:3", 4.0 / 3.0), ("16:9", 16.0 / 9.0), ("9:16", 9.0 / 16.0), ("4:5", 0.8)];
+
 #[derive(Clone)]
 pub struct Doc {
     pub w: usize,
@@ -601,6 +617,15 @@ pub struct Doc {
     pub active: usize,
     /// Groupes de calques (dossiers) : les calques d'un groupe se suivent dans la pile
     pub groups: Vec<Group>,
+    /// Repères tirés des règles
+    pub guides: Vec<Guide>,
+}
+
+/// Un repère : une ligne verticale (à x) ou horizontale (à y), en pixels du document
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Debug)]
+pub struct Guide {
+    pub vertical: bool,
+    pub at: f32,
 }
 
 /// Un groupe de calques, comme un dossier de Photoshop
@@ -717,7 +742,7 @@ impl Doc {
 
     pub fn new(w: usize, h: usize, white: bool) -> Doc {
         let base = if white { Layer::filled("fond", w, h, [255, 255, 255, 255]) } else { Layer::blank("calque 1", w, h) };
-        Doc { w, h, layers: vec![base], active: 0, groups: vec![] }
+        Doc { w, h, layers: vec![base], active: 0, groups: vec![], guides: vec![] }
     }
 
     pub fn save(&self, path: &Path) -> Result<(), String> {
@@ -735,6 +760,7 @@ impl Doc {
             active: self.active,
             layers: self.layers.iter().map(|l| LayerHead { name: l.name.clone(), visible: l.visible, opacity: l.opacity, blend: l.blend, off: l.off, w: l.w, h: l.h, mask: l.mask.is_some(), mask_on: l.mask_on, fill: l.fill, lock_alpha: l.lock_alpha, lock_all: l.lock_all, clip: l.clip, adj: l.adj, group: l.group, fx: l.fx.clone() }).collect(),
             groups: self.groups.iter().map(|g| Group { has_mask: g.mask.0.is_some(), mask: GroupMask(None), ..g.clone() }).collect(),
+            guides: self.guides.clone(),
         };
         let json = serde_json::to_vec(&head).map_err(|e| e.to_string())?;
         let mut out = b"ARYIMG1\n".to_vec();
@@ -776,7 +802,7 @@ impl Doc {
             // Une image ordinaire renommée : un seul calque
             let img = image::load_from_memory(&b).map_err(|_| "fichier .aryimg illisible".to_string())?.to_rgba8();
             let (w, h) = (img.width() as usize, img.height() as usize);
-            return Ok(Doc { w, h, layers: vec![Layer { px: img.into_raw(), ..Layer::blank("calque 1", w, h) }], active: 0, groups: vec![] });
+            return Ok(Doc { w, h, layers: vec![Layer { px: img.into_raw(), ..Layer::blank("calque 1", w, h) }], active: 0, groups: vec![], guides: vec![] });
         }
         let mut at = 8;
         let rd = |at: &mut usize| -> Result<usize, String> {
@@ -813,7 +839,7 @@ impl Doc {
                 g.mask = GroupMask(Some(Box::new(Layer { px: mpx, ..Layer::blank("masque", mw, mh) })));
             }
         }
-        Ok(Doc { w: head.w, h: head.h, active: head.active.min(layers.len() - 1), layers, groups })
+        Ok(Doc { w: head.w, h: head.h, active: head.active.min(layers.len() - 1), layers, groups, guides: head.guides })
     }
 
     /// Mélange les calques visibles dans `out` (RGBA du document) pour la zone `r` (x0, y0, x1, y1) :
@@ -859,6 +885,8 @@ pub enum Tool {
     Ellipse,
     Lasso,
     Wand,
+    /// Recadrage : le cadre se règle à la souris, Entrée l'applique
+    Crop,
     Brush,
     /// Tampon de duplication : Alt+clic choisit la source, on peint ce qu'il y a là-bas
     Clone,
@@ -869,12 +897,13 @@ pub enum Tool {
     Picker,
 }
 
-const TOOLS: [(Tool, &str, &str, &str); 12] = [
+const TOOLS: [(Tool, &str, &str, &str); 13] = [
     (Tool::Move, crate::lucide::MOVE, "déplacer le calque", "V"),
     (Tool::Select, crate::lucide::SQUARE_DASHED, "sélection rectangulaire", "M"),
     (Tool::Ellipse, crate::lucide::CIRCLE_DASHED, "sélection elliptique", "O"),
     (Tool::Lasso, crate::lucide::LASSO, "lasso", "L"),
     (Tool::Wand, crate::lucide::WAND_SPARKLES, "baguette magique", "W"),
+    (Tool::Crop, crate::lucide::CROP, "recadrage", "C"),
     (Tool::Brush, crate::lucide::PAINTBRUSH, "pinceau", "B"),
     (Tool::Clone, crate::lucide::STAMP, "tampon de duplication (Alt+clic : source)", "S"),
     (Tool::Eraser, crate::lucide::ERASER, "gomme", "E"),
@@ -1146,8 +1175,28 @@ pub struct Editor {
     // Trait en cours : calque de départ et couverture maximale par pixel
     stroke: Option<(Layer, Vec<f32>, Pos2)>,
     drag_from: Option<(Pos2, [i32; 2])>,
-    undo: Vec<(Vec<Layer>, usize)>,
-    redo: Vec<(Vec<Layer>, usize)>,
+    undo: Vec<Snap>,
+    redo: Vec<Snap>,
+    /// Nom du prochain état de l'historique (sinon celui de l'outil)
+    next_label: Option<&'static str>,
+    /// Pression de la tablette (1 sans tablette) et ce qu'elle règle
+    pressure: f32,
+    press_size: bool,
+    press_flow: bool,
+    /// Lissage du trait (0 : aucun) et le point lissé du trait en cours
+    smooth: f32,
+    stab: Option<Pos2>,
+    /// Recadrage en cours (x0, y0, x1, y1 du document), le format et le geste (0 : nouveau cadre, 1 : déplacer)
+    crop: Option<[f32; 4]>,
+    crop_ratio: usize,
+    crop_drag: Option<(u8, Pos2)>,
+    /// Règles visibles (Ctrl+R) et repère qu'on tire
+    rulers: bool,
+    guide_drag: Option<usize>,
+    /// Vue tournée (radians) et en miroir : l'image ne change pas
+    view_rot: f32,
+    view_flip: bool,
+    history_open: bool,
     pub save_due: Option<Instant>,
     pub message: Option<String>,
     adjust: Option<(Adjust, Layer, [f32; 2])>,
@@ -1299,6 +1348,20 @@ impl Editor {
             adjust: None,
             renaming: None,
             xf: None,
+            next_label: None,
+            pressure: 1.0,
+            press_size: true,
+            press_flow: false,
+            smooth: 0.0,
+            stab: None,
+            crop: None,
+            crop_ratio: 0,
+            crop_drag: None,
+            rulers: false,
+            guide_drag: None,
+            view_rot: 0.0,
+            view_flip: false,
+            history_open: false,
             clone_src: None,
             clone_off: None,
         })
@@ -1510,8 +1573,30 @@ impl Editor {
         }
     }
 
+    fn snap(&self, label: String) -> Snap {
+        Snap { layers: self.doc.layers.clone(), active: self.doc.active, groups: self.doc.groups.clone(), w: self.doc.w, h: self.doc.h, label }
+    }
+
+    /// Remet un état, et rend celui qu'on quitte (avec le nom de `keep_label`)
+    fn restore(&mut self, s: Snap, keep_label: String) -> Snap {
+        let old = Snap { layers: std::mem::replace(&mut self.doc.layers, s.layers), active: self.doc.active, groups: std::mem::replace(&mut self.doc.groups, s.groups), w: self.doc.w, h: self.doc.h, label: keep_label };
+        self.doc.active = s.active.min(self.doc.layers.len().saturating_sub(1));
+        if (s.w, s.h) != (self.doc.w, self.doc.h) {
+            (self.doc.w, self.doc.h) = (s.w, s.h);
+            self.sel = None;
+            self.fit = true;
+        }
+        self.all();
+        old
+    }
+
     fn checkpoint(&mut self) {
-        self.undo.push((self.doc.layers.clone(), self.doc.active));
+        let label = match self.next_label.take() {
+            Some(l) => crate::i18n::t(l),
+            None => crate::i18n::t("modification"),
+        };
+        let s = self.snap(label);
+        self.undo.push(s);
         if self.undo.len() > 40 {
             self.undo.remove(0);
         }
@@ -1519,18 +1604,123 @@ impl Editor {
     }
 
     fn undo(&mut self) {
-        if let Some((l, a)) = self.undo.pop() {
-            self.redo.push((std::mem::replace(&mut self.doc.layers, l), self.doc.active));
-            self.doc.active = a.min(self.doc.layers.len().saturating_sub(1));
-            self.all();
+        if let Some(s) = self.undo.pop() {
+            let label = s.label.clone();
+            let old = self.restore(s, label);
+            self.redo.push(old);
         }
     }
 
     fn redo(&mut self) {
-        if let Some((l, a)) = self.redo.pop() {
-            self.undo.push((std::mem::replace(&mut self.doc.layers, l), self.doc.active));
-            self.doc.active = a.min(self.doc.layers.len().saturating_sub(1));
-            self.all();
+        if let Some(s) = self.redo.pop() {
+            let label = s.label.clone();
+            let old = self.restore(s, label);
+            self.undo.push(old);
+        }
+    }
+
+    /// Point aimanté aux repères et aux bords du document (à 6 pixels d'écran près)
+    fn snap_pt(&self, d: Pos2) -> Pos2 {
+        let tol = 6.0 / self.zoom;
+        let mut out = d;
+        let (mut bx, mut by) = (tol, tol);
+        let xs = self.doc.guides.iter().filter(|g| g.vertical).map(|g| g.at).chain([0.0, self.doc.w as f32, self.doc.w as f32 / 2.0]);
+        for x in xs {
+            if (d.x - x).abs() < bx {
+                bx = (d.x - x).abs();
+                out.x = x;
+            }
+        }
+        let ys = self.doc.guides.iter().filter(|g| !g.vertical).map(|g| g.at).chain([0.0, self.doc.h as f32, self.doc.h as f32 / 2.0]);
+        for y in ys {
+            if (d.y - y).abs() < by {
+                by = (d.y - y).abs();
+                out.y = y;
+            }
+        }
+        out
+    }
+
+    /// Cadre du recadrage contraint au format choisi, à partir de son coin de départ
+    fn crop_box(&self, a: Pos2, b: Pos2) -> [f32; 4] {
+        let r = match CROP_RATIOS[self.crop_ratio.min(CROP_RATIOS.len() - 1)].1 {
+            x if x < 0.0 => self.doc.w as f32 / self.doc.h.max(1) as f32,
+            x => x,
+        };
+        let b = if r > 0.0 {
+            let (dx, dy) = (b.x - a.x, b.y - a.y);
+            let w = dx.abs().max(dy.abs() * r);
+            pos2(a.x + w * dx.signum(), a.y + w / r * if dy == 0.0 { 1.0 } else { dy.signum() })
+        } else {
+            b
+        };
+        [a.x.min(b.x), a.y.min(b.y), a.x.max(b.x), a.y.max(b.y)]
+    }
+
+    /// Applique le recadrage : la toile change de taille, les pixels hors cadre restent dans les calques
+    fn apply_crop(&mut self) {
+        let Some(c) = self.crop.take() else { return };
+        let (x0, y0) = (c[0].round() as i32, c[1].round() as i32);
+        let (w, h) = ((c[2] - c[0]).round().max(1.0) as usize, (c[3] - c[1]).round().max(1.0) as usize);
+        if (x0, y0, w, h) == (0, 0, self.doc.w, self.doc.h) {
+            return;
+        }
+        self.next_label = Some("recadrage");
+        self.checkpoint();
+        for l in &mut self.doc.layers {
+            l.off = [l.off[0] - x0, l.off[1] - y0];
+            if let Some(m) = l.mask.as_deref_mut() {
+                m.off = [m.off[0] - x0, m.off[1] - y0];
+            }
+            l.fx_maps = None;
+        }
+        for g in &mut self.doc.groups {
+            if let Some(m) = g.mask.0.as_deref_mut() {
+                m.off = [m.off[0] - x0, m.off[1] - y0];
+            }
+        }
+        for g in &mut self.doc.guides {
+            g.at -= if g.vertical { x0 as f32 } else { y0 as f32 };
+        }
+        (self.doc.w, self.doc.h) = (w, h);
+        self.sel = None;
+        self.fit = true;
+        self.fx_due = true;
+        self.all();
+        self.save_due = Some(Instant::now());
+    }
+
+    /// Le panneau des calques, puis l'historique (comme le panneau Historique de Photoshop)
+    fn side_panel(&mut self, ui: &mut egui::Ui) {
+        let p = theme::pal();
+        egui::ScrollArea::vertical().id_salt("paint-side").auto_shrink([false, true]).max_height((ui.available_height() - if self.history_open { 170.0 } else { 26.0 }).max(80.0)).show(ui, |ui| self.layers_panel(ui));
+        ui.separator();
+        let head = egui::RichText::new(format!("{}  {}", if self.history_open { crate::lucide::CHEVRON_DOWN } else { crate::lucide::CHEVRON_RIGHT }, crate::i18n::t("Historique"))).size(12.0);
+        if ui.add(egui::Button::new(head).frame(false)).on_hover_text(crate::i18n::t("Cliquer un état pour y revenir")).clicked() {
+            self.history_open = !self.history_open;
+        }
+        if !self.history_open {
+            return;
+        }
+        let mut go: Option<i32> = None;
+        egui::ScrollArea::vertical().id_salt("paint-history").max_height(140.0).stick_to_bottom(true).show(ui, |ui| {
+            let n = self.undo.len();
+            for (k, s) in self.undo.iter().enumerate() {
+                if ui.add(egui::Button::new(egui::RichText::new(format!("{}  {}", crate::lucide::HISTORY, s.label)).size(11.5)).frame(false)).clicked() {
+                    go = Some(k as i32 - n as i32);
+                }
+            }
+            ui.label(egui::RichText::new(format!("{}  {}", crate::lucide::CIRCLE_DOT, crate::i18n::t("état actuel"))).size(11.5).strong().color(p.accent));
+            for (k, s) in self.redo.iter().rev().enumerate() {
+                if ui.add(egui::Button::new(egui::RichText::new(format!("{}  {}", crate::lucide::HISTORY, s.label)).size(11.5).color(p.muted)).frame(false)).clicked() {
+                    go = Some(k as i32 + 1);
+                }
+            }
+        });
+        match go {
+            Some(g) if g < 0 => (0..-g).for_each(|_| self.undo()),
+            Some(g) => (0..g).for_each(|_| self.redo()),
+            None => {}
         }
     }
 
@@ -1564,7 +1754,10 @@ impl Editor {
                 }
             }
         };
-        let r = self.size / 2.0;
+        // Pression de la tablette : diamètre et/ou opacité
+        let pr = self.pressure.clamp(0.02, 1.0);
+        let r = self.size / 2.0 * if self.press_size { pr } else { 1.0 };
+        let flow = self.flow * if self.press_flow { pr } else { 1.0 };
         let (x0, y0) = ((c.x - r).floor() as i32, (c.y - r).floor() as i32);
         let (x1, y1) = ((c.x + r).ceil() as i32, (c.y + r).ceil() as i32);
         let hard = self.hardness.clamp(0.0, 0.99);
@@ -1589,7 +1782,7 @@ impl Editor {
                 }
                 // Bord doux : plein jusqu'à la dureté, puis décroissance
                 let k = if d <= hard { 1.0 } else { 1.0 - (d - hard) / (1.0 - hard) };
-                let k = k * k * (3.0 - 2.0 * k) * self.flow * sk;
+                let k = k * k * (3.0 - 2.0 * k) * flow * sk;
                 let idx = ly as usize * l.w + lx as usize;
                 if k <= cover[idx] {
                     continue;
@@ -2096,6 +2289,34 @@ impl Editor {
                         ui.end_row();
                     }
                     ui.add(egui::Slider::new(&mut self.flow, 0.05..=1.0).text(crate::i18n::t("opacité")).show_value(false));
+                    if ui.max_rect().right() - ui.cursor().left() < 190.0 {
+                        ui.end_row();
+                    }
+                    ui.add(egui::Slider::new(&mut self.smooth, 0.0..=1.0).text(crate::i18n::t("lissage")).show_value(false)).on_hover_text(crate::i18n::t("Stabilisateur : le trait suit la souris avec du retard, pour des lignes propres"));
+                    let tog = |ui: &mut egui::Ui, on: &mut bool, icon: &str, tip: &str| {
+                        if ui.add(egui::Button::new(egui::RichText::new(icon).size(14.0)).selected(*on).min_size(egui::vec2(24.0, 20.0))).on_hover_text(crate::i18n::t(tip)).clicked() {
+                            *on = !*on;
+                        }
+                    };
+                    tog(ui, &mut self.press_size, crate::lucide::CIRCLE_DOT, "La pression de la tablette règle le diamètre");
+                    tog(ui, &mut self.press_flow, crate::lucide::GAUGE, "La pression de la tablette règle l'opacité");
+                }
+                Tool::Crop => {
+                    egui::ComboBox::from_id_salt("paint-crop-ratio").selected_text(crate::i18n::t(CROP_RATIOS[self.crop_ratio].0)).show_ui(ui, |ui| {
+                        for (k, (name, _)) in CROP_RATIOS.iter().enumerate() {
+                            ui.selectable_value(&mut self.crop_ratio, k, crate::i18n::t(name));
+                        }
+                    });
+                    if self.crop.is_some() {
+                        if ui.add(egui::Button::new(egui::RichText::new(crate::lucide::CHECK).size(14.0)).min_size(egui::vec2(24.0, 20.0))).on_hover_text(crate::i18n::t("Appliquer le recadrage (Entrée)")).clicked() {
+                            self.apply_crop();
+                        }
+                        if ui.add(egui::Button::new(egui::RichText::new(crate::lucide::X).size(14.0)).min_size(egui::vec2(24.0, 20.0))).on_hover_text(crate::i18n::t("Annuler (Échap)")).clicked() {
+                            self.crop = None;
+                        }
+                    } else {
+                        ui.label(egui::RichText::new(crate::i18n::t("glisser pour tracer le cadre · Entrée : appliquer")).size(11.0).color(p.muted));
+                    }
                 }
                 Tool::Fill | Tool::Wand => {
                     if ui.max_rect().right() - ui.cursor().left() < 220.0 {
@@ -2124,10 +2345,7 @@ impl Editor {
                 self.sel = None;
             }
             ui.separator();
-            ui.label(egui::RichText::new(format!("{} × {} px · {} %", self.doc.w, self.doc.h, (self.zoom * 100.0).round())).size(11.0).color(p.muted));
-            if ui.add(egui::Button::new(egui::RichText::new(crate::lucide::SCAN).size(14.0)).min_size(egui::vec2(24.0, 20.0))).on_hover_text(crate::i18n::t("ajuster")).clicked() {
-                self.fit = true;
-            }
+
         });
         if let Some(m) = &self.message {
             ui.label(egui::RichText::new(m).size(11.0).color(p.muted));
@@ -2138,7 +2356,7 @@ impl Editor {
                 ui.spacing_mut().item_spacing.y = 2.0;
                 for (k, (t, icon, label, key)) in TOOLS.into_iter().enumerate() {
                     // Petits séparateurs entre les familles : déplacer, sélections, peinture, texte et pipette
-                    if [1, 5, 10].contains(&k) {
+                    if [1, 5, 6, 11].contains(&k) {
                         ui.add_space(4.0);
                         let (r, _) = ui.allocate_exact_size(vec2(26.0, 1.0), egui::Sense::hover());
                         ui.painter().rect_filled(r, 0.0, p.line);
@@ -2195,11 +2413,11 @@ impl Editor {
 
         // ---- Calques, à droite
         match crate::layout::offer("paint-layers", "calques (retouche)") {
-            Some(r) => crate::layout::draw_in(ui, r, p.panel, 8.0, |ui| self.layers_panel(ui)),
+            Some(r) => crate::layout::draw_in(ui, r, p.panel, 8.0, |ui| self.side_panel(ui)),
             None => {
                 egui::Panel::right(egui::Id::unique(("paint-layers", self.path.to_string_lossy().to_string()))).resizable(true).max_size(480.0).default_size(230.0).min_size(180.0).frame(egui::Frame::new().fill(p.panel).stroke(Stroke::new(1.0, p.line)).inner_margin(8)).show(ui, |ui| {
                     self.panel_w = ui.max_rect().width() + 16.0;
-                    self.layers_panel(ui)
+                    self.side_panel(ui)
                 });
             }
         }
@@ -2255,14 +2473,69 @@ impl Editor {
         let size = vec2(self.doc.w as f32, self.doc.h as f32) * self.zoom;
         let canvas = Rect::from_center_size(rect.center() + self.pan, size);
         let zoom = self.zoom;
-        let to_doc = move |q: Pos2| pos2((q.x - canvas.left()) / zoom, (q.y - canvas.top()) / zoom);
-        let to_screen = move |x: f32, y: f32| pos2(canvas.left() + x * zoom, canvas.top() + y * zoom);
-        // Damier sous la transparence
+        // Vue tournée et/ou en miroir autour du centre de l'image
+        let (cs, sn) = (self.view_rot.cos(), self.view_rot.sin());
+        let flip = self.view_flip;
+        let turn = self.view_rot.rem_euclid(std::f32::consts::TAU);
+        let plain = (turn < 1e-4 || std::f32::consts::TAU - turn < 1e-4) && !flip;
+        let center = canvas.center();
+        let (hw, hh) = (self.doc.w as f32 / 2.0, self.doc.h as f32 / 2.0);
+        let to_doc = move |q: Pos2| {
+            let (dx, dy) = (q.x - center.x, q.y - center.y);
+            let mut vx = dx * cs + dy * sn;
+            let vy = -dx * sn + dy * cs;
+            if flip {
+                vx = -vx;
+            }
+            pos2(vx / zoom + hw, vy / zoom + hh)
+        };
+        let to_screen = move |x: f32, y: f32| {
+            let mut vx = (x - hw) * zoom;
+            let vy = (y - hh) * zoom;
+            if flip {
+                vx = -vx;
+            }
+            pos2(center.x + vx * cs - vy * sn, center.y + vx * sn + vy * cs)
+        };
+        // Damier sous la transparence (vue tournée : des cases tournées, limitées à l'écran)
+        if !plain {
+            let corners = [rect.left_top(), rect.right_top(), rect.right_bottom(), rect.left_bottom()].map(to_doc);
+            let (mut a, mut b) = (pos2(f32::MAX, f32::MAX), pos2(f32::MIN, f32::MIN));
+            for c in corners {
+                a = a.min(c);
+                b = b.max(c);
+            }
+            let step = 12.0 / zoom;
+            let (x0, y0) = ((a.x.max(0.0) / step).floor() as i32, (a.y.max(0.0) / step).floor() as i32);
+            let (x1, y1) = ((b.x.min(self.doc.w as f32) / step).ceil() as i32, (b.y.min(self.doc.h as f32) / step).ceil() as i32);
+            let mut mesh = egui::Mesh::default();
+            let quad = |mesh: &mut egui::Mesh, a: Pos2, b: Pos2, col: Color32| {
+                let i = mesh.vertices.len() as u32;
+                for (x, y) in [(a.x, a.y), (b.x, a.y), (b.x, b.y), (a.x, b.y)] {
+                    mesh.colored_vertex(to_screen(x, y), col);
+                }
+                mesh.add_triangle(i, i + 1, i + 2);
+                mesh.add_triangle(i, i + 2, i + 3);
+            };
+            quad(&mut mesh, pos2(0.0, 0.0), pos2(self.doc.w as f32, self.doc.h as f32), Color32::from_gray(245));
+            if (x1 - x0) as i64 * (y1 - y0) as i64 <= 40_000 {
+                for cy in y0.max(0)..y1 {
+                    for cx in x0.max(0)..x1 {
+                        if (cx + cy) % 2 == 0 {
+                            let a = pos2(cx as f32 * step, cy as f32 * step);
+                            let b = pos2(((cx + 1) as f32 * step).min(self.doc.w as f32), ((cy + 1) as f32 * step).min(self.doc.h as f32));
+                            quad(&mut mesh, a, b, Color32::from_gray(205));
+                        }
+                    }
+                }
+            }
+            painter.add(egui::Shape::mesh(mesh));
+        }
         let cell = 12.0;
-        let clip = canvas.intersect(rect);
+        let clip = if plain { canvas.intersect(rect) } else { Rect::NOTHING };
         let mut y = clip.top();
         let mut row = ((clip.top() - canvas.top()) / cell) as i32;
-        while y < clip.bottom() {
+        while plain && y < clip.bottom() {
             let mut x = clip.left();
             let mut col = ((clip.left() - canvas.left()) / cell) as i32;
             while x < clip.right() {
@@ -2333,10 +2606,26 @@ impl Editor {
                 }
             }
         }
+        let (dw, dh) = (self.doc.w as f32, self.doc.h as f32);
         if let Some(t) = &self.tex {
-            painter.image(t.id(), canvas, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+            if plain {
+                painter.image(t.id(), canvas, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+            } else {
+                let mut mesh = egui::Mesh::with_texture(t.id());
+                for (x, y, u, v) in [(0.0, 0.0, 0.0, 0.0), (dw, 0.0, 1.0, 0.0), (dw, dh, 1.0, 1.0), (0.0, dh, 0.0, 1.0)] {
+                    mesh.vertices.push(egui::epaint::Vertex { pos: to_screen(x, y), uv: pos2(u, v), color: Color32::WHITE });
+                }
+                mesh.add_triangle(0, 1, 2);
+                mesh.add_triangle(0, 2, 3);
+                painter.add(egui::Shape::mesh(mesh));
+            }
         }
-        painter.rect_stroke(canvas, 0.0, Stroke::new(1.0, p.line), egui::StrokeKind::Outside);
+        if plain {
+            painter.rect_stroke(canvas, 0.0, Stroke::new(1.0, p.line), egui::StrokeKind::Outside);
+        } else {
+            let pts = [to_screen(0.0, 0.0), to_screen(dw, 0.0), to_screen(dw, dh), to_screen(0.0, dh)];
+            painter.add(egui::Shape::closed_line(pts.to_vec(), Stroke::new(1.0, p.line)));
+        }
         // ---- Souris
         let hover = ui.input(|i| i.pointer.hover_pos());
         let space = ui.input(|i| i.key_down(egui::Key::Space));
@@ -2344,7 +2633,47 @@ impl Editor {
         if xf_on {
             self.xf_ui(ui, &resp, &painter, to_doc, to_screen);
         }
-        if resp.dragged_by(egui::PointerButton::Middle) || (space && resp.dragged_by(egui::PointerButton::Primary)) {
+        // Pression du stylet : arrive avec les évènements tactiles (Windows Ink) ; sans tablette, elle reste à 1
+        if let Some(f) = ui.input(|i| i.events.iter().rev().find_map(|e| match e {
+            egui::Event::Touch { force: Some(f), .. } => Some(*f),
+            _ => None,
+        })) {
+            self.pressure = f;
+        }
+        // Règles : une bande en haut et à gauche ; on en tire les repères
+        let ruler_w = 18.0;
+        let top_band = Rect::from_min_max(rect.min, pos2(rect.right(), rect.top() + ruler_w));
+        let left_band = Rect::from_min_max(rect.min, pos2(rect.left() + ruler_w, rect.bottom()));
+        if resp.drag_started_by(egui::PointerButton::Primary) && !xf_on && !space {
+            if let Some(o) = ui.input(|i| i.pointer.press_origin()) {
+                let d = to_doc(o);
+                if self.rulers && plain && top_band.contains(o) {
+                    self.doc.guides.push(Guide { vertical: false, at: d.y });
+                    self.guide_drag = Some(self.doc.guides.len() - 1);
+                } else if self.rulers && plain && left_band.contains(o) {
+                    self.doc.guides.push(Guide { vertical: true, at: d.x });
+                    self.guide_drag = Some(self.doc.guides.len() - 1);
+                } else if self.tool == Tool::Move {
+                    self.guide_drag = self.doc.guides.iter().position(|g| (if g.vertical { d.x } else { d.y } - g.at).abs() * self.zoom < 4.0);
+                }
+            }
+        }
+        if let Some(gi) = self.guide_drag {
+            if let (Some(at), Some(g)) = (resp.interact_pointer_pos(), self.doc.guides.get_mut(gi)) {
+                let d = to_doc(at);
+                g.at = (if g.vertical { d.x } else { d.y }).round();
+                ctx.set_cursor_icon(if g.vertical { egui::CursorIcon::ResizeHorizontal } else { egui::CursorIcon::ResizeVertical });
+            }
+            if resp.drag_stopped() {
+                // Rendu à la règle ou sorti de la vue : le repère s'en va
+                let out = resp.interact_pointer_pos().or(hover).is_none_or(|q| !rect.contains(q) || top_band.contains(q) || left_band.contains(q));
+                if out && gi < self.doc.guides.len() {
+                    self.doc.guides.remove(gi);
+                }
+                self.guide_drag = None;
+                self.save_due = Some(Instant::now());
+            }
+        } else if resp.dragged_by(egui::PointerButton::Middle) || (space && resp.dragged_by(egui::PointerButton::Primary)) {
             self.pan += resp.drag_delta();
         } else if !xf_on {
             if self.swallow_click || self.swatch_pick.is_some() {
@@ -2355,6 +2684,7 @@ impl Editor {
                 }
                 if let Some(at) = ui.input(|i| i.pointer.press_origin()) {
                     let d = to_doc(at);
+                    self.next_label = TOOLS.iter().find(|t| t.0 == self.tool).map(|t| t.2);
                     match self.tool {
                         Tool::Clone if ui.input(|i| i.modifiers.alt) => {
                             // Alt+clic : la source du tampon (le décalage se fixe au premier coup de pinceau)
@@ -2375,7 +2705,19 @@ impl Editor {
                             let l = self.target_ref().clone();
                             let n = l.w * l.h;
                             self.stroke = Some((l, vec![0.0; n], d));
+                            self.stab = Some(d);
                             self.dab(d);
+                        }
+                        Tool::Crop => {
+                            match self.crop {
+                                // Dans le cadre : on le déplace
+                                Some(c) if d.x > c[0] && d.x < c[2] && d.y > c[1] && d.y < c[3] => self.crop_drag = Some((1, pos2(d.x - c[0], d.y - c[1]))),
+                                _ => {
+                                    let a = self.snap_pt(d);
+                                    self.crop = Some([a.x, a.y, a.x, a.y]);
+                                    self.crop_drag = Some((0, a));
+                                }
+                            }
                         }
                         Tool::Move if !self.doc.layers[self.doc.active].lock_all => {
                             self.checkpoint();
@@ -2384,6 +2726,7 @@ impl Editor {
                         Tool::Select | Tool::Ellipse | Tool::Lasso => {
                             let m = ui.input(|i| if i.modifiers.shift { 1 } else if i.modifiers.alt { 2 } else { 0 });
                             self.sel_base = Some((self.sel.clone(), m));
+                            let d = if self.tool == Tool::Lasso { d } else { self.snap_pt(d) };
                             self.drag_from = Some((d, [0, 0]));
                             self.lasso = vec![[d.x, d.y]];
                         }
@@ -2397,6 +2740,15 @@ impl Editor {
                     let d = to_doc(at);
                     match self.tool {
                         Tool::Brush | Tool::Eraser | Tool::Clone => {
+                            // Lissage : le point suivi rattrape la souris avec du retard
+                            let d = match self.stab {
+                                Some(st) if self.smooth > 0.0 => {
+                                    let q = st + (d - st) * (1.0 - 0.93 * self.smooth.powf(0.6));
+                                    self.stab = Some(q);
+                                    q
+                                }
+                                _ => d,
+                            };
                             // Tampons espacés le long du mouvement
                             if let Some(last) = self.stroke.as_ref().map(|s| s.2) {
                                 let dist = (d - last).length();
@@ -2425,7 +2777,22 @@ impl Editor {
                                 self.all();
                             }
                         }
+                        Tool::Crop => match self.crop_drag {
+                            Some((0, a)) => {
+                                let b = self.snap_pt(d);
+                                self.crop = Some(self.crop_box(a, b));
+                            }
+                            Some((_, off)) => {
+                                if let Some(c) = &mut self.crop {
+                                    let (w, h) = (c[2] - c[0], c[3] - c[1]);
+                                    let o = pos2(d.x - off.x, d.y - off.y);
+                                    *c = [o.x, o.y, o.x + w, o.y + h];
+                                }
+                            }
+                            None => {}
+                        },
                         Tool::Select | Tool::Ellipse | Tool::Lasso => {
+                            let d = if self.tool == Tool::Lasso { d } else { self.snap_pt(d) };
                             if let Some((from, _)) = self.drag_from {
                                 let (w, h) = (self.doc.w, self.doc.h);
                                 let (mut a, b) = ([from.x, from.y], [d.x, d.y]);
@@ -2472,11 +2839,18 @@ impl Editor {
                     self.sel = self.mix_sel(new);
                 }
                 if let Some((a, b)) = self.grad.take() {
+                    self.next_label = Some("dégradé");
                     self.gradient(a, b);
                 }
                 self.sel_base = None;
                 self.stroke = None;
+                self.stab = None;
                 self.drag_from = None;
+                self.crop_drag = None;
+                // Cadre trop petit : un simple clic, on l'oublie
+                if self.crop.is_some_and(|c| (c[2] - c[0]) * self.zoom < 4.0 || (c[3] - c[1]) * self.zoom < 4.0) {
+                    self.crop = None;
+                }
             }
             if ui.input(|i| i.pointer.any_released()) && std::mem::take(&mut self.swallow_click) {
                 // Le clic qui a fermé le sélecteur de couleur s'arrête là
@@ -2484,6 +2858,7 @@ impl Editor {
                 if let Some(at) = resp.interact_pointer_pos() {
                     let d = to_doc(at);
                     let px = [d.x.floor() as i32, d.y.floor() as i32];
+                    self.next_label = TOOLS.iter().find(|t| t.0 == self.tool).map(|t| t.2);
                     match self.tool {
                         Tool::Fill => self.fill(px),
                         Tool::Picker => {
@@ -2526,7 +2901,7 @@ impl Editor {
                             self.commit_text(ui.ctx());
                             self.text = Some(TextDraft { at: [d.x, d.y], s: String::new(), preview: None, focus: true });
                         }
-                        Tool::Gradient | Tool::Move | Tool::Brush | Tool::Eraser | Tool::Clone => {}
+                        Tool::Gradient | Tool::Move | Tool::Brush | Tool::Eraser | Tool::Clone | Tool::Crop => {}
                     }
                 }
             }
@@ -2539,10 +2914,13 @@ impl Editor {
                     let before = to_doc(at);
                     let z = (self.zoom * (scroll * 0.0025).exp()).clamp(0.02, 32.0);
                     self.zoom = z;
-                    // Le point sous le pointeur reste sous le pointeur
-                    let after_canvas_min = at - before.to_vec2() * z;
-                    let center = after_canvas_min + vec2(self.doc.w as f32, self.doc.h as f32) * z / 2.0;
-                    self.pan = center - rect.center();
+                    // Le point sous le pointeur reste sous le pointeur (vue tournée comprise)
+                    let mut vx = (before.x - hw) * z;
+                    let vy = (before.y - hh) * z;
+                    if flip {
+                        vx = -vx;
+                    }
+                    self.pan = at - rect.center() - vec2(vx * cs - vy * sn, vx * sn + vy * cs);
                 }
             }
         }
@@ -2647,17 +3025,135 @@ impl Editor {
                 painter.circle_stroke(q, (self.size * self.zoom / 2.0).max(1.0), Stroke::new(1.0, Color32::from_white_alpha(110)));
             }
         }
+        // Recadrage : l'extérieur assombri, le cadre et ses tiers
+        if let Some(c) = self.crop {
+            let q = [to_screen(c[0], c[1]), to_screen(c[2], c[1]), to_screen(c[2], c[3]), to_screen(c[0], c[3])];
+            if plain {
+                let r = Rect::from_two_pos(q[0], q[2]);
+                let dim = Color32::from_black_alpha(130);
+                painter.rect_filled(Rect::from_min_max(rect.min, pos2(rect.right(), r.top())), 0.0, dim);
+                painter.rect_filled(Rect::from_min_max(pos2(rect.left(), r.bottom()), rect.max), 0.0, dim);
+                painter.rect_filled(Rect::from_min_max(pos2(rect.left(), r.top()), pos2(r.left(), r.bottom())), 0.0, dim);
+                painter.rect_filled(Rect::from_min_max(pos2(r.right(), r.top()), pos2(rect.right(), r.bottom())), 0.0, dim);
+            }
+            painter.add(egui::Shape::closed_line(q.to_vec(), Stroke::new(1.5, Color32::WHITE)));
+            for k in [1.0f32, 2.0] {
+                let (x, y) = (c[0] + (c[2] - c[0]) * k / 3.0, c[1] + (c[3] - c[1]) * k / 3.0);
+                painter.line_segment([to_screen(x, c[1]), to_screen(x, c[3])], Stroke::new(1.0, Color32::from_white_alpha(90)));
+                painter.line_segment([to_screen(c[0], y), to_screen(c[2], y)], Stroke::new(1.0, Color32::from_white_alpha(90)));
+            }
+            let txt = format!("{} × {}", (c[2] - c[0]).round(), (c[3] - c[1]).round());
+            painter.text(q[2] + vec2(6.0, 6.0), egui::Align2::LEFT_TOP, txt, egui::FontId::proportional(11.0), Color32::WHITE);
+        }
+        // Repères
+        let guide_col = Color32::from_rgb(0, 200, 230);
+        for g in &self.doc.guides {
+            let (a, b) = if g.vertical { (to_screen(g.at, -1e5), to_screen(g.at, 1e5)) } else { (to_screen(-1e5, g.at), to_screen(1e5, g.at)) };
+            painter.line_segment([a, b], Stroke::new(1.0, guide_col));
+        }
+        // Règles (vue droite seulement), graduées en pixels
+        if self.rulers && plain {
+            let bg = p.panel;
+            painter.rect_filled(top_band, 0.0, bg);
+            painter.rect_filled(left_band, 0.0, bg);
+            painter.hline(top_band.x_range(), top_band.bottom(), Stroke::new(1.0, p.line));
+            painter.vline(left_band.right(), left_band.y_range(), Stroke::new(1.0, p.line));
+            let step = [1.0f32, 2.0, 5.0, 10.0, 20.0, 50.0, 100.0, 200.0, 500.0, 1000.0, 2000.0, 5000.0].into_iter().find(|s| s * zoom >= 60.0).unwrap_or(10000.0);
+            let font = egui::FontId::proportional(9.0);
+            let (a, b) = (to_doc(top_band.left_top()), to_doc(top_band.right_bottom()));
+            let (lo, hi) = (a.x.min(b.x), a.x.max(b.x));
+            let mut x = (lo / step).floor() * step;
+            while x <= hi {
+                for k in 0..10 {
+                    let xx = x + step * k as f32 / 10.0;
+                    let sx = to_screen(xx, 0.0).x;
+                    if sx > left_band.right() && sx < rect.right() {
+                        let len = if k == 0 { ruler_w } else if k == 5 { 7.0 } else { 4.0 };
+                        painter.vline(sx, (top_band.bottom() - len)..=top_band.bottom(), Stroke::new(1.0, p.muted));
+                        if k == 0 {
+                            painter.text(pos2(sx + 2.0, top_band.top() + 1.0), egui::Align2::LEFT_TOP, format!("{}", x as i64), font.clone(), p.muted);
+                        }
+                    }
+                }
+                x += step;
+            }
+            let (a, b) = (to_doc(left_band.left_top()), to_doc(left_band.right_bottom()));
+            let (lo, hi) = (a.y.min(b.y), a.y.max(b.y));
+            let mut y = (lo / step).floor() * step;
+            while y <= hi {
+                for k in 0..10 {
+                    let yy = y + step * k as f32 / 10.0;
+                    let sy = to_screen(0.0, yy).y;
+                    if sy > top_band.bottom() && sy < rect.bottom() {
+                        let len = if k == 0 { ruler_w } else if k == 5 { 7.0 } else { 4.0 };
+                        painter.hline((left_band.right() - len)..=left_band.right(), sy, Stroke::new(1.0, p.muted));
+                        if k == 0 {
+                            painter.text(pos2(left_band.left() + 1.0, sy + 2.0), egui::Align2::LEFT_TOP, format!("{}", y as i64), font.clone(), p.muted);
+                        }
+                    }
+                }
+                y += step;
+            }
+            // Le pointeur sur les deux règles
+            if let Some(h) = hover.filter(|q| rect.contains(*q)) {
+                painter.vline(h.x, top_band.y_range(), Stroke::new(1.0, p.accent));
+                painter.hline(left_band.x_range(), h.y, Stroke::new(1.0, p.accent));
+            }
+            painter.rect_filled(Rect::from_min_size(rect.min, vec2(ruler_w, ruler_w)), 0.0, bg);
+        }
         // Rond du pinceau sous le pointeur
         if let (Some(at), true) = (hover.filter(|q| rect.contains(*q)), matches!(self.tool, Tool::Brush | Tool::Eraser | Tool::Clone)) {
             painter.circle_stroke(at, (self.size * self.zoom / 2.0).max(1.0), Stroke::new(1.0, Color32::from_black_alpha(160)));
             painter.circle_stroke(at, (self.size * self.zoom / 2.0).max(1.0) + 1.0, Stroke::new(1.0, Color32::from_white_alpha(160)));
+            // Le point lissé que suit le trait
+            if let (Some(st), true) = (self.stab, self.smooth > 0.0) {
+                let q = to_screen(st.x, st.y);
+                painter.line_segment([q, at], Stroke::new(1.0, Color32::from_white_alpha(140)));
+                painter.circle_filled(q, 2.5, self.color);
+            }
             ctx.set_cursor_icon(egui::CursorIcon::Crosshair);
         }
+        // Barre de vue en bas à droite de la toile : taille, zoom, ajuster, tourner, miroir, règles
+        {
+            let bar = Rect::from_min_size(pos2(rect.right() - 286.0, rect.bottom() - 30.0), vec2(280.0, 24.0));
+            painter.rect_filled(bar, 0.0, p.panel.gamma_multiply(0.92));
+            painter.rect_stroke(bar, 0.0, Stroke::new(1.0, p.line), egui::StrokeKind::Inside);
+            ui.scope_builder(egui::UiBuilder::new().max_rect(bar.shrink2(vec2(6.0, 2.0))).layout(egui::Layout::right_to_left(egui::Align::Center)), |ui| {
+                ui.spacing_mut().item_spacing.x = 2.0;
+                let vb = |ui: &mut egui::Ui, icon: &str, on: bool, tip: &str| ui.add(egui::Button::new(egui::RichText::new(icon).size(13.0)).selected(on).frame(on).min_size(egui::vec2(22.0, 20.0))).on_hover_text(crate::i18n::t(tip)).clicked();
+                if vb(ui, crate::lucide::RULER, self.rulers, "Règles et repères (Ctrl+R) : tirer depuis une règle pour poser un repère") {
+                    self.rulers = !self.rulers;
+                }
+                if vb(ui, crate::lucide::FLIP_HORIZONTAL_2, self.view_flip, "Vue en miroir : l'image ne change pas") {
+                    self.view_flip = !self.view_flip;
+                }
+                if vb(ui, crate::lucide::ROTATE_CW, false, "Tourner la vue de 15° (6)") {
+                    self.view_rot += 15f32.to_radians();
+                }
+                if vb(ui, crate::lucide::ROTATE_CCW, false, "Tourner la vue de 15° (4) ; 5 la remet droite") {
+                    self.view_rot -= 15f32.to_radians();
+                }
+                if vb(ui, crate::lucide::SCAN, false, "ajuster") {
+                    self.fit = true;
+                    self.view_rot = 0.0;
+                }
+                let deg = self.view_rot.to_degrees().rem_euclid(360.0).round();
+                let txt = if deg == 0.0 { format!("{} × {} · {} %", self.doc.w, self.doc.h, (self.zoom * 100.0).round()) } else { format!("{} × {} · {} % · {deg}°", self.doc.w, self.doc.h, (self.zoom * 100.0).round()) };
+                ui.label(egui::RichText::new(txt).size(10.5).color(p.muted));
+            });
+        }
+        self.next_label = None;
         // ---- Clavier
         if !ctx.egui_wants_keyboard_input() && (resp.hovered() || resp.has_focus()) {
             let (cmd, shift) = ui.input(|i| (i.modifiers.command, i.modifiers.shift));
             let k = |key: egui::Key| ui.input(|i| i.key_pressed(key));
-            if self.xf.is_some() {
+            if self.crop.is_some() && k(egui::Key::Enter) {
+                self.apply_crop();
+            } else if self.crop.is_some() && k(egui::Key::Escape) {
+                self.crop = None;
+            } else if cmd && k(egui::Key::R) {
+                self.rulers = !self.rulers;
+            } else if self.xf.is_some() {
                 if k(egui::Key::Enter) {
                     self.end_xf(true);
                 } else if k(egui::Key::Escape) {
@@ -2707,6 +3203,17 @@ impl Editor {
                 if k(egui::Key::X) {
                     std::mem::swap(&mut self.color, &mut self.bg_color);
                 }
+                // Vue : 4 et 6 tournent, 5 remet droite (comme Krita)
+                if k(egui::Key::Num4) {
+                    self.view_rot -= 15f32.to_radians();
+                }
+                if k(egui::Key::Num6) {
+                    self.view_rot += 15f32.to_radians();
+                }
+                if k(egui::Key::Num5) {
+                    self.view_rot = 0.0;
+                }
+
                 if k(egui::Key::D) && !ui.input(|i| i.modifiers.any()) {
                     (self.color, self.bg_color) = (Color32::BLACK, Color32::WHITE);
                 }
@@ -2801,7 +3308,7 @@ impl Editor {
         base.blend = Blend::Normal;
         let mut top = self.doc.layers[a].clone();
         top.clip = false;
-        let pair = Doc { w: self.doc.w, h: self.doc.h, layers: vec![base, top], active: 1, groups: vec![] };
+        let pair = Doc { w: self.doc.w, h: self.doc.h, layers: vec![base, top], active: 1, groups: vec![], guides: vec![] };
         let mut out = vec![0u8; self.doc.w * self.doc.h * 4];
         pair.composite(&mut out, [0, 0, self.doc.w, self.doc.h]);
         let below = &self.doc.layers[a - 1];
