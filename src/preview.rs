@@ -34,6 +34,8 @@ pub enum Out {
     Toggle(usize),
     /// Changer une propriété de l'en-tête (None : la retirer) ; `list` : l'écrire en liste
     SetProp { key: String, vals: Option<Vec<String>>, list: bool },
+    /// Renommer (Some) ou retirer (None) une propriété dans toutes les notes du coffre
+    RenameProp { from: String, to: Option<String> },
 }
 
 /// Affiche la note et retourne le nom de la note cliquée, s'il y en a une (lecture seule)
@@ -47,7 +49,9 @@ pub fn show(ui: &mut egui::Ui, text: &str, existing: &HashSet<String>, paths: &H
 /// Affiche la note ; un clic peut ouvrir un lien ou cocher une case
 pub fn show_doc(ui: &mut egui::Ui, text: &str, existing: &HashSet<String>, paths: &HashSet<String>) -> Option<Out> {
     let mut out = None;
-    let lines: Vec<&str> = text.lines().collect();
+    // Les identifiants de bloc « ^id » en fin de ligne ne s'affichent pas
+    let cleaned: Vec<String> = text.lines().map(|l| BLOCK_ID.replace(l, "").to_string()).collect();
+    let lines: Vec<&str> = cleaned.iter().map(|s| s.as_str()).collect();
     let mut i = 0;
     let ctx = Ctx { existing, paths };
     // Notes de bas de page : leurs définitions sont gardées pour les numéros et la liste du bas
@@ -75,7 +79,11 @@ pub fn show_doc(ui: &mut egui::Ui, text: &str, existing: &HashSet<String>, paths
                 code.push('\n');
                 i += 1;
             }
-            code_block(ui, &code, lang.trim());
+            match lang.trim() {
+                "base" | "bases" => base_block(ui, &code, &ctx, &mut out),
+                "tasks" | "tâches" => tasks_block(ui, &code, &ctx, &mut out),
+                l => code_block(ui, &code, l),
+            }
             i += 1;
             continue;
         }
@@ -294,6 +302,8 @@ fn quote(ui: &mut egui::Ui, body: &[&str], ctx: &Ctx, out: &mut Option<Out>) {
     ui.add_space(4.0);
 }
 
+static BLOCK_ID: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| regex::Regex::new(r"\s\^[A-Za-z0-9-]+\s*$").unwrap());
+
 thread_local! {
     /// Profondeur des notes intégrées : une note qui s'intègre elle-même ne boucle pas
     static DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
@@ -322,6 +332,18 @@ fn note_target(target: &str, paths: &HashSet<String>) -> Option<(String, Option<
 
 /// La partie d'une note sous un titre, jusqu'au titre suivant de même niveau ou plus haut
 pub fn section(text: &str, title: &str) -> Option<String> {
+    // Référence de bloc « ^id » : le paragraphe (ou l'élément) qui se termine par cet identifiant
+    if let Some(id) = title.trim().strip_prefix('^') {
+        let tag = format!("^{id}");
+        let lines: Vec<&str> = text.lines().collect();
+        let at = lines.iter().position(|l| l.trim_end().ends_with(&tag))?;
+        let mut a = at;
+        while a > 0 && !lines[a - 1].trim().is_empty() && !lines[at].trim_start().starts_with(['-', '*']) {
+            a -= 1;
+        }
+        let block: Vec<&str> = lines[a..=at].to_vec();
+        return Some(block.join("\n").trim_end().trim_end_matches(&tag).trim_end().to_string());
+    }
     let want = title.trim().to_lowercase();
     let lines: Vec<&str> = text.lines().collect();
     let start = lines.iter().position(|l| heading(l.trim_start()).is_some_and(|(_, t)| t.trim().to_lowercase() == want))?;
@@ -360,7 +382,41 @@ fn properties(ui: &mut egui::Ui, props: &[(String, Vec<String>)], ctx: &Ctx, out
                     _ if vals.first().is_some_and(|v| v.starts_with("http")) => crate::lucide::LINK,
                     _ => crate::lucide::TEXT_ICON,
                 };
-                ui.label(RichText::new(format!("{icon}  {k}")).color(p.muted).size(12.5));
+                // Renommer partout : la clé devient un champ ; Entrée renomme dans toutes les notes
+                let rid = ui.id().with("prop-rename");
+                let mut renaming: Option<(String, String)> = ui.data(|d| d.get_temp(rid));
+                match renaming.as_mut().filter(|r| &r.0 == k) {
+                    Some(r) => {
+                        let te = ui.add(egui::TextEdit::singleline(&mut r.1).desired_width(110.0)).on_hover_text(crate::i18n::t("Entrée : renommer dans tout le coffre · Échap : annuler"));
+                        te.request_focus();
+                        let (enter, esc) = ui.input(|i| (i.key_pressed(egui::Key::Enter), i.key_pressed(egui::Key::Escape)));
+                        if enter && !r.1.trim().is_empty() && r.1.trim() != k {
+                            *out = Some(Out::RenameProp { from: k.clone(), to: Some(r.1.trim().to_string()) });
+                            renaming = None;
+                        } else if esc || enter {
+                            renaming = None;
+                        }
+                        ui.data_mut(|d| match &renaming {
+                            Some(r) => {
+                                d.insert_temp(rid, r.clone());
+                            }
+                            None => d.remove::<(String, String)>(rid),
+                        });
+                    }
+                    None => {
+                        let kr = ui.add(egui::Label::new(RichText::new(format!("{icon}  {k}")).color(p.muted).size(12.5)).sense(egui::Sense::click())).on_hover_text(crate::i18n::t("Clic droit : renommer ou retirer cette propriété dans tout le coffre"));
+                        kr.context_menu(|ui| {
+                            if ui.button(format!("{}  {}", crate::lucide::PENCIL, crate::i18n::t("Renommer dans tout le coffre…"))).clicked() {
+                                ui.data_mut(|d| d.insert_temp(rid, (k.clone(), k.clone())));
+                                ui.close();
+                            }
+                            if ui.button(format!("{}  {}", crate::lucide::TRASH_2, crate::i18n::t("Retirer de toutes les notes"))).clicked() {
+                                *out = Some(Out::RenameProp { from: k.clone(), to: None });
+                                ui.close();
+                            }
+                        });
+                    }
+                }
                 let list = is_list(k, vals);
                 match edit.as_mut().filter(|e| &e.0 == k) {
                     Some(e) => {
@@ -566,6 +622,23 @@ fn inline(ui: &mut egui::Ui, text: &str, ctx: &Ctx, out: &mut Option<Out>, size:
                     let shown = l.get(2).map(|a| a.as_str().trim()).unwrap_or(&target).to_string();
                     let color = if ctx.existing.contains(&target.to_lowercase()) { p.link } else { p.missing };
                     let resp = ui.add(egui::Label::new(base(&shown).color(color).underline()).sense(egui::Sense::click()));
+                    // Aperçu de la note au survol (comme Obsidian), sans l'ouvrir
+                    let resp = match note_target(&target, ctx.paths) {
+                        Some((rel, sec)) if DEPTH.with(|d| d.get()) < 2 => resp.on_hover_ui(|ui| {
+                            ui.set_max_width(420.0);
+                            let text = std::fs::read_to_string(std::path::Path::new(&crate::nodes::vault_root()).join(&rel)).unwrap_or_default();
+                            let content = match &sec {
+                                Some(s) => section(body(&text), s).unwrap_or_default(),
+                                None => body(&text).lines().take(18).collect::<Vec<_>>().join("\n"),
+                            };
+                            DEPTH.with(|d| d.set(d.get() + 1));
+                            egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
+                                let _ = show_doc(ui, &content, ctx.existing, ctx.paths);
+                            });
+                            DEPTH.with(|d| d.set(d.get() - 1));
+                        }),
+                        _ => resp,
+                    };
                     if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
                         *out = Some(Out::Open(target));
                     }
@@ -604,6 +677,128 @@ fn inline(ui: &mut egui::Ui, text: &str, ctx: &Ctx, out: &mut Option<Out>, size:
             ui.label(base(&seg[last..]));
         }
     }
+}
+
+/// Bloc ```base : les notes du coffre qui répondent à la requête, en tableau, cartes ou liste
+fn base_block(ui: &mut egui::Ui, src: &str, ctx: &Ctx, out: &mut Option<Out>) {
+    let p = theme::pal();
+    let q = crate::bases::parse_query(src);
+    let rels: Vec<String> = ctx.paths.iter().cloned().collect();
+    let all = crate::bases::rows(&crate::nodes::vault_root(), &rels);
+    let groups = crate::bases::run(&q, &all);
+    let total: usize = groups.iter().map(|g| g.1.len()).sum();
+    egui::Frame::new().fill(p.code_bg.gamma_multiply(0.5)).stroke(egui::Stroke::new(1.0, p.line)).corner_radius(6).inner_margin(10.0).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.label(RichText::new(format!("{}  {} {}", crate::lucide::TABLE, total, crate::i18n::t_mid("notes"))).size(11.0).color(p.muted));
+        let mut open = |ui: &mut egui::Ui, r: &crate::bases::Row, text: &str| {
+            let l = ui.add(egui::Label::new(RichText::new(text).color(p.link)).sense(egui::Sense::click())).on_hover_cursor(egui::CursorIcon::PointingHand);
+            if l.clicked() {
+                *out = Some(Out::Open(r.rel.trim_end_matches(".md").to_string()));
+            }
+        };
+        for (gi, (g, rows)) in groups.iter().enumerate() {
+            if q.group.is_some() {
+                ui.add_space(4.0);
+                ui.label(RichText::new(format!("{}  ({})", if g.is_empty() { crate::i18n::t("(sans valeur)") } else { g.clone() }, rows.len())).strong());
+            }
+            match q.view.as_str() {
+                "cartes" | "cards" | "card" => {
+                    ui.horizontal_wrapped(|ui| {
+                        for r in rows {
+                            egui::Frame::new().fill(p.panel).stroke(egui::Stroke::new(1.0, p.line)).corner_radius(6).inner_margin(8.0).show(ui, |ui| {
+                                ui.set_width(170.0);
+                                open(ui, r, r.name());
+                                for c in q.columns.iter().filter(|c| !matches!(c.to_lowercase().as_str(), "file" | "fichier" | "nom" | "name")) {
+                                    let v = r.get(c);
+                                    if !v.is_empty() {
+                                        ui.label(RichText::new(format!("{c} : {v}")).size(11.0).color(p.muted));
+                                    }
+                                }
+                            });
+                        }
+                    });
+                }
+                "liste" | "list" => {
+                    for r in rows {
+                        ui.horizontal(|ui| {
+                            ui.label("•");
+                            open(ui, r, r.name());
+                            let rest: Vec<String> = q.columns.iter().filter(|c| !matches!(c.to_lowercase().as_str(), "file" | "fichier" | "nom" | "name")).map(|c| r.get(c)).filter(|v| !v.is_empty()).collect();
+                            if !rest.is_empty() {
+                                ui.label(RichText::new(rest.join(" · ")).color(p.muted));
+                            }
+                        });
+                    }
+                }
+                _ => {
+                    egui::Grid::new(("base-grid", gi, src.len())).striped(true).spacing(egui::vec2(16.0, 4.0)).show(ui, |ui| {
+                        for c in &q.columns {
+                            ui.label(RichText::new(c).strong().size(12.0));
+                        }
+                        ui.end_row();
+                        for r in rows {
+                            for c in &q.columns {
+                                let v = r.get(c);
+                                if matches!(c.to_lowercase().as_str(), "file" | "fichier" | "nom" | "name") {
+                                    open(ui, r, &v);
+                                } else {
+                                    ui.label(v);
+                                }
+                            }
+                            ui.end_row();
+                        }
+                    });
+                }
+            }
+        }
+        if total == 0 {
+            ui.label(RichText::new(crate::i18n::t("Aucune note ne répond à ces conditions.")).color(p.muted));
+        }
+    });
+}
+
+/// Bloc ```tasks : les cases à cocher du coffre (« done: false » par défaut, « from: dossier/ » pour filtrer)
+fn tasks_block(ui: &mut egui::Ui, src: &str, ctx: &Ctx, out: &mut Option<Out>) {
+    let p = theme::pal();
+    let q = crate::bases::parse_query(src);
+    let show_done = src.lines().find_map(|l| l.split_once(':').filter(|(k, _)| matches!(k.trim(), "done" | "faites" | "faits"))).map(|(_, v)| v.trim().to_string()).unwrap_or_else(|| "false".into());
+    let rels: Vec<String> = ctx.paths.iter().cloned().collect();
+    let mut all = crate::bases::rows(&crate::nodes::vault_root(), &rels);
+    all.retain(|r| q.from.is_empty() || q.from.iter().any(|f| r.rel.starts_with(f.trim_start_matches('/'))));
+    all.sort_by(|a, b| a.rel.cmp(&b.rel));
+    egui::Frame::new().fill(p.code_bg.gamma_multiply(0.5)).stroke(egui::Stroke::new(1.0, p.line)).corner_radius(6).inner_margin(10.0).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        let mut n = 0;
+        for r in &all {
+            let tasks: Vec<_> = r.tasks.iter().filter(|t| match show_done.as_str() {
+                "true" | "oui" => t.1,
+                "all" | "toutes" | "tout" => true,
+                _ => !t.1,
+            }).collect();
+            if tasks.is_empty() {
+                continue;
+            }
+            let l = ui.add(egui::Label::new(RichText::new(format!("{}  {}", crate::lucide::FILE_TEXT, r.name())).size(12.0).color(p.link)).sense(egui::Sense::click()));
+            if l.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                *out = Some(Out::Open(r.rel.trim_end_matches(".md").to_string()));
+            }
+            for (_, done, label) in tasks {
+                n += 1;
+                ui.horizontal(|ui| {
+                    ui.add_space(14.0);
+                    ui.label(if *done { crate::lucide::SQUARE_CHECK } else { crate::lucide::SQUARE });
+                    if *done {
+                        ui.label(RichText::new(label).strikethrough().color(p.muted));
+                    } else {
+                        inline(ui, label, ctx, out, None);
+                    }
+                });
+            }
+        }
+        if n == 0 {
+            ui.label(RichText::new(crate::i18n::t("Aucune tâche.")).color(p.muted));
+        }
+    });
 }
 
 fn code_block(ui: &mut egui::Ui, code: &str, lang: &str) {

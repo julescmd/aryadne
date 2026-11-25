@@ -2581,5 +2581,13 @@
   "copies ": "copies ",
   "opacité finale ": "end opacity ",
   "Expression : time, value, wiggle(2, 10), linear(time, 0, 1, 0, 100), sin(time * 4) * 20…": "Expression: time, value, wiggle(2, 10), linear(time, 0, 1, 0, 100), sin(time * 4) * 20…",
-  "retirer l'expression": "remove expression"
+  "retirer l'expression": "remove expression",
+  "(sans valeur)": "(no value)",
+  "Aucune note ne répond à ces conditions.": "No note matches these conditions.",
+  "Aucune tâche.": "No tasks.",
+  "Clic droit : renommer ou retirer cette propriété dans tout le coffre": "Right-click: rename or remove this property across the vault",
+  "Entrée : renommer dans tout le coffre · Échap : annuler": "Enter: rename across the vault · Esc: cancel",
+  "Renommer dans tout le coffre…": "Rename across the vault…",
+  "Retirer de toutes les notes": "Remove from all notes",
+  "retirée": "removed"
 }

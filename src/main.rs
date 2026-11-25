@@ -3,6 +3,7 @@
 mod cloud;
 mod scopes;
 mod expr;
+mod bases;
 mod keymap;
 mod lucide;
 mod hl;
@@ -251,6 +252,8 @@ struct Doc {
 enum Action {
     Open(String),
     OpenLink(String),
+    /// Renommer ou retirer une propriété dans toutes les notes
+    RenameProp(String, Option<String>),
     NewFile(String),
     NewDir(String),
     Rename(String),
@@ -2269,6 +2272,7 @@ impl App {
                     self.dialog_text = String::new();
                     self.dialog = Some(Dialog::NewDir { dir });
                 }
+                Action::RenameProp(from, to) => self.rename_prop_everywhere(&from, to.as_deref()),
                 Action::Rename(from) => {
                     self.dialog_text = from.clone();
                     self.dialog = Some(Dialog::Rename { from });
@@ -3573,6 +3577,7 @@ impl App {
                                         Some(preview::Out::Open(n)) => goto = Some(n),
                                         Some(preview::Out::Toggle(l)) => toggle = Some(l),
                                         Some(preview::Out::SetProp { key, vals, list }) => set_prop = Some((key, vals, list)),
+                                        Some(preview::Out::RenameProp { from, to }) => self.actions.push(Action::RenameProp(from, to)),
                                         None => {}
                                     }
                                 });
@@ -5660,6 +5665,57 @@ impl App {
 
     /// Remplace partout où la recherche a trouvé, sauf dans les fichiers décochés ; un fichier ouvert est
     /// changé dans son onglet (et s'enregistre comme une saisie)
+    /// Renomme (ou retire) une propriété de l'en-tête dans toutes les notes du coffre, notes ouvertes comprises
+    fn rename_prop_everywhere(&mut self, from: &str, to: Option<&str>) {
+        let rewrite = |text: &str| -> Option<String> {
+            let (props, _) = vault::frontmatter(text)?;
+            let (key, vals) = props.into_iter().find(|(k, _)| k.eq_ignore_ascii_case(from))?;
+            let list = vals.len() > 1 || matches!(key.to_lowercase().as_str(), "tags" | "aliases");
+            match to {
+                // Renommer : la ligne de la clé change sur place (l'ordre des propriétés reste)
+                Some(n) => {
+                    let (_, end) = vault::frontmatter(text)?;
+                    let mut out = String::with_capacity(text.len());
+                    for (i, line) in text.split_inclusive('\n').enumerate() {
+                        match line.split_once(':') {
+                            Some((k, rest)) if i > 0 && i < end && k.trim() == key && !line.starts_with([' ', '\t', '-']) => out.push_str(&format!("{n}:{rest}")),
+                            _ => out.push_str(line),
+                        }
+                    }
+                    let _ = (&vals, list);
+                    Some(out)
+                }
+                None => Some(vault::set_front(text, &key, None, list)),
+            }
+        };
+        let root = self.root();
+        let rels: Vec<String> = self.entries.iter().filter(|e| e.rel.ends_with(".md")).map(|e| e.rel.clone()).collect();
+        let mut n = 0;
+        for rel in rels {
+            if let Some(d) = self.docs.iter_mut().find(|d| d.rel == rel) {
+                if let Content::Text(t) = &mut d.content {
+                    if let Some(new) = rewrite(t) {
+                        *t = new;
+                        d.dirty_since = Some(Instant::now());
+                        n += 1;
+                    }
+                    continue;
+                }
+            }
+            if let Ok(text) = vault::read(&root, &rel) {
+                if let Some(new) = rewrite(&text) {
+                    if vault::write(&root, &rel, &new).is_ok() {
+                        n += 1;
+                    }
+                }
+            }
+        }
+        self.toast(match to {
+            Some(t) => format!("« {from} » → « {t} » · {n} {}", crate::i18n::t_mid("notes")),
+            None => format!("« {from} » {} · {n} {}", crate::i18n::t_mid("retirée"), crate::i18n::t_mid("notes")),
+        });
+    }
+
     fn replace_everywhere(&mut self) {
         let (Some(res), Some(with)) = (self.search.results.clone(), self.search.replace.clone()) else { return };
         let (files, query) = {
