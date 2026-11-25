@@ -53,6 +53,7 @@ mod motion;
 mod lottie;
 mod audio;
 mod audio_ui;
+mod spectral;
 mod music;
 mod music_ui;
 mod midi;

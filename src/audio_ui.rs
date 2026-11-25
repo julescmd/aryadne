@@ -62,6 +62,10 @@ pub struct Editor {
     auto_drag: Option<(usize, usize)>,
     /// Prise au micro en cours
     rec: Option<audio::Recording>,
+    /// Vue spectrale ouverte à la place des pistes, et le clip qu'elle retouche
+    spectral: Option<(crate::spectral::View, usize, usize)>,
+    /// Vue spectrale demandée pour ce clip : elle s'ouvre dès que son son est décodé
+    spectral_wanted: Option<(usize, usize)>,
 }
 
 impl Drop for Editor {
@@ -136,6 +140,8 @@ impl Editor {
             auto_shown: Default::default(),
             auto_drag: None,
             rec: None,
+            spectral: None,
+            spectral_wanted: None,
         }
     }
 
@@ -499,7 +505,11 @@ impl Editor {
                 ctx.request_repaint_after(std::time::Duration::from_millis(150));
             }
         }
-        self.keyboard(ui);
+        // La vue spectrale a ses propres raccourcis (Suppr y oublie la peinture, pas le clip)
+        if self.spectral.is_none() {
+            self.keyboard(ui);
+        }
+        self.open_spectral();
         let frame = egui::Frame::new().fill(p.panel).stroke(Stroke::new(1.0, p.line));
         egui::Panel::left("audio-sounds").resizable(true).default_size(230.0).min_size(180.0).max_size(420.0).frame(frame).show(ui, |ui| self.sounds_panel(ui));
         egui::Panel::right("audio-inspector").resizable(true).default_size(290.0).min_size(240.0).max_size(460.0).frame(frame).show(ui, |ui| {
@@ -507,7 +517,76 @@ impl Editor {
         });
         egui::Panel::bottom("audio-status").exact_size(34.0).frame(frame).show(ui, |ui| self.status(ui));
         egui::Panel::top("audio-transport").exact_size(44.0).frame(frame).show(ui, |ui| self.transport(ui));
-        egui::CentralPanel::default().frame(egui::Frame::new().fill(p.code_bg)).show(ui, |ui| self.tracks(ui));
+        egui::CentralPanel::default().frame(egui::Frame::new().fill(p.code_bg)).show(ui, |ui| {
+            if self.spectral.is_some() {
+                self.spectral_panel(ui);
+            } else {
+                self.tracks(ui);
+            }
+        });
+    }
+
+    /// Ouvre la vue spectrale demandée quand le son du clip (sans ses effets) est décodé
+    fn open_spectral(&mut self) {
+        let Some((ti, ci)) = self.spectral_wanted else { return };
+        let Some(src) = self.session.tracks.get(ti).and_then(|t| t.clips.get(ci)).map(|c| c.src.clone()) else {
+            self.spectral_wanted = None;
+            return;
+        };
+        match self.sounds.get(&src, "", None) {
+            audio::Slot::Ready(buf) => {
+                self.stop();
+                self.spectral = Some((crate::spectral::View::new(&src, buf), ti, ci));
+                self.spectral_wanted = None;
+            }
+            audio::Slot::Failed(e) => {
+                self.spectral_wanted = None;
+                self.say(e);
+            }
+            audio::Slot::Loading => {}
+        }
+    }
+
+    fn spectral_panel(&mut self, ui: &mut egui::Ui) {
+        let Some((view, ti, ci)) = &mut self.spectral else { return };
+        let (ti, ci) = (*ti, *ci);
+        let Some(c) = self.session.tracks.get(ti).and_then(|t| t.clips.get(ci)).filter(|c| c.src == view.src).cloned() else {
+            // Le clip a changé sous la vue (annulation, suppression) : elle se ferme
+            self.spectral = None;
+            return;
+        };
+        match view.show(ui, c.offset, c.offset + c.len) {
+            crate::spectral::Action::None => {}
+            crate::spectral::Action::Close => self.spectral = None,
+            crate::spectral::Action::Apply(data) => {
+                self.spectral = None;
+                match self.write_retouched(&c.src, &data) {
+                    Ok(rel) => {
+                        self.session.tracks[ti].clips[ci].src = rel.clone();
+                        self.changed();
+                        self.sel_clip = self.session.tracks[ti].clips.iter().position(|k| k.src == rel && (k.start - c.start).abs() < 1e-9).map(|k| (ti, k));
+                        self.say(format!("{} {}", crate::i18n::t("Son retouché :"), rel.rsplit('/').next().unwrap_or(&rel)));
+                    }
+                    Err(e) => self.say(e),
+                }
+            }
+        }
+    }
+
+    /// Écrit le son retouché à côté de l'original (« nom (retouché).wav », numéroté s'il existe déjà) ; rend son chemin dans le coffre
+    fn write_retouched(&self, src: &str, data: &[f32]) -> Result<String, String> {
+        let (dir, file) = src.rsplit_once('/').map(|(d, f)| (format!("{d}/"), f)).unwrap_or((String::new(), src));
+        let stem = file.rsplit_once('.').map(|(s, _)| s).unwrap_or(file);
+        let stem = stem.split(" (retouché").next().unwrap_or(stem);
+        for k in 1..1000 {
+            let rel = if k == 1 { format!("{dir}{stem} (retouché).wav") } else { format!("{dir}{stem} (retouché {k}).wav") };
+            let path = crate::vault::safe(&self.root, &rel)?;
+            if !path.exists() {
+                std::fs::write(&path, audio::wav_bytes(data)).map_err(|e| e.to_string())?;
+                return Ok(rel);
+            }
+        }
+        Err(crate::i18n::t("Trop de versions retouchées de ce son."))
     }
 
     // ---------- Sons ----------
@@ -1508,6 +1587,15 @@ impl Editor {
     /// Le spectre : en direct pendant la lecture, sinon celui de la plage ou du clip choisi
     fn spectrum_view(&mut self, ui: &mut egui::Ui) {
         let p = crate::theme::pal();
+        // La vue spectrale du clip choisi : voir et retoucher le son au pinceau
+        if let Some(sel) = self.sel_clip.filter(|(t, c)| self.session.tracks.get(*t).is_some_and(|tr| *c < tr.clips.len())) {
+            let waiting = self.spectral_wanted.is_some();
+            let label = format!("{}  {}", l::AUDIO_WAVEFORM, crate::i18n::t(if waiting { "lecture du son…" } else { "Vue spectrale" }));
+            if ui.add_enabled(!waiting && self.spectral.is_none(), egui::Button::new(label)).on_hover_text(crate::i18n::t("Le spectrogramme du clip : peins un clic, une sonnerie ou un sifflement pour le réparer ou l'effacer")).clicked() {
+                self.spectral_wanted = Some(sel);
+            }
+            ui.add_space(6.0);
+        }
         let bands = 96;
         let live = self.playing.as_ref().map(|(t0, _, data)| {
             let f = (t0.elapsed().as_secs_f64() * RATE as f64) as usize;
