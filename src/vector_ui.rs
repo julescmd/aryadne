@@ -121,6 +121,8 @@ pub struct Editor {
     /// Animation des plans à exporter : images par seconde, secondes sur chaque plan ; et l'export en cours
     anim: (f32, f32),
     anim_rx: Option<std::sync::mpsc::Receiver<String>>,
+    /// Composants des autres dessins du coffre (bibliothèque partagée), relevés à la demande
+    lib_items: Option<Vec<crate::vector::LibItem>>,
     warp_bend: f32,
     /// Bibliothèque d'icônes ouverte : la recherche
     icon_pick: Option<String>,
@@ -182,6 +184,7 @@ impl Editor {
             print: crate::vector::PrintOpts::default(),
             anim: (24.0, 1.2),
             anim_rx: None,
+            lib_items: None,
             warp_bend: 50.0,
             icon_pick: None,
             present: None,
@@ -679,6 +682,61 @@ impl Editor {
 
     // ------------------------------------------------------------------ propriétés
 
+    /// Bibliothèque partagée : les composants des autres dessins du coffre, à poser d'un clic
+    fn library_ui(&mut self, ui: &mut egui::Ui) {
+        let p = crate::theme::pal();
+        ui.add_space(6.0);
+        let has_lib = self.doc.shapes.iter().any(|s| !s.lib.is_empty());
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new(crate::i18n::t("Bibliothèque")).size(11.5).strong().color(p.muted));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.add(egui::Button::new(egui::RichText::new(l::REFRESH_CW).color(p.muted)).frame(false)).on_hover_text(crate::i18n::t("Relire les composants des dessins du coffre")).clicked() {
+                    self.lib_items = None;
+                }
+                if has_lib && ui.add(egui::Button::new(egui::RichText::new(l::DOWNLOAD).color(p.muted)).frame(false)).on_hover_text(crate::i18n::t("Mettre à jour les composants venus de la bibliothèque (leurs instances suivent)")).clicked() {
+                    self.checkpoint();
+                    let n = self.doc.update_library(&self.root);
+                    self.message = Some(format!("{n} {}", crate::i18n::t("composant(s) mis à jour")));
+                    self.changed();
+                }
+            });
+        });
+        if self.lib_items.is_none() {
+            self.lib_items = Some(crate::vector::library(&self.root, &self.path));
+        }
+        let items = self.lib_items.clone().unwrap_or_default();
+        if items.is_empty() {
+            ui.label(egui::RichText::new(crate::i18n::t("Les composants des autres dessins du coffre apparaissent ici, à poser dans ce dessin.")).size(11.0).color(p.muted));
+            return;
+        }
+        let mut pick = None;
+        let mut last = String::new();
+        egui::ScrollArea::vertical().id_salt("vec-lib").max_height(180.0).show(ui, |ui| {
+            for it in &items {
+                if it.file != last {
+                    last = it.file.clone();
+                    let f = std::path::Path::new(&it.file).file_stem().map(|s| crate::formats::strip(&s.to_string_lossy()).to_string()).unwrap_or_default();
+                    ui.label(egui::RichText::new(format!("{}  {f}", l::FILE)).size(11.0).color(p.muted));
+                }
+                if ui.add(egui::Button::new(format!("{}  {}", l::COMPONENT, it.name)).frame(false)).on_hover_text(crate::i18n::t("Poser une instance au milieu du plan de travail")).clicked() {
+                    pick = Some(it.clone());
+                }
+            }
+        });
+        if let Some(it) = pick {
+            let bi = self.sel_board.unwrap_or(0).min(self.doc.boards.len().saturating_sub(1));
+            let at = self.doc.boards.get(bi).map(|b| [b.x + b.w / 2.0, b.y + b.h / 2.0]).unwrap_or([0.0, 0.0]);
+            self.checkpoint();
+            match self.doc.place_from_library(&self.root, &it, at) {
+                Ok(id) => {
+                    self.sel = vec![id];
+                    self.changed();
+                }
+                Err(e) => self.message = Some(e),
+            }
+        }
+    }
+
     /// Variables de couleur et leurs modes (comme Figma) : un tableau, une colonne par mode
     fn vars_ui(&mut self, ui: &mut egui::Ui) {
         let p = crate::theme::pal();
@@ -926,6 +984,7 @@ impl Editor {
                 ui.label(egui::RichText::new(crate::i18n::t("Choisis une forme ou un plan de travail.")).color(p.muted));
             }
             self.vars_ui(ui);
+            self.library_ui(ui);
             head(ui, "Nuances");
             // Nuances globales : changer une nuance la change partout où elle sert ; clic droit pour la retirer
             let mut edit: Option<(usize, [u8; 4], [u8; 4])> = None;

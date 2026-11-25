@@ -3435,5 +3435,12 @@
   "état au survol": "hover state",
   "En présentation, la forme change quand la souris passe dessus (bouton, carte)": "In presentation, the shape changes when the mouse passes over it (button, card)",
   "se soulève": "lifts",
-  "Une ombre apparaît sous la forme au survol": "A shadow appears under the shape on hover"
+  "Une ombre apparaît sous la forme au survol": "A shadow appears under the shape on hover",
+  "Bibliothèque": "Library",
+  "Relire les composants des dessins du coffre": "Reload components from the vault's drawings",
+  "Mettre à jour les composants venus de la bibliothèque (leurs instances suivent)": "Update components from the library (their instances follow)",
+  "composant(s) mis à jour": "component(s) updated",
+  "Les composants des autres dessins du coffre apparaissent ici, à poser dans ce dessin.": "Components from the vault's other drawings show up here, ready to place in this drawing.",
+  "Poser une instance au milieu du plan de travail": "Place an instance in the middle of the artboard",
+  "composant introuvable": "component not found"
 }

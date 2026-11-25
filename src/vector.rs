@@ -273,6 +273,9 @@ pub struct Shape {
     /// État au survol, en présentation (composant interactif) : autre remplissage, opacité, ombre
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hover: Option<Hover>,
+    /// Composant venu d'une bibliothèque partagée : « fichier du coffre#nom du composant »
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub lib: String,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -830,7 +833,7 @@ fn union(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {
 
 impl Shape {
     pub fn base() -> Shape {
-        Shape { id: 0, name: String::new(), kind: Kind::Rect { w: 100.0, h: 100.0, r: [0.0; 4] }, x: 0.0, y: 0.0, rot: 0.0, fills: vec![], strokes: vec![], opacity: 1.0, visible: true, locked: false, parent: 0, shadow: None, blur: 0.0, blend: String::new(), layout: None, component: false, instance_of: 0, widths: vec![], constraint: [0, 0], style: String::new(), link: String::new(), on_path: 0, fill_var: String::new(), hover: None }
+        Shape { id: 0, name: String::new(), kind: Kind::Rect { w: 100.0, h: 100.0, r: [0.0; 4] }, x: 0.0, y: 0.0, rot: 0.0, fills: vec![], strokes: vec![], opacity: 1.0, visible: true, locked: false, parent: 0, shadow: None, blur: 0.0, blend: String::new(), layout: None, component: false, instance_of: 0, widths: vec![], constraint: [0, 0], style: String::new(), link: String::new(), on_path: 0, fill_var: String::new(), hover: None, lib: String::new() }
     }
 
     pub fn kind_label(&self) -> &'static str {
@@ -2345,6 +2348,35 @@ mod tests {
     use super::*;
 
     #[test]
+    fn bibliotheque_partagee() {
+        let dir = std::env::temp_dir().join(format!("aryadne-lib-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // Le dessin qui publie : un composant « Bouton » (un groupe avec un fond)
+        let mut lib = Doc::default();
+        lib.shapes.push(Shape { id: 1, name: "Bouton".into(), kind: Kind::Group { children: vec![2], op: 0 }, component: true, ..Shape::base() });
+        lib.shapes.push(Shape { id: 2, name: "fond".into(), parent: 1, fills: vec![Paint::Solid { c: [10, 20, 30, 255] }], ..Shape::base() });
+        lib.next_id = 3;
+        std::fs::write(dir.join("Lib.aryvec"), serde_json::to_string(&lib).unwrap()).unwrap();
+        let root = dir.to_string_lossy().to_string();
+        let items = library(&root, &dir.join("Moi.aryvec"));
+        assert_eq!(items.len(), 1);
+        let mut d = Doc::starter();
+        let inst = d.place_from_library(&root, &items[0], [500.0, 500.0]).unwrap();
+        assert!(d.get(inst).is_some_and(|s| s.instance_of != 0));
+        // Deuxième pose : pas de second maître
+        d.place_from_library(&root, &items[0], [300.0, 300.0]).unwrap();
+        assert_eq!(d.shapes.iter().filter(|s| !s.lib.is_empty()).count(), 1);
+        // La bibliothèque change : le maître et ses instances suivent
+        lib.shapes[1].fills = vec![Paint::Solid { c: [200, 0, 0, 255] }];
+        std::fs::write(dir.join("Lib.aryvec"), serde_json::to_string(&lib).unwrap()).unwrap();
+        assert_eq!(d.update_library(&root), 1);
+        let red = d.shapes.iter().filter(|s| s.fills.first() == Some(&Paint::Solid { c: [200, 0, 0, 255] })).count();
+        assert!(red >= 3, "maître + 2 instances : {red}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+
+    #[test]
     fn etat_au_survol() {
         let mut d = Doc::default();
         d.shapes.push(Shape { id: 1, fills: vec![Paint::Solid { c: [10, 10, 10, 255] }], hover: Some(Hover { fill: Some([200, 0, 0, 255]), opacity: 0.5, lift: true }), ..Shape::base() });
@@ -3171,6 +3203,136 @@ mod device_tests {
             let px = rasterize(&svg, 473, 932).unwrap();
             image::RgbaImage::from_raw(473, 932, px).unwrap().save("/tmp/device.png").unwrap();
         }
+    }
+}
+
+// ---------- Bibliothèque partagée (comme Figma) : les composants des autres dessins du coffre ----------
+
+/// Un composant publié par un autre dessin du coffre
+#[derive(Clone, Debug, PartialEq)]
+pub struct LibItem {
+    /// Fichier du coffre (relatif)
+    pub file: String,
+    pub name: String,
+    pub id: u64,
+}
+
+/// Les composants de tous les dessins du coffre sauf `except` (le dessin ouvert)
+pub fn library(root: &str, except: &Path) -> Vec<LibItem> {
+    let mut out = vec![];
+    let base = Path::new(root);
+    let mut stack = vec![base.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&d) else { continue };
+        for e in rd.flatten() {
+            let p = e.path();
+            let name = e.file_name().to_string_lossy().to_string();
+            if name.starts_with('.') {
+                continue;
+            }
+            if p.is_dir() {
+                stack.push(p);
+            } else if is_vector(&name) && p != except {
+                let Ok(doc) = Doc::load(&p) else { continue };
+                let rel = p.strip_prefix(base).map(|r| r.to_string_lossy().to_string()).unwrap_or(name.clone());
+                for s in doc.shapes.iter().filter(|s| s.component && s.lib.is_empty()) {
+                    out.push(LibItem { file: rel.clone(), name: s.name.clone(), id: s.id });
+                }
+            }
+        }
+    }
+    out.sort_by(|a, b| a.file.cmp(&b.file).then(a.name.cmp(&b.name)));
+    out
+}
+
+impl Doc {
+    /// Copie la forme `id` de `src` (et son contenu) dans ce document ; rend l'identifiant de la copie
+    pub fn import_tree(&mut self, src: &Doc, id: u64, parent: u64) -> Option<u64> {
+        let s = src.get(id)?.clone();
+        let nid = self.new_id();
+        let mut c = s.clone();
+        c.id = nid;
+        c.parent = parent;
+        c.instance_of = 0;
+        if let Kind::Group { children, op } = &s.kind {
+            let kids: Vec<u64> = children.iter().filter_map(|k| self.import_tree(src, *k, nid)).collect();
+            c.kind = Kind::Group { children: kids, op: *op };
+        }
+        self.shapes.push(c);
+        Some(nid)
+    }
+
+    /// Pose un composant de la bibliothèque : son maître (copié, gardant le lien) à droite des plans,
+    /// et une instance à `at`. Si le maître est déjà là, seule une instance s'ajoute. Rend l'instance.
+    pub fn place_from_library(&mut self, root: &str, item: &LibItem, at: [f32; 2]) -> Result<u64, String> {
+        let key = format!("{}#{}", item.file, item.name);
+        let mid = match self.shapes.iter().find(|s| s.lib == key).map(|s| s.id) {
+            Some(m) => m,
+            None => {
+                let src = Doc::load(&Path::new(root).join(&item.file))?;
+                let m = self.import_tree(&src, item.id, 0).ok_or("composant introuvable")?;
+                // Le maître se range à droite de tout, hors des plans de travail
+                let right = self.boards.iter().map(|b| b.x + b.w).fold(0.0f32, f32::max);
+                let top = self.boards.iter().map(|b| b.y).fold(f32::MAX, f32::min).min(0.0);
+                let b = self.get(m).map(|s| self.bounds(s)).unwrap_or([0.0; 4]);
+                self.translate(m, right + 200.0 - b[0], top - b[1]);
+                if let Some(s) = self.shapes.iter_mut().find(|s| s.id == m) {
+                    s.component = true;
+                    s.lib = key.clone();
+                }
+                m
+            }
+        };
+        let iid = self.instantiate(mid).ok_or("composant introuvable")?;
+        let b = self.get(iid).map(|s| self.bounds(s)).unwrap_or([0.0; 4]);
+        self.translate(iid, at[0] - (b[0] + b[2]) / 2.0, at[1] - (b[1] + b[3]) / 2.0);
+        Ok(iid)
+    }
+
+    /// Met à jour les composants venus de la bibliothèque (leurs instances suivent) ; rend le nombre mis à jour
+    pub fn update_library(&mut self, root: &str) -> usize {
+        let masters: Vec<(u64, String)> = self.shapes.iter().filter(|s| !s.lib.is_empty() && s.component).map(|s| (s.id, s.lib.clone())).collect();
+        let mut n = 0;
+        for (mid, key) in masters {
+            let Some((file, name)) = key.split_once('#') else { continue };
+            let Ok(src) = Doc::load(&Path::new(root).join(file)) else { continue };
+            let Some(sid) = src.shapes.iter().find(|s| s.component && s.name == name).map(|s| s.id) else { continue };
+            let Some(old) = self.get(mid).cloned() else { continue };
+            // Le nouveau contenu, posé à la place de l'ancien
+            let Some(fresh) = self.import_tree(&src, sid, old.parent) else { continue };
+            let (ob, nb) = (self.bounds(&old), self.get(fresh).map(|s| self.bounds(s)).unwrap_or([0.0; 4]));
+            self.translate(fresh, ob[0] - nb[0], ob[1] - nb[1]);
+            let pre = self.preorder(mid);
+            let kids = self.get(fresh).map(|s| s.kind.clone());
+            let fresh_pre = self.preorder(fresh);
+            // L'identifiant du maître ne change pas : ses instances le retrouvent
+            self.remove(&pre[1..].to_vec());
+            if let (Some(k), Some(i)) = (kids, self.index(mid)) {
+                let f = self.get(fresh).cloned().unwrap();
+                let s = &mut self.shapes[i];
+                s.kind = k;
+                s.fills = f.fills;
+                s.strokes = f.strokes;
+                s.shadow = f.shadow;
+                s.x = f.x;
+                s.y = f.y;
+            }
+            for c in fresh_pre.iter().skip(1) {
+                if let Some(i) = self.index(*c) {
+                    if self.shapes[i].parent == fresh {
+                        self.shapes[i].parent = mid;
+                    }
+                }
+            }
+            if let Some(i) = self.index(fresh) {
+                self.shapes.remove(i);
+            }
+            n += 1;
+        }
+        if n > 0 {
+            self.sync_instances();
+        }
+        n
     }
 }
 
