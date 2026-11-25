@@ -4905,6 +4905,19 @@ impl Viewer {
                 if ui.add_enabled(job.image.is_some(), egui::Button::new(format!("{}  {}", crate::lucide::SAVE, crate::i18n::t("enregistrer…")))).clicked() {
                     save = true;
                 }
+                // Le rendu part vers un autre outil (Retouche, Montage, Motion…)
+                if let Some(t) = crate::sendto::button(ui, job.image.is_some(), "3d") {
+                    if let Some(img) = job.image.as_ref().and_then(|px| image::RgbaImage::from_raw(job.w as u32, job.h as u32, px.clone())) {
+                        let name = format!("{} - {}", self.path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default(), crate::i18n::t_mid("rendu"));
+                        self.capture_msg = Some(match crate::sendto::stage(&crate::nodes::vault_root(), &name, &img) {
+                            Ok(rel) => {
+                                crate::sendto::push(t, rel);
+                                crate::i18n::t("Envoyé.")
+                            }
+                            Err(e) => e,
+                        });
+                    }
+                }
                 if ui.button(format!("{}  {}", crate::lucide::X, crate::i18n::t("fermer"))).clicked() {
                     close = true;
                 }

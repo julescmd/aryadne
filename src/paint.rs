@@ -2358,6 +2358,11 @@ impl Editor {
         self.add_image_file(&f);
     }
 
+    /// Reçoit une image envoyée d'un autre outil : un nouveau calque
+    pub fn receive(&mut self, f: &std::path::Path) {
+        self.add_image_file(f);
+    }
+
     /// Une image du disque devient un nouveau calque (bouton, ou glissée depuis l'explorateur).
     fn add_image_file(&mut self, f: &std::path::Path) {
         let f = f.to_path_buf();
@@ -2420,6 +2425,22 @@ impl Editor {
                 if ui.button(format!("{}  {}", crate::lucide::DOWNLOAD, crate::i18n::t("exporter en PNG, JPG, WebP ou PSD…"))).clicked() {
                     self.export();
                     ui.close();
+                }
+                ui.separator();
+                ui.label(egui::RichText::new(crate::i18n::t("envoyer l'image vers")).weak().size(11.0));
+                for (id, label, icon) in crate::sendto::TARGETS {
+                    if id != "retouche" && ui.button(format!("{icon}  {}", crate::i18n::t(label))).clicked() {
+                        let name = self.path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "image".into());
+                        let root = crate::nodes::vault_root();
+                        self.message = Some(match crate::sendto::stage(&root, &name, &self.doc.flatten()) {
+                            Ok(rel) => {
+                                crate::sendto::push(id, rel);
+                                crate::i18n::t("Envoyé.")
+                            }
+                            Err(e) => e,
+                        });
+                        ui.close();
+                    }
                 }
             });
             egui::containers::menu::MenuButton::new(crate::i18n::t("sélection ▾")).ui(ui, |ui| {

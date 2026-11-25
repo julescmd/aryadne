@@ -16,6 +16,7 @@ mod track2d;
 mod gltfscene;
 mod fbxscene;
 mod spell;
+mod sendto;
 mod vector_ui;
 mod keymap;
 mod lucide;
@@ -2279,9 +2280,67 @@ impl App {
 
     // ---------- actions différées (évite les conflits d'emprunt pendant le dessin) ----------
 
+    /// Livre une image envoyée d'un outil à un autre : au fichier ouvert de cet outil (le plus récent),
+    /// sinon à un nouveau fichier
+    fn deliver(&mut self, target: &str, rel: &str) {
+        let root = self.root();
+        let full = std::path::Path::new(&root).join(rel);
+        let matches = |c: &Content| match target {
+            "retouche" => matches!(c, Content::Paint(_)),
+            "vector" => matches!(c, Content::Vector(_)),
+            "motion" => matches!(c, Content::Motion(_)),
+            "montage" => matches!(c, Content::Montage(_)),
+            _ => false,
+        };
+        if target == "board" {
+            self.board.drop_file(rel, egui::vec2(0.0, 0.0), &mut self.images);
+            self.view = Some(View::Boards);
+            self.toast = Some((crate::i18n::t("Image ajoutée au moodboard."), Instant::now()));
+            return;
+        }
+        let found = self.active.filter(|&a| matches(&self.docs[a].content)).or_else(|| (0..self.docs.len()).rev().find(|&k| matches(&self.docs[k].content)));
+        let k = match found {
+            Some(k) => k,
+            None => {
+                // Pas de fichier ouvert pour cet outil : un nouveau
+                match target {
+                    // Retouche : l'image devient le document (un calque)
+                    "retouche" => {
+                        let bytes = std::fs::read(&full).unwrap_or_default();
+                        self.new_untitled(crate::formats::ext("image"), |p| std::fs::write(p, &bytes).map_err(|e| e.to_string()));
+                        return;
+                    }
+                    "vector" => self.new_untitled(crate::formats::ext("vector"), |p| crate::vector::Doc::starter().save(p)),
+                    "motion" => self.new_untitled(crate::formats::ext("motion"), |p| crate::motion::Compo::default().write(p)),
+                    "montage" => self.new_untitled(crate::formats::ext("seq"), |p| crate::montage::Project::default().write(p)),
+                    _ => return,
+                }
+                match self.active.filter(|&a| matches(&self.docs[a].content)) {
+                    Some(k) => k,
+                    None => return,
+                }
+            }
+        };
+        match &mut self.docs[k].content {
+            Content::Paint(ed) => ed.receive(&full),
+            Content::Vector(ed) => ed.receive(rel),
+            Content::Motion(ed) => ed.receive(rel),
+            Content::Montage(ed) => ed.receive(&full),
+            _ => {}
+        }
+        // On passe à l'outil qui reçoit (son espace de travail compris)
+        let r = self.docs[k].rel.clone();
+        self.open(r);
+    }
+
     fn run_actions(&mut self, ctx: &egui::Context) {
         if std::mem::take(&mut self.links_dirty) {
             self.refresh();
+        }
+        // Images envoyées d'un outil à un autre
+        for (target, rel) in crate::sendto::take() {
+            self.refresh();
+            self.deliver(&target, &rel);
         }
         let root = self.root();
         for a in std::mem::take(&mut self.actions) {

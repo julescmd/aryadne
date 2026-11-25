@@ -98,6 +98,11 @@ impl Editor {
     }
 
     /// Pose la partie choisie d'un média : à la fin de l'histoire (V1), ou insérée à la tête de lecture
+    /// Reçoit une image ou une vidéo envoyée d'un autre outil : un plan à la fin du montage
+    pub fn receive(&mut self, path: &std::path::Path) {
+        self.add_from_card(&path.to_string_lossy(), true);
+    }
+
     fn add_from_card(&mut self, file: &str, at_end: bool) {
         let path = self.media_path(file);
         let Some(mut clips) = self.media_clips(&path, 0, self.atarget) else { return };

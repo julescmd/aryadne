@@ -1190,7 +1190,34 @@ impl Editor {
             if ui.button(format!("{}  SVG", l::DOWNLOAD)).clicked() {
                 self.export(bi, "svg");
             }
+            // Le plan de travail part vers un autre outil
+            if let Some(t) = crate::sendto::button(ui, true, "vector") {
+                let name = self.doc.boards[bi].name.clone();
+                self.message = Some(match crate::vector::export_png(&self.doc, bi, &self.root, self.export_scale).ok_or_else(|| crate::i18n::t("export impossible")).and_then(|img| crate::sendto::stage(&self.root, &name, &img)) {
+                    Ok(rel) => {
+                        crate::sendto::push(t, rel);
+                        crate::i18n::t("Envoyé.")
+                    }
+                    Err(e) => e,
+                });
+            }
         });
+    }
+
+    /// Reçoit une image du coffre (envoyée d'un autre outil) : posée au milieu du premier plan de travail
+    pub fn receive(&mut self, rel: &str) {
+        let full = std::path::Path::new(&self.root).join(rel);
+        let (w, h) = image::image_dimensions(&full).map(|(w, h)| (w as f32, h as f32)).unwrap_or((512.0, 512.0));
+        let b = self.doc.boards.first().map(|b| [b.x, b.y, b.w, b.h]).unwrap_or([0.0, 0.0, 1080.0, 1080.0]);
+        // À l'échelle du plan s'il est plus petit que l'image
+        let k = (b[2] / w).min(b[3] / h).min(1.0);
+        let (w, h) = (w * k, h * k);
+        self.checkpoint();
+        let id = self.doc.new_id();
+        let name = std::path::Path::new(rel).file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+        self.doc.shapes.push(Shape { id, name, kind: Kind::Image { path: rel.to_string(), w, h }, x: b[0] + (b[2] - w) / 2.0, y: b[1] + (b[3] - h) / 2.0, ..Shape::base() });
+        self.sel = vec![id];
+        self.changed();
     }
 
     fn export(&mut self, bi: usize, ext: &str) {

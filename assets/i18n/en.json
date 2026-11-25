@@ -2952,5 +2952,15 @@
   "Les mots inconnus sont soulignés ; clic droit pour une correction ou pour l'ajouter au dictionnaire": "Unknown words are underlined; right-click for a correction or to add it to the dictionary",
   "aucune suggestion": "no suggestion",
   "ajouter au dictionnaire": "add to dictionary",
-  "Ce mot ne sera plus souligné dans ce coffre": "This word will no longer be underlined in this vault"
+  "Ce mot ne sera plus souligné dans ce coffre": "This word will no longer be underlined in this vault",
+  "Retouche (nouveau calque)": "Photo editing (new layer)",
+  "Vectoriel (image)": "Vector (image)",
+  "Motion (calque image)": "Motion (image layer)",
+  "Montage (plan à la fin)": "Editing (shot at the end)",
+  "envoyer vers": "send to",
+  "Envoyer vers un autre outil (Retouche, Vectoriel, Motion, Montage, Moodboard)": "Send to another tool (Photo editing, Vector, Motion, Editing, Moodboard)",
+  "Envoyé.": "Sent.",
+  "export impossible": "export failed",
+  "envoyer l'image vers": "send the image to",
+  "Image ajoutée au moodboard.": "Image added to the moodboard."
 }

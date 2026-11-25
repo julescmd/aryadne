@@ -270,6 +270,11 @@ impl Editor {
         }
     }
 
+    /// Reçoit une image du coffre (envoyée d'un autre outil) : un calque image au milieu
+    pub fn receive(&mut self, rel: &str) {
+        self.add_layer(Kind::Image { path: rel.to_string() }, None);
+    }
+
     fn add_layer(&mut self, kind: Kind, at: Option<[f32; 2]>) {
         let base = match &kind {
             Kind::Text { .. } => "Texte",
@@ -957,6 +962,19 @@ impl Editor {
             let label = if busy { format!("{} {} %", crate::i18n::t("Export"), self.export_prog.load(Ordering::Relaxed) / 10) } else { crate::i18n::t("Exporter MP4") };
             if ui.add_enabled(!busy, egui::Button::new(format!("{}  {}", l::FILM, label))).clicked() {
                 self.export();
+            }
+            // L'image à la tête de lecture part vers un autre outil
+            if let Some(t) = crate::sendto::button(ui, true, "motion") {
+                let img = motion::render(&self.compo, self.time, 1.0, &mut self.cache);
+                let name = format!("{} {:.2}s", self.path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default(), self.time);
+                let root = self.root.clone();
+                self.message = Some(match crate::sendto::stage(&root, &name, &img) {
+                    Ok(rel) => {
+                        crate::sendto::push(t, rel);
+                        crate::i18n::t("Envoyé.")
+                    }
+                    Err(e) => e,
+                });
             }
             ui.add_space(4.0);
             let zl = match self.zoom {
