@@ -3641,5 +3641,8 @@
   "muet : le calque ne compte plus": "mute: the layer no longer counts",
   "Les nouvelles clés (I) vont dans ce calque": "New keys (I) go into this layer",
   "poids du calque": "layer weight",
-  "supprimer le calque et ses clés": "delete the layer and its keys"
+  "supprimer le calque et ses clés": "delete the layer and its keys",
+  "affiché :": "shown:",
+  "sélectionnée(s)": "selected",
+  "densité :": "density:"
 }

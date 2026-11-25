@@ -2290,7 +2290,7 @@ impl Edit {
                 }
             }
         });
-        ui.label(RichText::new(format!("{} faces · {} sélectionnée(s) · {} coutures", self.topo.polys.len(), self.sel.len(), self.data.seams.len())).color(p.muted).size(10.5));
+        ui.label(RichText::new(format!("{} faces · {} {} · {} {}", self.topo.polys.len(), self.sel.len(), crate::i18n::t_mid("sélectionnée(s)"), self.data.seams.len(), crate::i18n::t_mid("coutures"))).color(p.muted).size(10.5));
         ui.separator();
         match self.tab {
             0 => self.tab_materials(ui),
@@ -2517,7 +2517,7 @@ impl Edit {
         pack(&self.topo, &mut self.data, &PackOptions { optimize: self.optimize, rotate: self.rotate, fixed_scale: None });
         self.checker = true;
         let n = self.data.chart.iter().max().map(|m| m + 1).unwrap_or(0);
-        self.message = Some(format!("{n} îlots, remplissage {:.0} %, {:.1} s", fill_rate(&self.data) * 100.0, t0.elapsed().as_secs_f32()));
+        self.message = Some(format!("{n} {}, {} {:.0} %, {:.1} s", crate::i18n::t_mid("îlots"), crate::i18n::t_mid("remplissage"), fill_rate(&self.data) * 100.0, t0.elapsed().as_secs_f32()));
         self.changed();
     }
 
@@ -2824,12 +2824,12 @@ impl Edit {
                 self.udim_count = tiles.len().max(1);
             }
             ui.label(RichText::new("UDIM").size(11.0).color(p.muted));
-            ui.add(egui::DragValue::new(&mut self.udim_count).range(1..=20).suffix(format!(" {}", crate::i18n::t("tuiles"))));
+            ui.add(egui::DragValue::new(&mut self.udim_count).range(1..=20).suffix(format!(" {}", crate::i18n::t_mid("tuiles"))));
             if ui.add_enabled(self.data.has_uv(), egui::Button::new(crate::i18n::t("répartir"))).on_hover_text(crate::i18n::t("Répartit les îlots sur ce nombre de tuiles UDIM (1001, 1002…) : chaque tuile a ses propres images à la cuisson, donc plus de détail par îlot. 1 : tout revient dans le carré de base")).clicked() {
                 distribute_udim(&self.topo, &mut self.data, self.udim_count, &PackOptions { optimize: self.optimize, rotate: self.rotate, fixed_scale: None });
                 self.version += 1;
                 self.save();
-                self.message = Some(format!("{} {}", udim_tiles(&self.data).len(), crate::i18n::t("tuiles")));
+                self.message = Some(format!("{} {}", udim_tiles(&self.data).len(), crate::i18n::t_mid("tuiles")));
             }
             if tiles.len() > 1 {
                 ui.label(RichText::new(format!("{} – {}", udim_number(tiles[0]), udim_number(tiles[tiles.len() - 1]))).size(11.0).color(p.muted));
@@ -2844,7 +2844,7 @@ impl Edit {
             }
             if self.data.has_uv() && ui.button(crate::i18n::t("ranger")).on_hover_text(crate::i18n::t("packing : même densité, rotation, rangement serré")).clicked() {
                 pack(&self.topo, &mut self.data, &PackOptions { optimize: self.optimize, rotate: self.rotate, fixed_scale: None });
-                self.message = Some(format!("remplissage {:.0} %", fill_rate(&self.data) * 100.0));
+                self.message = Some(format!("{} {:.0} %", crate::i18n::t_mid("remplissage"), fill_rate(&self.data) * 100.0));
                 self.changed();
             }
             if ui.toggle_value(&mut self.checker, crate::i18n::t("damier")).changed() {
@@ -2874,7 +2874,7 @@ impl Edit {
         let dens = densities(&self.topo, &self.data, self.scale);
         let (mn, mx) = dens.iter().fold((f32::MAX, 0.0f32), |a, &x| (a.0.min(x), a.1.max(x)));
         let avg = dens.iter().sum::<f32>() / dens.len().max(1) as f32;
-        ui.label(RichText::new(format!("densité : {avg:.0} px/unité (min {mn:.0}, max {mx:.0}) · remplissage {:.0} %", fill_rate(&self.data) * 100.0)).size(10.5).color(p.muted));
+        ui.label(RichText::new(format!("{} {avg:.0} px/u (min {mn:.0}, max {mx:.0}) · {} {:.0} %", crate::i18n::t_mid("densité :"), crate::i18n::t_mid("remplissage"), fill_rate(&self.data) * 100.0)).size(10.5).color(p.muted));
         ui.horizontal(|ui| {
             ui.add(egui::DragValue::new(&mut self.density_target).range(1.0..=100000.0).speed(4.0).suffix(" px/u"));
             if ui.button(crate::i18n::t("imposer la densité")).on_hover_text(crate::i18n::t("tous les îlots à cette densité (ils peuvent déborder du carré si elle est trop forte)")).clicked() {

@@ -3466,6 +3466,7 @@ impl Viewer {
             // Calques de peinture de l'objet choisi : couleur, rugosité, métal, masques pour l'Atelier
             egui::containers::menu::MenuButton::new(egui::RichText::new(crate::lucide::LAYERS).size(15.0)).ui(ui, |ui| {
                 ui.set_min_width(290.0);
+                ui.set_max_width(320.0);
                 ui.label(crate::theme::section(&crate::i18n::t("CALQUES DE PEINTURE")));
                 let Some((k, oname, before)) = self.scene_sel.and_then(|k| self.scene.as_ref()?.objects.get(k).map(|o| (k, o.name.clone(), crate::paint3d::layers_of(o)))) else {
                     ui.label(egui::RichText::new(crate::i18n::t("Choisis d'abord un objet de la scène.")).size(11.0).color(p.muted));
@@ -7770,13 +7771,15 @@ impl Viewer {
                 let (mut dup, mut del, mut del_action) = (false, false, false);
                 resp.context_menu(|ui| {
                     ui.set_min_width(250.0);
+                    ui.set_max_width(280.0);
+                    ui.spacing_mut().slider_width = 110.0;
                     let s = &mut scene.strips[i];
                     ui.label(egui::RichText::new(format!("{}  {}", crate::lucide::FILM, s.action)).strong());
                     changed |= crate::modifiers::row(ui, &crate::i18n::t("répétitions"), |ui| ui.add(egui::DragValue::new(&mut s.repeat).speed(0.05).range(0.1..=1000.0)).changed());
                     changed |= crate::modifiers::row(ui, &crate::i18n::t("durée ×"), |ui| ui.add(egui::DragValue::new(&mut s.scale).speed(0.01).range(0.05..=50.0)).on_hover_text(crate::i18n::t("Étire l'action dans le temps (2 : deux fois plus lente)")).changed());
                     changed |= crate::modifiers::row_slider(ui, "poids", egui::Slider::new(&mut s.weight, 0.0..=1.0));
-                    changed |= crate::modifiers::row(ui, &crate::i18n::t("fondu d'entrée"), |ui| ui.add(egui::DragValue::new(&mut s.blend_in).range(0..=10000).suffix(" im.")).changed());
-                    changed |= crate::modifiers::row(ui, &crate::i18n::t("fondu de sortie"), |ui| ui.add(egui::DragValue::new(&mut s.blend_out).range(0..=10000).suffix(" im.")).changed());
+                    changed |= crate::modifiers::row(ui, &crate::i18n::t("fondu d'entrée"), |ui| ui.add(egui::DragValue::new(&mut s.blend_in).range(0..=10000).suffix(crate::i18n::t_mid(" im."))).changed());
+                    changed |= crate::modifiers::row(ui, &crate::i18n::t("fondu de sortie"), |ui| ui.add(egui::DragValue::new(&mut s.blend_out).range(0..=10000).suffix(crate::i18n::t_mid(" im."))).changed());
                     changed |= ui.checkbox(&mut s.additive, crate::i18n::t("additive")).on_hover_text(crate::i18n::t("Ajoute le mouvement de l'action à ce qu'il y a dessous, au lieu de le remplacer")).changed();
                     changed |= ui.checkbox(&mut s.travel, crate::i18n::t("avance à chaque cycle")).on_hover_text(crate::i18n::t("Chaque répétition repart d'où la précédente est arrivée (un cycle de marche qui avance)")).changed();
                     changed |= ui.checkbox(&mut s.hold, crate::i18n::t("tenir la dernière pose")).changed();
@@ -8624,6 +8627,28 @@ impl Viewer {
                                 self.hdr_add = Some("bvh");
                                 ui.close();
                             }
+                            // Les mêmes ajouts que le « + » de la liste de la scène
+                            ui.separator();
+                            if ui.button(format!("{}  {}", crate::lucide::TYPE, crate::i18n::t("texte 3D…"))).clicked() {
+                                self.text3d = Some((String::new(), 1.0, 0.25, 1));
+                                ui.close();
+                            }
+                            if ui.add_enabled(self.mm_job.is_none(), egui::Button::new(format!("{}  {}", crate::lucide::VIDEO, crate::i18n::t("caméra suivie depuis une vidéo…")))).on_hover_text(crate::i18n::t("Suivi de caméra : retrouve le mouvement de la caméra d'une vidéo et des repères de la scène filmée, avec la vidéo en fond")).clicked() {
+                                self.want_matchmove = true;
+                                ui.close();
+                            }
+                            let has_markers = self.scene.as_ref().and_then(crate::autorig::read_markers).is_some();
+                            ui.menu_button(format!("{}  {}", crate::lucide::PERSON_STANDING, crate::i18n::t("rig bipède")), |ui| {
+                                ui.set_min_width(250.0);
+                                if ui.button(format!("{}  {}", crate::lucide::LOCATE, crate::i18n::t("poser les repères"))).on_hover_text(crate::i18n::t("Choisis d'abord le personnage : des repères (bassin, épaule, coude, genou…) sont posés à leur place probable, du côté gauche. Déplace-les sur les articulations, puis génère le squelette")).clicked() {
+                                    self.rig_request = Some(0);
+                                    ui.close();
+                                }
+                                if ui.add_enabled(has_markers, egui::Button::new(format!("{}  {}", crate::lucide::BONE, crate::i18n::t("générer le squelette")))).on_hover_text(crate::i18n::t("Construit le squelette des deux côtés d'après les repères, avec des cibles de cinématique inverse aux mains et aux pieds, et lie le personnage au squelette")).clicked() {
+                                    self.rig_request = Some(1);
+                                    ui.close();
+                                }
+                            });
                             ui.separator();
                             ui.label(egui::RichText::new(crate::i18n::t("Maj+A dans la vue : le même menu sous le curseur")).size(10.5).color(p.muted));
                         });
@@ -8904,13 +8929,13 @@ impl Viewer {
         }
         let stats = {
             let s = model.size();
-            let shown = if shown_tris != model.total_tris { format!(" · affiché : {}", fmt_n(shown_tris)) } else { String::new() };
+            let shown = if shown_tris != model.total_tris { format!(" · {} {}", crate::i18n::t_mid("affiché :"), fmt_n(shown_tris)) } else { String::new() };
             if model.total_vertices <= 2 {
                 crate::i18n::t("scène vide")
             } else {
                 // Dimensions avec Z vers le haut, dans l'unité choisie
                 let (un, uf) = crate::settings::unit();
-                format!("{} triangles{shown} · {} sommets · {:.2} × {:.2} × {:.2} {un}", fmt_n(model.total_tris), fmt_n(model.total_vertices), s[0] * uf, s[2] * uf, s[1] * uf)
+                format!("{} triangles{shown} · {} {} · {:.2} × {:.2} × {:.2} {un}", fmt_n(model.total_tris), fmt_n(model.total_vertices), crate::i18n::t_mid("sommets"), s[0] * uf, s[2] * uf, s[1] * uf)
             }
         };
         // Un calcul en cours (modificateurs, scène) : un mot discret à la fin de la ligne d'infos
@@ -9707,7 +9732,8 @@ impl Viewer {
                                 self.scene_sel = Some(k);
                             }
                         }
-                    } else {
+                    } else if self.paint3d.is_none() || hit.is_some() {
+                        // En peinture, un clic à côté de l'objet ne le désélectionne pas
                         self.scene_multi.clear();
                         self.scene_sel = hit;
                     }
@@ -10520,7 +10546,8 @@ impl Viewer {
             let col = if self.look.show_bg { Color32::from_white_alpha(200) } else { p.muted };
             painter.text(rect.left_bottom() + vec2(60.0, -10.0), egui::Align2::LEFT_BOTTOM, format!("{} · {} / {}", crate::i18n::t("tracé de chemins"), acc.spp, self.trace_max), egui::FontId::monospace(10.5), col);
         }
-        if !self.stats_text.is_empty() {
+        // En peinture, la barre du pinceau prend le bas de la vue : pas de ligne d'infos dessous
+        if !self.stats_text.is_empty() && self.paint3d.is_none() {
             let col = if self.look.show_bg { Color32::from_gray(225) } else { p.muted };
             painter.text(rect.right_bottom() + vec2(-12.0, -10.0), egui::Align2::RIGHT_BOTTOM, &self.stats_text, egui::FontId::monospace(10.5), col);
         }
