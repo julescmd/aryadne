@@ -720,6 +720,22 @@ impl App {
                 }
                 self.files.save();
             }
+            // Une photo de surface devient un matériau PBR (quatre cartes à côté)
+            let ext = e.rel.rsplit('.').next().unwrap_or("").to_lowercase();
+            if !e.is_dir && matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "webp" | "tif" | "tiff" | "bmp" | "tga") {
+                ui.menu_button(format!("{}  {}", crate::lucide::LAYERS, crate::i18n::t("matériau PBR depuis la photo")), |ui| {
+                    for (label, invert) in [("relief : le clair dépasse", false), ("relief : le clair est creux", true)] {
+                        if ui.button(crate::i18n::t(label)).on_hover_text(crate::i18n::t("Couleur sans éclairage (albedo), normale, hauteur et rugosité, à côté de la photo")).clicked() {
+                            let r = vault::safe(&self.root(), &e.rel).and_then(|p| crate::pbrphoto::write(&p, 3.0, invert));
+                            if let Some(v) = self.report(r) {
+                                self.refresh();
+                                self.toast = Some((format!("{} {}", v.len(), crate::i18n::t_mid("cartes créées")), Instant::now()));
+                            }
+                            ui.close();
+                        }
+                    }
+                });
+            }
             self.entry_menu(ui, &e);
         });
     }

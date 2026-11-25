@@ -3211,5 +3211,10 @@
   "copier en CSV": "copy as CSV",
   "Projet, fichier, heures : à coller dans un tableur ou une facture": "Project, file, hours: to paste into a spreadsheet or an invoice",
   "bilan copié": "report copied",
-  "temps passé par projet": "time spent per project"
+  "temps passé par projet": "time spent per project",
+  "matériau PBR depuis la photo": "PBR material from photo",
+  "relief : le clair dépasse": "relief: light is raised",
+  "relief : le clair est creux": "relief: light is recessed",
+  "Couleur sans éclairage (albedo), normale, hauteur et rugosité, à côté de la photo": "Unlit color (albedo), normal, height and roughness, next to the photo",
+  "cartes créées": "maps created"
 }
