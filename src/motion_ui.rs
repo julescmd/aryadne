@@ -106,6 +106,7 @@ fn layer_color(k: &Kind) -> Color32 {
         Kind::Text { .. } => crate::theme::ws_color("2d").unwrap_or(p.accent),
         Kind::Rect { .. } | Kind::Ellipse { .. } => p.accent,
         Kind::Image { .. } => crate::theme::ws_color("3d").unwrap_or(p.info),
+        Kind::Compo { .. } => crate::theme::ws_color("motion").unwrap_or(p.accent),
     }
 }
 
@@ -115,6 +116,7 @@ fn layer_icon(k: &Kind) -> &'static str {
         Kind::Rect { .. } => l::SQUARE,
         Kind::Ellipse { .. } => l::CIRCLE,
         Kind::Image { .. } => l::IMAGE,
+        Kind::Compo { .. } => l::FILM,
     }
 }
 
@@ -234,6 +236,7 @@ impl Editor {
             Kind::Rect { .. } => "Rectangle",
             Kind::Ellipse { .. } => "Ellipse",
             Kind::Image { .. } => "Image",
+            Kind::Compo { path } => path.rsplit('/').next().unwrap_or("Composition").trim_end_matches(".arymotion"),
         };
         let name = self.compo.fresh_name(&crate::i18n::t(base));
         let mut layer = Layer::new(&name, kind, &self.compo);
@@ -478,6 +481,20 @@ impl Editor {
                 if ui.add(egui::Button::new(egui::RichText::new(l::IMAGE_PLUS).size(14.0)).min_size(egui::vec2(24.0, 20.0))).on_hover_text(crate::i18n::t("Image…")).clicked() {
                     self.add_image();
                 }
+                let me = self.path.clone();
+                let others: Vec<String> = self.comps.iter().filter(|r| !me.ends_with(r.as_str())).cloned().collect();
+                ui.add_enabled_ui(!others.is_empty(), |ui| {
+                    ui.menu_button(egui::RichText::new(l::FILM).size(14.0), |ui| {
+                        for r in &others {
+                            if ui.button(r).clicked() {
+                                self.add_layer(Kind::Compo { path: r.clone() }, Some([c.0, c.1]));
+                                ui.close();
+                            }
+                        }
+                    })
+                    .response
+                    .on_hover_text(crate::i18n::t("Précomposition : une autre composition du coffre, jouée comme un calque"));
+                });
             });
             section(ui, "Préréglages d'animation");
             let has_sel = self.sel.is_some();
@@ -964,6 +981,17 @@ impl Editor {
                 Kind::Image { path } => {
                     section(ui, "Image");
                     ui.label(egui::RichText::new(path.as_str()).size(11.5).color(p.muted));
+                }
+                Kind::Compo { path } => {
+                    section(ui, "Précomposition");
+                    ui.label(egui::RichText::new(path.as_str()).size(11.5).color(p.muted));
+                    if ui.button(format!("{}  {}", l::EXTERNAL_LINK, crate::i18n::t("ouvrir la précomposition"))).clicked() {
+                        self.open_request = Some(path.clone());
+                    }
+                    if ui.button(format!("{}  {}", l::REFRESH_CW, crate::i18n::t("recharger"))).on_hover_text(crate::i18n::t("Relit la précomposition après l'avoir modifiée")).clicked() {
+                        self.cache.forget_compos();
+                        changed = true;
+                    }
                 }
             }
             if matches!(lay.kind, Kind::Text { .. }) {

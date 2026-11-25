@@ -178,6 +178,11 @@ pub enum Kind {
         /// Chemin dans le coffre
         path: String,
     },
+    /// Précomposition : une autre composition Motion du coffre, jouée depuis le début du calque
+    Compo {
+        /// Chemin dans le coffre
+        path: String,
+    },
 }
 
 impl Kind {
@@ -187,6 +192,7 @@ impl Kind {
             Kind::Rect { .. } => "rectangle",
             Kind::Ellipse { .. } => "ellipse",
             Kind::Image { .. } => "image",
+            Kind::Compo { .. } => "composition",
         }
     }
 }
@@ -796,11 +802,31 @@ pub struct Cache {
     /// Contenus de calques déjà dessinés (formes, textes immobiles), par contenu et résolution
     bitmaps: HashMap<(u64, u32), Arc<Bitmap>>,
     root: PathBuf,
+    /// Précompositions lues (chemin → composition)
+    compos: HashMap<String, Option<Arc<Compo>>>,
+    /// Profondeur des précompositions en cours (une composition qui se contient elle-même s'arrête là)
+    depth: u32,
 }
 
 impl Cache {
     pub fn new(root: &Path) -> Cache {
-        Cache { images: HashMap::new(), bitmaps: HashMap::new(), root: root.to_path_buf() }
+        Cache { images: HashMap::new(), bitmaps: HashMap::new(), root: root.to_path_buf(), compos: HashMap::new(), depth: 0 }
+    }
+
+    pub fn compo(&mut self, rel: &str) -> Option<Arc<Compo>> {
+        let root = self.root.clone();
+        self.compos
+            .entry(rel.to_string())
+            .or_insert_with(|| {
+                let p = crate::vault::safe(&root.to_string_lossy(), rel).ok()?;
+                Compo::read(&p).ok().map(Arc::new)
+            })
+            .clone()
+    }
+
+    /// Oublie les précompositions lues (l'une d'elles a pu changer)
+    pub fn forget_compos(&mut self) {
+        self.compos.clear();
     }
 
     pub fn image(&mut self, rel: &str) -> Option<Arc<image::RgbaImage>> {
@@ -827,6 +853,7 @@ pub fn size(l: &Layer, cache: &mut Cache) -> [f32; 2] {
         }
         Kind::Rect { w, h, .. } | Kind::Ellipse { w, h, .. } => [*w, *h],
         Kind::Image { path } => cache.image(path).map(|i| [i.width() as f32, i.height() as f32]).unwrap_or([200.0, 120.0]),
+        Kind::Compo { path } => cache.compo(path).map(|c| [c.w as f32, c.h as f32]).unwrap_or([400.0, 225.0]),
     }
 }
 
@@ -899,6 +926,19 @@ fn bitmap(l: &Layer, t: f32, k: f32, cache: &mut Cache) -> Option<Bitmap> {
             let img = cache.image(path)?;
             let (w, h) = (img.width() as f32, img.height() as f32);
             Some(Bitmap { img: (*img).clone(), ox: -w / 2.0, oy: -h / 2.0, k: 1.0 })
+        }
+        Kind::Compo { path } => {
+            if cache.depth >= 4 {
+                return None;
+            }
+            let sub = cache.compo(path)?;
+            // Le temps de la précomposition part du début du calque ; après sa fin, la dernière image reste
+            let local = (t - l.start).clamp(0.0, (sub.duration - 1.0 / sub.fps.max(1.0)).max(0.0));
+            cache.depth += 1;
+            // Rendue sur fond transparent (son fond ne recouvre pas la composition)
+            let img = render(&sub, local, k, cache);
+            cache.depth -= 1;
+            Some(Bitmap { img, ox: -(sub.w as f32) / 2.0, oy: -(sub.h as f32) / 2.0, k })
         }
         Kind::Text { text, size, color, font: fname, tracking, align } => {
             use ab_glyph::{Font, ScaleFont};
@@ -1153,6 +1193,7 @@ fn prep_layer(c: &Compo, li: usize, t: f32, scale: f32, cache: &mut Cache, (w, h
     let k = (scale * x.max_scale()).clamp(0.02, 8.0);
     // Un contenu qui ne bouge pas à l'intérieur du calque se dessine une fois (l'export reste rapide)
     let still = match (&l.kind, &l.reveal) {
+        (Kind::Compo { .. }, _) => false,
         (Kind::Text { text, .. }, Some(r)) => t - l.start >= text.chars().count() as f32 * r.delay + r.dur,
         _ => true,
     };
@@ -1218,7 +1259,8 @@ fn matte_map(c: &Compo, li: usize, t: f32, scale: f32, cache: &mut Cache, (w, h)
 fn render_one(c: &Compo, t: f32, scale: f32, cache: &mut Cache) -> image::RgbaImage {
     use rayon::prelude::*;
     let (w, h) = (((c.w as f32 * scale).round() as u32).max(1), ((c.h as f32 * scale).round() as u32).max(1));
-    let mut out = image::RgbaImage::from_pixel(w, h, image::Rgba([c.bg[0], c.bg[1], c.bg[2], 255]));
+    // Une précomposition se rend sur fond transparent
+    let mut out = image::RgbaImage::from_pixel(w, h, image::Rgba([c.bg[0], c.bg[1], c.bg[2], if cache.depth > 0 { 0 } else { 255 }]));
     // Les calques qui servent de cache au calque d'en dessous ne se dessinent pas eux-mêmes
     let mattes: Vec<usize> = (1..c.layers.len()).filter(|&i| c.layers[i].matte.is_some()).map(|i| i - 1).collect();
     for li in (0..c.layers.len()).rev() {
@@ -1242,10 +1284,14 @@ fn render_one(c: &Compo, t: f32, scale: f32, cache: &mut Cache) -> image::RgbaIm
                     continue;
                 }
                 let i = px as usize * 4;
+                // « Par-dessus » avec l'alpha du fond (opaque dans une composition, transparent dans une précomposition)
+                let da = row[i + 3] as f32 / 255.0;
+                let oa = a + da * (1.0 - a);
                 for ch in 0..3 {
                     let src = s[ch] / s[3].max(1e-6);
-                    row[i + ch] = (row[i + ch] as f32 * (1.0 - a) + src * a).round().clamp(0.0, 255.0) as u8;
+                    row[i + ch] = ((src * a + row[i + ch] as f32 * da * (1.0 - a)) / oa.max(1e-6)).round().clamp(0.0, 255.0) as u8;
                 }
+                row[i + 3] = (oa * 255.0).round().clamp(0.0, 255.0) as u8;
             }
         });
     }
@@ -1516,6 +1562,31 @@ mod tests {
         assert!(lit(&sharp) <= 12, "{}", lit(&sharp));
         assert!(lit(&soft) > 12, "{}", lit(&soft));
         assert!(soft.get_pixel(100, 20)[0] < 255);
+    }
+
+    #[test]
+    fn precomposition() {
+        let root = std::env::temp_dir().join(format!("ary-precomp-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        // La précomposition : 40 × 20, fond vert, un carré rouge de 10 px au centre
+        let mut sub = Compo { layers: vec![], ..Compo::default() };
+        (sub.w, sub.h, sub.bg, sub.duration) = (40, 20, [0, 255, 0], 2.0);
+        let mut r = Layer::new("r", Kind::Rect { w: 10.0, h: 10.0, radius: 0.0, color: [255, 0, 0] }, &sub);
+        r.pos.v = [20.0, 10.0];
+        sub.layers = vec![r];
+        sub.write(&root.join("sub.arymotion")).unwrap();
+        let mut c = Compo { layers: vec![], ..Compo::default() };
+        (c.w, c.h, c.bg) = (100, 40, [0, 0, 255]);
+        let mut l = Layer::new("p", Kind::Compo { path: "sub.arymotion".into() }, &c);
+        l.pos.v = [50.0, 20.0];
+        c.layers = vec![l];
+        let mut cache = Cache::new(&root);
+        let img = render(&c, 0.5, 1.0, &mut cache);
+        assert_eq!(img.get_pixel(50, 20).0, [255, 0, 0, 255]);
+        // Là où la précomposition n'a que son fond : le bleu de la composition (le vert ne recouvre pas)
+        assert_eq!(img.get_pixel(35, 20).0, [0, 0, 255, 255]);
+        assert_eq!(img.get_pixel(5, 5).0, [0, 0, 255, 255]);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

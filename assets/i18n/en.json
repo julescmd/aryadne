@@ -2467,5 +2467,10 @@
   "Contrainte « viser » : l'objet se tourne toujours vers la cible, même animée. Sa rotation X et Y ne se règle plus à la main.": "Aim constraint: the object always turns toward the target, even animated. Its X and Y rotation can no longer be set by hand.",
   "Pistes séparées (stems)": "Separate tracks (stems)",
   "Un WAV par piste, tous de la durée de la session : ils se recalent tels quels dans un autre logiciel": "One WAV per track, each as long as the session: they line up as-is in another app",
-  "Aucune piste à exporter.": "No track to export."
+  "Aucune piste à exporter.": "No track to export.",
+  "Précomposition": "Precomp",
+  "ouvrir la précomposition": "open the precomp",
+  "recharger": "reload",
+  "Relit la précomposition après l'avoir modifiée": "Reads the precomp again after you've changed it",
+  "Précomposition : une autre composition du coffre, jouée comme un calque": "Precomp: another composition from the vault, played as a layer"
 }
