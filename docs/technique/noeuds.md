@@ -220,7 +220,7 @@ pub trait Solver: Send + Sync {
 
 Un solveur fait avancer un état d'un pas de temps. Il reçoit l'état **en colonnes** et le modifie sur place. C'est le même contrat pour un solveur sur le processeur et sur la carte graphique, où les colonnes deviennent des tampons.
 
-`SolverParams` : `iterations`, `compliance`, `damping`, `floor`, `ball`, `cube`, `grip`, et pour le tissu sur carte graphique `stiffness`, `bending`, `substeps`.
+`SolverParams` : `iterations`, `compliance`, `damping`, `floor`, `ball`, `cube`, `grip` (le frottement), et pour le tissu sur carte graphique `stiffness`, `bending`, `substeps`, `shear`, `calm`, `thickness`.
 
 Deux solveurs sont inscrits dans `geo::solvers()` :
 

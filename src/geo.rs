@@ -543,7 +543,7 @@ impl Solver for VbdCloth {
             return;
         }
         let t0 = std::time::Instant::now();
-        let par = crate::gpucloth::Params { stiffness: p.stiffness, shear: p.shear, bending: p.bending, damping: p.damping, calm: p.calm, iterations: p.iterations, substeps: p.substeps, rho: crate::gpucloth::RHO, floor: p.floor, ball: p.ball, cube: p.cube, friction: p.grip, ..Default::default() }.with_levels();
+        let par = crate::gpucloth::Params { stiffness: p.stiffness, shear: p.shear, bending: p.bending, damping: p.damping, calm: p.calm, iterations: p.iterations, substeps: p.substeps, rho: crate::gpucloth::RHO, floor: p.floor, ball: p.ball, cube: p.cube, friction: p.grip, thickness: p.thickness, ..Default::default() }.with_levels();
         let version = |g: &Geo, name: &str| g.col(name).map(|c| c.version).unwrap_or(0);
         let inputs = (version(g, "P"), version(g, "v"), dt.to_bits(), n);
         // Le moteur calcule par tranches : plutôt que d'attendre la carte, on lui rend la main, et
@@ -1787,26 +1787,28 @@ pub fn starter() -> Graph {
 }
 
 /// Exemples proposés dans l'éditeur : chacun montre une façon de se servir des nodes de géométrie.
-pub const EXAMPLES: [&str; 4] = ["tissu sur une boule", "tissu sur la carte graphique", "fontaine de particules", "vagues animées"];
+pub const EXAMPLES: [&str; 5] = ["tissu sur une boule", "tissu sur la carte graphique", "tissu qui se replie", "fontaine de particules", "vagues animées"];
 
 pub fn example(name: &str) -> Option<Graph> {
     match name {
         "tissu sur une boule" => Some(starter()),
         "tissu sur la carte graphique" => Some(cloth_gpu()),
+        "tissu qui se replie" => Some(cloth_fold()),
         "fontaine de particules" => Some(fountain()),
         "vagues animées" => Some(waves()),
         _ => None,
     }
 }
 
-/// Le tissu de départ, plus fin, calculé par le solveur sur carte graphique, et posé sur une
-/// boule et une boîte.
+/// Le tissu de départ, plus fin et sans point fixe, calculé par le solveur sur carte graphique :
+/// une nappe lâchée sur une boule et une boîte, qui les épouse en retombant.
 fn cloth_gpu() -> Graph {
     let mut g = starter();
     let id = |g: &Graph, op: &str| g.nodes.iter().find(|n| n.op == op).map(|n| n.id).unwrap_or(0);
     let (grid, solver) = (id(&g, "geo_grid"), id(&g, "sim_solver"));
     set_value(&mut g, grid, 2, [48.0; 4]);
     set_value(&mut g, grid, 3, [48.0; 4]);
+    unpin(&mut g);
     set_param(&mut g, solver, "solveur", SOLVER_NAMES[1]);
     set_value(&mut g, solver, 1, [32.0; 4]);
     set_value(&mut g, solver, 6, [0.25, 0.7, 0.1, 0.0]);
@@ -1821,6 +1823,50 @@ fn cloth_gpu() -> Graph {
     let ball = id(&g, "geo_sphere");
     set_value(&mut g, ball, 1, [0.48; 4]);
     g
+}
+
+/// Un tissu debout, un peu penché, lâché sur le sol : il s'affaisse et se replie sur lui-même,
+/// sans se traverser (auto-collision), calculé par le solveur sur carte graphique.
+fn cloth_fold() -> Graph {
+    let mut g = starter();
+    let id = |g: &Graph, op: &str| g.nodes.iter().find(|n| n.op == op).map(|n| n.id).unwrap_or(0);
+    let (grid, lift, solver) = (id(&g, "geo_grid"), id(&g, "geo_transform"), id(&g, "sim_solver"));
+    for k in 0..2 {
+        set_value(&mut g, grid, k, [1.6; 4]);
+        set_value(&mut g, grid, 2 + k, [40.0; 4]);
+    }
+    // Debout, penché de dix degrés, le bas juste au-dessus du sol
+    set_value(&mut g, lift, 1, [0.0, 0.9, 0.0, 0.0]);
+    set_value(&mut g, lift, 2, [80.0, 0.0, 0.0, 0.0]);
+    set_param(&mut g, solver, "solveur", SOLVER_NAMES[1]);
+    set_param(&mut g, solver, "auto-collision", "oui");
+    set_value(&mut g, solver, 7, [0.0; 4]);
+    // Ni boule ni points fixes dans cet exemple
+    let ball = id(&g, "geo_sphere");
+    g.remove(ball);
+    let shown: Vec<u32> = g.nodes.iter().filter(|n| n.op == "geo_transform" && n.id != lift).map(|n| n.id).collect();
+    for node in shown {
+        g.remove(node);
+    }
+    // La teinte de la boule n'a plus rien en entrée ; l'attribut `pin` reste, à zéro partout
+    let orphans: Vec<u32> = g.nodes.iter().filter(|n| n.op == "geo_attr" && !g.links.iter().any(|l| l.to == n.id && l.inp == 0)).map(|n| n.id).collect();
+    for node in orphans {
+        g.remove(node);
+    }
+    unpin(&mut g);
+    g
+}
+
+/// Retire du graphe de départ ce qui épingle les points du fond : l'attribut `pin` reste, à zéro partout.
+fn unpin(g: &mut Graph) {
+    for op in ["position", "sepxyz", "compare"] {
+        if let Some(node) = g.nodes.iter().find(|n| n.op == op).map(|n| n.id) {
+            g.remove(node);
+        }
+    }
+    let pin = g.nodes.iter().find(|n| n.op == "geo_attr" && n.params.get("nom").is_some_and(|p| matches!(p, crate::nodes::Param::S(s) if s == "pin"))).map(|n| n.id).unwrap_or(0);
+    set_value(g, pin, 1, [0.0; 4]);
+    g.frames.clear();
 }
 
 fn hide_thumbs(g: &mut Graph, ids: &[u32]) {
@@ -2221,7 +2267,7 @@ mod tests {
     /// réglage, et l'exemple dédié drape sur la boule et la boîte sans les traverser.
     #[test]
     fn tissu_sur_carte_par_les_nodes() {
-        let check = |g: &Graph, side: usize, frame: i32, ball: ([f32; 3], f32), cube: Option<([f32; 3], [f32; 3])>| {
+        let check = |g: &Graph, side: usize, pinned: usize, frame: i32, ball: ([f32; 3], f32), cube: Option<([f32; 3], [f32; 3])>| {
             let mut eng = Engine::default();
             let end = g.nodes.iter().find(|n| n.op == "sim_out").unwrap().id;
             let first = eng.eval_node(g, end, 0, 1, "").map_err(|x| x.1).unwrap();
@@ -2247,7 +2293,7 @@ mod tests {
                 }
                 low = low.min(p[1]);
             }
-            assert_eq!(pins, side);
+            assert_eq!(pins, pinned);
             assert!(low < 1.2, "le tissu est tombé");
             let (worst, mean) = crate::gpucloth::stretch(&r.edges, &r.ecols["rest"].data[0], &r.vec3("P"));
             assert!(worst < 0.35 && mean < 0.03, "allongement {worst} / {mean}");
@@ -2263,10 +2309,10 @@ mod tests {
         let mut g = starter();
         let solver = g.nodes.iter().find(|n| n.op == "sim_solver").unwrap().id;
         set_param(&mut g, solver, "solveur", SOLVER_NAMES[1]);
-        check(&g, 28, 30, ([0.0, 0.7, 0.0], 0.55), None);
-        // L'exemple dédié : plus fin, avec une boîte
+        check(&g, 28, 28, 30, ([0.0, 0.7, 0.0], 0.55), None);
+        // L'exemple dédié : plus fin, sans point fixe, avec une boîte
         let g = example("tissu sur la carte graphique").unwrap();
-        check(&g, 48, 24, ([0.25, 0.7, 0.1], 0.5), Some(([-0.55, 0.3, 0.0], [0.25, 0.3, 0.4])));
+        check(&g, 48, 0, 24, ([0.25, 0.7, 0.1], 0.5), Some(([-0.55, 0.3, 0.0], [0.25, 0.3, 0.4])));
     }
 
     /// Calcul par tranches : tant que la carte n'a pas fini son pas, le tissu rend la main au
@@ -2333,6 +2379,40 @@ mod tests {
         for name in EXAMPLES {
             example(name).unwrap().save(&std::path::Path::new(&dir).join(format!("{name}.arygeo"))).unwrap();
         }
+    }
+
+    /// L'exemple du tissu qui se replie : il s'affaisse sur le sol, et ses couches restent à une
+    /// épaisseur l'une de l'autre (sans auto-collision, elles se traversent).
+    #[test]
+    fn exemple_du_tissu_qui_se_replie() {
+        let closest = |on: bool| {
+            let mut g = example("tissu qui se replie").unwrap();
+            let solver = g.nodes.iter().find(|n| n.op == "sim_solver").unwrap().id;
+            set_param(&mut g, solver, "auto-collision", if on { "oui" } else { "non" });
+            let end = g.nodes.iter().find(|n| n.op == "sim_out").unwrap().id;
+            let mut eng = Engine::default();
+            let first = eng.eval_node(&g, end, 0, 1, "").map_err(|x| x.1).unwrap();
+            let r = eng.eval_node(&g, end, 0, 70, "").map_err(|x| x.1).unwrap();
+            assert_eq!(r.n, 1600);
+            assert!(r.col("pin").is_none_or(|c| c.data[0].iter().all(|p| *p < 0.5)), "aucun point fixe");
+            let (a, b) = (first.vec3("P"), r.vec3("P"));
+            assert!(b[1].iter().all(|y| y.is_finite() && *y >= -1e-4));
+            assert!(b[1].iter().cloned().fold(0.0, f32::max) < 0.6, "le tissu s'est affaissé");
+            let thick = crate::gpucloth::AUTO_THICK * 1.6 / 39.0;
+            let mut least = f32::MAX;
+            for i in 0..r.n {
+                for j in i + 1..r.n {
+                    let rest = (0..3).map(|k| (a[k][i] - a[k][j]).powi(2)).sum::<f32>().sqrt();
+                    if rest >= 2.1 * thick {
+                        least = least.min((0..3).map(|k| (b[k][i] - b[k][j]).powi(2)).sum::<f32>().sqrt());
+                    }
+                }
+            }
+            least / thick
+        };
+        let (with, without) = (closest(true), closest(false));
+        assert!(with > 0.75, "couches à {with} épaisseur avec l'auto-collision");
+        assert!(without < 0.3, "sans auto-collision, les couches devraient se traverser ({without})");
     }
 
     /// La comparaison à budget égal donne des nombres sensés (les vrais chiffres : `aryadne --banc-gpu`).

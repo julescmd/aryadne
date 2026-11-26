@@ -135,7 +135,7 @@ Ses premières idées au classement :
 
 **Dans le code.** Les points 1, 2 et 4 sont faits dans `gpucloth.rs`. Le point 3 ne l'est pas : les obstacles sont un sol, une boule et une boîte.
 
-Piège annoncé pour wgpu : le coût fixe de chaque lancement. Huit couleurs fois mille itérations font huit mille lancements par image. Le rangement par grappes, en cours d'essai, attaque ce problème.
+Piège annoncé pour wgpu : le coût fixe de chaque lancement. Huit couleurs fois mille itérations font huit mille lancements par image. Le rangement par grappes a été essayé puis retiré (plus lent sur une vraie carte). Ce qui marche : moins de couleurs (quatre sur une grille), des niveaux grossiers en passes de Jacobi, et les petits niveaux traités d'un seul lancement. Voir [Simulation sur carte graphique](simulation-gpu.md).
 
 ### 5. Hors piste et architecture
 
@@ -161,7 +161,7 @@ Le rapport propose de faire **le graphe avant les fluides**, parce que la façon
 Synthèse des cinq ordres proposés, confrontée à l'état du code. C'est une lecture, pas une décision.
 
 1. **Mesurer.** Lancer le banc sur la machine de travail, et recaler les rapports sur ces chiffres. Les rapports listent ce qui manque encore : débit de relecture, coût fixe d'un lancement, reproductibilité d'un noyau.
-2. **Finir le tissu.** Auto-collision, collision avec un personnage (champ de distance), cache compressé.
+2. **Finir le tissu.** L'auto-collision entre sommets est faite ; restent l'auto-collision par triangles (épaisseur fine), la collision avec un personnage (champ de distance), le cache compressé.
 3. **Afficher l'état du solveur sans relecture.** Cela demande la vue sur carte graphique : c'est l'étape 3 du plan. Elle sert en même temps les gros modèles et les simulations.
 4. **Fixer le format de cache** avant d'écrire d'autres solveurs.
 5. **Fumée dense**, puis le solveur de pression, puis la grille creuse.

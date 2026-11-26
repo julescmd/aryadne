@@ -4081,5 +4081,6 @@
   "Au contact des obstacles : 0 glisse, 0,4 un coton sur du bois, 1 accroche fort": "Against obstacles: 0 slides, 0.4 cotton on wood, 1 grips hard",
   "Le tissu ne se traverse plus lui-même quand il se replie (plus lent)": "The cloth no longer passes through itself when it folds (slower)",
   "Distance gardée entre deux couches du tissu, en mètres. 0 : choisie d'après la taille des mailles": "Distance kept between two layers of the cloth, in metres. 0: chosen from the mesh size",
-  "réduire": "minimize"
+  "réduire": "minimize",
+  "tissu qui se replie": "cloth folding onto itself"
 }

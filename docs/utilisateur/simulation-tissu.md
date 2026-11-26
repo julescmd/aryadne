@@ -8,7 +8,7 @@ Le tissu se simule dans un graphe de [géométrie en nœuds](noeuds-geometrie.md
 2. Le graphe de départ est déjà un tissu qui tombe sur une boule.
 3. Souris sur l'aperçu, `Espace` : la simulation se lit.
 
-Pour l'essayer sur la carte graphique, ouvre l'exemple « Cloth on the graphics card ».
+Pour l'essayer sur la carte graphique, ouvre l'exemple « Cloth on the graphics card » : une nappe lâchée sur une boule et une boîte. L'exemple « Cloth folding onto itself » montre l'auto-collision.
 
 ## Ce qu'il faut dans le graphe
 

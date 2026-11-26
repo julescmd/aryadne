@@ -41,35 +41,55 @@ Si la fumée donne des valeurs non finies, le banc le signale : c'est une erreur
 
 `VBD cloth (one pass = every vertex updated once)`. Deux tailles : 250 000 et 1 million de sommets.
 
-| Colonne | Sens |
+La première ligne mesure **une passe seule** :
+
+| Valeur | Sens |
 |---|---|
 | `Vertices` | Nombre de points du tissu |
-| `Colors` | Nombre de couleurs (voir [Simulation de tissu](simulation-tissu.md#ce-que-dit-laperçu)) |
+| `Colors` | Nombre de couleurs (voir [Simulation de tissu](simulation-tissu.md#ce-que-dit-laperçu)). Une grille avec diagonales en a 4 |
 | `Per pass` | Temps d'une passe sur la carte |
-| `Passes per second` | Combien de passes par seconde |
+| `Dispatches per pass` | Lancements de calcul par passe. Sur un petit tissu, ce sont eux qui coûtent : chaque lancement a un coût fixe |
 | `Per vertex per pass` | Temps ramené à un sommet |
 | `GB/s` | Débit mémoire pendant le calcul |
+
+Puis des **images entières**, découpées comme le solveur le fait :
+
+| Ligne | Sens |
+|---|---|
+| `One frame at a budget of 16 passes, without levels` | Beaucoup de sous-pas d'une passe |
+| `... with coarse levels` | Moins de sous-pas, chacun avec sa correction d'ensemble. C'est le réglage du nœud |
+| `One frame at a budget of 32 passes ...` | Les deux mêmes mesures, au double du budget |
+| `... with levels and self-collision` | La même image avec l'auto-collision. La fin de la ligne donne **ce qu'elle coûte par sous-pas**, à côté du coût d'un sous-pas sans elle |
+
+Chaque ligne donne le temps de l'image, le nombre de `substeps` et le nombre de `dispatches`.
+
+Le budget compte tout ce que coûte un sous-pas : sa passe, l'amortissement des plis, la correction d'ensemble, l'auto-collision. À budget égal, une image avec niveaux fait donc moins de sous-pas, et une image avec auto-collision encore moins.
+
+Le reste :
+
+| Valeur | Sens |
+|---|---|
+| `Coarse levels` | Nombre de versions plus grossières du tissu, et coût d'une correction en passes |
 | `At 24 frames per second` › `Passes per frame` | Combien de passes tiennent dans une image à 24 images par seconde |
-| `One frame of 32 passes` | Temps d'une image type : 4 sous-pas de 8 itérations |
 | `Readback` | Temps pour relire les positions depuis la carte |
 | `CPU` › `Per pass` | Le même calcul sur le processeur, pour comparer |
-| `Setup` | Préparation au chargement : voisinages, couleurs, rangement |
+| `Setup` | Préparation au chargement : voisinages, couleurs, rangement, niveaux grossiers |
 | `Memory on the card` | Mémoire occupée par ce tissu |
 
 Si un tissu ne tient pas sur la carte : « Cloth of N vertices: it does not fit on this card, measured on the CPU ».
 
-### 4. VBD contre XPBD
+### 4. Raideur et contacts, à budget égal
 
-`VBD versus XPBD, at an equal number of passes`. Les deux méthodes reçoivent le même budget de calcul. Le banc compare ce qu'elles en font. Cette partie prend moins d'une minute.
+`VBD, without and with coarse levels, against XPBD, at an equal number of passes`. Les trois méthodes reçoivent le même budget de calcul : 16, 32 puis 64 passes par image. Le banc compare ce qu'elles en font. Cette partie prend moins d'une minute, et tourne sur le processeur (la carte donne le même résultat).
 
-| Essai | Mesures |
+| Essai | Ce qu'il dit |
 |---|---|
-| `Hanging cloth, fully converged` | `Elongation` (de combien le tissu s'allonge sous son poids), `Elastic energy` |
-| `Falling on a ball` | `Worst edge` (le fil le plus étiré), `Mean` |
+| Tissu pendu | `Stiffness obtained` : la raideur réellement obtenue, en part de celle demandée. 100 % : le calcul a convergé. `Elongation` : de combien le tissu s'allonge sous son poids |
+| `Falling on a ball` | `Worst edge` : le fil le plus étiré pendant la chute. `Mean` : l'étirement moyen à la fin. Plus c'est bas, plus les contacts sont propres |
 
-Colonnes : `Passes`, `Stiffness obtained`, `Elongation`, `Energy`.
+Chaque ligne donne aussi le nombre de `substeps` et le `real cost` du découpage, en passes.
 
-Un tissu qui s'allonge moins, à budget égal, est une méthode qui converge mieux.
+**Ce qu'il faut regarder.** La ligne `VBD + niveaux` doit donner une raideur bien plus haute que `VBD` seul, et une pire arête qui n'est pas plus mauvaise.
 
 ### 5. Contrôles
 
