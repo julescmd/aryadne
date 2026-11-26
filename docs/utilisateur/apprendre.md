@@ -52,6 +52,7 @@ Chaque étape est une carte avec une case. L'étape en cours est entourée.
 
 - La mention **Checked automatically** veut dire que la case se coche toute seule quand le geste est fait : le bon fichier ouvert, le bon nœud posé, la lecture arrivée à une image…
 - Les étapes vérifiées se cochent dans l'ordre. Une étape n'est regardée que quand celles d'avant sont faites.
+- Une étape qui suit un bouton **Try it yourself** attend que tu aies cliqué ce bouton.
 - Sans cette mention, coche la case toi-même quand c'est fait.
 - Tu peux toujours cocher ou décocher une case à la main, d'un clic.
 

@@ -82,6 +82,7 @@ Le moteur affiche les vérifications qu'il ne connaît pas comme une case à coc
 Précisions du moteur :
 
 - Les étapes vérifiées se cochent **dans l'ordre**. Une étape n'est regardée que si les étapes vérifiées d'avant sont faites. Écris donc les étapes dans l'ordre des gestes. Les étapes sans `verifier:` ne retiennent pas les suivantes.
+- Une étape vérifiée placée après un bloc `essayer` attend que le bouton ait servi. Un autre fichier déjà ouvert ne coche donc rien avant de commencer.
 - `graphe.contient` accepte le nom interne (`sim_solver`), sa fin (`solver`) ou le nom affiché (`Solveur`, `Solver`), sans tenir compte des majuscules ni des accents.
 - `graphe.noeuds` et `graphe.liens` comptent tous les niveaux : la racine, l'intérieur des groupes, les graphes des calques d'un matériau.
 - `fichier.enregistre` est faux pour un fichier sans titre (`untitled`) : il faut `Ctrl+S` pour lui donner sa place. Un fichier créé par `essayer` a déjà sa place.

@@ -37,7 +37,7 @@ Un bloc mal écrit ne casse rien : un bloc jamais refermé, un mot-clé inconnu,
 | `text` | le texte du fichier ouvert |
 | `layers` | les calques de l'image, ou les formes de premier niveau du dessin vectoriel |
 
-`learn::newly_done` applique l'ordre : une étape vérifiée n'est regardée que si les étapes vérifiées d'avant sont faites. Les étapes à cocher à la main ne retiennent pas les suivantes. Le panneau appelle cette fonction à chaque image où il est affiché.
+`learn::newly_done` applique l'ordre : une étape vérifiée n'est regardée que si les étapes vérifiées d'avant sont faites. Les étapes à cocher à la main ne retiennent pas les suivantes. Une étape placée après un bloc `essayer` attend que son bouton ait servi (`Lesson::step_starts`). Le panneau appelle cette fonction à chaque image où il est affiché.
 
 `GraphStats::contains` accepte le nom interne d'un node (`sim_solver`), sa fin (`solver`), ou son nom affiché en français ou en anglais.
 

@@ -409,6 +409,29 @@ pub fn parse_blocks(body: &str) -> Vec<Block> {
     out
 }
 
+/// Sépare les tableaux du reste d'un texte Markdown : (est-ce un tableau ?, texte). Le panneau est
+/// étroit : un tableau large défile de côté, seul, sans élargir les paragraphes qui l'entourent.
+pub fn split_tables(text: &str) -> Vec<(bool, String)> {
+    let mut out: Vec<(bool, String)> = vec![];
+    let mut fence = false;
+    for line in text.lines() {
+        let t = line.trim_start();
+        if t.starts_with("```") {
+            fence = !fence;
+        }
+        let table = !fence && t.starts_with('|') && !t.starts_with("```");
+        match out.last_mut() {
+            Some((kind, part)) if *kind == table => {
+                part.push('\n');
+                part.push_str(line);
+            }
+            _ => out.push((table, line.to_string())),
+        }
+    }
+    out.retain(|(_, part)| !part.trim().is_empty());
+    out
+}
+
 /// Une leçon lue : son en-tête et ses blocs.
 #[derive(Clone, Debug, Default)]
 pub struct Lesson {
@@ -797,19 +820,44 @@ impl Check {
 /// `done` : celles déjà cochées. Les étapes vérifiées se cochent dans l'ordre : une étape n'est
 /// regardée que si les étapes vérifiées d'avant sont faites (sinon « fichier enregistré » serait vrai
 /// avant même d'avoir commencé). Les étapes à cocher à la main ne retiennent pas les suivantes.
-pub fn newly_done(steps: &[Option<Check>], done: &[bool], state: &State) -> Vec<usize> {
+///
+/// `ready` : l'étape peut-elle être regardée ? Une étape placée après un bloc `essayer` attend que
+/// son bouton ait servi (sinon un autre fichier déjà ouvert cocherait l'étape avant de commencer).
+pub fn newly_done(steps: &[Option<Check>], done: &[bool], ready: &[bool], state: &State) -> Vec<usize> {
     let mut out = vec![];
     for (k, c) in steps.iter().enumerate() {
         let Some(c) = c.as_ref().filter(|c| c.automatic()) else { continue };
         if done.get(k).copied().unwrap_or(false) {
             continue;
         }
-        if !c.holds(state) {
+        if !ready.get(k).copied().unwrap_or(true) || !c.holds(state) {
             break;
         }
         out.push(k);
     }
     out
+}
+
+impl Lesson {
+    /// Pour chaque étape, le rang du dernier bloc `essayer` valide placé avant elle (None : aucun).
+    pub fn step_starts(&self) -> Vec<Option<usize>> {
+        let mut out = vec![];
+        let mut last = None;
+        let mut k = 0;
+        for b in &self.blocks {
+            match b {
+                Block::Essayer(r) => {
+                    if r.is_ok() {
+                        last = Some(k);
+                    }
+                    k += 1;
+                }
+                Block::Etape { .. } => out.push(last),
+                _ => {}
+            }
+        }
+        out
+    }
 }
 
 // ---------------------------------------------------------------------------------------------- progression
@@ -1085,6 +1133,17 @@ mod tests {
     }
 
     #[test]
+    fn tableaux_a_part() {
+        let parts = split_tables("avant\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\naprès\n```\n| pas un tableau |\n```\nfin");
+        assert_eq!(parts.len(), 3);
+        assert_eq!(parts[0], (false, "avant\n".to_string()));
+        assert!(parts[1].0 && parts[1].1.lines().count() == 3);
+        assert!(!parts[2].0 && parts[2].1.contains("| pas un tableau |") && parts[2].1.ends_with("fin"));
+        assert_eq!(split_tables("texte seul"), vec![(false, "texte seul".to_string())]);
+        assert!(split_tables("").is_empty());
+    }
+
+    #[test]
     fn lecture_des_verifications() {
         let table = [
             ("onglet = 3d", Check::Onglet("3d".into())),
@@ -1182,19 +1241,23 @@ mod tests {
         let steps = vec![None, Some(Check::FichierOuvert("md".into())), Some(Check::Inconnue("x".into())), Some(Check::TexteContient("bonjour".into())), Some(Check::FichierEnregistre)];
         // Un autre fichier ouvert et enregistré : rien ne se coche (la première étape vérifiée attend)
         let other = State { ext: "aryscene".into(), saved: true, ..Default::default() };
-        assert!(newly_done(&steps, &[false; 5], &other).is_empty());
+        assert!(newly_done(&steps, &[false; 5], &[], &other).is_empty());
         // La note ouverte : la première étape vérifiée seulement ; les étapes à la main ne retiennent rien
         let open = State { ext: "md".into(), saved: true, text: Some(""), ..Default::default() };
-        assert_eq!(newly_done(&steps, &[false; 5], &open), vec![1]);
+        assert_eq!(newly_done(&steps, &[false; 5], &[], &open), vec![1]);
         // Le mot écrit, pas encore enregistré : jusqu'à l'étape du texte
         let typed = State { ext: "md".into(), saved: false, text: Some("Bonjour"), ..Default::default() };
-        assert_eq!(newly_done(&steps, &[false, true, false, false, false], &typed), vec![3]);
+        assert_eq!(newly_done(&steps, &[false, true, false, false, false], &[], &typed), vec![3]);
         // Tout est vrai d'un coup : toutes les étapes vérifiées, dans l'ordre
         let all = State { ext: "md".into(), saved: true, text: Some("Bonjour"), ..Default::default() };
-        assert_eq!(newly_done(&steps, &[false; 5], &all), vec![1, 3, 4]);
+        assert_eq!(newly_done(&steps, &[false; 5], &[], &all), vec![1, 3, 4]);
         // Une étape vérifiée cochée à la main ne bloque pas la suite
-        assert_eq!(newly_done(&steps, &[false, true, false, true, false], &other), vec![4]);
-        assert!(newly_done(&steps, &[true; 5], &all).is_empty());
+        assert_eq!(newly_done(&steps, &[false, true, false, true, false], &[], &other), vec![4]);
+        assert!(newly_done(&steps, &[true; 5], &[], &all).is_empty());
+        // Une étape placée après un bloc `essayer` attend que le bouton ait servi
+        assert_eq!(newly_done(&steps, &[false; 5], &[true, true, true, false, false], &all), vec![1]);
+        let l = Lesson::parse("```etape\na\n```\n```essayer\nnouveau: md\n```\n```etape\nb\n```\n```essayer\nnouveau: docx\n```\n```etape\nc\n```\n```essayer\nexemple: or\n```\n```etape\nd\n```");
+        assert_eq!(l.step_starts(), vec![None, Some(0), Some(0), Some(2)]);
     }
 
     #[test]

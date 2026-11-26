@@ -122,25 +122,41 @@ fn card<R>(ui: &mut egui::Ui, edge: Option<egui::Color32>, body: impl FnOnce(&mu
 }
 
 /// Texte Markdown d'une leçon, rendu comme une note en lecture. Rend le lien cliqué.
+/// Le texte tient dans la largeur du panneau ; un tableau trop large défile de côté sans élargir la page.
 fn markdown(ui: &mut egui::Ui, base: &str, salt: impl std::hash::Hash + std::fmt::Debug, text: &str) -> Option<String> {
     thread_local! {
         static NONE: HashSet<String> = HashSet::new();
     }
     let mut out = None;
-    // Le texte tient dans la largeur du panneau ; un tableau trop large défile de côté sans élargir la page
     let w = ui.available_width();
     ui.push_id(salt, |ui| {
-        egui::ScrollArea::horizontal().auto_shrink([false, true]).max_width(w).show(ui, |ui| {
-            ui.set_max_width(w);
-            preview::set_base(base);
-            let shown = NONE.with(|none| preview::show_doc(ui, text, none, none));
-            preview::set_base("");
-            if let Some(preview::Out::Open(t)) = shown {
-                out = Some(t);
-            }
-        });
+        for (k, (table, part)) in learn::split_tables(text).into_iter().enumerate() {
+            let mut show = |ui: &mut egui::Ui| {
+                preview::set_base(base);
+                let shown = NONE.with(|none| preview::show_doc(ui, &part, none, none));
+                preview::set_base("");
+                if let Some(preview::Out::Open(t)) = shown {
+                    out = Some(t);
+                }
+            };
+            ui.push_id(k, |ui| {
+                if table {
+                    egui::ScrollArea::horizontal().auto_shrink([false, true]).max_width(w).show(ui, show);
+                } else {
+                    ui.scope(|ui| {
+                        ui.set_max_width(w);
+                        show(ui);
+                    });
+                }
+            });
+        }
     });
     out
+}
+
+/// Les deux-points : précédés d'une espace en français, collés en anglais.
+fn colon() -> &'static str {
+    if crate::i18n::current() == "fr" { " :" } else { ":" }
 }
 
 /// Ce qu'ouvre un bloc `essayer`, en une ligne.
@@ -151,10 +167,10 @@ fn source_label(src: &Source) -> String {
                 "md" => crate::i18n::t_mid("note"),
                 e => format!(".{e}"),
             });
-            format!("{} : {kind}", crate::i18n::t("nouveau fichier"))
+            format!("{}{} {kind}", crate::i18n::t("nouveau fichier"), colon())
         }
-        Source::Exemple(n) => format!("{} : {n}", crate::i18n::t("exemple")),
-        Source::Fichier(f) => format!("{} : {}", crate::i18n::t("fichier fourni"), f.rsplit('/').next().unwrap_or(f)),
+        Source::Exemple(n) => format!("{}{} {n}", crate::i18n::t("exemple"), colon()),
+        Source::Fichier(f) => format!("{}{} {}", crate::i18n::t("fichier fourni"), colon(), f.rsplit('/').next().unwrap_or(f)),
     }
 }
 
@@ -313,7 +329,10 @@ impl App {
         if !steps.iter().zip(&done).any(|(c, d)| !d && c.as_ref().is_some_and(|c| c.automatic())) {
             return vec![];
         }
-        let now = learn::newly_done(&steps, &done, &self.learn_state());
+        // Une étape qui suit un bloc `essayer` attend que son bouton ait servi
+        let started = self.learn.progress.lesson(&id).map(|l| l.essais.keys().copied().collect::<Vec<_>>()).unwrap_or_default();
+        let ready: Vec<bool> = lesson.step_starts().into_iter().map(|s| s.is_none_or(|k| started.contains(&k))).collect();
+        let now = learn::newly_done(&steps, &done, &ready, &self.learn_state());
         for k in &now {
             self.learn.progress.set_step(&id, *k, true);
             self.learn.dirty = true;
@@ -333,7 +352,7 @@ impl App {
         self.learn.dirty = true;
         let cat = learn::catalog();
         match cat.iter().find(|c| c.id == learn::course_of(id)).filter(|c| self.learn.progress.course_finished(c)) {
-            Some(c) => self.toast(format!("{}  {} : {}", lucide::TROPHY, crate::i18n::t("parcours terminé"), c.meta.titre)),
+            Some(c) => self.toast(format!("{}  {}{} {}", lucide::TROPHY, crate::i18n::t("parcours terminé"), colon(), c.meta.titre)),
             None => self.toast(format!("{}  {}", lucide::CIRCLE_CHECK, crate::i18n::t("leçon terminée"))),
         }
     }
@@ -523,7 +542,7 @@ impl App {
                 ui.vertical(|ui| {
                     let (title, sub) = match &resume {
                         Some((_, lesson, course, true)) => (crate::i18n::t("Continuer là où tu t'es arrêté"), format!("{course} · {lesson}")),
-                        Some((_, lesson, course, false)) => (crate::i18n::t("Apprendre Aryadne pas à pas"), format!("{} : {course} · {lesson}", crate::i18n::t("première leçon"))),
+                        Some((_, lesson, course, false)) => (crate::i18n::t("Apprendre Aryadne pas à pas"), format!("{}{} {course} · {lesson}", crate::i18n::t("première leçon"), colon())),
                         None => (crate::i18n::t("Toutes les leçons sont terminées"), crate::i18n::t("Tu peux les revoir quand tu veux")),
                     };
                     ui.label(RichText::new(title).size(14.0).family(theme::bold()));
@@ -881,6 +900,8 @@ impl Panel {
         ui.add_space(4.0);
         // La première étape pas encore cochée : c'est celle « en cours »
         let current = (0..steps).find(|k| !self.progress.step_done(id, *k));
+        let starts = lesson.step_starts();
+        let started: Vec<usize> = self.progress.lesson(id).map(|l| l.essais.keys().copied().collect()).unwrap_or_default();
         let (mut step_k, mut quiz_k, mut try_k) = (0usize, 0usize, 0usize);
         for (bi, b) in lesson.blocks.iter().enumerate() {
             match b {
@@ -924,7 +945,9 @@ impl Panel {
                                     ui.horizontal(|ui| {
                                         ui.spacing_mut().item_spacing.x = 4.0;
                                         ui.label(RichText::new(lucide::SPARKLES).size(10.5).color(p.muted));
-                                        ui.label(RichText::new(crate::i18n::t("Vérifiée automatiquement")).size(10.5).color(p.muted));
+                                        let waiting = starts.get(k).copied().flatten().is_some_and(|t| !started.contains(&t));
+                                        let note = if waiting { "Vérifiée automatiquement, après « Essaie par toi-même »" } else { "Vérifiée automatiquement" };
+                                        ui.label(RichText::new(crate::i18n::t(note)).size(10.5).color(p.muted));
                                     });
                                 }
                             });
@@ -1004,7 +1027,7 @@ impl Panel {
                     });
                 });
                 if let Some(c) = cat.iter().find(|c| c.id == learn::course_of(id)).filter(|c| self.progress.course_finished(c)) {
-                    ui.label(RichText::new(format!("{}  {} : {}", lucide::TROPHY, crate::i18n::t("parcours terminé"), c.meta.titre)).size(12.0).color(p.success));
+                    ui.label(RichText::new(format!("{}  {}{} {}", lucide::TROPHY, crate::i18n::t("parcours terminé"), colon(), c.meta.titre)).size(12.0).color(p.success));
                 }
             });
         } else if steps + quizzes == 0 {
