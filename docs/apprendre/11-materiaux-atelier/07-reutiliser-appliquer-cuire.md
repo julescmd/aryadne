@@ -169,7 +169,7 @@ explication: La cuisson part des UV de l'objet et du matériau de chaque ID. Ell
 
 ```defi
 Pose deux matériaux différents sur un même cube : le dessus et le reste.
-indice: En mode UV & materials, onglet Materials : choisis les faces du dessus, clique Assign sur un second ID, puis ＋ Nodes sur cet ID.
+indice: En mode UV & materials, onglet Materials : ajoute un ID avec le bouton Material, choisis les faces du dessus, clique Assign sur ce nouvel ID, puis ＋ Nodes.
 ```
 
 ## En trois lignes
