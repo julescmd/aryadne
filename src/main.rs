@@ -3,6 +3,8 @@
 mod cloud;
 mod gpubench;
 #[allow(dead_code)]
+mod gpucloth;
+#[allow(dead_code)]
 mod gpusim;
 mod rig;
 mod scopes;
