@@ -143,6 +143,10 @@ pub enum Check {
     AtelierCalques(usize),
     SceneObjets(usize),
     SceneSelection,
+    /// Géométries de nodes (`.arygeo`) posées dans la scène
+    SceneSimulations(usize),
+    /// Objets de la scène qui ont un matériau
+    SceneMateriaux(usize),
     LectureImage(i32),
     TexteContient(String),
     Calques(usize),
@@ -258,6 +262,8 @@ pub fn parse_check(raw: &str) -> Check {
         ("atelier.calques", ">=") => num().map(Check::AtelierCalques).unwrap_or_else(unknown),
         ("scene.objets", ">=") => num().map(Check::SceneObjets).unwrap_or_else(unknown),
         ("scene.selection", "") => Check::SceneSelection,
+        ("scene.simulations", ">=") => num().map(Check::SceneSimulations).unwrap_or_else(unknown),
+        ("scene.materiaux", ">=") => num().map(Check::SceneMateriaux).unwrap_or_else(unknown),
         ("lecture.image", ">=") => value.parse::<f32>().ok().map(|n| Check::LectureImage(n.round() as i32)).unwrap_or_else(unknown),
         ("texte.contient", "=") if !value.is_empty() => Check::TexteContient(value.to_string()),
         ("calques", ">=") => num().map(Check::Calques).unwrap_or_else(unknown),
@@ -743,6 +749,9 @@ pub struct State<'a> {
     /// Objets de la scène 3D active, et y a-t-il un objet choisi
     pub objects: Option<usize>,
     pub selection: bool,
+    /// Dans cette scène : géométries de nodes posées, objets qui ont un matériau
+    pub scene_sims: usize,
+    pub scene_mats: usize,
     /// Tête de lecture (timeline 3D ou simulation)
     pub frame: Option<i32>,
     pub text: Option<&'a str>,
@@ -803,6 +812,8 @@ impl Check {
             Check::AtelierCalques(n) => s.mat_layers.is_some_and(|l| l >= *n),
             Check::SceneObjets(n) => s.objects.is_some_and(|o| o >= *n),
             Check::SceneSelection => s.objects.is_some() && s.selection,
+            Check::SceneSimulations(n) => s.objects.is_some() && s.scene_sims >= *n,
+            Check::SceneMateriaux(n) => s.objects.is_some() && s.scene_mats >= *n,
             Check::LectureImage(n) => s.frame.is_some_and(|f| f >= *n),
             Check::TexteContient(w) => s.text.is_some_and(|t| crate::chat::fold(t).to_lowercase().contains(&crate::chat::fold(w).to_lowercase())),
             Check::Calques(n) => s.layers.is_some_and(|l| l >= *n),
@@ -1161,6 +1172,8 @@ mod tests {
             ("scene.objets >= 4", Check::SceneObjets(4)),
             ("scène.objets >= 4", Check::SceneObjets(4)),
             ("scene.selection", Check::SceneSelection),
+            ("scene.simulations >= 1", Check::SceneSimulations(1)),
+            ("scène.matériaux >= 2", Check::SceneMateriaux(2)),
             ("lecture.image >= 24", Check::LectureImage(24)),
             ("texte.contient = Bonjour", Check::TexteContient("Bonjour".into())),
             ("calques >= 2", Check::Calques(2)),
@@ -1224,6 +1237,11 @@ mod tests {
         // scene.*
         let s = State { objects: Some(3), selection: true, ..Default::default() };
         assert!(Check::SceneObjets(3).holds(&s) && !Check::SceneObjets(4).holds(&s) && !Check::SceneObjets(0).holds(&vide));
+        let sim = State { objects: Some(3), scene_sims: 1, scene_mats: 2, ..Default::default() };
+        assert!(Check::SceneSimulations(1).holds(&sim) && !Check::SceneSimulations(2).holds(&sim) && !Check::SceneSimulations(1).holds(&s));
+        assert!(Check::SceneMateriaux(2).holds(&sim) && !Check::SceneMateriaux(3).holds(&sim));
+        // Hors d'une scène, rien ne se coche (même « au moins zéro »)
+        assert!(!Check::SceneSimulations(0).holds(&vide) && !Check::SceneMateriaux(0).holds(&vide));
         assert!(Check::SceneSelection.holds(&s) && !Check::SceneSelection.holds(&State { objects: Some(3), ..Default::default() }) && !Check::SceneSelection.holds(&State { selection: true, ..Default::default() }));
         // lecture.image
         let s = State { frame: Some(24), ..Default::default() };

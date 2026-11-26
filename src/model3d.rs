@@ -2475,6 +2475,31 @@ fn geo_menu(ui: &mut egui::Ui, root: &str, files: &mut Option<(std::time::Instan
     pick
 }
 
+/// La scène telle qu'elle est posée (image courante comprise), prête pour le rendu dans le cadre
+/// `frame_box` : ses maillages réunis, les UV que ses objets apportent, un matériau par objet.
+fn scene_prepared(sc: &crate::scene::Scene, path: &std::path::Path, frame_box: (V3, V3), floor: f32) -> Result<Prepared, String> {
+    let (model, _, ranges) = crate::scene::build_ranges(sc, path);
+    let mut m = model?;
+    (m.min, m.max) = frame_box;
+    let s = m.size();
+    let l2 = s[0].max(s[1]).max(s[2]).max(1e-9);
+    let mc = [(m.min[0] + m.max[0]) / 2.0, (m.min[1] + m.max[1]) / 2.0, (m.min[2] + m.max[2]) / 2.0];
+    let origin = [-mc[0] / l2, -mc[1] / l2, -mc[2] / l2];
+    let base = crate::modifiers::Mesh::from_model(&m, m.z_up);
+    let mut prep = Prepared::from_mesh_fixed(crate::modifiers::apply(&[], base, origin), floor);
+    if let Some(uv) = &m.uv {
+        prep.set_scene_uv(uv);
+    }
+    // Un matériau par objet, comme à l'écran
+    if ranges.last().map(|r| r.2) == Some(prep.tris.len()) {
+        prep.mat = vec![0; prep.tris.len()];
+        for (k, a, b) in &ranges {
+            prep.mat[*a..*b].fill(*k as u16);
+        }
+    }
+    Ok(prep)
+}
+
 /// Rend chaque image d'une scène (début → fin) et les envoie à ffmpeg, qui écrit la vidéo `out`.
 /// La caméra de la scène sert de point de vue ; sans caméra, `view_cam`.
 #[allow(clippy::too_many_arguments)]
@@ -2513,25 +2538,7 @@ fn encode_animation(ff: std::path::PathBuf, scene: crate::scene::Scene, path: &s
     let mut sc = scene;
     for f in start..=end {
         sc.apply_frame(f as f32);
-        let (model, _, ranges) = crate::scene::build_ranges(&sc, path);
-        let mut m = model?;
-        (m.min, m.max) = (lo, hi);
-        let s = m.size();
-        let l2 = s[0].max(s[1]).max(s[2]).max(1e-9);
-        let mc = [(m.min[0] + m.max[0]) / 2.0, (m.min[1] + m.max[1]) / 2.0, (m.min[2] + m.max[2]) / 2.0];
-        let origin = [-mc[0] / l2, -mc[1] / l2, -mc[2] / l2];
-        let base = crate::modifiers::Mesh::from_model(&m, m.z_up);
-        let mut prep = Prepared::from_mesh_fixed(crate::modifiers::apply(&[], base, origin), floor);
-        if let Some(uv) = &m.uv {
-            prep.set_scene_uv(uv);
-        }
-        // Un matériau par objet, comme à l'écran
-        if ranges.last().map(|r| r.2) == Some(prep.tris.len()) {
-            prep.mat = vec![0; prep.tris.len()];
-            for (k, a, b) in &ranges {
-                prep.mat[*a..*b].fill(*k as u16);
-            }
-        }
+        let prep = scene_prepared(&sc, path, (lo, hi), floor)?;
         // Lumières de la scène à cette image
         let mut lk = look.clone();
         lk.lamps = sc.lights().into_iter().map(|l| lamp_of(&l, c, longest)).collect();
@@ -3044,6 +3051,8 @@ pub struct Viewer {
     slot_rev: u64,
     /// Matériau à ouvrir dans l'éditeur de nodes (à côté du modèle)
     pub open_request: Option<std::path::PathBuf>,
+    /// Fichier à ouvrir dans son propre onglet (le graphe d'une géométrie de nodes)
+    pub open_tab: Option<std::path::PathBuf>,
     /// Ctrl+S : écrire les changements (modificateurs, retopo) dans le fichier (None) ou dans un autre (Ctrl+Maj+S)
     pub save_request: Option<Option<std::path::PathBuf>>,
     /// Le fichier a été réécrit : à recharger
@@ -3281,6 +3290,11 @@ impl Viewer {
         self.scene.as_ref().map(|s| (s.objects.len(), self.scene_sel.is_some_and(|k| k < s.objects.len()), self.anim_frame.round() as i32))
     }
 
+    /// Pour les leçons : géométries de nodes posées dans la scène, et objets qui ont un matériau.
+    pub fn learn_scene_extra(&self) -> (usize, usize) {
+        self.scene.as_ref().map(|s| (s.objects.iter().filter(|o| crate::geoscene::is_geo(&o.file)).count(), s.objects.iter().filter(|o| !o.material.is_empty()).count())).unwrap_or((0, 0))
+    }
+
     /// Reste-t-il une modification de la scène à enregistrer ?
     pub fn learn_dirty(&self) -> bool {
         self.scene_dirty || self.mesh_unsaved
@@ -3346,6 +3360,7 @@ impl Viewer {
             slot_progs: vec![],
             slot_rev: 0,
             open_request: None,
+            open_tab: None,
             save_request: None,
             reload_request: false,
             root: String::new(),
@@ -7275,7 +7290,7 @@ impl Viewer {
                                                         self.geo_export_req = self.scene_sel;
                                                     }
                                                     if ui.add(egui::Button::new(egui::RichText::new(crate::lucide::WORKFLOW).size(14.0)).frame(false)).on_hover_text(crate::i18n::t("Ouvrir le graphe dans l'onglet Simulation : ce qu'on y enregistre se voit aussitôt dans la scène")).clicked() {
-                                                        self.open_request = Some(file.clone());
+                                                        self.open_tab = Some(file.clone());
                                                     }
                                                 });
                                             });
@@ -11016,6 +11031,53 @@ mod tests {
         assert_eq!(rect.sample([0.0, 4.0, 0.0], [0.5, 0.5]).2, 0.0);
         // Deux tirages sur le panneau : deux directions (ombres douces)
         assert!(rect.sample([0.0, 0.0, 0.0], [0.0, 0.0]).0 != rect.sample([0.0, 0.0, 0.0], [1.0, 1.0]).0);
+    }
+
+    /// Une géométrie de nodes dans une scène : ombrée avec ses UV, différente d'une image à
+    /// l'autre au rendu, et présente dans la vidéo exportée.
+    #[test]
+    fn geometrie_de_nodes_au_rendu_et_dans_la_video() {
+        let dir = std::env::temp_dir().join(format!("aryadne-geo-rendu-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        crate::geo::example("drapeau dans le vent").unwrap().save(&dir.join("drapeau.arygeo")).unwrap();
+        let path = dir.join("plan.aryscene");
+        let mut sc = crate::scene::Scene::starter();
+        (sc.start, sc.end) = (0, 4);
+        let k = sc.add_geo(&path, &dir.join("drapeau.arygeo"));
+        let frame_box = ([-6.0; 3], [6.0; 3]);
+        let mut at = |f: f32| {
+            sc.apply_frame(f);
+            let prep = scene_prepared(&sc, &path, frame_box, 0.0).unwrap();
+            let img = render(&prep, &Camera::default(), &Look::default(), 96, 54).rgba;
+            (prep, img)
+        };
+        let (rest, img0) = at(0.0);
+        let (later, img1) = at(30.0);
+        // Chaque triangle a ses UV : celles de la grille pour le drapeau, la projection par défaut ailleurs
+        assert_eq!(rest.uv.len(), rest.tris.len());
+        assert!(rest.uv.iter().flatten().flatten().all(|x| x.is_finite()));
+        // Le drapeau a son propre matériau (un par objet) et ses triangles sont les derniers
+        assert_eq!(rest.mat.last().copied(), Some(k as u16));
+        let flag: Vec<usize> = (0..rest.tris.len()).filter(|t| rest.mat[*t] == k as u16).collect();
+        assert_eq!(flag.len(), 35 * 23 * 2);
+        assert!(flag.iter().all(|t| rest.uv[*t].iter().all(|c| (0.0..=1.0).contains(&c[0]) && (0.0..=1.0).contains(&c[1]))));
+        // Même maillage, autre forme : la simulation a avancé, et l'image rendue n'est plus la même
+        assert_eq!(later.tris.len(), rest.tris.len());
+        assert_ne!(img0, img1, "le rendu suit la simulation");
+        // L'export d'animation rend chaque image
+        if let Some(ff) = crate::ffmpeg::find("ffmpeg") {
+            sc.write(&path).unwrap();
+            let out = dir.join("plan.mp4");
+            let n = std::sync::atomic::AtomicUsize::new(0);
+            encode_animation(ff, sc.clone(), &path, frame_box, &Look::default(), Camera::default(), (64, 36), &out, &|| {
+                n.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            })
+            .unwrap();
+            assert_eq!(n.load(std::sync::atomic::Ordering::Relaxed), 5);
+            assert!(std::fs::metadata(&out).unwrap().len() > 500);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

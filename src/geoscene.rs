@@ -318,6 +318,34 @@ mod tests {
         d
     }
 
+    /// Écrit dans le dossier donné par ARY_DEMO de quoi essayer à l'écran : un drapeau simulé et un
+    /// matériau à bandes qui suit ses UV.
+    #[test]
+    #[ignore]
+    fn ecrire_la_demo() {
+        let Some(dir) = std::env::var_os("ARY_DEMO") else { return };
+        let dir = Path::new(&dir);
+        crate::geo::example("drapeau dans le vent").unwrap().save(&dir.join("Drapeau.arygeo")).unwrap();
+        let mut g = Graph::empty(crate::nodes::GraphKind::Material);
+        let uv = g.add("texcoord", [0.0, 0.0]);
+        let bands = g.add("stripes", [220.0, 0.0]);
+        let mix = g.add("mix", [440.0, 0.0]);
+        let out = g.add("mat_out", [660.0, 0.0]);
+        for n in g.nodes.iter_mut() {
+            if n.id == bands {
+                n.params.insert("axe".into(), crate::nodes::Param::S("y".into()));
+                n.values = vec![[3.0; 4], [0.5; 4], [0.0; 4]];
+            }
+            if n.id == mix {
+                n.values = vec![[0.5; 4], [0.92, 0.9, 0.84, 1.0], [0.1, 0.25, 0.6, 1.0]];
+            }
+        }
+        g.connect(uv, 1, bands, 2);
+        g.connect(bands, 0, mix, 0);
+        g.connect(mix, 0, out, 0);
+        g.save(&dir.join("Drapeau rayé.arymat")).unwrap();
+    }
+
     #[test]
     fn scene_frame_drives_the_simulation_frame() {
         let t = TimeRange { fps: 24.0, start: 1, end: 120 };

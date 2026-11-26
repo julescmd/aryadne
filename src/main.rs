@@ -4171,6 +4171,9 @@ impl App {
                     if let Some(path) = viewer.open_request.take() {
                         open_material = Some(path);
                     }
+                    if let Some(path) = viewer.open_tab.take() {
+                        open_tab = Some(path);
+                    }
                     if std::mem::take(&mut viewer.reload_request) {
                         self.actions.push(Action::Reload(rel.clone()));
                     }

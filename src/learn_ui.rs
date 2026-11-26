@@ -295,6 +295,7 @@ impl App {
                             s.objects = Some(n);
                             s.selection = sel;
                             s.frame = Some(frame);
+                            (s.scene_sims, s.scene_mats) = v.learn_scene_extra();
                         }
                         dirty |= v.learn_dirty();
                     }
