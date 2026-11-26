@@ -560,7 +560,7 @@ impl Solver for VbdCloth {
         g.set("v", v);
         let (substeps, per) = par.split();
         let on_gpu = s.cloth.on_gpu();
-        let status = ClothStatus { on_gpu, card: if on_gpu { crate::gpusim::gpu().map(|c| c.name.clone()).unwrap_or_default() } else { String::new() }, points: n, colors: s.cloth.topo.colors.len(), substeps, per, ms: t0.elapsed().as_secs_f32() * 1000.0 };
+        let status = ClothStatus { on_gpu, card: if on_gpu { crate::gpusim::gpu().map(|c| c.name.clone()).unwrap_or_default() } else { String::new() }, points: n, colors: s.cloth.topo.colors(), substeps, per, ms: t0.elapsed().as_secs_f32() * 1000.0 };
         *CLOTH_STATUS.lock().unwrap_or_else(|e| e.into_inner()) = Some(status);
     }
 }

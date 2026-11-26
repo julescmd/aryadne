@@ -96,14 +96,17 @@ struct Consts {
     /// Centre, puis 1 si la boîte existe
     cube_c: [f32; 4],
     cube_h: [f32; 4],
+    /// Longueur au repos = code² × cette échelle (voir `Topo::rest`)
+    rest_scale: f32,
+    pad: [f32; 3],
 }
 
 impl Consts {
-    fn new(p: &Params, dt: f32, origin: [f32; 3]) -> Consts {
+    fn new(p: &Params, dt: f32, origin: [f32; 3], rest_scale: f32) -> Consts {
         let (sub, _) = p.split();
         let h = dt / sub as f32;
         let rel = |c: [f32; 3]| [c[0] - origin[0], c[1] - origin[1], c[2] - origin[2]];
-        let mut c = Consts { h, inv_h2: 1.0 / (h * h), k: p.stiffness.max(0.0), d: p.bending.max(0.0), keep: (1.0 - p.damping).clamp(0.0, 1.0).powf(1.0 / sub as f32), slide: 1.0 - p.grip.clamp(0.0, 1.0), ..Default::default() };
+        let mut c = Consts { h, inv_h2: 1.0 / (h * h), k: p.stiffness.max(0.0), d: p.bending.max(0.0), keep: (1.0 - p.damping).clamp(0.0, 1.0).powf(1.0 / sub as f32), slide: 1.0 - p.grip.clamp(0.0, 1.0), rest_scale, ..Default::default() };
         if let Some(y) = p.floor {
             c.floor_y = y - origin[1];
             c.floor_on = 1.0;
@@ -132,25 +135,65 @@ fn omega(k: usize, prev: f32, rho: f32) -> f32 {
 
 // ---------- topologie ----------
 
+/// Comment les sommets sont rangés, donc comment une passe parcourt la mémoire.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Layout {
+    /// Par couleur : une passe par couleur, chaque sommet va lire tous ses voisins dans les tampons.
+    Colors,
+    /// Par grappes de 64 sommets voisins, traitées chacune par un groupe de fils : la grappe est
+    /// chargée une fois en mémoire partagée, ses couleurs y sont résolues l'une après l'autre, et
+    /// seuls les voisins hors de la grappe sont lus dans les tampons. Les grappes sont coloriées
+    /// à leur tour, pour que deux grappes voisines ne soient jamais traitées ensemble.
+    /// Moins d'octets lus, plus de calcul : lequel gagne dépend de la carte (le banc mesure les deux).
+    Clusters,
+}
+
+impl Default for Layout {
+    /// Par couleur, sauf si `ARY_TISSU_GRAPPES` est défini dans l'environnement
+    fn default() -> Layout {
+        static CLUSTERS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if *CLUSTERS.get_or_init(|| std::env::var_os("ARY_TISSU_GRAPPES").is_some()) { Layout::Clusters } else { Layout::Colors }
+    }
+}
+
+/// Sommets par grappe : la taille d'un groupe de fils
+pub const CLUSTER: usize = gpusim::WG as usize;
+
+/// Marque d'une entrée de ressort : elle forme un terme de flexion avec la suivante
+const PAIR: u32 = 1 << 31;
+const NONE: u32 = u32::MAX;
+/// Couleur d'un sommet fixe
+const FIXED: u32 = 255;
+
 /// Tout ce qui ne dépend que du maillage au repos : ordre des sommets, couleurs, voisinages.
 /// Construit une fois au chargement ; les mêmes tableaux servent au processeur et à la carte.
 pub struct Topo {
     pub n: usize,
+    pub layout: Layout,
     /// Rang d'origine du sommet rangé en `k`
     pub perm: Vec<u32>,
     /// Rang de rangement du sommet d'origine `i`
-    #[allow(dead_code)]
     pub inv: Vec<u32>,
-    /// Plage de chaque couleur : début, nombre. Les sommets fixes sont après la dernière.
-    pub colors: Vec<[u32; 2]>,
-    /// Par sommet (n + 1 cases) : début de ses ressorts, début de ses termes de flexion
+    /// Plages traitées l'une après l'autre : début, nombre. Par couleur (les sommets fixes sont
+    /// alors après la dernière), ou par couleur de grappes (les fixes restent dans leur grappe).
+    pub groups: Vec<[u32; 2]>,
+    /// Sommets traités d'un bloc : 1, ou `CLUSTER`
+    pub cluster: usize,
+    /// Nombre de couleurs de sommets
+    pub phases: u32,
+    /// Par sommet : début de ses ressorts, puis leur nombre (16 bits) et sa couleur (à partir du bit 16 ; 255 : fixe)
     pub off: Vec<[u32; 2]>,
-    /// Ressort : voisin, longueur au repos (bits d'un f32)
-    pub springs: Vec<[u32; 2]>,
-    /// Flexion : deux autres sommets a et b, poids du sommet lui-même et de a (bits de f32). Le poids de b est l'opposé de leur somme.
-    pub bends: Vec<[u32; 4]>,
+    /// Ressort vers le voisin j : son rang (bit 31 : forme un terme de flexion avec l'entrée
+    /// suivante, le sommet au milieu), le sommet k qui prolonge l'arête au-delà de j (terme de
+    /// flexion dont j est le milieu ; `NONE` s'il n'y en a pas), et les longueurs au repos de
+    /// i–j et de j–k, sur 16 bits chacune (voir `Topo::rest`).
+    pub springs: Vec<[u32; 3]>,
+    /// Longueur au repos = code² × cette échelle
+    pub rest_scale: f32,
     /// Masse (0 : sommet fixe)
     pub mass: Vec<f32>,
+    /// Nombre de termes de flexion
+    pub trips: usize,
 }
 
 fn part1by2(x: u32) -> u32 {
@@ -179,64 +222,104 @@ fn csr<T: Copy + Default>(n: usize, pairs: impl Iterator<Item = (u32, T)> + Clon
     (start, out)
 }
 
+/// Plus petite couleur libre parmi celles déjà prises (au plus 128 couleurs)
+fn free_color(used: u128) -> u32 {
+    (!used).trailing_zeros().min(127)
+}
+
 impl Topo {
     /// `pos` : positions au repos. `rest` : longueur au repos de chaque arête. `mass` : masse par
     /// sommet si la géométrie en donne une, sinon elle est déduite de la taille des mailles.
     pub fn build(n: usize, edges: &[[u32; 2]], rest: &[f32], pos: &[Vec<f32>; 3], pinned: &[bool], mass: Option<&[f32]>) -> Topo {
+        Topo::build_with(n, edges, rest, pos, pinned, mass, Layout::default(), true)
+    }
+
+    /// Même chose en choisissant le rangement, et s'il faut des termes de flexion.
+    #[allow(clippy::too_many_arguments)]
+    pub fn build_with(n: usize, edges: &[[u32; 2]], rest: &[f32], pos: &[Vec<f32>; 3], pinned: &[bool], mass: Option<&[f32]>, layout: Layout, bend: bool) -> Topo {
         let at = |i: u32| [pos[0][i as usize], pos[1][i as usize], pos[2][i as usize]];
         let ok = |e: &[u32; 2]| (e[0] as usize) < n && (e[1] as usize) < n && e[0] != e[1];
-        // Arêtes autour de chaque sommet
-        let around = edges.iter().zip(rest).filter(|(e, _)| ok(e)).flat_map(|(e, r)| [(e[0], (e[1], *r)), (e[1], (e[0], *r))]);
+        // Longueurs au repos sur 16 bits : code = √(longueur / la plus grande) × 65535. Les deux
+        // bouts d'une arête lisent le même code, donc la même longueur : rien ne dérive. Sur un
+        // maillage régulier l'erreur est de l'ordre de 0,002 % de la longueur.
+        let longest = edges.iter().zip(rest).filter(|(e, _)| ok(e)).map(|(_, r)| *r).fold(0.0f32, f32::max).max(1e-30);
+        let rest_scale = longest / (65535.0f32 * 65535.0);
+        let code = |r: f32| ((r.max(0.0) / longest).sqrt() * 65535.0).round().clamp(1.0, 65535.0) as u32;
+        // Demi-arêtes autour de chaque sommet : voisin, code de la longueur, numéro de l'arête
+        let around = edges.iter().zip(rest).enumerate().filter(|(_, (e, _))| ok(e)).flat_map(|(id, (e, r))| [(e[0], (e[1], code(*r), id as u32)), (e[1], (e[0], code(*r), id as u32))]);
         let (nb_start, nb) = csr(n, around);
-        let ring = |i: usize| &nb[nb_start[i] as usize..nb_start[i + 1] as usize];
-        // Flexion : paires d'arêtes opposées autour d'un sommet (i au milieu de j et k)
-        struct Trip {
-            v: [u32; 3],
-            t: f32,
-            s: f32,
+        let ring = |i: usize| nb_start[i] as usize..nb_start[i + 1] as usize;
+        // Flexion : autour de chaque sommet, les arêtes sont appariées deux à deux quand elles se
+        // prolongent (i au milieu de j et k), les mieux alignées d'abord. Une arête ne sert qu'à
+        // un terme par bout : le voisinage tient alors tout entier dans la liste des ressorts.
+        let mut partner = vec![NONE; nb.len()];
+        let mut trips = 0;
+        if bend {
+            let mut cand: Vec<(f32, u32, u32)> = Vec::new();
+            for i in 0..n {
+                let (r, pi) = (ring(i), at(i as u32));
+                cand.clear();
+                for a in r.clone() {
+                    for b in a + 1..r.end {
+                        let (j, k) = (nb[a].0, nb[b].0);
+                        if j == k {
+                            continue;
+                        }
+                        let (pj, pk) = (at(j), at(k));
+                        let (dj, dk) = ([pj[0] - pi[0], pj[1] - pi[1], pj[2] - pi[2]], [pk[0] - pi[0], pk[1] - pi[1], pk[2] - pi[2]]);
+                        let dot = dj[0] * dk[0] + dj[1] * dk[1] + dj[2] * dk[2];
+                        let len = ((dj[0] * dj[0] + dj[1] * dj[1] + dj[2] * dj[2]) * (dk[0] * dk[0] + dk[1] * dk[1] + dk[2] * dk[2])).sqrt();
+                        if len > 1e-18 && dot / len < -0.95 {
+                            cand.push((dot / len, a as u32, b as u32));
+                        }
+                    }
+                }
+                cand.sort_by(|x, y| x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal));
+                for &(_, a, b) in &cand {
+                    if partner[a as usize] == NONE && partner[b as usize] == NONE {
+                        partner[a as usize] = b;
+                        partner[b as usize] = a;
+                        trips += 1;
+                    }
+                }
+            }
         }
-        let mut trips = Vec::new();
-        for i in 0..n {
-            let (r, pi) = (ring(i), at(i as u32));
-            for (a, &(j, lj)) in r.iter().enumerate() {
-                for &(k, lk) in &r[a + 1..] {
-                    if j == k || lj < 1e-9 || lk < 1e-9 {
-                        continue;
-                    }
-                    let (pj, pk) = (at(j), at(k));
-                    let (dj, dk) = ([pj[0] - pi[0], pj[1] - pi[1], pj[2] - pi[2]], [pk[0] - pi[0], pk[1] - pi[1], pk[2] - pi[2]]);
-                    let dot = dj[0] * dk[0] + dj[1] * dk[1] + dj[2] * dk[2];
-                    let len = ((dj[0] * dj[0] + dj[1] * dj[1] + dj[2] * dj[2]) * (dk[0] * dk[0] + dk[1] * dk[1] + dk[2] * dk[2])).sqrt();
-                    if len < 1e-18 || dot / len > -0.95 {
-                        continue;
-                    }
-                    // Courbure ≈ 2·|c| / (lj·lk), sur une bande de largeur et de longueur ≈ (lj + lk) / 2.
-                    // Chaque direction du tissu est comptée deux fois (droites et diagonales) : d'où le ½.
-                    let s = (lj + lk) / (std::f32::consts::SQRT_2 * lj * lk);
-                    trips.push(Trip { v: [i as u32, j, k], t: lj / (lj + lk), s });
+        // La demi-arête inverse de chacune (j vers i pour i vers j) : c'est par elle qu'on trouve
+        // le sommet qui prolonge l'arête de l'autre côté de j
+        let mut twin = vec![NONE; nb.len()];
+        {
+            let mut first = vec![NONE; edges.len()];
+            for (s, h) in nb.iter().enumerate() {
+                let f = &mut first[h.2 as usize];
+                if *f == NONE {
+                    *f = s as u32;
+                } else {
+                    twin[s] = *f;
+                    twin[*f as usize] = s as u32;
                 }
             }
         }
         // Couleurs : deux sommets liés par un ressort ou par un terme de flexion n'ont jamais la même
-        let links = edges.iter().filter(|e| ok(e)).flat_map(|e| [(e[0], e[1]), (e[1], e[0])]).chain(trips.iter().flat_map(|t| [(t.v[1], t.v[2]), (t.v[2], t.v[1])]));
+        let ends = (0..nb.len()).filter(|s| partner[*s] != NONE).map(|s| (nb[s].0, nb[partner[s] as usize].0));
+        let links = edges.iter().filter(|e| ok(e)).flat_map(|e| [(e[0], e[1]), (e[1], e[0])]).chain(ends);
         let (cp_start, cp) = csr(n, links);
-        const FIXED: u32 = u32::MAX;
+        let linked = |i: usize| &cp[cp_start[i] as usize..cp_start[i + 1] as usize];
         let mut color = vec![FIXED; n];
-        let mut count = 0u32;
+        let mut phases = 0u32;
         for i in 0..n {
             if pinned.get(i).copied().unwrap_or(false) {
                 continue;
             }
             let mut used = 0u128;
-            for &j in &cp[cp_start[i] as usize..cp_start[i + 1] as usize] {
+            for &j in linked(i) {
                 if color[j as usize] < 128 {
                     used |= 1 << color[j as usize];
                 }
             }
-            color[i] = (!used).trailing_zeros().min(127);
-            count = count.max(color[i] + 1);
+            color[i] = free_color(used);
+            phases = phases.max(color[i] + 1);
         }
-        // Rangement : par couleur, puis le long d'une courbe de Morton
+        // Courbe de Morton : les voisins dans l'espace sont voisins en mémoire
         let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
         for c in 0..3 {
             for &x in &pos[c][..n] {
@@ -245,53 +328,108 @@ impl Topo {
             }
         }
         let cell = |x: f32, c: usize| if hi[c] > lo[c] { ((x - lo[c]) / (hi[c] - lo[c]) * 1023.0) as u32 } else { 0 };
-        let mut order: Vec<(u32, u32, u32)> = (0..n as u32)
-            .map(|i| {
-                let p = at(i);
-                (color[i as usize], part1by2(cell(p[0], 0)) | part1by2(cell(p[1], 1)) << 1 | part1by2(cell(p[2], 2)) << 2, i)
-            })
-            .collect();
-        order.sort_unstable();
-        let perm: Vec<u32> = order.iter().map(|o| o.2).collect();
+        let morton = |i: u32| {
+            let p = at(i);
+            part1by2(cell(p[0], 0)) | part1by2(cell(p[1], 1)) << 1 | part1by2(cell(p[2], 2)) << 2
+        };
+        let (perm, groups): (Vec<u32>, Vec<[u32; 2]>) = match layout {
+            Layout::Colors => {
+                let mut order: Vec<(u32, u32, u32)> = (0..n as u32).map(|i| (color[i as usize], morton(i), i)).collect();
+                order.sort_unstable();
+                let mut groups = vec![[0u32; 2]; phases as usize];
+                for (k, o) in order.iter().enumerate() {
+                    if o.0 != FIXED {
+                        let g = &mut groups[o.0 as usize];
+                        if g[1] == 0 {
+                            g[0] = k as u32;
+                        }
+                        g[1] += 1;
+                    }
+                }
+                (order.iter().map(|o| o.2).collect(), groups)
+            }
+            Layout::Clusters => {
+                let mut order: Vec<(u32, u32)> = (0..n as u32).map(|i| (morton(i), i)).collect();
+                order.sort_unstable();
+                let count = n.div_ceil(CLUSTER);
+                let mut of = vec![0u32; n];
+                for (k, o) in order.iter().enumerate() {
+                    of[o.1 as usize] = (k / CLUSTER) as u32;
+                }
+                // Deux grappes qui se lisent l'une l'autre n'ont jamais la même couleur
+                let mut cc = vec![NONE; count];
+                let mut kinds = 0u32;
+                for c in 0..count {
+                    let mut used = 0u128;
+                    for o in &order[c * CLUSTER..((c + 1) * CLUSTER).min(n)] {
+                        for &j in linked(o.1 as usize) {
+                            let other = cc[of[j as usize] as usize];
+                            if other < 128 {
+                                used |= 1 << other;
+                            }
+                        }
+                    }
+                    cc[c] = free_color(used);
+                    kinds = kinds.max(cc[c] + 1);
+                }
+                // La grappe incomplète (la dernière) doit finir la dernière plage : sa couleur passe en dernier
+                let last = cc.last().copied().unwrap_or(0);
+                let rank = |c: u32| if c == last { kinds } else { c };
+                let mut seq: Vec<(u32, u32)> = (0..count as u32).map(|c| (rank(cc[c as usize]), c)).collect();
+                seq.sort_unstable();
+                let mut perm = Vec::with_capacity(n);
+                let mut groups: Vec<[u32; 2]> = Vec::new();
+                let mut current = NONE;
+                for &(kind, c) in &seq {
+                    let mut inside: Vec<(u32, u32, u32)> = order[c as usize * CLUSTER..((c as usize + 1) * CLUSTER).min(n)].iter().map(|o| (color[o.1 as usize], o.0, o.1)).collect();
+                    inside.sort_unstable();
+                    if kind != current {
+                        groups.push([perm.len() as u32, 0]);
+                        current = kind;
+                    }
+                    if let Some(g) = groups.last_mut() {
+                        g[1] += inside.len() as u32;
+                    }
+                    perm.extend(inside.iter().map(|o| o.2));
+                }
+                (perm, groups)
+            }
+        };
         let mut inv = vec![0u32; n];
         for (k, &i) in perm.iter().enumerate() {
             inv[i as usize] = k as u32;
         }
-        let mut colors = vec![[0u32; 2]; count as usize];
-        for (k, o) in order.iter().enumerate() {
-            if o.0 != FIXED {
-                let c = &mut colors[o.0 as usize];
-                if c[1] == 0 {
-                    c[0] = k as u32;
-                }
-                c[1] += 1;
-            }
-        }
-        // Voisinages, dans l'ordre de rangement
-        let (tr_start, tr) = csr(n, trips.iter().enumerate().flat_map(|(ti, t)| [(t.v[0], (ti as u32, 0u8)), (t.v[1], (ti as u32, 1)), (t.v[2], (ti as u32, 2))]));
-        let mut off = Vec::with_capacity(n + 1);
+        // Voisinages, dans l'ordre de rangement : les entrées appariées d'abord, côte à côte
+        let mut off = Vec::with_capacity(n);
         let mut springs = Vec::with_capacity(nb.len());
-        let mut bends = Vec::with_capacity(tr.len());
         let mut m = Vec::with_capacity(n);
         for &i in &perm {
             let i = i as usize;
-            off.push([springs.len() as u32, bends.len() as u32]);
+            let start = springs.len();
             let mut shortest = f32::MAX;
-            for &(j, r) in ring(i) {
-                springs.push([inv[j as usize], r.to_bits()]);
-                shortest = shortest.min(r);
+            let mut push = |s: usize, flag: u32| {
+                let (j, cj, _) = nb[s];
+                // Au-delà de j : l'arête appariée à la nôtre autour de j
+                let far = if twin[s] != NONE { partner[twin[s] as usize] } else { NONE };
+                let (k, ck) = if far != NONE { (inv[nb[far as usize].0 as usize], nb[far as usize].1) } else { (NONE, 0) };
+                springs.push([inv[j as usize] | flag, k, cj | ck << 16]);
+                shortest = shortest.min(cj as f32 * cj as f32 * rest_scale);
+            };
+            for s in ring(i) {
+                if partner[s] != NONE && (s as u32) < partner[s] {
+                    push(s, PAIR);
+                    push(partner[s] as usize, 0);
+                }
             }
-            for &(ti, role) in &tr[tr_start[i] as usize..tr_start[i + 1] as usize] {
-                let t = &trips[ti as usize];
-                // Poids des trois sommets dans c = (1−t)·xj + t·xk − xi, mis à l'échelle
-                let w = [-t.s, (1.0 - t.t) * t.s, t.t * t.s];
-                let (a, b) = match role {
-                    0 => (1, 2),
-                    1 => (0, 2),
-                    _ => (0, 1),
-                };
-                bends.push([inv[t.v[a] as usize], inv[t.v[b] as usize], w[role as usize].to_bits(), w[a].to_bits()]);
+            for s in ring(i) {
+                if partner[s] == NONE {
+                    push(s, 0);
+                }
             }
+            // Au-delà de 65 535 ressorts autour d'un sommet, les suivants sont ignorés
+            let count = (springs.len() - start).min(0xffff);
+            springs.truncate(start + count);
+            off.push([start as u32, count as u32 | color[i] << 16]);
             m.push(if color[i] == FIXED {
                 0.0
             } else {
@@ -302,20 +440,52 @@ impl Topo {
                 }
             });
         }
-        off.push([springs.len() as u32, bends.len() as u32]);
-        Topo { n, perm, inv, colors, off, springs, bends, mass: m }
+        Topo { n, layout, perm, inv, groups, cluster: if layout == Layout::Clusters { CLUSTER } else { 1 }, phases, off, springs, rest_scale, mass: m, trips }
+    }
+
+    /// Longueur au repos d'un code de 16 bits (le même calcul que dans les noyaux de la carte)
+    #[inline]
+    fn rest(&self, code: u32) -> f32 {
+        let u = code as f32;
+        u * u * self.rest_scale
+    }
+
+    /// Nombre de couleurs de sommets
+    pub fn colors(&self) -> usize {
+        self.phases as usize
     }
 
     /// Octets que la carte garde pour ce tissu
     pub fn gpu_bytes(&self) -> u64 {
-        (self.n * 16 * 6 + self.off.len() * 8 + self.springs.len() * 8 + self.bends.len() * 16) as u64
+        (self.n * 16 * 6 + self.off.len() * 8 + self.springs.len() * 12) as u64
     }
 
-    /// Octets lus et écrits par passe complète sur tous les sommets (pour estimer le débit)
-    pub fn bytes_per_iteration(&self) -> u64 {
-        // Par sommet : ses réglages (cible, précédent, débuts), sa position lue et écrite, et pour
-        // chaque ressort ou terme de flexion l'entrée de la liste et les positions voisines
-        (self.n * (16 + 16 + 16 + 32) + self.springs.len() * (8 + 16) + self.bends.len() * (16 + 32) + self.n * 64) as u64
+    /// Octets lus et écrits par passe complète sur tous les sommets (pour estimer le débit).
+    /// `bending` : la flexion est-elle active ? `accel` : l'accélération de Tchebychev aussi ?
+    /// Un sommet au contact d'un obstacle lit 16 octets de plus (sa position d'avant).
+    pub fn bytes_per_pass(&self, bending: bool, accel: bool) -> u64 {
+        // Par sommet : ses débuts, sa cible, sa position lue et écrite
+        let mut total = self.n as u64 * (8 + 16 + 32);
+        let outside = |k: usize, j: u32| self.cluster == 1 || j as usize / self.cluster != k / self.cluster;
+        for (k, o) in self.off.iter().enumerate() {
+            if o[1] >> 16 == FIXED {
+                continue;
+            }
+            for sp in &self.springs[o[0] as usize..][..(o[1] & 0xffff) as usize] {
+                // L'entrée, puis chaque position voisine qui n'est pas déjà dans la grappe chargée
+                total += 12 + 16 * outside(k, sp[0] & !PAIR) as u64;
+                if bending && sp[1] != NONE {
+                    total += 16 * outside(k, sp[1]) as u64;
+                }
+            }
+        }
+        total + if accel { self.n as u64 * 64 } else { 0 }
+    }
+
+    /// Ce que le même tissu lisait avant le rangement compact (ressorts de 8 octets, termes de
+    /// flexion de 16 octets rangés à part, position d'avant toujours lue) : la référence du banc.
+    pub fn bytes_per_pass_before(&self) -> u64 {
+        (self.n * (16 + 16 + 16 + 32) + self.springs.len() * (8 + 16) + self.trips * 3 * (16 + 32) + self.n * 64) as u64
     }
 }
 
@@ -377,24 +547,33 @@ fn collide(mut x: [f32; 3], pv: [f32; 3], c: &Consts) -> V4 {
     [x[0], x[1], x[2], hit]
 }
 
-/// Le cœur de VBD : nouvelle position du sommet `i`, ses voisins étant figés. `at` lit la position d'un voisin.
-fn solve_vertex(t: &Topo, i: usize, xi: [f32; 3], tgt: V4, pv: [f32; 3], c: &Consts, at: impl Fn(u32) -> [f32; 3]) -> V4 {
+/// Force sur un sommet et sa dérivée seconde (symétrique : diagonale, puis xy, xz, yz)
+struct Force {
+    f: [f32; 3],
+    hd: [f32; 3],
+    ho: [f32; 3],
+}
+
+/// Inertie, ressorts et flexion du sommet `i` placé en `xi`, ses voisins étant figés. `at` lit la position d'un voisin.
+#[inline]
+fn forces(t: &Topo, i: usize, xi: [f32; 3], tgt: V4, c: &Consts, at: &impl Fn(u32) -> [f32; 3]) -> Force {
     let m = tgt[3] * c.inv_h2;
-    // Force et dérivée seconde (symétrique : diagonale, puis xy, xz, yz)
     let mut f = [-m * (xi[0] - tgt[0]), -m * (xi[1] - tgt[1]), -m * (xi[2] - tgt[2])];
     let mut hd = [m; 3];
     let mut ho = [0.0f32; 3];
-    let (o0, o1) = (t.off[i], t.off[i + 1]);
-    for sp in &t.springs[o0[0] as usize..o1[0] as usize] {
-        let xj = at(sp[0]);
+    let o = t.off[i];
+    // L'entrée d'avant, quand elle forme un terme de flexion avec celle-ci
+    let mut before: Option<([f32; 3], f32)> = None;
+    for sp in &t.springs[o[0] as usize..][..(o[1] & 0xffff) as usize] {
+        let xj = at(sp[0] & !PAIR);
+        let lj = t.rest(sp[2] & 0xffff);
         let d = [xi[0] - xj[0], xi[1] - xj[1], xi[2] - xj[2]];
         let l = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
         if l > 1e-12 {
-            let rest = f32::from_bits(sp[1]);
             let nrm = [d[0] / l, d[1] / l, d[2] / l];
-            let pull = c.k * (l - rest);
+            let pull = c.k * (l - lj);
             // Un ressort comprimé a une dérivée seconde négative en travers : on la coupe à zéro
-            let iso = c.k * (1.0 - rest / l).max(0.0);
+            let iso = c.k * (1.0 - lj / l).max(0.0);
             let ani = c.k - iso;
             for k in 0..3 {
                 f[k] -= pull * nrm[k];
@@ -404,21 +583,46 @@ fn solve_vertex(t: &Topo, i: usize, xi: [f32; 3], tgt: V4, pv: [f32; 3], c: &Con
             ho[1] += ani * nrm[0] * nrm[2];
             ho[2] += ani * nrm[1] * nrm[2];
         }
-    }
-    for b in &t.bends[o0[1] as usize..o1[1] as usize] {
-        let (ws, wa) = (f32::from_bits(b[2]), f32::from_bits(b[3]));
-        let wb = -(ws + wa);
-        let (xa, xb) = (at(b[0]), at(b[1]));
-        let g = c.d * ws;
-        for k in 0..3 {
-            f[k] -= g * (ws * xi[k] + wa * xa[k] + wb * xb[k]);
-            hd[k] += g * ws;
+        if c.d > 0.0 {
+            // Flexion : ½·D·s²·|w·x(bout) + (1−w)·x(autre bout) − x(milieu)|², nulle quand les
+            // trois points sont alignés comme au repos. Chaque bout pèse la longueur de l'autre côté.
+            if sp[1] != NONE {
+                // Ce sommet est un bout, j le milieu, k l'autre bout
+                let lk = t.rest(sp[2] >> 16);
+                let xk = at(sp[1]);
+                let sum = lj + lk;
+                let s = sum / (std::f32::consts::SQRT_2 * lj * lk);
+                let w = lk / sum;
+                let g = c.d * s * s * w;
+                for k in 0..3 {
+                    f[k] -= g * (w * xi[k] + (1.0 - w) * xk[k] - xj[k]);
+                    hd[k] += g * w;
+                }
+            }
+            if let Some((xp, lp)) = before.take() {
+                // Ce sommet est le milieu, entre le voisin d'avant et celui-ci
+                let sum = lp + lj;
+                let s = sum / (std::f32::consts::SQRT_2 * lp * lj);
+                let g = c.d * s * s;
+                for k in 0..3 {
+                    f[k] += g * ((lj * xp[k] + lp * xj[k]) / sum - xi[k]);
+                    hd[k] += g;
+                }
+            } else if sp[0] & PAIR != 0 {
+                before = Some((xj, lj));
+            }
         }
     }
-    // Pas de Newton : résolution du bloc 3×3, mis à l'échelle pour rester loin des bornes du f32
+    Force { f, hd, ho }
+}
+
+/// Pas de Newton sur le bloc 3×3 du sommet, mis à l'échelle pour rester loin des bornes du f32
+#[inline]
+fn newton(fo: &Force, xi: [f32; 3]) -> [f32; 3] {
+    let (hd, ho) = (fo.hd, fo.ho);
     let s = 1.0 / (hd[0] + hd[1] + hd[2]);
     let (a, b, cc, d, e, g) = (hd[0] * s, ho[0] * s, ho[1] * s, hd[1] * s, ho[2] * s, hd[2] * s);
-    let f = [f[0] * s, f[1] * s, f[2] * s];
+    let f = [fo.f[0] * s, fo.f[1] * s, fo.f[2] * s];
     let (c00, c01, c02) = (d * g - e * e, cc * e - b * g, b * e - cc * d);
     let (c11, c12, c22) = (a * g - cc * cc, b * cc - a * e, a * d - b * b);
     let det = a * c00 + b * c01 + cc * c02;
@@ -429,11 +633,50 @@ fn solve_vertex(t: &Topo, i: usize, xi: [f32; 3], tgt: V4, pv: [f32; 3], c: &Con
         x[1] += r * (c01 * f[0] + c11 * f[1] + c12 * f[2]);
         x[2] += r * (c02 * f[0] + c12 * f[1] + c22 * f[2]);
     }
-    collide(x, pv, c)
+    x
+}
+
+/// Une passe : tous les sommets libres mis à jour une fois, plage après plage. Dans une plage,
+/// les blocs (un sommet, ou une grappe) sont indépendants : chacun ne lit, hors de lui-même, que
+/// des sommets d'autres plages. Même suite d'opérations que sur la carte.
+fn sweep(t: &Topo, pos: &mut [V4], tgt: &[V4], prev: &[V4], c: &Consts) {
+    let size = t.cluster.max(1);
+    for g in &t.groups {
+        let (start, count) = (g[0] as usize, g[1] as usize);
+        let (lo, rest) = pos.split_at_mut(start);
+        let (mid, hi) = rest.split_at_mut(count);
+        let (lo, hi) = (&*lo, &*hi);
+        // Un petit lot par fil au moins : sur un petit tissu, se partager le travail coûterait plus que le faire
+        mid.par_chunks_mut(size).with_min_len((256 / size).max(1)).enumerate().for_each(|(q, block)| {
+            let base = start + q * size;
+            for a in 0..block.len() {
+                let i = base + a;
+                if t.mass[i] <= 0.0 {
+                    continue;
+                }
+                let x = {
+                    let at = |j: u32| {
+                        let j = j as usize;
+                        let v = if j >= base && j < base + block.len() {
+                            block[j - base]
+                        } else if j < start {
+                            lo[j]
+                        } else {
+                            hi[j - start - count]
+                        };
+                        [v[0], v[1], v[2]]
+                    };
+                    let xi = [block[a][0], block[a][1], block[a][2]];
+                    collide(newton(&forces(t, i, xi, tgt[i], c, &at), xi), [prev[i][0], prev[i][1], prev[i][2]], c)
+                };
+                block[a] = x;
+            }
+        });
+    }
 }
 
 /// Un pas d'image sur le processeur. `pos` et `vel` sont dans l'ordre de rangement, positions
-/// relatives à l'origine du tissu. Même suite d'opérations que sur la carte.
+/// relatives à l'origine du tissu.
 fn step_cpu(t: &Topo, pos: &mut [V4], vel: &mut [V4], c: &Consts, p: &Params) {
     let n = t.n;
     let (sub, per) = p.split();
@@ -453,23 +696,7 @@ fn step_cpu(t: &Topo, pos: &mut [V4], vel: &mut [V4], c: &Consts, p: &Params) {
         });
         let mut w = 1.0;
         for k in 1..=per {
-            for col in &t.colors {
-                let (start, count) = (col[0] as usize, col[1] as usize);
-                // Les voisins d'un sommet sont tous d'une autre couleur : on les lit pendant qu'on écrit celle-ci
-                let (lo, rest) = pos.split_at_mut(start);
-                let (mid, hi) = rest.split_at_mut(count);
-                let (lo, hi) = (&*lo, &*hi);
-                // Un petit lot par fil au moins : sur un petit tissu, se partager le travail coûterait plus que le faire
-                mid.par_iter_mut().with_min_len(256).enumerate().for_each(|(q, x)| {
-                    let i = start + q;
-                    let at = |j: u32| {
-                        let j = j as usize;
-                        let v = if j < start { lo[j] } else { hi[j - start - count] };
-                        [v[0], v[1], v[2]]
-                    };
-                    *x = solve_vertex(t, i, [x[0], x[1], x[2]], tgt[i], [prev[i][0], prev[i][1], prev[i][2]], c, at);
-                });
-            }
+            sweep(t, pos, &tgt, &prev, c);
             if rho > 0.0 {
                 w = omega(k, w, rho);
                 pos.par_iter_mut().zip(s[k % 2].par_iter_mut()).with_min_len(1024).for_each(|(x, o)| {
@@ -497,25 +724,108 @@ struct C {
     ball: vec4<f32>,
     cube_c: vec4<f32>,
     cube_h: vec4<f32>,
+    rest_scale: f32, p0: f32, p1: f32, p2: f32,
 }
-struct S { start: u32, count: u32, omega: f32, pad: u32 }
+struct S { start: u32, count: u32, omega: f32, phases: u32 }
+struct E { j: u32, k: u32, codes: u32 }
 "#;
 
-/// Le pas de Newton par sommet, une couleur à la fois.
-const SOLVE: &str = r#"
+/// Ce que lisent les noyaux qui parcourent les voisinages
+const NEIGHBOURS: &str = r#"
 @group(0) @binding(0) var<uniform> c: C;
 @group(0) @binding(1) var<uniform> s: S;
 @group(0) @binding(2) var<storage, read_write> pos: array<vec4<f32>>;
 @group(0) @binding(3) var<storage, read> tgt: array<vec4<f32>>;
 @group(0) @binding(4) var<storage, read> prev: array<vec4<f32>>;
 @group(0) @binding(5) var<storage, read> off: array<vec2<u32>>;
-@group(0) @binding(6) var<storage, read> springs: array<vec2<u32>>;
-@group(0) @binding(7) var<storage, read> bends: array<vec4<u32>>;
+@group(0) @binding(6) var<storage, read> springs: array<E>;
+"#;
 
-fn collide(x0: vec3<f32>, pv: vec3<f32>) -> vec4<f32> {
+/// Force sur un sommet, pas de Newton, obstacles : le même calcul que `forces`, `newton` et
+/// `collide`. `fetch(j)` lit la position d'un voisin ; chaque noyau le définit à sa façon.
+const VERTEX: &str = r#"
+struct F { f: vec3<f32>, hd: vec3<f32>, ho: vec3<f32> }
+
+fn rest_of(code: u32) -> f32 { let u = f32(code); return u * u * c.rest_scale; }
+
+fn forces(i: u32, xi: vec3<f32>) -> F {
+    let ty = tgt[i];
+    let m = ty.w * c.inv_h2;
+    var f = -m * (xi - ty.xyz);
+    var hd = vec3<f32>(m);
+    var ho = vec3<f32>(0.0);
+    let o = off[i];
+    let count = o.y & 0xffffu;
+    var xp = vec3<f32>(0.0);
+    var lp = 0.0;
+    var paired = false;
+    for (var e = 0u; e < count; e++) {
+        let sp = springs[o.x + e];
+        let xj = fetch(sp.j & 0x7fffffffu);
+        let lj = rest_of(sp.codes & 0xffffu);
+        let d = xi - xj;
+        let l = length(d);
+        if (l > 1e-12) {
+            let nrm = d / l;
+            let iso = c.k * max(1.0 - lj / l, 0.0);
+            let ani = c.k - iso;
+            f -= c.k * (l - lj) * nrm;
+            hd += vec3<f32>(iso) + ani * nrm * nrm;
+            ho += ani * vec3<f32>(nrm.x * nrm.y, nrm.x * nrm.z, nrm.y * nrm.z);
+        }
+        if (c.d > 0.0) {
+            if (sp.k != 0xffffffffu) {
+                let lk = rest_of(sp.codes >> 16u);
+                let xk = fetch(sp.k);
+                let sum = lj + lk;
+                let sc = sum / (1.4142135 * lj * lk);
+                let w = lk / sum;
+                let g = c.d * sc * sc * w;
+                f -= g * (w * xi + (1.0 - w) * xk - xj);
+                hd += vec3<f32>(g * w);
+            }
+            if (paired) {
+                let sum = lp + lj;
+                let sc = sum / (1.4142135 * lp * lj);
+                let g = c.d * sc * sc;
+                f += g * ((lj * xp + lp * xj) / sum - xi);
+                hd += vec3<f32>(g);
+                paired = false;
+            } else if ((sp.j & 0x80000000u) != 0u) {
+                xp = xj;
+                lp = lj;
+                paired = true;
+            }
+        }
+    }
+    return F(f, hd, ho);
+}
+
+fn newton(fo: F, xi: vec3<f32>) -> vec3<f32> {
+    let sc = 1.0 / (fo.hd.x + fo.hd.y + fo.hd.z);
+    let a = fo.hd.x * sc; let b = fo.ho.x * sc; let cc = fo.ho.y * sc;
+    let d = fo.hd.y * sc; let e = fo.ho.z * sc; let g = fo.hd.z * sc;
+    let f = fo.f * sc;
+    let c00 = d * g - e * e; let c01 = cc * e - b * g; let c02 = b * e - cc * d;
+    let c11 = a * g - cc * cc; let c12 = b * cc - a * e; let c22 = a * d - b * b;
+    let det = a * c00 + b * c01 + cc * c02;
+    var x = xi;
+    if (det > 1e-12) {
+        x += vec3<f32>(c00 * f.x + c01 * f.y + c02 * f.z, c01 * f.x + c11 * f.y + c12 * f.z, c02 * f.x + c12 * f.y + c22 * f.z) / det;
+    }
+    return x;
+}
+
+// La position d'avant n'est lue que si le sommet touche un obstacle
+fn collide(x0: vec3<f32>, i: u32) -> vec4<f32> {
     var x = x0;
+    let under = c.floor_on > 0.5 && x.y < c.floor_y;
+    let in_ball = c.ball.w > 0.0 && distance(x, c.ball.xyz) < c.ball.w;
+    let in_cube = c.cube_c.w > 0.5 && all(abs(x - c.cube_c.xyz) < c.cube_h.xyz);
+    if (!(under || in_ball || in_cube)) { return vec4<f32>(x, 0.0); }
+    let pv = prev[i].xyz;
     var hit = 0.0;
-    if (c.floor_on > 0.5 && x.y < c.floor_y) {
+    if (under) {
         x.y = c.floor_y;
         x.x = pv.x + (x.x - pv.x) * c.slide;
         x.z = pv.z + (x.z - pv.z) * c.slide;
@@ -551,54 +861,57 @@ fn collide(x0: vec3<f32>, pv: vec3<f32>) -> vec4<f32> {
     }
     return vec4<f32>(x, hit);
 }
+"#;
+
+/// Le pas de Newton par sommet, une couleur à la fois.
+const SOLVE: &str = r#"
+fn fetch(j: u32) -> vec3<f32> { return pos[j].xyz; }
 
 @compute @workgroup_size(WG)
 fn solve(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>) {
     let q = lin(gid, nwg);
     if (q >= s.count) { return; }
     let i = s.start + q;
-    let ty = tgt[i];
-    let m = ty.w * c.inv_h2;
     let xi = pos[i].xyz;
-    var f = -m * (xi - ty.xyz);
-    var hd = vec3<f32>(m);
-    var ho = vec3<f32>(0.0);
-    let o0 = off[i];
-    let o1 = off[i + 1u];
-    for (var e = o0.x; e < o1.x; e++) {
-        let sp = springs[e];
-        let d = xi - pos[sp.x].xyz;
-        let l = length(d);
-        if (l > 1e-12) {
-            let rest = bitcast<f32>(sp.y);
-            let nrm = d / l;
-            let iso = c.k * max(1.0 - rest / l, 0.0);
-            let ani = c.k - iso;
-            f -= c.k * (l - rest) * nrm;
-            hd += vec3<f32>(iso) + ani * nrm * nrm;
-            ho += ani * vec3<f32>(nrm.x * nrm.y, nrm.x * nrm.z, nrm.y * nrm.z);
+    pos[i] = collide(newton(forces(i, xi), xi), i);
+}
+"#;
+
+/// Le même pas, une grappe par groupe de fils : la grappe est chargée en mémoire partagée, ses
+/// couleurs y sont résolues l'une après l'autre, puis elle est rendue au tampon. Un voisin de la
+/// grappe se lit dans la mémoire partagée, les autres dans le tampon (ils sont d'une autre plage,
+/// personne ne les écrit pendant ce temps).
+const SOLVE_CLUSTERS: &str = r#"
+var<workgroup> xs: array<vec4<f32>, WG>;
+var<private> base: u32;
+
+fn fetch(j: u32) -> vec3<f32> {
+    let q = j - base;
+    if (q < WG) { return xs[q].xyz; }
+    return pos[j].xyz;
+}
+
+@compute @workgroup_size(WG)
+fn solve(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>, @builtin(local_invocation_index) li: u32) {
+    let q = lin(gid, nwg);
+    let i = s.start + q;
+    base = i - li;
+    var colour = 255u;
+    var x = vec4<f32>(0.0);
+    if (q < s.count) {
+        colour = off[i].y >> 16u;
+        x = pos[i];
+    }
+    xs[li] = x;
+    workgroupBarrier();
+    for (var p = 0u; p < s.phases; p++) {
+        if (colour == p) {
+            let xi = xs[li].xyz;
+            xs[li] = collide(newton(forces(i, xi), xi), i);
         }
+        workgroupBarrier();
     }
-    for (var e = o0.y; e < o1.y; e++) {
-        let b = bends[e];
-        let ws = bitcast<f32>(b.z);
-        let wa = bitcast<f32>(b.w);
-        let g = c.d * ws;
-        f -= g * (ws * xi + wa * pos[b.x].xyz - (ws + wa) * pos[b.y].xyz);
-        hd += vec3<f32>(g * ws);
-    }
-    let sc = 1.0 / (hd.x + hd.y + hd.z);
-    let a = hd.x * sc; let b = ho.x * sc; let cc = ho.y * sc;
-    let d = hd.y * sc; let e = ho.z * sc; let g = hd.z * sc;
-    f = f * sc;
-    let c00 = d * g - e * e; let c01 = cc * e - b * g; let c02 = b * e - cc * d;
-    let c11 = a * g - cc * cc; let c12 = b * cc - a * e; let c22 = a * d - b * b;
-    let det = a * c00 + b * c01 + cc * c02;
-    var x = xi;
-    if (det > 1e-12) {
-        x += vec3<f32>(c00 * f.x + c01 * f.y + c02 * f.z, c01 * f.x + c11 * f.y + c12 * f.z, c02 * f.x + c12 * f.y + c22 * f.z) / det;
-    }
-    pos[i] = collide(x, prev[i].xyz);
+    if (colour != 255u) { pos[i] = xs[li]; }
 }
 "#;
 
@@ -673,79 +986,90 @@ struct GpuCloth {
 /// Itérations par sous-pas que les cases de réglages peuvent décrire
 const MAX_PER: usize = 4096;
 
+/// Les noyaux, les mêmes pour tous les tissus : compilés une fois, gardés
+struct Programs {
+    /// Résolution par couleur, puis par grappes
+    solve: [Kernels; 2],
+    mv: Kernels,
+}
+
+fn programs(g: &Gpu) -> &'static Programs {
+    static PROGRAMS: std::sync::OnceLock<Programs> = std::sync::OnceLock::new();
+    PROGRAMS.get_or_init(|| {
+        let neighbours = [Bind::Uniform, Bind::Slot(16), Bind::Write, Bind::Read, Bind::Read, Bind::Read, Bind::Read];
+        Programs {
+            solve: [
+                g.kernels("tissu-vbd", &format!("{STRUCTS}{NEIGHBOURS}{VERTEX}{SOLVE}"), &neighbours, &["solve"]),
+                g.kernels("tissu-grappes", &format!("{STRUCTS}{NEIGHBOURS}{VERTEX}{SOLVE_CLUSTERS}"), &neighbours, &["solve"]),
+            ],
+            mv: g.kernels("tissu-pas", &format!("{STRUCTS}{MOVE}"), &[Bind::Uniform, Bind::Slot(16), Bind::Write, Bind::Write, Bind::Write, Bind::Write, Bind::Write, Bind::Write], &["predict", "accel", "finish"]),
+        }
+    })
+}
+
 impl GpuCloth {
     /// `None` si ce tissu ne tient pas sur cette carte (une colonne dépasserait ce qu'un noyau peut brancher).
     fn new(g: &Gpu, t: &Topo) -> Option<GpuCloth> {
-        let biggest = (t.n * 16).max(t.off.len() * 8).max(t.springs.len() * 8).max(t.bends.len() * 16) as u64;
+        let biggest = (t.n * 16).max(t.off.len() * 8).max(t.springs.len() * 12) as u64;
         if t.n == 0 || biggest > g.max_binding.min(g.max_buffer) || t.gpu_bytes() > g.max_buffer.saturating_mul(8) {
             return None;
         }
         let v4 = |label: &str| g.column(label, t.n, 16);
         let (pos, vel, tgt, prev, s0, s1) = (v4("tissu-position"), v4("tissu-vitesse"), v4("tissu-cible"), v4("tissu-precedent"), v4("tissu-cheb-0"), v4("tissu-cheb-1"));
         let off = g.column("tissu-debuts", t.off.len(), 8);
-        let springs = g.column("tissu-ressorts", t.springs.len().max(1), 8);
-        let bends = g.column("tissu-flexion", t.bends.len().max(1), 16);
+        let springs = g.column("tissu-ressorts", t.springs.len().max(1), 12);
         let masses: Vec<V4> = t.mass.iter().map(|m| [0.0, 0.0, 0.0, *m]).collect();
         g.write(&tgt, &masses);
         g.write(&off, &t.off);
         if !t.springs.is_empty() {
             g.write(&springs, &t.springs);
         }
-        if !t.bends.is_empty() {
-            g.write(&bends, &t.bends);
-        }
         let slot = g.slot_size(16);
         let consts = g.uniform("tissu-reglages", std::mem::size_of::<Consts>() as u64);
-        let slots = g.uniform("tissu-cases", slot * (t.colors.len() + MAX_PER) as u64);
-        // Les noyaux sont les mêmes pour tous les tissus : compilés une fois, gardés
-        static KERNELS: std::sync::OnceLock<(Kernels, Kernels)> = std::sync::OnceLock::new();
-        let (solve, mv) = KERNELS.get_or_init(|| {
-            (
-                g.kernels("tissu-vbd", &format!("{STRUCTS}{SOLVE}"), &[Bind::Uniform, Bind::Slot(16), Bind::Write, Bind::Read, Bind::Read, Bind::Read, Bind::Read, Bind::Read], &["solve"]),
-                g.kernels("tissu-pas", &format!("{STRUCTS}{MOVE}"), &[Bind::Uniform, Bind::Slot(16), Bind::Write, Bind::Write, Bind::Write, Bind::Write, Bind::Write, Bind::Write], &["predict", "accel", "finish"]),
-            )
-        });
+        let slots = g.uniform("tissu-cases", slot * (t.groups.len() + MAX_PER) as u64);
+        let progs = programs(g);
+        let (solve, mv) = (&progs.solve[(t.layout == Layout::Clusters) as usize], &progs.mv);
         let one = |c: &Column| c.pages[0].clone();
         let (bp, bv, bt, bpr, b0, b1) = (one(&pos), one(&vel), one(&tgt), one(&prev), one(&s0), one(&s1));
-        let g_solve = g.group(solve, &[&consts, &slots, &bp, &bt, &bpr, &off.pages[0], &springs.pages[0], &bends.pages[0]]);
+        let g_solve = g.group(solve, &[&consts, &slots, &bp, &bt, &bpr, &off.pages[0], &springs.pages[0]]);
         let g_move = [g.group(mv, &[&consts, &slots, &bp, &bv, &bt, &bpr, &b0, &b1]), g.group(mv, &[&consts, &slots, &bp, &bv, &bt, &bpr, &b1, &b0])];
-        Some(GpuCloth { pos, vel, consts, slots, slot, slots_for: (0, -1.0), solve, mv, g_solve, g_move, _keep: vec![tgt, prev, s0, s1, off, springs, bends] })
+        Some(GpuCloth { pos, vel, consts, slots, slot, slots_for: (0, -1.0), solve, mv, g_solve, g_move, _keep: vec![tgt, prev, s0, s1, off, springs] })
     }
 
-    /// Envoie à la carte tout un pas d'image : sous-pas, itérations, une passe par couleur.
+    /// Envoie à la carte tout un pas d'image : sous-pas, itérations, une passe par plage.
     fn step(&mut self, g: &Gpu, t: &Topo, c: &Consts, p: &Params) {
         let (sub, per) = p.split();
         let rho = p.rho_used();
-        let colors = t.colors.len();
-        // Cases de réglages : une par couleur (sa plage), puis une par itération (son poids de Tchebychev)
+        let groups = t.groups.len();
+        // Cases de réglages : une par plage, puis une par itération (son poids de Tchebychev)
         if self.slots_for != (per, rho) {
-            let mut data = vec![0u8; (self.slot as usize) * (colors + per)];
+            let mut data = vec![0u8; (self.slot as usize) * (groups + per)];
             let mut put = |k: usize, v: [u32; 4]| data[k * self.slot as usize..][..16].copy_from_slice(gpusim::bytes_of(&v));
-            for (k, col) in t.colors.iter().enumerate() {
-                put(k, [col[0], col[1], 1.0f32.to_bits(), 0]);
+            for (k, r) in t.groups.iter().enumerate() {
+                put(k, [r[0], r[1], 1.0f32.to_bits(), t.phases]);
             }
             let mut w = 1.0;
             for k in 1..=per {
                 w = omega(k, w, rho);
-                put(colors + k - 1, [0, t.n as u32, w.to_bits(), 0]);
+                put(groups + k - 1, [0, t.n as u32, w.to_bits(), 0]);
             }
             g.queue.write_buffer(&self.slots, 0, &data);
             self.slots_for = (per, rho);
         }
         g.queue.write_buffer(&self.consts, 0, gpusim::bytes_of(std::slice::from_ref(c)));
         let at = |k: usize| [(k as u64 * self.slot) as u32];
-        let all = at(colors);
+        let all = at(groups);
         let mut enc = g.device.create_command_encoder(&Default::default());
         for _ in 0..sub {
             let mut pass = enc.begin_compute_pass(&Default::default());
             g.launch(&mut pass, &self.mv.pipelines[0], &self.g_move[0], &all, t.n as u64);
             for k in 1..=per {
-                for (ci, col) in t.colors.iter().enumerate() {
-                    g.launch(&mut pass, &self.solve.pipelines[0], &self.g_solve, &at(ci), col[1] as u64);
+                for (gi, r) in t.groups.iter().enumerate() {
+                    g.launch(&mut pass, &self.solve.pipelines[0], &self.g_solve, &at(gi), r[1] as u64);
                 }
                 if rho > 0.0 {
                     // L'itération k relit l'itéré k−2 : il est dans le tampon « sb » d'un branchement sur deux
-                    g.launch(&mut pass, &self.mv.pipelines[1], &self.g_move[(k + 1) % 2], &at(colors + k - 1), t.n as u64);
+                    g.launch(&mut pass, &self.mv.pipelines[1], &self.g_move[(k + 1) % 2], &at(groups + k - 1), t.n as u64);
                 }
             }
             g.launch(&mut pass, &self.mv.pipelines[2], &self.g_move[0], &all, t.n as u64);
@@ -826,7 +1150,7 @@ impl Cloth {
         if self.topo.n == 0 || dt <= 0.0 {
             return;
         }
-        let c = Consts::new(p, dt, self.origin);
+        let c = Consts::new(p, dt, self.origin, self.topo.rest_scale);
         if let (Some(gc), Some(g)) = (self.gpu.as_mut(), gpusim::gpu()) {
             if self.send.0 {
                 g.write(&gc.pos, &self.pos);
@@ -1083,10 +1407,14 @@ mod tests {
 
     /// Un tissu accroché par un bord, avec ses réglages d'essai
     fn hung(n: usize, on_gpu: bool) -> (Cloth, Vec<[u32; 2]>, Vec<f32>) {
+        hung_as(n, on_gpu, Layout::default())
+    }
+
+    fn hung_as(n: usize, on_gpu: bool, layout: Layout) -> (Cloth, Vec<[u32; 2]>, Vec<f32>) {
         let (p, e) = grid(n, n, 2.0, 1.6);
         let rest = rest_lengths(&e, &p);
         let pinned: Vec<bool> = (0..n * n).map(|i| i / n == 0).collect();
-        let topo = Topo::build(n * n, &e, &rest, &p, &pinned, None);
+        let topo = Topo::build_with(n * n, &e, &rest, &p, &pinned, None, layout, true);
         (Cloth::new(topo, &p, on_gpu), e, rest)
     }
 
@@ -1107,37 +1435,87 @@ mod tests {
 
     #[test]
     fn topologie_rangee_et_coloriee() {
-        let (c, e, _) = hung(12, false);
-        let t = &c.topo;
-        let n = 144;
-        // Rangement : une vraie permutation, et son inverse
-        let mut seen = vec![false; n];
-        for (k, &i) in t.perm.iter().enumerate() {
-            assert!(!std::mem::replace(&mut seen[i as usize], true));
-            assert_eq!(t.inv[i as usize], k as u32);
-        }
-        // Chaque arête apparaît chez ses deux sommets
-        assert_eq!(t.springs.len(), e.len() * 2);
-        assert!(!t.bends.is_empty() && t.colors.len() >= 4 && t.colors.len() <= 16, "{} couleurs", t.colors.len());
-        // Les couleurs couvrent tous les sommets libres, les 12 fixes sont rangés après
-        let free: u32 = t.colors.iter().map(|c| c[1]).sum();
-        assert_eq!(free as usize, n - 12);
-        let color_of = |k: u32| t.colors.iter().position(|c| k >= c[0] && k < c[0] + c[1]);
-        for k in 0..n {
-            let Some(mine) = color_of(k as u32) else {
-                assert_eq!(t.mass[k], 0.0);
-                continue;
-            };
-            assert!(t.mass[k] > 0.0);
-            // Aucun voisin (ressort ou flexion) de la même couleur : c'est ce qui permet de les traiter ensemble
-            for sp in &t.springs[t.off[k][0] as usize..t.off[k + 1][0] as usize] {
-                assert_ne!(color_of(sp[0]), Some(mine));
+        for layout in [Layout::Colors, Layout::Clusters] {
+            let (c, e, rest) = hung_as(12, false, layout);
+            let t = &c.topo;
+            let n = 144;
+            // Rangement : une vraie permutation, et son inverse
+            let mut seen = vec![false; n];
+            for (k, &i) in t.perm.iter().enumerate() {
+                assert!(!std::mem::replace(&mut seen[i as usize], true));
+                assert_eq!(t.inv[i as usize], k as u32);
             }
-            for b in &t.bends[t.off[k][1] as usize..t.off[k + 1][1] as usize] {
-                assert_ne!(color_of(b[0]), Some(mine));
-                assert_ne!(color_of(b[1]), Some(mine));
+            // Chaque arête apparaît chez ses deux sommets, avec sa longueur au repos à 0,01 % près
+            assert_eq!(t.springs.len(), e.len() * 2);
+            for k in 0..n {
+                for sp in &t.springs[t.off[k][0] as usize..][..(t.off[k][1] & 0xffff) as usize] {
+                    let (a, b) = (t.perm[k], t.perm[(sp[0] & !PAIR) as usize]);
+                    let id = e.iter().position(|x| *x == [a, b] || *x == [b, a]).expect("un ressort sans arête");
+                    assert!((t.rest(sp[2] & 0xffff) / rest[id] - 1.0).abs() < 1e-4);
+                }
             }
+            assert!(t.trips > 0 && t.phases >= 4 && t.phases <= 16, "{} couleurs", t.phases);
+            let colour = |k: usize| t.off[k][1] >> 16;
+            // Les plages couvrent tous les sommets libres ; les 12 fixes sont après (par couleur) ou dans leur grappe
+            let covered: u32 = t.groups.iter().map(|g| g[1]).sum();
+            assert_eq!(covered as usize, if layout == Layout::Colors { n - 12 } else { n });
+            assert_eq!((0..n).filter(|k| colour(*k) == FIXED).count(), 12);
+            let group_of = |k: u32| t.groups.iter().position(|g| k >= g[0] && k < g[0] + g[1]);
+            let block = |k: u32| (group_of(k), k as usize / t.cluster);
+            let mut flex = 0;
+            for k in 0..n {
+                assert_eq!(colour(k) == FIXED, t.mass[k] == 0.0);
+                if layout == Layout::Clusters {
+                    assert_eq!(t.groups[group_of(k as u32).unwrap()][0] as usize % CLUSTER, 0);
+                }
+                let list = &t.springs[t.off[k][0] as usize..][..(t.off[k][1] & 0xffff) as usize];
+                for (a, sp) in list.iter().enumerate() {
+                    let near = sp[0] & !PAIR;
+                    // Aucun voisin (ressort ou flexion) de la même couleur : c'est ce qui permet de les traiter ensemble
+                    assert!(colour(k) == FIXED || colour(near as usize) != colour(k));
+                    // Et aucun dans un autre bloc de la même plage : personne ne l'écrit pendant qu'on le lit
+                    let apart = |j: u32| block(j) == block(k as u32) || group_of(j) != group_of(k as u32) || group_of(j).is_none();
+                    assert!(apart(near));
+                    if sp[1] != NONE {
+                        assert!(colour(k) == FIXED || colour(sp[1] as usize) != colour(k));
+                        assert!(apart(sp[1]));
+                        flex += 1;
+                    }
+                    if sp[0] & PAIR != 0 {
+                        assert!(a + 1 < list.len() && list[a + 1][0] & PAIR == 0);
+                        flex += 1;
+                    }
+                }
+            }
+            // Chaque terme de flexion est vu de ses trois sommets
+            assert_eq!(flex, t.trips * 3);
         }
+    }
+
+    /// Le rangement compact divise par trois les octets lus par passe, et les grappes plus encore.
+    #[test]
+    fn octets_par_passe() {
+        let (p, e) = grid(96, 96, 2.0, 1.6);
+        let rest = rest_lengths(&e, &p);
+        let build = |layout| Topo::build_with(96 * 96, &e, &rest, &p, &[], None, layout, true);
+        let (colors, clusters) = (build(Layout::Colors), build(Layout::Clusters));
+        let per = |t: &Topo, b: u64| b as f64 / t.n as f64;
+        let before = per(&colors, colors.bytes_per_pass_before());
+        assert!(before > 850.0 && before < 920.0, "{before}");
+        let (a, b) = (per(&colors, colors.bytes_per_pass(true, true)), per(&clusters, clusters.bytes_per_pass(true, true)));
+        assert!(a < before * 0.55, "par couleur : {a} octets par sommet contre {before}");
+        assert!(b < before / 3.0, "par grappes : {b} octets par sommet contre {before}");
+    }
+
+    /// Les deux rangements résolvent le même tissu : même position d'équilibre, à l'ordre des mises à jour près.
+    #[test]
+    fn grappes_et_couleurs_meme_tissu() {
+        let run = |layout| {
+            let (mut c, _, _) = hung_as(16, false, layout);
+            fall(&mut c, 40, &Params { iterations: 256, substeps: 4, damping: 0.3, ..Default::default() })
+        };
+        let gap = worst_gap(&run(Layout::Colors), &run(Layout::Clusters));
+        assert!(gap < 2e-3, "écart {gap}");
     }
 
     #[test]
@@ -1209,21 +1587,24 @@ mod tests {
         assert!(gap < 2e-3, "écart {gap}");
     }
 
-    /// La règle du socle : le noyau de la carte et sa version processeur donnent le même tissu.
+    /// La règle du socle : le noyau de la carte et sa version processeur donnent le même tissu,
+    /// dans les deux rangements.
     #[test]
     fn carte_contre_processeur() {
         if gpusim::gpu().is_none() {
             return;
         }
         // Peu d'itérations (sans accélération), puis beaucoup (avec) ; sol, boule et boîte
-        for (it, sub) in [(16, 8), (48, 4)] {
-            let par = Params { iterations: it, substeps: sub, floor: Some(0.0), ball: Some(([0.3, 0.9, 0.2], 0.5)), cube: Some(([-0.6, 1.0, 0.0], [0.25, 0.3, 0.4])), ..Default::default() };
-            let (mut cpu, _, _) = hung(20, false);
-            let (mut gpu, _, _) = hung(20, true);
-            assert!(gpu.on_gpu() && !cpu.on_gpu());
-            let gap = worst_gap(&fall(&mut cpu, 8, &par), &fall(&mut gpu, 8, &par));
-            assert!(gap < 5e-4, "écart {gap} ({it} passes, {sub} sous-pas)");
-            assert!(gpu.on_gpu());
+        for layout in [Layout::Colors, Layout::Clusters] {
+            for (it, sub) in [(16, 8), (48, 4)] {
+                let par = Params { iterations: it, substeps: sub, floor: Some(0.0), ball: Some(([0.3, 0.9, 0.2], 0.5)), cube: Some(([-0.6, 1.0, 0.0], [0.25, 0.3, 0.4])), ..Default::default() };
+                let (mut cpu, _, _) = hung_as(20, false, layout);
+                let (mut gpu, _, _) = hung_as(20, true, layout);
+                assert!(gpu.on_gpu() && !cpu.on_gpu());
+                let gap = worst_gap(&fall(&mut cpu, 8, &par), &fall(&mut gpu, 8, &par));
+                assert!(gap < 5e-4, "écart {gap} ({layout:?}, {it} passes, {sub} sous-pas)");
+                assert!(gpu.on_gpu());
+            }
         }
     }
 

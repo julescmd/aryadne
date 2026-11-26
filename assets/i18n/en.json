@@ -3997,5 +3997,10 @@
   "moyenne": "mean",
   "pas de carte graphique utilisable : tissu calculé sur le processeur": "no usable graphics card: cloth computed on the CPU",
   "Peindre les textures d'un modèle par calques, avec masques, générateurs et export des textures": "Paint a model's textures in layers, with masks, generators and texture export",
-  "nouveau fichier (clic droit : importer)": "new file (right-click: import)"
+  "nouveau fichier (clic droit : importer)": "new file (right-click: import)",
+  "rangé par couleur": "sorted by colour",
+  "rangé par grappes de 64": "sorted by clusters of 64",
+  "lancements par passe": "dispatches per pass",
+  "octets lus et écrits par sommet et par passe": "bytes read and written per vertex per pass",
+  "avant le rangement compact": "before the compact layout"
 }

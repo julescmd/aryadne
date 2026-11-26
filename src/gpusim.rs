@@ -231,7 +231,9 @@ impl Gpu {
         };
         let layout = self.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some(label), entries: &binds.iter().enumerate().map(entry).collect::<Vec<_>>() });
         let pl = self.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some(label), bind_group_layouts: &[Some(&layout)], immediate_size: 0 });
-        let pipelines = entries.iter().map(|e| self.device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor { label: Some(e), layout: Some(&pl), module: &module, entry_point: Some(e), compilation_options: Default::default(), cache: None })).collect();
+        // La mémoire partagée d'un groupe de fils est remplie par le noyau avant d'être lue : inutile de la mettre à zéro
+        let opts = wgpu::PipelineCompilationOptions { zero_initialize_workgroup_memory: false, ..Default::default() };
+        let pipelines = entries.iter().map(|e| self.device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor { label: Some(e), layout: Some(&pl), module: &module, entry_point: Some(e), compilation_options: opts.clone(), cache: None })).collect();
         Kernels { layout, pipelines, binds: binds.to_vec() }
     }
 
