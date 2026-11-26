@@ -507,7 +507,7 @@ impl Editor {
         });
         // Calques à gauche de la toile
         crate::dock::panel(ui, "vec-layers", "calques (vectoriel)", egui::Panel::left(egui::Id::unique(("vec-layers", &key))).resizable(true).default_size(200.0).min_size(150.0).max_size(360.0), egui::Frame::new().fill(p.panel).stroke(Stroke::new(1.0, p.line)).inner_margin(8), |ui| self.layers(ui));
-        self.toolbar(ui);
+        crate::dock::strip(ui, "vec-options", "options de l'outil (vectoriel)", p.panel, |ui| self.toolbar(ui));
         self.icon_window(&ui.ctx().clone());
         self.comment_window(&ui.ctx().clone());
         self.canvas(ui);

@@ -430,6 +430,8 @@ struct Moving {
 thread_local! {
     static LIVE: std::cell::RefCell<HashMap<String, Live>> = std::cell::RefCell::new(HashMap::new());
     static MOVING: std::cell::RefCell<Option<Moving>> = const { std::cell::RefCell::new(None) };
+    /// Dernier endroit connu du pointeur pendant qu'on tire une poignée
+    static LAST_DRAG: std::cell::Cell<Option<Pos2>> = const { std::cell::Cell::new(None) };
     /// Panneaux d'éditeur dessinés à cette image (le même panneau de deux éditeurs côte à côte n'a qu'une fenêtre)
     static SEEN: std::cell::RefCell<HashMap<String, u64>> = std::cell::RefCell::new(HashMap::new());
 }
@@ -447,6 +449,10 @@ fn touch() {
 /// À appeler une fois par image depuis la fenêtre principale : écrit les places des fenêtres déplacées
 /// (pas à chaque pixel) et montre où lâcher une fenêtre pour la rattacher.
 pub fn tick(ctx: &egui::Context) {
+    if FRAMES.load(std::sync::atomic::Ordering::Relaxed) < 4 {
+        FRAMES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        ctx.request_repaint();
+    }
     let closing = ctx.input(|i| i.viewport().close_requested());
     let due = DIRTY.lock().ok().and_then(|g| *g).is_some_and(|t| closing || t.elapsed().as_secs_f32() > 0.8);
     if due {
@@ -496,9 +502,14 @@ pub fn detach_at(ctx: &egui::Context, id: &str, at: Option<Pos2>, size: [f32; 2]
     ctx.request_repaint();
 }
 
+/// Images dessinées par la fenêtre principale depuis le lancement.
+static FRAMES: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
 /// Le panneau `id` est-il sorti dans sa propre fenêtre ?
+/// Au lancement, les fenêtres détachées attendent que la fenêtre principale soit affichée : ouvertes avant elle,
+/// elles se retrouveraient cachées derrière sur un seul écran.
 pub fn is_out(id: &str) -> bool {
-    side_of(id) == Some(Side::Window)
+    side_of(id) == Some(Side::Window) && FRAMES.load(std::sync::atomic::Ordering::Relaxed) >= 3
 }
 
 /// Ce que rend une fenêtre détachée.
@@ -553,9 +564,10 @@ fn native<R>(ctx: &egui::Context, key: &str, title: &str, size: egui::Vec2, min:
     let passes = ctx.options(|o| o.max_passes);
     ctx.options_mut(|o| o.max_passes = std::num::NonZeroUsize::MIN);
     let out = ctx.show_viewport_immediate(egui::ViewportId::from_hash_of(("dock", key)), vp, |ui, _class| {
-        let (asked, outer, inner) = ui.ctx().input(|i| (i.viewport().close_requested(), i.viewport().outer_rect, i.viewport().inner_rect));
+        let (asked, outer, inner, hidden) = ui.ctx().input(|i| (i.viewport().close_requested(), i.viewport().outer_rect, i.viewport().inner_rect, i.viewport().minimized == Some(true)));
         close = asked;
-        if let (Some(o), Some(r)) = (outer, inner) {
+        // Réduite dans la barre des tâches : sa place n'a pas de sens (Windows la dit à −32000), on garde la dernière
+        if let (Some(o), Some(r), false) = (outer, inner, hidden) {
             // Déplacée ou redimensionnée par le système : on retient sa place
             let changed = with(|m| {
                 let pl = m.entry(key.to_string()).or_insert(Place::new(Side::Window, [0.0, 0.0], [r.width(), r.height()]));
@@ -649,13 +661,18 @@ pub enum Grip {
 /// barre basse). Un clic le détache, le tirer le détache là où on le lâche. Dans une fenêtre détachée, un clic le rattache.
 /// Dessinée par-dessus le contenu, dans la marge : la mise en page du panneau ne change pas.
 pub fn grip(ui: &Ui, rect: Rect, id: &str, title: &str, out: bool) -> Grip {
-    let p = crate::theme::pal();
     // Barre basse et large (transport, statut) : la poignée se met debout, à gauche
     let upright = rect.height() < 64.0 && rect.width() > rect.height() * 2.0;
     let pill = if upright { Rect::from_center_size(pos2(rect.left() + 4.0, rect.center().y), vec2(8.0, 26.0f32.min(rect.height() - 4.0))) } else { Rect::from_center_size(pos2(rect.center().x, rect.top() + 4.0), vec2(34.0f32.min(rect.width() - 4.0), 8.0)) };
+    grip_in(ui, rect, pill, upright, id, title, out)
+}
+
+/// La poignée, dessinée dans `pill` (`rect` : le panneau qu'elle détache).
+fn grip_in(ui: &Ui, rect: Rect, pill: Rect, upright: bool, id: &str, title: &str, out: bool) -> Grip {
+    let p = crate::theme::pal();
     let resp = ui.interact(pill, egui::Id::unique(("dock-grip", id)), Sense::click_and_drag());
     let hot = resp.hovered() || resp.dragged();
-    let painter = ui.ctx().layer_painter(ui.layer_id()).with_clip_rect(rect.expand(1.0));
+    let painter = ui.ctx().layer_painter(ui.layer_id()).with_clip_rect(rect.union(pill).expand(1.0));
     if hot {
         painter.rect_filled(pill, 4.0, p.accent);
     } else if out {
@@ -680,6 +697,7 @@ pub fn grip(ui: &Ui, rect: Rect, id: &str, title: &str, out: bool) -> Grip {
     if resp.dragged() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
         if let Some(at) = ui.ctx().pointer_latest_pos() {
+            LAST_DRAG.with(|l| l.set(Some(at)));
             // Le fantôme de la fenêtre suit le pointeur tant qu'il reste dans l'application
             let ghost = Rect::from_min_size(at - vec2(rect.width().min(360.0) / 2.0, 6.0), vec2(rect.width().min(360.0), rect.height().min(220.0)));
             let top = ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::unique("dock-ghost")));
@@ -690,11 +708,14 @@ pub fn grip(ui: &Ui, rect: Rect, id: &str, title: &str, out: bool) -> Grip {
         ui.ctx().request_repaint();
     }
     if resp.drag_stopped() {
-        if let Some(at) = ui.ctx().pointer_latest_pos() {
-            if outside(ui.ctx(), at) || (at - pill.center()).length() > 24.0 {
+        // Sorti de la fenêtre, le pointeur n'est parfois plus suivi : on prend alors le dernier endroit connu
+        let now = ui.ctx().pointer_latest_pos();
+        if let Some(at) = now.or(LAST_DRAG.with(|l| l.get())) {
+            if now.is_none() || outside(ui.ctx(), at) || (at - pill.center()).length() > 24.0 {
                 ask = Grip::Detach(Some(desk(ui.ctx(), at - vec2(rect.width().min(360.0) / 2.0, 6.0))));
             }
         }
+        LAST_DRAG.with(|l| l.set(None));
     }
     if !resp.dragged() {
         resp.on_hover_cursor(egui::CursorIcon::Grab).on_hover_text(format!("{}  {} · {title}\n{}", crate::lucide::EXTERNAL_LINK, crate::i18n::t("détacher dans sa propre fenêtre"), crate::i18n::t("un clic, ou tirer la poignée hors de la fenêtre (vers un autre écran)")));
@@ -707,7 +728,7 @@ pub fn apply_grip(ctx: &egui::Context, key: &str, rect: Rect, ask: Grip) {
     match ask {
         Grip::None => {}
         Grip::Detach(at) => {
-            let size = [rect.width().max(200.0), rect.height().max(160.0)];
+            let size = [rect.width().max(56.0), rect.height().max(60.0)];
             detach_at(ctx, key, Some(at.unwrap_or_else(|| desk(ctx, rect.min))), size);
         }
         Grip::Attach => attach(ctx, key),
@@ -750,7 +771,7 @@ pub fn slot<R>(ui: &mut Ui, slot: crate::layout::Slot, fill: Color32, margin: f3
             out
         }
         None if first_this_frame(&ctx, &key) => {
-            let shown = native(&ctx, &key, &title, vec2(320.0, 420.0), vec2(120.0, 80.0), true, |ui| {
+            let shown = native(&ctx, &key, &title, vec2(320.0, 420.0), vec2(48.0, 48.0), true, |ui| {
                 egui::CentralPanel::default()
                     .frame(egui::Frame::new().fill(fill).inner_margin(margin))
                     .show(ui, |ui| {
@@ -788,6 +809,67 @@ pub fn panel<R>(ui: &mut Ui, id: &str, title: &str, panel: egui::Panel, frame: e
     let ask = grip(ui, rect, &key, &crate::i18n::t(title), false);
     apply_grip(ui.ctx(), &key, rect, ask);
     shown.inner
+}
+
+/// Une zone d'éditeur détachable qui n'est pas un panneau egui : un bloc dessiné dans le rectangle `rect`
+/// (bibliothèque de nodes, pile de calques de l'atelier…). Sortie dans sa fenêtre ou sa case, elle s'y dessine ;
+/// l'appelant demande `layout::offer(id, …).is_some()` pour savoir s'il peut reprendre sa place.
+pub fn area<R>(ui: &mut Ui, id: &str, title: &str, rect: Rect, fill: Color32, margin: f32, body: impl FnOnce(&mut Ui) -> R) -> R {
+    if let Some(s) = crate::layout::offer(id, title) {
+        return slot(ui, s, fill, margin, body);
+    }
+    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect.shrink(margin)).layout(egui::Layout::top_down(egui::Align::Min)));
+    child.set_clip_rect(rect.intersect(ui.clip_rect()));
+    child.painter().rect_filled(rect, 0.0, fill);
+    let out = body(&mut child);
+    let key = crate::layout::editor_pane(id);
+    let ask = grip(ui, rect, &key, &crate::i18n::t(title), false);
+    apply_grip(ui.ctx(), &key, rect, ask);
+    out
+}
+
+/// Une barre d'outils détachable qui prend sa place dans le flux (barre d'options, rangée de menus) :
+/// dessinée sur place avec sa poignée à gauche, ou dans sa fenêtre.
+pub fn strip<R>(ui: &mut Ui, id: &str, title: &str, fill: Color32, body: impl FnOnce(&mut Ui) -> R) -> R {
+    if let Some(s) = crate::layout::offer(id, title) {
+        return slot(ui, s, fill, 8.0, body);
+    }
+    let shown = ui.scope(body);
+    let rect = shown.response.rect;
+    let key = crate::layout::editor_pane(id);
+    // La poignée dans la marge, à gauche de la barre : elle ne couvre aucun bouton
+    let ask = grip(ui, Rect::from_min_max(pos2(rect.left() - 9.0, rect.top()), pos2(rect.right().max(rect.left() + 200.0), rect.bottom().clamp(rect.top() + 20.0, rect.top() + 60.0))), &key, &crate::i18n::t(title), false);
+    apply_grip(ui.ctx(), &key, rect, ask);
+    shown.inner
+}
+
+/// Une barre flottante posée sur une vue (outils de la vue 3D, en-tête du graphe) : `area` sur place, avec sa
+/// poignée, ou dans sa propre fenêtre. Rend aussi la place qu'elle occupe dans la vue (vide quand elle en est sortie).
+pub fn overlay<R>(ui: &mut Ui, id: &str, title: &str, area: egui::Area, body: impl FnOnce(&mut Ui) -> R) -> (R, Rect) {
+    if let Some(s) = crate::layout::offer(id, title) {
+        let fill = crate::theme::pal().panel;
+        return (slot(ui, s, fill, 8.0, body), Rect::from_min_size(ui.max_rect().min, egui::Vec2::ZERO));
+    }
+    let key = crate::layout::editor_pane(id);
+    let title = crate::i18n::t(title);
+    let mut ask = Grip::None;
+    let shown = area.show(ui.ctx(), |ui| {
+        let out = body(ui);
+        let rect = ui.min_rect();
+        if rect.height() < 64.0 && rect.width() > rect.height() * 2.0 {
+            // Barre couchée : la poignée debout, dans sa marge de gauche
+            ask = grip(ui, rect, &key, &title, false);
+        } else {
+            // Colonne d'outils : la poignée a sa petite rangée, sous le dernier outil
+            let (row, _) = ui.allocate_exact_size(vec2(rect.width(), 9.0), Sense::hover());
+            let pill = Rect::from_center_size(row.center(), vec2(26.0f32.min(row.width() - 2.0), 8.0));
+            ask = grip_in(ui, rect.union(row), pill, false, &key, &title, false);
+        }
+        out
+    });
+    let rect = shown.response.rect;
+    apply_grip(ui.ctx(), &key, rect, ask);
+    (shown.inner, rect)
 }
 
 /// La zone centrale d'un éditeur (vue, moniteur, pistes…), détachable elle aussi. Sortie dans sa fenêtre,

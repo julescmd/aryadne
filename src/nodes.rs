@@ -3681,29 +3681,32 @@ impl Editor {
         let picks = self.picks();
         let mut preset: Option<&'static str> = None;
         let avail = ui.available_rect_before_wrap();
-        let lib_w = 240.0f32.min(avail.width() * 0.22);
-        let insp_w = 290.0f32.min(avail.width() * 0.28);
+        // Bibliothèque, inspecteur, préréglages : chacun peut sortir dans sa fenêtre ou sa case, et rend alors sa place au graphe
+        let lib_away = crate::layout::offer("node-lib", "bibliothèque de nodes").is_some();
+        let insp_away = crate::layout::offer("node-inspector", "aperçu et réglages (nodes)").is_some();
+        let strip_away = crate::layout::offer("node-presets", "préréglages de matériaux").is_some();
+        let lib_w = if lib_away { 0.0 } else { 240.0f32.min(avail.width() * 0.22) };
+        let insp_w = if insp_away { 0.0 } else { 290.0f32.min(avail.width() * 0.28) };
         let lib_rect = Rect::from_min_size(avail.min, vec2(lib_w, avail.height()));
         let insp_rect = Rect::from_min_max(pos2(avail.right() - insp_w, avail.top()), avail.max);
         let graph_rect = Rect::from_min_max(pos2(lib_rect.right(), avail.top()), pos2(insp_rect.left(), avail.bottom()));
         // Bande des préréglages sous le graphe (matériaux seulement)
-        let strip_h = if kind == GraphKind::Material { if self.strip_open { 126.0 } else { 28.0 } } else { 0.0 };
+        let strip_h = if kind == GraphKind::Material && !strip_away { if self.strip_open { 126.0 } else { 28.0 } } else { 0.0 };
         let strip_rect = Rect::from_min_max(pos2(graph_rect.left(), graph_rect.bottom() - strip_h), graph_rect.max);
         let graph_rect = Rect::from_min_max(graph_rect.min, pos2(graph_rect.right(), graph_rect.bottom() - strip_h));
-        if strip_h > 0.0 {
-            if let Some(name) = self.preset_strip(ui, strip_rect, &ctx) {
+        if kind == GraphKind::Material {
+            let picked = crate::dock::area(ui, "node-presets", "préréglages de matériaux", strip_rect, p.panel, 0.0, |ui| {
+                let r = ui.max_rect();
+                self.preset_strip(ui, r, &ctx)
+            });
+            if let Some(name) = picked {
                 preset = Some(name);
             }
         }
-        for r in [lib_rect, insp_rect] {
-            ui.painter().rect_filled(r, 0.0, p.panel);
-        }
-        ui.painter().vline(lib_rect.right() - 0.5, lib_rect.y_range(), Stroke::new(1.0, p.line));
-        ui.painter().vline(insp_rect.left() + 0.5, insp_rect.y_range(), Stroke::new(1.0, p.line));
         // ---- Bibliothèque de nodes : chercher, puis une rangée par node, rangés par catégorie
-        {
-            let mut lui = ui.new_child(egui::UiBuilder::new().max_rect(lib_rect).layout(egui::Layout::top_down(egui::Align::Min)));
-            lui.set_clip_rect(lib_rect);
+        crate::dock::area(ui, "node-lib", "bibliothèque de nodes", lib_rect, p.panel, 0.0, |lui| {
+            let lib_rect = lui.max_rect();
+            lui.painter().vline(lib_rect.right() - 0.5, lib_rect.y_range(), Stroke::new(1.0, p.line));
             let (hr, _) = lui.allocate_exact_size(vec2(lib_rect.width(), 34.0), Sense::hover());
             lui.painter().hline(hr.x_range(), hr.bottom() - 0.5, Stroke::new(1.0, p.line));
             lui.painter().text(hr.left_center() + vec2(12.0, 0.0), egui::Align2::LEFT_CENTER, crate::i18n::t("Nodes"), egui::FontId::new(13.0, theme::bold()), p.text);
@@ -3714,7 +3717,7 @@ impl Editor {
             });
             lui.add_space(4.0);
             let f = crate::chat::fold(&self.lib_filter);
-            egui::ScrollArea::vertical().id_salt("node-lib").auto_shrink([false, false]).show(&mut lui, |ui| {
+            egui::ScrollArea::vertical().id_salt("node-lib").auto_shrink([false, false]).show(lui, |ui| {
                 ui.spacing_mut().item_spacing.y = 0.0;
                 for cat in CATS {
                     let items: Vec<&(String, &'static str, Pick, bool)> = picks.iter().filter(|x| x.1 == cat).filter(|x| f.is_empty() || crate::chat::fold(&x.0).contains(&f)).collect();
@@ -3741,9 +3744,14 @@ impl Editor {
                     }
                 }
             });
-        }
+        });
         // ---- Inspecteur : aperçu carré, puis le node choisi
-        let prev_rect = Rect::from_min_size(insp_rect.min + vec2(12.0, 46.0), vec2(insp_rect.width() - 24.0, insp_rect.width() - 24.0));
+        crate::dock::area(ui, "node-inspector", "aperçu et réglages (nodes)", insp_rect, p.panel, 0.0, |ui| {
+        let insp_rect = ui.max_rect();
+        ui.painter().vline(insp_rect.left() + 0.5, insp_rect.y_range(), Stroke::new(1.0, p.line));
+        // Dans une grande fenêtre, l'aperçu garde une taille raisonnable
+        let side = (insp_rect.width() - 24.0).min((insp_rect.height() * 0.6).max(120.0));
+        let prev_rect = Rect::from_min_size(insp_rect.min + vec2(12.0, 46.0), vec2(insp_rect.width() - 24.0, side));
         {
             let (hr, _) = (Rect::from_min_size(insp_rect.min, vec2(insp_rect.width(), 34.0)), ());
             ui.painter().hline(hr.x_range(), hr.bottom() - 0.5, Stroke::new(1.0, p.line));
@@ -3789,6 +3797,7 @@ impl Editor {
                 self.structure_ui(ui);
             });
         }
+        });
         if let Some(g) = preset.and_then(material_preset) {
             self.leave();
             self.graph = g;
@@ -3798,7 +3807,7 @@ impl Editor {
         ui.painter().rect_filled(graph_rect, 0.0, p.bg);
         // ---- En-tête flottant du graphe (une zone au-dessus du graphe, qui garde ses clics)
         let hdr_w = (graph_rect.width() - 24.0).max(120.0);
-        egui::Area::new(ui.scope_id().with("node-hdr")).order(egui::Order::Middle).fixed_pos(graph_rect.min + vec2(12.0, 10.0)).show(&ctx, |ui| {
+        crate::dock::overlay(ui, "node-header", "barre du graphe (nodes)", egui::Area::new(ui.scope_id().with("node-hdr")).order(egui::Order::Middle).fixed_pos(graph_rect.min + vec2(12.0, 10.0)), |ui| {
             {
                 let v = &mut ui.style_mut().visuals.widgets;
                 v.inactive.weak_bg_fill = Color32::TRANSPARENT;
@@ -5601,8 +5610,11 @@ impl Editor {
         self.atelier_thumbs(ctx, &masters, &smart);
 
         let avail = ui.available_rect_before_wrap();
-        let left_w = 236.0f32.min(avail.width() * 0.24);
-        let right_w = 330.0f32.min(avail.width() * 0.34);
+        // La bibliothèque et la pile de calques peuvent sortir dans leur fenêtre : l'aperçu prend alors leur place
+        let lib_away = crate::layout::offer("atelier-lib", "matériaux (atelier)").is_some();
+        let panel_away = crate::layout::offer("atelier-layers", "calques et propriétés (atelier)").is_some();
+        let left_w = if lib_away { 0.0 } else { 236.0f32.min(avail.width() * 0.24) };
+        let right_w = if panel_away { 0.0 } else { 330.0f32.min(avail.width() * 0.34) };
         let lib = Rect::from_min_max(avail.min, pos2(avail.min.x + left_w, avail.max.y));
         let panel = Rect::from_min_max(pos2(avail.max.x - right_w, avail.min.y), avail.max);
         let prev = Rect::from_min_max(pos2(lib.right() + 1.0, avail.min.y), pos2(panel.left() - 1.0, avail.max.y));
@@ -5618,15 +5630,13 @@ impl Editor {
         };
 
         // ---------- Bibliothèque (à gauche) ----------
-        ui.painter().rect_filled(lib, 0.0, p.panel);
         ui.painter().vline(lib.right(), lib.y_range(), egui::Stroke::new(1.0, p.line));
         let mut add_master: Option<String> = None;
         let mut add_smart: Option<String> = None;
         let mut add_preset: Option<&'static str> = None;
         let mut new_master = false;
-        {
-            let mut lui = ui.new_child(egui::UiBuilder::new().max_rect(lib.shrink2(vec2(10.0, 10.0))));
-            head(&mut lui, "MATÉRIAUX");
+        crate::dock::area(ui, "atelier-lib", "matériaux (atelier)", lib, p.panel, 10.0, |lui| {
+            head(lui, "MATÉRIAUX");
             lui.add_space(4.0);
             lui.add(egui::TextEdit::singleline(&mut self.lib_search).hint_text(format!("{}  {}", crate::lucide::SEARCH, crate::i18n::t("chercher"))).desired_width(f32::INFINITY));
             lui.add_space(4.0);
@@ -5667,7 +5677,7 @@ impl Editor {
                     }
                 }
             }
-            egui::ScrollArea::vertical().id_salt("atelier-lib").auto_shrink([false, false]).show(&mut lui, |ui| {
+            egui::ScrollArea::vertical().id_salt("atelier-lib").auto_shrink([false, false]).show(lui, |ui| {
                 let cols = ((ui.available_width() + 6.0) / 70.0).floor().max(2.0) as usize;
                 let cell = (ui.available_width() - 6.0 * (cols as f32 - 1.0)) / cols as f32;
                 egui::Grid::new("atelier-lib-grid").spacing(vec2(6.0, 8.0)).show(ui, |ui| {
@@ -5714,7 +5724,7 @@ impl Editor {
                     new_master = true;
                 }
             });
-        }
+        });
         if let Some(m) = add_master {
             let name = std::path::Path::new(&m).file_name().map(|s| crate::formats::strip(&s.to_string_lossy()).to_string()).unwrap_or_default();
             stack.layers.push(crate::atelier::Layer { name, master: m, params: Default::default(), mask: Default::default(), opacity: 1.0, visible: true });
@@ -5765,10 +5775,8 @@ impl Editor {
         }
 
         // ---------- Calques et propriétés (à droite) ----------
-        ui.painter().rect_filled(panel, 0.0, p.panel);
         ui.painter().vline(panel.left(), panel.y_range(), egui::Stroke::new(1.0, p.line));
-        let mut child = ui.new_child(egui::UiBuilder::new().max_rect(panel.shrink2(vec2(10.0, 10.0))));
-        let ui = &mut child;
+        crate::dock::area(ui, "atelier-layers", "calques et propriétés (atelier)", panel, p.panel, 10.0, |ui| {
         let n = stack.layers.len();
         let (mut del, mut up, mut down, mut dup) = (None, None, None, None);
         // En-tête des calques : le titre, et les actions en icônes (comme Painter)
@@ -5999,6 +6007,7 @@ impl Editor {
                 });
             });
         }
+        });
         if changed || self.graph.stack.as_ref() != Some(&stack) {
             self.graph.stack = Some(stack);
             self.changed();

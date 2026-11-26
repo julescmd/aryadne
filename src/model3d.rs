@@ -8508,7 +8508,7 @@ impl Viewer {
         let mut want_edit: Option<bool> = if std::mem::take(&mut self.start_edit) { Some(true) } else { None };
         // L'en-tête flotte par-dessus le haut de la vue, comme dans Blender : la vue garde toute la hauteur
         let vp = self.vp_rect.unwrap_or(ui.available_rect_before_wrap());
-        let hdr_area = egui::Area::new(egui::Id::unique(("hdr3d", self.path.to_string_lossy().to_string()))).order(egui::Order::Middle).fixed_pos(vp.min + egui::vec2(12.0, 10.0)).show(ui.ctx(), |ui| {
+        let hdr_area = crate::dock::overlay(ui, "3d-header", "barre de la vue 3D", egui::Area::new(egui::Id::unique(("hdr3d", self.path.to_string_lossy().to_string()))).order(egui::Order::Middle).fixed_pos(vp.min + egui::vec2(12.0, 10.0)), |ui| {
         ui.set_max_width((vp.width() - 24.0).max(200.0));
         // Comme la maquette : une barre de 34 px sur toute la largeur, boutons sans cadre
         ui.spacing_mut().button_padding = egui::vec2(6.0, 2.0);
@@ -8974,7 +8974,7 @@ impl Viewer {
         }));
         });
         });
-        self.hdr_h = hdr_area.response.rect.height();
+        self.hdr_h = hdr_area.1.height();
         if let Some(on) = want_edit {
             let editing = on;
             if editing != self.edit.is_some() {
@@ -9368,7 +9368,7 @@ impl Viewer {
         // Barre d'outils à gauche de la vue (scènes) : sélection, déplacer, tourner, taille, ajouter
         if crate::scene::is_scene(&self.path) && self.edit.is_none() {
             let top = rect.min + egui::vec2(6.0, self.hdr_h + 14.0);
-            egui::Area::new(egui::Id::unique(("tools3d", self.path.to_string_lossy().to_string()))).order(egui::Order::Middle).fixed_pos(top).show(ui.ctx(), |ui| {
+            crate::dock::overlay(ui, "3d-tools", "outils (3D)", egui::Area::new(egui::Id::unique(("tools3d", self.path.to_string_lossy().to_string()))).order(egui::Order::Middle).fixed_pos(top), |ui| {
                 egui::Frame::new().fill(p.panel.gamma_multiply(0.94)).corner_radius(6).stroke(Stroke::new(1.0, p.line)).inner_margin(3).show(ui, |ui| {
                     ui.spacing_mut().item_spacing.y = 2.0;
                     // Des cases toutes de la même taille, alignées

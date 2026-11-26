@@ -2998,6 +2998,7 @@ impl Editor {
         // Elle passe à la ligne avant le panneau des calques (sinon elle l'écarte hors de la fenêtre)
         let docked = crate::layout::offer("paint-layers", "calques (retouche)").is_some();
         let bar_w = (ui.available_width() - if docked { 0.0 } else { self.panel_w + 12.0 }).max(200.0);
+        crate::dock::strip(ui, "paint-options", "options de l'outil (retouche)", p.panel, |ui| {
         ui.horizontal_wrapped(|ui| {
             ui.set_max_width(bar_w);
             ui.spacing_mut().item_spacing.x = 4.0;
@@ -3314,6 +3315,7 @@ impl Editor {
             }
             ui.separator();
 
+        });
         });
         if let Some(m) = &self.message {
             ui.label(egui::RichText::new(m).size(11.0).color(p.muted));

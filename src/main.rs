@@ -674,7 +674,9 @@ impl App {
         };
         let mut go: Option<String> = None;
         let mut act: u8 = 0;
-        egui::containers::menu::MenuButton::new(RichText::new(format!("{cur} {}", lucide::CHEVRON_DOWN)).size(12.5).color(p.text)).ui(ui, |ui| {
+        // Le menu reste ouvert quand on clique dans le champ du nom (il se ferme par ses boutons, ou à côté)
+        let stay = egui::containers::menu::MenuConfig::new().close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
+        egui::containers::menu::MenuButton::new(RichText::new(format!("{cur} {}", lucide::CHEVRON_DOWN)).size(12.5).color(p.text)).config(stay).ui(ui, |ui| {
             self.disp_items(ui, &names, &cur, &mut go, &mut act);
         });
         self.disp_apply(go, act, &cur, &ctx);
@@ -1865,7 +1867,7 @@ impl App {
         }
         // Sortis dans leur propre fenêtre du système : dessinés à part
         let panes = layout::panes(&tree);
-        let outside: Vec<String> = panes.iter().filter(|p| dock::side_of(p) == Some(dock::Side::Window)).cloned().collect();
+        let outside: Vec<String> = panes.iter().filter(|p| dock::is_out(p)).cloned().collect();
         dock::set_managed(panes.iter().filter(|p| !outside.contains(p)).cloned().collect());
         layout::set_visibility(&mut tree, &|p| !outside.iter().any(|o| o == p) && self.pane_open(p));
         layout::set_docked(panes.iter().filter(|p| p.starts_with("ed:") && self.offered_now.contains_key(*p) && !outside.contains(p)).cloned().collect());
@@ -3017,7 +3019,8 @@ impl App {
                             cmd = Some(extras::Cmd::Pin);
                         }
                     });
-                    ui.menu_button(top("Disposition"), |ui| {
+                    let stay = egui::containers::menu::MenuConfig::new().close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
+                    egui::containers::menu::MenuButton::new(top("Disposition")).config(stay).ui(ui, |ui| {
                         self.disp_items(ui, &names, &cur, &mut go, &mut act);
                     });
                     ui.menu_button(top("Fenêtre"), |ui| self.window_menu(ui, &mut cmd, &ctx));
@@ -3206,13 +3209,25 @@ impl App {
         let offered = layout::offered();
         if !offered.is_empty() {
             ui.separator();
-            ui.label(caps(&crate::i18n::t("panneaux de l'éditeur, dans leur case")));
+            ui.label(caps(&crate::i18n::t("panneaux de l'éditeur : fenêtre à part, ou case")));
             let in_tree: Vec<String> = self.tree.as_ref().map(layout::panes).unwrap_or_default();
             for (id, title) in offered {
                 let mut on = in_tree.contains(&id);
-                if ui.checkbox(&mut on, crate::i18n::t(&title)).on_hover_text(crate::i18n::t("Coché : le panneau a sa propre case, qu'on glisse où on veut. Décoché : il revient dans l'éditeur.")).changed() {
-                    self.dock_editor_panes.push((id, on));
-                }
+                ui.horizontal(|ui| {
+                    // À gauche : le sortir dans une vraie fenêtre ; la case : lui donner une case de la disposition
+                    let out = dock::is_out(&id);
+                    let b = egui::Button::new(egui::RichText::new(if out { crate::lucide::MINIMIZE_2 } else { crate::lucide::EXTERNAL_LINK }).size(12.0).color(if out { theme::pal().accent } else { theme::pal().muted })).frame(false).min_size(egui::vec2(18.0, 18.0));
+                    if ui.add(b).on_hover_text(crate::i18n::t(if out { "rattacher à la fenêtre principale" } else { "détacher dans sa propre fenêtre" })).clicked() {
+                        if out {
+                            dock::attach(ctx, &id);
+                        } else {
+                            dock::detach_at(ctx, &id, None, [320.0, 460.0]);
+                        }
+                    }
+                    if ui.checkbox(&mut on, crate::i18n::t(&title)).on_hover_text(crate::i18n::t("Coché : le panneau a sa propre case, qu'on glisse où on veut. Décoché : il revient dans l'éditeur.")).changed() {
+                        self.dock_editor_panes.push((id, on));
+                    }
+                });
             }
         }
         ui.separator();

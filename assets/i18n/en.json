@@ -3819,5 +3819,16 @@
   "ou exclusif": "exclusive or",
   "non-et": "nand",
   "non-ou": "nor",
-  "assombrir": "darken"
+  "assombrir": "darken",
+  "panneaux de l'éditeur : fenêtre à part, ou case": "editor panels: own window, or tile",
+  "aperçu et réglages (nodes)": "preview and settings (nodes)",
+  "bibliothèque de nodes": "node library",
+  "calques et propriétés (atelier)": "layers and properties (workshop)",
+  "matériaux (atelier)": "materials (workshop)",
+  "préréglages de matériaux": "material presets",
+  "outils (3D)": "tools (3D)",
+  "barre de la vue 3D": "3D view bar",
+  "barre du graphe (nodes)": "graph bar (nodes)",
+  "options de l'outil (retouche)": "tool options (image)",
+  "options de l'outil (vectoriel)": "tool options (vector)"
 }
