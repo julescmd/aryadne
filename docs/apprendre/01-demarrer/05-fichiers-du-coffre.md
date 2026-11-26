@@ -16,7 +16,7 @@ nom: a-ranger
 ```
 
 ```etape
-Clique **Essaie par toi-même**. La note `a-ranger` s'ouvre dans le dossier `Apprendre/`.
+Clique **Try it yourself**. La note `a-ranger` s'ouvre dans le dossier `Apprendre/`.
 verifier: fichier.ouvert = md
 ```
 

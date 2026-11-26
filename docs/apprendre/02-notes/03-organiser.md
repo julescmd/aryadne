@@ -15,7 +15,7 @@ fichier: fichiers/plan-sh010.md
 ```
 
 ```etape
-Clique **Essaie par toi-même**. La fiche d'un plan s'ouvre.
+Clique **Try it yourself**. La fiche d'un plan s'ouvre.
 verifier: fichier.ouvert = md
 ```
 

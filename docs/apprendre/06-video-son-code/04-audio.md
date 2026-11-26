@@ -20,7 +20,7 @@ nom: voix-et-musique
 ```
 
 ```etape
-Clique **Essaie par toi-même**. Une session audio s'ouvre dans l'étape Sound, outil **Audio**.
+Clique **Try it yourself**. Une session audio s'ouvre dans l'étape Sound, outil **Audio**.
 verifier: onglet = son
 ```
 

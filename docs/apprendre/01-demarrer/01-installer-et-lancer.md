@@ -59,7 +59,7 @@ nom: premiers-pas
 Le bouton ci-dessus ouvre une note vide dans le dossier `Apprendre/` de ton coffre.
 
 ```etape
-Clique **Essaie par toi-même**. Une note vide s'ouvre.
+Clique **Try it yourself**. Une note vide s'ouvre.
 verifier: fichier.ouvert = md
 ```
 

@@ -16,7 +16,7 @@ nom: premiere-scene
 ```
 
 ```etape
-Clique **Essaie par toi-même**. Un storyboard s'ouvre dans l'étape Video, outil **Storyboard**.
+Clique **Try it yourself**. Un storyboard s'ouvre dans l'étape Video, outil **Storyboard**. Il arrive avec trois cases vides.
 verifier: onglet = video
 ```
 
@@ -64,7 +64,7 @@ Le ton gris donne la lecture en trois secondes : où est la lumière, où regard
 ## Une deuxième case
 
 ```etape
-Appuie sur `N` : **New panel after**. Une case vide apparaît après la première.
+Appuie sur `→` pour passer à la deuxième case. Elle est vide.
 ```
 
 ```etape
@@ -85,8 +85,14 @@ Appuie sur `Ctrl+D` : **Duplicate panel**. Tu as une copie de la deuxième case.
 Sur la copie, gomme le visage avec `E` et redessine une expression de surprise.
 ```
 
+Il te reste une case vide, la dernière des trois de départ. Elle ne sert plus : ta copie a pris sa place dans l'histoire.
+
 ```etape
-Ajoute une quatrième case avec `N`. Dessine la porte vide : le personnage est sorti.
+Va sur la dernière case avec `→`. Dessine la porte vide : le personnage est sorti.
+```
+
+```etape
+Appuie sur `N` : **New panel after**. Une cinquième case s'ajoute. Supprime-la avec le bouton de la corbeille : tu sais maintenant ajouter et retirer une case.
 ```
 
 ## Se déplacer dans les cases

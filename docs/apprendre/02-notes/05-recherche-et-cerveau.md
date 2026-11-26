@@ -15,7 +15,7 @@ fichier: fichiers/court-metrage.md
 ```
 
 ```etape
-Clique **Essaie par toi-même**. La note du court métrage s'ouvre.
+Clique **Try it yourself**. La note du court métrage s'ouvre.
 verifier: fichier.ouvert = md
 ```
 

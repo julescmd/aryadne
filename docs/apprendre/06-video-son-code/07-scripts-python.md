@@ -43,7 +43,7 @@ fichier: fichiers/inventaire.py
 ```
 
 ```etape
-Clique **Essaie par toi-même**. Le script d'inventaire s'ouvre.
+Clique **Try it yourself**. Le script d'inventaire s'ouvre.
 verifier: fichier.ouvert = py
 ```
 

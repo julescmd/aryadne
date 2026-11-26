@@ -16,7 +16,7 @@ nom: tour-de-l-interface
 ```
 
 ```etape
-Clique **Essaie par toi-même** pour avoir un fichier ouvert pendant la visite.
+Clique **Try it yourself** pour avoir un fichier ouvert pendant la visite.
 verifier: fichier.ouvert = md
 ```
 

@@ -16,7 +16,7 @@ nom: animatique
 ```
 
 ```etape
-Clique **Essaie par toi-même**. Dessine quatre cases, ou reprends ton storyboard de la leçon précédente. Donne une durée à chacune.
+Clique **Try it yourself**. Dessine dans les trois cases de départ et ajoute-en une quatrième avec `N`. Donne une durée à chacune.
 verifier: onglet = video
 ```
 

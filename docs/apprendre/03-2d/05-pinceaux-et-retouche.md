@@ -16,7 +16,7 @@ nom: pinceaux
 ```
 
 ```etape
-Clique **Essaie par toi-même**. Prends le pinceau avec `B`.
+Clique **Try it yourself**. Prends le pinceau avec `B`.
 verifier: fichier.ouvert = aryimg
 ```
 

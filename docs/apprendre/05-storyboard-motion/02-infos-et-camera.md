@@ -16,7 +16,7 @@ nom: decoupage
 ```
 
 ```etape
-Clique **Essaie par toi-même**. Dessine vite trois cases : un paysage large, un personnage, un visage.
+Clique **Try it yourself**. Le storyboard arrive avec trois cases vides. Dessine vite dans chacune : un paysage large, un personnage, un visage.
 verifier: onglet = video
 ```
 

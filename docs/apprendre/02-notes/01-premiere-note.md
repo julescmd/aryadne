@@ -20,7 +20,7 @@ nom: mon-projet
 ```
 
 ```etape
-Clique **Essaie par toi-même**. Une note vide s'ouvre dans l'étape Notes.
+Clique **Try it yourself**. Une note vide s'ouvre dans l'étape Notes.
 verifier: onglet = notes
 ```
 

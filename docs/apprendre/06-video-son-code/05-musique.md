@@ -18,7 +18,7 @@ nom: boucle
 ```
 
 ```etape
-Clique **Essaie par toi-même**. Un morceau s'ouvre dans l'étape Sound, outil **Music**.
+Clique **Try it yourself**. Un morceau s'ouvre dans l'étape Sound, outil **Music**.
 verifier: onglet = son
 ```
 

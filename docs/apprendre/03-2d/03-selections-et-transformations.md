@@ -18,7 +18,7 @@ nom: selections
 ```
 
 ```etape
-Clique **Essaie par toi-même**. Ouvre ensuite **Layer ▾ › Layer from an image…** et choisis une photo de ton ordinateur.
+Clique **Try it yourself**. Ouvre ensuite **Layer ▾ › Layer from an image…** et choisis une photo de ton ordinateur.
 verifier: calques >= 2
 ```
 

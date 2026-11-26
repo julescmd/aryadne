@@ -16,7 +16,7 @@ nom: decor
 ```
 
 ```etape
-Clique **Essaie par toi-même**. Trace trois formes de tailles différentes : un fond, un plan moyen, un premier plan.
+Clique **Try it yourself**. Supprime les deux calques de départ : choisis-les dans la timeline, puis menu **Layer**, **Delete**. Trace trois formes de tailles différentes : un fond, un plan moyen, un premier plan.
 verifier: onglet = motion
 ```
 

@@ -16,7 +16,7 @@ nom: paysage
 ```
 
 ```etape
-Clique **Essaie par toi-même**. Un dessin vide s'ouvre dans l'étape 2D, outil **Vector**.
+Clique **Try it yourself**. Un dessin vide s'ouvre dans l'étape 2D, outil **Vector**.
 verifier: fichier.ouvert = aryvec
 ```
 
@@ -32,8 +32,10 @@ verifier: fichier.ouvert = aryvec
 
 Un plan de travail est une page : une affiche, un écran, une vignette. Un fichier peut en contenir plusieurs, posés sur la toile.
 
+Ton dessin arrive avec un plan de travail carré, blanc, de 1080 sur 1080.
+
 ```etape
-Si la toile n'a pas encore de plan de travail, appuie sur `F` pour l'outil **Artboard** et glisse pour en tracer un.
+Appuie sur `F` pour l'outil **Artboard**. Glisse à côté du premier plan pour en tracer un deuxième. Supprime-le ensuite avec `Suppr` : un seul suffit ici.
 ```
 
 **Size…** propose des formats tout prêts : Square, Story, Post 4:5, YouTube thumbnail, HD screen, iPhone, Desktop, US Letter, A4.

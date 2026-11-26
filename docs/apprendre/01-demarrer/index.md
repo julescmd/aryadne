@@ -25,7 +25,8 @@ Aucune connaissance n'est demandée. Compte une heure et demie, en sept leçons 
 ## Comment suivre une leçon
 
 - Lis une étape, fais le geste, passe à la suivante.
-- Le bouton **Essaie par toi-même** ouvre un point de départ dans un dossier `Apprendre/` de ton coffre. C'est une copie : tu ne peux rien casser.
+- Le bouton **Try it yourself** (essaie par toi-même) ouvre un point de départ dans un dossier `Apprendre/` de ton coffre. C'est une copie : tu ne peux rien casser. Une fois l'essai créé, le bouton devient **Reopen my attempt**.
+- Lis la leçon dans le panneau, fais les gestes dans le logiciel à côté.
 - Certaines étapes se cochent toutes seules quand Aryadne voit que c'est fait. Les autres, tu les coches à la main.
 - Les libellés de l'interface sont écrits en **gras**, en anglais, tels qu'ils s'affichent.
 

@@ -16,7 +16,7 @@ nom: montage-fini
 ```
 
 ```etape
-Clique **Essaie par toi-même**. Pose trois plans sur la timeline, comme dans la leçon précédente. Ou rouvre ton premier montage avec `Ctrl+P`.
+Clique **Try it yourself**. Pose trois plans sur la timeline, comme dans la leçon précédente. Ou rouvre ton premier montage avec `Ctrl+P`.
 verifier: onglet = video
 ```
 

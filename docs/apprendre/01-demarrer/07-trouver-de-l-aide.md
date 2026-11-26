@@ -16,7 +16,7 @@ nom: mes-questions
 ```
 
 ```etape
-Clique **Essaie par toi-même**. Tu noteras dans ce fichier ce que tu veux retrouver plus tard.
+Clique **Try it yourself**. Tu noteras dans ce fichier ce que tu veux retrouver plus tard.
 verifier: fichier.ouvert = md
 ```
 
@@ -41,14 +41,27 @@ Presque chaque bouton est une icône. Laisse la souris dessus un instant : son n
 
 ## Le mode Apprendre
 
-Tu y es. Ce programme compte seize parcours, du premier lancement aux projets complets.
+Tu y es. Ce programme compte seize parcours, du premier lancement aux projets complets. Le panneau des leçons reste ouvert à côté de ton travail.
 
-- Chaque leçon commence par ce que tu vas réussir à faire.
-- **Essaie par toi-même** ouvre un point de départ dans le dossier `Apprendre/` de ton coffre. C'est toujours une copie.
-- Une étape se coche seule quand Aryadne peut le vérifier. Sinon, coche-la toi-même.
-- Une leçon est terminée quand toutes ses étapes sont cochées et tous ses quiz réussis.
+Trois chemins l'ouvrent :
 
-Ta progression est gardée dans ton coffre. Tu peux arrêter et reprendre quand tu veux.
+- **File › Help › Learn** ;
+- l'icône de toque, tout en bas du rail ;
+- la palette : `Ctrl+K`, puis tape `learn`.
+
+```etape
+Ferme le panneau des leçons avec l'icône de toque du rail. Rouvre-le de la même façon.
+```
+
+Dans le panneau :
+
+- chaque leçon commence par ce que tu vas réussir à faire ;
+- **Try it yourself** crée un point de départ dans le dossier `Apprendre/` de ton coffre et l'ouvre. C'est toujours une copie ;
+- **Reopen my attempt** rouvre ton essai. La flèche à côté repart d'une nouvelle copie, sans toucher à la première ;
+- une étape se coche seule quand Aryadne peut le vérifier. Sinon, coche-la toi-même ;
+- une leçon est terminée quand toutes ses étapes sont cochées et tous ses quiz réussis.
+
+Ta progression est gardée dans ton coffre. L'écran d'accueil propose **Continue where you left off**.
 
 ```astuce
 Tu n'es pas obligé de suivre l'ordre. Le [sommaire](../README.md) propose un chemin rapide par envie : matériaux, simulation, montage.
@@ -81,6 +94,7 @@ Différence avec ce programme : la documentation décrit chaque bouton. Les leç
 | Commande | Effet |
 |---|---|
 | **Home** | L'écran d'accueil |
+| **Learn** | Ce programme de leçons |
 | **Documentation** | La documentation |
 | **Keyboard shortcuts** | La liste des raccourcis, dans les réglages |
 | **Time spent per project** | Le temps actif passé sur chaque fichier |
@@ -141,6 +155,6 @@ indice: Page « Coffre et fichiers », section « Formats lus ».
 
 - La barre du bas donne les touches de l'endroit survolé.
 - **File › Help › Documentation** ouvre la documentation complète, hors ligne.
-- Le mode Apprendre te fait pratiquer, et garde ta progression dans le coffre.
+- **File › Help › Learn** ouvre les leçons. Ta progression est gardée dans le coffre.
 
 Parcours suivant : [Notes](../02-notes/index.md)

@@ -18,7 +18,7 @@ nom: interview
 ```
 
 ```etape
-Clique **Essaie par toi-même**. Importe ta vidéo de parole et pose-la sur la timeline avec `E`.
+Clique **Try it yourself**. Importe ta vidéo de parole et pose-la sur la timeline avec `E`.
 verifier: onglet = video
 ```
 

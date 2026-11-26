@@ -18,8 +18,20 @@ nom: titre
 ```
 
 ```etape
-Clique **Essaie par toi-même**. Une composition vide s'ouvre dans l'étape Motion.
+Clique **Try it yourself**. Une composition s'ouvre dans l'étape Motion.
 verifier: onglet = motion
+```
+
+Une composition neuve n'est pas vide. Elle contient un titre qui entre lettre par lettre, souligné d'un trait qui s'étire. Elle dure 6 secondes.
+
+```etape
+Appuie sur `Espace` pour la lire. Appuie encore pour arrêter.
+```
+
+Tu vas refaire toi-même une animation de ce genre. Repars d'abord de zéro.
+
+```etape
+Choisis le calque du titre dans la timeline. Ouvre le menu **Layer** et clique **Delete**. Fais de même pour le trait.
 ```
 
 ## L'écran
@@ -54,11 +66,11 @@ Appuie sur `T`. Clique sur le bandeau et tape ton titre.
 Le premier calque de la liste est au-dessus. Le texte doit être au-dessus du bandeau.
 
 ```etape
-Si le texte est caché par le bandeau, choisis-le dans la timeline et clique **Move up**.
+Si le texte est caché par le bandeau, choisis-le dans la timeline, puis menu **Layer**, **Move up**.
 ```
 
 ```astuce
-Le menu **Layer** et le bouton **Add a layer** du panneau Projet créent les mêmes calques, plus d'autres : image, bruit fractal, objet nul, précomposition.
+Le menu **Layer** crée aussi un texte, un rectangle, une ellipse ou une image. Le panneau **Project (motion)** ajoute les autres genres : bruit fractal, objet nul, précomposition, import d'un SVG. Survole ses boutons pour lire leur nom.
 ```
 
 ## Les quatre propriétés de base

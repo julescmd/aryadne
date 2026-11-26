@@ -16,7 +16,7 @@ nom: logo
 ```
 
 ```etape
-Clique **Essaie par toi-même**.
+Clique **Try it yourself**.
 verifier: fichier.ouvert = aryvec
 ```
 

@@ -16,7 +16,7 @@ nom: boutons
 ```
 
 ```etape
-Clique **Essaie par toi-même**. Dessine un bouton : un rectangle arrondi et un texte dessus. Groupe-les avec `Ctrl+G`.
+Clique **Try it yourself**. Dessine un bouton : un rectangle arrondi et un texte dessus. Groupe-les avec `Ctrl+G`.
 verifier: fichier.ouvert = aryvec
 ```
 

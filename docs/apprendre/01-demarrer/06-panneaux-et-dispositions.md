@@ -15,7 +15,7 @@ fichier: fichiers/recette.md
 ```
 
 ```etape
-Clique **Essaie par toi-même** pour avoir un fichier ouvert.
+Clique **Try it yourself** pour avoir un fichier ouvert.
 verifier: fichier.ouvert = md
 ```
 

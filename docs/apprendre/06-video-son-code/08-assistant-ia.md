@@ -53,7 +53,7 @@ fichier: fichiers/court-metrage.md
 ```
 
 ```etape
-Clique **Essaie par toi-même**. La note du court métrage s'ouvre.
+Clique **Try it yourself**. La note du court métrage s'ouvre.
 verifier: fichier.ouvert = md
 ```
 
@@ -128,7 +128,7 @@ exemple: tissu sur une boule
 ```
 
 ```etape
-Clique ce deuxième **Essaie par toi-même**. Un graphe de simulation de tissu s'ouvre dans l'étape 3D.
+Clique ce deuxième **Try it yourself**. Un graphe de simulation de tissu s'ouvre dans l'étape 3D.
 verifier: fichier.ouvert = arygeo
 ```
 

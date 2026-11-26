@@ -16,7 +16,7 @@ nom: export
 ```
 
 ```etape
-Clique **Essaie par toi-même**. Choisis le plan de travail, ou trace-en un avec `F`. Clique **Size…** et prends le format Square. Dessine dessus un bouton : un rectangle arrondi coloré, avec une ombre portée, et un texte.
+Clique **Try it yourself**. Choisis le plan de travail, ou trace-en un avec `F`. Clique **Size…** et prends le format Square. Dessine dessus un bouton : un rectangle arrondi coloré, avec une ombre portée, et un texte.
 verifier: calques >= 2
 ```
 

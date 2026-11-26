@@ -16,7 +16,7 @@ nom: systeme
 ```
 
 ```etape
-Clique **Essaie par toi-même**. Trace un grand cercle au centre avec `E` : la planète. Trace un petit cercle à côté : la lune.
+Clique **Try it yourself**. Supprime les deux calques de départ : choisis-les dans la timeline, puis menu **Layer**, **Delete**. Trace un grand cercle au centre avec `E` : la planète. Trace un petit cercle à côté : la lune.
 verifier: onglet = motion
 ```
 
@@ -33,7 +33,7 @@ Choisis la planète. Pose une clé de **Rotation** au début. Avance de deux sec
 ```
 
 ```astuce
-Pour un mouvement d'ensemble, crée un objet nul : menu **Layer**, **Null**. Il est invisible au rendu. Donne-le comme parent à plusieurs calques, et anime-le lui seul.
+Pour un mouvement d'ensemble, crée un objet nul avec le bouton d'ajout du panneau **Project (motion)**. Il est invisible au rendu. Donne-le comme parent à plusieurs calques, et anime-le lui seul.
 ```
 
 ## Le cache de piste
@@ -92,7 +92,7 @@ Choisis la lune. Active **Glow**. Règle **Radius** et **Strength**.
 ## Les effets
 
 ```etape
-Trace un grand rectangle derrière tout le reste : le fond. Descends-le en bas de la pile avec **Move down**.
+Trace un grand rectangle : le fond. Descends-le en bas de la pile avec **Layer › Move down**, autant de fois qu'il faut.
 ```
 
 ```etape
@@ -109,7 +109,7 @@ Choisis le fond. Dans la section **Effects**, clique **Add an effect**, puis **W
 Il y a quatre effets. Il n'y a pas de greffons.
 
 ```astuce
-Le calque **Fractal noise** fait un bon fond vivant : fumée, nuages, textures qui bougent. Menu **Layer**, puis règle **Pattern size**, **Evolution** et **Contrast**.
+Le calque **Fractal noise** fait un bon fond vivant : fumée, nuages, textures qui bougent. Ajoute-le depuis le panneau **Project (motion)**, puis règle **Pattern size**, **Evolution** et **Contrast**.
 ```
 
 ## Le répétiteur

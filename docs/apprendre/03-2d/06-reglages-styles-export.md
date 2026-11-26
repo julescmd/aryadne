@@ -16,7 +16,7 @@ nom: reglages
 ```
 
 ```etape
-Clique **Essaie par toi-même**. Ajoute une photo avec **Layer ▾ › Layer from an image…**.
+Clique **Try it yourself**. Ajoute une photo avec **Layer ▾ › Layer from an image…**.
 verifier: calques >= 2
 ```
 

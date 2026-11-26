@@ -15,7 +15,7 @@ fichier: fichiers/suivi-des-plans.md
 ```
 
 ```etape
-Clique **Essaie par toi-même**. La note de suivi s'ouvre.
+Clique **Try it yourself**. La note de suivi s'ouvre.
 verifier: fichier.ouvert = md
 ```
 

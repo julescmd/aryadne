@@ -18,7 +18,7 @@ nom: balle
 ```
 
 ```etape
-Clique **Essaie par toi-même**.
+Clique **Try it yourself**.
 verifier: fichier.ouvert = aryimg
 ```
 

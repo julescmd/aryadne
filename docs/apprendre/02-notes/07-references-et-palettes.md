@@ -16,7 +16,7 @@ nom: palette-et-poses
 ```
 
 ```etape
-Clique **Essaie par toi-même**. Glisse quatre ou cinq images sur le board, comme dans la leçon précédente.
+Clique **Try it yourself**. Glisse quatre ou cinq images sur le board, comme dans la leçon précédente.
 verifier: onglet = 2d
 ```
 

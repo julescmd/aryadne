@@ -16,7 +16,7 @@ nom: croquis
 ```
 
 ```etape
-Clique **Essaie par toi-même**. Une image vide s'ouvre dans l'étape 2D, outil **Retouch**.
+Clique **Try it yourself**. Une image vide s'ouvre dans l'étape 2D, outil **Retouch**.
 verifier: fichier.ouvert = aryimg
 ```
 

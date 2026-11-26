@@ -17,7 +17,7 @@ fichier: fichiers/inventaire.py
 ```
 
 ```etape
-Clique **Essaie par toi-même**. Le script s'ouvre dans l'étape Code.
+Clique **Try it yourself**. Le script s'ouvre dans l'étape Code.
 verifier: onglet = code
 ```
 

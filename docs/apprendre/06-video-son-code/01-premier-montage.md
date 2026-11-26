@@ -18,7 +18,7 @@ nom: premier-montage
 ```
 
 ```etape
-Clique **Essaie par toi-même**. Un montage vide s'ouvre dans l'étape Video, outil **Edit**.
+Clique **Try it yourself**. Un montage vide s'ouvre dans l'étape Video, outil **Edit**.
 verifier: fichier.ouvert = aryseq
 ```
 

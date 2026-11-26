@@ -75,7 +75,7 @@ fichier: fichiers/recette.md
 ```
 
 ```etape
-Clique **Essaie par toi-même**. Une note `recette` s'ouvre.
+Clique **Try it yourself**. Une note `recette` s'ouvre.
 verifier: fichier.ouvert = md
 ```
 

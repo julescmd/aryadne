@@ -16,7 +16,7 @@ nom: carte
 ```
 
 ```etape
-Clique **Essaie par toi-même**. Trace un rectangle arrondi : le fond de la carte.
+Clique **Try it yourself**. Trace un rectangle arrondi : le fond de la carte.
 verifier: calques >= 1
 ```
 

@@ -16,7 +16,7 @@ nom: titre-anime
 ```
 
 ```etape
-Clique **Essaie par toi-même**. Pose un texte de trois ou quatre mots avec `T`.
+Clique **Try it yourself**. Supprime les deux calques de départ : choisis-les dans la timeline, puis menu **Layer**, **Delete**. Pose un texte de trois ou quatre mots avec `T`.
 verifier: onglet = motion
 ```
 

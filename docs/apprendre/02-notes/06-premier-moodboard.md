@@ -18,7 +18,7 @@ nom: ambiance
 ```
 
 ```etape
-Clique **Essaie par toi-même**. Un board vide s'ouvre dans l'étape 2D, outil **Moodboard**.
+Clique **Try it yourself**. Un board vide s'ouvre dans l'étape 2D, outil **Moodboard**.
 verifier: onglet = 2d
 ```
 
