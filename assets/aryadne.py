@@ -57,7 +57,7 @@ class Coffre:
             for f in files:
                 if f.startswith(".") or not f.lower().endswith(extension.lower()):
                     continue
-                out.append(os.path.relpath(os.path.join(d, f), self.racine))
+                out.append(os.path.relpath(os.path.join(d, f), self.racine).replace(os.sep, "/"))
         return sorted(out)
 
     def lire(self, rel):
