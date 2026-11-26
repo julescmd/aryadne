@@ -105,13 +105,29 @@ Menu `Add`, ou `Maj+A` dans la vue (le même menu sous le curseur).
 | `Empty` | Un objet sans forme, pour déplacer plusieurs objets ensemble |
 | `Bone` | Un os. Ajouté au bout de l'os choisi. Voir [Rig](3d-rig-mocap.md) |
 | `Motion capture (BVH)…` | Un squelette animé |
+| `Node geometry` | Une géométrie de nodes (`.arygeo`) : un tissu simulé, des particules. `New simulated flag` en crée une à côté de la scène ; `FROM THE VAULT` liste celles du coffre |
 | `3D text…` | Du texte extrudé en volume, enregistré en `.obj` à côté de la scène |
 | `Tracked camera from a video…` | Suivi de caméra |
 | `Biped rig` | Rig automatique d'un personnage |
 | `Models in the vault` | N'importe quel modèle du coffre |
 | `Pick a file…` | Un modèle ou une image du disque |
 
-Tu peux aussi glisser des modèles sur la fenêtre.
+Tu peux aussi glisser des modèles sur la fenêtre, ou un `.arygeo` depuis le panneau des fichiers.
+
+### Géométrie de nodes
+
+Une géométrie de nodes posée dans la scène suit la timeline : l'image de la scène pilote l'image de sa simulation. Elle a une transformation, reçoit un matériau (onglet `Material`) et sort au rendu.
+
+Onglet `Object`, section `Simulation` :
+
+| Réglage | Effet |
+|---|---|
+| Icône du graphe | Ouvre le graphe dans l'onglet **Simulation**. Ce qu'on y enregistre se voit aussitôt dans la scène |
+| Icône de téléchargement | Exporte la simulation en suite d'OBJ, un fichier par image, dans un dossier à côté de la scène |
+| `Start (frames)` | Décalage de départ. 10 : la simulation part à la dixième image. -10 : elle a dix images d'avance |
+| `Simulation frame` | L'image de la simulation montrée, et sa durée |
+
+Elle ne se modifie pas en mode édition : elle se modifie dans son graphe. Détail : [Géométrie et simulation en nœuds](noeuds-geometrie.md#dans-une-scène-3d).
 
 Une **image** ajoutée devient un plan de référence dans la scène, avec une `Opacity` réglable.
 

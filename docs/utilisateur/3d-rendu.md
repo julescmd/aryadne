@@ -85,6 +85,8 @@ Pendant le calcul : `Stop` arrête. À la fin :
 
 `Capture › Animation as video (MP4)…` : chaque image de la scène, du début à la fin, vue par sa caméra. S'il n'y a pas de caméra, c'est la vue actuelle. ffmpeg assemble la vidéo.
 
+Une géométrie de nodes posée dans la scène (un tissu simulé) est rendue à chaque image, à l'image de sa simulation, avec son matériau. Elle sort aussi dans le rendu final (`F12`).
+
 **Incertain.** Le code de capture d'animation passe par le moteur de la vue. La qualité (aperçu ou tracé de chemins) et le temps par image n'ont pas été vérifiés à l'écran.
 
 ## Matériaux prêts à l'emploi

@@ -1,14 +1,16 @@
 ---
-titre: Projet 2 : un plan animé, rendu et monté
+titre: Projet 2 : un plan avec un tissu simulé, rendu et monté
 niveau: avancé
-duree: 50 min
-prerequis: 15-animation-rendu/01-cles-lissages-et-rythme, 15-animation-rendu/07-rendu, 06-video-son-code/01-premier-montage
-objectifs: Animer un plan court ; Faire bouger la caméra ; Sortir le plan en vidéo ; Le monter avec un titre ; Exporter le film
+duree: 55 min
+prerequis: 14-simulation/06-vent-lecture-et-cache, 15-animation-rendu/07-rendu, 06-video-son-code/01-premier-montage
+objectifs: Poser une simulation de tissu dans une scène 3D ; Lui donner un matériau ; Caler son départ sur la timeline ; Rendre une image et sortir le plan en vidéo ; Le monter avec un titre
 ---
 
 ## Ce que tu vas réussir
 
-Un petit film de quelques secondes : une balle rebondit devant la caméra, un titre apparaît, le tout exporté en MP4. Tu passes de la 3D au montage.
+Un petit film de trois secondes : un drapeau claque au vent sur sa hampe, la caméra avance, un titre apparaît. Le drapeau est une vraie simulation de tissu. Il vit dans la scène comme un objet ordinaire : il est ombré, il porte un matériau, il sort au rendu.
+
+Tu passes par quatre outils : la scène, la simulation, le rendu, le montage.
 
 ```essayer
 nouveau: aryscene
@@ -18,7 +20,11 @@ nom: projet-plan
 ## Étape 1 : le décor
 
 ```etape
-Ajoute une **Sphere** : la balle. Ajoute un **Plane** et agrandis-le : le sol. Supprime le cube.
+Supprime le cube. Ajoute un **Plane** et agrandis-le avec S : le sol.
+```
+
+```etape
+Ajoute un **Cylinder** : la hampe. Dans l'onglet **Object**, mets **Scale** à 0,035 en X et en Z, et à 1,6 en Y. Mets **Location** à (-1,53, 1,6, 0).
 verifier: scene.objets >= 4
 ```
 
@@ -26,81 +32,130 @@ verifier: scene.objets >= 4
 Dans l'onglet **Scene**, mets **End** à 72. Le plan durera trois secondes.
 ```
 
+## Étape 2 : le drapeau
+
+Une simulation est un fichier à part, un `.arygeo`. La scène ne le copie pas : elle le lit.
+
 ```etape
-Donne une couleur à la balle : choisis-la, onglet **Object**, et règle sa couleur.
+Ouvre le menu **Add**, puis **Node geometry**, et choisis **New simulated flag**.
+verifier: scene.simulations >= 1
+```
+
+Un drapeau apparaît contre la hampe, plat et rouge. Son graphe vient d'être créé à côté de la scène. Dans la liste, son icône est une vague.
+
+```astuce
+Tu as déjà une simulation dans le coffre ? Elle est dans le même menu, sous **FROM THE VAULT**. Tu peux aussi la glisser depuis le panneau des fichiers sur la vue.
+```
+
+```etape
+Lis avec Espace. À chaque image de la scène, la simulation avance d'une image. Le tissu part à plat, puis le vent le prend.
+verifier: lecture.image >= 20
+```
+
+```attention
+La première lecture calcule la simulation, image après image. La vue affiche **computing…** pendant ce temps. La deuxième lecture reprend ce qui est déjà calculé.
+```
+
+### Le caler sur le plan
+
+Au début du plan, le drapeau est encore plat. Dans un film, il flotte déjà.
+
+```etape
+Choisis le drapeau. Dans l'onglet **Object**, section **Simulation**, mets **Start (frames)** à -24.
 verifier: scene.selection
 ```
 
+La simulation a maintenant une seconde d'avance. Sous le réglage, **Simulation frame** te dit quelle image de la simulation tu regardes.
+
+```etape
+Reviens à l'image 0. Le drapeau flotte déjà.
+```
+
+```attention
+La simulation du drapeau dure 120 images. Avec 24 images d'avance, il en reste 96 pour un plan de 72 : c'est assez. Au-delà de sa dernière image, une simulation reste sur place.
+```
+
+## Étape 3 : le matériau
+
+Le drapeau reçoit un matériau comme les autres objets. La grille du graphe lui donne des UV : un motif suit le tissu dans ses plis.
+
+```etape
+Le drapeau choisi, ouvre l'onglet **Material**. Clique le petit **＋** : un matériau est créé, appliqué au drapeau et ouvert dans l'Atelier.
+verifier: fichier.ouvert = arymat
+```
+
+```etape
+Dans la bibliothèque, filtre **Presets** et clique **Woven fabric**. Enregistre avec Ctrl+S.
+verifier: fichier.enregistre
+```
+
+```etape
+Reviens à l'onglet de ta scène. Le drapeau porte son tissu.
+verifier: scene.materiaux >= 1
+```
+
 ```astuce
-Pour une vraie matière, fais comme au projet 1 : le **＋** de l'onglet **Material**, puis un préréglage dans l'Atelier.
+Pour des bandes qui suivent le tissu, entre dans le graphe du calque. Relie la sortie **uv** d'un node **Texture coordinates** à l'entrée **Coordinates** d'un node **Stripes**. Sans ce lien, un motif se pose dans l'espace et glisse sur le tissu quand il bouge.
 ```
 
-## Étape 2 : l'animation
+## Étape 4 : régler le vent
 
-Détail des gestes : [Clés, lissages et rythme](../15-animation-rendu/01-cles-lissages-et-rythme.md).
-
-```etape
-Passe en vue de face avec 1. Choisis la balle. À l'image 1, place-la en haut à gauche et pose une clé avec I.
-```
+Le drapeau se règle dans son graphe. La scène suit.
 
 ```etape
-À l'image 14, pose-la au sol, un peu plus à droite. Clé.
-verifier: lecture.image >= 14
+Choisis le drapeau. Dans l'onglet **Object**, section **Simulation**, clique l'icône du graphe. Il s'ouvre dans l'onglet **Simulation**.
+verifier: graphe.contient = sim_solver
 ```
 
 ```etape
-À l'image 28, remonte-la moins haut, encore plus à droite. Clé. Continue : au sol à 40, petit saut à 50, au sol à 58, immobile à 72.
+Trouve le node **Combine XYZ**, dans le cadre du vent. Passe **X** de 22 à 30 : le vent pousse plus fort le long du drapeau.
+```
+
+```etape
+Enregistre avec Ctrl+S.
+verifier: fichier.enregistre
+```
+
+```etape
+Reviens à l'onglet de ta scène et lis. Le drapeau est plus tendu : la scène a relu le graphe.
+verifier: scene.simulations >= 1
+```
+
+Détail des réglages du tissu : [Régler un tissu](../14-simulation/04-regler-un-tissu.md) et [Vent, lecture et cache](../14-simulation/06-vent-lecture-et-cache.md).
+
+```astuce
+Une simulation longue à calculer se fige dans l'onglet **Simulation** (le cache sur le disque). La scène lit ce cache au lieu de recalculer.
+```
+
+## Étape 5 : la caméra et la lumière
+
+```etape
+Regarde par la caméra avec 0. Recule-la jusqu'à voir la hampe en entier et le drapeau déployé.
+```
+
+```etape
+À l'image 0, pose une clé sur la caméra avec I. À l'image 72, avance-la un peu vers le drapeau et pose une clé.
 verifier: lecture.image >= 72
 ```
 
 ```etape
-Clic droit sur chaque clé haute : **Ease in**. Clic droit sur chaque clé du sol : **Ease out**.
+Dans l'onglet **World**, coche **Cast shadows**. L'ombre du drapeau bouge sur le sol avec lui.
 ```
 
 ```etape
-Lis avec Espace. La balle traverse le cadre en rebondissant, puis s'arrête.
+Place la lumière de la scène en hauteur, de côté. Les plis du tissu se creusent.
 ```
 
-## Étape 3 : la caméra
-
-Une caméra fixe filme. Une caméra qui suit raconte.
-
-```etape
-Choisis la caméra. Dans l'onglet **Object**, ajoute la contrainte **Aim at**, avec la balle pour cible.
-```
-
-```etape
-Regarde par la caméra avec 0 et lis. La caméra garde la balle au centre pendant tout le plan.
-```
-
-```etape
-Recule la caméra jusqu'à voir le sol sous la balle à chaque rebond.
-```
-
-### Un léger travelling
-
-```etape
-Choisis la caméra. À l'image 1, pose une clé. À l'image 72, avance-la un peu vers la balle et pose une clé.
-```
-
-Les clés règlent sa position. La contrainte règle sa direction. Les deux s'additionnent.
-
-## Étape 4 : la lumière
-
-```etape
-Dans l'onglet **World**, coche **Cast shadows** et monte un peu **Softness**. L'ombre de la balle touche le sol à chaque rebond : c'est elle qui donne le contact.
-```
-
-```etape
-Place la lumière de la scène en hauteur, de côté. L'ombre s'allonge et se lit mieux.
-```
-
-## Étape 5 : la vidéo
+## Étape 6 : une image, puis la vidéo
 
 Détail des gestes : [Rendu et export](../15-animation-rendu/07-rendu.md).
 
 ```etape
-Enregistre la scène avec Ctrl+S.
+Va à une image où le drapeau a une belle forme. Appuie sur F12, choisis **720p** et clique **Render**. Le tracé de chemins rend le tissu, son matériau et son ombre.
+```
+
+```etape
+Ferme le rendu. Enregistre la scène avec Ctrl+S.
 verifier: fichier.enregistre
 ```
 
@@ -108,13 +163,13 @@ verifier: fichier.enregistre
 Ouvre le menu **Capture** et choisis **Animation as video (MP4)…**. Attends la fin du calcul.
 ```
 
-La vidéo est enregistrée dans le coffre, à côté de la scène ou de son modèle. Chaque image est vue par la caméra.
+Chaque image est vue par la caméra, avec la simulation à sa place. La vidéo est enregistrée dans le coffre, à côté de la scène.
 
 ```attention
 Il faut ffmpeg. S'il manque, Aryadne propose de l'installer.
 ```
 
-## Étape 6 : le montage
+## Étape 7 : le montage
 
 Détail des gestes : [Ton premier montage](../06-video-son-code/01-premier-montage.md).
 
@@ -133,30 +188,18 @@ Survole sa carte et appuie sur E : **Add at the end**. Le plan est posé sur la 
 ```
 
 ```etape
-Lis avec Espace.
-```
-
-### Un titre
-
-```etape
-Place la tête de lecture à l'image où la balle s'arrête. Appuie sur T et clique dans le moniteur. Tape ton titre.
+Place la tête de lecture au milieu du plan. Appuie sur T et clique dans le moniteur. Tape ton titre.
 ```
 
 ```etape
-Le titre est un clip, sur une piste au-dessus de l'image. Choisis-le. Dans **Inspector (edit)**, onglet **Clip**, règle sa **Scale** et sa **Color**.
+Le titre est un clip, sur une piste au-dessus de l'image. Choisis-le. Dans **Inspector (edit)**, onglet **Clip**, règle sa **Scale** et sa **Color**. Tire son bord pour qu'il dure jusqu'à la fin du plan. Reviens à l'outil de sélection avec V.
 ```
 
 ```etape
-Tire le bord du clip de titre pour qu'il dure jusqu'à la fin du plan. Reviens à l'outil de sélection avec V.
+Choisis le plan. Place la tête de lecture une demi-seconde avant sa fin. Dans l'onglet **Clip**, clique **Turn on animation**. Va à la dernière image et mets **Opacity** à 0 : le plan s'éteint en fondu.
 ```
 
-### Un fondu de fin
-
-```etape
-Choisis le plan. Place la tête de lecture une demi-seconde avant sa fin. Dans l'onglet **Clip**, clique **Turn on animation** : une clé est posée. Va à la dernière image et mets **Opacity** à 0 : une seconde clé est posée, et le plan s'éteint en fondu.
-```
-
-## Étape 7 : l'export
+## Étape 8 : l'export
 
 ```etape
 Enregistre le montage avec Ctrl+S.
@@ -173,39 +216,52 @@ Ton film est dans le coffre.
 
 | Outil | Ce que tu y as fait |
 |---|---|
-| Scène | Décor, lumière, ombres |
-| Timeline 3D | Sept clés pour la balle, deux pour la caméra |
-| Capture | La vidéo du plan |
+| Scène | Le décor, le drapeau posé comme un objet, son départ calé |
+| Simulation | Le vent, réglé dans le graphe |
+| Atelier | Le matériau du tissu |
+| Rendu | Une image en tracé de chemins, puis la vidéo du plan |
 | Montage | Le plan, un titre, un fondu |
-| Export | Le film |
 
-Le montage ne copie pas ta vidéo : il garde son chemin. La scène, la vidéo et le montage restent trois fichiers du coffre, que tu peux rouvrir.
+Quatre fichiers restent dans le coffre : la scène, le graphe du drapeau, la vidéo, le montage. Aucun ne copie l'autre. Change le vent dans le graphe : la scène suit. Refais la capture : le montage relit la vidéo.
 
 ```quiz
-Pourquoi l'ombre compte-t-elle tant dans un rebond ?
-- [ ] Elle rend l'image plus sombre.
-- [x] Elle montre le moment précis où la balle touche le sol.
-- [ ] Elle remplace les clés.
-explication: Sans ombre, une balle semble flotter. L'ombre qui rejoint la balle signe le contact.
+Tu changes le vent dans le graphe du drapeau et tu enregistres. Que fait la scène ?
+- [ ] Rien : il faut reposer le drapeau.
+- [x] Elle relit le graphe et recalcule la simulation.
+- [ ] Elle garde l'ancienne simulation jusqu'au prochain rendu.
+explication: La scène ne garde que le chemin du graphe. Dès que le fichier change, elle le relit.
 ```
 
 ```quiz
-La caméra a une contrainte Aim at et des clés de position. Que se passe-t-il ?
-- [ ] Les clés sont ignorées.
-- [x] Les clés déplacent la caméra, la contrainte l'oriente vers la cible.
-- [ ] La contrainte est ignorée.
-explication: Aim at ne règle que la direction. La position reste libre, donc animable.
+Start (frames) vaut -24. Que vois-tu à l'image 0 de la scène ?
+- [ ] La première image de la simulation, à plat.
+- [x] La simulation après 24 images : le drapeau flotte déjà.
+- [ ] Rien : la simulation commence à l'image 24.
+explication: Un départ négatif donne de l'avance à la simulation. Un départ positif la retarde.
+```
+
+```quiz
+Pourquoi relier Texture coordinates au motif du matériau ?
+- [ ] Pour que le rendu soit plus rapide.
+- [x] Pour que le motif suive le tissu dans ses plis.
+- [ ] Pour que le tissu soit plus souple.
+explication: Les UV sont attachées aux points du tissu. Un motif posé dans l'espace reste immobile pendant que le tissu le traverse.
 ```
 
 ```defi
-Ajoute un second plan : la même action, filmée de très près et de côté. Monte les deux à la suite.
-indice: Duplique la scène avec Ctrl+Maj+S, change la caméra, refais la capture. Dans le montage, coupe sur un rebond.
+Fais tomber une nappe sur une boule de ta scène. La boule est un objet ordinaire, que tu peux déplacer.
+indice: Pose l'exemple « tissu sur une boule » dans une scène. Dans son graphe, ajoute un node Scene object, écris le nom de ta sphère dans Object, et relie Center et Radius aux entrées Ball center et Ball radius du Solver.
+```
+
+```defi
+Exporte la simulation pour un autre logiciel.
+indice: Le drapeau choisi, onglet Object, section Simulation : l'icône de téléchargement écrit un fichier OBJ par image, dans un dossier à côté de la scène.
 ```
 
 ## En trois lignes
 
-- Peu de clés, les bons lissages, et une ombre pour le contact.
-- **Capture**, puis **Animation as video (MP4)…** : le plan devient une vidéo.
-- Dans le montage : E pose le plan, T pose un titre, Ctrl+M exporte.
+- **Add**, **Node geometry** : une simulation devient un objet de la scène. Elle suit la timeline.
+- Le tissu se règle dans son graphe, le plan dans la scène. **Start (frames)** cale l'un sur l'autre.
+- F12 rend une image, **Capture** sort la vidéo, le montage pose le titre.
 
 [Suite : Projet 3, une affiche](03-affiche-2d-et-vectoriel.md)

@@ -134,7 +134,8 @@ L'auto-collision coûte du temps de calcul. Si le tissu se traverse quand même,
 
 ## Ce qui n'existe pas encore
 
-- Les obstacles sont un sol, une boule et une boîte. Pas de collision avec un modèle quelconque.
+- Les obstacles sont un sol, une boule et une boîte. Pas de collision avec la forme exacte d'un modèle.
+- Dans une scène 3D, le node **Scene object** donne au Solver la boule ou la boîte qui entoure un objet de la scène. L'objet peut bouger : la simulation le suit. Voir [Géométrie et simulation en nœuds](../../utilisateur/noeuds-geometrie.md#dans-une-scène-3d).
 - L'auto-collision se fait entre points, pas entre faces. Il n'y a pas de frottement entre les couches.
 - Elle n'existe que dans le solveur **Cloth (graphics card)**.
 

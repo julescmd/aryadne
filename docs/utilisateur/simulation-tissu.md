@@ -147,9 +147,9 @@ Pour connaître ce que ta carte sait faire, lance le [banc de mesure](banc-gpu.m
 ## Limites connues
 
 - **Auto-collision entre points.** Pas entre faces : l'épaisseur ne peut pas être plus fine que la maille, et il n'y a pas de frottement entre les couches.
-- **Obstacles simples.** Un sol, une boule, une boîte. Pas de collision avec un personnage ou un modèle quelconque.
+- **Obstacles simples.** Un sol, une boule, une boîte. Le nœud `Scene object` y met la boîte d'un objet de la scène 3D, même animé. Pas de collision avec la forme exacte d'un personnage ou d'un modèle.
 - **Pas de couture ni de patron.** On ne coud pas deux pièces de tissu.
-- **Affichage en points et en arêtes.** Le tissu n'a pas de faces : il ne se rend pas comme une surface dans la scène 3D. Voir les limites de la [géométrie en nœuds](noeuds-geometrie.md#limites).
+- **Aperçu en points et en arêtes.** Dans l'onglet **Simulation**. Posé dans une scène 3D, le tissu est une surface : ombrée, avec un matériau, rendue et exportée. Voir [Dans une scène 3D](noeuds-geometrie.md#dans-une-scène-3d).
 - **Taille.** Un tissu trop gros pour les tampons de la carte est calculé sur le processeur. La limite dépend de la carte.
 - **Avec très peu d'itérations par sous-pas** (moins de 4), l'accélération du calcul est coupée pour éviter que le tissu explose. C'est voulu.
 

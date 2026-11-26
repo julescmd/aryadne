@@ -22,7 +22,7 @@ Un bloc mal écrit ne casse rien : un bloc jamais refermé, un mot-clé inconnu,
 
 ## Les vérifications
 
-`learn::Check` est la liste fermée des vérifications. `parse_check` lit la ligne `verifier:`. Ce qui n'est pas reconnu devient `Check::Inconnue` : l'étape se coche alors à la main.
+`learn::Check` est la liste fermée des vérifications (la table est dans `docs/apprendre/FORMAT.md` ; les dernières ajoutées : `scene.simulations` et `scene.materiaux`, remplies par `Viewer::learn_scene_extra`). `parse_check` lit la ligne `verifier:`. Ce qui n'est pas reconnu devient `Check::Inconnue` : l'étape se coche alors à la main.
 
 `Check::holds(&State)` dit si la vérification est vraie. `State` est une photo de l'application, prise par `App::learn_state` :
 

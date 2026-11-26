@@ -167,6 +167,7 @@ Le board est un cas à part : c'est une page (`View::Boards`), pas une variante 
 | `nodeflow` | Groupes, zones, renvois, mise à plat |
 | `geo` | Moteur de géométrie et de simulation |
 | `geoview` | Aperçu 3D, lecture, tableau des attributs |
+| `geoscene` | Géométrie de nodes dans une scène 3D : image de scène vers image de simulation, maillage, obstacles venus de la scène, suite d'OBJ |
 | `gpusim` | Socle de simulation sur carte graphique |
 | `gpucloth` | Tissu en VBD |
 | `gpubench` | Banc de mesure |

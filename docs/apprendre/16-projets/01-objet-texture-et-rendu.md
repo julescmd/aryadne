@@ -195,4 +195,4 @@ indice: Duplique le vase avec Maj+D et change les curseurs de ses modificateurs.
 - Le **＋** de l'onglet **Material** crée, applique et ouvre le matériau.
 - 0 pour la caméra, F12 pour l'image.
 
-[Suite : Projet 2, un plan animé, rendu et monté](02-plan-anime-rendu-et-monte.md)
+[Suite : Projet 2, un plan avec un tissu simulé, rendu et monté](02-plan-anime-rendu-et-monte.md)

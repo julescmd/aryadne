@@ -73,6 +73,8 @@ Le texte de l'étape est tout ce qui précède la ligne `verifier:`. Sans ligne 
 | `atelier.calques >= <n>` | le matériau actif a au moins n calques |
 | `scene.objets >= <n>` | la scène 3D active a au moins n objets |
 | `scene.selection` | un objet est choisi dans la scène 3D |
+| `scene.simulations >= <n>` | la scène 3D active contient au moins n géométries de nodes (`.arygeo` posés avec **Add**, **Node geometry**) |
+| `scene.materiaux >= <n>` | au moins n objets de la scène 3D active ont un matériau |
 | `lecture.image >= <n>` | la tête de lecture (timeline 3D ou simulation) est à l'image n ou plus |
 | `texte.contient = <mot>` | la note ou le fichier texte actif contient ce mot |
 | `calques >= <n>` | l'image à calques ou le dessin vectoriel actif a au moins n calques |
@@ -116,7 +118,7 @@ indice: Le node Solver a un réglage Box center.
 
 ## Exemples intégrés utilisables dans `essayer: exemple:`
 
-Géométrie et simulation : `tissu sur une boule`, `tissu sur la carte graphique`, `tissu qui se replie`, `fontaine de particules`, `vagues animées`.
+Géométrie et simulation : `tissu sur une boule`, `tissu sur la carte graphique`, `tissu qui se replie`, `drapeau dans le vent`, `fontaine de particules`, `vagues animées`.
 
 Matériaux (les préréglages de la fenêtre « nouveau fichier ») : `carrelage en relief`, `béton fissuré`, `métal brossé rayé`, `velours`, `cire`, `tissu tissé`, `métal peint usé`, `pierre aux creux sombres`, `bois`, `pierre`, `métal rouillé`, `toon`, `céramique`, `or`, `verre`, `verre dépoli`, `eau`, `toon 3 bandes`, `peinture de voiture`, `plastique`, `néon`.
 

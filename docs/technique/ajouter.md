@@ -51,6 +51,8 @@ Lis les réglages avec les fonctions d'aide déjà là : `pnum(&s.params, "rayon
 
 Si le résultat change d'une image à l'autre, il doit le déclarer, sinon le cache le croira constant. Regarde comment le nœud `time` est traité (`uses_time` dans `nodes.rs`) et comment la clé de cache de `geo.rs` inclut l'image.
 
+Même règle pour un nœud qui lit la scène 3D : `geo_scene_obj` met la boîte de l'objet dans l'empreinte du champ (`Run::source_hash`) et toute sa trajectoire dans la clé de la zone de simulation. Voir [Dans une scène 3D](noeuds.md#dans-une-scène-3d-geoscene).
+
 ### 4. Les traductions
 
 Ajoute à `assets/i18n/en.json` : le libellé, la catégorie si elle est nouvelle, chaque nom de prise, chaque nom de réglage, chaque choix.

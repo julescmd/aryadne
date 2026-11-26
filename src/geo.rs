@@ -2069,10 +2069,10 @@ fn flag() -> Graph {
     set_param(&mut g, pin, "type", "nombre");
     let (begin, end) = crate::nodeflow::add_zone(&mut g, "sim", [0.0, 620.0]);
     // Le vent : une poussée le long du drapeau, et des rafales de côté qui vont et viennent
-    let time = g.add("time", [-500.0, 900.0]);
-    let gust = g.add("expr", [-250.0, 900.0]);
+    let time = g.add("time", [-500.0, 1140.0]);
+    let gust = g.add("expr", [-250.0, 1140.0]);
     set_param(&mut g, gust, "formule", "sin(a * 0.31) * 7 + sin(a * 0.13 + y * 2) * 4");
-    let wind = g.add("combxyz", [0.0, 900.0]);
+    let wind = g.add("combxyz", [0.0, 1140.0]);
     set_value(&mut g, wind, 0, [22.0; 4]);
     let forces = g.add("sim_forces", [250.0, 620.0]);
     set_value(&mut g, forces, 3, [0.6; 4]);
@@ -2103,7 +2103,7 @@ fn flag() -> Graph {
     g.connect(tint, 0, out, 0);
     hide_thumbs(&mut g, &[pos, sep, cmp, time, gust, wind, tint]);
     g.frames.push(crate::nodes::Frame { rect: [230.0, 290.0, 690.0, 190.0], label: "ce qui est épinglé : le bord gauche, la hampe".into(), color: [90, 120, 200], note: String::new() });
-    g.frames.push(crate::nodes::Frame { rect: [-520.0, 860.0, 730.0, 190.0], label: "le vent : il pousse le long du drapeau, avec des rafales de côté".into(), color: [80, 160, 110], note: String::new() });
+    g.frames.push(crate::nodes::Frame { rect: [-520.0, 1100.0, 730.0, 190.0], label: "le vent : il pousse le long du drapeau, avec des rafales de côté".into(), color: [80, 160, 110], note: String::new() });
     g
 }
 

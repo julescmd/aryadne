@@ -27,8 +27,8 @@ Ce parcours part de zéro. À la fin, tu sais monter un tissu, le régler, le fa
 
 Tu sais ajouter un node et tirer un lien. Sinon, fais d'abord [Les principes des nodes](../12-noeuds/01-principes.md).
 
-```attention
-Une simulation se regarde dans son propre aperçu. Le tissu est montré par ses points et ses arêtes. Il ne passe pas encore dans une scène 3D ni dans le rendu.
+```astuce
+Dans l'onglet **Simulation**, l'aperçu montre le tissu par ses points et ses arêtes : c'est fait pour régler vite. Pour le voir ombré, avec un matériau, et le rendre, pose-le dans une scène 3D : menu **Add**, **Node geometry**. Le [projet 2](../16-projets/02-plan-anime-rendu-et-monte.md) le fait de bout en bout.
 ```
 
 Pour chercher un réglage précis plus tard, garde sous la main le guide [Simulation de tissu](../../utilisateur/simulation-tissu.md).

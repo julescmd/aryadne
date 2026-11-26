@@ -57,7 +57,8 @@ Un fichier qui en cite un autre (une scène et ses modèles, un montage et ses m
 | Champ | Type | Sens |
 |---|---|---|
 | `name` | texte | Nom, unique dans la scène. Sert d'identifiant (parenté, contraintes) |
-| `file` | texte | Chemin du modèle. Vide pour un objet sans forme. `@cube`, `@sphere`, `@plane`, `@cylinder`, `@cone`, `@torus` pour une forme de base |
+| `file` | texte | Chemin du modèle. Vide pour un objet sans forme. `@cube`, `@sphere`, `@plane`, `@cylinder`, `@cone`, `@torus` pour une forme de base. Un `.arygeo` : une géométrie de nodes, calculée à l'image de la scène |
+| `sim_offset` | entier | Géométrie de nodes : décalage de départ de sa simulation, en images de la scène. Absent s'il vaut 0 |
 | `pos`, `rot`, `scale` | 3 nombres | Position, rotation en degrés (X puis Y puis Z), taille |
 | `visible` | booléen | |
 | `color` | 3 octets ou `null` | Couleur d'affichage. `null` : celles du fichier |
@@ -194,6 +195,11 @@ Binaire, petit-boutiste. Un fichier par image et par prise : `<image sur 5 chiff
 | 4 | Nombre d'arêtes (u32) |
 | | Colonnes des points, puis colonnes des arêtes |
 | 8 par arête | Les deux numéros de points (u32, u32) |
+| 4 | Facultatif : `FACE` |
+| 4 | Nombre de faces (u32) |
+| 16 par face | Quatre numéros de points (u32). Le quatrième vaut `0xFFFFFFFF` pour un triangle |
+
+Le bloc `FACE` vient à la fin et n'existe que si la géométrie a des faces. Un cache écrit avant lui se relit (sans faces). Une version plus ancienne de l'application s'arrête après les arêtes et ignore ce bloc.
 
 Un bloc de colonnes : le nombre de colonnes (u32), puis pour chacune : longueur du nom (u32), nom en UTF-8, largeur (u32, nombre de composantes, au plus 16), puis chaque composante en entier, en `f32` bruts.
 

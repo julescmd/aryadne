@@ -149,6 +149,7 @@ Une géométrie (`Geo`) est une table.
 | `cols` | Attributs des points : nom vers `Arc<Column>` |
 | `edges` | Arêtes : paires de numéros de points |
 | `ecols` | Attributs des arêtes (longueur au repos…) |
+| `faces` | Faces : quatre numéros de points, le quatrième valant `NO_VERT` pour un triangle |
 
 Une `Column` contient **un tableau par composante** (`data: Vec<Vec<f32>>`) : tous les x, tous les y, tous les z. Et un numéro de `version`, qui change à chaque écriture.
 
@@ -207,6 +208,53 @@ Une miniature ne lance jamais une simulation : elle prend ce qui est déjà en c
 Une entrée de nombre, de vecteur ou de couleur d'un nœud de géométrie est un champ : `Field::Const(valeur)` ou `Field::Per(une valeur par point)`.
 
 `Run::field` compile la chaîne de nœuds en amont de l'entrée (`Program::compile_field`), puis l'exécute **point par point**. Les attributs de la géométrie y sont lisibles par leur nom. Un champ est donc évalué par le même code que les matériaux.
+
+### Faces et UV
+
+`Geo::faces` porte des quads ou des triangles (`[u32; 4]`, le quatrième indice valant `NO_VERT` pour un triangle), avec son numéro de version comme les arêtes : il entre dans `Geo::stamp`, et `Geo::adopt` reprend l'ancien tableau s'il n'a pas changé. Les solveurs ne lisent pas les faces. Elles servent à `geoscene::to_model`, qui en fait un maillage.
+
+Qui s'en occupe :
+
+| Nœud | Ce qu'il fait des faces |
+|---|---|
+| `geo_grid` | Les crée (un quad par case, tourné vers +Y au sol, vers +Z au mur), avec la colonne `uv` (largeur 2). Réglage `faces` ; absent d'un ancien fichier, il vaut oui |
+| `geo_transform`, `geo_set_pos`, `geo_attr`, `sim_forces`, `sim_move`, `sim_collide`, `sim_solver` | Rien : ils clonent la géométrie et ne remplacent que des colonnes |
+| `geo_merge` (`merge`) | Décale les faces de la seconde géométrie |
+| `geo_delete`, `sim_emit` (`filter`) | Retirent les faces qui perdent un sommet, renumérotent les autres |
+| `geo_copy` | Recopie les faces et les `uv` du modèle sur chaque copie |
+
+Un nœud qui crée des points doit décider de ses faces. Un nœud qui en déplace n'a rien à faire. `Geo::triangles()` rend les triangles et, pour chacun, ses vrais côtés (la diagonale d'un quad n'est pas une arête).
+
+### Dans une scène 3D (`geoscene`)
+
+Un objet de scène dont `file` est un `.arygeo` est une géométrie de nodes. `scene::kind` le range avec les modèles : tout ce qui vaut pour un modèle (transformation, parenté, sélection par plage de triangles, matériau par objet) vaut pour lui. `geoscene::is_geo` le distingue là où il le faut (pas de mode édition, pas de formes).
+
+Le chemin d'une image :
+
+1. `Scene::apply_frame(f)` range l'image courante dans `Scene::frame` (un `Transient` : ni écrit, ni comparé) et rend vrai s'il y a une géométrie de nodes, pour que la vue reconstruise la scène.
+2. `scene::build_ranges` appelle `geoscene::model(scene, chemin, k)` pour cet objet.
+3. `geoscene::sim_frame` convertit l'image de la scène en image de simulation : départ à `scene.start + sim_offset`, même instant si les cadences diffèrent, bornée à la durée du graphe.
+4. `geoscene::eval_file` tient un `Engine` par fichier (relu quand la date du fichier change), y inscrit les caches figés d'après le réglage `cache` des fins de zone, et calcule sans heure limite. Lire la timeline dans l'ordre ne coûte qu'un pas par image, puisque le moteur garde les états.
+5. `geoscene::to_model` fait le `Model` : triangles et côtés depuis les faces, couleur par triangle depuis `Cd`, UV par coin depuis `uv` (`Model::uv`). Sans face : un tétraèdre par point.
+6. `build_ranges` réunit les objets. Dès qu'un objet apporte des UV, le modèle réuni a un tableau d'UV par triangle ; les triangles des autres objets y valent NaN.
+7. `Prepared::set_scene_uv` remplace ces NaN par la projection par défaut des matériaux (calculée depuis les sommets), ce qui donne le même rendu qu'avant aux objets sans UV. L'aperçu, le tracé de chemins et `encode_animation` (par `scene_prepared`) lisent `Prepared::uv`.
+
+#### Le nœud « Objet de la scène » (`geo_scene_obj`)
+
+`geoscene::inputs` calcule, pour chaque objet nommé par un nœud `geo_scene_obj`, sa boîte (centre, tailles) à **chaque image de la simulation**, dans le repère de la géométrie : la scène est clonée, posée à l'image voulue (`apply_frame`), et les huit coins de la boîte du modèle d'origine sont passés dans le repère de l'objet géométrie. Le résultat (`geo::SceneInputs`) est donné au moteur par `Engine::scene`.
+
+Le moteur le fait lire comme il fait lire le temps :
+
+- pendant un calcul, un `thread_local` (`SCENE_NOW`) tient les entrées et l'image en cours ; `Run::set_frame` le met à jour ;
+- `Program::compile_flat` écrit la boîte du moment dans les réglages du pas (`_cx`… `_sz`), comme il écrit `_image` pour `time` ; `pixel` rend centre, rayon (la moitié de la plus grande taille) et tailles. Sans scène, il rend les deux entrées du nœud ;
+- `Run::source_hash` ajoute la boîte du moment à l'empreinte du champ (un objet qui bouge invalide ce qui le lit) ;
+- la clé d'une zone de simulation (`sim_state`) ajoute **toute la trajectoire** des objets regardés : changer l'objet ou son animation recalcule la simulation, changer d'image non.
+
+Limites assumées : une boîte alignée sur les axes de la géométrie, pas un champ de distance ; le modèle d'origine, sans modificateurs ni squelette ; les obstacles du `Solver` (une boule, une boîte).
+
+#### Export
+
+`geoscene::export_obj_sequence` écrit un OBJ par image de la scène (`obj_text` : points dans le repère de la scène, `vt` depuis `uv`, faces telles quelles). Pas d'Alembic : c'est un conteneur binaire (Ogawa) sans bibliothèque Rust disponible ici, et l'écrire à la main dépasse de loin le besoin, qu'une suite d'OBJ couvre dans Blender, Houdini et les moteurs de jeu.
 
 ### Le contrat `Solver`
 
@@ -309,5 +357,9 @@ Dans `Work::op` pour les nœuds, `layer_op` pour les calques : lire les champs a
 ## Tests
 
 Les tests de `geo.rs` vérifient notamment que seul le nécessaire est refait. Exemple lu dans le code : après un déplacement refait à l'identique, `(computed, cutoffs) == (1, 1)`, c'est-à-dire que la couleur posée en aval vient du cache.
+
+Ils vérifient aussi les faces à travers les nœuds, la simulation et le cache (`faces_follow_the_points_through_the_nodes`, `faces_survive_the_cloth_simulation_and_its_cache`), et qu'un graphe ou un cache d'avant les faces se relit.
+
+Les tests de `geoscene.rs` couvrent le lien avec la scène : image de scène vers image de simulation, maillage et UV, sérialisation de l'objet, obstacle fixe puis animé, suite d'OBJ. Celui de `model3d.rs` (`geometrie_de_nodes_au_rendu_et_dans_la_video`) rend deux images et exporte la vidéo.
 
 Pour ajouter un nœud, voir [Ajouter un nœud](ajouter.md#ajouter-un-nœud).
