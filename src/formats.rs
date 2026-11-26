@@ -18,7 +18,7 @@ pub struct Format {
     pub ready: bool,
 }
 
-pub const ALL: [Format; 11] = [
+pub const ALL: [Format; 12] = [
     Format { id: "scene", ext: "aryscene", legacy: &["arya3"], label: "scène 3D", help: "Modèles, lumières, caméras et animation ; arrive avec un cube, une lumière et une caméra", ready: true },
     Format { id: "seq", ext: "aryseq", legacy: &["aryav"], label: "montage vidéo", help: "Timeline de vidéos, d'images, de sons et de titres", ready: true },
     Format { id: "motion", ext: "arymotion", legacy: &[], label: "composition animée", help: "Motion design : titres, formes et images animés par clés, exportés en MP4", ready: true },
@@ -26,6 +26,7 @@ pub const ALL: [Format; 11] = [
     Format { id: "music", ext: "arymusic", legacy: &[], label: "morceau", help: "Séquenceur : synthés et batterie intégrés, régions et rouleau de piano ; s'exporte en WAV ou MP3", ready: true },
     Format { id: "mat", ext: "arymat", legacy: &["mat.json"], label: "matériau en nodes", help: "Matériau pour les modèles et les objets d'une scène", ready: true },
     Format { id: "comp", ext: "arycomp", legacy: &["comp.json"], label: "compositing en nodes", help: "Retouche d'image ou étalonnage d'un clip", ready: true },
+    Format { id: "geo", ext: "arygeo", legacy: &[], label: "géométrie et simulation en nodes", help: "Points, attributs et simulation (tissu, particules) construits en nodes, avec une lecture image par image", ready: true },
     Format { id: "board", ext: "aryboard", legacy: &["board.json"], label: "board", help: "Planche d'images, de notes et de liens", ready: true },
     Format { id: "vector", ext: "aryvec", legacy: &[], label: "dessin vectoriel", help: "Logos, illustrations et maquettes d'écrans en vecteurs, comme Illustrator et Figma ; s'exporte en SVG ou PNG", ready: true },
     Format { id: "story", ext: "arystory", legacy: &[], label: "storyboard", help: "Cases dessinées avec plan, action et dialogue ; l'animatique se lit et part au montage", ready: true },

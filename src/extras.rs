@@ -97,6 +97,7 @@ pub enum Cmd {
     NewFile,
     UpgradeExtensions,
     NewCompositor,
+    NewGeometry,
     Stats,
     RunFile,
     NewBoard,
@@ -135,6 +136,7 @@ impl App {
             ("nouveau scénario (Fountain)", "", Cmd::NewScript),
             ("nouveau matériau (nodes)", "", Cmd::NewMaterial),
             ("nouveau compositing (nodes)", "", Cmd::NewCompositor),
+            ("nouvelle géométrie ou simulation (nodes)", "", Cmd::NewGeometry),
             ("importer des fichiers…", "", Cmd::Import),
             ("lier un dossier…", "", Cmd::LinkFolder),
             ("importer une image depuis une URL…", "", Cmd::ImportUrl),
@@ -326,6 +328,7 @@ impl App {
             Cmd::NewMaterial => self.new_untitled(crate::formats::ext("mat"), |p| nodes::Graph::new_material().save(p)),
             Cmd::NewLayered => self.new_untitled(crate::formats::ext("mat"), |p| nodes::Graph::new_layered().save(p)),
             Cmd::NewCompositor => self.new_untitled(crate::formats::ext("comp"), |p| nodes::Graph::new_compositor().save(p)),
+            Cmd::NewGeometry => self.new_untitled(crate::formats::ext("geo"), |p| nodes::Graph::new_geometry().save(p)),
             Cmd::NewVector => self.new_untitled(crate::formats::ext("vector"), |p| crate::vector::Doc::starter().save(p)),
             Cmd::NewScript => self.new_untitled("fountain", |p| crate::vault::atomic_write(p, crate::fountain::STARTER).map_err(|e| e.to_string())),
             Cmd::NewProduction => {
@@ -1801,7 +1804,7 @@ fn kind_of(rel: &str) -> &'static str {
     // Les formats d'Aryadne d'abord, anciennes extensions comprises
     match crate::formats::of(rel).map(|f| f.id) {
         Some("board") => return "boards",
-        Some("mat") | Some("comp") => return "nodes",
+        Some("mat") | Some("comp") | Some("geo") => return "nodes",
         Some("scene") => return "3d",
         Some("seq") => return "vidéos",
         Some("image") => return "images",

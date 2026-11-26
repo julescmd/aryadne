@@ -77,7 +77,7 @@ impl Def {
         match kind {
             GraphKind::Material => self.mat,
             GraphKind::Compositor => self.comp,
-            GraphKind::Geometry => matches!(self.cat, "géométrie" | "simulation") || (self.mat && self.comp && !matches!(self.cat, "sortie" | "shader") && !matches!(self.op, "alphaover" | "param")),
+            GraphKind::Geometry => matches!(self.cat, "géométrie" | "simulation") || self.op == "geo_out" || (self.mat && self.comp && !matches!(self.cat, "sortie" | "shader" | "usure") && !matches!(self.op, "alphaover" | "param" | "video" | "texture" | "coords" | "texcoord" | "posterize" | "shape")),
         }
     }
 }
@@ -228,6 +228,29 @@ pub const DEFS: &[Def] = &[
     Def { op: "group", label: "Groupe", cat: "interne", inputs: &[], outputs: &[], params: &[], mat: true, comp: true },
     Def { op: "group_in", label: "Entrées du groupe", cat: "interne", inputs: &[], outputs: &[], params: &[], mat: true, comp: true },
     Def { op: "group_out", label: "Sorties du groupe", cat: "interne", inputs: &[], outputs: &[], params: &[], mat: true, comp: true },
+    // Géométrie : des points, leurs attributs, des arêtes. Les entrées de nombre, de vecteur et de
+    // couleur sont des champs : on y branche n'importe quelle chaîne de nodes, calculée point par point.
+    Def { op: "geo_out", label: "Sortie géométrie", cat: "sortie", inputs: &[("géométrie", Sock::Geo, ZERO)], outputs: &[], params: &[], mat: false, comp: false },
+    Def { op: "geo_grid", label: "Grille", cat: "géométrie", inputs: &[("largeur", Sock::Float, f(2.0)), ("profondeur", Sock::Float, f(2.0)), ("points en largeur", Sock::Int, f(20.0)), ("points en profondeur", Sock::Int, f(20.0))], outputs: &[("géométrie", Sock::Geo)], params: &[ParamDef::Choice("plan", &["sol (XZ)", "mur (XY)"]), ParamDef::Choice("arêtes", &["oui", "avec diagonales", "non"])], mat: false, comp: false },
+    Def { op: "geo_sphere", label: "Points sur une sphère", cat: "géométrie", inputs: &[("points", Sock::Int, f(500.0)), ("rayon", Sock::Float, f(1.0))], outputs: &[("géométrie", Sock::Geo)], params: &[], mat: false, comp: false },
+    Def { op: "geo_circle", label: "Cercle", cat: "géométrie", inputs: &[("points", Sock::Int, f(32.0)), ("rayon", Sock::Float, f(1.0))], outputs: &[("géométrie", Sock::Geo)], params: &[], mat: false, comp: false },
+    Def { op: "geo_line", label: "Ligne", cat: "géométrie", inputs: &[("points", Sock::Int, f(10.0)), ("départ", Sock::Vector, ZERO), ("arrivée", Sock::Vector, [0.0, 1.0, 0.0, 0.0])], outputs: &[("géométrie", Sock::Geo)], params: &[], mat: false, comp: false },
+    Def { op: "geo_scatter", label: "Nuage de points", cat: "géométrie", inputs: &[("points", Sock::Int, f(1000.0)), ("taille", Sock::Vector, [2.0, 2.0, 2.0, 0.0]), ("graine", Sock::Float, f(0.0))], outputs: &[("géométrie", Sock::Geo)], params: &[], mat: false, comp: false },
+    Def { op: "geo_transform", label: "Déplacer, tourner", cat: "géométrie", inputs: &[("géométrie", Sock::Geo, ZERO), ("déplacement", Sock::Vector, ZERO), ("rotation", Sock::Vector, ZERO), ("échelle", Sock::Vector, [1.0, 1.0, 1.0, 1.0])], outputs: &[("géométrie", Sock::Geo)], params: &[], mat: false, comp: false },
+    Def { op: "geo_set_pos", label: "Placer les points", cat: "géométrie", inputs: &[("géométrie", Sock::Geo, ZERO), ("sélection", Sock::Bool, f(1.0)), ("position", Sock::Vector, ZERO), ("décalage", Sock::Vector, ZERO)], outputs: &[("géométrie", Sock::Geo)], params: &[], mat: false, comp: false },
+    Def { op: "geo_attr", label: "Définir un attribut", cat: "géométrie", inputs: &[("géométrie", Sock::Geo, ZERO), ("valeur", Sock::Color, W), ("sélection", Sock::Bool, f(1.0))], outputs: &[("géométrie", Sock::Geo)], params: &[ParamDef::Line("nom", "Cd"), ParamDef::Choice("type", &["couleur", "nombre", "vecteur"])], mat: false, comp: false },
+    Def { op: "geo_merge", label: "Réunir", cat: "géométrie", inputs: &[("géométrie A", Sock::Geo, ZERO), ("géométrie B", Sock::Geo, ZERO)], outputs: &[("géométrie", Sock::Geo)], params: &[], mat: false, comp: false },
+    Def { op: "geo_delete", label: "Supprimer des points", cat: "géométrie", inputs: &[("géométrie", Sock::Geo, ZERO), ("sélection", Sock::Bool, f(0.0))], outputs: &[("géométrie", Sock::Geo)], params: &[], mat: false, comp: false },
+    Def { op: "geo_copy", label: "Copier sur des points", cat: "géométrie", inputs: &[("points", Sock::Geo, ZERO), ("modèle", Sock::Geo, ZERO), ("taille", Sock::Float, f(1.0))], outputs: &[("géométrie", Sock::Geo)], params: &[], mat: false, comp: false },
+    Def { op: "position", label: "Position", cat: "géométrie", inputs: &[], outputs: &[("position", Sock::Vector)], params: &[], mat: false, comp: false },
+    Def { op: "index", label: "Numéro du point", cat: "géométrie", inputs: &[], outputs: &[("numéro", Sock::Float)], params: &[], mat: false, comp: false },
+    Def { op: "attribute", label: "Lire un attribut", cat: "géométrie", inputs: &[], outputs: &[("valeur", Sock::Float), ("vecteur", Sock::Vector)], params: &[ParamDef::Line("nom", "v")], mat: false, comp: false },
+    // Simulation : ces nodes vont dans une zone de simulation, où l'état passe d'une image à la suivante
+    Def { op: "sim_forces", label: "Forces", cat: "simulation", inputs: &[("géométrie", Sock::Geo, ZERO), ("gravité", Sock::Vector, [0.0, -9.8, 0.0, 0.0]), ("vent", Sock::Vector, ZERO), ("frottement de l'air", Sock::Float, f(0.1)), ("pas de temps", Sock::Float, f(1.0 / 24.0))], outputs: &[("géométrie", Sock::Geo)], params: &[], mat: false, comp: false },
+    Def { op: "sim_move", label: "Avancer", cat: "simulation", inputs: &[("géométrie", Sock::Geo, ZERO), ("pas de temps", Sock::Float, f(1.0 / 24.0))], outputs: &[("géométrie", Sock::Geo)], params: &[], mat: false, comp: false },
+    Def { op: "sim_collide", label: "Collision", cat: "simulation", inputs: &[("géométrie", Sock::Geo, ZERO), ("hauteur du sol", Sock::Float, f(0.0)), ("rebond", Sock::Float, f(0.4)), ("adhérence", Sock::Float, f(0.2)), ("centre de la boule", Sock::Vector, ZERO), ("rayon de la boule", Sock::Float, f(0.0))], outputs: &[("géométrie", Sock::Geo)], params: &[], mat: false, comp: false },
+    Def { op: "sim_emit", label: "Émettre des particules", cat: "simulation", inputs: &[("état", Sock::Geo, ZERO), ("source", Sock::Geo, ZERO), ("par image", Sock::Int, f(20.0)), ("vitesse", Sock::Vector, [0.0, 2.0, 0.0, 0.0]), ("dispersion", Sock::Float, f(0.5)), ("durée de vie (s)", Sock::Float, f(3.0)), ("pas de temps", Sock::Float, f(1.0 / 24.0))], outputs: &[("géométrie", Sock::Geo)], params: &[], mat: false, comp: false },
+    Def { op: "sim_solver", label: "Solveur", cat: "simulation", inputs: &[("géométrie", Sock::Geo, ZERO), ("itérations", Sock::Int, f(16.0)), ("souplesse", Sock::Float, f(0.0)), ("amortissement", Sock::Float, f(0.02)), ("pas de temps", Sock::Float, f(1.0 / 24.0)), ("hauteur du sol", Sock::Float, f(0.0)), ("centre de la boule", Sock::Vector, ZERO), ("rayon de la boule", Sock::Float, f(0.0)), ("adhérence", Sock::Float, f(0.6))], outputs: &[("géométrie", Sock::Geo)], params: &[ParamDef::Choice("solveur", crate::geo::SOLVER_NAMES), ParamDef::Choice("sol", &["oui", "non"])], mat: false, comp: false },
     Def { op: "grainmatch", label: "Grain assorti (mesuré sur la plaque)", cat: "filtre", inputs: &[("image", Sock::Color, GRAY), ("plaque", Sock::Color, GRAY)], outputs: &[("image", Sock::Color), ("force mesurée", Sock::Float)], params: &[ParamDef::Float("taille du grain", 0.5, 4.0, 1.0), ParamDef::Float("dosage", 0.0, 2.0, 1.0)], mat: false, comp: true },
 ];
 
@@ -554,6 +577,11 @@ impl Graph {
     /// Matériau à calques (atelier) : une pile vide, le graphe vient de ses calques.
     pub fn new_layered() -> Graph {
         Graph { stack: Some(crate::atelier::Stack::default()), ..Graph::empty(GraphKind::Material) }
+    }
+
+    /// Graphe de géométrie de départ : un tissu simulé, à modifier ou à vider.
+    pub fn new_geometry() -> Graph {
+        crate::geo::starter()
     }
 
     pub fn new_compositor() -> Graph {
@@ -2891,6 +2919,8 @@ const NW: f32 = 190.0;
 thread_local! {
     /// Nodes copiés, partagés entre tous les graphes ouverts
     static NODE_CLIP: std::cell::RefCell<Option<(Vec<Node>, Vec<Link>)>> = const { std::cell::RefCell::new(None) };
+    /// Les groupes dont les nodes copiés ont besoin : ils suivent la copie d'un graphe à l'autre
+    static GROUP_CLIP: std::cell::RefCell<Vec<crate::nodeflow::Group>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 const ROW: f32 = 22.0;
 const HEAD: f32 = 24.0;
@@ -3031,6 +3061,8 @@ pub struct Editor {
     leave_request: bool,
     /// Un champ de texte avait-il le clavier à l'image d'avant ? (pour la touche Tab)
     was_typing: bool,
+    /// Géométrie et simulation : le moteur, l'aperçu 3D et la lecture
+    geo: Option<Box<crate::geoview::GeoView>>,
 }
 
 /// Échange le contenu de la racine et celui du groupe `name` : entrer dans un groupe, ou en sortir.
@@ -3134,10 +3166,14 @@ impl Editor {
             group_request: false,
             leave_request: false,
             was_typing: false,
+            geo: None,
             frame_sel: false,
             frame_rename: None,
             frame_sel_request: false, pv_yaw: 0.4, pv_pitch: 0.25, pv_dist: 2.0, pv_env: 0, pv_shape: None, boxy: None, pv_model: None, pv_key: 0, solo: None, roto_drag: None,
         };
+        if ed.graph.kind == GraphKind::Geometry {
+            ed.geo = Some(Box::new(crate::geoview::GeoView::new(&ed.graph)));
+        }
         // Un graphe dont des nodes se chevauchent (fichier écrit à la main, ancienne version) est rangé à l'ouverture
         if ed.overlaps() {
             ed.arrange();
@@ -3604,7 +3640,7 @@ impl Editor {
                 }
             }
         }
-        if self.thumb_rx.is_some() || self.thumb_version == self.version {
+        if self.thumb_rx.is_some() || self.thumb_version == self.version || self.graph.kind == GraphKind::Geometry {
             return;
         }
         self.thumb_version = self.version;
@@ -3686,7 +3722,14 @@ impl Editor {
         let insp_away = crate::layout::offer("node-inspector", "aperçu et réglages (nodes)").is_some();
         let strip_away = crate::layout::offer("node-presets", "préréglages de matériaux").is_some();
         let lib_w = if lib_away { 0.0 } else { 240.0f32.min(avail.width() * 0.22) };
-        let insp_w = if insp_away { 0.0 } else { 290.0f32.min(avail.width() * 0.28) };
+        // La géométrie se regarde en grand : son aperçu prend plus de place
+        let insp_w = if insp_away {
+            0.0
+        } else if kind == GraphKind::Geometry {
+            380.0f32.min(avail.width() * 0.34)
+        } else {
+            290.0f32.min(avail.width() * 0.28)
+        };
         let lib_rect = Rect::from_min_size(avail.min, vec2(lib_w, avail.height()));
         let insp_rect = Rect::from_min_max(pos2(avail.right() - insp_w, avail.top()), avail.max);
         let graph_rect = Rect::from_min_max(pos2(lib_rect.right(), avail.top()), pos2(insp_rect.left(), avail.bottom()));
@@ -3757,7 +3800,11 @@ impl Editor {
             ui.painter().hline(hr.x_range(), hr.bottom() - 0.5, Stroke::new(1.0, p.line));
             let chip = Rect::from_min_size(hr.left_center() + vec2(6.0, -12.0), vec2(70.0, 24.0));
             ui.painter().rect(chip, 2.0, p.raised, Stroke::new(1.0, p.line), egui::StrokeKind::Inside);
-            ui.painter().text(chip.center(), egui::Align2::CENTER_CENTER, crate::i18n::t(if kind == GraphKind::Material { "Matériau" } else { "Image" }), egui::FontId::proportional(12.5), p.text);
+            ui.painter().text(chip.center(), egui::Align2::CENTER_CENTER, crate::i18n::t(match kind {
+                GraphKind::Material => "Matériau",
+                GraphKind::Compositor => "Image",
+                GraphKind::Geometry => "Géométrie",
+            }), egui::FontId::proportional(12.5), p.text);
         }
         self.preview_ui(ui, prev_rect, &ctx);
         {
@@ -3766,7 +3813,7 @@ impl Editor {
             iui.set_clip_rect(below);
             iui.spacing_mut().item_spacing.y = 6.0;
             if let Some(n) = self.selected.iter().next().and_then(|id| self.graph.nodes.iter().find(|n| n.id == *id)) {
-                if let Some(d) = DEFS.iter().find(|d| d.op == n.op) {
+                if let Some(d) = n.def() {
                     iui.horizontal(|ui| {
                         let (r, _) = ui.allocate_exact_size(vec2(10.0, 10.0), Sense::hover());
                         ui.painter().rect_filled(r, 2.0, cat_color(d.cat));
@@ -3989,9 +4036,12 @@ impl Editor {
                 let links: Vec<Link> = self.graph.links.iter().filter(|l| ids.contains(&l.from) && ids.contains(&l.to)).cloned().collect();
                 if !nodes.is_empty() {
                     self.message = Some(format!("{} {}", nodes.len(), crate::i18n::t_mid("node(s) copié(s)")));
-                    if let Ok(t) = serde_json::to_string(&serde_json::json!({ "aryadne_nodes": nodes, "links": links })) {
+                    // Les groupes posés par ces nodes (et ceux qu'ils contiennent) partent avec la copie
+                    let groups = crate::nodeflow::groups_used(&self.doc(), &nodes);
+                    if let Ok(t) = serde_json::to_string(&serde_json::json!({ "aryadne_nodes": nodes, "links": links, "groups": groups })) {
                         ctx.copy_text(t);
                     }
+                    GROUP_CLIP.with(|c| *c.borrow_mut() = groups);
                     NODE_CLIP.with(|c| *c.borrow_mut() = Some((nodes.clone(), links.clone())));
                     self.clipboard = Some((nodes, links));
                     if cut_ev {
@@ -4007,12 +4057,21 @@ impl Editor {
                 let v: serde_json::Value = serde_json::from_str(t).ok()?;
                 let nodes: Vec<Node> = serde_json::from_value(v.get("aryadne_nodes")?.clone()).ok()?;
                 let links: Vec<Link> = serde_json::from_value(v.get("links")?.clone()).unwrap_or_default();
+                if let Some(groups) = v.get("groups").and_then(|g| serde_json::from_value::<Vec<crate::nodeflow::Group>>(g.clone()).ok()) {
+                    GROUP_CLIP.with(|c| *c.borrow_mut() = groups);
+                }
                 Some((nodes, links))
             });
             let want_paste = pasted.is_some() || (cmd && key(egui::Key::V));
             if want_paste {
                 let clip = pasted.or_else(|| NODE_CLIP.with(|c| c.borrow().clone())).or_else(|| self.clipboard.clone());
                 if let Some((nodes, links)) = clip {
+                    // Les groupes qui manquent à ce graphe arrivent avec les nodes collés
+                    for gr in GROUP_CLIP.with(|c| c.borrow().clone()) {
+                        if !self.graph.groups.iter().any(|x| x.name == gr.name) && nodes.iter().any(|n| n.op == "group") {
+                            self.graph.groups.push(gr);
+                        }
+                    }
                     let at = ctx.pointer_latest_pos().map(to_graph).unwrap_or([0.0, 0.0]);
                     let min = nodes.iter().fold([f32::MAX; 2], |m, n| [m[0].min(n.pos[0]), m[1].min(n.pos[1])]);
                     let new = self.paste(nodes, links, [at[0] - min[0], at[1] - min[1]]);
@@ -4459,7 +4518,7 @@ impl Editor {
                     ui.painter().circle_filled(dot.center(), 5.5, sock_color(port.sock));
                     let dr = dr.on_hover_text(crate::i18n::t("Type de la prise (clic pour changer)"));
                     egui::Popup::menu(&dr).show(|ui| {
-                        for (s, name) in [(Sock::Float, "nombre"), (Sock::Int, "entier"), (Sock::Bool, "vrai / faux"), (Sock::Vector, "vecteur"), (Sock::Color, "couleur"), (Sock::Geo, "géométrie")] {
+                        for (s, name) in [(Sock::Float, "nombre à virgule"), (Sock::Int, "entier"), (Sock::Bool, "vrai / faux"), (Sock::Vector, "vecteur"), (Sock::Color, "couleur"), (Sock::Geo, "géométrie")] {
                             if s == Sock::Geo && !allow_geo {
                                 continue;
                             }
@@ -4562,9 +4621,38 @@ impl Editor {
                 }
             }
         }
+        // Géométrie : les attributs de ce qui sort du node choisi
+        if let (Some(id), Some(mut geo)) = (first, first.and_then(|_| self.geo.take())) {
+            let shows = self.graph.nodes.iter().find(|n| n.id == id).is_some_and(|n| n.op == "geo_out" || n.def().is_some_and(|d| d.outputs.first().map(|o| o.1) == Some(Sock::Geo)));
+            if shows {
+                geo.attributes(ui, &self.graph, id, self.version, &self.root);
+            }
+            self.geo = Some(geo);
+        }
         // 3. Les prises de la zone choisie
         if let Some(id) = first.filter(|id| self.graph.nodes.iter().any(|n| n.id == *id && crate::nodeflow::is_zone(&n.op))) {
             let sim = self.graph.nodes.iter().any(|n| n.id == id && n.op.starts_with("sim"));
+            // Simulation : figer le cache sur le disque, ou le libérer
+            if sim && self.level.is_none() {
+                let end = if self.graph.nodes.iter().any(|n| n.id == id && n.op == "sim_out") { Some(id) } else { crate::nodeflow::zone_pair(&self.graph, id) };
+                if let Some(end) = end {
+                    let baked = self.graph.nodes.iter().find(|n| n.id == end).is_some_and(|n| matches!(n.params.get("cache"), Some(Param::S(s)) if !s.is_empty()));
+                    let mut toggle = false;
+                    card(ui, "CACHE DE LA SIMULATION", &mut |ui| {
+                        ui.horizontal(|ui| {
+                            let (ic, label) = if baked { (crate::lucide::ROTATE_CCW, "libérer le cache") } else { (crate::lucide::HARD_DRIVE, "figer sur le disque") };
+                            if ui.add(egui::Button::new(format!("{ic}  {}", crate::i18n::t(label))).corner_radius(10)).on_hover_text(crate::i18n::t(if baked { "La zone se recalcule de nouveau d'après ses réglages" } else { "Calcule toutes les images et les écrit dans le coffre : la zone se relit ensuite sans calcul, même si l'amont change" })).clicked() {
+                                toggle = true;
+                            }
+                        });
+                        ui.label(RichText::new(crate::i18n::t(if baked { "Figé : les images viennent du disque." } else { "En mémoire : chaque image calculée est gardée tant que rien ne change en amont." })).size(11.0).color(p.muted));
+                    });
+                    if toggle {
+                        self.bake_zone(end, !baked);
+                        return;
+                    }
+                }
+            }
             let mut ports = self.graph.nodes.iter().find(|n| n.id == id).map(|n| n.ins.clone()).unwrap_or_default();
             let mut edit = (false, None, None);
             card(ui, if sim { "ÉTAT DE LA SIMULATION" } else { "ÉTAT DE LA RÉPÉTITION" }, &mut |ui| {
@@ -4912,6 +5000,7 @@ impl Editor {
             }
         }
         // Nodes
+        let mut geo_view = self.geo.take();
         let mut hovered_in: Option<(u32, usize)> = None;
         let ids: Vec<u32> = self.graph.nodes.iter().map(|n| n.id).collect();
         let mut rename_done = None;
@@ -5183,7 +5272,9 @@ impl Editor {
                         }
                         Sock::Vector => {
                             // Trois nombres serrés sur la même rangée
-                            child.spacing_mut().item_spacing.x = 2.0;
+                            child.spacing_mut().item_spacing.x = 1.0;
+                            child.spacing_mut().button_padding.x = 2.0;
+                            child.spacing_mut().interact_size.x = 30.0;
                             let mut any: Option<egui::Response> = None;
                             for c in 0..3 {
                                 let r = child.add(egui::DragValue::new(&mut v[c]).speed(0.01).max_decimals(2));
@@ -5516,6 +5607,14 @@ impl Editor {
             // Miniature
             if preview_on && has_out {
                 let tr = Rect::from_min_size(pos2(r.left() + 8.0, r.bottom() - THUMB - 6.0), vec2(NW - 16.0, THUMB));
+                if let Some(geo) = geo_view.as_mut() {
+                    if d.outputs.first().map(|o| o.1) == Some(Sock::Geo) {
+                        geo.thumb(&painter, tr, &self.graph, *id, self.version, &self.root);
+                    } else {
+                        painter.text(tr.center(), egui::Align2::CENTER_CENTER, crate::i18n::t("champ : une valeur par point"), egui::FontId::proportional(10.5), p.muted);
+                    }
+                    continue;
+                }
                 painter.rect_filled(tr, 0.0, Color32::from_gray(40));
                 match self.thumbs.get(id) {
                     Some((_, t)) => {
@@ -5530,6 +5629,7 @@ impl Editor {
                 }
             }
         }
+        self.geo = geo_view;
         if let Some((id, text)) = rename_done {
             if let Some(n) = self.graph.nodes.iter_mut().find(|n| n.id == id) {
                 n.label = text.trim().to_string();
@@ -6178,6 +6278,10 @@ impl Editor {
 
     fn preview_ui(&mut self, ui: &mut egui::Ui, rect: Rect, ctx: &egui::Context) {
         let p = theme::pal();
+        if self.graph.kind == GraphKind::Geometry {
+            self.geo_preview(ui, rect, ctx);
+            return;
+        }
         ui.painter().rect_filled(rect, 0.0, Color32::from_gray(30));
         // Résultat prêt ?
         if let Some(rx) = &self.preview_rx {
@@ -6316,6 +6420,66 @@ impl Editor {
                 }
             });
         }
+    }
+
+    /// Géométrie : l'aperçu 3D, et dessous la barre de lecture avec les images en cache.
+    fn geo_preview(&mut self, ui: &mut egui::Ui, rect: Rect, ctx: &egui::Context) {
+        let Some(mut geo) = self.geo.take() else { return };
+        geo.solo = self.solo.filter(|id| self.level.is_none() && self.graph.nodes.iter().any(|n| n.id == *id));
+        // Espace : lire ou mettre en pause (souris sur l'aperçu ou sur le graphe, hors saisie)
+        if !ctx.egui_wants_keyboard_input() && self.add.is_none() && ctx.input(|i| i.key_pressed(egui::Key::Space) && !i.modifiers.any()) {
+            geo.playing = !geo.playing;
+        }
+        let doc = self.doc();
+        geo.tick(&doc, self.version, &self.root, ctx);
+        // Une erreur du moteur se montre sur le node en cause, comme les autres
+        match (&geo.error, &self.program) {
+            (Some(e), _) => self.program = Err(e.clone()),
+            (None, Err(_)) => self.program = crate::nodeflow::lower(&doc, false).map(|_| Program::empty(GraphKind::Geometry)),
+            _ => {}
+        }
+        geo.viewport(ui, rect);
+        let mut time = doc.time.unwrap_or_default();
+        let bar = Rect::from_min_size(rect.left_bottom() + vec2(0.0, 4.0), vec2(rect.width(), 36.0));
+        if geo.transport(ui, bar, &mut time) {
+            self.graph.time = Some(time);
+            self.geo = Some(geo);
+            self.changed();
+            return;
+        }
+        self.geo = Some(geo);
+    }
+
+    /// Fige sur le disque la simulation de la zone choisie, ou la libère.
+    fn bake_zone(&mut self, end: u32, on: bool) {
+        let Some(mut geo) = self.geo.take() else { return };
+        if on {
+            let stem = self.path.file_stem().map(|s| crate::formats::strip(&s.to_string_lossy()).to_string()).unwrap_or_else(|| "géométrie".into());
+            let rel = format!(".cache/{stem}/zone-{end}");
+            let dir = Path::new(&self.root).join(&rel);
+            let doc = self.doc();
+            match geo.engine.bake(&doc, end, &dir, &self.root) {
+                Ok(count) => {
+                    if let Some(n) = self.graph.nodes.iter_mut().find(|n| n.id == end) {
+                        n.params.insert("cache".into(), Param::S(rel));
+                    }
+                    self.message = Some(format!("{count} {}", crate::i18n::t_mid("images figées sur le disque. La zone ne se recalcule plus tant qu'elle n'est pas libérée.")));
+                }
+                Err(e) => self.message = Some(e),
+            }
+        } else if let Some(n) = self.graph.nodes.iter_mut().find(|n| n.id == end) {
+            if let Some(Param::S(rel)) = n.params.remove("cache") {
+                let dir = Path::new(&self.root).join(&rel);
+                // On ne supprime que notre propre dossier de cache
+                if rel.starts_with(".cache/") && dir.is_dir() {
+                    let _ = std::fs::remove_dir_all(dir);
+                }
+            }
+            geo.engine.baked.remove(&end);
+        }
+        geo.refresh();
+        self.geo = Some(geo);
+        self.changed();
     }
 
     fn export(&mut self) {

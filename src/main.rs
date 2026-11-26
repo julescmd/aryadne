@@ -96,6 +96,8 @@ mod live;
 mod modifiers;
 mod nodes;
 mod nodeflow;
+mod geo;
+mod geoview;
 mod model3d;
 mod office;
 mod ollama;
@@ -937,6 +939,7 @@ impl App {
                     self.new_untitled(ext, move |p| g.save(p));
                 }
                 "arycomp" => self.new_untitled(ext, |p| nodes::Graph::new_compositor().save(p)),
+                "arygeo" => self.new_untitled(ext, |p| nodes::Graph::new_geometry().save(p)),
                 "aryvec" => self.new_untitled(ext, |p| vector::Doc::starter().save(p)),
                 "arystory" => self.new_untitled(ext, |p| story::Story::starter().save(p)),
                 "aryimg" => {

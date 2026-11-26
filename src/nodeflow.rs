@@ -394,6 +394,22 @@ pub fn group_uses(g: &Graph, name: &str) -> usize {
     count(&g.nodes) + g.groups.iter().map(|gr| count(&gr.nodes)).sum::<usize>()
 }
 
+/// Les groupes dont ces nodes ont besoin : ceux qu'ils posent, et ceux que ces groupes posent à leur tour.
+pub fn groups_used(g: &Graph, nodes: &[Node]) -> Vec<Group> {
+    let mut names: Vec<String> = vec![];
+    let mut todo: Vec<String> = nodes.iter().filter(|n| n.op == "group").map(|n| pstr(n, "groupe").to_string()).collect();
+    while let Some(name) = todo.pop() {
+        if names.contains(&name) {
+            continue;
+        }
+        if let Some(gr) = g.groups.iter().find(|x| x.name == name) {
+            todo.extend(gr.nodes.iter().filter(|n| n.op == "group").map(|n| pstr(n, "groupe").to_string()));
+            names.push(name);
+        }
+    }
+    g.groups.iter().filter(|x| names.contains(&x.name)).cloned().collect()
+}
+
 /// Pose un node du groupe `name` dans le niveau courant.
 pub fn add_group_node(g: &mut Graph, name: &str, pos: [f32; 2]) -> Option<u32> {
     let gr = g.groups.iter().find(|x| x.name == name)?;
@@ -748,9 +764,10 @@ fn unroll(w: &mut Graph, begin: u32, end: u32, next: &mut u32, origin: &mut Hash
     Ok(())
 }
 
-/// Met le graphe à plat. `unroll_loops` : dérouler les répétitions (matériaux et images, où tout se
-/// calcule point par point) ; le moteur de géométrie, lui, exécute les zones lui-même.
-pub fn lower(g: &Graph, unroll_loops: bool) -> Result<Lowered, Fail> {
+/// Met le graphe à plat. `pixel` : pour un matériau ou une image, où tout se calcule point par point
+/// et où une zone de simulation n'a pas de sens. Le moteur de géométrie, lui, garde les zones de
+/// simulation et les exécute image après image.
+pub fn lower(g: &Graph, pixel: bool) -> Result<Lowered, Fail> {
     let mut origin: HashMap<u32, u32> = HashMap::new();
     let plain = !g.nodes.iter().any(|n| n.muted || is_dynamic(&n.op) || n.op == "reroute");
     if plain {
@@ -798,10 +815,12 @@ pub fn lower(g: &Graph, unroll_loops: bool) -> Result<Lowered, Fail> {
         w.remove(n.id);
     }
     // 3. Zones
-    if unroll_loops {
+    if pixel {
         if let Some(n) = w.nodes.iter().find(|n| matches!(n.op.as_str(), "sim_in" | "sim_out")) {
             return Err((origin.get(&n.id).copied().unwrap_or(n.id), "une zone de simulation garde un état d'une image à l'autre : elle va dans un graphe de géométrie".into()));
         }
+    }
+    {
         loop {
             let ends: Vec<u32> = w.nodes.iter().filter(|n| n.op == "repeat_out").map(|n| n.id).collect();
             if ends.is_empty() {
@@ -823,6 +842,9 @@ pub fn lower(g: &Graph, unroll_loops: bool) -> Result<Lowered, Fail> {
                     return Err((origin.get(end).copied().unwrap_or(*end), "cette fin de répétition a perdu son début".into()));
                 };
                 let body = zone_body(&w, begin, *end);
+                if w.nodes.iter().any(|n| body.contains(&n.id) && n.op.starts_with("sim_")) {
+                    return Err((origin.get(end).copied().unwrap_or(*end), "une zone de simulation ne peut pas se trouver dans une répétition : mets la répétition dans la simulation".into()));
+                }
                 if w.nodes.iter().any(|n| body.contains(&n.id) && is_zone(&n.op)) {
                     continue;
                 }
@@ -953,6 +975,18 @@ mod tests {
         sync(&mut g);
         let err = Program::compile(&g, "", 64).err().unwrap();
         assert!(err.1.contains("se contient"), "{}", err.1);
+    }
+
+    #[test]
+    fn copier_emporte_les_groupes_utiles() {
+        let (mut g, _, a, m, _) = chain();
+        let inner = make_group(&mut g, &[a].into_iter().collect(), "Dedans").unwrap();
+        let outer = make_group(&mut g, &[inner, m].into_iter().collect(), "Dehors").unwrap();
+        let other = g.add("math", [0.0, 300.0]);
+        make_group(&mut g, &[other].into_iter().collect(), "Ailleurs").unwrap();
+        let copied: Vec<Node> = g.nodes.iter().filter(|n| n.id == outer).cloned().collect();
+        let names: Vec<String> = groups_used(&g, &copied).into_iter().map(|x| x.name).collect();
+        assert_eq!(names, ["Dedans", "Dehors"], "le groupe copié et celui qu'il contient, pas les autres");
     }
 
     #[test]

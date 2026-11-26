@@ -133,7 +133,7 @@ pub fn tool_of(rel: &str) -> &'static str {
         "2d" if crate::formats::has(rel, "comp") => "comp",
         "2d" if crate::formats::has(rel, "vector") => "vector",
         "2d" => "image",
-        "3d" if crate::formats::has(rel, "mat") => "mat",
+        "3d" if crate::formats::has(rel, "mat") || crate::formats::has(rel, "geo") => "mat",
         "3d" => "scene",
         "motion" => "motion",
         "video" if crate::formats::has(rel, "seq") => "seq",
@@ -198,7 +198,7 @@ pub fn owner(rel: &str) -> &'static str {
         "motion"
     } else if crate::formats::has(rel, "audio") || crate::formats::has(rel, "music") || crate::audio::is_audio(rel) || crate::midi::is_midi(rel) {
         "son"
-    } else if crate::formats::has(rel, "mat") {
+    } else if crate::formats::has(rel, "mat") || crate::formats::has(rel, "geo") {
         "3d"
     } else if crate::model3d::is_model(rel) || matches!(ext, "hdr" | "exr") {
         "3d"
