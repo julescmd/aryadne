@@ -651,6 +651,14 @@ fn image(ui: &mut egui::Ui, target: &str, width: Option<f32>, ctx: &Ctx) {
         // Un nom seul (« ![[croquis.png]] ») : on le cherche dans le coffre
         let t = target.trim_start_matches('/');
         let rel = if ctx.paths.contains(t) { Some(t.to_string()) } else { ctx.paths.iter().find(|q| q.rsplit('/').next() == Some(t)).cloned() };
+        // Une image à côté de la page lue (« ![](images/vue.png) » dans une leçon ou la documentation)
+        let rel = rel.or_else(|| {
+            let base = BASE.with(|b| b.borrow().clone());
+            if base.is_empty() {
+                return None;
+            }
+            crate::docs::resolve(&base, target).map(|(page, _)| page).filter(|page| std::path::Path::new(&crate::nodes::vault_root()).join(page).is_file())
+        });
         rel.map(|r| std::path::Path::new(&crate::nodes::vault_root()).join(r).to_string_lossy().to_string())
     };
     match src {

@@ -19,24 +19,37 @@ fn embed_docs() {
     println!("cargo:rerun-if-changed=docs");
     let root = std::path::PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap()).join("docs");
     let mut files: Vec<std::path::PathBuf> = vec![];
-    fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+    // Ce qui accompagne les leçons (docs/apprendre) sans être du Markdown : fichiers d'exercice, images
+    let mut assets: Vec<std::path::PathBuf> = vec![];
+    fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>, assets: &mut Vec<std::path::PathBuf>, learn: bool) {
         let Ok(rd) = std::fs::read_dir(dir) else { return };
         for e in rd.flatten() {
             let p = e.path();
             if p.is_dir() {
-                walk(&p, out);
+                let learn = learn || p.file_name().is_some_and(|n| n == "apprendre");
+                walk(&p, out, assets, learn);
             } else if p.extension().is_some_and(|x| x == "md") {
                 out.push(p);
+            } else if learn && !p.file_name().is_some_and(|n| n.to_string_lossy().starts_with('.')) {
+                assets.push(p);
             }
         }
     }
-    walk(&root, &mut files);
+    walk(&root, &mut files, &mut assets, false);
     files.sort();
+    assets.sort();
     let mut code = String::from("pub const FILES: &[(&str, &str)] = &[\n");
     for f in &files {
         println!("cargo:rerun-if-changed={}", f.display());
         let rel = f.strip_prefix(&root).unwrap().to_string_lossy().replace('\\', "/");
         code.push_str(&format!("    ({rel:?}, include_str!({:?})),\n", f.to_string_lossy()));
+    }
+    code.push_str("];\n");
+    code.push_str("pub const ASSETS: &[(&str, &[u8])] = &[\n");
+    for f in &assets {
+        println!("cargo:rerun-if-changed={}", f.display());
+        let rel = f.strip_prefix(&root).unwrap().to_string_lossy().replace('\\', "/");
+        code.push_str(&format!("    ({rel:?}, include_bytes!({:?})),\n", f.to_string_lossy()));
     }
     code.push_str("];\n");
     let out = std::path::PathBuf::from(std::env::var("OUT_DIR").unwrap()).join("docs_embed.rs");

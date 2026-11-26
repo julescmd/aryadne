@@ -34,7 +34,7 @@ pub struct Editor {
     stroke: Option<(Tool, Vec<(f32, f32, f32)>)>,
     undo: Vec<Undo>,
     redo: Vec<Undo>,
-    save_due: Option<Instant>,
+    pub save_due: Option<Instant>,
     playing: Option<(Instant, f32)>,
     /// Caméra 2D : on règle ses cadres sur la case (le dessin est alors en pause) ; cadre saisi (0 départ, 1 arrivée)
     cam_edit: bool,

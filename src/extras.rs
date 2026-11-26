@@ -98,6 +98,7 @@ pub enum Cmd {
     NewCompositor,
     NewGeometry,
     Documentation,
+    Learn,
     Stats,
     RunFile,
     NewBoard,
@@ -147,6 +148,7 @@ impl App {
             ("mode compact", "Ctrl+Maj+M", Cmd::Compact),
             ("temps passé par projet", "", Cmd::TimeReport),
             ("documentation d'Aryadne", "", Cmd::Documentation),
+            ("apprendre : leçons et tutoriels pas à pas", "", Cmd::Learn),
             ("minuteur : 25 min de concentration", "", Cmd::Timer(25)),
             ("minuteur : 50 min", "", Cmd::Timer(50)),
             ("minuteur : pause 5 min", "", Cmd::Timer(5)),
@@ -213,6 +215,7 @@ impl App {
                 }
             }
             Cmd::TimeReport => self.time_report = Some(1),
+            Cmd::Learn => self.open_learn(None),
             Cmd::Documentation => {
                 // La documentation embarquée, copiée dans le coffre (.app/docs), s'ouvre en lecture comme une note
                 if let Some(rel) = self.report(crate::docs::install(&self.root())) {

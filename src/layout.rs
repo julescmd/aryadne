@@ -73,6 +73,42 @@ pub fn add(tree: &mut Layout, id: &str, near: &str) {
     }
 }
 
+/// Passe l'onglet d'un panneau devant ceux qui partagent sa case.
+pub fn activate(tree: &mut Layout, id: &str) {
+    let Some(t) = find(tree, id) else { return };
+    if let Some(parent) = tree.tiles.parent_of(t) {
+        if let Some(Tile::Container(Container::Tabs(tabs))) = tree.tiles.get_mut(parent) {
+            tabs.set_active(t);
+        }
+    }
+}
+
+/// Donne au moins `min` points de large à la colonne d'un panneau, en prenant sur ses voisines
+/// (jamais plus de la moitié de la rangée). Faux tant que sa place n'est pas connue.
+pub fn widen(tree: &mut Layout, id: &str, min: f32) -> bool {
+    let Some(mut t) = find(tree, id) else { return false };
+    loop {
+        let Some(parent) = tree.tiles.parent_of(t) else { return true };
+        let (Some(w), Some(total)) = (tree.tiles.rect(t).map(|r| r.width()), tree.tiles.rect(parent).map(|r| r.width())) else { return false };
+        let visible: Vec<TileId> = match tree.tiles.get(parent) {
+            Some(Tile::Container(c)) => c.children().copied().filter(|k| tree.tiles.is_visible(*k)).collect(),
+            _ => vec![],
+        };
+        if let Some(Tile::Container(Container::Linear(l))) = tree.tiles.get_mut(parent) {
+            if l.dir == egui_tiles::LinearDir::Horizontal && visible.len() > 1 {
+                let min = min.min(total * 0.5);
+                if w + 1.0 < min && total > min {
+                    let sum: f32 = visible.iter().map(|k| l.shares[*k]).sum();
+                    let mine = l.shares[t];
+                    l.shares.set_share(t, (sum - mine) * min / (total - min));
+                }
+                return true;
+            }
+        }
+        t = parent;
+    }
+}
+
 /// Retire un panneau de la disposition.
 pub fn remove(tree: &mut Layout, id: &str) {
     if let Some(t) = find(tree, id) {
@@ -128,6 +164,19 @@ mod tests {
         assert!(!t.tiles.is_visible(term_tabs));
         remove(&mut t, "view:brain#1");
         assert_eq!(panes(&t).len(), 5);
+        // Un panneau ajouté plus tard passe devant quand on le demande
+        add(&mut t, "learn", "side");
+        activate(&mut t, "side");
+        let tabs = |t: &Layout| match t.tiles.get(t.tiles.parent_of(find(t, "learn").unwrap()).unwrap()) {
+            Some(Tile::Container(Container::Tabs(tb))) => tb.active,
+            _ => None,
+        };
+        assert_eq!(tabs(&t), find(&t, "side"));
+        activate(&mut t, "learn");
+        assert_eq!(tabs(&t), find(&t, "learn"));
+        // Sans place connue (jamais dessiné), on ne touche pas aux largeurs
+        assert!(!widen(&mut t, "learn", 380.0));
+        remove(&mut t, "learn");
         // Se relit à l'identique
         let back: Layout = serde_json::from_str(&serde_json::to_string(&t).unwrap()).unwrap();
         assert_eq!(panes(&back).len(), 5);

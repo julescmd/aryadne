@@ -3468,6 +3468,21 @@ impl Editor {
         crate::aigraph::context(&self.graph, rel, self.ai_level().as_deref())
     }
 
+    /// Pour les leçons (mode Apprendre) : les nodes et les liens du graphe à tous ses niveaux, le
+    /// nombre de calques du matériau (l'Atelier), la tête de lecture d'une simulation, et s'il reste
+    /// une modification à enregistrer.
+    pub fn learn_state(&self) -> (crate::learn::GraphStats, Option<usize>, Option<i32>, bool) {
+        let mut stats = crate::learn::GraphStats::default();
+        stats.add_graph(&self.graph, None);
+        let mut layers = self.graph.stack.as_ref().map(|s| s.layers.len());
+        if let Some(i) = &self.inside {
+            // On édite le graphe d'un calque : le matériau entier attend à côté (sa copie du calque date d'avant)
+            stats.add_graph(&i.outer, Some(i.layer));
+            layers = i.outer.stack.as_ref().map(|s| s.layers.len());
+        }
+        (stats, layers, self.geo.as_ref().map(|g| g.frame), self.dirty.is_some())
+    }
+
     /// Change à chaque modification du graphe (les cartes de l'Assistant se revérifient alors).
     pub fn ai_version(&self) -> u64 {
         self.version

@@ -22,6 +22,10 @@ fn stamp() -> String {
         rel.hash(&mut h);
         text.hash(&mut h);
     }
+    for (rel, bytes) in ASSETS {
+        rel.hash(&mut h);
+        bytes.hash(&mut h);
+    }
     format!("{} {:x}", env!("CARGO_PKG_VERSION"), h.finish())
 }
 
@@ -39,6 +43,14 @@ pub fn install(root: &str) -> Result<String, String> {
                 std::fs::create_dir_all(d).map_err(|e| e.to_string())?;
             }
             std::fs::write(&file, text).map_err(|e| e.to_string())?;
+        }
+        // Les fichiers d'exercice et les images des leçons suivent
+        for (rel, bytes) in ASSETS {
+            let file = dir.join(rel);
+            if let Some(d) = file.parent() {
+                std::fs::create_dir_all(d).map_err(|e| e.to_string())?;
+            }
+            std::fs::write(&file, bytes).map_err(|e| e.to_string())?;
         }
         std::fs::write(&mark, &stamp).map_err(|e| e.to_string())?;
     }
@@ -141,7 +153,8 @@ mod tests {
                     }
                     let ok = resolve(rel, t).is_some_and(|(page, anchor)| match FILES.iter().find(|f| f.0 == page) {
                         Some(f) => anchor.is_none_or(|a| heading_of(f.1, &a).is_some()),
-                        None => false,
+                        // Un fichier d'exercice ou une image des leçons
+                        None => ASSETS.iter().any(|a| a.0 == page),
                     });
                     if !ok {
                         broken.push(format!("{rel} → {t}"));

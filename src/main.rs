@@ -58,6 +58,8 @@ mod boardlive;
 mod gizmo;
 mod paint;
 mod docs;
+mod learn;
+mod learn_ui;
 mod untitled;
 mod meshedit;
 mod montage;
@@ -499,6 +501,8 @@ struct App {
     /// Opérations sur les fichiers à annuler, par lots
     file_undo: Vec<Vec<FileOp>>,
     undoing: bool,
+    /// Mode Apprendre : le panneau des leçons et la progression du coffre
+    learn: learn_ui::Panel,
 }
 
 impl App {
@@ -1342,7 +1346,10 @@ impl App {
                             }
                         });
                     });
-                    ui.add_space(32.0);
+                    ui.add_space(20.0);
+                    // ---- Apprendre : reprendre les leçons là où on s'est arrêté
+                    self.learn_home_card(ui);
+                    ui.add_space(24.0);
                     // ---- Commencer : un modèle par genre de fichier, dessiné
                     ui.label(RichText::new(crate::i18n::t("Commencer")).size(15.0).family(theme::bold()));
                     ui.add_space(12.0);
@@ -1741,6 +1748,20 @@ impl App {
                         }
                     }
                 }
+                // En bas du rail : les leçons (mode Apprendre), à côté de la zone de travail
+                ui.add_space((ui.available_height() - 36.0).max(6.0));
+                let on = self.learn.open;
+                let (r, resp) = ui.allocate_exact_size(egui::vec2(32.0, 32.0), egui::Sense::click());
+                if on || resp.hovered() {
+                    ui.painter().rect_filled(r, 2.0, p.raised);
+                }
+                if on {
+                    ui.painter().rect_filled(egui::Rect::from_min_size(egui::pos2(r.left() - 6.0, r.top() + 6.0), egui::vec2(2.0, r.height() - 12.0)), 0.0, accent);
+                }
+                ui.painter().text(r.center(), egui::Align2::CENTER_CENTER, lucide::GRADUATION_CAP, egui::FontId::proportional(17.0), if on || resp.hovered() { p.text } else { p.muted });
+                if resp.on_hover_text(crate::i18n::t("Apprendre : leçons pas à pas")).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                    self.toggle_learn();
+                }
             });
         });
     }
@@ -1792,6 +1813,7 @@ impl App {
             "explorer" => self.explorer_open,
             "terminal" => self.terminal.is_some(),
             "assistant" => self.assistant_open,
+            "learn" => self.learn.open,
             "side" => self.side_wanted(),
             v if v.starts_with("ed:") => self.offered_now.contains_key(v),
             v => v.strip_prefix("view:").is_some_and(|k| self.view_panels.iter().any(|x| x == k)),
@@ -1804,6 +1826,7 @@ impl App {
             "explorer" => crate::i18n::t("fichiers"),
             "terminal" => "terminal".into(),
             "assistant" => crate::i18n::t("assistant"),
+            "learn" => crate::i18n::t("apprendre"),
             "side" => crate::i18n::t("inspecteur"),
             v if v.starts_with("ed:") => layout::title(v).map(|t| crate::i18n::t(&t)).unwrap_or_else(|| v.trim_start_matches("ed:").to_string()),
             v => {
@@ -1836,6 +1859,7 @@ impl App {
             }
             "terminal" => self.terminal_panel(ui),
             "assistant" => self.assistant_panel(ui),
+            "learn" => self.learn_panel(ui),
             "side" => self.side_panel(ui),
             v => {
                 let id = v.strip_prefix("view:").unwrap_or(v).to_string();
@@ -1873,6 +1897,14 @@ impl App {
         // Les pages ajoutées par le menu « fenêtre » ont leur case ; celles qu'on a fermées la perdent
         for v in self.view_panels.clone() {
             layout::add(&mut tree, &format!("view:{v}"), "side");
+        }
+        // Les leçons : à droite, à côté de l'inspecteur, pour suivre en travaillant
+        if layout::find(&tree, "learn").is_none() {
+            let near = if layout::find(&tree, "side").is_some() { "side" } else { "assistant" };
+            layout::add(&mut tree, "learn", near);
+        }
+        if self.learn.open && std::mem::take(&mut self.learn.focus) {
+            layout::activate(&mut tree, "learn");
         }
         for p in layout::panes(&tree) {
             if let Some(k) = p.strip_prefix("view:") {
@@ -1936,6 +1968,11 @@ impl App {
                     ctx.request_repaint();
                 }
             }
+        }
+        // Le panneau des leçons vient de s'ouvrir : sa colonne prend une largeur où le texte se lit bien
+        if self.learn.open && self.learn.widen && !dock::is_out("learn") && layout::widen(&mut tree, "learn", 380.0) {
+            self.learn.widen = false;
+            ctx.request_repaint();
         }
         for (zone, id) in [("explorer", "explorer"), ("side", "side"), ("assistant", "assistant")] {
             if let Some(r) = layout::find(&tree, id).filter(|t| tree.tiles.is_visible(*t)).and_then(|t| tree.tiles.rect(t)) {
@@ -3007,6 +3044,9 @@ impl App {
                             ui.set_min_width(220.0);
                             if item(ui, "Accueil", "") {
                                 self.home_open = true;
+                            }
+                            if item(ui, "Apprendre", "") {
+                                cmd = Some(extras::Cmd::Learn);
                             }
                             if item(ui, "Documentation", "") {
                                 cmd = Some(extras::Cmd::Documentation);
@@ -7737,6 +7777,12 @@ impl App {
                 if ui.add(btn).clicked() {
                     self.pick_vault();
                 }
+                // Premier lancement : les leçons attendent dans le coffre
+                let lessons: usize = learn::catalog().iter().map(|c| c.lessons.len()).sum();
+                if lessons > 0 {
+                    ui.add_space(14.0);
+                    ui.label(RichText::new(format!("{}  {}", lucide::GRADUATION_CAP, crate::i18n::t("Nouveau ? Une fois ton coffre ouvert, des leçons pas à pas t'attendent (Aide › Apprendre)."))).size(11.5).color(p.muted));
+                }
             });
         });
     }
@@ -7863,6 +7909,7 @@ impl eframe::App for App {
             self.welcome(ui);
         } else {
             self.handle_dropped_files(&ctx);
+            self.learn_sync();
             if self.compact {
                 self.compact_bar(ui);
             } else {
@@ -7900,6 +7947,9 @@ impl eframe::App for App {
                 if self.assistant_open {
                     self.assistant_panel(ui);
                 }
+                if self.learn.open {
+                    self.learn_panel(ui);
+                }
                 self.main_view(ui);
             }
             if let Some((msg, t)) = self.toast.clone() {
@@ -7916,6 +7966,7 @@ impl eframe::App for App {
                     self.toast = None;
                 }
             }
+            self.learn_offer(&ctx);
             self.switcher(&ctx);
             self.palette_ui(&ctx);
             self.template_ui(&ctx);
@@ -8311,6 +8362,7 @@ impl egui_tiles::Behavior<String> for Panes<'_> {
                             "explorer" => self.app.explorer_open = false,
                             "terminal" => self.app.terminal = None,
                             "assistant" => self.app.assistant_open = false,
+                            "learn" => self.app.toggle_learn(),
                             "side" => self.app.side_hidden = true,
                             v => {
                                 if let Some(k) = v.strip_prefix("view:") {

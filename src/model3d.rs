@@ -3188,6 +3188,19 @@ pub struct Viewer {
 }
 
 impl Viewer {
+    /// Pour les leçons (mode Apprendre) : nombre d'objets de la scène, un objet est-il choisi, image
+    /// de la tête de lecture. None : ce n'est pas une scène.
+    pub fn learn_state(&self) -> Option<(usize, bool, i32)> {
+        self.scene.as_ref().map(|s| (s.objects.len(), self.scene_sel.is_some_and(|k| k < s.objects.len()), self.anim_frame.round() as i32))
+    }
+
+    /// Reste-t-il une modification de la scène à enregistrer ?
+    pub fn learn_dirty(&self) -> bool {
+        self.scene_dirty || self.mesh_unsaved
+    }
+}
+
+impl Viewer {
     pub fn open(path: std::path::PathBuf, ctx: &egui::Context) -> Self {
         let p = path.clone();
         Self::open_with(path, ctx, move || load(&p))
