@@ -124,11 +124,13 @@ pub struct Settings {
     pub think: bool,
     /// Clés API par fournisseur (id → clé).
     pub keys: BTreeMap<String, String>,
+    /// Assistant : appliquer tout de suite les changements de graphe proposés, sans passer par la carte
+    pub auto_graph: bool,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { url: "http://localhost:11434/v1".into(), model: "llama3.2".into(), key: String::new(), think: false, keys: BTreeMap::new() }
+        Self { url: "http://localhost:11434/v1".into(), model: "llama3.2".into(), key: String::new(), think: false, keys: BTreeMap::new(), auto_graph: false }
     }
 }
 
@@ -172,13 +174,13 @@ impl Settings {
                 keys.entry(p.id.to_string()).or_insert(key.clone());
             }
         }
-        Self { url, model: get("model", d.model), key, think: v["think"].as_bool().unwrap_or(false), keys }
+        Self { url, model: get("model", d.model), key, think: v["think"].as_bool().unwrap_or(false), keys, auto_graph: v["auto_graph"].as_bool().unwrap_or(false) }
     }
 
     pub fn save(&self) {
         if let Some(f) = file() {
             let _ = std::fs::create_dir_all(f.parent().unwrap());
-            let v = json!({ "url": self.url, "model": self.model, "key": self.key, "think": self.think, "keys": self.keys });
+            let v = json!({ "url": self.url, "model": self.model, "key": self.key, "think": self.think, "keys": self.keys, "auto_graph": self.auto_graph });
             let _ = std::fs::write(f, serde_json::to_string_pretty(&v).unwrap());
         }
     }

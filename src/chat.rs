@@ -197,6 +197,8 @@ pub struct Chat {
     pub id: Option<String>,
     pub title: String,
     pub saved_len: usize,
+    /// Blocs ```graphe déjà appliqués (clé : message, bloc), pour ne pas les proposer deux fois
+    pub applied: HashSet<u64>,
 }
 
 impl Live {
@@ -264,11 +266,14 @@ impl Chat {
     }
 
     /// Envoie la question. `open_file` = (chemin, contenu) du fichier ouvert, si on l'inclut.
+    /// `graph` : ce qu'il faut savoir du graphe de nodes ouvert (voir `aigraph::context`).
+    #[allow(clippy::too_many_arguments)]
     pub fn send(
         &mut self,
         root: String,
         entries: Vec<Entry>,
         open_file: Option<(String, String)>,
+        graph: Option<String>,
         settings: crate::ai::Settings,
         local: crate::ollama::Local,
         ctx: eframe::egui::Context,
@@ -305,9 +310,15 @@ impl Chat {
                 l.status = if local_model { "le modèle se charge et lit la demande…".into() } else { "réflexion…".into() };
             });
             let ready = if crate::ollama::is_local(&settings.url) { local.ensure_running(&settings.url) } else { Ok(()) };
-            let docs = context_docs(&root, &entries, &q, &hits, open_file.as_ref());
+            // Devant un graphe, les notes du coffre ne sont lues que si la question les nomme
+            let docs = context_docs(&root, &entries, &q, &hits, open_file.as_ref(), graph.is_none());
+            let fake = fake_answer();
+            let ready = if fake.is_some() { Ok(()) } else { ready };
             let result = ready.and_then(|_| {
-                let mut messages = build_messages(&entries, &hits, open_file.as_ref(), &history, &q, &attachments, &docs);
+                let mut messages = build_messages(&entries, &hits, open_file.as_ref(), &history, &q, &attachments, &docs, graph.as_deref());
+                if let Ok(p) = std::env::var("ARY_AI_DUMP") {
+                    let _ = std::fs::write(p, serde_json::to_string_pretty(&messages).unwrap_or_default());
+                }
                 let full = std::sync::Arc::new(Mutex::new(String::new()));
                 // Jusqu'à 3 tours : l'IA peut demander à lire des fichiers (« LIRE: chemin »)
                 for round in 0..3 {
@@ -335,7 +346,17 @@ impl Chat {
                             l.chunks += 1;
                         });
                     };
-                    if local_model {
+                    if let Some(text) = &fake {
+                        // Essais sans fournisseur : la réponse vient d'un fichier, par petits morceaux
+                        let chars: Vec<char> = text.chars().collect();
+                        for piece in chars.chunks(48) {
+                            if stop.load(Ordering::Relaxed) {
+                                break;
+                            }
+                            on_delta(&piece.iter().collect::<String>());
+                            std::thread::sleep(std::time::Duration::from_millis(12));
+                        }
+                    } else if local_model {
                         stream_ollama(&settings, messages.clone(), &stop, &on_think, &on_delta)?;
                     } else {
                         stream(&settings, messages.clone(), &stop, &on_delta)?;
@@ -374,8 +395,9 @@ impl Chat {
         });
     }
 
-    /// À appeler à chaque image : range la réponse terminée dans l'historique.
-    pub fn poll(&mut self) {
+    /// À appeler à chaque image : range la réponse terminée dans l'historique. Vrai quand une
+    /// réponse vient d'arriver.
+    pub fn poll(&mut self) -> bool {
         let finished = self.live.as_ref().and_then(|l| l.lock().ok().filter(|l| l.done).map(|l| (l.text.clone(), l.sources.clone(), l.error.clone(), l.stop.load(Ordering::Relaxed), l.started.map(|t| t.elapsed().as_secs_f32()), l.chunks)));
         if let Some((mut text, sources, error, stopped, secs, chunks)) = finished {
             if stopped {
@@ -384,7 +406,9 @@ impl Chat {
             self.last_speed = secs.filter(|s| *s > 0.2 && chunks > 3).map(|s| chunks as f32 / s);
             self.msgs.push(Msg { role: Role::Assistant, text, sources, error, attached: vec![], thumbs: vec![], sent: vec![] });
             self.live = None;
+            return true;
         }
+        false
     }
 
     /// La conversation en Markdown, pour l'enregistrer comme note.
@@ -499,7 +523,7 @@ pub fn search(root: &str, entries: &[Entry], query: &str) -> Vec<Hit> {
 
 /// Contenu des fichiers utiles à la question : ceux qu'elle nomme, puis les notes (toutes si
 /// le coffre est petit, sinon le début des plus récentes). Environ 24 000 caractères au plus.
-fn context_docs(root: &str, entries: &[Entry], q: &str, hits: &[Hit], open: Option<&(String, String)>) -> Vec<(String, String)> {
+fn context_docs(root: &str, entries: &[Entry], q: &str, hits: &[Hit], open: Option<&(String, String)>, notes: bool) -> Vec<(String, String)> {
     let mut out: Vec<(String, String)> = vec![];
     let mut budget: usize = 24_000;
     let qf = fold(q);
@@ -521,6 +545,9 @@ fn context_docs(root: &str, entries: &[Entry], q: &str, hits: &[Hit], open: Opti
             }
         }
     }
+    if !notes {
+        return out;
+    }
     // 2. Les notes : toutes si elles tiennent, sinon le début des plus récentes
     let mut notes: Vec<&Entry> = entries.iter().filter(|e| !e.is_dir && crate::vault::is_md(&e.rel) && !e.rel.starts_with("modèles/") && !e.rel.starts_with(".app")).collect();
     notes.sort_by(|a, b| b.modified.cmp(&a.modified));
@@ -533,7 +560,8 @@ fn context_docs(root: &str, entries: &[Entry], q: &str, hits: &[Hit], open: Opti
     out
 }
 
-fn build_messages(entries: &[Entry], hits: &[Hit], open: Option<&(String, String)>, history: &[Msg], q: &str, attachments: &[Attachment], docs: &[(String, String)]) -> Vec<Value> {
+#[allow(clippy::too_many_arguments)]
+fn build_messages(entries: &[Entry], hits: &[Hit], open: Option<&(String, String)>, history: &[Msg], q: &str, attachments: &[Attachment], docs: &[(String, String)], graph: Option<&str>) -> Vec<Value> {
     // Liste courte : un long contexte ralentit beaucoup les modèles locaux.
     let files: Vec<&str> = entries.iter().filter(|e| !e.is_dir && !e.rel.starts_with('@')).map(|e| e.rel.as_str()).take(120).collect();
     let mut sys = String::from(
@@ -553,6 +581,10 @@ fn build_messages(entries: &[Entry], hits: &[Hit], open: Option<&(String, String
     if let Some((rel, text)) = open {
         let t: String = text.chars().take(6000).collect();
         sys.push_str(&format!("\nFichier actuellement ouvert : {rel}\n---\n{t}\n---\n"));
+    }
+    if let Some(g) = graph {
+        sys.push('\n');
+        sys.push_str(g);
     }
     if !docs.is_empty() {
         sys.push_str("\nContenu de fichiers du coffre :\n");
@@ -591,6 +623,12 @@ fn build_messages(entries: &[Entry], hits: &[Hit], open: Option<&(String, String
         msgs.push(json!({ "role": "user", "content": parts }));
     }
     msgs
+}
+
+/// Réponse toute faite pour les essais sans fournisseur : le contenu du fichier nommé par la
+/// variable d'environnement ARY_AI_FAKE. Rien n'est alors envoyé sur le réseau.
+fn fake_answer() -> Option<String> {
+    std::env::var("ARY_AI_FAKE").ok().filter(|p| !p.is_empty()).and_then(|p| std::fs::read_to_string(p).ok())
 }
 
 /// Réponses proposées par l'IA (ligne « ?> a | b | c ») et texte sans cette ligne.

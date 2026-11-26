@@ -168,6 +168,7 @@ pub const HARD_DRIVE: &str = "\u{f00ed}";
 pub const TABLE_2: &str = "\u{f02f9}";
 pub const CPU: &str = "\u{f00a9}";
 pub const GPU: &str = "\u{f066a}";
+pub const ZAP: &str = "\u{f01b4}";
 pub const FLIP_HORIZONTAL_2: &str = "\u{f035e}";
 pub const GLOBE: &str = "\u{f00e8}";
 pub const UNDO_2: &str = "\u{f02a1}";

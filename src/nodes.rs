@@ -3052,7 +3052,7 @@ pub fn is_out_op(op: &str) -> bool {
 }
 
 /// Largeur d'un node : un renvoi n'est qu'une pastille.
-fn node_w(n: &Node) -> f32 {
+pub(crate) fn node_w(n: &Node) -> f32 {
     if n.op == "reroute" { REROUTE_W } else { NW }
 }
 const REROUTE_W: f32 = 30.0;
@@ -3449,6 +3449,78 @@ impl Editor {
             }
         }
         r
+    }
+
+    /// Où l'on se trouve dans le document, dit au modèle : dans un groupe, dans un calque.
+    fn ai_level(&self) -> Option<String> {
+        let mut parts = vec![];
+        if let Some(ins) = &self.inside {
+            parts.push(format!("graphe du calque « {} » ({})", ins.name, if ins.part == Part::Mask { "son masque" } else { "son remplissage" }));
+        }
+        if let Some(l) = &self.level {
+            parts.push(format!("intérieur du groupe « {l} »"));
+        }
+        (!parts.is_empty()).then(|| parts.join(", "))
+    }
+
+    /// Ce que l'Assistant reçoit de ce graphe : la notice, le résumé de ce qui est affiché, le catalogue.
+    pub fn ai_context(&self, rel: &str) -> String {
+        crate::aigraph::context(&self.graph, rel, self.ai_level().as_deref())
+    }
+
+    /// Change à chaque modification du graphe (les cartes de l'Assistant se revérifient alors).
+    pub fn ai_version(&self) -> u64 {
+        self.version
+    }
+
+    /// Essaie un bloc de l'Assistant sur une copie du graphe. Rend le graphe obtenu et le résumé des
+    /// changements, ou les erreurs. Un graphe qui se calculait doit encore se calculer après.
+    fn ai_plan(&self, edit: &crate::aigraph::Edit, rel: &str) -> Result<(Graph, Vec<String>), Vec<String>> {
+        if let Some(f) = &edit.file {
+            let name = |s: &str| s.trim().trim_start_matches("./").rsplit('/').next().unwrap_or("").to_lowercase();
+            if name(f) != name(rel) {
+                return Err(vec![format!("{} « {f} » ; {} « {rel} »", crate::i18n::t("ce changement vise"), crate::i18n::t_mid("le document ouvert est"))]);
+            }
+        }
+        let mut g = self.graph.clone();
+        let done = crate::aigraph::apply(&mut g, edit, &self.root)?;
+        if self.program.is_ok() {
+            let mut doc = g.clone();
+            if let Some(l) = &self.level {
+                swap_level(&mut doc, l);
+            }
+            let check = if doc.kind == GraphKind::Geometry { crate::nodeflow::lower(&doc, false).map(|_| ()) } else { Program::compile_at(&doc.effective(), &self.root, 64, self.frame, 24.0).map(|_| ()) };
+            if let Err((id, e)) = check {
+                let who = g.nodes.iter().find(|n| n.id == id).map(|n| format!(" (« {} »)", if n.label.is_empty() { n.def().map(|d| crate::i18n::t(d.label)).unwrap_or_default() } else { n.label.clone() })).unwrap_or_default();
+                return Err(vec![format!("{} : {}{who}", crate::i18n::t("le graphe obtenu ne se calcule pas"), crate::i18n::t_mid(&e))]);
+            }
+        }
+        Ok((g, done))
+    }
+
+    /// Vérifie un bloc de l'Assistant sans rien changer : le résumé de ce qu'il ferait, ou ses erreurs.
+    pub fn ai_check(&self, edit: &crate::aigraph::Edit, rel: &str) -> Result<Vec<String>, Vec<String>> {
+        self.ai_plan(edit, rel).map(|(_, done)| done)
+    }
+
+    /// Applique un bloc de l'Assistant, en une seule étape annulable (Ctrl+Z). Rien n'est touché s'il y a une erreur.
+    pub fn ai_apply(&mut self, edit: &crate::aigraph::Edit, rel: &str) -> Result<Vec<String>, Vec<String>> {
+        let (g, done) = self.ai_plan(edit, rel)?;
+        // Ce qui était en cours (déplacement, saisie) fait son propre point d'annulation avant
+        self.commit();
+        self.graph = g;
+        self.selected.retain(|id| self.graph.nodes.iter().any(|n| n.id == *id));
+        self.thumbs.clear();
+        self.thumb_version = 0;
+        self.solo = None;
+        self.drag_link = None;
+        self.rename = None;
+        self.mthumb.retain(|k, _| !k.starts_with("e:"));
+        // La vue se recadre sur le graphe : ce qui vient d'être posé est visible
+        self.scene = Rect::ZERO;
+        self.changed();
+        self.message = None;
+        Ok(done)
     }
 
     fn level_changed(&mut self) {
@@ -3879,7 +3951,7 @@ impl Editor {
     }
 
     /// Hauteur d'un node selon son type et son état.
-    fn node_size(n: &Node, d: &Def) -> f32 {
+    pub(crate) fn node_size(n: &Node, d: &Def) -> f32 {
         if n.op == "reroute" {
             return REROUTE_H;
         }

@@ -1775,6 +1775,103 @@ pub fn file_buttons(ui: &mut egui::Ui, text: &str, exists: &dyn Fn(&str) -> bool
     picked
 }
 
+/// État d'un bloc ```graphe proposé par l'Assistant, face au graphe ouvert.
+#[derive(Clone)]
+pub enum GraphCard {
+    /// Aucun graphe n'est ouvert : rien à quoi l'appliquer
+    NoGraph,
+    Applied,
+    /// Vérifié : le résumé des changements
+    Ready(Vec<String>),
+    /// Refusé : les erreurs (rien ne sera appliqué)
+    Invalid(Vec<String>),
+}
+
+/// Ce que l'artiste a demandé sur une carte.
+#[derive(Clone, Copy, PartialEq)]
+pub enum GraphCardAct {
+    Apply,
+    /// Renvoyer les erreurs au modèle pour qu'il corrige son bloc
+    Fix,
+}
+
+/// Carte « Appliquer au graphe » sous une réponse de l'Assistant : ce qui va changer, puis le bouton.
+/// `salt` distingue les cartes d'une même conversation.
+pub fn graph_card(ui: &mut egui::Ui, card: &GraphCard, salt: u64) -> Option<GraphCardAct> {
+    let p = theme::pal();
+    let mut act = None;
+    ui.add_space(4.0);
+    egui::Frame::new().fill(p.field).stroke(egui::Stroke::new(1.0, p.line)).corner_radius(8.0).inner_margin(10).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        let line = |ui: &mut egui::Ui, l: &str, color: egui::Color32| {
+            // Un titre de section (« dans le calque … : ») n'a pas de puce
+            let text = if l.ends_with(':') { l.to_string() } else { format!("•  {l}") };
+            ui.add(egui::Label::new(RichText::new(text).color(color).size(11.5)).wrap());
+        };
+        let title = |ui: &mut egui::Ui, icon: &str, color: egui::Color32, text: &str, note: String| {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(RichText::new(icon).color(color).size(14.0));
+                ui.label(RichText::new(crate::i18n::t(text)).family(theme::bold()).size(12.5));
+                if !note.is_empty() {
+                    ui.label(RichText::new(note).color(p.muted).size(11.0));
+                }
+            });
+        };
+        match card {
+            GraphCard::Ready(done) => {
+                title(ui, crate::lucide::WORKFLOW, p.accent, "appliquer au graphe", format!("{} {}", done.len(), crate::i18n::t_mid("changement(s)")));
+                ui.add_space(2.0);
+                // L'essentiel d'abord : ce qui est posé, réglé, supprimé. Les liens sont comptés, le détail se déplie.
+                let link = crate::i18n::t("relie");
+                let (links, main): (Vec<&String>, Vec<&String>) = done.iter().partition(|l| l.starts_with(&link));
+                let brief = done.len() > 12;
+                let shown: Vec<&String> = if brief { main.iter().copied().take(10).collect() } else { done.iter().collect() };
+                for l in &shown {
+                    line(ui, l, p.text);
+                }
+                if brief {
+                    if !links.is_empty() {
+                        line(ui, &format!("{} {}", links.len(), crate::i18n::t_mid("lien(s) entre les nodes")), p.text);
+                    }
+                    egui::CollapsingHeader::new(RichText::new(crate::i18n::t("tout le détail")).color(p.muted).size(11.0)).id_salt(("carte-graphe-detail", salt)).show(ui, |ui| {
+                        for l in done {
+                            line(ui, l, p.muted);
+                        }
+                    });
+                }
+                ui.add_space(6.0);
+                let b = egui::Button::new(RichText::new(format!("{}  {}", crate::lucide::CHECK, crate::i18n::t("appliquer"))).color(p.on_accent)).fill(p.accent).stroke(egui::Stroke::NONE).corner_radius(6.0).min_size(egui::vec2(110.0, 26.0));
+                if ui.add(b).on_hover_text(crate::i18n::t("Une seule étape : Ctrl+Z dans le graphe pour l'annuler")).clicked() {
+                    act = Some(GraphCardAct::Apply);
+                }
+            }
+            GraphCard::Applied => title(ui, crate::lucide::CHECK, p.success, "appliqué au graphe", format!("{}  {}", crate::lucide::UNDO_2, crate::i18n::t("Ctrl+Z dans le graphe pour annuler"))),
+            GraphCard::Invalid(errs) => {
+                title(ui, crate::lucide::TRIANGLE_ALERT, p.warning, "changement refusé", crate::i18n::t("rien n'a été appliqué"));
+                ui.add_space(2.0);
+                for l in errs.iter().take(10) {
+                    line(ui, l, p.missing);
+                }
+                if errs.len() > 10 {
+                    ui.label(RichText::new(format!("… {} {}", errs.len() - 10, crate::i18n::t_mid("autres"))).color(p.muted).size(11.0));
+                }
+                ui.add_space(6.0);
+                let b = egui::Button::new(RichText::new(format!("{}  {}", crate::lucide::WAND_SPARKLES, crate::i18n::t("demander une correction")))).corner_radius(6.0).min_size(egui::vec2(110.0, 24.0));
+                if ui.add(b).on_hover_text(crate::i18n::t("Renvoie ces erreurs à l'assistant pour qu'il corrige sa proposition")).clicked() {
+                    act = Some(GraphCardAct::Fix);
+                }
+            }
+            GraphCard::NoGraph => {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(RichText::new(crate::lucide::WORKFLOW).color(p.muted).size(14.0));
+                    ui.label(RichText::new(crate::i18n::t("changement de graphe proposé : ouvre le graphe pour l'appliquer")).color(p.muted).size(11.5));
+                });
+            }
+        }
+    });
+    act
+}
+
 pub fn choice_buttons(ui: &mut egui::Ui, choices: &[String]) -> Option<String> {
     let p = theme::pal();
     let mut picked = None;

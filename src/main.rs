@@ -50,6 +50,7 @@ mod layout;
 mod screens;
 mod icons;
 mod atelier;
+mod aigraph;
 mod oidn;
 mod dock;
 mod formats;
@@ -6165,10 +6166,44 @@ impl App {
     // ---------- chat ----------
 
     /// Ce que l'assistant voit : le fichier ouvert (et la sélection), ou le board courant.
+    /// Le graphe de nodes ouvert et affiché, s'il y en a un : son chemin et son éditeur.
+    fn graph_doc(&self) -> Option<(&str, &nodes::Editor)> {
+        if self.view() != View::Files {
+            return None;
+        }
+        let d = self.current()?;
+        match &d.content {
+            Content::Nodes(ed) => Some((d.rel.as_str(), ed)),
+            _ => None,
+        }
+    }
+
+    /// Applique au graphe ouvert un bloc proposé par l'Assistant. Vrai si c'est fait.
+    fn apply_ai_graph(&mut self, key: u64, edit: &aigraph::Edit) -> bool {
+        let view = self.view();
+        let Some(d) = self.active.filter(|_| view == View::Files).and_then(|i| self.docs.get_mut(i)) else { return false };
+        let rel = d.rel.clone();
+        let Content::Nodes(ed) = &mut d.content else { return false };
+        match ed.ai_apply(edit, &rel) {
+            Ok(done) => {
+                self.assistant.applied.insert(key);
+                self.toast = Some((format!("{} ({} {}) · {}", crate::i18n::t("graphe modifié"), done.len(), crate::i18n::t_mid("changement(s)"), crate::i18n::t_mid("Ctrl+Z dans le graphe pour annuler")), Instant::now()));
+                true
+            }
+            Err(errs) => {
+                self.toast = Some((format!("{} : {}", crate::i18n::t("changement refusé"), errs.first().cloned().unwrap_or_default()), Instant::now()));
+                false
+            }
+        }
+    }
+
     fn assistant_context(&self, ctx: &egui::Context) -> Option<(String, String)> {
         match self.view() {
             View::Files => {
                 let d = self.current()?;
+                if matches!(d.content, Content::Nodes(_)) {
+                    return Some((d.rel.clone(), "(graphe de nodes ouvert : son résumé, son catalogue et la façon de le modifier sont donnés plus bas)".into()));
+                }
                 let Content::Text(t) = &d.content else {
                     return Some((d.rel.clone(), format!("(fichier non textuel : {})", d.rel)));
                 };
@@ -6200,11 +6235,25 @@ impl App {
     /// L'Assistant : dans son panneau, ou dans l'onglet Assistant de l'inspecteur (`embedded`).
     fn assistant_ui(&mut self, ui: &mut egui::Ui, embedded: bool) {
         let p = theme::pal();
-        self.assistant.poll();
+        let arrived = self.assistant.poll();
+        // Réponse tout juste arrivée, application automatique choisie : ses blocs valides s'appliquent d'eux-mêmes
+        if arrived && self.ai.clone().unwrap_or_else(ai::Settings::load).auto_graph {
+            if let Some((k, text)) = self.assistant.msgs.iter().enumerate().last().filter(|(_, m)| m.role == chat::Role::Assistant).map(|(k, m)| (k, m.text.clone())) {
+                for (bi, block) in aigraph::blocks(&text).into_iter().enumerate() {
+                    if let Ok(edit) = block {
+                        self.apply_ai_graph(graph_block_key(k, bi, &text), &edit);
+                    }
+                }
+            }
+        }
         let existing: HashSet<String> = self.md.keys().cloned().collect();
         let paths: HashSet<String> = self.entries.iter().map(|e| e.rel.clone()).collect();
         let ctxt = ui.ctx().clone();
         let context = self.assistant_context(&ctxt);
+        let graph_kind = self.graph_doc().map(|(_, ed)| ed.graph.kind);
+        let mut apply_graph: Option<(u64, aigraph::Edit)> = None;
+        let mut fix_graph: Option<Vec<String>> = None;
+        let mut auto_graph: Option<bool> = None;
         let mut send = false;
         let mut goto = None;
         let mut apply_file: Option<(String, String)> = None;
@@ -6225,10 +6274,22 @@ impl App {
                         }
                         if ui.add(egui::Button::new(egui::RichText::new(crate::lucide::ERASER).size(13.0)).min_size(egui::vec2(24.0, 20.0))).on_hover_text(crate::i18n::t("vider")).clicked() {
                             self.assistant.msgs.clear();
+                            self.assistant.applied.clear();
+                        }
+                        if graph_kind.is_some() {
+                            // Devant un graphe : appliquer les changements proposés sans passer par la carte
+                            let on = self.ai.as_ref().is_some_and(|s| s.auto_graph);
+                            let icon = egui::RichText::new(crate::lucide::ZAP).size(13.0).color(if on { p.on_accent } else { p.text });
+                            let b = egui::Button::new(icon).min_size(egui::vec2(24.0, 20.0)).fill(if on { p.accent } else { p.field });
+                            let tip = if on { "Application automatique : les changements de graphe proposés sont appliqués dès la réponse (Ctrl+Z pour annuler). Clic : revenir à la carte « appliquer »." } else { "Appliquer automatiquement les changements de graphe proposés, sans passer par la carte « appliquer »" };
+                            if ui.add(b).on_hover_text(crate::i18n::t(tip)).clicked() {
+                                auto_graph = Some(!on);
+                            }
                         }
                     });
                 });
                 let ctx_label = match &context {
+                    Some((rel, _)) if graph_kind.is_some() => format!("{} {rel}", crate::i18n::t("voit et modifie : le graphe")),
                     Some((rel, body)) if body.starts_with("SÉLECTION") => format!("voit : la sélection dans {rel}"),
                     Some((rel, _)) => format!("voit : {rel}"),
                     None => "voit : tout le coffre".into(),
@@ -6240,13 +6301,15 @@ impl App {
                     ui.add_space(6.0);
                     ui.horizontal_wrapped(|ui| {
                         let quick: &[(&str, &str)] = match self.view() {
+                            View::Files if graph_kind == Some(nodes::GraphKind::Geometry) => &[("expliquer", "Explique ce que fait ce graphe, étape par étape."), ("drapeau", "Fais un drapeau qui flotte au vent, en simulation de tissu sur la carte graphique."), ("encadrer", "Entoure les parties de ce graphe de cadres titrés pour le rendre lisible.")],
+                            View::Files if graph_kind.is_some() => &[("expliquer", "Explique ce que fait ce graphe, étape par étape."), ("améliorer", "Propose une amélioration de ce graphe et applique-la."), ("encadrer", "Entoure les parties de ce graphe de cadres titrés pour le rendre lisible.")],
                             View::Files => &[("expliquer", "Explique ce code ou ce texte simplement."), ("corriger", "Trouve les bugs ou les erreurs et donne la version corrigée dans un bloc de code."), ("améliorer", "Propose une version améliorée (plus claire, plus propre) dans un bloc de code."), ("commenter", "Ajoute des commentaires utiles et renvoie le code complet dans un bloc."), ("résumer", "Résume ce fichier en quelques points.")],
                             View::Boards => &[("idées", "Propose des idées et des références à ajouter à ce moodboard."), ("palette", "Décris l'ambiance et propose une palette de couleurs (codes hex).")],
                             _ => &[("organiser", "Comment mieux organiser mes fichiers et mes dossiers ?"), ("à faire", "Liste les tâches non terminées (cases - [ ]) trouvées dans mes notes.")],
                         };
                         for (label, prompt) in quick {
-                            if ui.small_button(*label).clicked() && !self.assistant.busy() {
-                                self.assistant.input = prompt.to_string();
+                            if ui.small_button(crate::i18n::t_mid(label)).clicked() && !self.assistant.busy() {
+                                self.assistant.input = crate::i18n::t(prompt);
                                 send = true;
                             }
                         }
@@ -6263,15 +6326,51 @@ impl App {
                 });
                 egui::ScrollArea::vertical().stick_to_bottom(true).auto_shrink(false).show(ui, |ui| {
                     if self.assistant.msgs.is_empty() && !self.assistant.busy() {
-                        ui.label(RichText::new(crate::i18n::t("Pose une question sur ce que tu as à l'écran. Les blocs de code proposés peuvent être insérés directement dans le fichier ouvert.")).color(p.muted).size(11.5));
+                        let hint = if graph_kind.is_some() { "Demande un changement à ce graphe (« fais un drapeau en tissu », « ajoute du vent »…). L'assistant connaît les nodes : il propose le changement sur une carte, à appliquer d'un clic et à annuler d'un Ctrl+Z." } else { "Pose une question sur ce que tu as à l'écran. Les blocs de code proposés peuvent être insérés directement dans le fichier ouvert." };
+                        ui.add(egui::Label::new(RichText::new(crate::i18n::t(hint)).color(p.muted).size(11.5)).wrap());
                     }
                     let n = self.assistant.msgs.len();
                     let mut reply = None;
                     for (k, m) in self.assistant.msgs.iter().enumerate() {
                         let user = m.role == chat::Role::User;
                         let (text, choices) = chat::split_choices(&m.text);
+                        // Les blocs ```graphe ne sont pas montrés tels quels : leur carte les résume
+                        let graph_blocks = if !user && m.text.contains("```") { aigraph::blocks(&m.text) } else { vec![] };
+                        let plain = if graph_blocks.is_empty() { m.text.clone() } else { aigraph::strip_blocks(&m.text) };
+                        let text = if graph_blocks.is_empty() { text } else { chat::split_choices(&plain).0 };
                         let shown = if m.attached.is_empty() { text } else { format!("{text}\n\n📎 {}", m.attached.join(", ")) };
                         msg_block(ui, user, &shown, &m.sources, m.error.as_deref(), None, &existing, &paths, &mut goto);
+                        for (bi, block) in graph_blocks.iter().enumerate() {
+                            let key = graph_block_key(k, bi, &m.text);
+                            let card = if self.assistant.applied.contains(&key) {
+                                extras::GraphCard::Applied
+                            } else {
+                                match (block, self.graph_doc()) {
+                                    (Err(e), _) => extras::GraphCard::Invalid(vec![e.clone()]),
+                                    (Ok(_), None) => extras::GraphCard::NoGraph,
+                                    (Ok(edit), Some((rel, ed))) => {
+                                        // Revérifié seulement quand le graphe change
+                                        let id = egui::Id::unique(("carte-graphe", key, rel, ed.ai_version()));
+                                        match ui.ctx().data(|d| d.get_temp::<extras::GraphCard>(id)) {
+                                            Some(c) => c,
+                                            None => {
+                                                let c = match ed.ai_check(edit, rel) {
+                                                    Ok(done) => extras::GraphCard::Ready(done),
+                                                    Err(errs) => extras::GraphCard::Invalid(errs),
+                                                };
+                                                ui.ctx().data_mut(|d| d.insert_temp(id, c.clone()));
+                                                c
+                                            }
+                                        }
+                                    }
+                                }
+                            };
+                            match (extras::graph_card(ui, &card, key), block, &card) {
+                                (Some(extras::GraphCardAct::Apply), Ok(edit), _) => apply_graph = Some((key, edit.clone())),
+                                (Some(extras::GraphCardAct::Fix), _, extras::GraphCard::Invalid(errs)) => fix_graph = Some(errs.clone()),
+                                _ => {}
+                            }
+                        }
                         if k + 1 == n && !user && self.assistant.live.is_none() {
                             reply = extras::choice_buttons(ui, &choices);
                         }
@@ -6281,7 +6380,7 @@ impl App {
                             }
                         }
                         if !user {
-                            for (k, block) in code_blocks(&m.text).into_iter().enumerate() {
+                            for (k, block) in code_blocks(&plain).into_iter().enumerate() {
                                 ui.horizontal(|ui| {
                                     ui.label(RichText::new(format!("bloc {}", k + 1)).color(p.muted).size(11.0));
                                     if ui.small_button(crate::i18n::t("insérer au curseur")).clicked() {
@@ -6296,9 +6395,12 @@ impl App {
                     }
                     if let Some(live) = &self.assistant.live {
                         if let Ok(l) = live.lock() {
-                            let status_s = l.status_line();
+                            // Pendant qu'un bloc ```graphe s'écrit, on le dit au lieu de montrer son JSON
+                            let writing = l.text.rfind("```graphe").is_some_and(|i| !l.text[i + 3..].contains("```"));
+                            let status_s = if writing { Some(crate::i18n::t("prépare les changements du graphe…")) } else { l.status_line() };
                             let status = status_s.as_deref();
-                            msg_block(ui, false, &l.text, &[], l.error.as_deref(), status, &existing, &paths, &mut goto);
+                            let shown = if l.text.contains("```graphe") { aigraph::strip_blocks(&l.text) } else { l.text.clone() };
+                            msg_block(ui, false, &shown, &[], l.error.as_deref(), status, &existing, &paths, &mut goto);
                         }
                     }
                     if let Some(r) = reply {
@@ -6315,11 +6417,28 @@ impl App {
         if let Some(b) = bar_out {
             self.apply_chat_bar(b, &ctxt);
         }
+        if let Some(on) = auto_graph {
+            let mut s = self.ai.clone().unwrap_or_else(ai::Settings::load);
+            s.auto_graph = on;
+            s.save();
+            self.ai = Some(s);
+        }
+        if let Some((key, edit)) = apply_graph {
+            self.apply_ai_graph(key, &edit);
+        }
+        if let Some(errs) = fix_graph {
+            if !self.assistant.busy() {
+                self.assistant.input = format!("{}\n- {}\n{}", crate::i18n::t("Ton bloc graphe a été refusé, rien n'a été appliqué :"), errs.join("\n- "), crate::i18n::t("Corrige-le et redonne le bloc complet."));
+                send = true;
+            }
+        }
         if send && !self.assistant.busy() {
             let root = self.root();
             let entries = self.entries.clone();
             let settings = self.ai.clone().unwrap_or_else(ai::Settings::load);
-            self.assistant.send(root, entries, context, settings, self.local.clone(), ctxt.clone());
+            // Devant un graphe : son résumé, le catalogue de ses nodes et la façon de le modifier
+            let graph = self.graph_doc().map(|(rel, ed)| ed.ai_context(rel));
+            self.assistant.send(root, entries, context, graph, settings, self.local.clone(), ctxt.clone());
         }
         if let Some(code) = insert {
             match self.active.filter(|_| self.view() == View::Files).and_then(|i| self.docs.get_mut(i)) {
@@ -6554,7 +6673,7 @@ impl App {
                 None
             };
             let settings = self.ai.clone().unwrap_or_default();
-            self.chat.send(self.root(), self.entries.clone(), open, settings, self.local.clone(), ui.ctx().clone());
+            self.chat.send(self.root(), self.entries.clone(), open, None, settings, self.local.clone(), ui.ctx().clone());
         }
         if save {
             let nd = self.notes_dir();
@@ -8015,6 +8134,14 @@ fn self_video_placeholder() -> Content {
 }
 
 /// Blocs de code ``` d'une réponse de l'assistant.
+/// Clé d'un bloc ```graphe dans la conversation : le message, son texte, le rang du bloc.
+fn graph_block_key(msg: usize, block: usize, text: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    (msg, block, text).hash(&mut h);
+    h.finish()
+}
+
 fn code_blocks(text: &str) -> Vec<String> {
     let mut out = vec![];
     let mut cur: Option<String> = None;
