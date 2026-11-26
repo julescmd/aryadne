@@ -26,7 +26,7 @@ verifier: fichier.ouvert = aryvec
 |---|---|
 | Molette | Zoom |
 | `Espace` + glisser | Déplacer la vue |
-| `Ctrl+0` | Tout cadrer |
+| `Ctrl+0`, ou le bouton **Fit all** | Tout cadrer |
 
 ## Le plan de travail
 

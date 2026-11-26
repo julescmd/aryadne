@@ -102,7 +102,7 @@ Seul le sujet reste visible. Affine le bord en peignant dans le masque, en noir 
 Un masque d'écrêtage fait autre chose : le calque n'apparaît que sur les pixels du calque juste en dessous.
 
 ```etape
-Crée un nouveau calque au-dessus de la photo détourée, avec `Ctrl+Maj+N`.
+Crée un nouveau calque au-dessus de la photo détourée, avec le bouton **New Layer**.
 verifier: calques >= 3
 ```
 

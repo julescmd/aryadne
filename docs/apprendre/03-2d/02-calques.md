@@ -25,11 +25,15 @@ verifier: fichier.ouvert = aryimg
 ## Créer un calque
 
 ```etape
-Appuie sur `Ctrl+Maj+N`. Un nouveau calque apparaît dans le panneau **Layers**, au-dessus du premier.
+En bas du panneau **Layers**, clique le bouton **New Layer**. Un nouveau calque apparaît au-dessus du premier.
 verifier: calques >= 2
 ```
 
-Le même geste est dans le menu **Layer ▾ › New layer**, et dans les boutons en bas du panneau **Layers**.
+Le même geste est dans le menu **Layer ▾ › New layer**.
+
+```attention
+L'interface annonce `Ctrl+Maj+N` pour ce bouton. Ce raccourci peut être pris par le raccourci global de nouvelle note, `Ctrl+N`. Si une note s'ouvre à la place, ferme-la et passe par le bouton.
+```
 
 Le calque actif est celui qui est surligné. Tu peins toujours sur le calque actif.
 
@@ -44,7 +48,7 @@ Double-clique le nom du calque. Nomme-le `trait`.
 ## Un calque de couleur, sous le trait
 
 ```etape
-Crée un autre calque avec `Ctrl+Maj+N`. Nomme-le `couleur`.
+Crée un autre calque avec le bouton **New Layer**. Nomme-le `couleur`.
 verifier: calques >= 3
 ```
 
@@ -117,7 +121,7 @@ Sur le calque `ombre`, peins un côté du rond avec un gris moyen. La couleur du
 
 | Action | Raccourci |
 |---|---|
-| **Duplicate layer** | `Ctrl+J` |
+| **Duplicate layer** | Menu **Layer ▾**, ou le bouton du panneau |
 | **Merge down** : fusionner avec le calque du dessous | `Ctrl+E` |
 | **Group layer** : mettre le calque dans un groupe | `Ctrl+G` |
 
@@ -158,7 +162,7 @@ indice: Place ce calque sous `trait` et au-dessus de `ombre`.
 
 ## Récapitulatif
 
-- `Ctrl+Maj+N` crée un calque. Tu peins sur le calque actif.
+- Le bouton **New Layer** crée un calque. Tu peins sur le calque actif.
 - L'ordre, l'opacité et le mode de fusion décident du mélange.
 - **Lock transparent pixels** garde la peinture dans la forme. `Ctrl+G` groupe.
 

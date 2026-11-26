@@ -71,7 +71,11 @@ Glisse un point pour le déplacer. Glisse une de ses poignées pour changer la c
 | Fermer ou ouvrir le tracé | **Closed** |
 | Réduire le nombre de points | **Simplify** |
 | Couper le tracé à un point | **Cut the path at the chosen point** |
-| Joindre deux tracés ouverts, ou fermer un tracé | `Ctrl+J` |
+| Joindre deux tracés ouverts, ou fermer un tracé | `Ctrl+J` (voir la mise en garde) |
+
+```attention
+`Ctrl+J` est aussi le raccourci global de la note du jour. Si une note s'ouvre au lieu de joindre tes tracés, change le raccourci de la note du jour dans **Edit › Keyboard shortcuts…**. Pour fermer un seul tracé, coche **Closed**.
+```
 
 ```etape
 Choisis un point de la feuille et appuie sur `Suppr`. La forme se simplifie. Annule avec `Ctrl+Z`.
@@ -160,7 +164,7 @@ indice: Deux points aux extrémités, deux au milieu des courbes. Règle les poi
 ## Récapitulatif
 
 - Plume : clic pour un angle, clic glissé pour une courbe.
-- `A` corrige les points. **Simplify** en retire. `Ctrl+J` joint ou ferme.
+- `A` corrige les points. **Simplify** en retire. **Closed** ferme ou ouvre le tracé.
 - **Brush**, l'outil **Width** et **Outline stroke** travaillent le contour.
 
 Leçon suivante : [Combiner des formes](03-combiner-des-formes.md)

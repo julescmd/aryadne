@@ -75,7 +75,7 @@ Choisis le calque de la photo. Sélectionne un rectangle avec `M`. Ouvre **Filte
 Un style est un effet attaché au calque. Il suit le contenu : si tu repeins, l'effet se met à jour.
 
 ```etape
-Crée un calque avec `Ctrl+Maj+N`. Écris ou dessine un mot dessus, en gros, avec une couleur claire.
+Crée un calque avec le bouton **New Layer**. Écris ou dessine un mot dessus, en gros, avec une couleur claire.
 verifier: calques >= 4
 ```
 
