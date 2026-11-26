@@ -129,7 +129,7 @@ Les images vont dans le dossier `.cache`, à la racine du coffre, sous le nom du
 Aryadne peut mesurer ce que ta carte graphique fait vraiment.
 
 ```etape
-Ouvre le menu **Help**, puis **Measure the graphics card**. Attends quelques secondes : le rapport s'affiche.
+Ouvre le menu **File**, puis **Help**, puis **Measure the graphics card**. Attends quelques secondes : le rapport s'affiche.
 ```
 
 Regarde trois choses.

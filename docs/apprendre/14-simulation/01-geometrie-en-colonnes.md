@@ -66,7 +66,7 @@ Clique maintenant le node **Set an attribute**, juste avant la sortie.
 Une colonne `Cd` est apparue. C'est une couleur. Ce node l'a écrite. Chaque node reçoit le tableau, le change, et le passe au suivant.
 
 ```astuce
-Cliquer un node montre dans l'aperçu ce qui sort de ce node. C'est le moyen le plus simple de suivre une géométrie étape par étape.
+Pour voir dans l'aperçu ce qui sort d'un node précis : clic droit sur lui, puis **Preview node**. Pour revenir à la sortie, refais un clic droit et choisis **Back to full material**. Le libellé parle de matériau, mais il vaut aussi ici.
 ```
 
 ## Change la source
