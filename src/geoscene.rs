@@ -41,6 +41,9 @@ struct Entry {
 }
 
 static ENGINES: Mutex<Option<HashMap<PathBuf, Entry>>> = Mutex::new(None);
+/// Durée de la simulation de chaque fichier connu. À part des moteurs : l'interface la lit à chaque
+/// image, et ne doit pas attendre la fin d'un calcul qui tient les moteurs.
+static TIMES: Mutex<Option<HashMap<PathBuf, TimeRange>>> = Mutex::new(None);
 
 /// Le graphe a-t-il un node « Objet de la scène » ? Rend les noms d'objets qu'il regarde.
 fn watched(g: &Graph) -> Vec<String> {
@@ -148,6 +151,7 @@ pub fn eval_file(file: &Path, pick: &dyn Fn(&Graph) -> (i32, Option<Arc<SceneInp
             }
         }
     }
+    TIMES.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(HashMap::new).insert(file.to_path_buf(), e.graph.time.unwrap_or_default());
     let (frame, scene) = pick(&e.graph);
     e.engine.scene = scene;
     e.engine.deadline = None;
@@ -156,8 +160,7 @@ pub fn eval_file(file: &Path, pick: &dyn Fn(&Graph) -> (i32, Option<Arc<SceneInp
 
 /// La durée de la simulation d'un fichier `.arygeo` (pour l'afficher dans la scène).
 pub fn time_of(file: &Path) -> Option<TimeRange> {
-    let all = ENGINES.lock().unwrap_or_else(|e| e.into_inner());
-    all.as_ref().and_then(|m| m.get(file)).map(|e| e.graph.time.unwrap_or_default())
+    TIMES.lock().unwrap_or_else(|e| e.into_inner()).as_ref().and_then(|m| m.get(file)).copied()
 }
 
 /// La géométrie de l'objet `k` de la scène, à l'image courante de la scène (`scene.frame`).
@@ -344,6 +347,20 @@ mod tests {
         g.connect(bands, 0, mix, 0);
         g.connect(mix, 0, out, 0);
         g.save(&dir.join("Drapeau rayé.arymat")).unwrap();
+        // Une nappe qui voit l'objet « boule » de la scène (sans la boule en points de l'exemple)
+        let mut g = crate::geo::example("tissu sur une boule").unwrap();
+        let id = |g: &Graph, op: &str| g.nodes.iter().find(|n| n.op == op).map(|n| n.id).unwrap();
+        let (solver, out, end) = (id(&g, "sim_solver"), id(&g, "geo_out"), id(&g, "sim_out"));
+        let tint = g.links.iter().find(|l| l.from == end).map(|l| l.to).unwrap();
+        g.links.retain(|l| l.to != out);
+        g.connect(tint, 0, out, 0);
+        let obj = g.add("geo_scene_obj", [250.0, 1010.0]);
+        if let Some(n) = g.nodes.iter_mut().find(|n| n.id == obj) {
+            n.params.insert("objet".into(), crate::nodes::Param::S("boule".into()));
+        }
+        g.connect(obj, 0, solver, 6);
+        g.connect(obj, 1, solver, 7);
+        g.save(&dir.join("Nappe.arygeo")).unwrap();
     }
 
     #[test]
@@ -465,7 +482,7 @@ mod tests {
         if let Some(n) = g.nodes.iter_mut().find(|n| n.id == obj) {
             n.params.insert("objet".into(), crate::nodes::Param::S("boule".into()));
             // Hors scène : pas d'obstacle
-            n.values = vec![[0.0; 4], [0.0; 4]];
+            n.values = vec![[0.0; 4], [0.0; 4], [0.0; 4]];
         }
         g.connect(obj, 0, solver, 6);
         g.connect(obj, 1, solver, 7);

@@ -244,8 +244,8 @@ pub const DEFS: &[Def] = &[
     Def { op: "geo_copy", label: "Copier sur des points", cat: "géométrie", inputs: &[("points", Sock::Geo, ZERO), ("modèle", Sock::Geo, ZERO), ("taille", Sock::Float, f(1.0))], outputs: &[("géométrie", Sock::Geo)], params: &[], mat: false, comp: false },
     // Entrée de la scène 3D : la boîte d'un objet de la scène où cette géométrie est posée (centre,
     // rayon de la boule qui la contient, tailles), dans le repère de la géométrie. Hors d'une scène,
-    // ou si l'objet n'existe pas : les valeurs réglées sur le node.
-    Def { op: "geo_scene_obj", label: "Objet de la scène", cat: "simulation", inputs: &[("centre hors scène", Sock::Vector, ZERO), ("dimensions hors scène", Sock::Vector, [1.0, 1.0, 1.0, 0.0])], outputs: &[("centre", Sock::Vector), ("rayon", Sock::Float), ("dimensions", Sock::Vector)], params: &[ParamDef::Line("objet", "")], mat: false, comp: false },
+    // ou si l'objet n'existe pas : les valeurs réglées sur le node. « marge » grossit un peu l'obstacle.
+    Def { op: "geo_scene_obj", label: "Objet de la scène", cat: "simulation", inputs: &[("centre hors scène", Sock::Vector, ZERO), ("dimensions hors scène", Sock::Vector, [1.0, 1.0, 1.0, 0.0]), ("marge", Sock::Float, f(0.02))], outputs: &[("centre", Sock::Vector), ("rayon", Sock::Float), ("dimensions", Sock::Vector)], params: &[ParamDef::Line("objet", "")], mat: false, comp: false },
     Def { op: "position", label: "Position", cat: "géométrie", inputs: &[], outputs: &[("position", Sock::Vector)], params: &[], mat: false, comp: false },
     Def { op: "index", label: "Numéro du point", cat: "géométrie", inputs: &[], outputs: &[("numéro", Sock::Float)], params: &[], mat: false, comp: false },
     Def { op: "attribute", label: "Lire un attribut", cat: "géométrie", inputs: &[], outputs: &[("valeur", Sock::Float), ("vecteur", Sock::Vector)], params: &[ParamDef::Line("nom", "v")], mat: false, comp: false },
@@ -3004,7 +3004,9 @@ fn pixel(s: &Step, i: &[V], c: &Ctx) -> [V; 4] {
             } else {
                 ([i[0][0], i[0][1], i[0][2]], [i[1][0], i[1][1], i[1][2]])
             };
-            [[c[0], c[1], c[2], 1.0], one(size[0].max(size[1]).max(size[2]) * 0.5), [size[0], size[1], size[2], 1.0], z]
+            // La marge écarte un peu le tissu de l'objet : sans elle, il affleure et l'objet transparaît
+            let m = i[2][0].max(0.0);
+            [[c[0], c[1], c[2], 1.0], one(size[0].max(size[1]).max(size[2]) * 0.5 + m), [size[0] + 2.0 * m, size[1] + 2.0 * m, size[2] + 2.0 * m, 1.0], z]
         }
         "expr" => match &s.shader {
             Some(sh) => {

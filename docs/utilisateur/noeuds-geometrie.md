@@ -169,7 +169,7 @@ Ils vont dans une zone de simulation.
 | `Collision` | `Floor height`, `Bounce`, `Grip`, `Ball center`, `Ball radius` | Fait rebondir les points sur le sol et sur une boule |
 | `Emit particles` | `State`, `Source`, `Per frame`, `Speed`, `Scatter`, `Lifetime (s)`, `Time step` | Fait naître des particules à chaque image, les fait vieillir, retire celles qui ont fait leur temps |
 | `Solver` | Voir [Simulation de tissu](simulation-tissu.md) | Tissu et fils |
-| `Scene object` | Réglage `Object` : le nom d'un objet de la scène. `Center outside a scene`, `Size outside a scene` | Donne la boîte de cet objet : `Center`, `Radius`, `Size`. Voir [Dans une scène 3D](#dans-une-scène-3d) |
+| `Scene object` | Réglage `Object` : le nom d'un objet de la scène. `Center outside a scene`, `Size outside a scene`, `Margin` | Donne la boîte de cet objet : `Center`, `Radius`, `Size`. Voir [Dans une scène 3D](#dans-une-scène-3d) |
 
 `Emit particles` refuse de dépasser 4 millions de particules.
 
@@ -241,6 +241,8 @@ Le nœud `Scene object` fait entrer un objet de la scène dans le graphe.
 3. Pour une boîte : relie `Center` à `Box center` et `Size` à `Box size`.
 
 À chaque image, le nœud donne la boîte qui entoure l'objet, dans le repère de la géométrie. Si l'objet est animé, la simulation le voit bouger.
+
+`Margin` grossit un peu l'obstacle (2 cm au départ). Sans marge, le tissu affleure l'objet et l'objet transparaît entre ses points. Un tissu grossier demande plus de marge.
 
 Hors d'une scène (dans l'onglet **Simulation**), ou si aucun objet ne porte ce nom, le nœud donne ses deux entrées, `Center outside a scene` et `Size outside a scene`. Tu peux donc régler le tissu sans la scène.
 

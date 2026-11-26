@@ -66,7 +66,7 @@ Tout a été écrit en lisant le code source (dossier `src/`), pas en essayant c
 | [L'éditeur de nœuds](utilisateur/noeuds-editeur.md) | Gestes communs, groupes, zones, champs, expressions |
 | [Matériaux en nœuds](utilisateur/noeuds-materiaux.md) | Fichiers `.arymat`, liste des nœuds |
 | [Compositing](utilisateur/noeuds-compositing.md) | Fichiers `.arycomp`, filtres, incrustation |
-| [Géométrie et simulation](utilisateur/noeuds-geometrie.md) | Fichiers `.arygeo`, points, attributs, zone de simulation |
+| [Géométrie et simulation](utilisateur/noeuds-geometrie.md) | Fichiers `.arygeo`, points, attributs, faces et UV, zone de simulation, pose dans une scène 3D |
 | [Simulation de tissu](utilisateur/simulation-tissu.md) | XPBD, VBD, carte graphique, cache |
 | [Banc de mesure de la carte graphique](utilisateur/banc-gpu.md) | Ce que mesure le banc et comment le lire |
 

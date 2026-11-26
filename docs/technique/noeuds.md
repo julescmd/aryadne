@@ -246,7 +246,7 @@ Le chemin d'une image :
 Le moteur le fait lire comme il fait lire le temps :
 
 - pendant un calcul, un `thread_local` (`SCENE_NOW`) tient les entrées et l'image en cours ; `Run::set_frame` le met à jour ;
-- `Program::compile_flat` écrit la boîte du moment dans les réglages du pas (`_cx`… `_sz`), comme il écrit `_image` pour `time` ; `pixel` rend centre, rayon (la moitié de la plus grande taille) et tailles. Sans scène, il rend les deux entrées du nœud ;
+- `Program::compile_flat` écrit la boîte du moment dans les réglages du pas (`_cx`… `_sz`), comme il écrit `_image` pour `time` ; `pixel` rend centre, rayon (la moitié de la plus grande taille) et tailles, grossis de l'entrée `marge`. Sans scène, il rend les deux entrées du nœud ;
 - `Run::source_hash` ajoute la boîte du moment à l'empreinte du champ (un objet qui bouge invalide ce qui le lit) ;
 - la clé d'une zone de simulation (`sim_state`) ajoute **toute la trajectoire** des objets regardés : changer l'objet ou son animation recalcule la simulation, changer d'image non.
 
