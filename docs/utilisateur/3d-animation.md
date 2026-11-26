@@ -74,7 +74,7 @@ Ces lissages sont les mêmes dans la 3D, le Motion et le montage.
 
 ## Éditeur de courbes
 
-`Maj+F6`, ou le bouton courbe. Une courbe par canal : position, rotation et taille, chacune en X, Y et Z.
+Le bouton courbe de la timeline. Une courbe par canal : position, rotation et taille, chacune en X, Y et Z.
 
 ### Gestes
 
