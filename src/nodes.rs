@@ -1414,6 +1414,58 @@ struct Step {
     ramp: Option<std::sync::Arc<Vec<(f32, V)>>>,
     /// Courbes déjà calculées en tables de 256 valeurs (node « Courbes RVB »)
     curves: Option<std::sync::Arc<[Vec<f32>; 4]>>,
+    /// Empreinte de ce que ce node calcule : son type, ses réglages, et l'empreinte de ce qui y entre.
+    /// Deux nodes de même empreinte donnent la même image : le compositing la reprend du cache.
+    key: u64,
+}
+
+/// Cache du compositing : l'image sortie par chaque node, rangée sous son empreinte et sa taille.
+/// Changer un réglage ne refait que ce node et ceux qui le suivent ; les miniatures et l'aperçu
+/// partagent ce qu'ils ont en commun.
+struct CompCache {
+    map: HashMap<(u64, usize, usize), (Vec<std::sync::Arc<Vec<V>>>, u64)>,
+    bytes: usize,
+    tick: u64,
+}
+
+static COMP_CACHE: std::sync::Mutex<Option<CompCache>> = std::sync::Mutex::new(None);
+/// Mémoire accordée au cache du compositing
+const COMP_BUDGET: usize = 384 << 20;
+
+thread_local! {
+    /// Nombre de nodes réellement calculés par le dernier compositing de ce fil (pour les essais et les mesures)
+    pub static COMP_COMPUTED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+fn comp_cache_get(key: (u64, usize, usize)) -> Option<Vec<std::sync::Arc<Vec<V>>>> {
+    let mut g = COMP_CACHE.lock().ok()?;
+    let c = g.as_mut()?;
+    c.tick += 1;
+    let tick = c.tick;
+    let e = c.map.get_mut(&key)?;
+    e.1 = tick;
+    Some(e.0.clone())
+}
+
+fn comp_cache_put(key: (u64, usize, usize), outs: &[std::sync::Arc<Vec<V>>]) {
+    let Ok(mut g) = COMP_CACHE.lock() else { return };
+    let c = g.get_or_insert_with(|| CompCache { map: HashMap::new(), bytes: 0, tick: 0 });
+    let bytes: usize = outs.iter().map(|o| o.len() * 16).sum();
+    if bytes > COMP_BUDGET / 4 {
+        return;
+    }
+    c.tick += 1;
+    if let Some(old) = c.map.insert(key, (outs.to_vec(), c.tick)) {
+        c.bytes -= old.0.iter().map(|o| o.len() * 16).sum::<usize>();
+    }
+    c.bytes += bytes;
+    // Trop plein : les images les moins récemment servies s'en vont
+    while c.bytes > COMP_BUDGET {
+        let Some(k) = c.map.iter().filter(|(k, _)| **k != key).min_by_key(|(_, v)| v.1).map(|(k, _)| *k) else { break };
+        if let Some(old) = c.map.remove(&k) {
+            c.bytes -= old.0.iter().map(|o| o.len() * 16).sum::<usize>();
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -1668,6 +1720,7 @@ impl Program {
             None => return Err((u32::MAX, "il manque le node de sortie".into())),
         }
         let mut base: HashMap<u32, usize> = HashMap::new();
+        let mut keys: HashMap<u32, u64> = HashMap::new();
         // Les attributs lus par un champ occupent les premiers registres
         let mut regs = attrs.len();
         let mut steps = vec![];
@@ -1679,7 +1732,7 @@ impl Program {
                     Some(l) => base.get(&l.from).map(|b| Src::Reg(b + l.out)).unwrap_or(Src::Const([0.0; 4])),
                     None => Src::Const(n.values.get(only - 1).copied().or_else(|| n.def().and_then(|d| d.inputs.get(only - 1)).map(|i| i.2)).unwrap_or([0.0; 4])),
                 };
-                steps.push(Step { op: "field_out", ins: vec![src], base: regs, nout: 0, params: BTreeMap::new(), shader: None, image: None, ramp: None, curves: None });
+                steps.push(Step { op: "field_out", ins: vec![src], base: regs, nout: 0, params: BTreeMap::new(), shader: None, image: None, ramp: None, curves: None, key: 0 });
                 continue;
             }
             let Some(d) = n.def() else { return Err((id, format!("node inconnu : {}", n.op))) };
@@ -1693,7 +1746,7 @@ impl Program {
                 match attrs.iter().position(|a| a == name) {
                     Some(k) => {
                         base.insert(id, regs);
-                        steps.push(Step { op: "attr_read", ins: vec![Src::Reg(k)], base: regs, nout: d.outputs.len(), params: BTreeMap::new(), shader: None, image: None, ramp: None, curves: None });
+                        steps.push(Step { op: "attr_read", ins: vec![Src::Reg(k)], base: regs, nout: d.outputs.len(), params: BTreeMap::new(), shader: None, image: None, ramp: None, curves: None, key: 0 });
                         regs += 4;
                         continue;
                     }
@@ -1751,7 +1804,38 @@ impl Program {
                     None
                 }
             });
-            steps.push(Step { op: d.op, ins, base: regs, nout: d.outputs.len(), params, shader, image, ramp, curves });
+            // Empreinte du node : type, réglages, fichier lu (nom, date, taille), et ce qui entre dans chaque prise
+            let key = {
+                use std::hash::{Hash, Hasher};
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                d.op.hash(&mut h);
+                for (k, v) in &params {
+                    k.hash(&mut h);
+                    match v {
+                        Param::F(x) => x.to_bits().hash(&mut h),
+                        Param::S(t) => t.hash(&mut h),
+                    }
+                }
+                if image.is_some() {
+                    max_img.hash(&mut h);
+                    if let Ok(md) = crate::vault::safe(root, pstr(&n.params, "fichier")).and_then(|p| std::fs::metadata(p).map_err(|e| e.to_string())) {
+                        md.len().hash(&mut h);
+                        md.modified().ok().hash(&mut h);
+                    }
+                }
+                for i in 0..d.inputs.len() {
+                    match into.get(&id).and_then(|v| v.iter().find(|l| l.inp == i)) {
+                        Some(l) => (1u8, keys.get(&l.from).copied().unwrap_or(0), l.out).hash(&mut h),
+                        None => {
+                            let v = n.values.get(i).copied().unwrap_or(d.inputs[i].2);
+                            (0u8, v.map(|x| x.to_bits())).hash(&mut h);
+                        }
+                    }
+                }
+                h.finish().max(1)
+            };
+            keys.insert(id, key);
+            steps.push(Step { op: d.op, ins, base: regs, nout: d.outputs.len(), params, shader, image, ramp, curves, key });
             regs += d.outputs.len().max(4);
         }
         let uses_curvature = steps.iter().any(|s| matches!(s.op, "curvature" | "edgewear" | "cavdirt"));
@@ -1854,12 +1938,15 @@ impl Program {
     pub fn composite_over(&self, size: Option<[usize; 2]>, over: Option<&Img>) -> Img {
         let [w, h] = size.unwrap_or_else(|| self.steps.iter().find_map(|s| s.image.as_ref().map(|i| [i.w, i.h])).unwrap_or([512, 512]));
         let n = w * h;
-        let mut bufs: Vec<Option<Vec<V>>> = vec![None; self.regs];
+        let mut bufs: Vec<Option<std::sync::Arc<Vec<V>>>> = vec![None; self.regs];
         use rayon::prelude::*;
+        COMP_COMPUTED.with(|c| c.set(0));
+        // Une image imposée de l'extérieur (étalonnage d'un clip, table de couleurs) ne passe pas par le cache
+        let cached = over.is_none();
         for s in &self.steps {
             let get = |src: &Src| -> Vec<V> {
                 match src {
-                    Src::Reg(r) => bufs[*r].clone().unwrap_or_else(|| vec![[0.0; 4]; n]),
+                    Src::Reg(r) => bufs[*r].as_ref().map(|b| b.as_ref().clone()).unwrap_or_else(|| vec![[0.0; 4]; n]),
                     Src::Const(v) => vec![*v; n],
                 }
             };
@@ -1867,6 +1954,18 @@ impl Program {
                 let px = get(&s.ins[0]);
                 return Img { w, h, px };
             }
+            // Déjà calculé avec les mêmes réglages et les mêmes entrées : on reprend l'image
+            if cached && s.key != 0 {
+                if let Some(outs) = comp_cache_get((s.key, w, h)) {
+                    for (k, o) in outs.into_iter().enumerate() {
+                        if s.base + k < bufs.len() {
+                            bufs[s.base + k] = Some(o);
+                        }
+                    }
+                    continue;
+                }
+            }
+            COMP_COMPUTED.with(|c| c.set(c.get() + 1));
             let outs: Vec<Vec<V>> = match s.op {
                 "blur" => vec![blur(&get(&s.ins[0]), w, h, pnum(&s.params, "rayon", 6.0) * w as f32 / 1000.0)],
                 "glow" => {
@@ -2106,6 +2205,10 @@ impl Program {
                     (0..s.nout.min(4)).map(|k| per.iter().map(|o| o[k]).collect()).collect()
                 }
             };
+            let outs: Vec<std::sync::Arc<Vec<V>>> = outs.into_iter().map(std::sync::Arc::new).collect();
+            if cached && s.key != 0 {
+                comp_cache_put((s.key, w, h), &outs);
+            }
             for (k, o) in outs.into_iter().enumerate() {
                 if s.base + k < bufs.len() {
                     bufs[s.base + k] = Some(o);
@@ -3063,6 +3166,8 @@ pub struct Editor {
     was_typing: bool,
     /// Géométrie et simulation : le moteur, l'aperçu 3D et la lecture
     geo: Option<Box<crate::geoview::GeoView>>,
+    /// Image de l'animation montrée par l'aperçu d'un matériau ou d'un compositing (node « Temps »)
+    frame: f32,
 }
 
 /// Échange le contenu de la racine et celui du groupe `name` : entrer dans un groupe, ou en sortir.
@@ -3167,6 +3272,7 @@ impl Editor {
             leave_request: false,
             was_typing: false,
             geo: None,
+            frame: 0.0,
             frame_sel: false,
             frame_rename: None,
             frame_sel_request: false, pv_yaw: 0.4, pv_pitch: 0.25, pv_dist: 2.0, pv_env: 0, pv_shape: None, boxy: None, pv_model: None, pv_key: 0, solo: None, roto_drag: None,
@@ -3238,7 +3344,12 @@ impl Editor {
             // La géométrie a son propre moteur : ici, seule la mise à plat est vérifiée
             return crate::nodeflow::lower(&self.doc(), false).map(|_| Program::empty(GraphKind::Geometry));
         }
-        Program::compile(&self.doc().effective(), &self.root, 1024)
+        Program::compile_at(&self.doc().effective(), &self.root, 1024, self.frame, 24.0)
+    }
+
+    /// Vrai si le graphe lit le temps (node « Temps », à la racine ou dans un groupe).
+    fn uses_time(&self) -> bool {
+        self.graph.nodes.iter().chain(self.graph.groups.iter().flat_map(|g| g.nodes.iter())).any(|n| n.op == "time")
     }
 
     fn changed(&mut self) {
@@ -3651,6 +3762,7 @@ impl Editor {
         let g = self.graph.clone();
         let root = self.root.clone();
         let version = self.version;
+        let frame = self.frame;
         let sphere = if g.kind == GraphKind::Material { Some(self.sphere.get_or_insert_with(|| std::sync::Arc::new(crate::model3d::preview_sphere())).clone()) } else { None };
         let (tx, rx) = std::sync::mpsc::channel();
         let ctx = ctx.clone();
@@ -3668,7 +3780,7 @@ impl Editor {
                     }
                 }
                 let Some(pg) = g.probe(id, out) else { continue };
-                let Ok(prog) = Program::compile(&pg, &root, 256) else { continue };
+                let Ok(prog) = Program::compile_at(&pg, &root, 256, frame, 24.0) else { continue };
                 let img = match &sphere {
                     Some(s) => crate::model3d::render_material_preview(s, std::sync::Arc::new(prog), 96),
                     None => prog.composite(Some([144, 96])),
@@ -3854,6 +3966,7 @@ impl Editor {
         ui.painter().rect_filled(graph_rect, 0.0, p.bg);
         // ---- En-tête flottant du graphe (une zone au-dessus du graphe, qui garde ses clics)
         let hdr_w = (graph_rect.width() - 24.0).max(120.0);
+        let mut frame_changed = false;
         crate::dock::overlay(ui, "node-header", "barre du graphe (nodes)", egui::Area::new(ui.scope_id().with("node-hdr")).order(egui::Order::Middle).fixed_pos(graph_rect.min + vec2(12.0, 10.0)), |ui| {
             {
                 let v = &mut ui.style_mut().visuals.widgets;
@@ -3927,12 +4040,24 @@ impl Editor {
                 if kind == GraphKind::Compositor && ui.button(format!("{}  {}", crate::lucide::DOWNLOAD, crate::i18n::t("Exporter PNG"))).clicked() {
                     self.export();
                 }
+                // Le graphe lit le temps : l'image montrée par l'aperçu se choisit ici
+                if kind != GraphKind::Geometry && self.uses_time() {
+                    let r = ui.add(egui::DragValue::new(&mut self.frame).speed(0.25).range(0.0..=100000.0).max_decimals(0).prefix(format!("{} ", crate::i18n::t("image")))).on_hover_text(crate::i18n::t("Image de l'animation montrée par l'aperçu (lue par le node Temps)"));
+                    if r.changed() {
+                        self.frame = self.frame.round();
+                        frame_changed = true;
+                    }
+                }
                 let name = self.path.file_name().map(|n| crate::formats::strip(&n.to_string_lossy()).to_string()).unwrap_or_default();
                 ui.label(RichText::new(format!("{name} · {} {}", self.graph.nodes.len(), crate::i18n::t_mid("nodes"))).size(11.0).color(p.muted));
             });
             });
             });
         });
+        if frame_changed {
+            self.program = self.compile_doc();
+            self.version += 1;
+        }
         let mut child = ui.new_child(egui::UiBuilder::new().max_rect(graph_rect));
         let over_graph = ctx.pointer_latest_pos().is_some_and(|pt| graph_rect.contains(pt));
         // Cadrage : tout (premier affichage, « recadrer », Origine) ou la sélection (F)
@@ -6332,7 +6457,7 @@ impl Editor {
         if self.preview_rx.is_none() && (self.preview_key != self.version || self.pv_key == 0) {
             // « Prévisualiser la node » : sa sortie remplace le matériau complet
             let solo = self.solo.filter(|id| self.graph.nodes.iter().any(|n| n.id == *id));
-            let solo_prog = solo.and_then(|id| self.graph.probe(id, 0)).and_then(|g| Program::compile(&g, &self.root, 1024).ok());
+            let solo_prog = solo.and_then(|id| self.graph.probe(id, 0)).and_then(|g| Program::compile_at(&g, &self.root, 1024, self.frame, 24.0).ok());
             let prog = solo_prog.map(Ok).unwrap_or_else(|| self.program.clone());
             if let Ok(prog) = prog {
                 let key = self.version;
@@ -7035,5 +7160,54 @@ mod tests_ops {
         assert!(DEFS.iter().any(|d| d.op == "group_in" && menu_cat(d, GraphKind::Material, true) == Some("structure")));
         // Un nom de node l'emporte sur une opération qui contient le même mot
         assert_eq!(first("math"), Some(Pick::Op("math")));
+    }
+}
+
+#[cfg(test)]
+mod tests_comp_cache {
+    use super::*;
+
+    #[test]
+    fn compositing_ne_refait_que_l_aval() {
+        // bruit → flou → luminosité → sortie, à une taille que les autres essais n'utilisent pas
+        let mut g = Graph::empty(GraphKind::Compositor);
+        let out = g.add("comp_out", [900.0, 0.0]);
+        let noise = g.add("noise", [0.0, 0.0]);
+        let blur = g.add("blur", [300.0, 0.0]);
+        let bright = g.add("brightcon", [600.0, 0.0]);
+        g.nodes.iter_mut().find(|n| n.id == noise).unwrap().values[0] = [7.31; 4];
+        g.connect(noise, 1, blur, 0);
+        g.connect(blur, 0, bright, 0);
+        g.connect(bright, 0, out, 0);
+        let size = Some([61, 37]);
+        let run = |g: &Graph| {
+            let img = Program::compile(g, "", 64).map_err(|e| e.1).unwrap().composite(size);
+            (img, COMP_COMPUTED.with(|c| c.get()))
+        };
+        let (a, n1) = run(&g);
+        assert_eq!(n1, 3);
+        // Même graphe : tout vient du cache, et l'image est la même
+        let (b, n2) = run(&g);
+        assert_eq!(n2, 0);
+        assert_eq!(a.px, b.px);
+        // Régler la luminosité ne refait ni le bruit ni le flou
+        g.nodes.iter_mut().find(|n| n.id == bright).unwrap().values[1] = [0.2; 4];
+        let (c, n3) = run(&g);
+        assert_eq!(n3, 1);
+        assert!(c.px != a.px);
+        // Régler le flou refait le flou et ce qui le suit, pas le bruit
+        g.nodes.iter_mut().find(|n| n.id == blur).unwrap().params.insert("rayon".into(), Param::F(30.0));
+        assert_eq!(run(&g).1, 2);
+        // Une autre taille est un autre calcul
+        assert_eq!(Program::compile(&g, "", 64).map_err(|e| e.1).unwrap().composite(Some([62, 37])).px.len(), 62 * 37);
+        assert_eq!(COMP_COMPUTED.with(|c| c.get()), 3);
+        // Le résultat du cache est celui qu'on aurait sans cache
+        let prog = Program::compile(&g, "", 64).map_err(|e| e.1).unwrap();
+        let direct = prog.composite(size);
+        let fresh = {
+            *COMP_CACHE.lock().unwrap() = None;
+            prog.composite(size)
+        };
+        assert_eq!(direct.px, fresh.px);
     }
 }

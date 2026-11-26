@@ -3921,5 +3921,7 @@
   "cette copie ferait plus de 8 millions de points : réduis le modèle ou le nombre de points": "this copy would make more than 8 million points: reduce the model or the point count",
   "plus de 4 millions de particules : baisse le débit ou la durée de vie": "more than 4 million particles: lower the rate or the lifetime",
   "cache de géométrie illisible": "unreadable geometry cache",
-  "graphe trop profond": "graph too deep"
+  "graphe trop profond": "graph too deep",
+  "Image de l'animation montrée par l'aperçu (lue par le node Temps)": "Animation frame shown by the preview (read by the Time node)",
+  "mélange": "mix"
 }
