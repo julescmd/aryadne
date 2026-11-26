@@ -117,7 +117,7 @@ Les fichiers d'Aryadne sont du JSON lisible. Le module `aryadne` les ouvre, les 
 
 ### Démarrer
 
-`Help › Example Python script (API)` :
+`File › Help › Example Python script (API)` :
 
 - crée `scripts/exemple aryadne.py` dans le coffre et l'ouvre ;
 - pose le module dans `.app/python/aryadne.py`.

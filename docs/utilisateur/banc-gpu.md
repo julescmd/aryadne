@@ -11,7 +11,7 @@ Les rapports de recherche du projet montrent que la simulation est bornée par l
 
 | Depuis | Geste |
 |---|---|
-| L'application | `Help › Measure the graphics card` |
+| L'application | `File › Help › Measure the graphics card` |
 | Un terminal | `aryadne --banc-gpu` |
 
 Dans l'application, une fenêtre s'ouvre : « Measuring, a few seconds ». Elle peut sortir de la fenêtre principale. À la fin, le rapport s'affiche. `Copy the report` le met dans le presse-papiers.

@@ -152,7 +152,7 @@ Les extensions `.mb` et `.max` sont reconnues par l'explorateur 3D, mais le code
 ## Statistiques et temps passé
 
 - `File › Vault › Statistics` : taille par type, fichiers les plus lourds, nombre de mots.
-- `Help › Time spent per project` : le temps actif devant chaque fichier, par jour. « Actif » veut dire que la fenêtre a le focus et qu'il y a eu une action dans les 2 dernières minutes. `Copy as CSV` donne projet, fichier et heures, pour une facture.
+- `File › Help › Time spent per project` : le temps actif devant chaque fichier, par jour. « Actif » veut dire que la fenêtre a le focus et qu'il y a eu une action dans les 2 dernières minutes. `Copy as CSV` donne projet, fichier et heures, pour une facture.
 
 ## Anciennes extensions
 

@@ -91,7 +91,7 @@ Si Aryadne se ferme avant, les fichiers sans titre sont proposés au lancement s
 
 ## L'écran d'accueil
 
-`Help › Home` (ou `Window › Home`) montre :
+`File › Help › Home` (ou `Edit › Window › Home`) montre :
 
 - **Pick up where you left off** : le coffre et les onglets à rouvrir ;
 - **Start** : les fichiers les plus courants à créer ;

@@ -28,8 +28,8 @@ Les images gardent leurs proportions. Une image qui a disparu affiche « File no
 |---|---|
 | Molette | Zoom |
 | Clic milieu, clic droit ou `Espace` + glisser | Déplacer la vue |
-| `View › Frame all` | Tout cadrer |
-| `View › Actual size (100 %)` | Taille réelle |
+| `Edit › View › Frame all` | Tout cadrer |
+| `Edit › View › Actual size (100 %)` | Taille réelle |
 
 ## Outils
 
@@ -117,7 +117,7 @@ Le générateur de palettes.
 
 | Commande | Effet |
 |---|---|
-| `View › Everything in grayscale` | Tout le board en gris, pour juger les valeurs |
+| `Edit › View › Everything in grayscale` | Tout le board en gris, pour juger les valeurs |
 | Clic droit › `Grayscale` | Une seule image en gris |
 
 ## Moodboard automatique
@@ -131,14 +131,14 @@ Menu `Add › Automatic moodboard` :
 
 ## Diaporama pour le croquis de pose
 
-`View › Slideshow (gesture drawing)` : les images choisies (ou toutes), une à la fois, avec un minuteur.
+`Edit › View › Slideshow (gesture drawing)` : les images choisies (ou toutes), une à la fois, avec un minuteur.
 
 - Durées : `30 seconds`, `1 minute`, `2 minutes`, `5 minutes`, `No timer`.
 - `←` `→` : image précédente, suivante. `Espace` : pause. `Échap` : fermer.
 
 ## Au-dessus des autres logiciels
 
-`View › Always on top` garde la fenêtre au-dessus de Blender, de Krita ou d'un autre logiciel, comme PureRef. Avec le `Compact mode` (`Ctrl+Maj+M`), il ne reste que le board.
+`Edit › View › Always on top` garde la fenêtre au-dessus de Blender, de Krita ou d'un autre logiciel, comme PureRef. Avec le `Compact mode` (`Ctrl+Maj+M`), il ne reste que le board.
 
 ## Éléments vivants
 

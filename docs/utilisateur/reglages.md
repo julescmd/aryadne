@@ -88,7 +88,7 @@ Seules les actions globales se changent. Les éditeurs (3D, montage, nœuds…) 
 
 | Réglage | Où |
 |---|---|
-| Disposition des panneaux | `View › Layout`, voir [Fenêtres et dispositions](fenetres-et-dispositions.md) |
+| Disposition des panneaux | `Edit › View › Layout`, voir [Fenêtres et dispositions](fenetres-et-dispositions.md) |
 | Rendu 3D, éclairage, affichage | Les menus de la vue 3D, voir [Rendu](3d-rendu.md) |
 | Format, cadence et durée d'un montage ou d'une composition | Dans le fichier lui-même (`Sequence settings`, onglet `Composition`) |
-| Entrée dans le menu des applications | `Window › Add to the applications menu` ou `Add to the Start menu` |
+| Entrée dans le menu des applications | `Edit › Window › Add to the applications menu` ou `Add to the Start menu` |

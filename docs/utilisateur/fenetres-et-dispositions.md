@@ -29,13 +29,13 @@ Trois façons :
 
 1. Le bouton **Detach to its own window** dans le coin du panneau.
 2. Tirer la poignée du panneau hors de la fenêtre, vers un autre écran. Un message « Release: separate window » s'affiche.
-3. `Window › Panels`, puis cocher le panneau.
+3. `Edit › Window › Panels`, puis cocher le panneau.
 
 Pour le rattacher : `Attach back to the main window`, ou ramener sa fenêtre au-dessus de la fenêtre principale et attendre (« Hold here: the panel attaches »). Fermer la fenêtre détachée le rattache aussi.
 
 ### Le document dans sa propre fenêtre
 
-`Window › Document in its own window` sort la zone du document (vue 3D, toile, montage, texte) dans une vraie fenêtre. Décoché, ou la fenêtre fermée, elle revient.
+`Edit › Window › Document in its own window` sort la zone du document (vue 3D, toile, montage, texte) dans une vraie fenêtre. Décoché, ou la fenêtre fermée, elle revient.
 
 ### Une étape entière dans une nouvelle fenêtre
 
@@ -63,13 +63,13 @@ Un fichier sorti en panneau reste ouvert à côté du document principal. `Put b
 
 ### Vue côte à côte
 
-`Ctrl+\` (ou `View › Side by side`) montre deux fichiers. `Swap both sides` les échange. `Close side-by-side view` revient à un seul.
+`Ctrl+\` (ou `Edit › View › Side by side`) montre deux fichiers. `Swap both sides` les échange. `Close side-by-side view` revient à un seul.
 
 ## Dispositions par étape
 
 Une étape peut avoir plusieurs dispositions nommées, par exemple « Modeling » et « Animation » en 3D.
 
-Menu `View › Layout` (ou le bouton de disposition) :
+Menu `Edit › View › Layout` (ou le bouton de disposition) :
 
 | Action | Effet |
 |---|---|
@@ -85,16 +85,16 @@ Ce qui est gardé : la place de chaque panneau, les cases, l'explorateur ouvert 
 
 ## Ajouter une page
 
-`Window › Add a window` ouvre une page de plus dans un panneau : `Brain`, `References`, `Board`, `Chat`, `Tasks`, `Search`, ou `The open file, separately`.
+`Edit › Window › Add a window` ouvre une page de plus dans un panneau : `Brain`, `References`, `Board`, `Chat`, `Tasks`, `Search`, ou `The open file, separately`.
 
 ## Autres réglages de fenêtre
 
 | Commande | Effet |
 |---|---|
-| `View › Compact mode` (`Ctrl+Maj+M`) | Cache les panneaux. Pratique pour garder un board de références par-dessus un autre logiciel |
-| `View › Keep on top` | Aryadne reste au-dessus des autres fenêtres |
-| `View › Full screen` | Plein écran |
-| `View › Light theme` / `Dark theme` | Change le thème |
+| `Edit › View › Compact mode` (`Ctrl+Maj+M`) | Cache les panneaux. Pratique pour garder un board de références par-dessus un autre logiciel |
+| `Edit › View › Keep on top` | Aryadne reste au-dessus des autres fenêtres |
+| `Edit › View › Full screen` | Plein écran |
+| `Edit › View › Light theme` / `Dark theme` | Change le thème |
 | `Ctrl +`, `Ctrl −`, `Ctrl 0` | Taille de l'interface |
 
 ## Limites

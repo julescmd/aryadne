@@ -5807,7 +5807,7 @@ impl Editor {
                     (if muted { "réactiver   M" } else { "rendre muet   M" }, NodeOp::Mute),
                     (if is_collapsed { "déplier   H" } else { "réduire   H" }, NodeOp::Collapse),
                     (if preview_on { "cacher la miniature   P" } else { "montrer la miniature   P" }, NodeOp::Preview),
-                    (if solo_on { "revenir au matériau complet" } else { "prévisualiser la node" }, NodeOp::Solo),
+                    (if solo_on { "revenir au résultat complet" } else { "prévisualiser la node" }, NodeOp::Solo),
                     ("déconnecter", NodeOp::Disconnect),
                     ("supprimer   X", NodeOp::Delete),
                 ] {
@@ -5842,7 +5842,7 @@ impl Editor {
                 let sp = out_pos[&(*id, k)];
                 let free = *sock == Sock::Any && *name == crate::nodeflow::VIRTUAL;
                 if !is_collapsed {
-                    painter.text(pos2(r.right() - 12.0, sp.y), egui::Align2::RIGHT_CENTER, crate::i18n::t(name), egui::FontId::proportional(11.0), if free { p.muted } else { p.text });
+                    painter.text(pos2(r.right() - 12.0, sp.y), egui::Align2::RIGHT_CENTER, sock_label(name), egui::FontId::proportional(11.0), if free { p.muted } else { p.text });
                 }
                 let hov = pointer.is_some_and(|pt| sp.distance(pt) < 9.0);
                 if free {
@@ -5883,10 +5883,10 @@ impl Editor {
                 let y = sp.y;
                 let row = Rect::from_min_size(pos2(r.left() + 10.0, y - ROW * 0.5 + 1.0), vec2(NW - 20.0, ROW - 2.0));
                 if linked {
-                    painter.text(row.left_center(), egui::Align2::LEFT_CENTER, crate::i18n::t(name), egui::FontId::proportional(11.0), p.text);
+                    painter.text(row.left_center(), egui::Align2::LEFT_CENTER, sock_label(name), egui::FontId::proportional(11.0), p.text);
                 } else if *name == "coordonnées" || matches!(sock, Sock::Geo | Sock::Any) {
                     // Rien à régler à la main : sans lien, le motif suit la surface ; une géométrie se branche
-                    painter.text(row.left_center(), egui::Align2::LEFT_CENTER, crate::i18n::t(name), egui::FontId::proportional(11.0), p.muted);
+                    painter.text(row.left_center(), egui::Align2::LEFT_CENTER, sock_label(name), egui::FontId::proportional(11.0), p.muted);
                 } else {
                     while node.values.len() <= k {
                         node.values.push(d.inputs[node.values.len()].2);
@@ -5897,7 +5897,7 @@ impl Editor {
                     if d.op == "sim_solver" && !crate::geo::solver_uses(pstr(&node.params, "solveur"), name) {
                         child.disable();
                     }
-                    child.label(RichText::new(crate::i18n::t(name)).size(11.0));
+                    child.label(RichText::new(sock_label(name)).size(11.0));
                     let v = &mut node.values[k];
                     let resp = match sock {
                         Sock::Float | Sock::Geo | Sock::Any => child.add(egui::DragValue::new(&mut v[0]).speed(0.01).max_decimals(3)),
@@ -5968,9 +5968,9 @@ impl Editor {
                 let entry = node.params.entry(name.to_string()).or_insert(Param::S(String::new()));
                 match (pd, entry) {
                     (ParamDef::Choice(_, opts), Param::S(cur)) => {
-                        egui::ComboBox::from_id_salt(("choice", *id, name)).selected_text(RichText::new(crate::i18n::t_mid(cur.as_str())).size(11.0)).width(NW - 24.0).height(320.0).show_ui(&mut child, |ui| {
+                        egui::ComboBox::from_id_salt(("choice", *id, name)).selected_text(RichText::new(choice_label(opts, cur.as_str())).size(11.0)).width(NW - 24.0).height(320.0).show_ui(&mut child, |ui| {
                             for o in *opts {
-                                if ui.selectable_label(cur == o, crate::i18n::t_mid(o)).clicked() {
+                                if ui.selectable_label(cur == o, choice_label(opts, o)).clicked() {
                                     *cur = o.to_string();
                                     actions.push(Act::Changed);
                                 }
@@ -5978,13 +5978,13 @@ impl Editor {
                         });
                     }
                     (ParamDef::Float(_, lo, hi, _), Param::F(v)) => {
-                        child.label(RichText::new(crate::i18n::t(name)).size(11.0));
+                        child.label(RichText::new(sock_label(name)).size(11.0));
                         if child.add(egui::DragValue::new(v).range(*lo..=*hi).speed(0.05)).changed() {
                             actions.push(Act::Changed);
                         }
                     }
                     (ParamDef::Line(..), Param::S(text)) => {
-                        child.label(RichText::new(crate::i18n::t(name)).size(11.0));
+                        child.label(RichText::new(sock_label(name)).size(11.0));
                         let w = child.available_width() - 2.0;
                         if child.add(egui::TextEdit::singleline(text).desired_width(w).font(egui::FontId::monospace(11.0))).changed() {
                             actions.push(Act::Changed);
@@ -6425,7 +6425,8 @@ impl Editor {
             });
             lui.add_space(6.0);
             let q = self.lib_search.to_lowercase();
-            let fits = |name: &str| q.is_empty() || name.to_lowercase().contains(&q);
+            // Le nom affiché (traduit) et le nom d'origine : « brushed » trouve « métal brossé »
+            let fits = |name: &str| q.is_empty() || name.to_lowercase().contains(&q) || crate::i18n::t(name).to_lowercase().contains(&q);
             // (clé de vignette, nom, genre)
             let mut items: Vec<(String, String, u8)> = vec![];
             if self.lib_shelf == 0 || self.lib_shelf == 1 {
@@ -7123,7 +7124,7 @@ impl Editor {
                 }
                 if let Some(id) = self.solo {
                     let name = self.graph.nodes.iter().find(|n| n.id == id).map(|n| if n.label.is_empty() { n.def().map(|d| crate::i18n::t(d.label)).unwrap_or_default() } else { n.label.clone() }).unwrap_or_default();
-                    if ui.small_button(format!("{} : {name} ×", crate::i18n::t("node"))).on_hover_text(crate::i18n::t("revenir au matériau complet")).clicked() {
+                    if ui.small_button(format!("{} : {name} ×", crate::i18n::t("node"))).on_hover_text(crate::i18n::t("revenir au résultat complet")).clicked() {
                         self.solo = None;
                         self.pv_key = 0;
                     }
@@ -7802,6 +7803,21 @@ mod tests_comp_cache {
         };
         assert_eq!(direct.px, fresh.px);
     }
+}
+
+/// Libellé d'un choix : « non » d'un oui/non n'est pas le « non » logique, et « nombre » comme type
+/// d'attribut n'est pas un compte (les deux mots ont une seule clé de traduction)
+fn choice_label(opts: &[&str], o: &str) -> String {
+    match o {
+        "non" if opts.contains(&"oui") || opts.contains(&"avec diagonales") => crate::i18n::t_mid("non (réponse)"),
+        "nombre" if opts.contains(&"vecteur") => crate::i18n::t_mid("nombre (type)"),
+        _ => crate::i18n::t_mid(o),
+    }
+}
+
+/// Libellé d'une prise : « image » y est une image, pas une image de l'animation
+fn sock_label(name: &str) -> String {
+    if name == "image" { crate::i18n::t("Image") } else { crate::i18n::t(name) }
 }
 
 #[cfg(test)]

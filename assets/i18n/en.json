@@ -4208,5 +4208,8 @@
   "débutant": "beginner",
   "intermédiaire": "intermediate",
   "avancé": "advanced",
-  "Vérifiée automatiquement, après « Essaie par toi-même »": "Checked automatically, after “Try it yourself”"
+  "Vérifiée automatiquement, après « Essaie par toi-même »": "Checked automatically, after “Try it yourself”",
+  "non (réponse)": "no",
+  "nombre (type)": "number",
+  "revenir au résultat complet": "back to the full result"
 }
