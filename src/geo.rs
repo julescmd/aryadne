@@ -545,13 +545,20 @@ impl Solver for VbdCloth {
         };
         let s = &mut all[at];
         s.used = clock;
-        if s.out.0 == 0 || version("P") != s.out.0 {
+        // Positions venues d'ailleurs que du dernier pas : un nouvel état, vitesses imposées. Sinon
+        // les vitesses n'ont changé que par les forces de l'image : le solveur les répartit sur ses sous-pas
+        let fresh = s.out.0 == 0 || version("P") != s.out.0;
+        if fresh {
             s.cloth.set_positions(&g.vec3("P"));
         }
         if s.out.1 == 0 || version("v") != s.out.1 {
-            s.cloth.set_velocities(&g.vec3("v"));
+            if fresh {
+                s.cloth.set_velocities(&g.vec3("v"));
+            } else {
+                s.cloth.push_velocities(&g.vec3("v"));
+            }
         }
-        let par = crate::gpucloth::Params { stiffness: p.stiffness, bending: p.bending, damping: p.damping, iterations: p.iterations, substeps: p.substeps, rho: crate::gpucloth::RHO, floor: p.floor, ball: p.ball, cube: p.cube, grip: p.grip };
+        let par = crate::gpucloth::Params { stiffness: p.stiffness, bending: p.bending, damping: p.damping, iterations: p.iterations, substeps: p.substeps, rho: crate::gpucloth::RHO, floor: p.floor, ball: p.ball, cube: p.cube, grip: p.grip, ..Default::default() }.with_levels();
         s.cloth.step(dt, &par);
         let (x, v) = s.cloth.read();
         let (x, v) = (Column::new(x.into()), Column::new(v.into()));
@@ -2212,7 +2219,7 @@ mod tests {
     #[test]
     #[ignore]
     fn comparaison_vbd_xpbd() {
-        let c = cloth_comparison(40, &[16, 64, 256]);
+        let c = cloth_comparison(40, &[16, 32, 64]);
         eprintln!("{c:#?}");
         assert!(c.rows.iter().all(|r| r.elongation.is_finite() && r.worst < 1.0));
     }

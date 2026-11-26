@@ -55,11 +55,29 @@ pub struct Params {
     pub cube: Option<([f32; 3], [f32; 3])>,
     /// Adhérence au contact (0 : glisse, 1 : colle)
     pub grip: f32,
+    /// Niveaux grossiers utilisés (0 : aucun, le VBD seul). Voir `Cycle`.
+    pub levels: usize,
+    pub cycle: Cycle,
+}
+
+/// La correction grossière faite au début de chaque sous-pas, avant les passes du niveau fin.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Cycle {
+    /// Passes sur chaque niveau grossier, en descendant puis en remontant
+    pub coarse: usize,
+    /// Passes sur le niveau le plus grossier
+    pub bottom: usize,
+}
+
+impl Default for Cycle {
+    fn default() -> Self {
+        Cycle { coarse: 1, bottom: 4 }
+    }
 }
 
 impl Default for Params {
     fn default() -> Self {
-        Params { stiffness: 1000.0, bending: 1e-4, damping: 0.02, iterations: 16, substeps: 8, rho: RHO, floor: None, ball: None, cube: None, grip: 0.6 }
+        Params { stiffness: 1000.0, bending: 1e-4, damping: 0.02, iterations: 16, substeps: 8, rho: RHO, floor: None, ball: None, cube: None, grip: 0.6, levels: 0, cycle: Cycle::default() }
     }
 }
 
@@ -70,12 +88,23 @@ impl Params {
         (sub, self.iterations.max(1).div_ceil(sub).min(MAX_PER))
     }
 
+    /// Les mêmes réglages avec la correction grossière à chaque sous-pas, pour à peu près le même
+    /// temps de calcul : une correction coûte deux à trois passes, qui sont retirées des passes de
+    /// chaque sous-pas (il en reste toujours au moins une, qui lisse la correction).
+    pub fn with_levels(mut self) -> Params {
+        let (sub, per) = self.split();
+        self.levels = MAX_LEVELS;
+        self.iterations = sub * per.saturating_sub(2).max(1);
+        self
+    }
+
     /// Rayon spectral réellement pris pour l'accélération. Avec peu d'itérations par sous-pas,
     /// l'extrapolation n'a pas le temps de se stabiliser et le tissu explose : on la bride, et on
     /// s'en passe en dessous de quatre itérations.
     pub fn rho_used(&self) -> f32 {
         let per = self.split().1;
-        if per < 4 || self.rho <= 0.0 { 0.0 } else { self.rho.min(1.0 - 2.4 / per as f32).clamp(0.0, 0.98) }
+        // Avec des niveaux grossiers non plus : la correction d'ensemble fait ce travail, et les deux se gênent
+        if per < 4 || self.rho <= 0.0 || self.levels > 0 { 0.0 } else { self.rho.min(1.0 - 2.4 / per as f32).clamp(0.0, 0.98) }
     }
 }
 
@@ -98,7 +127,9 @@ struct Consts {
     cube_h: [f32; 4],
     /// Longueur au repos = code² × cette échelle (voir `Topo::rest`)
     rest_scale: f32,
-    pad: [f32; 3],
+    /// Part de l'impulsion de l'image appliquée à chaque sous-pas (0 : pas d'impulsion)
+    kick: f32,
+    pad: [f32; 2],
 }
 
 impl Consts {
@@ -156,6 +187,9 @@ impl Default for Layout {
     }
 }
 
+/// Niveaux grossiers construits au plus : au-delà, le dernier a déjà moins de quelques dizaines de sommets
+pub const MAX_LEVELS: usize = 10;
+
 /// Sommets par grappe : la taille d'un groupe de fils
 pub const CLUSTER: usize = gpusim::WG as usize;
 
@@ -194,6 +228,243 @@ pub struct Topo {
     pub mass: Vec<f32>,
     /// Nombre de termes de flexion
     pub trips: usize,
+    /// Le même tissu en plus grossier, et de quoi passer de l'un à l'autre
+    pub coarse: Option<Box<Coarse>>,
+}
+
+/// Un niveau plus grossier : environ un sommet sur quatre du niveau d'au-dessus, les autres
+/// suivant le déplacement de leurs voisins gardés. Il sert à corriger d'un coup les déformations
+/// d'ensemble, que les passes sommet par sommet ne propagent que d'une maille à la fois.
+/// Sa matrice est celle du niveau d'au-dessus vue à travers ces déplacements (Galerkine) ; elle
+/// ne dépend que du maillage au repos, et se calcule une fois (voir « niveaux grossiers »).
+pub struct Coarse {
+    pub n: usize,
+    /// Plages de couleurs : début, nombre
+    pub groups: Vec<[u32; 2]>,
+    /// Diagonale de la matrice : part de masse, d'étirement, de flexion (à multiplier par 1/h², la raideur, la raideur de flexion)
+    pub diag: Vec<[f32; 4]>,
+    /// Par sommet : début de ses voisins, nombre
+    pub off: Vec<[u32; 2]>,
+    /// Voisin, puis les trois mêmes parts hors diagonale (bits de f32)
+    pub ent: Vec<[u32; 4]>,
+    /// Par sommet du niveau d'au-dessus : jusqu'à quatre sommets de ce niveau dont il suit le déplacement, et leurs poids (bits de f32)
+    pub up: Vec<[u32; 8]>,
+    /// Par sommet de ce niveau : début des sommets d'au-dessus qui le suivent (n + 1 cases), puis la liste (rang, poids)
+    pub down_off: Vec<u32>,
+    pub down: Vec<[u32; 2]>,
+    pub coarse: Option<Box<Coarse>>,
+}
+
+/// En dessous de ce nombre de sommets, un niveau de plus ne sert à rien
+const COARSEST: usize = 4;
+
+impl Coarse {
+    /// Construit le niveau grossier d'un niveau de `n` sommets, puis les suivants. `row(i, put)`
+    /// donne la ligne `i` de sa matrice : `put(j, [masse, étirement, flexion])`, diagonale
+    /// comprise, plusieurs fois le même `j` si besoin. `free(i)` : faux pour un sommet fixe.
+    /// `order` : ordre de visite, qui doit suivre le tissu de proche en proche.
+    fn build(n: usize, row: &dyn Fn(usize, &mut dyn FnMut(u32, [f32; 3])), free: &dyn Fn(usize) -> bool, order: &[u32], levels: usize) -> Option<Coarse> {
+        if levels == 0 || n < COARSEST * 2 {
+            return None;
+        }
+        // La matrice d'au-dessus, lignes triées et sans doublons
+        let mut starts = vec![0u32; n + 1];
+        let mut cols: Vec<u32> = Vec::new();
+        let mut vals: Vec<[f32; 3]> = Vec::new();
+        let mut line: Vec<(u32, [f32; 3])> = Vec::new();
+        let merge = |line: &mut Vec<(u32, [f32; 3])>, cols: &mut Vec<u32>, vals: &mut Vec<[f32; 3]>| {
+            line.sort_unstable_by_key(|x| x.0);
+            let first = cols.len();
+            for (j, v) in line.drain(..) {
+                if cols.len() > first && cols.last() == Some(&j) {
+                    let last = vals.last_mut().unwrap();
+                    for c in 0..3 {
+                        last[c] += v[c];
+                    }
+                } else {
+                    cols.push(j);
+                    vals.push(v);
+                }
+            }
+        };
+        for i in 0..n {
+            if free(i) {
+                row(i, &mut |j, v| line.push((j, v)));
+                merge(&mut line, &mut cols, &mut vals);
+            }
+            starts[i + 1] = cols.len() as u32;
+        }
+        let at = |i: usize| starts[i] as usize..starts[i + 1] as usize;
+        // Sommets gardés : aucun n'est lié à un autre, et tout sommet libre en a un pour voisin
+        let mut kept = vec![NONE; n];
+        let mut taken = vec![false; n];
+        let mut cn = 0u32;
+        for &i in order {
+            let i = i as usize;
+            if free(i) && !taken[i] {
+                kept[i] = cn;
+                cn += 1;
+                for e in at(i) {
+                    if vals[e][1] < 0.0 {
+                        taken[cols[e] as usize] = true;
+                    }
+                }
+                taken[i] = true;
+            }
+        }
+        let cn = cn as usize;
+        if cn < COARSEST || cn * 10 > n * 7 {
+            return None;
+        }
+        // Chaque sommet suit ses voisins gardés, à la mesure du lien qui les unit (les quatre plus
+        // forts). Près d'un bord fixe, la somme des poids est inférieure à 1 : il suit aussi le bord, qui ne bouge pas.
+        let mut up = vec![[0u32; 8]; n];
+        let mut near: Vec<(f32, u32)> = Vec::new();
+        for i in 0..n {
+            if !free(i) {
+                continue;
+            }
+            if kept[i] != NONE {
+                up[i] = [kept[i], 0, 0, 0, 1.0f32.to_bits(), 0, 0, 0];
+                continue;
+            }
+            near.clear();
+            let (mut all, mut own) = (0.0f32, 0.0f32);
+            for e in at(i) {
+                let j = cols[e] as usize;
+                if j == i {
+                    own = vals[e][1];
+                } else {
+                    all += (-vals[e][1]).max(0.0);
+                    if kept[j] != NONE && vals[e][1] < 0.0 {
+                        near.push((-vals[e][1], kept[j]));
+                    }
+                }
+            }
+            near.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+            near.truncate(4);
+            let strong: f32 = near.iter().map(|x| x.0).sum();
+            if strong <= 0.0 || own <= 0.0 {
+                continue;
+            }
+            let scale = (all / own).min(1.0) / strong;
+            for (k, x) in near.iter().enumerate() {
+                up[i][k] = x.1;
+                up[i][4 + k] = (x.0 * scale).to_bits();
+            }
+        }
+        let parents = |i: usize| {
+            let u = up[i];
+            (0..4).map(move |k| (u[k], f32::from_bits(u[4 + k]))).filter(|p| p.1 > 0.0)
+        };
+        let (down_off, down) = csr(cn, (0..n).flat_map(|i| parents(i).map(move |(a, w)| (a, [i as u32, w.to_bits()]))).collect::<Vec<_>>().into_iter());
+        // Matrice de ce niveau : Pᵀ·A·P, ligne par ligne
+        let mut cstart = vec![0u32; cn + 1];
+        let (mut ccols, mut cvals) = (Vec::new(), Vec::new());
+        for a in 0..cn {
+            for d in &down[down_off[a] as usize..down_off[a + 1] as usize] {
+                let (i, wi) = (d[0] as usize, f32::from_bits(d[1]));
+                for e in at(i) {
+                    for (b, wj) in parents(cols[e] as usize) {
+                        line.push((b, [wi * wj * vals[e][0], wi * wj * vals[e][1], wi * wj * vals[e][2]]));
+                    }
+                }
+            }
+            merge(&mut line, &mut ccols, &mut cvals);
+            cstart[a + 1] = ccols.len() as u32;
+        }
+        let cat = |a: usize| cstart[a] as usize..cstart[a + 1] as usize;
+        // Couleurs, puis rangement par couleur
+        let mut color = vec![NONE; cn];
+        let mut kinds = 0;
+        for a in 0..cn {
+            let mut used = 0u128;
+            for e in cat(a) {
+                if color[ccols[e] as usize] < 128 {
+                    used |= 1 << color[ccols[e] as usize];
+                }
+            }
+            color[a] = free_color(used);
+            kinds = kinds.max(color[a] + 1);
+        }
+        let mut sorted: Vec<u32> = (0..cn as u32).collect();
+        sorted.sort_by_key(|a| color[*a as usize]);
+        let mut rank = vec![0u32; cn];
+        let mut groups = vec![[0u32; 2]; kinds as usize];
+        for (k, &a) in sorted.iter().enumerate() {
+            rank[a as usize] = k as u32;
+            let g = &mut groups[color[a as usize] as usize];
+            if g[1] == 0 {
+                g[0] = k as u32;
+            }
+            g[1] += 1;
+        }
+        let (mut diag, mut off, mut ent) = (Vec::with_capacity(cn), Vec::with_capacity(cn), Vec::with_capacity(ccols.len()));
+        for &a in &sorted {
+            let first = ent.len();
+            let mut own = [0.0f32; 4];
+            for e in cat(a as usize) {
+                let v = cvals[e];
+                if ccols[e] == a {
+                    own = [v[0], v[1], v[2], 0.0];
+                } else {
+                    ent.push([rank[ccols[e] as usize], v[0].to_bits(), v[1].to_bits(), v[2].to_bits()]);
+                }
+            }
+            diag.push(own);
+            off.push([first as u32, (ent.len() - first) as u32]);
+        }
+        for u in up.iter_mut() {
+            for k in 0..4 {
+                if f32::from_bits(u[4 + k]) > 0.0 {
+                    u[k] = rank[u[k] as usize];
+                }
+            }
+        }
+        let (down_off, down) = csr(cn, up.iter().enumerate().flat_map(|(i, u)| (0..4).filter(|k| f32::from_bits(u[4 + k]) > 0.0).map(move |k| (u[k], [i as u32, u[4 + k]]))).collect::<Vec<_>>().into_iter());
+        let mut co = Coarse { n: cn, groups, diag, off, ent, up, down_off, down, coarse: None };
+        let next = {
+            let row = |a: usize, put: &mut dyn FnMut(u32, [f32; 3])| {
+                let d = co.diag[a];
+                put(a as u32, [d[0], d[1], d[2]]);
+                for e in &co.ent[co.off[a][0] as usize..][..co.off[a][1] as usize] {
+                    put(e[0], [f32::from_bits(e[1]), f32::from_bits(e[2]), f32::from_bits(e[3])]);
+                }
+            };
+            Coarse::build(cn, &row, &|_| true, &rank, levels - 1)
+        };
+        co.coarse = next.map(Box::new);
+        Some(co)
+    }
+
+    fn levels(&self) -> usize {
+        1 + self.coarse.as_ref().map_or(0, |c| c.levels())
+    }
+
+    /// Octets que ce niveau et les suivants gardent sur la carte
+    fn gpu_bytes(&self) -> u64 {
+        (self.n * (16 * 4 + 8) + self.ent.len() * 16 + self.up.len() * 32 + self.down_off.len() * 4 + self.down.len() * 8) as u64 + self.coarse.as_ref().map_or(0, |c| c.gpu_bytes())
+    }
+
+    /// Octets d'une passe sur ce niveau : par sommet, ses débuts, sa diagonale, sa force, son
+    /// déplacement lu et écrit ; par voisin, l'entrée de la matrice et son déplacement
+    fn sweep_bytes(&self) -> u64 {
+        (self.n * (8 + 16 + 16 + 32) + self.ent.len() * (16 + 16)) as u64
+    }
+
+    /// Octets de la correction à partir de ce niveau, `above` étant le nombre de sommets du niveau
+    /// d'au-dessus : descente (force restante réunie), passes, niveau suivant, remontée
+    fn cycle_bytes(&self, above: u64, cy: &Cycle, levels: usize) -> u64 {
+        let down = (self.n * (4 + 16 + 16) + self.down.len() * (8 + 16)) as u64;
+        let up = above * (16 + 32 + 32) + self.down.len() as u64 * 16;
+        let last = self.coarse.is_none() || levels <= 1;
+        let inner = match self.coarse.as_deref() {
+            // Sa force restante (une passe sans écriture du déplacement), puis son propre cycle
+            Some(next) if !last => self.sweep_bytes() * (2 * cy.coarse as u64 + 1) + next.cycle_bytes(self.n as u64, cy, levels - 1),
+            _ => self.sweep_bytes() * cy.bottom as u64,
+        };
+        down + inner + up
+    }
 }
 
 fn part1by2(x: u32) -> u32 {
@@ -231,7 +502,55 @@ impl Topo {
     /// `pos` : positions au repos. `rest` : longueur au repos de chaque arête. `mass` : masse par
     /// sommet si la géométrie en donne une, sinon elle est déduite de la taille des mailles.
     pub fn build(n: usize, edges: &[[u32; 2]], rest: &[f32], pos: &[Vec<f32>; 3], pinned: &[bool], mass: Option<&[f32]>) -> Topo {
-        Topo::build_with(n, edges, rest, pos, pinned, mass, Layout::default(), true)
+        Topo::build_with(n, edges, rest, pos, pinned, mass, Layout::default(), true).with_levels(MAX_LEVELS)
+    }
+
+    /// Ajoute jusqu'à `levels` niveaux grossiers, chacun construit sur le précédent.
+    pub fn with_levels(mut self, levels: usize) -> Topo {
+        self.coarse = None;
+        if levels == 0 {
+            return self;
+        }
+        // La matrice du niveau fin : masse, un ressort de raideur 1 par arête, et pour la flexion
+        // deux ressorts par terme, du milieu vers chaque bout (voir « niveaux grossiers »)
+        let row = |i: usize, put: &mut dyn FnMut(u32, [f32; 3])| {
+            let o = self.off[i];
+            let mut own = [self.mass[i], 0.0, 0.0];
+            let mut before: Option<(usize, f32)> = None;
+            let list = &self.springs[o[0] as usize..][..(o[1] & 0xffff) as usize];
+            let mut bend = vec![0.0f32; list.len()];
+            for (e, sp) in list.iter().enumerate() {
+                let lj = self.rest(sp[2] & 0xffff);
+                if sp[1] != NONE {
+                    let lk = self.rest(sp[2] >> 16);
+                    let sc = (lj + lk) / (std::f32::consts::SQRT_2 * lj * lk);
+                    bend[e] += sc * sc * lk / (lj + lk);
+                }
+                if let Some((ep, lp)) = before.take() {
+                    let sc = (lp + lj) / (std::f32::consts::SQRT_2 * lp * lj);
+                    bend[ep] += sc * sc * lj / (lp + lj);
+                    bend[e] += sc * sc * lp / (lp + lj);
+                } else if sp[0] & PAIR != 0 {
+                    before = Some((e, lj));
+                }
+            }
+            for (e, sp) in list.iter().enumerate() {
+                own[1] += 1.0;
+                own[2] += bend[e];
+                let j = sp[0] & !PAIR;
+                if self.mass[j as usize] > 0.0 {
+                    put(j, [0.0, -1.0, -bend[e]]);
+                }
+            }
+            put(i as u32, own);
+        };
+        self.coarse = Coarse::build(self.n, &row, &|i| self.mass[i] > 0.0, &self.inv, levels).map(Box::new);
+        self
+    }
+
+    /// Nombre de niveaux grossiers construits
+    pub fn levels(&self) -> usize {
+        self.coarse.as_ref().map_or(0, |c| c.levels())
     }
 
     /// Même chose en choisissant le rangement, et s'il faut des termes de flexion.
@@ -440,7 +759,7 @@ impl Topo {
                 }
             });
         }
-        Topo { n, layout, perm, inv, groups, cluster: if layout == Layout::Clusters { CLUSTER } else { 1 }, phases, off, springs, rest_scale, mass: m, trips }
+        Topo { n, layout, perm, inv, groups, cluster: if layout == Layout::Clusters { CLUSTER } else { 1 }, phases, off, springs, rest_scale, mass: m, trips, coarse: None }
     }
 
     /// Longueur au repos d'un code de 16 bits (le même calcul que dans les noyaux de la carte)
@@ -457,7 +776,7 @@ impl Topo {
 
     /// Octets que la carte garde pour ce tissu
     pub fn gpu_bytes(&self) -> u64 {
-        (self.n * 16 * 6 + self.off.len() * 8 + self.springs.len() * 12) as u64
+        (self.n * 16 * 7 + self.off.len() * 8 + self.springs.len() * 12) as u64 + self.coarse.as_ref().map_or(0, |c| self.n as u64 * 16 + c.gpu_bytes())
     }
 
     /// Octets lus et écrits par passe complète sur tous les sommets (pour estimer le débit).
@@ -480,6 +799,22 @@ impl Topo {
             }
         }
         total + if accel { self.n as u64 * 64 } else { 0 }
+    }
+
+    /// Octets lus et écrits par une correction grossière (tout ce qui s'ajoute aux passes du
+    /// niveau fin) : la force restante, qui relit tout le voisinage de chaque sommet, puis les
+    /// passages et les passes des niveaux grossiers.
+    pub fn correction_bytes(&self, bending: bool, cy: &Cycle, levels: usize) -> u64 {
+        let Some(co) = self.coarse.as_deref().filter(|_| levels > 0) else { return 0 };
+        let n = self.n as u64;
+        let around: u64 = self.off.iter().filter(|o| o[1] >> 16 != FIXED).map(|o| self.springs[o[0] as usize..][..(o[1] & 0xffff) as usize].iter().map(|sp| 12 + 16 * (1 + (bending && sp[1] != NONE) as u64)).sum::<u64>()).sum();
+        n * (8 + 16 + 16 + 16) + around + co.cycle_bytes(n, cy, levels)
+    }
+
+    /// Coût d'une correction grossière, en passes du niveau fin (par couleur, sans accélération)
+    pub fn correction_cost(&self, bending: bool, cy: &Cycle, levels: usize) -> f64 {
+        let around: u64 = self.off.iter().filter(|o| o[1] >> 16 != FIXED).map(|o| self.springs[o[0] as usize..][..(o[1] & 0xffff) as usize].iter().map(|sp| 12 + 16 * (1 + (bending && sp[1] != NONE) as u64)).sum::<u64>()).sum();
+        self.correction_bytes(bending, cy, levels) as f64 / (self.n as u64 * 56 + around).max(1) as f64
     }
 
     /// Ce que le même tissu lisait avant le rangement compact (ressorts de 8 octets, termes de
@@ -675,25 +1010,268 @@ fn sweep(t: &Topo, pos: &mut [V4], tgt: &[V4], prev: &[V4], c: &Consts) {
     }
 }
 
+// ---------- niveaux grossiers ----------
+//
+// Les passes sommet par sommet ne propagent une déformation que d'une maille à la fois : sur un
+// tissu fin, un étirement d'ensemble met des centaines de passes à se résorber, et le tissu paraît
+// mou, d'autant plus qu'il a de sommets. La correction grossière règle ce défaut. Au début de
+// chaque sous-pas, la force qui reste sur chaque sommet est confiée à un tissu quatre fois moins
+// dense, lui-même aidé par un tissu encore quatre fois moins dense, et ainsi de suite ; le
+// déplacement d'ensemble trouvé est rendu au niveau fin, que ses passes n'ont plus qu'à lisser.
+//
+// Ce que résolvent les niveaux grossiers n'est pas l'énergie du tissu mais une énergie plus
+// simple qui la borne par le dessus : chaque ressort y est remplacé par un ressort de même
+// raideur dans toutes les directions (Liu et al. 2013, « Fast Simulation of Mass-Spring
+// Systems » ; c'est aussi la matrice de Projective Dynamics, Bouaziz et al. 2014), et chaque terme
+// de flexion par deux ressorts du milieu vers les bouts. Deux conséquences :
+// - la matrice ne dépend que du maillage au repos. Celles des niveaux grossiers (Pᵀ·A·P, Galerkine)
+//   sont calculées une fois au chargement, et les trois axes se résolvent séparément ;
+// - minimiser une borne supérieure fait toujours baisser l'énergie vraie : la correction ne peut
+//   pas faire diverger le tissu, même plié, comprimé ou en grande rotation. En échange, elle ne
+//   corrige que l'étirement (ce qui manque aux passes) et laisse la flexion et les rotations au
+//   niveau fin, qui les traite déjà bien.
+// (Multigrille de Galerkine sur cette matrice : Xian, Tong, Liu 2019.)
+//
+// Un sommet fixe ou au contact d'un obstacle ne reçoit pas de correction ; ses voisins lui sont
+// alors attachés comme à un point d'ancrage, ce qui garde la borne valable.
+
+/// Force qui reste sur le sommet `i` du niveau fin. Quatrième valeur : −1 s'il ne doit pas être
+/// déplacé (fixe, ou il touchait un obstacle à sa dernière passe), sinon la raideur qui l'attache
+/// à ses voisins dans ce cas.
+#[inline]
+fn rest_force(t: &Topo, i: usize, pos: &[V4], tgt: &[V4], c: &Consts) -> V4 {
+    let (x, y) = (pos[i], tgt[i]);
+    if y[3] <= 0.0 || x[3] > 0.5 {
+        return [0.0, 0.0, 0.0, -1.0];
+    }
+    let m = y[3] * c.inv_h2;
+    let mut f = [-m * (x[0] - y[0]), -m * (x[1] - y[1]), -m * (x[2] - y[2])];
+    let mut anchor = 0.0;
+    let o = t.off[i];
+    // L'entrée d'avant, quand elle forme un terme de flexion avec celle-ci : position, longueur, ancrage
+    let mut before: Option<([f32; 3], f32, bool)> = None;
+    for sp in &t.springs[o[0] as usize..][..(o[1] & 0xffff) as usize] {
+        let pj = pos[(sp[0] & !PAIR) as usize];
+        let (xj, held) = ([pj[0], pj[1], pj[2]], pj[3] > 0.5);
+        let lj = t.rest(sp[2] & 0xffff);
+        let d = [x[0] - xj[0], x[1] - xj[1], x[2] - xj[2]];
+        let l = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+        if l > 1e-12 {
+            let pull = c.k * (l - lj) / l;
+            for a in 0..3 {
+                f[a] -= pull * d[a];
+            }
+        }
+        if held {
+            anchor += c.k;
+        }
+        if c.d > 0.0 {
+            if sp[1] != NONE {
+                let lk = t.rest(sp[2] >> 16);
+                let pk = pos[sp[1] as usize];
+                let sum = lj + lk;
+                let s = sum / (std::f32::consts::SQRT_2 * lj * lk);
+                let w = lk / sum;
+                let g = c.d * s * s * w;
+                for a in 0..3 {
+                    f[a] -= g * (w * x[a] + (1.0 - w) * pk[a] - xj[a]);
+                }
+                if held {
+                    anchor += g;
+                }
+            }
+            if let Some((xp, lp, held_p)) = before.take() {
+                let sum = lp + lj;
+                let s = sum / (std::f32::consts::SQRT_2 * lp * lj);
+                let g = c.d * s * s;
+                for a in 0..3 {
+                    f[a] += g * ((lj * xp[a] + lp * xj[a]) / sum - x[a]);
+                }
+                if held_p {
+                    anchor += g * lj / sum;
+                }
+                if held {
+                    anchor += g * lp / sum;
+                }
+            } else if sp[0] & PAIR != 0 {
+                before = Some((xj, lj, held));
+            }
+        }
+    }
+    [f[0], f[1], f[2], anchor]
+}
+
+/// L'état de travail d'un niveau grossier
+#[derive(Default)]
+struct Scratch {
+    /// Force à équilibrer, et raideur d'ancrage ajoutée à la diagonale
+    f: Vec<V4>,
+    /// Déplacement
+    d: Vec<V4>,
+    /// Force restante, confiée au niveau suivant
+    r: Vec<V4>,
+}
+
+/// Ce qui reste de la force d'un sommet grossier une fois retirée la part de ses voisins, et sa diagonale
+#[inline]
+fn coarse_row(co: &Coarse, a: usize, f: V4, c: &Consts, at: &impl Fn(u32) -> [f32; 3]) -> ([f32; 3], f32) {
+    let mix = |m: f32, s: f32, b: f32| c.inv_h2 * m + c.k * s + c.d * b;
+    let mut r = [f[0], f[1], f[2]];
+    let o = co.off[a];
+    for e in &co.ent[o[0] as usize..][..o[1] as usize] {
+        let (g, db) = (mix(f32::from_bits(e[1]), f32::from_bits(e[2]), f32::from_bits(e[3])), at(e[0]));
+        for k in 0..3 {
+            r[k] -= g * db[k];
+        }
+    }
+    let d = co.diag[a];
+    (r, mix(d[0], d[1], d[2]) + f[3])
+}
+
+/// Une passe sur un niveau grossier : chaque sommet prend le déplacement qui l'équilibre, ses voisins étant figés.
+fn relax(co: &Coarse, s: &mut Scratch, c: &Consts) {
+    let f = &s.f;
+    for g in &co.groups {
+        let (start, count) = (g[0] as usize, g[1] as usize);
+        let (lo, rest) = s.d.split_at_mut(start);
+        let (mid, hi) = rest.split_at_mut(count);
+        let (lo, hi) = (&*lo, &*hi);
+        mid.par_iter_mut().with_min_len(256).enumerate().for_each(|(q, x)| {
+            let a = start + q;
+            let at = |b: u32| {
+                let b = b as usize;
+                let v = if b < start { lo[b] } else { hi[b - start - count] };
+                [v[0], v[1], v[2]]
+            };
+            let (r, own) = coarse_row(co, a, f[a], c, &at);
+            if own > 0.0 {
+                *x = [r[0] / own, r[1] / own, r[2] / own, 0.0];
+            }
+        });
+    }
+}
+
+/// Descente : chaque sommet de `co` réunit la force restante (et l'ancrage) des sommets d'au-dessus qui le suivent.
+fn restrict(co: &Coarse, above: &[V4], s: &mut Scratch) {
+    s.f.resize(co.n, [0.0; 4]);
+    s.d.clear();
+    s.d.resize(co.n, [0.0; 4]);
+    s.f.par_iter_mut().with_min_len(256).enumerate().for_each(|(a, f)| {
+        let mut sum = [0.0f32; 4];
+        for d in &co.down[co.down_off[a] as usize..co.down_off[a + 1] as usize] {
+            let (w, r) = (f32::from_bits(d[1]), above[d[0] as usize]);
+            if r[3] >= 0.0 {
+                for k in 0..4 {
+                    sum[k] += w * r[k];
+                }
+            }
+        }
+        *f = sum;
+    });
+}
+
+/// Le déplacement que les sommets de `co` donnent au sommet `i` d'au-dessus
+#[inline]
+fn lift(co: &Coarse, i: usize, d: &[V4]) -> [f32; 3] {
+    let u = co.up[i];
+    let mut sum = [0.0f32; 3];
+    for k in 0..4 {
+        let w = f32::from_bits(u[4 + k]);
+        if w > 0.0 {
+            for a in 0..3 {
+                sum[a] += w * d[u[k] as usize][a];
+            }
+        }
+    }
+    sum
+}
+
+/// Un cycle en V à partir d'un niveau grossier, sa force étant déjà réunie.
+fn cycle(co: &Coarse, s: &mut Scratch, c: &Consts, cy: &Cycle, levels: usize, deeper: &mut [Scratch]) {
+    let (Some(next), Some((ns, rest))) = (co.coarse.as_deref().filter(|_| levels > 1), deeper.split_first_mut()) else {
+        for _ in 0..cy.bottom {
+            relax(co, s, c);
+        }
+        return;
+    };
+    for _ in 0..cy.coarse {
+        relax(co, s, c);
+    }
+    // Force restante de ce niveau, confiée au suivant
+    s.r.resize(co.n, [0.0; 4]);
+    {
+        let (f, d) = (&s.f, &s.d);
+        s.r.par_iter_mut().with_min_len(256).enumerate().for_each(|(a, r)| {
+            let at = |b: u32| [d[b as usize][0], d[b as usize][1], d[b as usize][2]];
+            let (q, own) = coarse_row(co, a, f[a], c, &at);
+            *r = [q[0] - own * d[a][0], q[1] - own * d[a][1], q[2] - own * d[a][2], f[a][3]];
+        });
+    }
+    restrict(next, &s.r, ns);
+    cycle(next, ns, c, cy, levels - 1, rest);
+    let big = &ns.d;
+    s.d.par_iter_mut().with_min_len(256).enumerate().for_each(|(a, x)| {
+        let q = lift(next, a, big);
+        *x = [x[0] + q[0], x[1] + q[1], x[2] + q[2], 0.0];
+    });
+    for _ in 0..cy.coarse {
+        relax(co, s, c);
+    }
+}
+
+/// La correction grossière d'un sous-pas : force restante du niveau fin, cycle, déplacement rendu.
+/// `res` : colonne de travail du niveau fin.
+#[allow(clippy::too_many_arguments)]
+fn correct(t: &Topo, pos: &mut [V4], tgt: &[V4], res: &mut Vec<V4>, c: &Consts, cy: &Cycle, levels: usize, scratch: &mut [Scratch]) {
+    let (Some(co), Some((s, deeper))) = (t.coarse.as_deref().filter(|_| levels > 0), scratch.split_first_mut()) else { return };
+    res.resize(t.n, [0.0; 4]);
+    {
+        let pos = &*pos;
+        res.par_iter_mut().with_min_len(256).enumerate().for_each(|(i, r)| *r = rest_force(t, i, pos, tgt, c));
+    }
+    restrict(co, res, s);
+    cycle(co, s, c, cy, levels, deeper);
+    let (d, res) = (&s.d, &*res);
+    pos.par_iter_mut().with_min_len(256).enumerate().for_each(|(i, x)| {
+        if res[i][3] >= 0.0 {
+            let q = lift(co, i, d);
+            for a in 0..3 {
+                x[a] += q[a];
+            }
+        }
+    });
+}
+
 /// Un pas d'image sur le processeur. `pos` et `vel` sont dans l'ordre de rangement, positions
-/// relatives à l'origine du tissu.
-fn step_cpu(t: &Topo, pos: &mut [V4], vel: &mut [V4], c: &Consts, p: &Params) {
+/// relatives à l'origine du tissu. `kick` : changement de vitesse demandé de l'extérieur pour
+/// cette image (gravité, vent), appliqué par parts égales à chaque sous-pas.
+fn step_cpu(t: &Topo, pos: &mut [V4], vel: &mut [V4], kick: Option<&[V4]>, c: &Consts, p: &Params) {
     let n = t.n;
     let (sub, per) = p.split();
     let rho = p.rho_used();
     let mut tgt: Vec<V4> = t.mass.iter().map(|m| [0.0, 0.0, 0.0, *m]).collect();
     let mut prev = vec![[0.0f32; 4]; n];
     let mut s = [vec![[0.0f32; 4]; n], vec![[0.0f32; 4]; n]];
+    let levels = p.levels.min(t.levels());
+    let mut scratch: Vec<Scratch> = (0..levels).map(|_| Scratch::default()).collect();
+    let mut res = Vec::new();
+    let zero = [[0.0f32; 4]];
+    let part = c.kick;
     for _ in 0..sub {
-        // Prédiction : où l'inertie seule mènerait chaque sommet
-        (pos.par_iter_mut(), vel.par_iter(), tgt.par_iter_mut(), prev.par_iter_mut(), s[0].par_iter_mut()).into_par_iter().with_min_len(1024).for_each(|(x, v, y, pv, s0)| {
+        // Prédiction : où l'inertie seule mènerait chaque sommet. Un sommet libre garde la marque
+        // « touchait un obstacle » de sa dernière passe : la correction grossière la lit.
+        let kicks = kick.map_or(rayon::iter::Either::Left(rayon::iter::repeat_n(&zero[0], n)), |k| rayon::iter::Either::Right(k.par_iter()));
+        (pos.par_iter_mut(), vel.par_iter(), tgt.par_iter_mut(), prev.par_iter_mut(), s[0].par_iter_mut(), kicks).into_par_iter().with_min_len(1024).for_each(|(x, v, y, pv, s0, dv)| {
             let m = y[3];
             *pv = [x[0], x[1], x[2], 0.0];
-            let q = if m > 0.0 { [x[0] + c.h * v[0], x[1] + c.h * v[1], x[2] + c.h * v[2]] } else { [x[0], x[1], x[2]] };
+            let q = if m > 0.0 { [x[0] + c.h * (v[0] + part * dv[0]), x[1] + c.h * (v[1] + part * dv[1]), x[2] + c.h * (v[2] + part * dv[2])] } else { [x[0], x[1], x[2]] };
             *y = [q[0], q[1], q[2], m];
-            *x = [q[0], q[1], q[2], if m > 0.0 { 0.0 } else { 1.0 }];
-            *s0 = *x;
+            *s0 = [q[0], q[1], q[2], if m > 0.0 { 0.0 } else { 1.0 }];
+            *x = [q[0], q[1], q[2], if m > 0.0 { x[3] } else { 1.0 }];
         });
+        if levels > 0 {
+            correct(t, pos, &tgt, &mut res, c, &p.cycle, levels, &mut scratch);
+        }
         let mut w = 1.0;
         for k in 1..=per {
             sweep(t, pos, &tgt, &prev, c);
@@ -724,7 +1302,7 @@ struct C {
     ball: vec4<f32>,
     cube_c: vec4<f32>,
     cube_h: vec4<f32>,
-    rest_scale: f32, p0: f32, p1: f32, p2: f32,
+    rest_scale: f32, kick: f32, p1: f32, p2: f32,
 }
 struct S { start: u32, count: u32, omega: f32, phases: u32 }
 struct E { j: u32, k: u32, codes: u32 }
@@ -741,8 +1319,8 @@ const NEIGHBOURS: &str = r#"
 @group(0) @binding(6) var<storage, read> springs: array<E>;
 "#;
 
-/// Force sur un sommet, pas de Newton, obstacles : le même calcul que `forces`, `newton` et
-/// `collide`. `fetch(j)` lit la position d'un voisin ; chaque noyau le définit à sa façon.
+/// Force sur un sommet et pas de Newton : le même calcul que `forces` et `newton`.
+/// `fetch(j)` lit la position d'un voisin ; chaque noyau le définit à sa façon.
 const VERTEX: &str = r#"
 struct F { f: vec3<f32>, hd: vec3<f32>, ho: vec3<f32> }
 
@@ -816,6 +1394,10 @@ fn newton(fo: F, xi: vec3<f32>) -> vec3<f32> {
     return x;
 }
 
+"#;
+
+/// Obstacles : le même calcul que `collide`.
+const COLLIDE: &str = r#"
 // La position d'avant n'est lue que si le sommet touche un obstacle
 fn collide(x0: vec3<f32>, i: u32) -> vec4<f32> {
     var x = x0;
@@ -915,6 +1497,167 @@ fn solve(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups)
 }
 "#;
 
+/// Force restante du niveau fin : le même calcul que `rest_force`.
+const REST: &str = r#"
+@group(0) @binding(0) var<uniform> c: C;
+@group(0) @binding(1) var<uniform> s: S;
+@group(0) @binding(2) var<storage, read> pos: array<vec4<f32>>;
+@group(0) @binding(3) var<storage, read> tgt: array<vec4<f32>>;
+@group(0) @binding(4) var<storage, read> off: array<vec2<u32>>;
+@group(0) @binding(5) var<storage, read> springs: array<E>;
+@group(0) @binding(6) var<storage, read_write> res: array<vec4<f32>>;
+
+fn rest_of(code: u32) -> f32 { let u = f32(code); return u * u * c.rest_scale; }
+
+@compute @workgroup_size(WG)
+fn rest(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>) {
+    let i = lin(gid, nwg);
+    if (i >= s.count) { return; }
+    let cur = pos[i];
+    let ty = tgt[i];
+    if (ty.w <= 0.0 || cur.w > 0.5) { res[i] = vec4<f32>(0.0, 0.0, 0.0, -1.0); return; }
+    let x = cur.xyz;
+    var f = -ty.w * c.inv_h2 * (x - ty.xyz);
+    var anchor = 0.0;
+    let o = off[i];
+    let count = o.y & 0xffffu;
+    var xp = vec3<f32>(0.0);
+    var lp = 0.0;
+    var held_p = false;
+    var paired = false;
+    for (var e = 0u; e < count; e++) {
+        let sp = springs[o.x + e];
+        let pj = pos[sp.j & 0x7fffffffu];
+        let xj = pj.xyz;
+        let held = pj.w > 0.5;
+        let lj = rest_of(sp.codes & 0xffffu);
+        let d = x - xj;
+        let l = length(d);
+        if (l > 1e-12) { f -= c.k * (l - lj) / l * d; }
+        if (held) { anchor += c.k; }
+        if (c.d > 0.0) {
+            if (sp.k != 0xffffffffu) {
+                let lk = rest_of(sp.codes >> 16u);
+                let xk = pos[sp.k].xyz;
+                let sum = lj + lk;
+                let sc = sum / (1.4142135 * lj * lk);
+                let w = lk / sum;
+                let g = c.d * sc * sc * w;
+                f -= g * (w * x + (1.0 - w) * xk - xj);
+                if (held) { anchor += g; }
+            }
+            if (paired) {
+                let sum = lp + lj;
+                let sc = sum / (1.4142135 * lp * lj);
+                let g = c.d * sc * sc;
+                f += g * ((lj * xp + lp * xj) / sum - x);
+                if (held_p) { anchor += g * lj / sum; }
+                if (held) { anchor += g * lp / sum; }
+                paired = false;
+            } else if ((sp.j & 0x80000000u) != 0u) {
+                xp = xj;
+                lp = lj;
+                held_p = held;
+                paired = true;
+            }
+        }
+    }
+    res[i] = vec4<f32>(f, anchor);
+}
+"#;
+
+/// Un niveau grossier : sa passe, et sa force restante. Mêmes calculs que `relax` et `cycle`.
+const COARSE: &str = r#"
+struct N { j: u32, m: f32, s: f32, b: f32 }
+@group(0) @binding(0) var<uniform> c: C;
+@group(0) @binding(1) var<uniform> s: S;
+@group(0) @binding(2) var<storage, read> diag: array<vec4<f32>>;
+@group(0) @binding(3) var<storage, read> off: array<vec2<u32>>;
+@group(0) @binding(4) var<storage, read> ent: array<N>;
+@group(0) @binding(5) var<storage, read> f: array<vec4<f32>>;
+@group(0) @binding(6) var<storage, read_write> d: array<vec4<f32>>;
+@group(0) @binding(7) var<storage, read_write> r: array<vec4<f32>>;
+
+// Ce qui reste de la force une fois retirée la part des voisins, et la diagonale
+fn row(a: u32) -> vec4<f32> {
+    let fa = f[a];
+    var q = fa.xyz;
+    let o = off[a];
+    for (var e = o.x; e < o.x + o.y; e++) {
+        let n = ent[e];
+        q -= (c.inv_h2 * n.m + c.k * n.s + c.d * n.b) * d[n.j].xyz;
+    }
+    let own = diag[a];
+    return vec4<f32>(q, c.inv_h2 * own.x + c.k * own.y + c.d * own.z + fa.w);
+}
+
+@compute @workgroup_size(WG)
+fn relax(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>) {
+    let q = lin(gid, nwg);
+    if (q >= s.count) { return; }
+    let a = s.start + q;
+    let v = row(a);
+    if (v.w > 0.0) { d[a] = vec4<f32>(v.xyz / v.w, 0.0); }
+}
+
+@compute @workgroup_size(WG)
+fn remain(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>) {
+    let a = lin(gid, nwg);
+    if (a >= s.count) { return; }
+    let v = row(a);
+    r[a] = vec4<f32>(v.xyz - v.w * d[a].xyz, f[a].w);
+}
+"#;
+
+/// Descente : chaque sommet grossier réunit la force restante des sommets d'au-dessus qui le suivent.
+const DOWN: &str = r#"
+@group(0) @binding(0) var<uniform> s: S;
+@group(0) @binding(1) var<storage, read> above: array<vec4<f32>>;
+@group(0) @binding(2) var<storage, read> down_off: array<u32>;
+@group(0) @binding(3) var<storage, read> down: array<vec2<u32>>;
+@group(0) @binding(4) var<storage, read_write> f: array<vec4<f32>>;
+@group(0) @binding(5) var<storage, read_write> d: array<vec4<f32>>;
+
+@compute @workgroup_size(WG)
+fn gather(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>) {
+    let a = lin(gid, nwg);
+    if (a >= s.count) { return; }
+    var sum = vec4<f32>(0.0);
+    let end = down_off[a + 1u];
+    for (var e = down_off[a]; e < end; e++) {
+        let k = down[e];
+        let v = above[k.x];
+        if (v.w >= 0.0) { sum += bitcast<f32>(k.y) * v; }
+    }
+    f[a] = sum;
+    d[a] = vec4<f32>(0.0);
+}
+"#;
+
+/// Remontée : le déplacement du niveau grossier, rendu aux sommets d'au-dessus qui ont le droit de bouger.
+const UP: &str = r#"
+struct U { who: vec4<u32>, w: vec4<f32> }
+@group(0) @binding(0) var<uniform> s: S;
+@group(0) @binding(1) var<storage, read> up: array<U>;
+@group(0) @binding(2) var<storage, read> deep: array<vec4<f32>>;
+@group(0) @binding(3) var<storage, read> mark: array<vec4<f32>>;
+@group(0) @binding(4) var<storage, read_write> into: array<vec4<f32>>;
+
+@compute @workgroup_size(WG)
+fn prolong(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>) {
+    let i = lin(gid, nwg);
+    if (i >= s.count) { return; }
+    if (mark[i].w < 0.0) { return; }
+    let u = up[i];
+    var sum = vec3<f32>(0.0);
+    for (var k = 0u; k < 4u; k++) {
+        if (u.w[k] > 0.0) { sum += u.w[k] * deep[u.who[k]].xyz; }
+    }
+    let x = into[i];
+    into[i] = vec4<f32>(x.xyz + sum, x.w);
+}
+"#;
+
 /// Prédiction, accélération de Tchebychev, vitesse finale : des passes simples, élément par élément.
 const MOVE: &str = r#"
 @group(0) @binding(0) var<uniform> c: C;
@@ -925,19 +1668,29 @@ const MOVE: &str = r#"
 @group(0) @binding(5) var<storage, read_write> prev: array<vec4<f32>>;
 @group(0) @binding(6) var<storage, read_write> sa: array<vec4<f32>>;
 @group(0) @binding(7) var<storage, read_write> sb: array<vec4<f32>>;
+@group(0) @binding(8) var<storage, read> kick: array<vec4<f32>>;
 
 @compute @workgroup_size(WG)
 fn predict(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>) {
     let i = lin(gid, nwg);
     if (i >= s.count) { return; }
-    let x = pos[i].xyz;
+    let cur = pos[i];
+    let x = cur.xyz;
     let m = tgt[i].w;
     var y = x;
     var fixed = 1.0;
-    if (m > 0.0) { y = x + c.h * vel[i].xyz; fixed = 0.0; }
+    // Un sommet libre garde la marque « touchait un obstacle » de sa dernière passe
+    var mark = 1.0;
+    if (m > 0.0) {
+        var v = vel[i].xyz;
+        if (c.kick > 0.0) { v += c.kick * kick[i].xyz; }
+        y = x + c.h * v;
+        fixed = 0.0;
+        mark = cur.w;
+    }
     prev[i] = vec4<f32>(x, 0.0);
     tgt[i] = vec4<f32>(y, m);
-    pos[i] = vec4<f32>(y, fixed);
+    pos[i] = vec4<f32>(y, mark);
     sa[i] = vec4<f32>(y, fixed);
 }
 
@@ -969,6 +1722,7 @@ fn finish(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups
 struct GpuCloth {
     pos: Column,
     vel: Column,
+    kick: Column,
     consts: wgpu::Buffer,
     slots: wgpu::Buffer,
     slot: u64,
@@ -979,6 +1733,9 @@ struct GpuCloth {
     g_solve: wgpu::BindGroup,
     /// Les deux branchements des passes simples : les tampons de Tchebychev y sont échangés
     g_move: [wgpu::BindGroup; 2],
+    /// Force restante du niveau fin (si le tissu a des niveaux grossiers)
+    g_rest: Option<wgpu::BindGroup>,
+    levels: Vec<GpuLevel>,
     /// Colonnes gardées en vie (branchées, jamais relues ici)
     _keep: Vec<Column>,
 }
@@ -991,20 +1748,45 @@ struct Programs {
     /// Résolution par couleur, puis par grappes
     solve: [Kernels; 2],
     mv: Kernels,
+    /// Niveaux grossiers : force restante du niveau fin, passe et force restante d'un niveau, descente, remontée
+    rest: Kernels,
+    coarse: Kernels,
+    down: Kernels,
+    up: Kernels,
 }
 
 fn programs(g: &Gpu) -> &'static Programs {
     static PROGRAMS: std::sync::OnceLock<Programs> = std::sync::OnceLock::new();
     PROGRAMS.get_or_init(|| {
-        let neighbours = [Bind::Uniform, Bind::Slot(16), Bind::Write, Bind::Read, Bind::Read, Bind::Read, Bind::Read];
+        use Bind::{Read, Slot, Uniform, Write};
+        let neighbours = [Uniform, Slot(16), Write, Read, Read, Read, Read];
         Programs {
             solve: [
-                g.kernels("tissu-vbd", &format!("{STRUCTS}{NEIGHBOURS}{VERTEX}{SOLVE}"), &neighbours, &["solve"]),
-                g.kernels("tissu-grappes", &format!("{STRUCTS}{NEIGHBOURS}{VERTEX}{SOLVE_CLUSTERS}"), &neighbours, &["solve"]),
+                g.kernels("tissu-vbd", &format!("{STRUCTS}{NEIGHBOURS}{VERTEX}{COLLIDE}{SOLVE}"), &neighbours, &["solve"]),
+                g.kernels("tissu-grappes", &format!("{STRUCTS}{NEIGHBOURS}{VERTEX}{COLLIDE}{SOLVE_CLUSTERS}"), &neighbours, &["solve"]),
             ],
-            mv: g.kernels("tissu-pas", &format!("{STRUCTS}{MOVE}"), &[Bind::Uniform, Bind::Slot(16), Bind::Write, Bind::Write, Bind::Write, Bind::Write, Bind::Write, Bind::Write], &["predict", "accel", "finish"]),
+            mv: g.kernels("tissu-pas", &format!("{STRUCTS}{MOVE}"), &[Uniform, Slot(16), Write, Write, Write, Write, Write, Write, Read], &["predict", "accel", "finish"]),
+            rest: g.kernels("tissu-reste", &format!("{STRUCTS}{REST}"), &[Uniform, Slot(16), Read, Read, Read, Read, Write], &["rest"]),
+            coarse: g.kernels("tissu-niveau", &format!("{STRUCTS}{COARSE}"), &[Uniform, Slot(16), Read, Read, Read, Read, Write, Write], &["relax", "remain"]),
+            down: g.kernels("tissu-descente", &format!("{STRUCTS}{DOWN}"), &[Slot(16), Read, Read, Read, Write, Write], &["gather"]),
+            up: g.kernels("tissu-remontee", &format!("{STRUCTS}{UP}"), &[Slot(16), Read, Read, Read, Write], &["prolong"]),
         }
     })
+}
+
+/// Un niveau grossier sur la carte
+struct GpuLevel {
+    n: u64,
+    /// Nombre de sommets du niveau d'au-dessus
+    above: u64,
+    /// Taille de chaque plage de couleur. Cases de réglages : une par plage, puis tous les sommets du niveau, puis tous ceux d'au-dessus
+    groups: Vec<u64>,
+    _slots: wgpu::Buffer,
+    /// Passe et force restante ; descente depuis le niveau d'au-dessus ; remontée vers lui
+    g_relax: wgpu::BindGroup,
+    g_down: wgpu::BindGroup,
+    g_up: wgpu::BindGroup,
+    _keep: Vec<Column>,
 }
 
 impl GpuCloth {
@@ -1032,8 +1814,82 @@ impl GpuCloth {
         let one = |c: &Column| c.pages[0].clone();
         let (bp, bv, bt, bpr, b0, b1) = (one(&pos), one(&vel), one(&tgt), one(&prev), one(&s0), one(&s1));
         let g_solve = g.group(solve, &[&consts, &slots, &bp, &bt, &bpr, &off.pages[0], &springs.pages[0]]);
-        let g_move = [g.group(mv, &[&consts, &slots, &bp, &bv, &bt, &bpr, &b0, &b1]), g.group(mv, &[&consts, &slots, &bp, &bv, &bt, &bpr, &b1, &b0])];
-        Some(GpuCloth { pos, vel, consts, slots, slot, slots_for: (0, -1.0), solve, mv, g_solve, g_move, _keep: vec![tgt, prev, s0, s1, off, springs] })
+        let kick = v4("tissu-impulsion");
+        let bk = one(&kick);
+        let g_move = [g.group(mv, &[&consts, &slots, &bp, &bv, &bt, &bpr, &b0, &b1, &bk]), g.group(mv, &[&consts, &slots, &bp, &bv, &bt, &bpr, &b1, &b0, &bk])];
+        // Niveaux grossiers : chacun a ses colonnes et ses passages avec le niveau d'au-dessus
+        let mut levels = Vec::new();
+        let mut g_rest = None;
+        let mut keep = vec![tgt, prev, s0, s1, off, springs];
+        if t.coarse.is_some() {
+            let res = g.column("tissu-reste", t.n, 16);
+            g_rest = Some(g.group(&progs.rest, &[&consts, &slots, &bp, &bt, &keep[4].pages[0], &keep[5].pages[0], &res.pages[0]]));
+            // Ce que le niveau suivant lit au-dessus de lui : force restante, marque « ne bouge pas », colonne à déplacer
+            let (mut above, mut mark, mut into, mut count) = (res.pages[0].clone(), res.pages[0].clone(), bp.clone(), t.n);
+            keep.push(res);
+            let mut next = t.coarse.as_deref();
+            while let Some(co) = next {
+                let col = |label: &str, len: usize, stride: usize| g.column(label, len.max(1), stride);
+                let (diag, coff, ent) = (col("tissu-niveau-diagonale", co.n, 16), col("tissu-niveau-debuts", co.n, 8), col("tissu-niveau-voisins", co.ent.len(), 16));
+                let (f, d, r) = (col("tissu-niveau-force", co.n, 16), col("tissu-niveau-deplacement", co.n, 16), col("tissu-niveau-reste", co.n, 16));
+                let (up, doff, down) = (col("tissu-remontee", co.up.len(), 32), col("tissu-descente-debuts", co.down_off.len(), 4), col("tissu-descente", co.down.len(), 8));
+                if [&ent, &up, &down].iter().any(|c| c.pages.len() != 1) {
+                    return None;
+                }
+                g.write(&diag, &co.diag);
+                g.write(&coff, &co.off);
+                g.write(&up, &co.up);
+                g.write(&doff, &co.down_off);
+                if !co.ent.is_empty() {
+                    g.write(&ent, &co.ent);
+                }
+                if !co.down.is_empty() {
+                    g.write(&down, &co.down);
+                }
+                let ls = g.uniform("tissu-niveau-cases", slot * (co.groups.len() + 2) as u64);
+                let mut data = vec![0u8; slot as usize * (co.groups.len() + 2)];
+                let mut put = |k: usize, v: [u32; 4]| data[k * slot as usize..][..16].copy_from_slice(gpusim::bytes_of(&v));
+                for (k, r) in co.groups.iter().enumerate() {
+                    put(k, [r[0], r[1], 0, 0]);
+                }
+                put(co.groups.len(), [0, co.n as u32, 0, 0]);
+                put(co.groups.len() + 1, [0, count as u32, 0, 0]);
+                g.queue.write_buffer(&ls, 0, &data);
+                let g_relax = g.group(&progs.coarse, &[&consts, &ls, &diag.pages[0], &coff.pages[0], &ent.pages[0], &f.pages[0], &d.pages[0], &r.pages[0]]);
+                let g_down = g.group(&progs.down, &[&ls, &above, &doff.pages[0], &down.pages[0], &f.pages[0], &d.pages[0]]);
+                let g_up = g.group(&progs.up, &[&ls, &up.pages[0], &d.pages[0], &mark, &into]);
+                (above, mark, into) = (r.pages[0].clone(), f.pages[0].clone(), d.pages[0].clone());
+                levels.push(GpuLevel { n: co.n as u64, above: count as u64, groups: co.groups.iter().map(|r| r[1] as u64).collect(), _slots: ls, g_relax, g_down, g_up, _keep: vec![diag, coff, ent, f, d, r, up, doff, down] });
+                count = co.n;
+                next = co.coarse.as_deref();
+            }
+        }
+        Some(GpuCloth { pos, vel, kick, consts, slots, slot, slots_for: (0, -1.0), solve, mv, g_solve, g_move, g_rest, levels, _keep: keep })
+    }
+
+    /// Le cycle en V à partir du niveau grossier `l`, dans une passe déjà ouverte. Même suite que `cycle`.
+    fn cycle(&self, g: &Gpu, pass: &mut wgpu::ComputePass, l: usize, depth: usize, cy: &Cycle) {
+        let progs = programs(g);
+        let at = |k: usize| [(k as u64 * self.slot) as u32];
+        let lv = &self.levels[l];
+        let all = at(lv.groups.len());
+        g.launch(pass, &progs.down.pipelines[0], &lv.g_down, &all, lv.n);
+        let relax = |pass: &mut wgpu::ComputePass, times: usize| {
+            for _ in 0..times {
+                for (gi, count) in lv.groups.iter().enumerate() {
+                    g.launch(pass, &progs.coarse.pipelines[0], &lv.g_relax, &at(gi), *count);
+                }
+            }
+        };
+        if l + 1 >= depth {
+            relax(pass, cy.bottom);
+        } else {
+            relax(pass, cy.coarse);
+            g.launch(pass, &progs.coarse.pipelines[1], &lv.g_relax, &all, lv.n);
+            self.cycle(g, pass, l + 1, depth, cy);
+            relax(pass, cy.coarse);
+        }
+        g.launch(pass, &progs.up.pipelines[0], &lv.g_up, &at(lv.groups.len() + 1), lv.above);
     }
 
     /// Envoie à la carte tout un pas d'image : sous-pas, itérations, une passe par plage.
@@ -1060,9 +1916,14 @@ impl GpuCloth {
         let at = |k: usize| [(k as u64 * self.slot) as u32];
         let all = at(groups);
         let mut enc = g.device.create_command_encoder(&Default::default());
+        let depth = p.levels.min(self.levels.len());
         for _ in 0..sub {
             let mut pass = enc.begin_compute_pass(&Default::default());
             g.launch(&mut pass, &self.mv.pipelines[0], &self.g_move[0], &all, t.n as u64);
+            if let Some(rest) = self.g_rest.as_ref().filter(|_| depth > 0) {
+                g.launch(&mut pass, &programs(g).rest.pipelines[0], rest, &all, t.n as u64);
+                self.cycle(g, &mut pass, 0, depth, &p.cycle);
+            }
             for k in 1..=per {
                 for (gi, r) in t.groups.iter().enumerate() {
                     g.launch(&mut pass, &self.solve.pipelines[0], &self.g_solve, &at(gi), r[1] as u64);
@@ -1089,11 +1950,13 @@ pub struct Cloth {
     /// État connu côté processeur, dans l'ordre de rangement
     pos: Vec<V4>,
     vel: Vec<V4>,
+    /// Changement de vitesse demandé pour le prochain pas (vide : aucun)
+    kick: Vec<V4>,
     gpu: Option<GpuCloth>,
-    /// Ce que la carte n'a pas encore reçu (positions, vitesses)
-    send: (bool, bool),
+    /// Ce que la carte n'a pas encore reçu (positions, vitesses, impulsion)
+    send: (bool, bool, bool),
     /// Pas envoyés à la carte et pas encore relus : de quoi les refaire sur le processeur si elle échoue
-    ahead: Vec<(Consts, Params)>,
+    ahead: Vec<(Consts, Params, Vec<V4>)>,
 }
 
 impl Cloth {
@@ -1108,7 +1971,7 @@ impl Cloth {
             }
         }
         let gpu = if on_gpu { gpusim::gpu().and_then(|g| GpuCloth::new(g, &topo)) } else { None };
-        let mut cloth = Cloth { topo, origin, pos: vec![[0.0; 4]; n], vel: vec![[0.0; 4]; n], gpu, send: (true, true), ahead: Vec::new() };
+        let mut cloth = Cloth { topo, origin, pos: vec![[0.0; 4]; n], vel: vec![[0.0; 4]; n], kick: Vec::new(), gpu, send: (true, true, false), ahead: Vec::new() };
         cloth.set_positions(positions);
         cloth
     }
@@ -1134,6 +1997,7 @@ impl Cloth {
         self.send.0 = true;
     }
 
+    /// Impose les vitesses : pour un état de départ, ou une reprise.
     pub fn set_velocities(&mut self, v: &[Vec<f32>; 3]) {
         self.sync();
         let perm = &self.topo.perm;
@@ -1141,7 +2005,23 @@ impl Cloth {
             let i = i as usize;
             *x = [v[0][i], v[1][i], v[2][i], 0.0];
         });
+        self.kick.clear();
         self.send.1 = true;
+    }
+
+    /// Les vitesses voulues au prochain pas, après les forces de l'image (gravité, vent, frein).
+    /// L'écart avec les vitesses courantes est appliqué par parts égales à chaque sous-pas, comme
+    /// une force qui agit pendant toute l'image : appliqué d'un coup, il secouerait le tissu à
+    /// chaque image, d'autant plus fort que le tissu est raide.
+    pub fn push_velocities(&mut self, v: &[Vec<f32>; 3]) {
+        self.sync();
+        let (perm, vel) = (&self.topo.perm, &self.vel);
+        self.kick.resize(self.topo.n, [0.0; 4]);
+        self.kick.par_iter_mut().zip(perm.par_iter()).zip(vel.par_iter()).for_each(|((k, &i), old)| {
+            let i = i as usize;
+            *k = [v[0][i] - old[0], v[1][i] - old[1], v[2][i] - old[2], 0.0];
+        });
+        self.send.2 = true;
     }
 
     /// Avance d'une image. Sur la carte, rend la main dès que le travail est envoyé : `read`
@@ -1150,7 +2030,11 @@ impl Cloth {
         if self.topo.n == 0 || dt <= 0.0 {
             return;
         }
-        let c = Consts::new(p, dt, self.origin, self.topo.rest_scale);
+        let mut c = Consts::new(p, dt, self.origin, self.topo.rest_scale);
+        if !self.kick.is_empty() {
+            c.kick = 1.0 / p.split().0 as f32;
+        }
+        let kick = std::mem::take(&mut self.kick);
         if let (Some(gc), Some(g)) = (self.gpu.as_mut(), gpusim::gpu()) {
             if self.send.0 {
                 g.write(&gc.pos, &self.pos);
@@ -1158,13 +2042,16 @@ impl Cloth {
             if self.send.1 {
                 g.write(&gc.vel, &self.vel);
             }
-            self.send = (false, false);
+            if self.send.2 && !kick.is_empty() {
+                g.write(&gc.kick, &kick);
+            }
+            self.send = (false, false, false);
             gc.step(g, &self.topo, &c, p);
-            self.ahead.push((c, *p));
+            self.ahead.push((c, *p, kick));
             return;
         }
         self.gpu = None;
-        step_cpu(&self.topo, &mut self.pos, &mut self.vel, &c, p);
+        step_cpu(&self.topo, &mut self.pos, &mut self.vel, (!kick.is_empty()).then_some(&kick[..]), &c, p);
     }
 
     /// Demande à la carte l'état courant, sans attendre. `None` : rien à relire (calcul sur le processeur).
@@ -1188,9 +2075,9 @@ impl Cloth {
             }
             None => {
                 self.gpu = None;
-                self.send = (true, true);
-                for (c, p) in std::mem::take(&mut self.ahead) {
-                    step_cpu(&self.topo, &mut self.pos, &mut self.vel, &c, &p);
+                self.send = (true, true, false);
+                for (c, p, kick) in std::mem::take(&mut self.ahead) {
+                    step_cpu(&self.topo, &mut self.pos, &mut self.vel, (!kick.is_empty()).then_some(&kick[..]), &c, &p);
                 }
             }
         }
@@ -1296,14 +2183,17 @@ pub type Other<'a> = &'a dyn Fn(&mut [Vec<f32>; 3], &mut [Vec<f32>; 3], &[[u32; 
 /// Une ligne de la comparaison : un solveur, un budget de passes par image.
 #[derive(Clone, Debug)]
 pub struct Row {
-    pub vbd: bool,
+    /// « XPBD », « VBD », « VBD + niveaux »
+    pub solver: &'static str,
     pub budget: usize,
+    /// Ce que le pas coûte vraiment, en passes du niveau fin (octets lus et écrits) : les
+    /// corrections grossières sont comptées, le budget est donc le même pour tous
+    pub cost: f32,
+    pub substeps: usize,
     /// Tissu pendu : allongement total sous son poids (0,01 = 1 %)
     pub elongation: f32,
     /// Raideur obtenue, en part de la raideur demandée (1 : convergé)
     pub stiffness: f32,
-    /// Énergie élastique du tissu pendu, en joules
-    pub energy: f32,
     /// Tissu qui tombe sur une boule : pire allongement d'une arête pendant la chute, et moyenne à la fin
     pub worst: f32,
     pub mean: f32,
@@ -1313,15 +2203,28 @@ pub struct Row {
 pub struct Comparison {
     pub points: usize,
     pub stiffness: f32,
+    /// Niveaux grossiers du tissu comparé
+    pub levels: usize,
     /// Tissu pendu calculé jusqu'à convergence : allongement et énergie élastique
     pub reference: (f32, f32),
     pub rows: Vec<Row>,
 }
 
-/// VBD contre un autre solveur, à nombre égal de passes par image, sur un tissu de `n` × `n`
-/// sommets et de 2 m de côté. Deux scènes : le tissu pendu par un bord (quelle raideur obtient-on
-/// vraiment ?), et le tissu qui tombe sur une boule (de combien s'étire-t-il ?).
-/// Le VBD tourne ici sur le processeur : la carte donne le même résultat (essai `carte_contre_processeur`).
+/// Le découpage conseillé pour un budget de passes par image, avec ou sans niveaux grossiers :
+/// (sous-pas, passes du niveau fin par image). Sans niveaux, beaucoup de sous-pas d'une passe.
+/// Avec, chaque sous-pas fait une correction grossière puis une passe : il y en a donc moins.
+pub fn split_budget(t: &Topo, budget: usize, bending: bool, levels: usize) -> (usize, usize) {
+    if levels.min(t.levels()) == 0 {
+        return (substeps_for(budget), budget);
+    }
+    let sub = (budget as f64 / (1.0 + t.correction_cost(bending, &Cycle::default(), levels))).round().max(1.0) as usize;
+    (sub, sub)
+}
+
+/// VBD (sans, puis avec niveaux grossiers) contre un autre solveur, à nombre égal de passes par
+/// image, sur un tissu de `n` × `n` sommets et de 2 m de côté. Deux scènes : le tissu pendu par un
+/// bord (quelle raideur obtient-on vraiment ?), et le tissu qui tombe sur une boule (de combien
+/// s'étire-t-il ?). Le VBD tourne ici sur le processeur : la carte donne le même résultat (essai `carte_contre_processeur`).
 pub fn compare(n: usize, budgets: &[usize], other: Other) -> Comparison {
     let k = 1000.0;
     let dt = 1.0 / 24.0;
@@ -1333,10 +2236,11 @@ pub fn compare(n: usize, budgets: &[usize], other: Other) -> Comparison {
     let rest = rest_lengths(&edges, &flat);
     // Le même tissu, pendu : la première rangée en haut, les autres dessous
     let hung = [flat[0].clone(), flat[2].iter().map(|z| 2.0 - (z + 1.0)).collect(), vec![0.0; n * n]];
+    let build = |start: &[Vec<f32>; 3]| Topo::build_with(n * n, &edges, &rest, start, &pinned, None, Layout::Colors, true).with_levels(MAX_LEVELS);
     let run = |vbd: bool, start: &[Vec<f32>; 3], par: &Params, frames: usize, see: &mut dyn FnMut(usize, &[Vec<f32>; 3])| {
         let mut pos = start.clone();
         let mut vel = [vec![0.0; n * n], vec![0.0; n * n], vec![0.0; n * n]];
-        let mut cloth = vbd.then(|| Cloth::new(Topo::build(n * n, &edges, &rest, start, &pinned, None), start, false));
+        let mut cloth = vbd.then(|| Cloth::new(build(start), start, false));
         for f in 0..frames {
             for (i, y) in vel[1].iter_mut().enumerate() {
                 if !pinned[i] {
@@ -1345,7 +2249,7 @@ pub fn compare(n: usize, budgets: &[usize], other: Other) -> Comparison {
             }
             match cloth.as_mut() {
                 Some(c) => {
-                    c.set_velocities(&vel);
+                    c.push_velocities(&vel);
                     c.step(dt, par);
                     (pos, vel) = c.read();
                 }
@@ -1366,8 +2270,7 @@ pub fn compare(n: usize, budgets: &[usize], other: Other) -> Comparison {
             0.5 * k * (l - r) * (l - r)
         }).sum::<f32>()
     };
-    // Tissu pendu : 72 images pour qu'il se pose, mesure moyennée sur les 12 dernières (la gravité
-    // arrive une fois par image, le tissu frémit un peu entre deux)
+    // Tissu pendu : 72 images pour qu'il se pose, mesure moyennée sur les 12 dernières
     let hang = |vbd: bool, par: &Params| {
         let (mut e, mut j) = (0.0, 0.0);
         run(vbd, &hung, par, 72, &mut |f, p| {
@@ -1380,23 +2283,28 @@ pub fn compare(n: usize, budgets: &[usize], other: Other) -> Comparison {
     };
     let still = Params { stiffness: k, bending: 0.0, damping: 0.3, ..Default::default() };
     let fall = Params { stiffness: k, bending: 0.0, damping: 0.02, floor: Some(0.0), ball: Some(([0.0, 0.7, 0.0], 0.55)), ..Default::default() };
+    let topo = build(&flat);
     // Référence : le tissu pendu, avec assez de passes pour que le résultat ne bouge plus
-    let mut out = Comparison { points: n * n, stiffness: k, reference: hang(true, &Params { iterations: 2048, substeps: 16, ..still }), rows: vec![] };
+    let mut out = Comparison { points: n * n, stiffness: k, levels: topo.levels(), reference: hang(true, &Params { iterations: 2048, substeps: 16, ..still }), rows: vec![] };
     for &budget in budgets {
-        for vbd in [false, true] {
-            // L'autre solveur découpe lui-même ses passes en sous-pas ; le VBD prend le découpage
-            // qui lui réussit le mieux à peu de passes : beaucoup de sous-pas, peu d'itérations
-            let with = |p: Params| Params { iterations: budget, substeps: substeps_for(budget), ..p };
-            let (e, j) = hang(vbd, &with(still));
+        for (solver, vbd, levels) in [("XPBD", false, 0), ("VBD", true, 0), ("VBD + niveaux", true, MAX_LEVELS)] {
+            if levels > 0 && topo.levels() == 0 {
+                continue;
+            }
+            // L'autre solveur découpe lui-même ses passes en sous-pas ; le VBD prend le découpage qui lui réussit le mieux
+            let (substeps, iterations) = if vbd { split_budget(&topo, budget, false, levels) } else { (substeps_for(budget), budget) };
+            let with = |p: Params| Params { iterations, substeps, levels, ..p };
+            let cost = iterations as f32 + if levels > 0 { substeps as f32 * topo.correction_cost(false, &Cycle::default(), levels) as f32 } else { 0.0 };
+            let e = hang(vbd, &with(still)).0;
             let mut worst = 0.0f32;
             let q = run(vbd, &flat, &with(fall), 60, &mut |_, p| worst = worst.max(stretch(&edges, &rest, p).0));
-            out.rows.push(Row { vbd, budget, elongation: e, stiffness: if e > 1e-9 { (out.reference.0 / e).min(1.0) } else { 1.0 }, energy: j, worst, mean: stretch(&edges, &rest, &q).1 });
+            out.rows.push(Row { solver, budget, cost, substeps, elongation: e, stiffness: if e > 1e-9 { out.reference.0 / e } else { 1.0 }, worst, mean: stretch(&edges, &rest, &q).1 });
         }
     }
     out
 }
 
-/// Nombre de sous-pas conseillé pour un budget de passes par image.
+/// Nombre de sous-pas conseillé pour un budget de passes par image, sans niveaux grossiers.
 pub fn substeps_for(budget: usize) -> usize {
     budget.clamp(1, 32)
 }
@@ -1414,7 +2322,7 @@ mod tests {
         let (p, e) = grid(n, n, 2.0, 1.6);
         let rest = rest_lengths(&e, &p);
         let pinned: Vec<bool> = (0..n * n).map(|i| i / n == 0).collect();
-        let topo = Topo::build_with(n * n, &e, &rest, &p, &pinned, None, layout, true);
+        let topo = Topo::build_with(n * n, &e, &rest, &p, &pinned, None, layout, true).with_levels(MAX_LEVELS);
         (Cloth::new(topo, &p, on_gpu), e, rest)
     }
 
@@ -1423,7 +2331,7 @@ mod tests {
         for _ in 0..frames {
             let (_, mut v) = c.read();
             v[1].iter_mut().for_each(|y| *y -= 9.8 / 24.0);
-            c.set_velocities(&v);
+            c.push_velocities(&v);
             c.step(1.0 / 24.0, par);
         }
         c.read().0
@@ -1518,6 +2426,85 @@ mod tests {
         assert!(gap < 2e-3, "écart {gap}");
     }
 
+    /// Les niveaux grossiers : poids, matrices, et ce qu'ils gardent du niveau d'au-dessus.
+    #[test]
+    fn niveaux_grossiers_coherents() {
+        let (c, _, _) = hung_as(40, false, Layout::Colors);
+        let t = &c.topo;
+        assert!(t.levels() >= 3, "{} niveaux", t.levels());
+        let (mut above, mut next) = (t.n, t.coarse.as_deref());
+        let mut mass: f32 = t.mass.iter().sum();
+        while let Some(co) = next {
+            assert!(co.n * 2 < above && co.up.len() == above, "{} sommets pour {above}", co.n);
+            let covered: u32 = co.groups.iter().map(|g| g[1]).sum();
+            assert_eq!(covered as usize, co.n);
+            let group_of = |a: u32| co.groups.iter().position(|g| a >= g[0] && a < g[0] + g[1]);
+            let mut total = 0.0;
+            for a in 0..co.n {
+                let list = &co.ent[co.off[a][0] as usize..][..co.off[a][1] as usize];
+                // Deux sommets liés par la matrice n'ont jamais la même couleur
+                assert!(list.iter().all(|e| group_of(e[0]) != group_of(a as u32)));
+                // Étirement : la diagonale domine (un déplacement d'ensemble ne coûte que près des bords fixes)
+                let s_off: f32 = list.iter().map(|e| f32::from_bits(e[2])).sum();
+                assert!(co.diag[a][1] > 0.0 && co.diag[a][1] + s_off > -1e-3 * co.diag[a][1], "ligne {a} : {} + {s_off}", co.diag[a][1]);
+                total += co.diag[a][0] + list.iter().map(|e| f32::from_bits(e[1])).sum::<f32>();
+            }
+            // Chaque sommet d'au-dessus suit des sommets de ce niveau, avec des poids dont la somme ne dépasse pas 1
+            for u in &co.up {
+                let w: f32 = (0..4).map(|k| f32::from_bits(u[4 + k])).sum();
+                assert!((0.0..=1.0 + 1e-5).contains(&w) && (0..4).all(|k| (u[k] as usize) < co.n));
+            }
+            // La masse vue par le niveau grossier ne dépasse pas celle d'au-dessus (elle baisse un peu près des bords fixes)
+            assert!(total <= mass * 1.0001 && total > mass * 0.7, "masse {total} pour {mass}");
+            mass = total;
+            (above, next) = (co.n, co.coarse.as_deref());
+        }
+    }
+
+    /// Tissu pendu : à nombre de passes égal, la correction grossière donne un tissu bien plus raide.
+    #[test]
+    fn niveaux_raidissent_a_petit_budget() {
+        let n = 32;
+        let sag = |par: &Params| {
+            let (mut c, _, _) = hung_as(n, false, Layout::Colors);
+            // Le même tissu, pendu : la première rangée en haut, les autres dessous
+            let (flat, _) = grid(n, n, 2.0, 1.6);
+            c.set_positions(&[flat[0].clone(), flat[2].iter().map(|z| 1.0 - z).collect(), vec![0.0; n * n]]);
+            let p = fall(&mut c, 48, par);
+            (2.0 - p[1][n * (n - 1)..].iter().sum::<f32>() / n as f32) / 2.0 - 1.0
+        };
+        let base = Params { bending: 0.0, damping: 0.3, ..Default::default() };
+        let exact = sag(&Params { iterations: 1024, substeps: 8, ..base });
+        let plain = sag(&Params { iterations: 16, substeps: 16, ..base });
+        // Quatre sous-pas d'une passe et d'une correction : le même coût que seize passes
+        let multi = Params { iterations: 4, substeps: 4, levels: MAX_LEVELS, ..base };
+        let (c, _, _) = hung_as(n, false, Layout::Colors);
+        let cost = 4.0 * (1.0 + c.topo.correction_cost(false, &multi.cycle, multi.levels));
+        assert!(cost < 18.0 && split_budget(&c.topo, 16, false, MAX_LEVELS) == (4, 4), "coût {cost} passes");
+        let levels = sag(&multi);
+        assert!(exact > 0.0 && plain > exact * 8.0, "sans niveaux : {plain} pour {exact}");
+        assert!(levels < exact * 2.5 && levels > exact * 0.9, "avec niveaux : {levels} pour {exact}");
+    }
+
+    /// La correction grossière ne fait jamais diverger le tissu : il se balance, se plie, se
+    /// comprime et tombe sur des obstacles avec peu de sous-pas, et reste fini et peu étiré.
+    #[test]
+    fn niveaux_stables_tissu_plie() {
+        for (floor, ball) in [(None, None), (Some(0.0), Some(([0.0, 0.7, 0.0], 0.55)))] {
+            for (it, sub, bending) in [(2, 2, 0.0), (4, 4, 1e-4), (8, 4, 1e-2)] {
+                let (mut c, e, rest) = hung_as(28, false, Layout::Colors);
+                let par = Params { iterations: it, substeps: sub, bending, floor, ball, levels: MAX_LEVELS, ..Default::default() };
+                let mut worst = 0.0f32;
+                for _ in 0..12 {
+                    let p = fall(&mut c, 5, &par);
+                    assert!(p.iter().all(|a| a.iter().all(|x| x.is_finite())));
+                    worst = worst.max(stretch(&e, &rest, &p).0);
+                }
+                assert!(worst < 1.0, "arête étirée de {} % ({it} passes, {sub} sous-pas)", worst * 100.0);
+            }
+        }
+    }
+
     #[test]
     fn tchebychev_bride_quand_peu_d_iterations() {
         let p = |it, sub| Params { iterations: it, substeps: sub, rho: 0.9, ..Default::default() };
@@ -1583,27 +2570,36 @@ mod tests {
             out
         };
         let gap = worst_gap(&run([0.0; 3]), &run([1000.0, 200.0, -500.0]));
-        // À un kilomètre, un f32 ne distingue plus que 0,06 mm : l'écart vient de l'aller-retour, pas du calcul
-        assert!(gap < 2e-3, "écart {gap}");
+        // À un kilomètre, un f32 ne distingue plus que 0,06 mm : l'écart vient de l'aller-retour, que la
+        // chute sur la boule amplifie, pas du calcul (fait en positions absolues, il dépasserait le décimètre)
+        assert!(gap < 1.5e-2, "écart {gap}");
     }
 
     /// La règle du socle : le noyau de la carte et sa version processeur donnent le même tissu,
-    /// dans les deux rangements.
+    /// dans les deux rangements, avec et sans niveaux grossiers.
     #[test]
     fn carte_contre_processeur() {
         if gpusim::gpu().is_none() {
             return;
         }
-        // Peu d'itérations (sans accélération), puis beaucoup (avec) ; sol, boule et boîte
+        // Peu d'itérations (sans accélération), beaucoup (avec), puis avec un, deux, trois et tous les niveaux
         for layout in [Layout::Colors, Layout::Clusters] {
-            for (it, sub) in [(16, 8), (48, 4)] {
-                let par = Params { iterations: it, substeps: sub, floor: Some(0.0), ball: Some(([0.3, 0.9, 0.2], 0.5)), cube: Some(([-0.6, 1.0, 0.0], [0.25, 0.3, 0.4])), ..Default::default() };
-                let (mut cpu, _, _) = hung_as(20, false, layout);
-                let (mut gpu, _, _) = hung_as(20, true, layout);
-                assert!(gpu.on_gpu() && !cpu.on_gpu());
-                let gap = worst_gap(&fall(&mut cpu, 8, &par), &fall(&mut gpu, 8, &par));
-                assert!(gap < 5e-4, "écart {gap} ({layout:?}, {it} passes, {sub} sous-pas)");
-                assert!(gpu.on_gpu());
+            for (it, sub, levels) in [(16, 8, 0), (48, 4, 0), (4, 4, 1), (4, 4, 2), (4, 4, 3), (8, 4, MAX_LEVELS)] {
+                for obstacles in [false, true] {
+                    let mut par = Params { iterations: it, substeps: sub, levels, ..Default::default() };
+                    if obstacles {
+                        (par.floor, par.ball, par.cube) = (Some(0.0), Some(([0.3, 0.9, 0.2], 0.5)), Some(([-0.6, 1.0, 0.0], [0.25, 0.3, 0.4])));
+                    }
+                    let (mut cpu, _, _) = hung_as(20, false, layout);
+                    let (mut gpu, _, _) = hung_as(20, true, layout);
+                    assert!(gpu.on_gpu() && !cpu.on_gpu());
+                    let gap = worst_gap(&fall(&mut cpu, 8, &par), &fall(&mut gpu, 8, &par));
+                    // Sans obstacle, le même calcul à l'arrondi près. Un contact qui bascule amplifie
+                    // l'arrondi, davantage quand la correction grossière le propage à tout le tissu.
+                    let allowed = if !obstacles { 2e-5 } else if levels == 0 { 5e-4 } else { 3e-3 };
+                    assert!(gap < allowed, "écart {gap} ({layout:?}, {it} passes, {sub} sous-pas, {levels} niveaux, obstacles : {obstacles})");
+                    assert!(gpu.on_gpu());
+                }
             }
         }
     }
@@ -1621,7 +2617,7 @@ mod tests {
         fall(&mut gpu, 2, &par);
         let (_, mut v) = gpu.read();
         v[1].iter_mut().for_each(|y| *y -= 9.8 / 24.0);
-        gpu.set_velocities(&v);
+        gpu.push_velocities(&v);
         gpu.step(1.0 / 24.0, &par);
         // La relecture échoue : on fait comme si la carte n'avait rien rendu
         gpu.accept(None);

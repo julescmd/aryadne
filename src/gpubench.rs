@@ -142,6 +142,14 @@ pub struct Tissu {
     pub plages: usize,
     /// Octets par passe du même tissu avant le rangement compact
     pub octets_avant: f64,
+    /// Niveaux grossiers, et coût d'une correction en passes du niveau fin
+    pub niveaux: usize,
+    pub correction: f64,
+    /// Une image au budget de 16 passes : sans niveaux (16 sous-pas d'une passe), puis avec
+    /// (`sous_pas_niveaux` sous-pas d'une correction et d'une passe)
+    pub image16_ms: f64,
+    pub image16_niveaux_ms: f64,
+    pub sous_pas_niveaux: usize,
     /// Calculé sur la carte (sinon le tissu n'y tient pas, ou il n'y a pas de carte)
     pub carte: bool,
     /// Préparation au chargement : voisinages, couleurs, rangement
@@ -165,10 +173,18 @@ fn tissu(cote: usize, images: usize, rangement: crate::gpucloth::Layout) -> Tiss
     let rest = rest_lengths(&e, &p);
     let pinned: Vec<bool> = (0..n).map(|i| i / cote == 0).collect();
     let t = Instant::now();
-    let topo = Topo::build_with(n, &e, &rest, &p, &pinned, None, rangement, true);
+    let topo = Topo::build_with(n, &e, &rest, &p, &pinned, None, rangement, true).with_levels(crate::gpucloth::MAX_LEVELS);
     let preparation_ms = t.elapsed().as_secs_f64() * 1000.0;
     let (couleurs, octets, memoire) = (topo.colors(), topo.bytes_per_pass(true, true) as f64, topo.gpu_bytes());
     let (octets_avant, plages) = (topo.bytes_per_pass_before() as f64, topo.groups.len());
+    // Budget de 16 passes par image, sans puis avec niveaux grossiers : le découpage conseillé pour chacun
+    let niveaux = topo.levels();
+    let correction = topo.correction_cost(true, &Default::default(), niveaux);
+    let decoupe = |levels: usize| {
+        let (substeps, iterations) = crate::gpucloth::split_budget(&topo, 16, true, levels);
+        Params { iterations, substeps, levels, floor: Some(0.0), ball: Some(([0.0, 0.7, 0.0], 0.55)), ..Default::default() }
+    };
+    let (seize, seize_niveaux) = (decoupe(0), decoupe(niveaux));
     let par = Params { iterations: PASSES, substeps: 4, floor: Some(0.0), ball: Some(([0.0, 0.7, 0.0], 0.55)), ..Default::default() };
     let dt = 1.0 / 24.0;
     let chute = [vec![0.0; n], vec![-0.4; n], vec![0.0; n]];
@@ -193,10 +209,23 @@ fn tissu(cote: usize, images: usize, rangement: crate::gpucloth::Layout) -> Tiss
         g.finish();
     }
     let passe_ms = t.elapsed().as_secs_f64() * 1000.0 / (images * PASSES) as f64;
+    let mut image = |par: &Params| {
+        c.step(dt, par);
+        c.sync();
+        let t = Instant::now();
+        for _ in 0..images {
+            c.step(dt, par);
+        }
+        if let Some(g) = crate::gpusim::gpu().filter(|_| carte) {
+            g.finish();
+        }
+        t.elapsed().as_secs_f64() * 1000.0 / images as f64
+    };
+    let (image16_ms, image16_niveaux_ms) = (image(&seize), if niveaux > 0 { image(&seize_niveaux) } else { 0.0 });
     let t = Instant::now();
     c.sync();
     let relecture_ms = t.elapsed().as_secs_f64() * 1000.0;
-    Tissu { points: n, couleurs, rangement, plages, octets_avant, carte: carte && c.on_gpu(), preparation_ms, passe_ms, relecture_ms, passe_processeur_ms, octets, memoire }
+    Tissu { points: n, couleurs, rangement, plages, octets_avant, niveaux, correction, image16_ms, image16_niveaux_ms, sous_pas_niveaux: seize_niveaux.substeps, carte: carte && c.on_gpu(), preparation_ms, passe_ms, relecture_ms, passe_processeur_ms, octets, memoire }
 }
 
 /// Le même petit tissu sur la carte et sur le processeur : écart maximal des positions après trois images.
@@ -215,7 +244,7 @@ fn ecart_tissu() -> Option<f32> {
         for _ in 0..3 {
             let (_, mut v) = c.read();
             v[1].iter_mut().for_each(|y| *y -= 9.8 / 24.0);
-            c.set_velocities(&v);
+            c.push_velocities(&v);
             c.step(1.0 / 24.0, &par);
         }
         Some(c.read().0)
@@ -473,7 +502,7 @@ pub fn run(quick: bool, progress: &dyn Fn(String)) -> Result<Rapport, String> {
     }
     if !quick {
         progress(crate::i18n::t("comparaison du tissu avec le XPBD, moins d'une minute"));
-        r.comparaison = Some(crate::geo::cloth_comparison(40, &[16, 64, 256]));
+        r.comparaison = Some(crate::geo::cloth_comparison(40, &[16, 32, 64]));
     }
     Ok(r)
 }
@@ -513,6 +542,9 @@ impl Rapport {
             let ou = tm(if m.carte { "carte graphique" } else { "processeur" });
             s += &format!("- {} {}, {} ({} {}, {} {}, {}) : {:.3} ms {}, {:.2} ns {}, ~{:.0} {}\n", m.points, tm("sommets"), tm(nom_rangement(m.rangement)), m.couleurs, tm("couleurs"), m.plages, tm("lancements par passe"), ou, m.passe_ms, tm("par passe"), m.passe_ms * 1e6 / m.points as f64, tm("par sommet et par passe"), m.octets / (m.passe_ms / 1000.0) / 1e9, tm("Go/s"));
             s += &format!("  {} : {:.0} ({} : {:.0}, ÷{:.1})\n", t("octets lus et écrits par sommet et par passe"), m.octets / m.points as f64, tm("avant le rangement compact"), m.octets_avant / m.points as f64, m.octets_avant / m.octets);
+            if m.niveaux > 0 {
+                s += &format!("  {} : {:.1} ms · {} ({} {}, {} {}, {} {:.1} {}) : {:.1} ms\n", t("une image au budget de 16 passes"), m.image16_ms, tm("avec niveaux grossiers"), m.niveaux, tm("niveaux"), m.sous_pas_niveaux, tm("sous-pas"), tm("une correction coûte"), m.correction, tm("passes"), m.image16_niveaux_ms);
+            }
             s += &format!("  {} : {:.0} {} · {} : {:.1} ms · {} : {:.1} ms\n", t("à 24 images par seconde"), 1000.0 / 24.0 / m.passe_ms, tm("passes par image"), tm("une image de 32 passes"), m.passe_ms * PASSES as f64, tm("relecture"), m.relecture_ms);
             s += &format!("  {} : {:.2} ms {} (×{:.1}) · {} : {:.0} ms · {} : {:.0} Mo\n", t("processeur"), m.passe_processeur_ms, tm("par passe"), m.passe_processeur_ms / m.passe_ms, tm("préparation"), m.preparation_ms, tm("mémoire sur la carte"), m.memoire as f64 / 1e6);
         }
@@ -520,10 +552,15 @@ impl Rapport {
             s += &format!("{} : {:.1e} m\n", t("écart du tissu entre la carte et le processeur (contrôle)"), e);
         }
         if let Some(c) = &self.comparaison {
-            s += &format!("\n{} ({} {}, {} N/m) :\n", t("VBD contre XPBD, à nombre de passes égal"), c.points, tm("sommets"), c.stiffness);
+            s += &format!("\n{} ({} {}, {} N/m, {} {}) :\n", t("VBD, sans et avec niveaux grossiers, contre XPBD, à nombre de passes égal"), c.points, tm("sommets"), c.stiffness, c.levels, tm("niveaux grossiers"));
             s += &format!("{} : {:.3} %, {:.4} J\n", t("tissu pendu, calculé jusqu'au bout : allongement, énergie élastique"), c.reference.0 * 100.0, c.reference.1);
+            let mut budget = 0;
             for row in &c.rows {
-                s += &format!("- {} {:3} {} : {} {:5.1} %, {} {:.3} %, {} {:.4} J · {} : {} {:.1} %, {} {:.2} %\n", if row.vbd { "VBD " } else { "XPBD" }, row.budget, tm("passes"), tm("raideur obtenue"), row.stiffness * 100.0, tm("allongement"), row.elongation * 100.0, tm("énergie"), row.energy, tm("chute sur une boule"), tm("pire arête"), row.worst * 100.0, tm("moyenne"), row.mean * 100.0);
+                if row.budget != budget {
+                    budget = row.budget;
+                    s += &format!("{} {} :\n", budget, tm("passes par image"));
+                }
+                s += &format!("- {:13} ({:2} {}, {} {:.1}) : {} {:5.1} %, {} {:.3} % · {} : {} {:.1} %, {} {:.2} %\n", row.solver, row.substeps, tm("sous-pas"), tm("coût réel"), row.cost, tm("raideur obtenue"), row.stiffness * 100.0, tm("allongement"), row.elongation * 100.0, tm("chute sur une boule"), tm("pire arête"), row.worst * 100.0, tm("moyenne"), row.mean * 100.0);
             }
         }
         for n in &self.notes {
@@ -647,7 +684,7 @@ mod tests {
         let cote = std::env::var("ARY_COTE").ok().and_then(|s| s.parse().ok()).unwrap_or(250);
         for rangement in [crate::gpucloth::Layout::Colors, crate::gpucloth::Layout::Clusters] {
             let m = super::tissu(cote, 2, rangement);
-            eprintln!("{rangement:?} : {:.3} ms par passe, processeur {:.2} ms, {:.0} octets par sommet (avant {:.0}), {} plages, préparation {:.0} ms, relecture {:.1} ms", m.passe_ms, m.passe_processeur_ms, m.octets / m.points as f64, m.octets_avant / m.points as f64, m.plages, m.preparation_ms, m.relecture_ms);
+            eprintln!("{rangement:?} : {:.3} ms par passe, 16 passes {:.1} ms, avec {} niveaux ({} sous-pas, correction {:.2} passes) {:.1} ms, processeur {:.2} ms, {:.0} octets par sommet (avant {:.0}), {} plages, préparation {:.0} ms, relecture {:.1} ms", m.passe_ms, m.image16_ms, m.niveaux, m.sous_pas_niveaux, m.correction, m.image16_niveaux_ms, m.passe_processeur_ms, m.octets / m.points as f64, m.octets_avant / m.points as f64, m.plages, m.preparation_ms, m.relecture_ms);
         }
     }
 }
