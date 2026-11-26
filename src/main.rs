@@ -95,6 +95,7 @@ mod images;
 mod live;
 mod modifiers;
 mod nodes;
+mod nodeflow;
 mod model3d;
 mod office;
 mod ollama;
@@ -2794,8 +2795,8 @@ impl App {
             if let Some(i) = self.active {
                 self.docs[i].code.goto = Some(String::new());
             }
-        } else if !matches!(self.current().map(|d| &d.content), Some(Content::Paint(_) | Content::Vector(_))) && pressed(Modifiers::COMMAND, Key::G) {
-            // (Dans la Retouche et le vectoriel, Ctrl+G groupe, comme dans Photoshop et Illustrator)
+        } else if !matches!(self.current().map(|d| &d.content), Some(Content::Paint(_) | Content::Vector(_) | Content::Nodes(_))) && pressed(Modifiers::COMMAND, Key::G) {
+            // (Dans la Retouche, le vectoriel et les nodes, Ctrl+G groupe, comme dans Photoshop, Illustrator et Blender)
             self.view = Some(if self.view() == View::Brain { View::Files } else { View::Brain });
         }
         // Ctrl+1, 2, 3… : les étapes du pipeline ; Alt+1, 2, 3… : les outils de l'étape en cours

@@ -204,7 +204,7 @@ enum Src {
 
 /// La pile ramenée à un seul graphe de matériau.
 pub fn flatten(stack: &Stack, root: &str) -> Graph {
-    let mut g = Graph { kind: GraphKind::Material, nodes: vec![], links: vec![], next_id: 0, frames: vec![], stack: None };
+    let mut g = Graph::empty(GraphKind::Material);
     let out = g.add("mat_out", [1400.0, 0.0]);
     let socks: Vec<bool> = crate::nodes::def("mat_out").map(|d| d.inputs.iter().map(|i| matches!(i.1, crate::nodes::Sock::Color)).collect()).unwrap_or_default();
     let defaults: Vec<[f32; 4]> = g.nodes[0].values.clone();

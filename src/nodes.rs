@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 pub type V = [f32; 4];
 
 pub fn is_graph(rel: &str) -> bool {
-    crate::formats::has(rel, "mat") || crate::formats::has(rel, "comp")
+    crate::formats::has(rel, "mat") || crate::formats::has(rel, "comp") || crate::formats::has(rel, "geo")
 }
 
 // ---------- définitions des nodes ----------
@@ -22,12 +22,26 @@ pub fn is_graph(rel: &str) -> bool {
 pub enum GraphKind {
     Material,
     Compositor,
+    /// Géométrie et simulation : des points et leurs attributs, rangés en colonnes
+    Geometry,
 }
 
-#[derive(Clone, Copy, PartialEq)]
+/// Type d'une prise. Dans un matériau ou une image, toutes les valeurs voyagent en quatre nombres ;
+/// le type sert à l'artiste (couleur de la prise, réglage proposé) et à refuser les liens absurdes.
+#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
 pub enum Sock {
     Float,
     Color,
+    /// Trois nombres : position, direction, vitesse
+    Vector,
+    /// Vrai ou faux (0 ou 1)
+    Bool,
+    /// Nombre entier
+    Int,
+    /// Géométrie : points, attributs, arêtes
+    Geo,
+    /// Prise libre (renvoi, port à créer) : prend le type de ce qu'on y branche
+    Any,
 }
 
 #[derive(Clone, Copy)]
@@ -40,6 +54,8 @@ pub enum ParamDef {
     Ramp(&'static str),
     /// Courbes de réglage (ensemble, rouge, vert, bleu), tracées à la souris
     Curve(&'static str),
+    /// Une ligne de texte (nom d'attribut, formule), avec sa valeur de départ
+    Line(&'static str, &'static str),
 }
 
 pub struct Def {
@@ -54,6 +70,18 @@ pub struct Def {
     pub comp: bool,
 }
 
+impl Def {
+    /// Ce node a-t-il sa place dans ce genre de graphe ? Un graphe de géométrie prend ses propres
+    /// nodes, plus tous ceux qui calculent une valeur en un point sans lire d'image (les champs).
+    pub fn fits(&self, kind: GraphKind) -> bool {
+        match kind {
+            GraphKind::Material => self.mat,
+            GraphKind::Compositor => self.comp,
+            GraphKind::Geometry => matches!(self.cat, "géométrie" | "simulation") || (self.mat && self.comp && !matches!(self.cat, "sortie" | "shader") && !matches!(self.op, "alphaover" | "param")),
+        }
+    }
+}
+
 const W: V = [1.0, 1.0, 1.0, 1.0];
 const BLACK: V = [0.0, 0.0, 0.0, 1.0];
 const GRAY: V = [0.5, 0.5, 0.5, 1.0];
@@ -62,7 +90,11 @@ const fn f(x: f32) -> V {
 }
 
 const BLEND: &[&str] = &["mélange", "multiplier", "écran", "incrustation", "ajouter", "soustraire", "différence", "éclaircir", "assombrir", "diviser"];
-const MATH: &[&str] = &["ajouter", "soustraire", "multiplier", "diviser", "puissance", "minimum", "maximum", "modulo", "sinus", "cosinus", "absolu", "arrondi inf.", "fraction", "racine", "inférieur à", "supérieur à", "lisse (smoothstep)"];
+const MATH: &[&str] = &["ajouter", "soustraire", "multiplier", "diviser", "puissance", "minimum", "maximum", "modulo", "sinus", "cosinus", "absolu", "arrondi inf.", "fraction", "racine", "inférieur à", "supérieur à", "lisse (smoothstep)", "tangente", "arc sinus", "arc cosinus", "arc tangente", "arc tangente (A / B)", "exponentielle", "logarithme", "signe", "arrondi", "arrondi sup.", "tronquer", "aimanter (pas B)", "boucler (0 à B)", "ping-pong (0 à B)", "inverse (1 / A)", "opposé", "en radians", "en degrés", "minimum doux", "maximum doux"];
+const VMATH: &[&str] = &["ajouter", "soustraire", "multiplier", "diviser", "échelle (× facteur)", "produit scalaire", "produit vectoriel", "longueur", "distance", "normaliser", "mélange (facteur)", "réfléchir", "projeter", "minimum", "maximum", "absolu", "arrondi inf.", "fraction", "sinus", "cosinus"];
+const COMPARE: &[&str] = &["égal", "différent", "inférieur", "inférieur ou égal", "supérieur", "supérieur ou égal"];
+const LOGIC: &[&str] = &["et", "ou", "non", "ou exclusif", "non-et", "non-ou"];
+const ZERO: V = [0.0, 0.0, 0.0, 0.0];
 
 pub const DEFS: &[Def] = &[
     // Sorties
@@ -177,6 +209,25 @@ pub const DEFS: &[Def] = &[
     Def { op: "glitch", label: "Glitch", cat: "filtre", inputs: &[("image", Sock::Color, GRAY)], outputs: &[("image", Sock::Color)], params: &[ParamDef::Float("force", 0.0, 1.0, 0.3), ParamDef::Float("blocs", 2.0, 80.0, 24.0), ParamDef::Float("graine", 0.0, 100.0, 1.0)], mat: false, comp: true },
     Def { op: "unmult", label: "Retirer le noir (unmult)", cat: "couleur", inputs: &[("image", Sock::Color, GRAY)], outputs: &[("image", Sock::Color)], params: &[], mat: false, comp: true },
     Def { op: "zdefocus", label: "Flou de profondeur (passe Z)", cat: "filtre", inputs: &[("image", Sock::Color, GRAY), ("profondeur", Sock::Float, f(0.0))], outputs: &[("image", Sock::Color)], params: &[ParamDef::Float("mise au point", 0.0, 1000.0, 5.0), ParamDef::Float("étendue nette", 0.0, 500.0, 1.0), ParamDef::Float("étalement", 0.01, 500.0, 4.0), ParamDef::Float("rayon max (px)", 0.0, 80.0, 14.0)], mat: false, comp: true },
+    // Vecteurs, logique, temps : valables partout
+    Def { op: "vmath", label: "Math vectoriel", cat: "math", inputs: &[("A", Sock::Vector, ZERO), ("B", Sock::Vector, ZERO), ("facteur", Sock::Float, f(1.0))], outputs: &[("vecteur", Sock::Vector), ("valeur", Sock::Float)], params: &[ParamDef::Choice("opération", VMATH)], mat: true, comp: true },
+    Def { op: "sepxyz", label: "Séparer XYZ", cat: "math", inputs: &[("vecteur", Sock::Vector, ZERO)], outputs: &[("X", Sock::Float), ("Y", Sock::Float), ("Z", Sock::Float)], params: &[], mat: true, comp: true },
+    Def { op: "combxyz", label: "Combiner XYZ", cat: "math", inputs: &[("X", Sock::Float, f(0.0)), ("Y", Sock::Float, f(0.0)), ("Z", Sock::Float, f(0.0))], outputs: &[("vecteur", Sock::Vector)], params: &[], mat: true, comp: true },
+    Def { op: "compare", label: "Comparer", cat: "math", inputs: &[("A", Sock::Float, f(0.5)), ("B", Sock::Float, f(0.5)), ("tolérance", Sock::Float, f(0.001))], outputs: &[("résultat", Sock::Bool)], params: &[ParamDef::Choice("comparaison", COMPARE)], mat: true, comp: true },
+    Def { op: "logic", label: "Logique", cat: "math", inputs: &[("A", Sock::Bool, f(0.0)), ("B", Sock::Bool, f(0.0))], outputs: &[("résultat", Sock::Bool)], params: &[ParamDef::Choice("opération", LOGIC)], mat: true, comp: true },
+    Def { op: "switch", label: "Aiguillage", cat: "math", inputs: &[("condition", Sock::Bool, f(0.0)), ("si faux", Sock::Color, BLACK), ("si vrai", Sock::Color, W)], outputs: &[("résultat", Sock::Color)], params: &[], mat: true, comp: true },
+    Def { op: "random", label: "Aléatoire", cat: "math", inputs: &[("min", Sock::Float, f(0.0)), ("max", Sock::Float, f(1.0)), ("graine", Sock::Float, f(0.0)), ("coordonnées", Sock::Color, ZERO)], outputs: &[("valeur", Sock::Float), ("couleur", Sock::Color)], params: &[], mat: true, comp: true },
+    Def { op: "expr", label: "Expression", cat: "math", inputs: &[("a", Sock::Float, f(0.5)), ("b", Sock::Float, f(0.5)), ("c", Sock::Float, f(0.0)), ("d", Sock::Float, f(0.0))], outputs: &[("valeur", Sock::Float)], params: &[ParamDef::Line("formule", "a * b")], mat: true, comp: true },
+    Def { op: "time", label: "Temps", cat: "entrée", inputs: &[], outputs: &[("image", Sock::Float), ("secondes", Sock::Float)], params: &[], mat: true, comp: true },
+    // Structure : ce qui organise le graphe sans rien calculer
+    Def { op: "reroute", label: "Renvoi", cat: "structure", inputs: &[("", Sock::Any, ZERO)], outputs: &[("", Sock::Any)], params: &[], mat: true, comp: true },
+    Def { op: "repeat_in", label: "Zone de répétition", cat: "structure", inputs: &[], outputs: &[], params: &[], mat: true, comp: true },
+    Def { op: "repeat_out", label: "Fin de la répétition", cat: "interne", inputs: &[], outputs: &[], params: &[], mat: true, comp: true },
+    Def { op: "sim_in", label: "Zone de simulation", cat: "simulation", inputs: &[], outputs: &[], params: &[], mat: false, comp: false },
+    Def { op: "sim_out", label: "Fin de la simulation", cat: "interne", inputs: &[], outputs: &[], params: &[], mat: false, comp: false },
+    Def { op: "group", label: "Groupe", cat: "interne", inputs: &[], outputs: &[], params: &[], mat: true, comp: true },
+    Def { op: "group_in", label: "Entrées du groupe", cat: "interne", inputs: &[], outputs: &[], params: &[], mat: true, comp: true },
+    Def { op: "group_out", label: "Sorties du groupe", cat: "interne", inputs: &[], outputs: &[], params: &[], mat: true, comp: true },
     Def { op: "grainmatch", label: "Grain assorti (mesuré sur la plaque)", cat: "filtre", inputs: &[("image", Sock::Color, GRAY), ("plaque", Sock::Color, GRAY)], outputs: &[("image", Sock::Color), ("force mesurée", Sock::Float)], params: &[ParamDef::Float("taille du grain", 0.5, 4.0, 1.0), ParamDef::Float("dosage", 0.0, 2.0, 1.0)], mat: false, comp: true },
 ];
 
@@ -325,6 +376,18 @@ pub struct Node {
     /// Nom choisi par l'utilisateur (sinon celui du type)
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub label: String,
+    /// Prises propres à ce node (groupes, zones) : entrées puis sorties
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ins: Vec<crate::nodeflow::Port>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub outs: Vec<crate::nodeflow::Port>,
+}
+
+impl Node {
+    /// Définition de ce node : celle de son type, ou une définition sur mesure s'il porte ses propres prises.
+    pub fn def(&self) -> Option<&'static Def> {
+        crate::nodeflow::node_def(self)
+    }
 }
 
 fn yes() -> bool {
@@ -352,6 +415,12 @@ pub struct Graph {
     /// Matériau à calques (atelier) : la pile ; le graphe effectif en est tiré
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stack: Option<crate::atelier::Stack>,
+    /// Groupes réutilisables : des sous-graphes avec leurs entrées et leurs sorties
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub groups: Vec<crate::nodeflow::Group>,
+    /// Réglages de lecture (géométrie et simulation) : images par seconde, première et dernière image
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub time: Option<crate::nodeflow::TimeRange>,
 }
 
 #[derive(Clone, Serialize, Deserialize, PartialEq)]
@@ -359,9 +428,16 @@ pub struct Frame {
     pub rect: [f32; 4],
     pub label: String,
     pub color: [u8; 3],
+    /// Texte libre : le cadre sert alors de note posée sur le graphe
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub note: String,
 }
 
 impl Graph {
+    pub fn empty(kind: GraphKind) -> Graph {
+        Graph { kind, nodes: vec![], links: vec![], next_id: 0, frames: vec![], stack: None, groups: vec![], time: None }
+    }
+
     pub fn add(&mut self, op: &str, pos: [f32; 2]) -> u32 {
         let d = def(op).expect("node inconnu");
         self.next_id = self.next_id.max(self.nodes.iter().map(|n| n.id + 1).max().unwrap_or(0));
@@ -388,10 +464,13 @@ impl Graph {
                 ParamDef::Curve(n) => {
                     params.insert(n.to_string(), Param::S(DEFAULT_CURVES.to_string()));
                 }
+                ParamDef::Line(n, v) => {
+                    params.insert(n.to_string(), Param::S(v.to_string()));
+                }
             }
         }
-        let preview = !matches!(op, "mat_out" | "comp_out");
-        self.nodes.push(Node { id, op: op.into(), pos, values: d.inputs.iter().map(|i| i.2).collect(), params, muted: false, collapsed: false, preview, label: String::new() });
+        let preview = !is_out_op(op) && !matches!(op, "reroute" | "group_in" | "group_out" | "repeat_in" | "repeat_out" | "sim_in" | "sim_out") && d.cat != "simulation";
+        self.nodes.push(Node { id, op: op.into(), pos, values: d.inputs.iter().map(|i| i.2).collect(), params, muted: false, collapsed: false, preview, label: String::new(), ins: vec![], outs: vec![] });
         id
     }
 
@@ -418,33 +497,33 @@ impl Graph {
         false
     }
 
-    /// Graphe réellement calculé : les nodes muets laissent passer leur première entrée.
+    /// Graphe réellement calculé. Les nodes muets, les renvois, les groupes et les zones sont
+    /// traités à la compilation (`nodeflow::lower`) ; ici, seule la pile d'un matériau à calques est dépliée.
     pub fn effective(&self) -> std::borrow::Cow<'_, Graph> {
         if let Some(stack) = &self.stack {
             return std::borrow::Cow::Owned(crate::atelier::flatten(stack, &vault_root()));
         }
-        if !self.nodes.iter().any(|n| n.muted) {
-            return std::borrow::Cow::Borrowed(self);
+        std::borrow::Cow::Borrowed(self)
+    }
+
+    /// Nom du node de sortie de ce genre de graphe.
+    pub fn out_op(&self) -> &'static str {
+        match self.kind {
+            GraphKind::Material => "mat_out",
+            GraphKind::Compositor => "comp_out",
+            GraphKind::Geometry => "geo_out",
         }
-        let mut g = self.clone();
-        for n in self.nodes.iter().filter(|n| n.muted) {
-            let src = g.links.iter().find(|l| l.to == n.id && l.inp == 0).map(|l| (l.from, l.out));
-            let outs: Vec<Link> = g.links.iter().filter(|l| l.from == n.id).cloned().collect();
-            g.links.retain(|l| l.from != n.id);
-            if let Some((f, o)) = src {
-                for l in outs {
-                    g.links.push(Link { from: f, out: o, to: l.to, inp: l.inp });
-                }
-            }
-        }
-        std::borrow::Cow::Owned(g)
     }
 
     /// Copie du graphe où la sortie montre la sortie `out` du node `id` (aperçus).
     pub fn probe(&self, id: u32, out: usize) -> Option<Graph> {
-        let out_op = if self.kind == GraphKind::Material { "mat_out" } else { "comp_out" };
-        let target = self.nodes.iter().find(|n| n.op == out_op)?.id;
+        let out_op = self.out_op();
         let mut g = self.effective().into_owned();
+        // À l'intérieur d'un groupe, il n'y a pas de sortie : on en pose une le temps de l'aperçu
+        let target = match g.nodes.iter().find(|n| n.op == out_op) {
+            Some(n) => n.id,
+            None => g.add(out_op, [0.0, 0.0]),
+        };
         g.links.retain(|l| !(l.to == target && l.inp == 0));
         g.links.push(Link { from: id, out, to: target, inp: 0 });
         if self.kind == GraphKind::Material {
@@ -463,7 +542,7 @@ impl Graph {
     }
 
     pub fn new_material() -> Graph {
-        let mut g = Graph { kind: GraphKind::Material, nodes: vec![], links: vec![], next_id: 0, frames: vec![], stack: None };
+        let mut g = Graph::empty(GraphKind::Material);
         let noise = g.add("noise", [0.0, 0.0]);
         let ramp = g.add("ramp", [220.0, 0.0]);
         let out = g.add("mat_out", [460.0, 40.0]);
@@ -474,11 +553,11 @@ impl Graph {
 
     /// Matériau à calques (atelier) : une pile vide, le graphe vient de ses calques.
     pub fn new_layered() -> Graph {
-        Graph { kind: GraphKind::Material, nodes: vec![], links: vec![], next_id: 0, frames: vec![], stack: Some(crate::atelier::Stack::default()) }
+        Graph { stack: Some(crate::atelier::Stack::default()), ..Graph::empty(GraphKind::Material) }
     }
 
     pub fn new_compositor() -> Graph {
-        let mut g = Graph { kind: GraphKind::Compositor, nodes: vec![], links: vec![], next_id: 0, frames: vec![], stack: None };
+        let mut g = Graph::empty(GraphKind::Compositor);
         let img = g.add("image", [0.0, 0.0]);
         let bc = g.add("brightcon", [220.0, 0.0]);
         let vig = g.add("vignette", [440.0, 20.0]);
@@ -491,7 +570,9 @@ impl Graph {
 
     pub fn load(path: &Path) -> Result<Graph, String> {
         let t = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
-        serde_json::from_str(&t).map_err(|e| format!("Graphe illisible : {e}"))
+        let mut g: Graph = serde_json::from_str(&t).map_err(|e| format!("Graphe illisible : {e}"))?;
+        crate::nodeflow::sync(&mut g);
+        Ok(g)
     }
 
     pub fn save(&self, path: &Path) -> Result<(), String> {
@@ -514,7 +595,7 @@ pub const SHADER_EXAMPLES: &[(&str, &str)] = &[
 
 /// Matériaux prêts à l'emploi (menu « + » de l'éditeur).
 pub fn material_preset(name: &str) -> Option<Graph> {
-    let mut g = Graph { kind: GraphKind::Material, nodes: vec![], links: vec![], next_id: 0, frames: vec![], stack: None };
+    let mut g = Graph::empty(GraphKind::Material);
     let out = g.add("mat_out", [700.0, 40.0]);
     let set = |g: &mut Graph, id: u32, k: usize, v: V| {
         if let Some(n) = g.nodes.iter_mut().find(|n| n.id == id) {
@@ -801,6 +882,9 @@ enum Func {
 /// Variables prédéfinies (dans cet ordre).
 const VARS: [&str; 24] = ["r", "g", "b", "a", "ar", "ag", "ab", "aa", "br", "bg", "bb", "ba", "f", "x", "y", "nx", "ny", "nz", "px", "py", "pz", "pi", "w", "h"];
 
+/// Variables du node « Expression » : ses quatre entrées, la position, les coordonnées, pi, et le résultat `o`.
+const EXPR_VARS: [&str; 11] = ["a", "b", "c", "d", "x", "y", "z", "u", "v", "pi", "o"];
+
 #[derive(Clone)]
 pub struct Shader {
     stmts: Vec<(usize, Expr)>,
@@ -950,7 +1034,12 @@ impl<'a> Parser<'a> {
 
 impl Shader {
     pub fn compile(code: &str) -> Result<Shader, String> {
-        let mut names: Vec<String> = VARS.iter().map(|s| s.to_string()).collect();
+        Self::compile_vars(code, &VARS)
+    }
+
+    /// Compile avec une autre liste de variables prédéfinies (node « Expression », champs de géométrie).
+    pub fn compile_vars(code: &str, vars: &[&str]) -> Result<Shader, String> {
+        let mut names: Vec<String> = vars.iter().map(|s| s.to_string()).collect();
         let mut stmts = vec![];
         for (ln, raw) in code.lines().enumerate() {
             let line = raw.split("//").next().unwrap_or("").trim();
@@ -1305,6 +1394,13 @@ enum Src {
     Const(V),
 }
 
+impl Program {
+    /// Programme vide (un graphe de géométrie n'a pas de programme point par point).
+    pub fn empty(kind: GraphKind) -> Program {
+        Program { steps: vec![], regs: 0, kind, uses_curvature: false, uses_bump: false }
+    }
+}
+
 pub struct Img {
     pub w: usize,
     pub h: usize,
@@ -1477,38 +1573,108 @@ fn pnum(p: &BTreeMap<String, Param>, k: &str, d: f32) -> f32 {
 impl Program {
     /// `root` : dossier du coffre (pour les images), `max_img` : taille max des images chargées.
     pub fn compile(g: &Graph, root: &str, max_img: u32) -> Result<Program, (u32, String)> {
+        Self::compile_at(g, root, max_img, 0.0, 24.0)
+    }
+
+    /// Comme `compile`, à une image donnée de l'animation (le node « Temps » la lit).
+    pub fn compile_at(g: &Graph, root: &str, max_img: u32, frame: f32, fps: f32) -> Result<Program, (u32, String)> {
         // Matériau à calques : on compile le graphe tiré de sa pile
         if let Some(stack) = &g.stack {
-            return Self::compile(&crate::atelier::flatten(stack, root), root, max_img);
+            return Self::compile_at(&crate::atelier::flatten(stack, root), root, max_img, frame, fps);
         }
+        // Groupes dépliés, répétitions déroulées, renvois et nodes muets retirés
+        let low = crate::nodeflow::lower(g, true)?;
+        let out_node = low.graph.nodes.iter().find(|n| n.op == low.graph.out_op()).map(|n| n.id);
+        Self::compile_flat(&low.graph, out_node, 0, &[], root, max_img, frame, fps).map_err(|(id, e)| (low.origin(id), e))
+    }
+
+    /// Champ : le petit programme qui calcule l'entrée `inp` du node `node`, élément par élément.
+    /// `attrs` : les attributs que le graphe peut lire ; leurs valeurs occupent les premiers registres.
+    pub fn compile_field(g: &Graph, node: u32, inp: usize, attrs: &[String], root: &str, frame: f32, fps: f32) -> Result<Program, (u32, String)> {
+        Self::compile_flat(g, Some(node), inp + 1, attrs, root, 256, frame, fps)
+    }
+
+    /// Compile un graphe déjà mis à plat. `only` : 0 pour tout le node de sortie, sinon k + 1 pour
+    /// ne calculer que son entrée k (un champ).
+    #[allow(clippy::too_many_arguments)]
+    fn compile_flat(g: &Graph, out_node: Option<u32>, only: usize, attrs: &[String], root: &str, max_img: u32, frame: f32, fps: f32) -> Result<Program, (u32, String)> {
         // Ordre topologique depuis la sortie
-        let out_op = if g.kind == GraphKind::Material { "mat_out" } else { "comp_out" };
-        let out_node = g.nodes.iter().find(|n| n.op == out_op).map(|n| n.id);
         let mut order: Vec<u32> = vec![];
         let mut state: HashMap<u32, u8> = HashMap::new();
-        fn visit(id: u32, g: &Graph, order: &mut Vec<u32>, st: &mut HashMap<u32, u8>) {
-            if st.get(&id).copied().unwrap_or(0) != 0 {
-                return;
+        // Les liens rangés par node d'arrivée : un graphe déroulé peut compter des milliers de nodes
+        let mut into: HashMap<u32, Vec<&Link>> = HashMap::new();
+        for l in &g.links {
+            into.entry(l.to).or_default().push(l);
+        }
+        let by_id: HashMap<u32, &Node> = g.nodes.iter().map(|n| (n.id, n)).collect();
+        // Parcours sans récursion : une longue chaîne ne doit pas faire déborder la pile
+        fn visit(start: u32, only: usize, into: &HashMap<u32, Vec<&Link>>, order: &mut Vec<u32>, st: &mut HashMap<u32, u8>) {
+            let mut stack: Vec<(u32, usize)> = vec![(start, 0)];
+            st.insert(start, 1);
+            while let Some((id, k)) = stack.pop() {
+                let ins = into.get(&id).map(|v| v.as_slice()).unwrap_or(&[]);
+                let mut k = k;
+                let mut pushed = false;
+                while k < ins.len() {
+                    let l = ins[k];
+                    k += 1;
+                    if id == start && only > 0 && l.inp != only - 1 {
+                        continue;
+                    }
+                    if st.get(&l.from).copied().unwrap_or(0) == 0 {
+                        st.insert(l.from, 1);
+                        stack.push((id, k));
+                        stack.push((l.from, 0));
+                        pushed = true;
+                        break;
+                    }
+                }
+                if !pushed {
+                    st.insert(id, 2);
+                    order.push(id);
+                }
             }
-            st.insert(id, 1);
-            for l in g.links.iter().filter(|l| l.to == id) {
-                visit(l.from, g, order, st);
-            }
-            st.insert(id, 2);
-            order.push(id);
         }
         match out_node {
-            Some(o) => visit(o, g, &mut order, &mut state),
+            Some(o) => visit(o, only, &into, &mut order, &mut state),
             None => return Err((u32::MAX, "il manque le node de sortie".into())),
         }
         let mut base: HashMap<u32, usize> = HashMap::new();
-        let mut regs = 0;
+        // Les attributs lus par un champ occupent les premiers registres
+        let mut regs = attrs.len();
         let mut steps = vec![];
         for id in order {
-            let n = g.nodes.iter().find(|n| n.id == id).unwrap();
-            let Some(d) = def(&n.op) else { return Err((id, format!("node inconnu : {}", n.op))) };
+            let Some(n) = by_id.get(&id).copied() else { continue };
+            if only > 0 && Some(id) == out_node {
+                // Champ : seule l'entrée demandée compte, le node lui-même n'est pas exécuté ici
+                let src = match into.get(&id).and_then(|v| v.iter().find(|l| l.inp == only - 1)) {
+                    Some(l) => base.get(&l.from).map(|b| Src::Reg(b + l.out)).unwrap_or(Src::Const([0.0; 4])),
+                    None => Src::Const(n.values.get(only - 1).copied().or_else(|| n.def().and_then(|d| d.inputs.get(only - 1)).map(|i| i.2)).unwrap_or([0.0; 4])),
+                };
+                steps.push(Step { op: "field_out", ins: vec![src], base: regs, nout: 0, params: BTreeMap::new(), shader: None, image: None, ramp: None, curves: None });
+                continue;
+            }
+            let Some(d) = n.def() else { return Err((id, format!("node inconnu : {}", n.op))) };
+            // Un attribut lu par un champ : son registre est déjà rempli par l'appelant
+            if n.op == "attribute" || n.op == "index" || n.op == "position" {
+                let name = match n.op.as_str() {
+                    "index" => "index",
+                    "position" => "P",
+                    _ => pstr(&n.params, "nom"),
+                };
+                match attrs.iter().position(|a| a == name) {
+                    Some(k) => {
+                        base.insert(id, regs);
+                        steps.push(Step { op: "attr_read", ins: vec![Src::Reg(k)], base: regs, nout: d.outputs.len(), params: BTreeMap::new(), shader: None, image: None, ramp: None, curves: None });
+                        regs += 4;
+                        continue;
+                    }
+                    None if attrs.is_empty() => return Err((id, "ce node lit un attribut de géométrie : il va dans un graphe de géométrie".into())),
+                    None => return Err((id, format!("attribut introuvable : {name}"))),
+                }
+            }
             let ins = (0..d.inputs.len())
-                .map(|i| match g.links.iter().find(|l| l.to == id && l.inp == i) {
+                .map(|i| match into.get(&id).and_then(|v| v.iter().find(|l| l.inp == i)) {
                     Some(l) => match base.get(&l.from) {
                         Some(b) => Src::Reg(b + l.out),
                         None => Src::Const(d.inputs[i].2),
@@ -1516,7 +1682,16 @@ impl Program {
                     None => Src::Const(n.values.get(i).copied().unwrap_or(d.inputs[i].2)),
                 })
                 .collect();
-            let shader = if n.op == "shader" { Some(Shader::compile(pstr(&n.params, "code")).map_err(|e| (id, e))?) } else { None };
+            let shader = match n.op.as_str() {
+                "shader" => Some(Shader::compile(pstr(&n.params, "code")).map_err(|e| (id, e))?),
+                "expr" => Some(Shader::compile_vars(&format!("o = {}", pstr(&n.params, "formule").replace('\n', " ")), &EXPR_VARS).map_err(|e| (id, e.replace("ligne 1 : ", "")))?),
+                _ => None,
+            };
+            let mut params = n.params.clone();
+            if n.op == "time" {
+                params.insert("_image".into(), Param::F(frame));
+                params.insert("_secondes".into(), Param::F(frame / fps.max(1e-3)));
+            }
             let image = if n.op == "exr" {
                 let rel = pstr(&n.params, "fichier");
                 if rel.is_empty() {
@@ -1548,12 +1723,53 @@ impl Program {
                     None
                 }
             });
-            steps.push(Step { op: d.op, ins, base: regs, nout: d.outputs.len(), params: n.params.clone(), shader, image, ramp, curves });
+            steps.push(Step { op: d.op, ins, base: regs, nout: d.outputs.len(), params, shader, image, ramp, curves });
             regs += d.outputs.len().max(4);
         }
         let uses_curvature = steps.iter().any(|s| matches!(s.op, "curvature" | "edgewear" | "cavdirt"));
         let uses_bump = steps.iter().any(|s| s.op == "mat_out" && matches!(s.ins.get(11), Some(Src::Reg(_))));
         Ok(Program { steps, regs, kind: g.kind, uses_curvature, uses_bump })
+    }
+
+    /// Valeur d'un champ en un point. `regs` commence par les valeurs des attributs, dans l'ordre donné à `compile_field`.
+    pub fn field(&self, c: &Ctx, regs: &mut Vec<V>) -> V {
+        if regs.len() < self.regs {
+            regs.resize(self.regs, [0.0; 4]);
+        }
+        let mut ins: Vec<V> = Vec::with_capacity(8);
+        for s in &self.steps {
+            ins.clear();
+            ins.extend(s.ins.iter().map(|i| match i {
+                Src::Reg(r) => regs[*r],
+                Src::Const(v) => *v,
+            }));
+            match s.op {
+                "field_out" => return ins[0],
+                "attr_read" => {
+                    let v = ins[0];
+                    regs[s.base] = v;
+                    regs[s.base + 1] = v;
+                }
+                _ => {
+                    let o = pixel(s, &ins, c);
+                    for (k, v) in o.iter().enumerate().take(s.nout.min(4)) {
+                        regs[s.base + k] = *v;
+                    }
+                }
+            }
+        }
+        [0.0; 4]
+    }
+
+    /// Vrai si ce champ donne la même valeur partout (aucun node, ou seulement des constantes).
+    pub fn is_const(&self) -> Option<V> {
+        match self.steps.as_slice() {
+            [s] if s.op == "field_out" => match s.ins[0] {
+                Src::Const(v) => Some(v),
+                Src::Reg(_) => None,
+            },
+            _ => None,
+        }
     }
 
     /// Matériau : couleur (sRGB), rugosité, métal, émission.
@@ -2500,10 +2716,155 @@ fn pixel(s: &Step, i: &[V], c: &Ctx) -> [V; 4] {
                 "inférieur à" => (a < b) as u8 as f32,
                 "supérieur à" => (a > b) as u8 as f32,
                 "lisse (smoothstep)" => smoothstep(0.0, b.max(1e-4), a),
+                "tangente" => a.tan(),
+                "arc sinus" => a.clamp(-1.0, 1.0).asin(),
+                "arc cosinus" => a.clamp(-1.0, 1.0).acos(),
+                "arc tangente" => a.atan(),
+                "arc tangente (A / B)" => a.atan2(b),
+                "exponentielle" => a.exp(),
+                "logarithme" => a.max(1e-12).ln(),
+                "signe" => {
+                    if a > 0.0 {
+                        1.0
+                    } else if a < 0.0 {
+                        -1.0
+                    } else {
+                        0.0
+                    }
+                }
+                "arrondi" => a.round(),
+                "arrondi sup." => a.ceil(),
+                "tronquer" => a.trunc(),
+                "aimanter (pas B)" => {
+                    if b == 0.0 {
+                        a
+                    } else {
+                        (a / b).floor() * b
+                    }
+                }
+                "boucler (0 à B)" => a.rem_euclid(if b == 0.0 { 1.0 } else { b }),
+                "ping-pong (0 à B)" => {
+                    if b == 0.0 {
+                        0.0
+                    } else {
+                        (a.rem_euclid(2.0 * b) - b).abs() * -1.0 + b
+                    }
+                }
+                "inverse (1 / A)" => {
+                    if a == 0.0 {
+                        0.0
+                    } else {
+                        1.0 / a
+                    }
+                }
+                "opposé" => -a,
+                "en radians" => a.to_radians(),
+                "en degrés" => a.to_degrees(),
+                // Minimum et maximum adoucis sur une largeur de 0,1 : pas d'arête là où les deux se croisent
+                "minimum doux" => {
+                    let h = (0.1 - (a - b).abs()).max(0.0) / 0.1;
+                    a.min(b) - h * h * h * 0.1 / 6.0
+                }
+                "maximum doux" => {
+                    let h = (0.1 - (a - b).abs()).max(0.0) / 0.1;
+                    a.max(b) + h * h * h * 0.1 / 6.0
+                }
                 _ => a + b,
             };
             [one(v), z, z, z]
         }
+        "vmath" => {
+            let (a, b, k) = ([i[0][0], i[0][1], i[0][2]], [i[1][0], i[1][1], i[1][2]], i[2][0]);
+            let dot = |a: [f32; 3], b: [f32; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+            let each = |f: &dyn Fn(f32, f32) -> f32| [f(a[0], b[0]), f(a[1], b[1]), f(a[2], b[2])];
+            let len = dot(a, a).sqrt();
+            let (v, s): ([f32; 3], f32) = match pstr(&s.params, "opération") {
+                "soustraire" => (each(&|x, y| x - y), 0.0),
+                "multiplier" => (each(&|x, y| x * y), 0.0),
+                "diviser" => (each(&|x, y| if y == 0.0 { 0.0 } else { x / y }), 0.0),
+                "échelle (× facteur)" => ([a[0] * k, a[1] * k, a[2] * k], 0.0),
+                "produit scalaire" => {
+                    let d = dot(a, b);
+                    ([d; 3], d)
+                }
+                "produit vectoriel" => ([a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]], 0.0),
+                "longueur" => ([len; 3], len),
+                "distance" => {
+                    let d = each(&|x, y| x - y);
+                    let l = dot(d, d).sqrt();
+                    ([l; 3], l)
+                }
+                "normaliser" => (if len > 1e-12 { [a[0] / len, a[1] / len, a[2] / len] } else { [0.0; 3] }, len),
+                "mélange (facteur)" => (each(&|x, y| x + (y - x) * k), 0.0),
+                "réfléchir" => {
+                    let bl = dot(b, b).sqrt().max(1e-12);
+                    let n = [b[0] / bl, b[1] / bl, b[2] / bl];
+                    let d = 2.0 * dot(a, n);
+                    ([a[0] - d * n[0], a[1] - d * n[1], a[2] - d * n[2]], 0.0)
+                }
+                "projeter" => {
+                    let d = dot(a, b) / dot(b, b).max(1e-12);
+                    ([b[0] * d, b[1] * d, b[2] * d], d)
+                }
+                "minimum" => (each(&|x, y| x.min(y)), 0.0),
+                "maximum" => (each(&|x, y| x.max(y)), 0.0),
+                "absolu" => ([a[0].abs(), a[1].abs(), a[2].abs()], 0.0),
+                "arrondi inf." => ([a[0].floor(), a[1].floor(), a[2].floor()], 0.0),
+                "fraction" => ([a[0].rem_euclid(1.0), a[1].rem_euclid(1.0), a[2].rem_euclid(1.0)], 0.0),
+                "sinus" => ([a[0].sin(), a[1].sin(), a[2].sin()], 0.0),
+                "cosinus" => ([a[0].cos(), a[1].cos(), a[2].cos()], 0.0),
+                _ => (each(&|x, y| x + y), 0.0),
+            };
+            // Sans valeur propre à l'opération, la seconde sortie donne la longueur du résultat
+            let s = if s == 0.0 { dot(v, v).sqrt() } else { s };
+            [[v[0], v[1], v[2], 1.0], one(s), z, z]
+        }
+        "sepxyz" => [one(i[0][0]), one(i[0][1]), one(i[0][2]), z],
+        "combxyz" => [[i[0][0], i[1][0], i[2][0], 1.0], z, z, z],
+        "compare" => {
+            let (a, b, eps) = (i[0][0], i[1][0], i[2][0].abs());
+            let r = match pstr(&s.params, "comparaison") {
+                "différent" => (a - b).abs() > eps,
+                "inférieur" => a < b,
+                "inférieur ou égal" => a <= b,
+                "supérieur" => a > b,
+                "supérieur ou égal" => a >= b,
+                _ => (a - b).abs() <= eps,
+            };
+            [one(r as u8 as f32), z, z, z]
+        }
+        "logic" => {
+            let (a, b) = (i[0][0] > 0.5, i[1][0] > 0.5);
+            let r = match pstr(&s.params, "opération") {
+                "ou" => a || b,
+                "non" => !a,
+                "ou exclusif" => a != b,
+                "non-et" => !(a && b),
+                "non-ou" => !(a || b),
+                _ => a && b,
+            };
+            [one(r as u8 as f32), z, z, z]
+        }
+        "switch" => [if i[0][0] > 0.5 { i[2] } else { i[1] }, z, z, z],
+        "random" => {
+            let q = if linked(3) { [i[3][0], i[3][1], i[3][2]] } else { p3 };
+            let seed = i[2][0];
+            let h = |k: f32| hash2(q[0] * 91.7 + q[2] * 13.1 + seed * 7.3 + k, q[1] * 57.3 - q[2] * 31.9 + seed * 3.1 + k * 1.7);
+            let (lo, hi) = (i[0][0], i[1][0]);
+            let m = |x: f32| lo + (hi - lo) * x;
+            [one(m(h(0.0))), [m(h(0.0)), m(h(17.0)), m(h(41.0)), 1.0], z, z]
+        }
+        "time" => [one(pnum(&s.params, "_image", 0.0)), one(pnum(&s.params, "_secondes", 0.0)), z, z],
+        "expr" => match &s.shader {
+            Some(sh) => {
+                let mut v = vec![0.0f32; sh.slots];
+                let pre = [i[0][0], i[1][0], i[2][0], i[3][0], p3[0], p3[1], p3[2], c.uv[0], c.uv[1], std::f32::consts::PI, 0.0];
+                v[..pre.len()].copy_from_slice(&pre);
+                sh.eval(&mut v);
+                [one(v[10]), z, z, z]
+            }
+            None => [z, z, z, z],
+        },
         "map" => {
             let t = (i[0][0] - i[1][0]) / (i[2][0] - i[1][0]).max(1e-6);
             [one(i[3][0] + t * (i[4][0] - i[3][0])), z, z, z]
@@ -2538,6 +2899,10 @@ const THUMB: f32 = 96.0;
 pub fn cat_color(cat: &str) -> Color32 {
     match cat {
         "sortie" => theme::pal().accent,
+        "géométrie" => Color32::from_rgb(0x58, 0xb8, 0xa4),
+        "simulation" => Color32::from_rgb(0xa9, 0x8f, 0xd6),
+        "répétition" => Color32::from_rgb(0xd9, 0x9a, 0x5b),
+        "groupe" => Color32::from_rgb(0x8f, 0xbf, 0x7a),
         "entrée" | "motif" => Color32::from_rgb(0xc6, 0x95, 0x80),
         "usure" => Color32::from_rgb(0xa6, 0x7f, 0x6f),
         "couleur" => Color32::from_rgb(0x94, 0xb0, 0xd1),
@@ -2547,7 +2912,38 @@ pub fn cat_color(cat: &str) -> Color32 {
     }
 }
 
-const CATS: [&str; 8] = ["entrée", "motif", "usure", "couleur", "math", "filtre", "shader", "sortie"];
+const CATS: [&str; 11] = ["entrée", "géométrie", "simulation", "motif", "usure", "couleur", "math", "filtre", "shader", "structure", "sortie"];
+
+/// Node de sortie d'un graphe : il n'y en a qu'un, on ne le supprime ni ne le copie.
+pub fn is_out_op(op: &str) -> bool {
+    matches!(op, "mat_out" | "comp_out" | "geo_out")
+}
+
+/// Largeur d'un node : un renvoi n'est qu'une pastille.
+fn node_w(n: &Node) -> f32 {
+    if n.op == "reroute" { REROUTE_W } else { NW }
+}
+const REROUTE_W: f32 = 30.0;
+const REROUTE_H: f32 = 16.0;
+
+/// Ce qu'on choisit dans le menu d'ajout : un node, un node déjà réglé (« Math › multiplier »), un groupe.
+#[derive(Clone, PartialEq, Debug)]
+pub enum Pick {
+    Op(&'static str),
+    Preset(&'static str, &'static str, &'static str),
+    Group(String),
+}
+
+/// Catégorie où ranger ce node dans les menus, ou rien s'il ne s'y montre pas.
+fn menu_cat(d: &Def, kind: GraphKind, in_group: bool) -> Option<&'static str> {
+    if matches!(d.op, "group_in" | "group_out") {
+        return in_group.then_some("structure");
+    }
+    if d.op == "sim_in" {
+        return (kind == GraphKind::Geometry).then_some("simulation");
+    }
+    (d.cat != "interne" && d.fits(kind)).then_some(d.cat)
+}
 
 struct AddMenu {
     /// Position écran du menu et position dans le graphe du futur node
@@ -2624,6 +3020,27 @@ pub struct Editor {
     /// Atelier : recherche et rayon de la bibliothèque (0 tout, 1 maîtres, 2 intelligents, 3 préréglages)
     lib_search: String,
     lib_shelf: u8,
+    /// Groupe dont on édite l'intérieur (rien : la racine). Tant qu'on y est, `graph.nodes`, `links`
+    /// et `frames` sont ceux du groupe, et ceux de la racine attendent à sa place dans `graph.groups`.
+    level: Option<String>,
+    /// Cadre dont on écrit la note
+    note_edit: Option<usize>,
+    /// Nom de groupe en cours de saisie dans l'inspecteur : (ancien nom, texte)
+    group_rename: Option<(String, String)>,
+    group_request: bool,
+    leave_request: bool,
+    /// Un champ de texte avait-il le clavier à l'image d'avant ? (pour la touche Tab)
+    was_typing: bool,
+}
+
+/// Échange le contenu de la racine et celui du groupe `name` : entrer dans un groupe, ou en sortir.
+fn swap_level(g: &mut Graph, name: &str) -> bool {
+    let Some(k) = g.groups.iter().position(|x| x.name == name) else { return false };
+    let gr = &mut g.groups[k];
+    std::mem::swap(&mut g.nodes, &mut gr.nodes);
+    std::mem::swap(&mut g.links, &mut gr.links);
+    std::mem::swap(&mut g.frames, &mut gr.frames);
+    true
 }
 
 enum Act {
@@ -2634,6 +3051,10 @@ enum Act {
     Connect(u32, usize, u32, usize),
     Unlink(u32, usize),
     RemoveLink(usize),
+    /// Pose un renvoi sur ce lien, à cet endroit
+    Reroute(usize, Pos2),
+    /// Entre dans le groupe posé par ce node
+    Enter(u32),
     Changed,
     Click(u32, bool),
     Clear,
@@ -2652,6 +3073,8 @@ enum NodeOp {
     Disconnect,
     Rename,
     Solo,
+    Group,
+    Ungroup,
 }
 
 fn to_texture(ctx: &egui::Context, name: &str, img: &Img) -> egui::ColorImage {
@@ -2664,7 +3087,7 @@ fn to_texture(ctx: &egui::Context, name: &str, img: &Img) -> egui::ColorImage {
 impl Editor {
     pub fn open(path: PathBuf, root: &str) -> Result<Editor, String> {
         let graph = Graph::load(&path)?;
-        let program = Program::compile(&graph.effective(), root, 1024);
+        let program = if graph.kind == GraphKind::Geometry { crate::nodeflow::lower(&graph, false).map(|_| Program::empty(GraphKind::Geometry)) } else { Program::compile(&graph.effective(), root, 1024) };
         let mut ed = Editor {
             lib_filter: String::new(),
             path,
@@ -2705,6 +3128,12 @@ impl Editor {
             lib_shelf: 0,
             mat_list: None,
             masters_seen: 0,
+            level: None,
+            note_edit: None,
+            group_rename: None,
+            group_request: false,
+            leave_request: false,
+            was_typing: false,
             frame_sel: false,
             frame_rename: None,
             frame_sel_request: false, pv_yaw: 0.4, pv_pitch: 0.25, pv_dist: 2.0, pv_env: 0, pv_shape: None, boxy: None, pv_model: None, pv_key: 0, solo: None, roto_drag: None,
@@ -2716,19 +3145,81 @@ impl Editor {
         Ok(ed)
     }
 
+    /// Le document entier, racine à sa place, même quand on édite l'intérieur d'un groupe.
+    fn doc(&self) -> Graph {
+        let mut g = self.graph.clone();
+        if let Some(l) = &self.level {
+            swap_level(&mut g, l);
+        }
+        g
+    }
+
+    /// Agit sur le document entier (racine à sa place), puis revient au niveau en cours d'édition.
+    fn with_doc<R>(&mut self, f: impl FnOnce(&mut Graph) -> R) -> R {
+        if let Some(l) = self.level.clone() {
+            swap_level(&mut self.graph, &l);
+        }
+        let r = f(&mut self.graph);
+        if let Some(l) = self.level.clone() {
+            if !swap_level(&mut self.graph, &l) {
+                self.level = None;
+            }
+        }
+        r
+    }
+
+    fn level_changed(&mut self) {
+        self.selected.clear();
+        self.thumbs.clear();
+        self.thumb_version = 0;
+        self.scene = Rect::ZERO;
+        self.solo = None;
+        self.rename = None;
+        self.frame_rename = None;
+        self.note_edit = None;
+        self.drag_link = None;
+    }
+
+    /// Entre dans un groupe pour en modifier le contenu.
+    fn enter(&mut self, name: &str) {
+        self.leave();
+        if swap_level(&mut self.graph, name) {
+            self.level = Some(name.to_string());
+            self.level_changed();
+        }
+    }
+
+    /// Revient à la racine du graphe.
+    fn leave(&mut self) {
+        if let Some(l) = self.level.take() {
+            swap_level(&mut self.graph, &l);
+            self.level_changed();
+        }
+    }
+
+    fn compile_doc(&self) -> Result<Program, (u32, String)> {
+        if self.graph.kind == GraphKind::Geometry {
+            // La géométrie a son propre moteur : ici, seule la mise à plat est vérifiée
+            return crate::nodeflow::lower(&self.doc(), false).map(|_| Program::empty(GraphKind::Geometry));
+        }
+        Program::compile(&self.doc().effective(), &self.root, 1024)
+    }
+
     fn changed(&mut self) {
         self.dirty = Some(std::time::Instant::now());
-        self.program = Program::compile(&self.graph.effective(), &self.root, 1024);
+        self.with_doc(crate::nodeflow::sync);
+        self.program = self.compile_doc();
         self.version += 1;
         self.commit();
     }
 
     /// Point d'annulation si le graphe a changé depuis le dernier.
     fn commit(&mut self) {
-        let a = serde_json::to_string(&self.graph).unwrap_or_default();
+        let doc = self.doc();
+        let a = serde_json::to_string(&doc).unwrap_or_default();
         let b = serde_json::to_string(&self.last).unwrap_or_default();
         if a != b {
-            self.undo.push(std::mem::replace(&mut self.last, self.graph.clone()));
+            self.undo.push(std::mem::replace(&mut self.last, doc));
             if self.undo.len() > 200 {
                 self.undo.remove(0);
             }
@@ -2739,22 +3230,29 @@ impl Editor {
     fn restore(&mut self, g: Graph) {
         self.graph = g;
         self.last = self.graph.clone();
+        // On reste dans le groupe qu'on éditait, s'il existe encore
+        if let Some(l) = self.level.clone() {
+            if !swap_level(&mut self.graph, &l) {
+                self.level = None;
+                self.scene = Rect::ZERO;
+            }
+        }
         self.selected.retain(|id| self.graph.nodes.iter().any(|n| n.id == *id));
         self.dirty = Some(std::time::Instant::now());
-        self.program = Program::compile(&self.graph.effective(), &self.root, 1024);
+        self.program = self.compile_doc();
         self.version += 1;
     }
 
     fn undo(&mut self) {
         if let Some(g) = self.undo.pop() {
-            self.redo.push(self.graph.clone());
+            self.redo.push(self.doc());
             self.restore(g);
         }
     }
 
     fn redo(&mut self) {
         if let Some(g) = self.redo.pop() {
-            self.undo.push(self.graph.clone());
+            self.undo.push(self.doc());
             self.restore(g);
         }
     }
@@ -2762,12 +3260,103 @@ impl Editor {
     pub fn save_if_due(&mut self, force: bool) {
         if let Some(t) = self.dirty {
             if force || t.elapsed() > std::time::Duration::from_millis(500) {
-                if let Err(e) = self.graph.save(&self.path) {
+                if let Err(e) = self.doc().save(&self.path) {
                     self.message = Some(e);
                 }
                 self.dirty = None;
             }
         }
+    }
+
+    /// Tout ce que les menus d'ajout proposent ici : (libellé, catégorie, choix, a une entrée).
+    fn picks(&self) -> Vec<(String, &'static str, Pick, bool)> {
+        let kind = self.graph.kind;
+        let in_group = self.level.is_some();
+        // Une seule sortie par graphe : elle n'est proposée que si elle manque
+        let has_out = in_group || self.graph.nodes.iter().any(|n| is_out_op(&n.op));
+        let mut v: Vec<(String, &'static str, Pick, bool)> = DEFS.iter().filter(|d| !(has_out && is_out_op(d.op))).filter_map(|d| menu_cat(d, kind, in_group).map(|c| (crate::i18n::t(d.label), c, Pick::Op(d.op), !d.inputs.is_empty() || crate::nodeflow::is_dynamic(d.op)))).collect();
+        for gr in self.graph.groups.iter().filter(|gr| Some(&gr.name) != self.level.as_ref()) {
+            v.push((gr.name.clone(), "structure", Pick::Group(gr.name.clone()), !gr.inputs.is_empty()));
+        }
+        v
+    }
+
+    /// Pose ce qu'on a choisi dans un menu d'ajout. Renvoie le node à relier (le début, pour une zone).
+    fn add_pick(&mut self, pick: &Pick, at: [f32; 2]) -> Option<u32> {
+        let id = match pick {
+            Pick::Op("repeat_in") | Pick::Op("sim_in") => {
+                let (a, b) = crate::nodeflow::add_zone(&mut self.graph, if *pick == Pick::Op("sim_in") { "sim" } else { "repeat" }, at);
+                self.selected = [a, b].into_iter().collect();
+                return Some(a);
+            }
+            Pick::Op(op) => self.graph.add(op, at),
+            Pick::Preset(op, key, value) => {
+                let id = self.graph.add(op, at);
+                if let Some(n) = self.graph.nodes.iter_mut().find(|n| n.id == id) {
+                    n.params.insert(key.to_string(), Param::S(value.to_string()));
+                }
+                id
+            }
+            Pick::Group(name) => crate::nodeflow::add_group_node(&mut self.graph, name, at)?,
+        };
+        self.selected = [id].into_iter().collect();
+        Some(id)
+    }
+
+    /// Réunit la sélection en un groupe (Ctrl+G).
+    fn group_selection(&mut self) {
+        let base = crate::i18n::t("groupe");
+        match crate::nodeflow::make_group(&mut self.graph, &self.selected, &base) {
+            Ok(id) => {
+                self.selected = [id].into_iter().collect();
+                self.changed();
+                self.message = Some(crate::i18n::t("Groupe créé. Tab pour y entrer, Ctrl+Alt+G pour le défaire."));
+            }
+            Err(e) => self.message = Some(crate::i18n::t(&e)),
+        }
+    }
+
+    /// Remet à plat les nodes de groupe choisis (Ctrl+Alt+G).
+    fn ungroup_selection(&mut self) {
+        let ids: Vec<u32> = self.selected.iter().copied().filter(|id| self.graph.nodes.iter().any(|n| n.id == *id && n.op == "group")).collect();
+        let mut new = vec![];
+        for id in ids {
+            match crate::nodeflow::ungroup(&mut self.graph, id) {
+                Ok(v) => new.extend(v),
+                Err(e) => self.message = Some(e),
+            }
+        }
+        if !new.is_empty() {
+            self.selected = new.into_iter().collect();
+            self.changed();
+        }
+    }
+
+    /// Supprime un node. Une zone part en entier ; un renvoi supprimé laisse ses liens se rejoindre.
+    fn delete_node(&mut self, id: u32) {
+        if self.is_output(id) {
+            return;
+        }
+        let pair = crate::nodeflow::zone_pair(&self.graph, id);
+        if self.graph.nodes.iter().any(|n| n.id == id && n.op == "reroute") {
+            if let Some((from, out)) = self.graph.links.iter().find(|l| l.to == id).map(|l| (l.from, l.out)) {
+                let users: Vec<(u32, usize)> = self.graph.links.iter().filter(|l| l.from == id).map(|l| (l.to, l.inp)).collect();
+                self.graph.remove(id);
+                for (to, inp) in users {
+                    self.graph.links.push(Link { from, out, to, inp });
+                }
+            }
+        }
+        self.graph.remove(id);
+        if let Some(o) = pair {
+            self.graph.remove(o);
+            self.selected.remove(&o);
+        }
+    }
+
+    /// Le groupe posé par ce node, s'il en pose un.
+    fn group_of(&self, id: u32) -> Option<String> {
+        self.graph.nodes.iter().find(|n| n.id == id && n.op == "group").map(|n| pstr(&n.params, "groupe").to_string())
     }
 
 /// Range les nodes en colonnes, de gauche (sources) à droite (sortie) : la sélection s'il y a
@@ -2805,7 +3394,7 @@ impl Editor {
             let mut y = y0;
             for (_, id) in members {
                 if let Some(n) = self.graph.nodes.iter_mut().find(|n| n.id == id) {
-                    let h = def(&n.op).map(|d| Self::node_size(n, d)).unwrap_or(120.0);
+                    let h = n.def().map(|d| Self::node_size(n, d)).unwrap_or(120.0);
                     n.pos = [x0 + c as f32 * 240.0, y];
                     y += h + 28.0;
                 }
@@ -2816,25 +3405,47 @@ impl Editor {
 
     /// Deux nodes se recouvrent-ils ?
     fn overlaps(&self) -> bool {
-        let rects: Vec<Rect> = self.graph.nodes.iter().filter_map(|n| def(&n.op).map(|d| Rect::from_min_size(pos2(n.pos[0], n.pos[1]), vec2(NW, Self::node_size(n, d))).shrink(4.0))).collect();
+        let rects: Vec<Rect> = self.graph.nodes.iter().filter_map(|n| n.def().map(|d| Rect::from_min_size(pos2(n.pos[0], n.pos[1]), vec2(node_w(n), Self::node_size(n, d))).shrink(4.0))).collect();
         rects.iter().enumerate().any(|(i, a)| rects[i + 1..].iter().any(|b| a.intersects(*b)))
     }
 
     fn is_output(&self, id: u32) -> bool {
-        self.graph.nodes.iter().find(|n| n.id == id).is_some_and(|n| n.op == "mat_out" || n.op == "comp_out")
+        self.graph.nodes.iter().find(|n| n.id == id).is_some_and(|n| is_out_op(&n.op))
     }
 
     /// Copie les nodes choisis (avec les liens entre eux) décalés de `offset`.
     fn duplicate(&mut self, ids: &[u32], offset: [f32; 2]) -> Vec<u32> {
-        let nodes: Vec<Node> = self.graph.nodes.iter().filter(|n| ids.contains(&n.id) && n.op != "mat_out" && n.op != "comp_out").cloned().collect();
+        // Une zone se copie en entier : l'autre bout suit
+        let mut ids: Vec<u32> = ids.to_vec();
+        for id in ids.clone() {
+            if let Some(o) = crate::nodeflow::zone_pair(&self.graph, id) {
+                if !ids.contains(&o) {
+                    ids.push(o);
+                }
+            }
+        }
+        let nodes: Vec<Node> = self.graph.nodes.iter().filter(|n| ids.contains(&n.id) && !is_out_op(&n.op)).cloned().collect();
         let links: Vec<Link> = self.graph.links.iter().filter(|l| ids.contains(&l.from) && ids.contains(&l.to)).cloned().collect();
         self.paste(nodes, links, offset)
     }
 
     fn paste(&mut self, nodes: Vec<Node>, links: Vec<Link>, offset: [f32; 2]) -> Vec<u32> {
         let mut map = HashMap::new();
+        // Les zones collées gardent leurs paires, sans se mêler à celles déjà là
+        let zone_shift = self.graph.nodes.iter().filter_map(|n| match n.params.get("zone") { Some(Param::F(z)) => Some(*z), _ => None }).fold(0.0f32, f32::max);
+        let zone_of = |n: &Node| match n.params.get("zone") { Some(Param::F(z)) => Some(*z), _ => None };
         for n in &nodes {
-            if def(&n.op).is_none() {
+            if n.def().is_none() || is_out_op(&n.op) {
+                continue;
+            }
+            // Une moitié de zone, une entrée de groupe hors d'un groupe, un groupe absent de ce document : on passe
+            let whole_zone = !crate::nodeflow::is_zone(&n.op) || nodes.iter().any(|m| m.id != n.id && crate::nodeflow::is_zone(&m.op) && zone_of(m) == zone_of(n));
+            let misplaced = matches!(n.op.as_str(), "group_in" | "group_out") && self.level.is_none();
+            let lost_group = n.op == "group" && (!self.graph.groups.iter().any(|g| g.name == pstr(&n.params, "groupe")) || self.level.as_deref() == Some(pstr(&n.params, "groupe")));
+            if !whole_zone || misplaced || lost_group {
+                if lost_group {
+                    self.message = Some(format!("{} : {}", crate::i18n::t("ce groupe n'existe pas dans ce graphe"), pstr(&n.params, "groupe")));
+                }
                 continue;
             }
             let id = self.graph.add(&n.op, [n.pos[0] + offset[0], n.pos[1] + offset[1]]);
@@ -2845,6 +3456,11 @@ impl Editor {
                 m.collapsed = n.collapsed;
                 m.preview = n.preview;
                 m.label = n.label.clone();
+                m.ins = n.ins.clone();
+                m.outs = n.outs.clone();
+                if let Some(z) = zone_of(n) {
+                    m.params.insert("zone".into(), Param::F(z + zone_shift));
+                }
             }
             map.insert(n.id, id);
         }
@@ -2858,6 +3474,9 @@ impl Editor {
 
     /// Hauteur d'un node selon son type et son état.
     fn node_size(n: &Node, d: &Def) -> f32 {
+        if n.op == "reroute" {
+            return REROUTE_H;
+        }
         if n.collapsed {
             return HEAD;
         }
@@ -2872,8 +3491,8 @@ impl Editor {
             if only.is_some_and(|s| !s.contains(&n.id)) {
                 continue;
             }
-            let h = def(&n.op).map(|d| Self::node_size(n, d)).unwrap_or(100.0);
-            bb = bb.union(Rect::from_min_size(pos2(n.pos[0], n.pos[1]), vec2(NW, h)));
+            let h = n.def().map(|d| Self::node_size(n, d)).unwrap_or(100.0);
+            bb = bb.union(Rect::from_min_size(pos2(n.pos[0], n.pos[1]), vec2(node_w(n), h)));
         }
         bb
     }
@@ -2989,7 +3608,7 @@ impl Editor {
             return;
         }
         self.thumb_version = self.version;
-        let ids: Vec<(u32, usize)> = self.graph.nodes.iter().filter(|n| n.preview && !n.collapsed && def(&n.op).is_some_and(|d| !d.outputs.is_empty())).map(|n| (n.id, 0)).collect();
+        let ids: Vec<(u32, usize)> = self.graph.nodes.iter().filter(|n| n.preview && !n.collapsed && n.def().is_some_and(|d| !d.outputs.is_empty())).map(|n| (n.id, 0)).collect();
         if ids.is_empty() {
             return;
         }
@@ -3058,7 +3677,8 @@ impl Editor {
         }
         let kind = self.graph.kind;
         // Disposition de la maquette : bibliothèque à gauche, aperçu et réglages à droite, graphe au centre
-        let mut add_now: Option<&'static str> = None;
+        let mut add_now: Option<Pick> = None;
+        let picks = self.picks();
         let mut preset: Option<&'static str> = None;
         let avail = ui.available_rect_before_wrap();
         let lib_w = 240.0f32.min(avail.width() * 0.22);
@@ -3097,7 +3717,7 @@ impl Editor {
             egui::ScrollArea::vertical().id_salt("node-lib").auto_shrink([false, false]).show(&mut lui, |ui| {
                 ui.spacing_mut().item_spacing.y = 0.0;
                 for cat in CATS {
-                    let items: Vec<&Def> = DEFS.iter().filter(|d| d.cat == cat && if kind == GraphKind::Material { d.mat } else { d.comp }).filter(|d| f.is_empty() || crate::chat::fold(&crate::i18n::t(d.label)).contains(&f)).collect();
+                    let items: Vec<&(String, &'static str, Pick, bool)> = picks.iter().filter(|x| x.1 == cat).filter(|x| f.is_empty() || crate::chat::fold(&x.0).contains(&f)).collect();
                     if items.is_empty() {
                         continue;
                     }
@@ -3107,15 +3727,16 @@ impl Editor {
                         ui.label(RichText::new(crate::i18n::sentence(&crate::i18n::t(cat))).size(11.0).color(p.muted));
                     });
                     ui.add_space(2.0);
-                    for d in items {
+                    for (label, _, pick, _) in items {
                         let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 26.0), Sense::click_and_drag());
                         if resp.hovered() {
                             ui.painter().rect_filled(r, 0.0, p.line.linear_multiply(0.45));
                         }
-                        ui.painter().rect_filled(Rect::from_center_size(pos2(r.left() + 16.0, r.center().y), vec2(8.0, 8.0)), 2.0, cat_color(cat));
-                        ui.painter().text(pos2(r.left() + 28.0, r.center().y), egui::Align2::LEFT_CENTER, crate::i18n::t(d.label), egui::FontId::proportional(12.5), p.text);
+                        let col = if matches!(pick, Pick::Group(_)) { cat_color("groupe") } else { cat_color(cat) };
+                        ui.painter().rect_filled(Rect::from_center_size(pos2(r.left() + 16.0, r.center().y), vec2(8.0, 8.0)), 2.0, col);
+                        ui.painter().with_clip_rect(r).text(pos2(r.left() + 28.0, r.center().y), egui::Align2::LEFT_CENTER, label, egui::FontId::proportional(12.5), p.text);
                         if resp.on_hover_text(crate::i18n::t("cliquer pour l'ajouter au centre du graphe")).clicked() {
-                            add_now = Some(d.op);
+                            add_now = Some(pick.clone());
                         }
                     }
                 }
@@ -3152,14 +3773,24 @@ impl Editor {
             } else {
                 iui.label(RichText::new(crate::i18n::t("Choisis un node pour voir son nom et sa catégorie ici.")).size(11.5).color(p.muted));
             }
-            if let Err((_, e)) = &self.program {
-                iui.label(RichText::new(format!("⚠ {e}")).color(p.missing).size(11.5));
+            if let Err((id, e)) = &self.program {
+                let id = *id;
+                let r = iui.add(egui::Label::new(RichText::new(format!("{}  {}", crate::lucide::TRIANGLE_ALERT, crate::i18n::t(e))).color(p.missing).size(11.5)).sense(Sense::click())).on_hover_text(crate::i18n::t("Cliquer pour montrer le node en cause"));
+                if r.clicked() && self.graph.nodes.iter().any(|n| n.id == id) {
+                    self.selected = [id].into_iter().collect();
+                    self.frame_sel = true;
+                }
             }
             if let Some(m) = &self.message {
                 iui.label(RichText::new(m).color(p.muted).size(11.0));
             }
+            iui.add_space(4.0);
+            egui::ScrollArea::vertical().id_salt("node-structure").auto_shrink([false, false]).show(&mut iui, |ui| {
+                self.structure_ui(ui);
+            });
         }
         if let Some(g) = preset.and_then(material_preset) {
+            self.leave();
             self.graph = g;
             self.scene = Rect::ZERO;
             self.changed();
@@ -3181,16 +3812,25 @@ impl Editor {
             ui.set_width(hdr_w - 14.0);
             ui.set_clip_rect(Rect::from_min_size(graph_rect.min + vec2(12.0, 10.0), vec2(hdr_w, 40.0)));
             ui.horizontal(|ui| {
+            if let Some(l) = self.level.clone() {
+                // Dans un groupe : d'où l'on vient, où l'on est, et la sortie
+                if ui.button(format!("{}  {}", crate::lucide::ARROW_LEFT, crate::i18n::t("Graphe"))).on_hover_text(crate::i18n::t("Sortir du groupe (Tab)")).clicked() {
+                    self.leave_request = true;
+                }
+                ui.label(RichText::new(crate::lucide::CHEVRON_RIGHT).size(11.0).color(p.muted));
+                ui.label(RichText::new(format!("{}  {l}", crate::lucide::GROUP)).color(cat_color("groupe")).family(theme::bold()));
+                ui.separator();
+            }
             egui::containers::menu::MenuButton::new(crate::i18n::t("Ajouter")).ui(ui, |ui| {
                 for cat in CATS {
-                    let items: Vec<&Def> = DEFS.iter().filter(|d| d.cat == cat && if kind == GraphKind::Material { d.mat } else { d.comp }).collect();
+                    let items: Vec<&(String, &'static str, Pick, bool)> = picks.iter().filter(|x| x.1 == cat).collect();
                     if items.is_empty() {
                         continue;
                     }
                     ui.menu_button(crate::i18n::t(cat), |ui| {
-                        for d in items {
-                            if ui.button(crate::i18n::t(d.label)).clicked() {
-                                add_now = Some(d.op);
+                        for (label, _, pick, _) in items {
+                            if ui.button(label).clicked() {
+                                add_now = Some(pick.clone());
                             }
                         }
                     });
@@ -3209,9 +3849,9 @@ impl Editor {
                 if ui.button(format!("{}  {}", crate::lucide::SCAN, crate::i18n::t("Tout cadrer   Origine"))).clicked() {
                     self.scene = Rect::ZERO;
                 }
-                let all_on = self.graph.nodes.iter().filter(|n| n.op != "mat_out" && n.op != "comp_out").all(|n| n.preview);
+                let all_on = self.graph.nodes.iter().filter(|n| !is_out_op(&n.op)).all(|n| n.preview);
                 if ui.button(crate::i18n::t(if all_on { "Cacher les miniatures" } else { "Montrer les miniatures" })).clicked() {
-                    for n in self.graph.nodes.iter_mut().filter(|n| n.op != "mat_out" && n.op != "comp_out") {
+                    for n in self.graph.nodes.iter_mut().filter(|n| !is_out_op(&n.op)) {
                         n.preview = !all_on;
                     }
                     self.changed();
@@ -3225,7 +3865,7 @@ impl Editor {
                 }
             });
             egui::containers::menu::MenuButton::new(crate::i18n::t("Aide")).ui(ui, |ui| {
-                ui.label(RichText::new(crate::i18n::t("Maj+A ou clic droit : ajouter\nglisser dans le vide : sélection en rectangle (Maj : ajouter)\nclic molette ou clic droit glissé : se déplacer · molette : zoom\nglisser une sortie dans le vide : ajouter un node déjà relié\nCtrl+clic sur un lien : le couper\nA : tout · Alt+A : rien · X / Suppr : effacer\nMaj+D : dupliquer · Ctrl+C / Ctrl+V : copier, coller\nM : muet · H : réduire · P : miniature · F2 : renommer\nF : cadrer la sélection · Origine : tout cadrer\nCtrl+Z / Ctrl+Maj+Z : annuler, rétablir\nGlisser des images depuis l'ordinateur : nodes texture")).size(11.0));
+                ui.label(RichText::new(crate::i18n::t("Maj+A ou clic droit : ajouter (taper pour chercher, même une opération : « multiplier »)\nglisser dans le vide : sélection en rectangle (Maj : ajouter)\nclic molette ou clic droit glissé : se déplacer · molette : zoom\nglisser une sortie dans le vide : ajouter un node déjà relié\nCtrl+clic sur un lien : le couper · double-clic : y poser un renvoi\nA : tout · Alt+A : rien · X / Suppr : effacer\nMaj+D : dupliquer · Ctrl+C / Ctrl+V : copier, coller\nM : muet · H : réduire · P : miniature · F2 : renommer\nCtrl+G : grouper · Ctrl+Alt+G : défaire · Tab : entrer dans un groupe, en sortir\nCtrl+J : cadre autour de la sélection · clic droit dans le vide : note\nF : cadrer la sélection · Origine : tout cadrer · Q : ranger\nCtrl+Z / Ctrl+Maj+Z : annuler, rétablir\nGlisser des images depuis l'ordinateur : nodes texture")).size(11.0));
             });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if kind == GraphKind::Compositor && ui.button(format!("{}  {}", crate::lucide::DOWNLOAD, crate::i18n::t("Exporter PNG"))).clicked() {
@@ -3246,7 +3886,9 @@ impl Editor {
             if !bb.is_finite() {
                 bb = Rect::from_min_size(Pos2::ZERO, vec2(600.0, 400.0));
             }
-            let bb = bb.expand(40.0);
+            // Marge autour, et la place de l'en-tête flottant en haut
+            let mut bb = bb.expand(40.0);
+            bb.min.y -= bb.height() * 56.0 / (graph_rect.height() - 56.0).max(100.0);
             let aspect = graph_rect.width() / graph_rect.height().max(1.0);
             let (mut w, mut h) = (bb.width(), bb.height());
             if w / h < aspect {
@@ -3276,6 +3918,21 @@ impl Editor {
             [sc.min.x + (pt.x - graph_rect.min.x) * k, sc.min.y + (pt.y - graph_rect.min.y) * k]
         };
         let typing = ctx.egui_wants_keyboard_input();
+        // Tab entre dans le groupe choisi, ou sort de celui où l'on est. egui s'en sert aussi pour passer
+        // d'un champ à l'autre : dès l'appui, un menu prend le focus. On regarde donc si l'on écrivait
+        // à l'image d'avant, et on rend le focus.
+        if over_graph && self.add.is_none() && !self.was_typing && ctx.input(|i| i.key_pressed(egui::Key::Tab) && !i.modifiers.any()) {
+            if let Some(f) = ctx.memory(|m| m.focused()) {
+                ctx.memory_mut(|m| m.surrender_focus(f));
+            }
+            match self.selected.iter().next().and_then(|id| self.group_of(*id)).filter(|_| self.selected.len() == 1) {
+                Some(name) => self.enter(&name),
+                None => self.leave(),
+            }
+            self.was_typing = false;
+        } else {
+            self.was_typing = typing;
+        }
         // Raccourcis (souris sur le graphe)
         if over_graph && !typing && self.add.is_none() {
             let (shift, cmd, alt) = ctx.input(|i| (i.modifiers.shift, i.modifiers.command, i.modifiers.alt));
@@ -3291,9 +3948,7 @@ impl Editor {
             }
             if key(egui::Key::Delete) || key(egui::Key::X) && !cmd {
                 for id in self.selected.clone() {
-                    if !self.is_output(id) {
-                        self.graph.remove(id);
-                    }
+                    self.delete_node(id);
                 }
                 self.selected.clear();
                 self.changed();
@@ -3321,7 +3976,7 @@ impl Editor {
             });
             if (cmd && key(egui::Key::C)) || copy_ev || cut_ev {
                 let ids: Vec<u32> = self.selected.iter().copied().collect();
-                let nodes: Vec<Node> = self.graph.nodes.iter().filter(|n| ids.contains(&n.id) && n.op != "mat_out" && n.op != "comp_out").cloned().collect();
+                let nodes: Vec<Node> = self.graph.nodes.iter().filter(|n| ids.contains(&n.id) && !is_out_op(&n.op)).cloned().collect();
                 let links: Vec<Link> = self.graph.links.iter().filter(|l| ids.contains(&l.from) && ids.contains(&l.to)).cloned().collect();
                 if !nodes.is_empty() {
                     self.message = Some(format!("{} {}", nodes.len(), crate::i18n::t_mid("node(s) copié(s)")));
@@ -3332,9 +3987,7 @@ impl Editor {
                     self.clipboard = Some((nodes, links));
                     if cut_ev {
                         for id in ids {
-                            if !self.is_output(id) {
-                                self.graph.remove(id);
-                            }
+                            self.delete_node(id);
                         }
                         self.selected.clear();
                         self.changed();
@@ -3371,6 +4024,12 @@ impl Editor {
             if !cmd && key(egui::Key::Q) {
                 self.arrange();
             }
+            // Groupes : Ctrl+G réunit, Ctrl+Alt+G défait, Tab entre et sort
+            if cmd && alt && key(egui::Key::G) {
+                self.ungroup_selection();
+            } else if cmd && key(egui::Key::G) {
+                self.group_selection();
+            }
             for (k, op) in [(egui::Key::M, NodeOp::Mute), (egui::Key::H, NodeOp::Collapse), (egui::Key::P, NodeOp::Preview)] {
                 if !cmd && !shift && key(k) {
                     for id in self.selected.clone() {
@@ -3382,7 +4041,7 @@ impl Editor {
                 let bb = self.bbox(Some(&self.selected)).expand(24.0);
                 let n = self.graph.frames.len();
                 let cols = [[90u8, 120, 200], [80, 160, 110], [200, 140, 60], [170, 90, 170], [200, 80, 80]];
-                self.graph.frames.push(Frame { rect: [bb.min.x, bb.min.y - 26.0, bb.width(), bb.height() + 26.0], label: format!("{} {}", crate::i18n::t("cadre"), n + 1), color: cols[n % cols.len()] });
+                self.graph.frames.push(Frame { rect: [bb.min.x, bb.min.y - 26.0, bb.width(), bb.height() + 26.0], label: format!("{} {}", crate::i18n::t("cadre"), n + 1), color: cols[n % cols.len()], note: String::new() });
                 self.changed();
             }
             if key(egui::Key::F2) {
@@ -3406,7 +4065,7 @@ impl Editor {
                 let is_img = crate::images::has_preview(&rel) || ["exr", "hdr", "tga"].iter().any(|e| rel.to_lowercase().ends_with(&format!(".{e}")));
                 // Le node sous le pointeur, s'il a un champ fichier du bon genre
                 let target = self.graph.nodes.iter().rev().find(|n| {
-                    let Some(d) = def(&n.op) else { return false };
+                    let Some(d) = n.def() else { return false };
                     let h = Self::node_size(n, d);
                     g[0] >= n.pos[0] && g[0] <= n.pos[0] + NW && g[1] >= n.pos[1] && g[1] <= n.pos[1] + h && d.params.iter().any(|pp| matches!(pp, ParamDef::File(_))) && ((n.op == "video") == is_vid)
                 }).map(|n| (n.id, n.pos));
@@ -3464,14 +4123,14 @@ impl Editor {
                 self.changed();
             }
         }
-        if let Some(op) = add_now {
+        if let Some(pick) = add_now {
             let at = to_graph(graph_rect.center());
-            let id = self.graph.add(op, at);
-            self.selected = [id].into_iter().collect();
+            self.add_pick(&pick, [at[0] - NW * 0.5, at[1] - 60.0]);
             self.changed();
         }
         // Actions du graphe
         let mut changed = false;
+        let mut enter: Option<String> = None;
         let mut solo_toggle: Option<u32> = None;
         let mut moved = false;
         for a in actions {
@@ -3490,7 +4149,7 @@ impl Editor {
                 }
                 Act::MoveEnd => moved = true,
                 Act::Connect(a, o, b, i) => {
-                    self.graph.connect(a, o, b, i);
+                    self.connect(a, o, b, i);
                     changed = true;
                 }
                 Act::Unlink(b, i) => {
@@ -3503,6 +4162,17 @@ impl Editor {
                         changed = true;
                     }
                 }
+                Act::Reroute(k, at) => {
+                    if let Some(l) = self.graph.links.get(k).cloned() {
+                        let id = self.graph.add("reroute", [at.x - REROUTE_W * 0.5, at.y - REROUTE_H * 0.5]);
+                        self.graph.links.retain(|x| *x != l);
+                        self.graph.links.push(Link { from: l.from, out: l.out, to: id, inp: 0 });
+                        self.graph.links.push(Link { from: id, out: 0, to: l.to, inp: l.inp });
+                        self.selected = [id].into_iter().collect();
+                        changed = true;
+                    }
+                }
+                Act::Enter(id) => enter = self.group_of(id),
                 Act::Changed => changed = true,
                 Act::Click(id, add) => {
                     if add {
@@ -3523,8 +4193,8 @@ impl Editor {
                         self.selected.clear();
                     }
                     for n in &self.graph.nodes {
-                        let h = def(&n.op).map(|d| Self::node_size(n, d)).unwrap_or(100.0);
-                        if r.intersects(Rect::from_min_size(pos2(n.pos[0], n.pos[1]), vec2(NW, h))) {
+                        let h = n.def().map(|d| Self::node_size(n, d)).unwrap_or(100.0);
+                        if r.intersects(Rect::from_min_size(pos2(n.pos[0], n.pos[1]), vec2(node_w(n), h))) {
                             self.selected.insert(n.id);
                         }
                     }
@@ -3541,12 +4211,17 @@ impl Editor {
                             self.selected = new.into_iter().collect();
                         }
                         NodeOp::Delete => {
-                            if !self.is_output(id) {
-                                self.graph.remove(id);
-                                self.selected.remove(&id);
-                            }
+                            self.delete_node(id);
+                            self.selected.remove(&id);
                         }
                         NodeOp::Disconnect => self.graph.links.retain(|l| l.from != id && l.to != id),
+                        NodeOp::Group => {
+                            self.group_selection();
+                        }
+                        NodeOp::Ungroup => {
+                            self.selected = [id].into_iter().collect();
+                            self.ungroup_selection();
+                        }
                         NodeOp::Rename => {
                             let cur = self.graph.nodes.iter().find(|n| n.id == id).map(|n| n.label.clone()).unwrap_or_default();
                             self.rename = Some((id, cur));
@@ -3555,7 +4230,7 @@ impl Editor {
                             if let Some(n) = self.graph.nodes.iter_mut().find(|n| n.id == id) {
                                 match op {
                                     NodeOp::Mute => {
-                                        if n.op != "mat_out" && n.op != "comp_out" {
+                                        if !is_out_op(&n.op) {
                                             n.muted = !n.muted;
                                         }
                                     }
@@ -3583,6 +4258,15 @@ impl Editor {
         } else if moved {
             self.commit();
         }
+        if let Some(name) = enter {
+            self.enter(&name);
+        }
+        if std::mem::take(&mut self.group_request) {
+            self.group_selection();
+        }
+        if std::mem::take(&mut self.leave_request) {
+            self.leave();
+        }
         self.add_menu_ui(&ctx);
         ui.allocate_rect(avail, Sense::hover());
     }
@@ -3591,105 +4275,128 @@ impl Editor {
         self.add = Some(AddMenu { at: screen, graph_at, query: String::new(), cat: 0, sel: 0, link });
     }
 
-    /// Menu d'ajout façon Blender : catégories à gauche (survol), nodes à droite, recherche.
+    /// Menu d'ajout : on tape pour chercher (Entrée pose le premier résultat), ou on parcourt les
+    /// catégories à gauche et leurs nodes à droite.
     fn add_menu_ui(&mut self, ctx: &egui::Context) {
         let p = theme::pal();
-        let kind = self.graph.kind;
+        if self.add.is_none() {
+            return;
+        }
+        let picks = self.picks();
         let Some(m) = &mut self.add else { return };
-        let mut chosen: Option<&'static str> = None;
+        let mut chosen: Option<Pick> = None;
         let mut close = false;
-        let usable = |d: &&Def| if kind == GraphKind::Material { d.mat } else { d.comp };
         // Avec un lien en attente : seulement les nodes qui ont une entrée
         let need_input = m.link.is_some();
-        let area = egui::Area::new(egui::Id::unique("node-add")).order(egui::Order::Foreground).fixed_pos(m.at).show(ctx, |ui| {
-            egui::Frame::new().fill(p.bg).stroke(Stroke::new(1.0, p.text)).inner_margin(6).show(ui, |ui| {
-                let r = ui.add(egui::TextEdit::singleline(&mut m.query).hint_text(crate::i18n::t("chercher un node…")).desired_width(360.0));
+        let cats: Vec<&'static str> = CATS.iter().copied().filter(|c| picks.iter().any(|x| x.1 == *c && (!need_input || x.3))).collect();
+        if m.cat >= cats.len() {
+            m.cat = 0;
+        }
+        // Une rangée : pastille de la catégorie, nom, et la catégorie en discret à droite
+        let row = |ui: &mut egui::Ui, label: &str, cat: &str, group: bool, hi: bool, w: f32, show_cat: bool| -> egui::Response {
+            let (r, resp) = ui.allocate_exact_size(vec2(w, 24.0), Sense::click());
+            if hi {
+                ui.painter().rect_filled(r, 5.0, p.raised);
+            }
+            ui.painter().rect_filled(Rect::from_center_size(pos2(r.left() + 12.0, r.center().y), vec2(8.0, 8.0)), 2.0, cat_color(if group { "groupe" } else { cat }));
+            ui.painter().with_clip_rect(r).text(pos2(r.left() + 24.0, r.center().y), egui::Align2::LEFT_CENTER, label, egui::FontId::proportional(12.5), if hi { p.accent } else { p.text });
+            if show_cat {
+                ui.painter().text(pos2(r.right() - 8.0, r.center().y), egui::Align2::RIGHT_CENTER, crate::i18n::t(if group { "groupe" } else { cat }), egui::FontId::proportional(10.5), p.muted);
+            }
+            resp
+        };
+        let area = egui::Area::new(egui::Id::unique("node-add")).order(egui::Order::Foreground).fixed_pos(m.at).constrain(true).show(ctx, |ui| {
+            egui::Frame::new().fill(p.panel).stroke(Stroke::new(1.0, p.line)).corner_radius(8).inner_margin(8).shadow(egui::epaint::Shadow { offset: [0, 4], blur: 14, spread: 0, color: Color32::from_black_alpha(70) }).show(ui, |ui| {
+                ui.spacing_mut().item_spacing.y = 1.0;
+                let r = ui.add(egui::TextEdit::singleline(&mut m.query).hint_text(format!("{}  {}", crate::lucide::SEARCH, crate::i18n::t("chercher un node…"))).desired_width(372.0));
                 r.request_focus();
+                ui.add_space(5.0);
                 let q = crate::chat::fold(&m.query);
+                let (down, up, enter) = ui.input(|i| (i.key_pressed(egui::Key::ArrowDown), i.key_pressed(egui::Key::ArrowUp), i.key_pressed(egui::Key::Enter)));
                 if q.is_empty() {
                     ui.horizontal_top(|ui| {
+                        ui.spacing_mut().item_spacing.x = 8.0;
                         // Catégories
                         ui.vertical(|ui| {
-                            ui.set_width(110.0);
-                            for (ci, cat) in CATS.iter().enumerate() {
-                                let n = DEFS.iter().filter(usable).filter(|d| d.cat == *cat && (!need_input || !d.inputs.is_empty())).count();
-                                if n == 0 {
-                                    continue;
-                                }
+                            ui.set_width(124.0);
+                            for (ci, cat) in cats.iter().enumerate() {
                                 let active = m.cat == ci;
-                                let r = ui.add(egui::Button::new(RichText::new(format!("{}  ›", crate::i18n::t(cat))).color(if active { p.on_accent } else { p.text })).fill(if active { p.accent } else { Color32::TRANSPARENT }).stroke(Stroke::NONE).min_size(vec2(110.0, 22.0)));
-                                if r.hovered() || r.clicked() {
-                                    if m.cat != ci {
-                                        m.sel = 0;
-                                    }
+                                let (r, resp) = ui.allocate_exact_size(vec2(124.0, 24.0), Sense::click());
+                                if active {
+                                    ui.painter().rect_filled(r, 5.0, p.accent);
+                                }
+                                ui.painter().text(pos2(r.left() + 10.0, r.center().y), egui::Align2::LEFT_CENTER, crate::i18n::t(cat), egui::FontId::proportional(12.5), if active { p.on_accent } else { p.text });
+                                ui.painter().text(pos2(r.right() - 8.0, r.center().y), egui::Align2::RIGHT_CENTER, crate::lucide::CHEVRON_RIGHT, egui::FontId::proportional(11.0), if active { p.on_accent } else { p.muted });
+                                if (resp.hovered() || resp.clicked()) && m.cat != ci {
                                     m.cat = ci;
+                                    m.sel = 0;
                                 }
                             }
                         });
-                        ui.separator();
                         ui.vertical(|ui| {
-                            ui.set_width(220.0);
-                            let items: Vec<&Def> = DEFS.iter().filter(usable).filter(|d| d.cat == CATS[m.cat] && (!need_input || !d.inputs.is_empty())).collect();
-                            for (k, d) in items.iter().enumerate() {
-                                let hi = k == m.sel;
-                                let r = ui.add(egui::Button::new(RichText::new(crate::i18n::t(d.label)).color(if hi { p.accent } else { p.text })).fill(if hi { p.line.gamma_multiply(0.6) } else { Color32::TRANSPARENT }).stroke(Stroke::NONE).min_size(vec2(220.0, 22.0)));
-                                if r.hovered() {
-                                    m.sel = k;
+                            ui.set_width(240.0);
+                            let items: Vec<&(String, &'static str, Pick, bool)> = picks.iter().filter(|x| Some(&x.1) == cats.get(m.cat) && (!need_input || x.3)).collect();
+                            egui::ScrollArea::vertical().id_salt("node-add-items").max_height(cats.len().max(8) as f32 * 25.0).show(ui, |ui| {
+                                for (k, (label, cat, pick, _)) in items.iter().enumerate() {
+                                    let resp = row(ui, label, cat, matches!(pick, Pick::Group(_)), k == m.sel, 240.0, false);
+                                    if resp.hovered() {
+                                        m.sel = k;
+                                    }
+                                    if resp.clicked() {
+                                        chosen = Some(pick.clone());
+                                    }
                                 }
-                                if r.clicked() {
-                                    chosen = Some(d.op);
-                                }
-                            }
+                            });
                             let n = items.len();
-                            if ui.input(|i| i.key_pressed(egui::Key::ArrowDown)) && n > 0 {
+                            if down && n > 0 {
                                 m.sel = (m.sel + 1) % n;
                             }
-                            if ui.input(|i| i.key_pressed(egui::Key::ArrowUp)) && n > 0 {
+                            if up && n > 0 {
                                 m.sel = (m.sel + n - 1) % n;
                             }
-                            if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                                chosen = items.get(m.sel).map(|d| d.op);
+                            if enter {
+                                chosen = items.get(m.sel).map(|x| x.2.clone());
                             }
                         });
                     });
-                    if ui.input(|i| i.key_pressed(egui::Key::ArrowRight)) {
-                        m.cat = (m.cat + 1) % CATS.len();
+                    let (right, left) = ui.input(|i| (i.key_pressed(egui::Key::ArrowRight), i.key_pressed(egui::Key::ArrowLeft)));
+                    if right && !cats.is_empty() {
+                        m.cat = (m.cat + 1) % cats.len();
                         m.sel = 0;
                     }
-                    if ui.input(|i| i.key_pressed(egui::Key::ArrowLeft)) {
-                        m.cat = (m.cat + CATS.len() - 1) % CATS.len();
+                    if left && !cats.is_empty() {
+                        m.cat = (m.cat + cats.len() - 1) % cats.len();
                         m.sel = 0;
                     }
                 } else {
                     // Chaque mot doit se retrouver dans le nom (français ou anglais), la catégorie ou le
                     // code du node ; les meilleurs d'abord : début de mot, puis milieu, puis lettres dans l'ordre.
-                    let scored = search_defs(&q, kind == GraphKind::Material, need_input);
-                    let list: Vec<&Def> = scored.into_iter().take(16).map(|x| x.1).collect();
+                    let list: Vec<(String, &'static str, Pick)> = search_picks(&q, &picks, need_input).into_iter().take(14).map(|x| (x.1, x.2, x.3)).collect();
                     if m.sel >= list.len() {
                         m.sel = 0;
                     }
-                    for (k, d) in list.iter().enumerate() {
-                        let hi = k == m.sel;
-                        let r = ui.add(egui::Button::new(RichText::new(format!("{}   {}", crate::i18n::t(d.label), crate::i18n::t(d.cat))).color(if hi { p.accent } else { p.text })).fill(if hi { p.line.gamma_multiply(0.6) } else { Color32::TRANSPARENT }).stroke(Stroke::NONE).min_size(vec2(360.0, 22.0)));
-                        if r.hovered() {
+                    for (k, (label, cat, pick)) in list.iter().enumerate() {
+                        let resp = row(ui, label, cat, matches!(pick, Pick::Group(_)), k == m.sel, 372.0, true);
+                        if resp.hovered() {
                             m.sel = k;
                         }
-                        if r.clicked() {
-                            chosen = Some(d.op);
+                        if resp.clicked() {
+                            chosen = Some(pick.clone());
                         }
                     }
                     if list.is_empty() {
+                        ui.add_space(4.0);
                         ui.label(RichText::new(crate::i18n::t("aucun node")).color(p.muted));
                     }
                     let n = list.len();
-                    if ui.input(|i| i.key_pressed(egui::Key::ArrowDown)) && n > 0 {
+                    if down && n > 0 {
                         m.sel = (m.sel + 1) % n;
                     }
-                    if ui.input(|i| i.key_pressed(egui::Key::ArrowUp)) && n > 0 {
+                    if up && n > 0 {
                         m.sel = (m.sel + n - 1) % n;
                     }
-                    if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                        chosen = list.get(m.sel).map(|d| d.op);
+                    if enter {
+                        chosen = list.get(m.sel).map(|x| x.2.clone());
                     }
                 }
                 if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
@@ -3699,17 +4406,238 @@ impl Editor {
         });
         let (graph_at, link) = (m.graph_at, m.link);
         let outside = ctx.input(|i| i.pointer.any_pressed()) && !ctx.pointer_latest_pos().is_some_and(|pt| area.response.rect.contains(pt));
-        if let Some(op) = chosen {
-            let id = self.graph.add(op, graph_at);
-            if let Some((from, out)) = link {
-                self.graph.connect(from, out, id, 0);
-            }
-            self.selected = [id].into_iter().collect();
+        if let Some(pick) = chosen {
             self.add = None;
+            if let Some(id) = self.add_pick(&pick, graph_at) {
+                if let Some((from, out)) = link {
+                    // Le lien en attente va à la première entrée qui l'accepte
+                    let from_sock = self.graph.nodes.iter().find(|n| n.id == from).and_then(|n| n.def()).and_then(|d| d.outputs.get(out)).map(|o| o.1).unwrap_or(Sock::Any);
+                    let inp = self.graph.nodes.iter().find(|n| n.id == id).and_then(|n| n.def()).and_then(|d| d.inputs.iter().position(|i| socks_fit(from_sock, i.1) && i.0 != crate::nodeflow::VIRTUAL)).unwrap_or(0);
+                    self.connect(from, out, id, inp);
+                }
+            }
             self.changed();
         } else if close || outside {
             self.add = None;
         }
+    }
+
+    /// Inspecteur : ce qui touche à la structure. Le groupe choisi (nom, entrer, défaire), l'interface
+    /// du groupe où l'on se trouve, les prises de la zone choisie.
+    fn structure_ui(&mut self, ui: &mut egui::Ui) {
+        use crate::nodeflow::Port;
+        let p = theme::pal();
+        let first = self.selected.iter().next().copied();
+        let mut dirty = false;
+        let card = |ui: &mut egui::Ui, title: &str, add: &mut dyn FnMut(&mut egui::Ui)| {
+            egui::Frame::new().fill(p.field).corner_radius(8).inner_margin(egui::Margin::symmetric(10, 8)).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.label(theme::section(&crate::i18n::t(title)));
+                ui.add_space(2.0);
+                add(ui);
+            });
+            ui.add_space(6.0);
+        };
+        let icon = |ui: &mut egui::Ui, icon: &str, tip: &str| ui.add(egui::Button::new(RichText::new(icon).size(14.0)).frame(false).min_size(vec2(24.0, 22.0))).on_hover_text(crate::i18n::t(tip)).clicked();
+        // Une liste de prises : pastille du type (clic : changer), nom, valeur par défaut, corbeille
+        let allow_geo = self.graph.kind == GraphKind::Geometry;
+        let ports_ui = |ui: &mut egui::Ui, ports: &mut Vec<Port>, salt: &str, defaults: bool| -> (bool, Option<usize>, Option<Port>) {
+            let (mut changed, mut removed, mut added) = (false, None, None);
+            for (k, port) in ports.iter_mut().enumerate() {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 4.0;
+                    let (dot, dr) = ui.allocate_exact_size(vec2(16.0, 20.0), Sense::click());
+                    ui.painter().circle_filled(dot.center(), 5.5, sock_color(port.sock));
+                    let dr = dr.on_hover_text(crate::i18n::t("Type de la prise (clic pour changer)"));
+                    egui::Popup::menu(&dr).show(|ui| {
+                        for (s, name) in [(Sock::Float, "nombre"), (Sock::Int, "entier"), (Sock::Bool, "vrai / faux"), (Sock::Vector, "vecteur"), (Sock::Color, "couleur"), (Sock::Geo, "géométrie")] {
+                            if s == Sock::Geo && !allow_geo {
+                                continue;
+                            }
+                            if ui.selectable_label(port.sock == s, crate::i18n::t(name)).clicked() {
+                                port.sock = s;
+                                changed = true;
+                                ui.close();
+                            }
+                        }
+                    });
+                    let w = ui.available_width() - if defaults && matches!(port.sock, Sock::Float | Sock::Int) { 86.0 } else { 30.0 };
+                    if ui.add(egui::TextEdit::singleline(&mut port.name).desired_width(w.max(40.0)).id_salt((salt, k))).changed() {
+                        changed = true;
+                    }
+                    if defaults && matches!(port.sock, Sock::Float | Sock::Int) {
+                        let mut x = port.value[0];
+                        if ui.add(egui::DragValue::new(&mut x).speed(0.01).max_decimals(3)).on_hover_text(crate::i18n::t("Valeur de départ sur un nouveau node de ce groupe")).changed() {
+                            port.value = [x; 4];
+                            changed = true;
+                        }
+                    }
+                    if ui.add(egui::Button::new(RichText::new(crate::lucide::TRASH_2).size(12.5)).frame(false)).on_hover_text(crate::i18n::t("Retirer cette prise et ses liens")).clicked() {
+                        removed = Some(k);
+                    }
+                });
+            }
+            if ui.add(egui::Button::new(RichText::new(format!("{}  {}", crate::lucide::PLUS, crate::i18n::t("ajouter une prise"))).size(11.5)).frame(false)).on_hover_text(crate::i18n::t("Ou relie un node à l'anneau vide « nouvelle prise »")).clicked() {
+                added = Some(Port { name: crate::i18n::t_mid("valeur"), sock: Sock::Float, value: [0.0; 4] });
+            }
+            (changed, removed, added)
+        };
+        // 1. Le node de groupe choisi
+        if let Some(name) = first.and_then(|id| self.group_of(id)) {
+            let uses = self.with_doc(|g| crate::nodeflow::group_uses(g, &name));
+            let (mut enter, mut ungroup) = (false, false);
+            let mut text = match &self.group_rename {
+                Some((old, t)) if *old == name => t.clone(),
+                _ => name.clone(),
+            };
+            let mut commit = false;
+            card(ui, "GROUPE", &mut |ui| {
+                ui.horizontal(|ui| {
+                    let te = ui.add(egui::TextEdit::singleline(&mut text).desired_width(ui.available_width() - 62.0));
+                    commit |= te.lost_focus();
+                    if icon(ui, crate::lucide::LOG_IN, "Entrer dans le groupe (Tab)") {
+                        enter = true;
+                    }
+                    if icon(ui, crate::lucide::UNGROUP, "Défaire : remettre son contenu à plat ici (Ctrl+Alt+G)") {
+                        ungroup = true;
+                    }
+                });
+                ui.label(RichText::new(if uses > 1 { format!("{} {uses} {}", crate::i18n::t("Posé"), crate::i18n::t_mid("fois : le modifier change tous ses exemplaires.")) } else { crate::i18n::t("Ses entrées se règlent sur le node. Pose-le ailleurs depuis « Ajouter › structure ».") }).size(11.0).color(p.muted));
+            });
+            self.group_rename = (text != name).then(|| (name.clone(), text.clone()));
+            if commit && text != name {
+                let ok = self.with_doc(|g| crate::nodeflow::group_rename(g, &name, &text));
+                self.group_rename = None;
+                if ok {
+                    dirty = true;
+                } else {
+                    self.message = Some(crate::i18n::t("Ce nom de groupe est déjà pris."));
+                }
+            }
+            if enter {
+                self.enter(&name);
+                return;
+            }
+            if ungroup {
+                self.ungroup_selection();
+                return;
+            }
+        }
+        // 2. L'interface du groupe où l'on se trouve
+        if let Some(level) = self.level.clone() {
+            let (mut ins, mut outs) = self.graph.groups.iter().find(|g| g.name == level).map(|g| (g.inputs.clone(), g.outputs.clone())).unwrap_or_default();
+            let mut edits: Vec<(bool, (bool, Option<usize>, Option<Port>))> = vec![];
+            card(ui, "ENTRÉES DU GROUPE", &mut |ui| edits.push((true, ports_ui(ui, &mut ins, "gin", true))));
+            card(ui, "SORTIES DU GROUPE", &mut |ui| edits.push((false, ports_ui(ui, &mut outs, "gout", false))));
+            for (input, (changed, removed, added)) in edits {
+                if changed {
+                    let list = if input { ins.clone() } else { outs.clone() };
+                    self.with_doc(|g| {
+                        if let Some(gr) = g.groups.iter_mut().find(|g| g.name == level) {
+                            if input {
+                                gr.inputs = list;
+                            } else {
+                                gr.outputs = list;
+                            }
+                        }
+                    });
+                    dirty = true;
+                }
+                if let Some(k) = removed {
+                    self.with_doc(|g| crate::nodeflow::group_remove_port(g, &level, input, k));
+                    dirty = true;
+                }
+                if let Some(port) = added {
+                    self.with_doc(|g| crate::nodeflow::group_add_port(g, &level, input, port));
+                    dirty = true;
+                }
+            }
+        }
+        // 3. Les prises de la zone choisie
+        if let Some(id) = first.filter(|id| self.graph.nodes.iter().any(|n| n.id == *id && crate::nodeflow::is_zone(&n.op))) {
+            let sim = self.graph.nodes.iter().any(|n| n.id == id && n.op.starts_with("sim"));
+            let mut ports = self.graph.nodes.iter().find(|n| n.id == id).map(|n| n.ins.clone()).unwrap_or_default();
+            let mut edit = (false, None, None);
+            card(ui, if sim { "ÉTAT DE LA SIMULATION" } else { "ÉTAT DE LA RÉPÉTITION" }, &mut |ui| {
+                edit = ports_ui(ui, &mut ports, "zone", false);
+                ui.label(RichText::new(crate::i18n::t(if sim { "Ce qui passe d'une image à la suivante. Le contenu de la zone s'exécute une fois par image." } else { "Ce qui passe d'un tour au suivant. Le contenu de la zone s'exécute autant de fois qu'il y a d'itérations." })).size(11.0).color(p.muted));
+            });
+            let pair = crate::nodeflow::zone_pair(&self.graph, id);
+            if edit.0 {
+                for n in self.graph.nodes.iter_mut().filter(|n| n.id == id || Some(n.id) == pair) {
+                    n.ins = ports.clone();
+                }
+                dirty = true;
+            }
+            if let Some(k) = edit.1 {
+                crate::nodeflow::zone_remove_port(&mut self.graph, id, k);
+                dirty = true;
+            }
+            if let Some(port) = edit.2 {
+                crate::nodeflow::zone_add_port(&mut self.graph, id, port);
+                dirty = true;
+            }
+        }
+        if dirty {
+            self.changed();
+        }
+    }
+
+    /// Fond teinté derrière chaque zone : on voit d'un coup d'œil ce qui se répète ou se simule.
+    fn draw_zones(&self, painter: &egui::Painter, layout: &[(u32, Rect, &'static Def)]) {
+        for n in self.graph.nodes.iter().filter(|n| matches!(n.op.as_str(), "repeat_in" | "sim_in")) {
+            let Some(end) = crate::nodeflow::zone_pair(&self.graph, n.id) else { continue };
+            let body = crate::nodeflow::zone_body(&self.graph, n.id, end);
+            let mut bb = Rect::NOTHING;
+            for (id, r, _) in layout {
+                if *id == n.id || *id == end || body.contains(id) {
+                    bb = bb.union(*r);
+                }
+            }
+            if !bb.is_finite() {
+                continue;
+            }
+            let col = cat_color(if n.op == "sim_in" { "simulation" } else { "répétition" });
+            painter.rect(bb.expand(18.0), 14.0, col.gamma_multiply(0.07), Stroke::new(1.0, col.gamma_multiply(0.5)), egui::StrokeKind::Outside);
+        }
+    }
+
+    /// Relie une sortie à une entrée. Brancher la prise libre d'un groupe ou d'une zone crée
+    /// d'abord la vraie prise, du type de ce qu'on y branche.
+    fn connect(&mut self, from: u32, out: usize, to: u32, inp: usize) {
+        use crate::nodeflow::{virtual_input, virtual_output, Port, VIRTUAL};
+        let find = |g: &Graph, id: u32| g.nodes.iter().find(|n| n.id == id).cloned();
+        let (Some(a), Some(b)) = (find(&self.graph, from), find(&self.graph, to)) else { return };
+        let (Some(da), Some(db)) = (a.def(), b.def()) else { return };
+        let (Some(o), Some(i)) = (da.outputs.get(out), db.inputs.get(inp)) else { return };
+        if !socks_fit(o.1, i.1) {
+            self.message = Some(crate::i18n::t("Ces deux prises ne vont pas ensemble : une géométrie ne se branche que sur une géométrie."));
+            return;
+        }
+        let named = |name: &str, other: &str| if name.is_empty() || name == VIRTUAL { if other.is_empty() || other == VIRTUAL { "valeur".to_string() } else { other.to_string() } } else { name.to_string() };
+        let typed = |s: Sock, other: Sock| if s == Sock::Any { if other == Sock::Any { Sock::Float } else { other } } else { s };
+        let (free_out, free_in) = (virtual_output(&a) == Some(out), virtual_input(&b) == Some(inp));
+        if free_out && free_in {
+            return;
+        }
+        if free_out {
+            // Entrée de groupe : elle prend le nom, le type et la valeur de l'entrée qu'on vise
+            let Some(level) = self.level.clone() else { return };
+            let value = b.values.get(inp).copied().unwrap_or(i.2);
+            let port = Port { name: named(i.0, ""), sock: typed(i.1, Sock::Any), value };
+            self.with_doc(|g| crate::nodeflow::group_add_port(g, &level, true, port));
+        }
+        if free_in {
+            let port = Port { name: named(o.0, ""), sock: typed(o.1, Sock::Any), value: [0.0; 4] };
+            if b.op == "group_out" {
+                let Some(level) = self.level.clone() else { return };
+                self.with_doc(|g| crate::nodeflow::group_add_port(g, &level, false, port));
+            } else {
+                crate::nodeflow::zone_add_port(&mut self.graph, to, port);
+            }
+        }
+        // La nouvelle prise a pris le rang de la prise libre : le lien y va tel quel
+        self.graph.connect(from, out, to, inp);
     }
 
     fn draw_graph(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Act>) {
@@ -3779,6 +4707,22 @@ impl Editor {
                 self.frame_sel_request = true;
                 ui.close();
             }
+            if ui.button(format!("{}  {}", crate::lucide::STICKY_NOTE, crate::i18n::t("poser une note ici"))).clicked() {
+                if let Some(pt) = pointer {
+                    self.graph.frames.push(Frame { rect: [pt.x, pt.y, 240.0, 150.0], label: crate::i18n::t("note"), color: [200, 140, 60], note: String::new() });
+                    self.note_edit = Some(self.graph.frames.len() - 1);
+                    actions.push(Act::Changed);
+                }
+                ui.close();
+            }
+            if !self.selected.is_empty() && ui.button(format!("{}  {}", crate::lucide::GROUP, crate::i18n::t("grouper la sélection   Ctrl+G"))).clicked() {
+                self.group_request = true;
+                ui.close();
+            }
+            if self.level.is_some() && ui.button(format!("{}  {}", crate::lucide::ARROW_LEFT, crate::i18n::t("sortir du groupe   Tab"))).clicked() {
+                self.leave_request = true;
+                ui.close();
+            }
             if ui.button(format!("{}  {}", crate::lucide::SCAN, crate::i18n::t("tout cadrer   Origine"))).clicked() {
                 self.scene = Rect::ZERO;
                 ui.close();
@@ -3807,8 +4751,23 @@ impl Editor {
                     }
                 }
                 _ => {
-                    painter.text(title.left_center() + vec2(10.0, 0.0), egui::Align2::LEFT_CENTER, format!("{} · {}", crate::i18n::t("Groupe"), fr.label), egui::FontId::proportional(12.0), p.muted);
+                    painter.text(title.left_center() + vec2(10.0, 0.0), egui::Align2::LEFT_CENTER, &fr.label, egui::FontId::proportional(12.0), p.muted);
                 }
+            }
+            // Note : un texte libre dans le cadre (menu du titre, ou « poser une note ici »)
+            let note_rect = Rect::from_min_max(pos2(r.left() + 10.0, title.bottom() + 2.0), pos2(r.right() - 10.0, r.bottom() - 14.0));
+            if self.note_edit == Some(k) {
+                let mut child = ui.new_child(egui::UiBuilder::new().max_rect(note_rect).layout(egui::Layout::top_down(egui::Align::Min)));
+                let te = child.add_sized(note_rect.size(), egui::TextEdit::multiline(&mut self.graph.frames[k].note).font(egui::FontId::proportional(12.5)).hint_text(crate::i18n::t("Écris ta note ici…")));
+                if te.lost_focus() || child.input(|i| i.key_pressed(egui::Key::Escape)) {
+                    self.note_edit = None;
+                    actions.push(Act::Changed);
+                } else if !te.has_focus() {
+                    te.request_focus();
+                }
+            } else if !fr.note.is_empty() {
+                let gal = painter.layout(fr.note.clone(), egui::FontId::proportional(12.5), p.text, note_rect.width());
+                painter.with_clip_rect(note_rect).galley(note_rect.min, gal, p.text);
             }
             let tr = ui.interact(title, ui.scope_id().with(("frame-title", k)), Sense::click_and_drag());
             if tr.dragged_by(egui::PointerButton::Primary) {
@@ -3832,6 +4791,10 @@ impl Editor {
             tr.context_menu(|ui| {
                 if ui.button(format!("{}  {}", crate::lucide::PENCIL, crate::i18n::t("renommer le cadre"))).clicked() {
                     self.frame_rename = Some((k, fr.label.clone()));
+                    ui.close();
+                }
+                if ui.button(format!("{}  {}", crate::lucide::STICKY_NOTE, crate::i18n::t("écrire une note dans le cadre"))).clicked() {
+                    self.note_edit = Some(k);
                     ui.close();
                 }
                 ui.horizontal(|ui| {
@@ -3871,8 +4834,10 @@ impl Editor {
         // Mise en page
         let mut out_pos: HashMap<(u32, usize), Pos2> = HashMap::new();
         let mut in_pos: HashMap<(u32, usize), Pos2> = HashMap::new();
-        let layout: Vec<(u32, Rect, &'static Def)> = self.graph.nodes.iter().filter_map(|n| def(&n.op).map(|d| (n.id, Rect::from_min_size(pos2(n.pos[0], n.pos[1]), vec2(NW, Self::node_size(n, d))), d))).collect();
-        let collapsed: std::collections::HashSet<u32> = self.graph.nodes.iter().filter(|n| n.collapsed).map(|n| n.id).collect();
+        let layout: Vec<(u32, Rect, &'static Def)> = self.graph.nodes.iter().filter_map(|n| n.def().map(|d| (n.id, Rect::from_min_size(pos2(n.pos[0], n.pos[1]), vec2(node_w(n), Self::node_size(n, d))), d))).collect();
+        // Un renvoi se dessine comme un node réduit : ses deux prises à mi-hauteur
+        let collapsed: std::collections::HashSet<u32> = self.graph.nodes.iter().filter(|n| n.collapsed || n.op == "reroute").map(|n| n.id).collect();
+        self.draw_zones(&painter, &layout);
         for (id, r, d) in &layout {
             let c = collapsed.contains(id);
             for k in 0..d.outputs.len() {
@@ -3882,7 +4847,22 @@ impl Editor {
                 in_pos.insert((*id, k), if c { pos2(r.left(), r.center().y) } else { pos2(r.left(), r.top() + HEAD + (d.outputs.len() + k) as f32 * ROW + ROW * 0.5) });
             }
         }
-        let sock_of = |id: u32, out: usize| -> Sock { layout.iter().find(|x| x.0 == id).and_then(|x| x.2.outputs.get(out)).map(|o| o.1).unwrap_or(Sock::Float) };
+        // Type d'une sortie ; un renvoi prend celui de ce qui y entre
+        let link_src: HashMap<u32, (u32, usize)> = self.graph.links.iter().filter(|l| l.inp == 0).map(|l| (l.to, (l.from, l.out))).collect();
+        let sock_of = |id: u32, out: usize| -> Sock {
+            let (mut id, mut out) = (id, out);
+            for _ in 0..64 {
+                match layout.iter().find(|x| x.0 == id) {
+                    Some(x) if x.2.op == "reroute" => match link_src.get(&id) {
+                        Some(&(f, o)) => (id, out) = (f, o),
+                        None => return Sock::Any,
+                    },
+                    Some(x) => return x.2.outputs.get(out).map(|o| o.1).unwrap_or(Sock::Float),
+                    None => break,
+                }
+            }
+            Sock::Float
+        };
         // Liens (survol : surlignés ; Ctrl+clic ou clic droit : coupés)
         let bez = |a: Pos2, b: Pos2| -> [Pos2; 4] {
             let dx = ((b.x - a.x).abs() * 0.5).max(40.0);
@@ -3917,6 +4897,10 @@ impl Editor {
             if ui.input(|i| i.key_pressed(egui::Key::Delete)) {
                 actions.push(Act::RemoveLink(k));
             }
+            // Double-clic : un renvoi se pose là, pour faire passer le lien où l'on veut
+            if let (true, Some(pt)) = (ui.input(|i| i.pointer.button_double_clicked(egui::PointerButton::Primary)), pointer) {
+                actions.push(Act::Reroute(k, pt));
+            }
         }
         // Nodes
         let mut hovered_in: Option<(u32, usize)> = None;
@@ -3929,6 +4913,49 @@ impl Editor {
             let cat_col = cat_color(d.cat);
             let cat_col = if muted { Color32::from_gray(130) } else { cat_col };
             let hover_node = pointer.is_some_and(|pt| r.contains(pt));
+            if d.op == "reroute" {
+                // Renvoi : une pastille. On la déplace par le milieu, on tire un lien par ses bouts.
+                let col = sock_color(sock_of(*id, 0));
+                let body = ui.interact(r.shrink2(vec2(8.0, 0.0)), ui.scope_id().with(("node-body", *id)), Sense::click_and_drag());
+                painter.rect(*r, REROUTE_H * 0.5, p.panel, if selected { Stroke::new(2.0, p.accent) } else if hover_node { Stroke::new(1.5, p.muted) } else { Stroke::new(1.0, p.line) }, egui::StrokeKind::Outside);
+                painter.line_segment([r.left_center() + vec2(6.0, 0.0), r.right_center() - vec2(6.0, 0.0)], Stroke::new(2.0, col));
+                if body.clicked() && ui.input(|i| i.modifiers.alt) {
+                    actions.push(Act::Deselect(*id));
+                } else if body.drag_started_by(egui::PointerButton::Primary) || body.clicked() || body.secondary_clicked() {
+                    actions.push(Act::Click(*id, shift && !body.secondary_clicked()));
+                }
+                if body.dragged_by(egui::PointerButton::Primary) {
+                    actions.push(Act::Move(body.drag_delta()));
+                }
+                if body.drag_stopped() {
+                    actions.push(Act::MoveEnd);
+                }
+                body.context_menu(|ui| {
+                    if ui.button(format!("{}  {}", crate::lucide::TRASH_2, crate::i18n::t("supprimer le renvoi (les liens se rejoignent)   X"))).clicked() {
+                        actions.push(Act::Node(*id, NodeOp::Delete));
+                        ui.close();
+                    }
+                });
+                let (sp_in, sp_out) = (in_pos[&(*id, 0)], out_pos[&(*id, 0)]);
+                let hov_in = pointer.is_some_and(|pt| sp_in.distance(pt) < 9.0);
+                if hov_in && hovered_in.is_none() {
+                    hovered_in = Some((*id, 0));
+                }
+                painter.circle(sp_in, if hov_in && self.drag_link.is_some() { 6.0 } else { 4.5 }, col, Stroke::new(1.0, p.bg));
+                painter.circle(sp_out, if pointer.is_some_and(|pt| sp_out.distance(pt) < 9.0) { 6.0 } else { 4.5 }, col, Stroke::new(1.0, p.bg));
+                let so = ui.interact(Rect::from_center_size(sp_out, vec2(14.0, 16.0)), ui.scope_id().with(("out", *id, 0usize)), Sense::drag());
+                if so.drag_started() {
+                    self.drag_link = Some((*id, 0));
+                }
+                let si = ui.interact(Rect::from_center_size(sp_in, vec2(14.0, 16.0)), ui.scope_id().with(("in", *id, 0usize)), Sense::drag());
+                if si.drag_started() {
+                    if let Some(l) = self.graph.links.iter().find(|l| l.to == *id && l.inp == 0) {
+                        self.drag_link = Some((l.from, l.out));
+                        actions.push(Act::Unlink(*id, 0));
+                    }
+                }
+                continue;
+            }
             // Comme la maquette : carte du panneau, coins de 6 px, bande de couleur de 3 px en haut
             painter.rect_filled(r.translate(vec2(0.0, 3.0)), 6.0, Color32::from_black_alpha(40));
             painter.rect_filled(*r, 6.0, if muted { p.bg } else { p.panel });
@@ -3944,19 +4971,37 @@ impl Editor {
             if ar.clicked() {
                 actions.push(Act::Node(*id, NodeOp::Collapse));
             }
-            let has_out = !d.outputs.is_empty();
+            let has_out = !d.outputs.is_empty() && !crate::nodeflow::is_zone(d.op) && !matches!(d.op, "group_in" | "group_out");
             let eye = Rect::from_min_size(pos2(head.right() - 22.0, head.top()), vec2(22.0, HEAD));
-            if has_out && d.cat != "sortie" {
+            if has_out && d.cat != "sortie" && d.op != "group" {
                 let er = ui.interact(eye, ui.scope_id().with(("node-eye", *id)), Sense::click()).on_hover_text(crate::i18n::t("miniature (P)"));
                 painter.text(eye.center() + vec2(0.0, 1.0), egui::Align2::CENTER_CENTER, if preview_on { crate::lucide::EYE } else { crate::lucide::EYE_OFF }, egui::FontId::proportional(12.0), p.muted);
                 if er.clicked() {
                     actions.push(Act::Node(*id, NodeOp::Preview));
                 }
             }
+            // Node de groupe : une icône pour entrer dedans
+            if d.op == "group" {
+                let er = ui.interact(eye, ui.scope_id().with(("node-enter", *id)), Sense::click()).on_hover_text(crate::i18n::t("Entrer dans le groupe (Tab)"));
+                painter.text(eye.center() + vec2(0.0, 1.0), egui::Align2::CENTER_CENTER, crate::lucide::LOG_IN, egui::FontId::proportional(12.0), if er.hovered() { p.text } else { p.muted });
+                if er.clicked() {
+                    actions.push(Act::Enter(*id));
+                }
+            }
             let title_rect = Rect::from_min_max(pos2(arrow.right(), head.top()), pos2(eye.left(), head.bottom()));
             let label = &self.graph.nodes[ni].label;
-            let title = if label.is_empty() { crate::i18n::t(d.label) } else { label.clone() };
-            let title = if muted { format!("{title} (muet)") } else { title };
+            // Un node à choix se nomme d'après son opération : on lit le graphe sans ouvrir les menus
+            let title = if !label.is_empty() {
+                label.clone()
+            } else if matches!(d.op, "math" | "vmath" | "compare" | "logic") {
+                match d.params.first().map(|pd| if let ParamDef::Choice(k, _) = pd { pstr(&self.graph.nodes[ni].params, k) } else { "" }) {
+                    Some(o) if !o.is_empty() => crate::i18n::t(o),
+                    _ => crate::i18n::t(d.label),
+                }
+            } else {
+                crate::i18n::t(d.label)
+            };
+            let title = if muted { format!("{title} ({})", crate::i18n::t_mid("muet")) } else { title };
             match &mut self.rename {
                 Some((rid, text)) if rid == id => {
                     let mut child = ui.new_child(egui::UiBuilder::new().max_rect(title_rect.shrink(2.0)));
@@ -3980,6 +5025,15 @@ impl Editor {
                 Stroke::new(1.0, p.line)
             };
             painter.rect_stroke(*r, 6.0, border, egui::StrokeKind::Outside);
+            if err_node == Some(*id) {
+                // L'erreur s'écrit sous le node fautif, en clair
+                if let Err((_, e)) = &self.program {
+                    let gal = painter.layout(format!("{}  {}", crate::lucide::TRIANGLE_ALERT, crate::i18n::t(e)), egui::FontId::proportional(11.0), p.on_accent, NW + 40.0);
+                    let br = Rect::from_min_size(pos2(r.left() - 2.0, r.bottom() + 8.0), gal.size() + vec2(16.0, 10.0));
+                    painter.rect_filled(br, 6.0, p.missing);
+                    painter.galley(br.min + vec2(8.0, 5.0), gal, p.on_accent);
+                }
+            }
             let alt = ui.input(|i| i.modifiers.alt);
             let hr = ui.interact(title_rect, ui.scope_id().with(("node-head", *id)), Sense::click_and_drag());
             for resp in [&hr, &body] {
@@ -4017,10 +5071,28 @@ impl Editor {
                     ("déconnecter", NodeOp::Disconnect),
                     ("supprimer   X", NodeOp::Delete),
                 ] {
+                    if matches!(op, NodeOp::Preview | NodeOp::Solo) && !has_out {
+                        continue;
+                    }
                     if ui.button(crate::i18n::t(label)).clicked() {
                         actions.push(Act::Node(*id, op));
                         ui.close();
                     }
+                }
+                ui.separator();
+                if d.op == "group" {
+                    if ui.button(format!("{}  {}", crate::lucide::LOG_IN, crate::i18n::t("entrer dans le groupe   Tab"))).clicked() {
+                        actions.push(Act::Enter(*id));
+                        ui.close();
+                    }
+                    if ui.button(format!("{}  {}", crate::lucide::UNGROUP, crate::i18n::t("défaire le groupe   Ctrl+Alt+G"))).clicked() {
+                        actions.push(Act::Node(*id, NodeOp::Ungroup));
+                        ui.close();
+                    }
+                }
+                if ui.button(format!("{}  {}", crate::lucide::GROUP, crate::i18n::t("grouper la sélection   Ctrl+G"))).clicked() {
+                    actions.push(Act::Node(*id, NodeOp::Group));
+                    ui.close();
                 }
             };
             hr.context_menu(|ui| menu(ui, actions));
@@ -4028,11 +5100,17 @@ impl Editor {
             // Prises (toujours, même réduit)
             for (k, (name, sock)) in d.outputs.iter().enumerate() {
                 let sp = out_pos[&(*id, k)];
+                let free = *sock == Sock::Any && *name == crate::nodeflow::VIRTUAL;
                 if !is_collapsed {
-                    painter.text(pos2(r.right() - 12.0, sp.y), egui::Align2::RIGHT_CENTER, crate::i18n::t(name), egui::FontId::proportional(11.0), p.text);
+                    painter.text(pos2(r.right() - 12.0, sp.y), egui::Align2::RIGHT_CENTER, crate::i18n::t(name), egui::FontId::proportional(11.0), if free { p.muted } else { p.text });
                 }
                 let hov = pointer.is_some_and(|pt| sp.distance(pt) < 9.0);
-                painter.circle(sp, if hov { 6.5 } else { 5.0 }, sock_color(*sock), Stroke::new(1.0, p.bg));
+                if free {
+                    // Prise libre : un anneau vide, à relier pour créer une vraie prise
+                    painter.circle(sp, if hov { 6.5 } else { 5.0 }, p.panel, Stroke::new(1.5, p.muted));
+                } else {
+                    painter.circle(sp, if hov { 6.5 } else { 5.0 }, sock_color(*sock), Stroke::new(1.0, p.bg));
+                }
                 let sr = ui.interact(Rect::from_center_size(sp, vec2(16.0, 16.0)), ui.scope_id().with(("out", *id, k)), Sense::drag());
                 if sr.drag_started() {
                     self.drag_link = Some((*id, k));
@@ -4046,7 +5124,12 @@ impl Editor {
                 if hov && hovered_in.is_none() && (!is_collapsed || !linked) {
                     hovered_in = Some((*id, k));
                 }
-                painter.circle(sp, if hov && self.drag_link.is_some() { 6.5 } else { 5.0 }, sock_color(*sock), Stroke::new(1.0, p.bg));
+                let free = *sock == Sock::Any && *name == crate::nodeflow::VIRTUAL;
+                if free {
+                    painter.circle(sp, if hov && self.drag_link.is_some() { 6.5 } else { 5.0 }, p.panel, Stroke::new(1.5, p.muted));
+                } else {
+                    painter.circle(sp, if hov && self.drag_link.is_some() { 6.5 } else { 5.0 }, sock_color(*sock), Stroke::new(1.0, p.bg));
+                }
                 let sr = ui.interact(Rect::from_center_size(sp, vec2(16.0, 16.0)), ui.scope_id().with(("in", *id, k)), Sense::drag());
                 if sr.drag_started() && linked {
                     if let Some(l) = self.graph.links.iter().find(|l| l.to == *id && l.inp == k) {
@@ -4061,8 +5144,8 @@ impl Editor {
                 let row = Rect::from_min_size(pos2(r.left() + 10.0, y - ROW * 0.5 + 1.0), vec2(NW - 20.0, ROW - 2.0));
                 if linked {
                     painter.text(row.left_center(), egui::Align2::LEFT_CENTER, crate::i18n::t(name), egui::FontId::proportional(11.0), p.text);
-                } else if *name == "coordonnées" {
-                    // Rien à régler à la main : sans lien, le motif suit la surface
+                } else if *name == "coordonnées" || matches!(sock, Sock::Geo | Sock::Any) {
+                    // Rien à régler à la main : sans lien, le motif suit la surface ; une géométrie se branche
                     painter.text(row.left_center(), egui::Align2::LEFT_CENTER, crate::i18n::t(name), egui::FontId::proportional(11.0), p.muted);
                 } else {
                     while node.values.len() <= k {
@@ -4073,7 +5156,35 @@ impl Editor {
                     child.label(RichText::new(crate::i18n::t(name)).size(11.0));
                     let v = &mut node.values[k];
                     let resp = match sock {
-                        Sock::Float => child.add(egui::DragValue::new(&mut v[0]).speed(0.01).max_decimals(3)),
+                        Sock::Float | Sock::Geo | Sock::Any => child.add(egui::DragValue::new(&mut v[0]).speed(0.01).max_decimals(3)),
+                        Sock::Int => {
+                            let r = child.add(egui::DragValue::new(&mut v[0]).speed(0.1).max_decimals(0));
+                            if r.changed() {
+                                v[0] = v[0].round();
+                            }
+                            r
+                        }
+                        Sock::Bool => {
+                            let mut on = v[0] > 0.5;
+                            let r = child.checkbox(&mut on, "");
+                            if r.changed() {
+                                v[0] = on as u8 as f32;
+                            }
+                            r
+                        }
+                        Sock::Vector => {
+                            // Trois nombres serrés sur la même rangée
+                            child.spacing_mut().item_spacing.x = 2.0;
+                            let mut any: Option<egui::Response> = None;
+                            for c in 0..3 {
+                                let r = child.add(egui::DragValue::new(&mut v[c]).speed(0.01).max_decimals(2));
+                                any = Some(match any {
+                                    Some(a) => a.union(r),
+                                    None => r,
+                                });
+                            }
+                            any.unwrap()
+                        }
                         Sock::Color => {
                             let q = |x: f32| (x.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
                             let mut c = Color32::from_rgba_unmultiplied(q(v[0]), q(v[1]), q(v[2]), q(v[3]));
@@ -4086,7 +5197,7 @@ impl Editor {
                         }
                     };
                     if resp.changed() {
-                        if *sock == Sock::Float {
+                        if matches!(sock, Sock::Float | Sock::Int | Sock::Bool) {
                             let x = v[0];
                             *v = [x, x, x, x];
                         }
@@ -4104,16 +5215,16 @@ impl Editor {
                     ParamDef::Text(n) => (9.0 * ROW, *n),
                     ParamDef::Ramp(n) => (3.0 * ROW, *n),
                     ParamDef::Curve(n) => (7.0 * ROW, *n),
-                    ParamDef::Choice(n, _) | ParamDef::Float(n, ..) | ParamDef::File(n) => (ROW, *n),
+                    ParamDef::Choice(n, _) | ParamDef::Float(n, ..) | ParamDef::File(n) | ParamDef::Line(n, _) => (ROW, *n),
                 };
                 let row = Rect::from_min_size(pos2(r.left() + 8.0, y + 1.0), vec2(NW - 16.0, h - 2.0));
                 let mut child = ui.new_child(egui::UiBuilder::new().max_rect(row).layout(egui::Layout::left_to_right(egui::Align::Center)));
                 let entry = node.params.entry(name.to_string()).or_insert(Param::S(String::new()));
                 match (pd, entry) {
                     (ParamDef::Choice(_, opts), Param::S(cur)) => {
-                        egui::ComboBox::from_id_salt(("choice", *id, name)).selected_text(RichText::new(cur.as_str()).size(11.0)).width(NW - 24.0).show_ui(&mut child, |ui| {
+                        egui::ComboBox::from_id_salt(("choice", *id, name)).selected_text(RichText::new(crate::i18n::t_mid(cur.as_str())).size(11.0)).width(NW - 24.0).height(320.0).show_ui(&mut child, |ui| {
                             for o in *opts {
-                                if ui.selectable_label(cur == o, *o).clicked() {
+                                if ui.selectable_label(cur == o, crate::i18n::t_mid(o)).clicked() {
                                     *cur = o.to_string();
                                     actions.push(Act::Changed);
                                 }
@@ -4123,6 +5234,13 @@ impl Editor {
                     (ParamDef::Float(_, lo, hi, _), Param::F(v)) => {
                         child.label(RichText::new(crate::i18n::t(name)).size(11.0));
                         if child.add(egui::DragValue::new(v).range(*lo..=*hi).speed(0.05)).changed() {
+                            actions.push(Act::Changed);
+                        }
+                    }
+                    (ParamDef::Line(..), Param::S(text)) => {
+                        child.label(RichText::new(crate::i18n::t(name)).size(11.0));
+                        let w = child.available_width() - 2.0;
+                        if child.add(egui::TextEdit::singleline(text).desired_width(w).font(egui::FontId::monospace(11.0))).changed() {
                             actions.push(Act::Changed);
                         }
                     }
@@ -4379,6 +5497,7 @@ impl Editor {
                             ParamDef::Choice(_, c) => Param::S(c[0].to_string()),
                             ParamDef::Ramp(_) => Param::S(DEFAULT_RAMP.to_string()),
                             ParamDef::Curve(_) => Param::S(DEFAULT_CURVES.to_string()),
+                            ParamDef::Line(_, v) => Param::S(v.to_string()),
                             _ => Param::S(String::new()),
                         };
                     }
@@ -4421,7 +5540,7 @@ impl Editor {
                     // Lâché dans le vide : on propose un node déjà relié
                     None => {
                         if let Some(pt) = pointer {
-                            if !layout.iter().any(|(_, r, _)| r.contains(pt)) {
+                            if !layout.iter().any(|(_, r, _)| r.expand(6.0).contains(pt)) {
                                 actions.push(Act::OpenAdd(pt, Some((from, out))));
                             }
                         }
@@ -5115,6 +6234,7 @@ impl Editor {
                             ctx2.request_repaint();
                         });
                     }
+                    GraphKind::Geometry => {}
                     GraphKind::Material => {
                         let model = match &self.pv_model {
                             Some((_, m)) => m.clone(),
@@ -5179,7 +6299,7 @@ impl Editor {
                     }
                 }
                 if let Some(id) = self.solo {
-                    let name = self.graph.nodes.iter().find(|n| n.id == id).map(|n| if n.label.is_empty() { def(&n.op).map(|d| crate::i18n::t(d.label)).unwrap_or_default() } else { n.label.clone() }).unwrap_or_default();
+                    let name = self.graph.nodes.iter().find(|n| n.id == id).map(|n| if n.label.is_empty() { n.def().map(|d| crate::i18n::t(d.label)).unwrap_or_default() } else { n.label.clone() }).unwrap_or_default();
                     if ui.small_button(format!("{} : {name} ×", crate::i18n::t("node"))).on_hover_text(crate::i18n::t("revenir au matériau complet")).clicked() {
                         self.solo = None;
                         self.pv_key = 0;
@@ -5191,7 +6311,7 @@ impl Editor {
 
     fn export(&mut self) {
         let prog = match &self.program {
-            Ok(_) => Program::compile(&self.graph.effective(), &self.root, 16384),
+            Ok(_) => Program::compile(&self.doc().effective(), &self.root, 16384),
             Err(e) => Err(e.clone()),
         };
         match prog {
@@ -5218,40 +6338,94 @@ impl Editor {
 
 /// Recherche de nodes : chaque mot doit se retrouver dans le nom (français ou anglais), la
 /// catégorie ou le code ; début de mot d'abord, puis milieu, puis lettres dans l'ordre.
-fn search_defs(q: &str, material: bool, need_input: bool) -> Vec<(i32, &'static Def)> {
+/// Deux prises vont-elles ensemble ? Tout se convertit, sauf la géométrie, qui ne va qu'avec elle-même.
+pub fn socks_fit(a: Sock, b: Sock) -> bool {
+    a == Sock::Any || b == Sock::Any || (a == Sock::Geo) == (b == Sock::Geo)
+}
+
+/// Note d'un texte face aux mots cherchés : début de mot, milieu de mot, puis lettres dans l'ordre.
+fn search_score(hay: &str, words: &[&str], q: &str) -> Option<i32> {
+    let mut total = 0;
+    for w in words {
+        total += if hay.split_whitespace().any(|h| h.starts_with(w)) {
+            30
+        } else if hay.contains(w) {
+            20
+        } else {
+            let mut it = hay.chars();
+            if w.chars().all(|c| it.any(|h| h == c)) { 5 } else { return None }
+        };
+    }
+    if hay.starts_with(q.trim()) {
+        total += 20;
+    }
+    Some(total)
+}
+
+fn search_defs(q: &str, kind: GraphKind, need_input: bool) -> Vec<(i32, &'static Def)> {
     let q = crate::chat::fold(q);
     let words: Vec<&str> = q.split_whitespace().collect();
     let mut scored: Vec<(i32, &Def)> = DEFS
         .iter()
-        .filter(|d| if material { d.mat } else { d.comp })
+        .filter(|d| menu_cat(d, kind, false).is_some())
         .filter(|d| !need_input || !d.inputs.is_empty())
         .filter_map(|d| {
             let hay = crate::chat::fold(&format!("{} {} {} {} {}", d.label, crate::i18n::en(d.label), d.op, d.cat, crate::i18n::en(d.cat)));
-            let mut total = 0;
-            for w in &words {
-                total += if hay.split_whitespace().any(|h| h.starts_with(w)) {
-                    30
-                } else if hay.contains(w) {
-                    20
-                } else {
-                    let mut it = hay.chars();
-                    if w.chars().all(|c| it.any(|h| h == c)) { 5 } else { return None }
-                };
-            }
-            if hay.starts_with(q.trim()) {
-                total += 20;
-            }
-            Some((total, d))
+            search_score(&hay, &words, &q).map(|s| (s, d))
         })
         .collect();
     scored.sort_by(|a, b| b.0.cmp(&a.0));
     scored
 }
 
+/// Recherche du menu d'ajout. En plus des nodes et des groupes, chaque opération d'un node à choix
+/// (« Math › multiplier », « Mélange › écran ») se trouve par son nom et arrive déjà réglée.
+fn search_picks(q: &str, picks: &[(String, &'static str, Pick, bool)], need_input: bool) -> Vec<(i32, String, &'static str, Pick)> {
+    let q = crate::chat::fold(q);
+    let words: Vec<&str> = q.split_whitespace().collect();
+    let mut out: Vec<(i32, String, &'static str, Pick)> = vec![];
+    for (label, cat, pick, has_input) in picks {
+        if need_input && !has_input {
+            continue;
+        }
+        match pick {
+            Pick::Op(op) => {
+                let Some(d) = def(op) else { continue };
+                let hay = crate::chat::fold(&format!("{} {} {} {} {}", d.label, crate::i18n::en(d.label), d.op, cat, crate::i18n::en(cat)));
+                if let Some(sc) = search_score(&hay, &words, &q) {
+                    out.push((sc + 4, label.clone(), cat, pick.clone()));
+                }
+                if matches!(d.op, "math" | "vmath" | "compare" | "logic" | "mix") {
+                    if let Some(ParamDef::Choice(key, opts)) = d.params.first() {
+                        for o in opts.iter() {
+                            let hay = crate::chat::fold(&format!("{} {} {} {}", o, crate::i18n::en(o), d.label, crate::i18n::en(d.label)));
+                            if let Some(sc) = search_score(&hay, &words, &q) {
+                                out.push((sc, format!("{} › {}", crate::i18n::t(d.label), crate::i18n::t_mid(o)), cat, Pick::Preset(d.op, key, o)));
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {
+                if let Some(sc) = search_score(&crate::chat::fold(&format!("{label} groupe group")), &words, &q) {
+                    out.push((sc + 6, label.clone(), cat, pick.clone()));
+                }
+            }
+        }
+    }
+    out.sort_by(|a, b| b.0.cmp(&a.0));
+    out
+}
+
 fn sock_color(s: Sock) -> Color32 {
     match s {
         Sock::Float => Color32::from_rgb(160, 160, 165),
         Sock::Color => Color32::from_rgb(230, 190, 60),
+        Sock::Vector => Color32::from_rgb(120, 130, 225),
+        Sock::Bool => Color32::from_rgb(215, 150, 190),
+        Sock::Int => Color32::from_rgb(110, 170, 120),
+        Sock::Geo => Color32::from_rgb(70, 200, 175),
+        Sock::Any => Color32::from_rgb(120, 120, 124),
     }
 }
 
@@ -5463,7 +6637,7 @@ mod tests {
 
     #[test]
     fn recherche_de_nodes() {
-        let names = |q: &str| -> Vec<String> { search_defs(q, true, false).iter().take(8).map(|x| crate::i18n::en(x.1.label).to_lowercase()).collect() };
+        let names = |q: &str| -> Vec<String> { search_defs(q, GraphKind::Material, false).iter().take(8).map(|x| crate::i18n::en(x.1.label).to_lowercase()).collect() };
         eprintln!("{:?}", names("color"));
         eprintln!("{:?}", names("color ra"));
         assert!(names("color").iter().any(|n| n.contains("ramp")), "color doit trouver la rampe");
@@ -5507,7 +6681,7 @@ mod tests {
         assert!(Shader::compile(DEFAULT_SHADER).is_ok());
 
         // Compositing : couleur → inverser → sortie
-        let mut g = Graph { kind: GraphKind::Compositor, nodes: vec![], links: vec![], next_id: 0, frames: vec![], stack: None };
+        let mut g = Graph::empty(GraphKind::Compositor);
         let c = g.add("color", [0.0, 0.0]);
         g.nodes[0].values[0] = [0.2, 0.4, 0.6, 1.0];
         let inv = g.add("invert", [0.0, 0.0]);
@@ -5554,4 +6728,139 @@ pub fn clean_ai_code(t: &str) -> String {
     let mut lines: Vec<&str> = t.lines().filter(|l| !l.trim_start().starts_with("```")).collect();
     lines.retain(|l| l.trim().is_empty() || l.contains('=') || l.trim_start().starts_with("//"));
     lines.join("\n").trim().to_string() + "\n"
+}
+
+#[cfg(test)]
+mod tests_ops {
+    use super::*;
+
+    /// Valeur de la sortie `out` d'un node seul, réglé par `setup`, à l'image `frame`.
+    fn run(op: &str, out: usize, frame: f32, setup: impl FnOnce(&mut Node)) -> V {
+        let mut g = Graph::empty(GraphKind::Material);
+        let o = g.add("mat_out", [300.0, 0.0]);
+        let id = g.add(op, [0.0, 0.0]);
+        setup(g.nodes.iter_mut().find(|n| n.id == id).unwrap());
+        g.connect(id, out, o, 0);
+        let prog = Program::compile_at(&g, "", 64, frame, 24.0).map_err(|e| e.1).unwrap();
+        prog.material(&Ctx { uv: [0.25, 0.75], pos: [1.0, 2.0, 3.0], nrm: [0.0, 1.0, 0.0], view: [0.0, 0.0, 1.0], vcol: [1.0; 4], res: [64.0, 64.0], ..Default::default() }, &mut vec![]).color
+    }
+
+    fn math(op: &str, a: f32, b: f32) -> f32 {
+        run("math", 0, 0.0, |n| {
+            n.values = vec![[a; 4], [b; 4]];
+            n.params.insert("opération".into(), Param::S(op.into()));
+        })[0]
+    }
+
+    #[test]
+    fn math_complet() {
+        let near = |x: f32, y: f32| (x - y).abs() < 1e-4;
+        assert!(near(math("ajouter", 2.0, 3.0), 5.0));
+        assert!(near(math("arc tangente (A / B)", 1.0, 1.0), std::f32::consts::FRAC_PI_4));
+        assert!(near(math("signe", -3.0, 0.0), -1.0));
+        assert!(near(math("arrondi", 2.6, 0.0), 3.0));
+        assert!(near(math("arrondi sup.", 2.1, 0.0), 3.0));
+        assert!(near(math("tronquer", -2.7, 0.0), -2.0));
+        assert!(near(math("aimanter (pas B)", 0.74, 0.25), 0.5));
+        assert!(near(math("boucler (0 à B)", 2.5, 1.0), 0.5));
+        assert!(near(math("ping-pong (0 à B)", 1.25, 1.0), 0.75));
+        assert!(near(math("ping-pong (0 à B)", 0.25, 1.0), 0.25));
+        assert!(near(math("inverse (1 / A)", 4.0, 0.0), 0.25));
+        assert!(near(math("inverse (1 / A)", 0.0, 0.0), 0.0));
+        assert!(near(math("en degrés", std::f32::consts::PI, 0.0), 180.0));
+        assert!(near(math("logarithme", std::f32::consts::E, 0.0), 1.0));
+        // Loin du croisement, le minimum doux est le minimum ; au croisement, il passe juste dessous
+        assert!(near(math("minimum doux", 0.2, 0.9), 0.2));
+        assert!(math("minimum doux", 0.5, 0.5) < 0.5);
+        // Chaque opération de la liste est traitée (aucune ne retombe en silence sur l'addition)
+        for op in MATH.iter().filter(|o| **o != "ajouter") {
+            assert!(!near(math(op, 0.37, 0.61), 0.98) || *op == "maximum doux", "{op}");
+        }
+    }
+
+    #[test]
+    fn vecteurs_logique_expression_temps() {
+        let near = |x: f32, y: f32| (x - y).abs() < 1e-4;
+        let vm = |op: &str, a: [f32; 3], b: [f32; 3], out: usize| {
+            run("vmath", out, 0.0, |n| {
+                n.values = vec![[a[0], a[1], a[2], 0.0], [b[0], b[1], b[2], 0.0], [2.0; 4]];
+                n.params.insert("opération".into(), Param::S(op.into()));
+            })
+        };
+        assert_eq!(vm("produit vectoriel", [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], 0)[..3], [0.0, 0.0, 1.0]);
+        assert!(near(vm("produit scalaire", [1.0, 2.0, 3.0], [4.0, 5.0, 6.0], 1)[0], 32.0));
+        assert!(near(vm("longueur", [3.0, 4.0, 0.0], [0.0; 3], 1)[0], 5.0));
+        assert!(near(vm("normaliser", [0.0, 0.0, 9.0], [0.0; 3], 0)[2], 1.0));
+        assert_eq!(vm("échelle (× facteur)", [1.0, 2.0, 3.0], [0.0; 3], 0)[..3], [2.0, 4.0, 6.0]);
+        assert_eq!(vm("réfléchir", [1.0, -1.0, 0.0], [0.0, 1.0, 0.0], 0)[..3], [1.0, 1.0, 0.0]);
+        for op in VMATH.iter().filter(|o| **o != "ajouter") {
+            let v = vm(op, [0.3, 0.5, 0.7], [0.2, 0.9, 0.4], 0);
+            assert!(v[..3] != [0.5, 1.4, 1.1], "{op}");
+        }
+        let cmp = |op: &str, a: f32, b: f32| {
+            run("compare", 0, 0.0, |n| {
+                n.values = vec![[a; 4], [b; 4], [0.001; 4]];
+                n.params.insert("comparaison".into(), Param::S(op.into()));
+            })[0]
+        };
+        assert_eq!(cmp("égal", 1.0, 1.0005), 1.0);
+        assert_eq!(cmp("différent", 1.0, 1.0005), 0.0);
+        assert_eq!(cmp("inférieur ou égal", 2.0, 2.0), 1.0);
+        assert_eq!(cmp("supérieur", 2.0, 2.0), 0.0);
+        let logic = |op: &str, a: f32, b: f32| {
+            run("logic", 0, 0.0, |n| {
+                n.values = vec![[a; 4], [b; 4]];
+                n.params.insert("opération".into(), Param::S(op.into()));
+            })[0]
+        };
+        assert_eq!([logic("et", 1.0, 0.0), logic("ou", 1.0, 0.0), logic("non", 0.0, 0.0), logic("ou exclusif", 1.0, 1.0), logic("non-et", 1.0, 1.0), logic("non-ou", 0.0, 0.0)], [0.0, 1.0, 1.0, 0.0, 0.0, 1.0]);
+        // Aiguillage : la condition choisit l'une des deux entrées
+        let sw = |c: f32| run("switch", 0, 0.0, |n| n.values = vec![[c; 4], [0.1, 0.2, 0.3, 1.0], [0.7, 0.8, 0.9, 1.0]]);
+        assert_eq!(sw(0.0)[0], 0.1);
+        assert_eq!(sw(1.0)[0], 0.7);
+        // Expression : entrées a b c d, position x y z, coordonnées u v
+        let ex = |f: &str| {
+            run("expr", 0, 0.0, |n| {
+                n.values = vec![[2.0; 4], [3.0; 4], [4.0; 4], [5.0; 4]];
+                n.params.insert("formule".into(), Param::S(f.into()));
+            })[0]
+        };
+        assert!(near(ex("a * b + c / d"), 6.8));
+        assert!(near(ex("x + y + z"), 6.0));
+        assert!(near(ex("mix(a, b, u)"), 2.25));
+        assert!(near(ex("if(a > b, 1, 2)"), 2.0));
+        // Une formule fausse donne une erreur lisible, sur le bon node
+        let mut g = Graph::empty(GraphKind::Material);
+        let o = g.add("mat_out", [0.0, 0.0]);
+        let e = g.add("expr", [0.0, 0.0]);
+        g.nodes.iter_mut().find(|n| n.id == e).unwrap().params.insert("formule".into(), Param::S("a +* zz".into()));
+        g.connect(e, 0, o, 0);
+        let err = Program::compile(&g, "", 64).err().unwrap();
+        assert_eq!(err.0, e);
+        assert!(!err.1.contains("ligne"), "{}", err.1);
+        // Temps : l'image et les secondes
+        assert_eq!(run("time", 0, 48.0, |_| {})[0], 48.0);
+        assert!(near(run("time", 1, 48.0, |_| {})[0], 2.0));
+        // Aléatoire : entre min et max, stable, et changé par la graine
+        let rnd = |seed: f32| run("random", 0, 0.0, |n| n.values = vec![[2.0; 4], [3.0; 4], [seed; 4], [0.0; 4]])[0];
+        assert!((2.0..=3.0).contains(&rnd(0.0)));
+        assert_eq!(rnd(1.0), rnd(1.0));
+        assert_ne!(rnd(1.0), rnd(2.0));
+    }
+
+    #[test]
+    fn recherche_trouve_les_operations_et_les_groupes() {
+        let picks: Vec<(String, &'static str, Pick, bool)> = DEFS.iter().filter_map(|d| menu_cat(d, GraphKind::Material, false).map(|c| (d.label.to_string(), c, Pick::Op(d.op), !d.inputs.is_empty()))).chain([("Rouille".to_string(), "structure", Pick::Group("Rouille".into()), true)]).collect();
+        let first = |q: &str| search_picks(q, &picks, false).first().map(|x| x.3.clone());
+        assert!(search_picks("multiplier", &picks, false).iter().any(|x| x.3 == Pick::Preset("math", "opération", "multiplier")));
+        assert!(search_picks("produit vect", &picks, false).iter().any(|x| x.3 == Pick::Preset("vmath", "opération", "produit vectoriel")));
+        assert_eq!(first("rouille"), Some(Pick::Group("Rouille".into())));
+        assert_eq!(first("renvoi"), Some(Pick::Op("reroute")));
+        // Les nodes internes ne se proposent pas, la zone de simulation reste à la géométrie
+        assert!(!picks.iter().any(|x| matches!(x.2, Pick::Op("repeat_out" | "sim_out" | "group" | "sim_in" | "group_in"))));
+        assert!(DEFS.iter().any(|d| d.op == "sim_in" && menu_cat(d, GraphKind::Geometry, false) == Some("simulation")));
+        assert!(DEFS.iter().any(|d| d.op == "group_in" && menu_cat(d, GraphKind::Material, true) == Some("structure")));
+        // Un nom de node l'emporte sur une opération qui contient le même mot
+        assert_eq!(first("math"), Some(Pick::Op("math")));
+    }
 }
