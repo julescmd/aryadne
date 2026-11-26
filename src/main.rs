@@ -2,6 +2,8 @@
 
 mod cloud;
 mod gpubench;
+#[allow(dead_code)]
+mod gpusim;
 mod rig;
 mod scopes;
 mod story;
