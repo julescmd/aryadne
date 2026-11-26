@@ -227,7 +227,6 @@ Les graphes de nœuds (`.arymat`, `.arycomp`, `.arygeo`), les boards, les compos
 
 ### Défauts connus de l'API
 
-- **Ancienne extension dans les exemples.** Le script d'exemple fourni et l'aide du module cherchent les montages avec `coffre.fichiers(".aryav")`. C'est l'ancienne extension. Un montage créé aujourd'hui porte `.aryseq` : l'exemple ne le listera pas. Écris `.aryseq` dans tes scripts.
 - L'API est un module de fichiers. Elle ne parle pas à l'application ouverte : pas de sélection courante, pas de commande « lance un rendu ».
 - Pas de classe pour les nœuds, les boards, le Motion ni le son.
 - Les images à calques (`.aryimg`) et les caches de géométrie ne sont pas du JSON : l'API ne les lit pas.

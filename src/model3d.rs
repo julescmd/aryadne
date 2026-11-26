@@ -7440,8 +7440,11 @@ impl Viewer {
                 ui.toggle_value(&mut self.anim_auto, egui::RichText::new(crate::lucide::CIRCLE_DOT).size(14.0).color(rec_col)).on_hover_text(crate::i18n::t("Chaque déplacement pose une clé à l'image courante"));
                 ui.toggle_value(&mut self.onion, egui::RichText::new(crate::lucide::LAYERS).size(14.0)).on_hover_text(crate::i18n::t("Pelure d'oignon : l'objet choisi aux clés d'avant (rouge) et d'après (vert)"));
                 ui.toggle_value(&mut self.anim_tools, egui::RichText::new(crate::lucide::WAND_SPARKLES).size(14.0)).on_hover_text(crate::i18n::t("Outils d'animation : tweener, décaler les clés, poses, miroir…"));
-                if ui.toggle_value(&mut self.anim_graph, egui::RichText::new(crate::lucide::SPLINE).size(14.0)).on_hover_text(crate::i18n::t("Éditeur de courbes : clés et poignées de Bézier par canal (Maj+F6)")).changed() {
+                // Maj+F6 : ouvrir ou fermer l'éditeur de courbes (sauf pendant la saisie d'un texte)
+                if !ui.ctx().egui_wants_keyboard_input() && ui.input(|i| i.modifiers.shift && i.key_pressed(egui::Key::F6)) {
+                    self.anim_graph = !self.anim_graph;
                 }
+                ui.toggle_value(&mut self.anim_graph, egui::RichText::new(crate::lucide::SPLINE).size(14.0)).on_hover_text(crate::i18n::t("Éditeur de courbes : clés et poignées de Bézier par canal (Maj+F6)"));
                 if self.anim_graph {
                     ui.toggle_value(&mut self.graph_window, egui::RichText::new(crate::lucide::APP_WINDOW).size(14.0)).on_hover_text(crate::i18n::t("Éditeur de courbes dans sa propre fenêtre, qu'on peut sortir de l'application (sur un autre écran)"));
                 }

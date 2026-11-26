@@ -95,19 +95,7 @@ Pendant le développement, deux petits scripts Python ont servi à cela. **Ils n
 
 ### Manques relevés en écrivant cette documentation
 
-Ces libellés n'avaient pas de traduction anglaise au moment de la lecture du code :
-
-- matériaux de la vue : « gris », « chrome », « couleurs du fichier » ;
-- environnements : « studio doux », « coucher de soleil », « nuit », « neutre » ;
-- projections de texture : « triplanaire » et les autres ;
-- type de dégradé : « hauteur (3D) » ;
-- harmonies de palette : « analogue », « complément », « triade », « monochrome », « aléatoire » ;
-- pinceau de retouche : « flux » ;
-- vue spectrale : « Réparer », « Atténuer » ;
-- cibles de sonie : « YouTube, Spotify » et les suivantes ;
-- valeurs de plan et mouvements de caméra du storyboard, pour la plupart.
-
-La liste n'est pas complète : elle vient d'une recherche à la main sur les libellés rencontrés.
+Les libellés relevés à la lecture du code (matériaux de la vue, environnements, projections de texture, type de dégradé, pinceau, vue spectrale, cibles de sonie) ont été traduits depuis. Restent à vérifier : les valeurs de plan et les mouvements de caméra du storyboard.
 
 ## Ajouter une langue
 

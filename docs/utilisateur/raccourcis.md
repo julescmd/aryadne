@@ -46,7 +46,6 @@ Deux familles :
 | `F5` | Exécuter le script ouvert |
 | `Ctrl+Z` | Annuler, dans l'éditeur sous la souris |
 
-**Note.** L'aide intégrée des réglages écrit encore « Ctrl+1 … 5 : notes, 2D, 3D, vidéo, code ». Le code gère sept étapes.
 
 ## Explorateur de fichiers
 
@@ -212,6 +211,7 @@ Montage, audio, musique, Motion, 3D et éditeur de courbes partagent ces gestes.
 
 | Raccourci | Action |
 |---|---|
+| `Maj+F6` | Ouvrir ou fermer l'éditeur de courbes (timeline 3D) |
 | `A` | Tout choisir |
 | `F` | Cadrer |
 | `I` | Clé à la tête de lecture |

@@ -587,7 +587,7 @@ fn tab_shortcuts(ui: &mut egui::Ui) {
         ("Ctrl+S", "sauvegarder"),
         ("Ctrl+W", "fermer l'onglet"),
         ("Ctrl+E", "édition / lecture (Markdown)"),
-        ("Ctrl+1 … 5", "étapes : notes, 2D, 3D, vidéo, code"),
+        ("Ctrl+1 … 7", "étapes : notes, 2D, 3D, motion, vidéo, son, code"),
         ("Alt+1 … 3", "outils de l'étape (Moodboard, Retouche, Compositing…)"),
         ("Ctrl+G", "cerveau"),
         ("Ctrl + / − / 0", "taille de l'interface"),

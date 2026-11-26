@@ -2082,7 +2082,7 @@ for f in coffre.fichiers(".aryscene"):
     print(f"  {f} : {len(scene.objets())} objets, {scene.cadence()} i/s")
 
 print("Montages :")
-for f in coffre.fichiers(".aryav"):
+for f in coffre.fichiers(".aryseq"):
     m = coffre.montage(f)
     print(f"  {f} : {len(m.clips())} clips, {m.duree():.1f} s")
     # m.renommer_plans("Plan {n}")   # renomme les plans dans l'ordre de la timeline

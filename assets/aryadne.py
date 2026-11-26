@@ -14,7 +14,7 @@ Aryadne recharge un fichier quand il change sur le disque.
     scene.cle("boule", 24, pos=[0, 2, 0])         # une clé à l'image 24
     scene.enregistrer()
 
-    montage = coffre.montage("montage/Essai.aryav")
+    montage = coffre.montage("montage/Essai.aryseq")
     for c in montage.clips():
         print(c["name"], c["start"], montage.duree_clip(c))
     montage.enregistrer()
@@ -132,7 +132,7 @@ class Scene(_Json):
 
 
 class Montage(_Json):
-    """Un montage (.aryav) : clips sur des pistes, en secondes."""
+    """Un montage (.aryseq, ou l'ancien .aryav) : clips sur des pistes, en secondes."""
 
     def clips(self, piste=None, son=None):
         out = self.data.setdefault("clips", [])
