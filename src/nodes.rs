@@ -574,11 +574,6 @@ impl Graph {
         g
     }
 
-    /// Matériau à calques (atelier) : une pile vide, le graphe vient de ses calques.
-    pub fn new_layered() -> Graph {
-        Graph { stack: Some(crate::atelier::Stack::default()), ..Graph::empty(GraphKind::Material) }
-    }
-
     /// Graphe de géométrie de départ : un tissu simulé, à modifier ou à vider.
     pub fn new_geometry() -> Graph {
         crate::geo::starter()
@@ -604,7 +599,9 @@ impl Graph {
     }
 
     pub fn save(&self, path: &Path) -> Result<(), String> {
-        crate::vault::atomic_write(path, serde_json::to_string_pretty(self).map_err(|e| e.to_string())?).map_err(|e| e.to_string())
+        // Un matériau d'un seul calque « graphe » s'écrit comme un simple graphe (la forme des anciens fichiers)
+        let doc = crate::atelier::to_file(self);
+        crate::vault::atomic_write(path, serde_json::to_string_pretty(&*doc).map_err(|e| e.to_string())?).map_err(|e| e.to_string())
     }
 }
 
@@ -3022,6 +3019,8 @@ const NW: f32 = 190.0;
 thread_local! {
     /// Nodes copiés, partagés entre tous les graphes ouverts
     static NODE_CLIP: std::cell::RefCell<Option<(Vec<Node>, Vec<Link>)>> = const { std::cell::RefCell::new(None) };
+    /// Catégories repliées dans la bibliothèque de nodes (les mêmes dans tous les graphes ouverts)
+    static LIB_CLOSED: std::cell::RefCell<std::collections::BTreeSet<&'static str>> = const { std::cell::RefCell::new(std::collections::BTreeSet::new()) };
     /// Les groupes dont les nodes copiés ont besoin : ils suivent la copie d'un graphe à l'autre
     static GROUP_CLIP: std::cell::RefCell<Vec<crate::nodeflow::Group>> = const { std::cell::RefCell::new(Vec::new()) };
 }
@@ -3145,6 +3144,8 @@ pub struct Editor {
     strip_open: bool,
     /// Atelier : calque choisi, et les matériaux du coffre (relus de temps en temps)
     layer_sel: Option<usize>,
+    /// Atelier : clés des vignettes des calques, refaites quand le matériau change
+    layer_keys: (u64, Vec<String>),
     mat_list: Option<(std::time::Instant, Vec<String>)>,
     masters_seen: u64,
     /// Atelier : vignettes des matériaux (maîtres, intelligents, préréglages), calculées en arrière-plan
@@ -3162,12 +3163,50 @@ pub struct Editor {
     group_rename: Option<(String, String)>,
     group_request: bool,
     leave_request: bool,
+    leave_layer_request: bool,
     /// Un champ de texte avait-il le clavier à l'image d'avant ? (pour la touche Tab)
     was_typing: bool,
+    /// Matériau : le calque dont on édite le graphe (vue nodes). Rien : on est sur la pile de calques.
+    inside: Option<Inside>,
+    /// Bibliothèque de nodes : le node qu'on glisse vers le graphe, et le lien où il s'insérerait
+    lib_drag: Option<(Pick, String, &'static str)>,
+    drop_link: Option<usize>,
     /// Géométrie et simulation : le moteur, l'aperçu 3D et la lecture
     geo: Option<Box<crate::geoview::GeoView>>,
     /// Image de l'animation montrée par l'aperçu d'un matériau ou d'un compositing (node « Temps »)
     frame: f32,
+}
+
+/// Ce qu'on ouvre d'un calque : son remplissage (le matériau) ou son masque.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Part {
+    Fill,
+    Mask,
+}
+
+/// Le calque dont on édite le graphe : pendant ce temps `Editor::graph` est ce graphe-là, et le
+/// matériau entier (la pile) attend ici, avec son historique d'annulation.
+struct Inside {
+    outer: Graph,
+    layer: usize,
+    part: Part,
+    /// Calque lié à un matériau maître du coffre : le graphe vient de ce fichier et y retourne
+    master: Option<String>,
+    name: String,
+    hist: (Vec<Graph>, Vec<Graph>, Graph),
+}
+
+/// Écrit le graphe `inner` à sa place dans la pile de `outer` (remplissage ou masque du calque `layer`).
+fn put_inner(outer: &mut Graph, layer: usize, part: Part, inner: Graph) {
+    let Some(l) = outer.stack.as_mut().and_then(|s| s.layers.get_mut(layer)) else { return };
+    let inner = Some(crate::atelier::Inner(Box::new(inner)));
+    match part {
+        Part::Fill => l.graph = inner,
+        Part::Mask => {
+            l.mask.kind = "graphe".into();
+            l.mask.graph = inner;
+        }
+    }
 }
 
 /// Échange le contenu de la racine et celui du groupe `name` : entrer dans un groupe, ou en sortir.
@@ -3214,6 +3253,102 @@ enum NodeOp {
     Ungroup,
 }
 
+/// Position d'une prise dans le graphe, telle que `draw_graph` la dessine.
+fn port_pos(n: &Node, d: &Def, output: bool, k: usize) -> Pos2 {
+    let (x, y) = (n.pos[0], n.pos[1]);
+    let w = node_w(n);
+    if n.collapsed || n.op == "reroute" {
+        let h = if n.op == "reroute" { REROUTE_H } else { HEAD };
+        return pos2(if output { x + w } else { x }, y + h * 0.5);
+    }
+    if output {
+        pos2(x + w, y + HEAD + (k as f32 + 0.5) * ROW)
+    } else {
+        pos2(x, y + HEAD + (d.outputs.len() + k) as f32 * ROW + ROW * 0.5)
+    }
+}
+
+/// Courbe d'un lien entre deux prises.
+fn link_curve(a: Pos2, b: Pos2) -> [Pos2; 4] {
+    let dx = ((b.x - a.x).abs() * 0.5).max(40.0);
+    [a, a + vec2(dx, 0.0), b - vec2(dx, 0.0), b]
+}
+
+/// Le lien qui passe à moins de `tol` de ce point du graphe.
+fn link_at(g: &Graph, pt: Pos2, tol: f32) -> Option<usize> {
+    let find = |id: u32| g.nodes.iter().find(|n| n.id == id).and_then(|n| n.def().map(|d| (n, d)));
+    g.links.iter().position(|l| {
+        let (Some((a, da)), Some((b, db))) = (find(l.from), find(l.to)) else { return false };
+        let pts = link_curve(port_pos(a, da, true, l.out), port_pos(b, db, false, l.inp));
+        (0..=32).any(|i| {
+            let t = i as f32 / 32.0;
+            let u = 1.0 - t;
+            let q = pts[0].to_vec2() * (u * u * u) + pts[1].to_vec2() * (3.0 * u * u * t) + pts[2].to_vec2() * (3.0 * u * t * t) + pts[3].to_vec2() * (t * t * t);
+            q.to_pos2().distance(pt) < tol
+        })
+    })
+}
+
+/// Type de ce qui sort d'une prise ; un renvoi prend celui de ce qui y entre.
+fn out_sock(g: &Graph, id: u32, out: usize) -> Sock {
+    let (mut id, mut out) = (id, out);
+    for _ in 0..64 {
+        let Some(n) = g.nodes.iter().find(|n| n.id == id) else { break };
+        if n.op == "reroute" {
+            match g.links.iter().find(|l| l.to == id && l.inp == 0) {
+                Some(l) => (id, out) = (l.from, l.out),
+                None => return Sock::Any,
+            }
+        } else {
+            return n.def().and_then(|d| d.outputs.get(out)).map(|o| o.1).unwrap_or(Sock::Float);
+        }
+    }
+    Sock::Float
+}
+
+/// Un node de définition `d` peut-il s'insérer sur le lien `k` ? Rend l'entrée et la sortie à brancher :
+/// les premières dont les types vont avec ceux du lien.
+pub fn link_fit(g: &Graph, k: usize, d: &Def) -> Option<(usize, usize)> {
+    let l = g.links.get(k)?;
+    let from = out_sock(g, l.from, l.out);
+    let to = g.nodes.iter().find(|n| n.id == l.to).and_then(|n| n.def()).and_then(|d| d.inputs.get(l.inp)).map(|i| i.1)?;
+    // Une géométrie ne passe que par une prise de géométrie ; une valeur ou une couleur, par l'une ou l'autre
+    let strict = |a: Sock, b: Sock| socks_fit(a, b) && (a != Sock::Any || b != Sock::Geo) && (b != Sock::Any || a != Sock::Geo);
+    let inp = d.inputs.iter().position(|i| i.0 != crate::nodeflow::VIRTUAL && strict(from, i.1))?;
+    let out = d.outputs.iter().position(|o| o.0 != crate::nodeflow::VIRTUAL && strict(o.1, to))?;
+    Some((inp, out))
+}
+
+/// Insère le node `id` (encore sans lien) sur le lien `k` : la source entre dans le node, le node
+/// continue vers la destination. Faux, et rien ne change, si les types ne le permettent pas.
+pub fn insert_on_link(g: &mut Graph, k: usize, id: u32) -> bool {
+    let Some(l) = g.links.get(k).cloned() else { return false };
+    if l.from == id || l.to == id {
+        return false;
+    }
+    let Some(d) = g.nodes.iter().find(|n| n.id == id).and_then(|n| n.def()) else { return false };
+    let Some((inp, out)) = link_fit(g, k, d) else { return false };
+    g.links.remove(k);
+    g.links.push(Link { from: l.from, out: l.out, to: id, inp });
+    g.links.push(Link { from: id, out, to: l.to, inp: l.inp });
+    true
+}
+
+/// Clé de la vignette d'un calque : son maître, ou le contenu de son propre graphe.
+fn layer_key(l: &crate::atelier::Layer) -> String {
+    match &l.graph {
+        Some(g) => {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            serde_json::to_string(&g.0.nodes).unwrap_or_default().hash(&mut h);
+            serde_json::to_string(&g.0.links).unwrap_or_default().hash(&mut h);
+            serde_json::to_string(&g.0.groups).unwrap_or_default().hash(&mut h);
+            format!("e:{:x}", h.finish())
+        }
+        None => format!("m:{}", l.master),
+    }
+}
+
 fn to_texture(ctx: &egui::Context, name: &str, img: &Img) -> egui::ColorImage {
     let _ = (ctx, name);
     let q = |x: f32| (x.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
@@ -3223,7 +3358,8 @@ fn to_texture(ctx: &egui::Context, name: &str, img: &Img) -> egui::ColorImage {
 
 impl Editor {
     pub fn open(path: PathBuf, root: &str) -> Result<Editor, String> {
-        let graph = Graph::load(&path)?;
+        // Un matériau s'édite toujours en pile de calques : un ancien matériau en nodes y devient un calque « graphe »
+        let graph = crate::atelier::to_stack(Graph::load(&path)?);
         let program = if graph.kind == GraphKind::Geometry { crate::nodeflow::lower(&graph, false).map(|_| Program::empty(GraphKind::Geometry)) } else { Program::compile(&graph.effective(), root, 1024) };
         let mut ed = Editor {
             lib_filter: String::new(),
@@ -3259,6 +3395,7 @@ impl Editor {
             preset_rx: None,
             strip_open: true,
             layer_sel: None,
+            layer_keys: (0, vec![]),
             mthumb: HashMap::new(),
             mthumb_rx: None,
             lib_search: String::new(),
@@ -3270,7 +3407,11 @@ impl Editor {
             group_rename: None,
             group_request: false,
             leave_request: false,
+            leave_layer_request: false,
             was_typing: false,
+            inside: None,
+            lib_drag: None,
+            drop_link: None,
             geo: None,
             frame: 0.0,
             frame_sel: false,
@@ -3337,6 +3478,95 @@ impl Editor {
             swap_level(&mut self.graph, &l);
             self.level_changed();
         }
+    }
+
+    /// Forme d'aperçu d'office : le cube arrondi pour la pile de calques et pour un masque (on y lit
+    /// les arêtes et les creux), la sphère pour le graphe d'un calque.
+    fn default_shape(&self) -> u8 {
+        if self.graph.stack.is_some() || self.inside.as_ref().is_some_and(|i| i.part == Part::Mask) { 1 } else { 0 }
+    }
+
+    /// Ouvre le graphe d'un calque (son remplissage ou son masque) dans la vue nodes.
+    fn enter_layer(&mut self, layer: usize, part: Part) {
+        if self.inside.is_some() || self.graph.kind != GraphKind::Material {
+            return;
+        }
+        let Some(l) = self.graph.stack.as_ref().and_then(|s| s.layers.get(layer)).cloned() else { return };
+        let mut master = None;
+        let inner = match part {
+            Part::Mask => match (&l.mask.graph, l.mask.kind == "graphe") {
+                (Some(g), true) => (*g.0).clone(),
+                // Le masque réglé jusque-là devient son point de départ en nodes
+                _ => crate::atelier::mask_graph(&l.mask),
+            },
+            Part::Fill => match &l.graph {
+                Some(g) => (*g.0).clone(),
+                None => {
+                    // Calque lié : on édite le maître lui-même, relu du disque
+                    let file = Path::new(&self.root).join(&l.master);
+                    match Graph::load(&file) {
+                        Ok(g) if g.stack.is_none() => {
+                            master = Some(l.master.clone());
+                            g
+                        }
+                        // Un maître lui-même à calques s'ouvre dans son onglet
+                        Ok(_) => {
+                            self.open_request = Some(file);
+                            return;
+                        }
+                        Err(e) => {
+                            self.message = Some(format!("{} : {e}", l.master));
+                            return;
+                        }
+                    }
+                }
+            },
+        };
+        self.save_if_due(true);
+        let mut outer = std::mem::replace(&mut self.graph, inner);
+        if part == Part::Mask {
+            // Le masque est désormais ce graphe
+            put_inner(&mut outer, layer, part, self.graph.clone());
+        }
+        let hist = (std::mem::take(&mut self.undo), std::mem::take(&mut self.redo), std::mem::replace(&mut self.last, self.graph.clone()));
+        self.inside = Some(Inside { outer, layer, part, master, name: l.name.clone(), hist });
+        self.level = None;
+        self.level_changed();
+        self.message = None;
+        self.pv_key = 0;
+        if self.overlaps() {
+            self.arrange();
+        }
+        self.program = self.compile_doc();
+        self.version += 1;
+        if part == Part::Mask {
+            self.dirty = Some(std::time::Instant::now());
+        }
+    }
+
+    /// Revient à la pile de calques : le graphe retourne dans son calque (ou dans son fichier maître).
+    fn leave_layer(&mut self) {
+        if self.inside.is_none() {
+            return;
+        }
+        self.leave();
+        self.save_if_due(true);
+        let Some(ins) = self.inside.take() else { return };
+        let inner = std::mem::replace(&mut self.graph, ins.outer);
+        match &ins.master {
+            Some(m) => crate::atelier::forget(m),
+            None => put_inner(&mut self.graph, ins.layer, ins.part, inner),
+        }
+        (self.undo, self.redo, self.last) = ins.hist;
+        self.layer_sel = Some(ins.layer);
+        self.level_changed();
+        self.message = None;
+        self.pv_key = 0;
+        self.mthumb.retain(|k, _| !k.starts_with("e:"));
+        self.program = self.compile_doc();
+        self.version += 1;
+        // Ce qui a changé dans le calque fait un seul point d'annulation dans la pile
+        self.commit();
     }
 
     fn compile_doc(&self) -> Result<Program, (u32, String)> {
@@ -3417,7 +3647,26 @@ impl Editor {
                         break;
                     }
                 }
-                if let Err(e) = doc.save(&self.path) {
+                // Dans un calque : son graphe retourne dans la pile, ou dans le fichier de son maître
+                let r = match &self.inside {
+                    Some(ins) => {
+                        let mut outer = ins.outer.clone();
+                        let own = match &ins.master {
+                            Some(m) => {
+                                let r = doc.save(&Path::new(&self.root).join(m));
+                                crate::atelier::forget(m);
+                                r
+                            }
+                            None => {
+                                put_inner(&mut outer, ins.layer, ins.part, doc);
+                                Ok(())
+                            }
+                        };
+                        own.and_then(|_| outer.save(&self.path))
+                    }
+                    None => doc.save(&self.path),
+                };
+                if let Err(e) = r {
                     self.message = Some(e);
                 }
                 self.dirty = None;
@@ -3829,7 +4078,11 @@ impl Editor {
             ctx.request_repaint_after(std::time::Duration::from_millis(300));
         }
         self.thumbs_tick(&ctx);
-        if self.graph.stack.is_some() {
+        // Un matériau : la pile de calques d'abord ; la vue nodes seulement à l'intérieur d'un calque
+        if self.graph.kind == GraphKind::Material && self.inside.is_none() {
+            if self.graph.stack.is_none() {
+                self.graph = crate::atelier::to_stack(std::mem::replace(&mut self.graph, Graph::empty(GraphKind::Material)));
+            }
             self.atelier_ui(ui, &ctx);
             return;
         }
@@ -3856,10 +4109,11 @@ impl Editor {
         let insp_rect = Rect::from_min_max(pos2(avail.right() - insp_w, avail.top()), avail.max);
         let graph_rect = Rect::from_min_max(pos2(lib_rect.right(), avail.top()), pos2(insp_rect.left(), avail.bottom()));
         // Bande des préréglages sous le graphe (matériaux seulement)
-        let strip_h = if kind == GraphKind::Material && !strip_away { if self.strip_open { 126.0 } else { 28.0 } } else { 0.0 };
+        let in_mask = self.inside.as_ref().is_some_and(|i| i.part == Part::Mask);
+        let strip_h = if kind == GraphKind::Material && !strip_away && !in_mask { if self.strip_open { 126.0 } else { 28.0 } } else { 0.0 };
         let strip_rect = Rect::from_min_max(pos2(graph_rect.left(), graph_rect.bottom() - strip_h), graph_rect.max);
         let graph_rect = Rect::from_min_max(graph_rect.min, pos2(graph_rect.right(), graph_rect.bottom() - strip_h));
-        if kind == GraphKind::Material {
+        if kind == GraphKind::Material && !in_mask {
             let picked = crate::dock::area(ui, "node-presets", "préréglages de matériaux", strip_rect, p.panel, 0.0, |ui| {
                 let r = ui.max_rect();
                 self.preset_strip(ui, r, &ctx)
@@ -3881,34 +4135,80 @@ impl Editor {
                 ui.add(egui::TextEdit::singleline(&mut self.lib_filter).hint_text(format!("{}  {}", crate::lucide::SEARCH, crate::i18n::t("Chercher un node"))).desired_width(lib_rect.width() - 24.0));
             });
             lui.add_space(4.0);
-            let f = crate::chat::fold(&self.lib_filter);
+            let q = self.lib_filter.trim().to_string();
+            // Une rangée de node : on la clique (il arrive au centre) ou on la glisse dans le graphe
+            let mut drag_now: Option<(Pick, String, &'static str)> = None;
+            let mut row = |ui: &mut egui::Ui, label: &str, cat: &'static str, pick: &Pick, add_now: &mut Option<Pick>| {
+                let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 26.0), Sense::click_and_drag());
+                if resp.hovered() || resp.dragged() {
+                    ui.painter().rect_filled(r.shrink2(vec2(6.0, 1.0)), 6.0, p.line.linear_multiply(0.45));
+                }
+                let col = if matches!(pick, Pick::Group(_)) { cat_color("groupe") } else { cat_color(cat) };
+                ui.painter().rect_filled(Rect::from_center_size(pos2(r.left() + 26.0, r.center().y), vec2(8.0, 8.0)), 2.0, col);
+                ui.painter().with_clip_rect(r).text(pos2(r.left() + 38.0, r.center().y), egui::Align2::LEFT_CENTER, label, egui::FontId::proportional(12.5), p.text);
+                if resp.hovered() {
+                    ui.painter().text(pos2(r.right() - 16.0, r.center().y), egui::Align2::CENTER_CENTER, crate::lucide::GRIP_VERTICAL, egui::FontId::proportional(12.0), p.muted);
+                }
+                if resp.drag_started() {
+                    drag_now = Some((pick.clone(), label.to_string(), cat));
+                }
+                let resp = resp.on_hover_cursor(egui::CursorIcon::Grab);
+                if resp.on_hover_text(crate::i18n::t("Glisser dans le graphe pour le poser où l'on veut (sur un lien : il s'y insère). Un clic l'ajoute au centre.")).clicked() {
+                    *add_now = Some(pick.clone());
+                }
+            };
             egui::ScrollArea::vertical().id_salt("node-lib").auto_shrink([false, false]).show(lui, |ui| {
                 ui.spacing_mut().item_spacing.y = 0.0;
+                if !q.is_empty() {
+                    // Recherche : les meilleurs d'abord, toutes catégories confondues (noms français, anglais, opérations)
+                    let found = search_picks(&q, &picks, false);
+                    ui.add_space(6.0);
+                    if found.is_empty() {
+                        ui.horizontal(|ui| {
+                            ui.add_space(14.0);
+                            ui.label(RichText::new(crate::i18n::t("aucun node")).size(11.5).color(p.muted));
+                        });
+                    }
+                    for (_, label, cat, pick) in found.iter().take(60) {
+                        row(ui, label, cat, pick, &mut add_now);
+                    }
+                    return;
+                }
                 for cat in CATS {
-                    let items: Vec<&(String, &'static str, Pick, bool)> = picks.iter().filter(|x| x.1 == cat).filter(|x| f.is_empty() || crate::chat::fold(&x.0).contains(&f)).collect();
+                    let items: Vec<&(String, &'static str, Pick, bool)> = picks.iter().filter(|x| x.1 == cat).collect();
                     if items.is_empty() {
                         continue;
                     }
-                    ui.add_space(8.0);
-                    ui.horizontal(|ui| {
-                        ui.add_space(12.0);
-                        ui.label(RichText::new(crate::i18n::sentence(&crate::i18n::t(cat))).size(11.0).color(p.muted));
-                    });
-                    ui.add_space(2.0);
+                    // En-tête de catégorie : un clic la replie ou la déplie
+                    let closed = LIB_CLOSED.with(|c| c.borrow().contains(cat));
+                    ui.add_space(6.0);
+                    let (hr, hresp) = ui.allocate_exact_size(vec2(ui.available_width(), 24.0), Sense::click());
+                    if hresp.hovered() {
+                        ui.painter().rect_filled(hr.shrink2(vec2(6.0, 1.0)), 6.0, p.line.linear_multiply(0.3));
+                    }
+                    ui.painter().text(pos2(hr.left() + 16.0, hr.center().y), egui::Align2::CENTER_CENTER, if closed { crate::lucide::CHEVRON_RIGHT } else { crate::lucide::CHEVRON_DOWN }, egui::FontId::proportional(11.0), p.muted);
+                    ui.painter().text(pos2(hr.left() + 28.0, hr.center().y), egui::Align2::LEFT_CENTER, crate::i18n::sentence(&crate::i18n::t(cat)), egui::FontId::new(11.5, theme::bold()), if hresp.hovered() { p.text } else { p.muted });
+                    ui.painter().text(pos2(hr.right() - 16.0, hr.center().y), egui::Align2::RIGHT_CENTER, items.len().to_string(), egui::FontId::proportional(10.5), p.muted.gamma_multiply(0.7));
+                    if hresp.on_hover_text(crate::i18n::t(if closed { "Déplier la catégorie" } else { "Replier la catégorie" })).clicked() {
+                        LIB_CLOSED.with(|c| {
+                            let mut c = c.borrow_mut();
+                            if !c.remove(cat) {
+                                c.insert(cat);
+                            }
+                        });
+                    }
+                    if closed {
+                        continue;
+                    }
                     for (label, _, pick, _) in items {
-                        let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 26.0), Sense::click_and_drag());
-                        if resp.hovered() {
-                            ui.painter().rect_filled(r, 0.0, p.line.linear_multiply(0.45));
-                        }
-                        let col = if matches!(pick, Pick::Group(_)) { cat_color("groupe") } else { cat_color(cat) };
-                        ui.painter().rect_filled(Rect::from_center_size(pos2(r.left() + 16.0, r.center().y), vec2(8.0, 8.0)), 2.0, col);
-                        ui.painter().with_clip_rect(r).text(pos2(r.left() + 28.0, r.center().y), egui::Align2::LEFT_CENTER, label, egui::FontId::proportional(12.5), p.text);
-                        if resp.on_hover_text(crate::i18n::t("cliquer pour l'ajouter au centre du graphe")).clicked() {
-                            add_now = Some(pick.clone());
-                        }
+                        row(ui, label, cat, pick, &mut add_now);
                     }
                 }
+                ui.add_space(10.0);
             });
+            if drag_now.is_some() {
+                self.lib_drag = drag_now;
+            }
         });
         // ---- Inspecteur : aperçu carré, puis le node choisi
         crate::dock::area(ui, "node-inspector", "aperçu et réglages (nodes)", insp_rect, p.panel, 0.0, |ui| {
@@ -3992,13 +4292,37 @@ impl Editor {
             ui.set_width(hdr_w - 14.0);
             ui.set_clip_rect(Rect::from_min_size(graph_rect.min + vec2(12.0, 10.0), vec2(hdr_w, 40.0)));
             ui.horizontal(|ui| {
+            // Fil d'Ariane : la pile de calques du matériau, le calque ouvert, puis le groupe où l'on est
+            let crumb = self.inside.as_ref().map(|ins| (crate::atelier::shown_name(&ins.name), ins.part, ins.master.is_some()));
+            if let Some((name, part, linked)) = &crumb {
+                if ui.button(format!("{}  {}", crate::lucide::ARROW_LEFT, crate::i18n::t("Calques"))).on_hover_text(crate::i18n::t("Revenir à la pile de calques du matériau (Tab, ou Échap)")).clicked() {
+                    self.leave_layer_request = true;
+                }
+                ui.label(RichText::new(crate::lucide::CHEVRON_RIGHT).size(11.0).color(p.muted));
+                let icon = if *part == Part::Mask { crate::lucide::WAND_SPARKLES } else if *linked { crate::lucide::LINK } else { crate::lucide::WORKFLOW };
+                let title = if *part == Part::Mask { format!("{icon}  {name} · {}", crate::i18n::t_mid("masque")) } else { format!("{icon}  {name}") };
+                let tip = crate::i18n::t(match (part, linked) {
+                    (Part::Mask, _) => "Le masque de ce calque, en nodes : la couleur de la sortie dit où le calque se pose (blanc : partout, noir : nulle part)",
+                    (_, true) => "Calque lié à un matériau maître du coffre : ce graphe est celui du maître, partagé par tous les matériaux qui s'en servent",
+                    _ => "Le graphe de nodes de ce calque",
+                });
+                if self.level.is_some() {
+                    if ui.button(title).on_hover_text(crate::i18n::t("Sortir du groupe (Tab)")).clicked() {
+                        self.leave_request = true;
+                    }
+                } else {
+                    ui.label(RichText::new(title).family(theme::bold())).on_hover_text(tip);
+                }
+            }
             if let Some(l) = self.level.clone() {
                 // Dans un groupe : d'où l'on vient, où l'on est, et la sortie
-                if ui.button(format!("{}  {}", crate::lucide::ARROW_LEFT, crate::i18n::t("Graphe"))).on_hover_text(crate::i18n::t("Sortir du groupe (Tab)")).clicked() {
+                if crumb.is_none() && ui.button(format!("{}  {}", crate::lucide::ARROW_LEFT, crate::i18n::t("Graphe"))).on_hover_text(crate::i18n::t("Sortir du groupe (Tab)")).clicked() {
                     self.leave_request = true;
                 }
                 ui.label(RichText::new(crate::lucide::CHEVRON_RIGHT).size(11.0).color(p.muted));
                 ui.label(RichText::new(format!("{}  {l}", crate::lucide::GROUP)).color(cat_color("groupe")).family(theme::bold()));
+            }
+            if crumb.is_some() || self.level.is_some() {
                 ui.separator();
             }
             egui::containers::menu::MenuButton::new(crate::i18n::t("Ajouter")).ui(ui, |ui| {
@@ -4016,7 +4340,7 @@ impl Editor {
                     });
                 }
             });
-            if kind == GraphKind::Material {
+            if kind == GraphKind::Material && !in_mask {
                 egui::containers::menu::MenuButton::new(crate::i18n::t("Préréglages")).ui(ui, |ui| {
                     for name in MATERIAL_PRESETS {
                         if ui.button(name).on_hover_text(crate::i18n::t("remplace le graphe actuel")).clicked() {
@@ -4137,6 +4461,8 @@ impl Editor {
             }
             match self.selected.iter().next().and_then(|id| self.group_of(*id)).filter(|_| self.selected.len() == 1) {
                 Some(name) => self.enter(&name),
+                // À la racine du graphe d'un calque, Tab ramène à la pile de calques
+                None if self.level.is_none() => self.leave_layer_request = true,
                 None => self.leave(),
             }
             self.was_typing = false;
@@ -4345,6 +4671,59 @@ impl Editor {
                 self.changed();
             }
         }
+        // Node glissé depuis la bibliothèque : un fantôme suit la souris, le lien visé s'allume, on lâche où l'on veut
+        self.drop_link = None;
+        if let Some((pick, label, cat)) = self.lib_drag.clone() {
+            let pt = ctx.pointer_latest_pos();
+            let over = pt.filter(|pt| graph_rect.contains(*pt));
+            let d = match &pick {
+                Pick::Op(op) | Pick::Preset(op, _, _) => def(op),
+                Pick::Group(_) => None,
+            };
+            let zone = matches!(pick, Pick::Op("repeat_in") | Pick::Op("sim_in"));
+            if let (Some(pt), Some(d), false) = (over, d, zone) {
+                let g = to_graph(pt);
+                self.drop_link = link_at(&self.graph, pos2(g[0], g[1]), 14.0).filter(|k| link_fit(&self.graph, *k, d).is_some());
+            }
+            ctx.set_cursor_icon(if over.is_some() { egui::CursorIcon::Grabbing } else { egui::CursorIcon::NoDrop });
+            if let Some(pt) = pt {
+                // Le fantôme : à l'échelle du graphe quand on le survole
+                let k = if over.is_some() { (graph_rect.width() / self.scene.width().max(1e-3)).clamp(0.2, 2.5) } else { 0.8 };
+                let rows = d.map(|d| d.inputs.len() + d.outputs.len()).unwrap_or(3).clamp(1, 9) as f32;
+                let r = Rect::from_min_size(pt - vec2(NW * 0.5, HEAD * 0.5) * k, vec2(NW, HEAD + rows * ROW + 8.0) * k);
+                let gp = ctx.layer_painter(egui::LayerId::new(egui::Order::Tooltip, ui.scope_id().with("node-ghost")));
+                let col = if matches!(pick, Pick::Group(_)) { cat_color("groupe") } else { cat_color(cat) };
+                let ok = self.drop_link.is_some();
+                gp.rect(r, 6.0 * k, p.panel.gamma_multiply(0.72), Stroke::new(if ok { 2.0 } else { 1.0 }, if ok { p.accent } else { p.line }), egui::StrokeKind::Outside);
+                gp.rect_filled(Rect::from_min_size(r.min, vec2(r.width(), 3.0 * k)), 0.0, col.gamma_multiply(0.9));
+                gp.with_clip_rect(r).text(r.min + vec2(10.0, 3.0 + HEAD * 0.5) * k, egui::Align2::LEFT_CENTER, &label, egui::FontId::new(12.0 * k, theme::bold()), p.text.gamma_multiply(0.9));
+                // Graphe vu de loin : le nom reste lisible, au-dessus du fantôme
+                if k < 0.7 {
+                    gp.text(r.left_top() - vec2(0.0, 4.0), egui::Align2::LEFT_BOTTOM, &label, egui::FontId::new(11.5, theme::bold()), p.text);
+                }
+                if ok {
+                    gp.text(r.left_bottom() + vec2(0.0, 6.0), egui::Align2::LEFT_TOP, crate::i18n::t("lâcher pour l'insérer sur ce lien"), egui::FontId::proportional(10.5), p.accent);
+                }
+            }
+            let (released, cancel) = ctx.input(|i| (i.pointer.any_released() || !i.pointer.any_down(), i.key_pressed(egui::Key::Escape)));
+            if cancel {
+                self.lib_drag = None;
+                self.drop_link = None;
+            } else if released {
+                self.lib_drag = None;
+                if let Some(pt) = over {
+                    let g = to_graph(pt);
+                    let link = self.drop_link.take();
+                    if let Some(id) = self.add_pick(&pick, [g[0] - NW * 0.5, g[1] - HEAD * 0.5]) {
+                        if let (Some(k), false) = (link, zone) {
+                            insert_on_link(&mut self.graph, k, id);
+                        }
+                    }
+                    self.changed();
+                }
+            }
+            ctx.request_repaint();
+        }
         if let Some(pick) = add_now {
             let at = to_graph(graph_rect.center());
             self.add_pick(&pick, [at[0] - NW * 0.5, at[1] - 60.0]);
@@ -4489,7 +4868,18 @@ impl Editor {
         if std::mem::take(&mut self.leave_request) {
             self.leave();
         }
+        // Échap (rien d'ouvert, rien en cours) : retour à la pile de calques
+        if self.inside.is_some() && over_graph && !typing && self.add.is_none() && self.drag_link.is_none() && self.lib_drag.is_none() && self.rename.is_none() && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            if self.level.is_some() {
+                self.leave();
+            } else {
+                self.leave_layer_request = true;
+            }
+        }
         self.add_menu_ui(&ctx);
+        if std::mem::take(&mut self.leave_layer_request) {
+            self.leave_layer();
+        }
         ui.allocate_rect(avail, Sense::hover());
     }
 
@@ -5131,10 +5521,12 @@ impl Editor {
         for (k, l) in self.graph.links.iter().enumerate() {
             if let (Some(a), Some(b)) = (out_pos.get(&(l.from, l.out)), in_pos.get(&(l.to, l.inp))) {
                 let pts = bez(*a, *b);
-                let hov = self.drag_link.is_none() && hovered_link.is_none() && pointer.is_some_and(|pt| near(&pts, pt));
+                let hov = self.lib_drag.is_none() && self.drag_link.is_none() && hovered_link.is_none() && pointer.is_some_and(|pt| near(&pts, pt));
                 if hov {
                     hovered_link = Some(k);
                 }
+                // Le lien où le node glissé depuis la bibliothèque va s'insérer
+                let hov = hov || self.drop_link == Some(k);
                 let muted = self.graph.nodes.iter().any(|n| (n.id == l.from || n.id == l.to) && n.muted);
                 let col = if hov { p.accent } else if muted { p.muted.gamma_multiply(0.5) } else { sock_color(sock_of(l.from, l.out)).gamma_multiply(0.85) };
                 painter.add(egui::epaint::CubicBezierShape::from_points_stroke(pts, false, Color32::TRANSPARENT, Stroke::new(if hov { 3.0 } else { 2.0 }, col)));
@@ -5854,7 +6246,8 @@ impl Editor {
     }
 
     /// Atelier (façon Substance Painter) : l'aperçu au centre, la pile de calques à droite.
-    /// Double-clic sur un calque : son matériau maître s'ouvre dans l'éditeur de nodes (façon Designer).
+    /// Double-clic sur un calque : son graphe s'ouvre dans l'éditeur de nodes (façon Designer), et l'on
+    /// revient à la pile par le fil d'Ariane.
     fn atelier_ui(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         let p = theme::pal();
         let mut changed = false;
@@ -5865,8 +6258,35 @@ impl Editor {
         let Some(stack) = self.graph.stack.clone() else { return };
         let mut stack = stack;
         // Les vignettes : un fil calcule celles qui manquent (une sphère par matériau)
-        self.atelier_thumbs(ctx, &masters, &smart);
+        if self.layer_keys.0 != self.version {
+            self.layer_keys = (self.version, stack.layers.iter().map(layer_key).collect());
+        }
+        let lkeys = self.layer_keys.1.clone();
+        self.atelier_thumbs(ctx, &masters, &smart, &stack, &lkeys);
+        // Ce qu'on demande d'ouvrir en nodes : (calque, remplissage ou masque)
+        let mut enter: Option<(usize, Part)> = None;
+        let mut make_local: Option<usize> = None;
+        // Annuler, rétablir (hors d'un champ de texte : un bouton qu'on vient de cliquer garde le clavier, lui aussi)
+        let writing = ctx.memory(|m| m.focused()).is_some_and(|id| egui::TextEdit::load_state(ctx, id).is_some());
+        if !writing {
+            use egui::{Key, KeyboardShortcut, Modifiers};
+            let (redo, undo) = ctx.input_mut(|i| {
+                let r = i.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND | Modifiers::SHIFT, Key::Z)) || i.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::Y));
+                (r, !r && i.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::Z)))
+            });
+            if redo {
+                self.redo();
+                return;
+            } else if undo {
+                self.undo();
+                return;
+            }
+        }
 
+        // Un calque est toujours choisi : celui du dessus à l'ouverture
+        if self.layer_sel.is_none_or(|i| i >= stack.layers.len()) && !stack.layers.is_empty() {
+            self.layer_sel = Some(stack.layers.len() - 1);
+        }
         let avail = ui.available_rect_before_wrap();
         // La bibliothèque et la pile de calques peuvent sortir dans leur fenêtre : l'aperçu prend alors leur place
         let lib_away = crate::layout::offer("atelier-lib", "matériaux (atelier)").is_some();
@@ -5892,7 +6312,6 @@ impl Editor {
         let mut add_master: Option<String> = None;
         let mut add_smart: Option<String> = None;
         let mut add_preset: Option<&'static str> = None;
-        let mut new_master = false;
         crate::dock::area(ui, "atelier-lib", "matériaux (atelier)", lib, p.panel, 10.0, |lui| {
             head(lui, "MATÉRIAUX");
             lui.add_space(4.0);
@@ -5961,9 +6380,9 @@ impl Editor {
                         let short: String = if name.chars().count() > 11 { format!("{}…", name.chars().take(10).collect::<String>()) } else { name.clone() };
                         ui.painter().text(pos2(r.center().x, r.bottom() - 7.0), egui::Align2::CENTER_CENTER, short, egui::FontId::proportional(10.5), p.text);
                         let tip = match kind {
-                            1 => crate::i18n::t("Ajouter en calque (double-clic sur le calque : ouvrir le maître)"),
+                            1 => crate::i18n::t("Ajouter en calque lié à ce matériau maître (double-clic sur le calque : l'ouvrir en nodes)"),
                             2 => crate::i18n::t("Matériau intelligent : ajoute tous ses calques, avec leurs masques"),
-                            _ => crate::i18n::t("Préréglage : devient un matériau maître du coffre, puis un calque"),
+                            _ => crate::i18n::t("Préréglage : devient un calque, avec son propre graphe de nodes"),
                         };
                         if resp.on_hover_text(format!("{name}\n{tip}")).clicked() {
                             match kind {
@@ -5978,14 +6397,11 @@ impl Editor {
                     }
                 });
                 ui.add_space(8.0);
-                if ui.add(egui::Button::new(format!("{}  {}", crate::lucide::PLUS, crate::i18n::t("nouveau matériau maître"))).corner_radius(10)).on_hover_text(crate::i18n::t("Crée un .arymat à côté, l'ajoute comme calque et l'ouvre en nodes")).clicked() {
-                    new_master = true;
-                }
             });
         });
         if let Some(m) = add_master {
             let name = std::path::Path::new(&m).file_name().map(|s| crate::formats::strip(&s.to_string_lossy()).to_string()).unwrap_or_default();
-            stack.layers.push(crate::atelier::Layer { name, master: m, params: Default::default(), mask: Default::default(), opacity: 1.0, visible: true });
+            stack.layers.push(crate::atelier::Layer::linked(name, m));
             self.layer_sel = Some(stack.layers.len() - 1);
             changed = true;
         }
@@ -5996,42 +6412,12 @@ impl Editor {
                 changed = true;
             }
         }
-        if let Some(n) = add_preset {
-            // Le préréglage devient un maître du coffre (« nodes/matériaux »), réutilisé s'il existe déjà
-            let dir = std::path::Path::new(&self.root).join("nodes").join("matériaux");
-            let _ = std::fs::create_dir_all(&dir);
-            let file = dir.join(format!("{n}.{}", crate::formats::ext("mat")));
-            let ok = file.exists() || material_preset(n).is_some_and(|g| g.save(&file).is_ok());
-            if ok {
-                let rel = file.strip_prefix(&self.root).map(|r| r.to_string_lossy().replace('\\', "/")).unwrap_or_default();
-                stack.layers.push(crate::atelier::Layer { name: crate::i18n::t(n), master: rel, params: Default::default(), mask: Default::default(), opacity: 1.0, visible: true });
-                self.layer_sel = Some(stack.layers.len() - 1);
-                self.mat_list = None;
-                changed = true;
-            }
+        if let Some(g) = add_preset.and_then(|n| material_preset(n).map(|g| (n, g))) {
+            // Le préréglage devient un calque « graphe » : rien n'est écrit ailleurs dans le coffre
+            stack.layers.push(crate::atelier::Layer::own(crate::i18n::t(g.0), g.1));
+            self.layer_sel = Some(stack.layers.len() - 1);
+            changed = true;
         }
-        if new_master {
-            // Un atelier pas encore enregistré : le maître va dans « nodes/ » du coffre (pas dans le dossier caché)
-            let untitled = self.path.strip_prefix(&self.root).is_ok_and(|r| r.to_string_lossy().replace('\\', "/").starts_with(crate::untitled::DIR));
-            let dir = if untitled { std::path::Path::new(&self.root).join("nodes") } else { self.path.parent().unwrap_or(std::path::Path::new("")).to_path_buf() };
-            let _ = std::fs::create_dir_all(&dir);
-            let stem = self.path.file_stem().map(|s| crate::formats::strip(&s.to_string_lossy()).to_string()).unwrap_or_else(|| "matériau".into());
-            let mut n = stack.layers.len() + 1;
-            let mut file = dir.join(format!("{stem} - calque {n}.{}", crate::formats::ext("mat")));
-            while file.exists() {
-                n += 1;
-                file = dir.join(format!("{stem} - calque {n}.{}", crate::formats::ext("mat")));
-            }
-            if Graph::new_material().save(&file).is_ok() {
-                let rel = file.strip_prefix(&self.root).map(|r| r.to_string_lossy().replace('\\', "/")).unwrap_or_else(|_| file.to_string_lossy().to_string());
-                stack.layers.push(crate::atelier::Layer { name: format!("calque {n}"), master: rel, params: Default::default(), mask: Default::default(), opacity: 1.0, visible: true });
-                self.layer_sel = Some(stack.layers.len() - 1);
-                self.open_request = Some(file);
-                self.mat_list = None;
-                changed = true;
-            }
-        }
-
         // ---------- Calques et propriétés (à droite) ----------
         ui.painter().vline(panel.left(), panel.y_range(), egui::Stroke::new(1.0, p.line));
         crate::dock::area(ui, "atelier-layers", "calques et propriétés (atelier)", panel, p.panel, 10.0, |ui| {
@@ -6064,12 +6450,20 @@ impl Editor {
                     });
                     self.mthumb.remove(&format!("s:{name}"));
                 }
+                if ib(ui, crate::lucide::PLUS, "Nouveau calque de remplissage : couleur, rugosité et métal se règlent ici, et un double-clic ouvre son graphe en nodes", true) {
+                    // Une teinte différente à chaque fois, pour le voir arriver
+                    let tints = [[0.62, 0.62, 0.62], [0.72, 0.36, 0.24], [0.28, 0.46, 0.68], [0.36, 0.58, 0.36], [0.78, 0.66, 0.34]];
+                    stack.layers.push(crate::atelier::Layer::own(format!("{} {}", crate::i18n::t("calque"), n + 1), crate::atelier::fill_graph(tints[n % tints.len()])));
+                    self.layer_sel = Some(n);
+                    changed = true;
+                }
             });
         });
+        let n = stack.layers.len();
         ui.add_space(4.0);
         egui::ScrollArea::vertical().id_salt("atelier-layers").max_height((panel.height() * 0.38).max(140.0)).show(ui, |ui| {
             if n == 0 {
-                ui.label(RichText::new(crate::i18n::t("Clique un matériau à gauche : il devient un calque, posé partout ou selon un masque (usure, saleté, poussière…).")).color(p.muted).size(11.0));
+                ui.label(RichText::new(crate::i18n::t("Clique un matériau à gauche, ou le + ci-dessus : il devient un calque, posé partout ou selon un masque (usure, saleté, poussière…). Un double-clic sur un calque ouvre ses nodes.")).color(p.muted).size(11.0));
             }
             // Le calque du dessus en haut, comme dans Painter
             for i in (0..n).rev() {
@@ -6081,7 +6475,7 @@ impl Editor {
                 ui.painter().text(eye.center(), egui::Align2::CENTER_CENTER, if l.visible { crate::lucide::EYE } else { crate::lucide::EYE_OFF }, egui::FontId::proportional(13.0), if l.visible { p.text } else { p.muted });
                 // Vignette du matériau, puis celle du masque (comme les deux pastilles de Painter)
                 let th = Rect::from_center_size(pos2(r.left() + 46.0, r.center().y), vec2(30.0, 30.0));
-                match self.mthumb.get(&format!("m:{}", l.master)) {
+                match lkeys.get(i).and_then(|k| self.mthumb.get(k)) {
                     Some(t) => {
                         ui.painter().image(t.id(), th, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
                     }
@@ -6095,22 +6489,40 @@ impl Editor {
                 if masked {
                     ui.painter().text(mk.center(), egui::Align2::CENTER_CENTER, crate::lucide::WAND_SPARKLES, egui::FontId::proportional(11.0), Color32::from_gray(40));
                 }
-                ui.painter().text(pos2(r.left() + 96.0, r.center().y - 7.0), egui::Align2::LEFT_CENTER, &l.name, egui::FontId::proportional(12.5), if l.visible { p.text } else { p.muted });
+                ui.painter().with_clip_rect(Rect::from_min_max(r.min, pos2(r.right() - 58.0, r.max.y))).text(pos2(r.left() + 96.0, r.center().y - 7.0), egui::Align2::LEFT_CENTER, crate::atelier::shown_name(&l.name), egui::FontId::proportional(12.5), if l.visible { p.text } else { p.muted });
                 let mask = crate::atelier::MASKS.iter().find(|m| m.0 == l.mask.kind).map(|m| m.1).unwrap_or("");
                 ui.painter().text(pos2(r.left() + 96.0, r.center().y + 8.0), egui::Align2::LEFT_CENTER, crate::i18n::t(mask), egui::FontId::proportional(10.5), p.muted);
-                ui.painter().text(pos2(r.right() - 10.0, r.center().y), egui::Align2::RIGHT_CENTER, format!("{:.0}", l.opacity * 100.0), egui::FontId::monospace(11.0), p.muted);
+                // À droite : l'entrée dans les nodes du calque (visible au survol ou sur le calque choisi), puis l'opacité
+                let go = Rect::from_center_size(pos2(r.right() - 16.0, r.center().y), vec2(22.0, 22.0));
+                let at = ui.input(|i| i.pointer.interact_pos().or(i.pointer.hover_pos()));
+                let over_go = resp.hovered() && at.is_some_and(|at| go.expand(3.0).contains(at));
+                let over_mask = resp.hovered() && at.is_some_and(|at| mk.expand(3.0).contains(at));
+                if over_go {
+                    ui.painter().rect_filled(go, 6.0, p.accent.gamma_multiply(0.25));
+                }
+                if on || resp.hovered() {
+                    ui.painter().text(go.center(), egui::Align2::CENTER_CENTER, crate::lucide::WORKFLOW, egui::FontId::proportional(13.0), if over_go { p.accent } else { p.muted });
+                }
+                // Un calque lié à un maître du coffre porte un petit maillon
+                if l.graph.is_none() {
+                    ui.painter().text(th.right_bottom() + vec2(1.0, 1.0), egui::Align2::RIGHT_BOTTOM, crate::lucide::LINK, egui::FontId::proportional(9.5), p.accent);
+                }
+                ui.painter().text(pos2(r.right() - 34.0, r.center().y), egui::Align2::RIGHT_CENTER, format!("{:.0}", l.opacity * 100.0), egui::FontId::monospace(11.0), p.muted);
                 if resp.clicked() {
-                    if ui.input(|i| i.pointer.interact_pos()).is_some_and(|at| eye.expand(4.0).contains(at)) {
+                    if at.is_some_and(|at| eye.expand(4.0).contains(at)) {
                         l.visible = !l.visible;
                         changed = true;
+                    } else if over_go {
+                        self.layer_sel = Some(i);
+                        enter = Some((i, Part::Fill));
                     } else {
                         self.layer_sel = Some(i);
                     }
                 }
-                if resp.double_clicked() {
-                    self.open_request = Some(std::path::Path::new(&self.root).join(&l.master));
+                if resp.double_clicked() && !at.is_some_and(|at| eye.expand(4.0).contains(at)) {
+                    enter = Some((i, if over_mask && l.mask.kind == "graphe" { Part::Mask } else { Part::Fill }));
                 }
-                resp.on_hover_text(crate::i18n::t("double-clic : ouvrir le matériau maître en nodes"));
+                resp.on_hover_text(crate::i18n::t(if over_go { "Ouvrir ce calque en nodes" } else if over_mask && l.mask.kind == "graphe" { "double-clic : ouvrir le masque en nodes" } else { "double-clic : ouvrir ce calque en nodes" }));
                 ui.add_space(3.0);
             }
         });
@@ -6157,20 +6569,30 @@ impl Editor {
                 card(ui, "Calque", &mut |ui| {
                     crate::modifiers::row(ui, &crate::i18n::t("nom"), |ui| {
                         changed |= ui.add(egui::TextEdit::singleline(&mut l.name).desired_width(ui.available_width() - 30.0)).changed();
-                        if ui.add(egui::Button::new(RichText::new(crate::lucide::WORKFLOW).size(13.0)).frame(false)).on_hover_text(format!("{}\n{}", crate::i18n::t("ouvrir le maître en nodes"), l.master)).clicked() {
-                            self.open_request = Some(std::path::Path::new(&self.root).join(&l.master));
+                        if ui.add(egui::Button::new(RichText::new(crate::lucide::WORKFLOW).size(13.0)).frame(false)).on_hover_text(crate::i18n::t("Ouvrir ce calque en nodes")).clicked() {
+                            enter = Some((i, Part::Fill));
                         }
                     });
+                    if l.graph.is_none() {
+                        // Calque lié : d'où il vient, et de quoi le détacher
+                        crate::modifiers::row(ui, &crate::i18n::t("matériau maître"), |ui| {
+                            let name = std::path::Path::new(&l.master).file_name().map(|s| crate::formats::strip(&s.to_string_lossy()).to_string()).unwrap_or_default();
+                            if ui.add(egui::Button::new(RichText::new(crate::lucide::UNLINK).size(13.0)).frame(false)).on_hover_text(crate::i18n::t("Détacher du maître : le calque garde une copie du graphe, à lui seul")).clicked() {
+                                make_local = Some(i);
+                            }
+                            ui.add(egui::Label::new(RichText::new(format!("{}  {name}", crate::lucide::LINK)).size(11.5).color(p.muted)).truncate()).on_hover_text(&l.master);
+                        });
+                    }
                     let mut o = l.opacity * 100.0;
                     if crate::modifiers::row_slider(ui, "opacité", egui::Slider::new(&mut o, 0.0..=100.0).suffix(" %").max_decimals(0)) {
                         l.opacity = o / 100.0;
                         changed = true;
                     }
                 });
-                let ex = crate::atelier::load_master(&self.root, &l.master).map(|g| crate::atelier::exposed(&g)).unwrap_or_default();
+                let ex = l.fill(&self.root).map(|g| crate::atelier::exposed(&g)).unwrap_or_default();
                 card(ui, "Paramètres", &mut |ui| {
                     if ex.is_empty() {
-                        ui.label(RichText::new(crate::i18n::t("Ce maître n'expose aucun paramètre. Dans ses nodes, ajoute un « Paramètre exposé » (et renomme-le) pour le régler d'ici.")).color(p.muted).size(10.5));
+                        ui.label(RichText::new(crate::i18n::t("Ce calque n'expose aucun paramètre. Dans ses nodes, ajoute un « Paramètre exposé » (et renomme-le) pour le régler d'ici.")).color(p.muted).size(10.5));
                     }
                     for e in &ex {
                         let mut v = l.params.get(&e.name).copied().unwrap_or(e.default);
@@ -6185,7 +6607,7 @@ impl Editor {
                                 ui.spacing_mut().slider_width = (ui.available_width() - 70.0).max(60.0);
                                 ui.add(egui::Slider::new(&mut v[0], 0.0..=1.0)).changed()
                             };
-                            if overridden && ui.add(egui::Button::new(RichText::new(crate::lucide::ROTATE_CCW).size(12.0)).frame(false)).on_hover_text(crate::i18n::t("revenir à la valeur du maître")).clicked() {
+                            if overridden && ui.add(egui::Button::new(RichText::new(crate::lucide::ROTATE_CCW).size(12.0)).frame(false)).on_hover_text(crate::i18n::t("revenir à la valeur du graphe")).clicked() {
                                 l.params.remove(&e.name);
                                 changed = true;
                             }
@@ -6204,12 +6626,25 @@ impl Editor {
                         for (id, label, _) in crate::atelier::MASKS {
                             let on = l.mask.kind == id;
                             let b = egui::Button::new(RichText::new(crate::i18n::t(label)).size(11.5).color(if on { p.on_accent } else { p.text })).fill(if on { p.accent } else { Color32::TRANSPARENT }).stroke(egui::Stroke::new(1.0, p.line)).corner_radius(10);
-                            if ui.add(b).clicked() {
-                                l.mask.kind = id.to_string();
-                                changed = true;
+                            let tip = if id == "graphe" { crate::i18n::t("Le masque devient un graphe de nodes, qui part du masque réglé ici") } else { String::new() };
+                            let r = ui.add(b);
+                            let r = if tip.is_empty() { r } else { r.on_hover_text(tip) };
+                            if r.clicked() {
+                                if id == "graphe" {
+                                    // Le masque en nodes : on y entre, il part du réglage en cours
+                                    enter = Some((i, Part::Mask));
+                                } else {
+                                    l.mask.kind = id.to_string();
+                                    changed = true;
+                                }
                             }
                         }
                     });
+                    if l.mask.kind == "graphe" {
+                        if ui.add(egui::Button::new(RichText::new(format!("{}  {}", crate::lucide::WORKFLOW, crate::i18n::t("ouvrir le masque en nodes"))).size(12.0)).corner_radius(10)).on_hover_text(crate::i18n::t("La couleur de sortie de ce graphe dit où le calque se pose : blanc, partout ; noir, nulle part")).clicked() {
+                            enter = Some((i, Part::Mask));
+                        }
+                    }
                     egui::containers::menu::MenuButton::new(RichText::new(format!("{}  {}", crate::lucide::WAND_SPARKLES, crate::i18n::t("masques intelligents"))).size(12.0)).ui(ui, |ui| {
                         ui.set_min_width(240.0);
                         for (name, m) in crate::atelier::smart_masks() {
@@ -6235,13 +6670,14 @@ impl Editor {
                         ui.label(RichText::new(crate::i18n::t("Dans la scène, en mode peinture : ajoute à l'objet un calque « masque » de ce canal, et peins où ce calque doit apparaître.")).size(10.5).color(p.muted));
                     }
                     if l.mask.kind != "plein" {
-                        if l.mask.kind != "peint" {
+                        if !matches!(l.mask.kind.as_str(), "peint" | "graphe") {
                             changed |= crate::modifiers::row_slider(ui, "quantité", egui::Slider::new(&mut l.mask.amount, 0.0..=1.0));
                             changed |= crate::modifiers::row_slider(ui, "contraste", egui::Slider::new(&mut l.mask.contrast, 0.0..=1.0));
                             changed |= crate::modifiers::row_slider(ui, "échelle", egui::Slider::new(&mut l.mask.scale, 0.5..=40.0).clamping(egui::SliderClamping::Never).logarithmic(true));
                         }
                         changed |= ui.checkbox(&mut l.mask.invert, crate::i18n::t("inverser")).changed();
                         // Cassure : un second motif découpe le masque, pour un résultat moins régulier
+                        if l.mask.kind != "graphe" {
                         crate::modifiers::row(ui, &crate::i18n::t("cassure"), |ui| {
                             let cur = if l.mask.breakup.is_empty() { "aucune" } else { crate::atelier::MASKS.iter().find(|m| m.0 == l.mask.breakup).map(|m| m.1).unwrap_or("aucune") };
                             egui::ComboBox::from_id_salt("atelier-breakup").width(ui.available_width() - 4.0).selected_text(crate::i18n::t(cur)).show_ui(ui, |ui| {
@@ -6257,7 +6693,8 @@ impl Editor {
                                 }
                             });
                         });
-                        if !l.mask.breakup.is_empty() {
+                        }
+                        if !l.mask.breakup.is_empty() && l.mask.kind != "graphe" {
                             changed |= crate::modifiers::row_slider(ui, "force", egui::Slider::new(&mut l.mask.breakup_amount, 0.0..=1.0));
                             changed |= crate::modifiers::row_slider(ui, "échelle cassure", egui::Slider::new(&mut l.mask.breakup_scale, 0.5..=40.0).logarithmic(true));
                         }
@@ -6266,12 +6703,25 @@ impl Editor {
             });
         }
         });
+        if let Some(i) = make_local {
+            // Le calque garde une copie du graphe de son maître, avec les valeurs réglées ici
+            if let Some(l) = stack.layers.get_mut(i) {
+                if let Ok(g) = Graph::load(&std::path::Path::new(&self.root).join(&l.master)) {
+                    l.graph = Some(crate::atelier::Inner(Box::new(g)));
+                    l.master.clear();
+                }
+            }
+        }
         if changed || self.graph.stack.as_ref() != Some(&stack) {
             self.graph.stack = Some(stack);
             self.changed();
         }
+        if let Some((i, part)) = enter {
+            self.enter_layer(i, part);
+            return;
+        }
         // Un maître modifié dans un autre onglet : l'aperçu suit
-        let key = self.graph.stack.as_ref().map(|s| s.layers.iter().map(|l| std::fs::metadata(std::path::Path::new(&self.root).join(&l.master)).and_then(|m| m.modified()).ok()).collect::<Vec<_>>());
+        let key = self.graph.stack.as_ref().map(|s| s.layers.iter().filter(|l| !l.master.is_empty()).map(|l| std::fs::metadata(std::path::Path::new(&self.root).join(&l.master)).and_then(|m| m.modified()).ok()).collect::<Vec<_>>());
         let h = {
             use std::hash::{Hash, Hasher};
             let mut hh = std::collections::hash_map::DefaultHasher::new();
@@ -6287,7 +6737,7 @@ impl Editor {
     }
 
     /// Les vignettes de la bibliothèque de l'atelier : une sphère rendue par matériau, en arrière-plan
-    fn atelier_thumbs(&mut self, ctx: &egui::Context, masters: &[String], smart: &[String]) {
+    fn atelier_thumbs(&mut self, ctx: &egui::Context, masters: &[String], smart: &[String], stack: &crate::atelier::Stack, lkeys: &[String]) {
         if let Some(rx) = &self.mthumb_rx {
             let mut done = false;
             loop {
@@ -6317,6 +6767,12 @@ impl Editor {
                 if let Some(g) = crate::atelier::load_master(&self.root, m) {
                     todo.push((k, g));
                 }
+            }
+        }
+        // Les calques « graphe » : une vignette par contenu
+        for (l, k) in stack.layers.iter().zip(lkeys) {
+            if let (Some(g), false) = (&l.graph, self.mthumb.contains_key(k)) {
+                todo.push((k.clone(), (*g.0).clone()));
             }
         }
         for n in smart {
@@ -6509,11 +6965,11 @@ impl Editor {
                     GraphKind::Material => {
                         let model = match &self.pv_model {
                             Some((_, m)) => m.clone(),
-                            None if self.pv_shape.unwrap_or(if self.graph.stack.is_some() { 1 } else { 0 }) == 1 => self.boxy.get_or_insert_with(|| std::sync::Arc::new(crate::model3d::preview_box())).clone(),
+                            None if self.pv_shape.unwrap_or(self.default_shape()) == 1 => self.boxy.get_or_insert_with(|| std::sync::Arc::new(crate::model3d::preview_box())).clone(),
                             None => self.sphere.get_or_insert_with(|| std::sync::Arc::new(crate::model3d::preview_sphere())).clone(),
                         };
                         // Le cube a des coins plus loin du centre que la sphère : un peu plus de recul pour le voir en entier
-                        let boxed = self.pv_model.is_none() && self.pv_shape.unwrap_or(if self.graph.stack.is_some() { 1 } else { 0 }) == 1;
+                        let boxed = self.pv_model.is_none() && self.pv_shape.unwrap_or(self.default_shape()) == 1;
                         let (yaw, pitch, dist, env) = (self.pv_yaw, self.pv_pitch, self.pv_dist * if boxed { 1.6 } else { 1.0 }, self.pv_env);
                         std::thread::spawn(move || {
                             let img = crate::model3d::render_material_view(&model, std::sync::Arc::new(prog), 480, yaw, pitch, dist, env);
@@ -6553,7 +7009,7 @@ impl Editor {
                         }
                     }
                 });
-                let shape = self.pv_shape.unwrap_or(if self.graph.stack.is_some() { 1 } else { 0 });
+                let shape = self.pv_shape.unwrap_or(self.default_shape());
                 for (k, l, tip) in [(0u8, "sphère", "aperçu sur une sphère"), (1, "cube", "aperçu sur un cube aux arêtes adoucies : on y voit l'usure des arêtes et la saleté des creux")] {
                     if ui.selectable_label(self.pv_model.is_none() && shape == k, RichText::new(crate::i18n::t(l)).size(10.5)).on_hover_text(crate::i18n::t(tip)).clicked() {
                         self.pv_model = None;
@@ -7285,5 +7741,125 @@ mod tests_compat {
         g.nodes.iter_mut().find(|n| n.id == 2).unwrap().muted = true;
         let direct = Program::compile(&g, "", 64).map_err(|e| e.1).unwrap().material(&c, &mut vec![]).color[0];
         assert!((direct * 2.0 - v).abs() < 1e-5);
+    }
+
+    /// Un ancien matériau en nodes s'ouvre comme une pile d'un seul calque « graphe » ; on entre dans le
+    /// calque pour retrouver ses nodes, on en ressort, et le fichier garde sa forme d'avant.
+    #[test]
+    fn materiau_ouvert_en_calques_puis_en_nodes() {
+        let dir = std::env::temp_dir().join(format!("aryadne-calques-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let root = dir.to_string_lossy().to_string();
+        let file = dir.join("Ancien.arymat");
+        let old = Graph::new_material();
+        std::fs::write(&file, serde_json::to_string_pretty(&old).unwrap()).unwrap();
+        let before = std::fs::read_to_string(&file).unwrap();
+        let c = Ctx { uv: [0.3, 0.6], pos: [0.1, 0.2, 0.3], nrm: [0.0, 1.0, 0.0], view: [0.0, 0.0, 1.0], vcol: [1.0; 4], res: [64.0, 64.0], ..Default::default() };
+        let look = |g: &Graph| Program::compile(g, &root, 64).map_err(|e| e.1).unwrap().material(&c, &mut vec![]).color;
+        let mut ed = Editor::open(file.clone(), &root).unwrap();
+        // La pile : un calque, et le même rendu qu'avant
+        let st = ed.graph.stack.clone().unwrap();
+        assert_eq!(st.layers.len(), 1);
+        assert!(st.layers[0].graph.is_some() && ed.graph.nodes.is_empty() && ed.inside.is_none());
+        assert_eq!(look(&ed.graph), look(&old));
+        assert!(ed.program.is_ok());
+        // Enregistré sans y toucher : le fichier ne change pas d'un caractère
+        ed.dirty = Some(std::time::Instant::now());
+        ed.save_if_due(true);
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), before);
+        // On entre dans le calque : ses nodes sont là, on en ajoute un
+        ed.enter_layer(0, Part::Fill);
+        assert!(ed.inside.is_some() && ed.graph.stack.is_none());
+        assert_eq!(ed.graph.nodes.len(), old.nodes.len());
+        let id = ed.graph.add("color", [0.0, 300.0]);
+        let out = ed.graph.nodes.iter().find(|n| n.op == "mat_out").unwrap().id;
+        ed.connect(id, 0, out, 0);
+        ed.graph.nodes.iter_mut().find(|n| n.id == id).unwrap().values[0] = [0.0, 1.0, 0.0, 1.0];
+        ed.changed();
+        assert_eq!(ed.undo.len(), 1, "l'historique du calque est à part");
+        ed.save_if_due(true);
+        // Toujours la forme d'un simple graphe, avec le nouveau node
+        let on_disk = Graph::load(&file).unwrap();
+        assert!(on_disk.stack.is_none() && on_disk.nodes.len() == old.nodes.len() + 1);
+        // Retour à la pile : le calque porte le changement, et un seul point d'annulation le défait
+        ed.leave_layer();
+        assert!(ed.inside.is_none());
+        let green = look(&ed.graph);
+        assert!(green[1] > 0.9 && green[0] < 0.1, "{green:?}");
+        assert_eq!(ed.undo.len(), 1);
+        ed.undo();
+        assert_eq!(look(&ed.graph), look(&old));
+        ed.redo();
+        assert_eq!(look(&ed.graph), green);
+        // Un deuxième calque, posé selon un masque : le fichier passe à la forme « pile », et se relit pareil
+        let mut st = ed.graph.stack.clone().unwrap();
+        let mut top = crate::atelier::Layer::own("rouge", crate::atelier::fill_graph([1.0, 0.0, 0.0]));
+        top.mask.kind = "bruit".into();
+        st.layers.push(top);
+        ed.graph.stack = Some(st);
+        ed.changed();
+        ed.save_if_due(true);
+        let on_disk = Graph::load(&file).unwrap();
+        assert_eq!(on_disk.stack.as_ref().map(|s| s.layers.len()), Some(2));
+        assert_eq!(look(&on_disk), look(&ed.graph));
+        // Le masque s'ouvre en nodes : il part du générateur réglé, et le rendu ne bouge pas
+        let with_gen = look(&ed.graph);
+        ed.enter_layer(1, Part::Mask);
+        assert!(ed.graph.nodes.iter().any(|n| n.op == "noise") && ed.graph.nodes.iter().any(|n| n.op == "mat_out"));
+        ed.leave_layer();
+        let st = ed.graph.stack.clone().unwrap();
+        assert!(st.layers[1].mask.kind == "graphe" && st.layers[1].mask.graph.is_some());
+        let with_graph = look(&ed.graph);
+        for k in 0..3 {
+            assert!((with_gen[k] - with_graph[k]).abs() < 1e-4, "{with_gen:?} {with_graph:?}");
+        }
+        // Un calque lié à un maître du coffre : on édite le maître sur place, il est réécrit dans son fichier
+        let master = dir.join("Maître.arymat");
+        Graph::new_material().save(&master).unwrap();
+        let mut st = ed.graph.stack.clone().unwrap();
+        st.layers.push(crate::atelier::Layer::linked("lié", "Maître.arymat"));
+        ed.graph.stack = Some(st);
+        ed.changed();
+        ed.enter_layer(2, Part::Fill);
+        assert_eq!(ed.inside.as_ref().and_then(|i| i.master.clone()).as_deref(), Some("Maître.arymat"));
+        let n = ed.graph.nodes.len();
+        ed.graph.add("value", [0.0, 500.0]);
+        ed.changed();
+        ed.leave_layer();
+        assert_eq!(Graph::load(&master).unwrap().nodes.len(), n + 1);
+        assert_eq!(ed.graph.stack.as_ref().unwrap().layers[2].master, "Maître.arymat");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn node_insere_sur_un_lien() {
+        // bruit → rampe → sortie : un node « luminosité » lâché sur le premier lien s'y insère
+        let mut g = Graph::new_material();
+        let (noise, ramp) = (g.nodes.iter().find(|n| n.op == "noise").unwrap().id, g.nodes.iter().find(|n| n.op == "ramp").unwrap().id);
+        let k = g.links.iter().position(|l| l.from == noise && l.to == ramp).unwrap();
+        // Le lien se retrouve sous un point de sa courbe, pas ailleurs
+        let (a, b) = (g.nodes.iter().find(|n| n.id == noise).unwrap().clone(), g.nodes.iter().find(|n| n.id == ramp).unwrap().clone());
+        let pts = link_curve(port_pos(&a, a.def().unwrap(), true, 0), port_pos(&b, b.def().unwrap(), false, 0));
+        let mid = pos2((pts[0].x + pts[3].x) * 0.5, (pts[0].y + pts[3].y) * 0.5);
+        assert_eq!(link_at(&g, mid, 14.0), Some(k));
+        assert_eq!(link_at(&g, pos2(mid.x, mid.y - 400.0), 14.0), None);
+        let id = g.add("math", [100.0, 100.0]);
+        assert!(insert_on_link(&mut g, k, id));
+        assert!(g.links.iter().any(|l| l.from == noise && l.to == id && l.inp == 0));
+        assert!(g.links.iter().any(|l| l.from == id && l.to == ramp && l.inp == 0));
+        assert!(!g.links.iter().any(|l| l.from == noise && l.to == ramp));
+        assert!(Program::compile(&g, "", 64).is_ok());
+        // Un node sans entrée (les coordonnées) ne s'insère pas : le lien reste tel quel
+        let before = g.links.clone();
+        let c = g.add("coords", [0.0, 0.0]);
+        assert!(!insert_on_link(&mut g, 0, c));
+        assert!(g.links == before);
+        // Géométrie : un node de valeurs ne s'insère pas sur un lien de géométrie, un node de géométrie oui
+        let mut geo = Graph::new_geometry();
+        let k = geo.links.iter().position(|l| out_sock(&geo, l.from, l.out) == Sock::Geo).expect("un lien de géométrie");
+        assert!(link_fit(&geo, k, def("math").unwrap()).is_none());
+        let fits = DEFS.iter().filter(|d| d.fits(GraphKind::Geometry) && d.inputs.first().is_some_and(|i| i.1 == Sock::Geo) && d.outputs.first().is_some_and(|o| o.1 == Sock::Geo) && !crate::nodeflow::is_dynamic(d.op)).find(|d| link_fit(&geo, k, d).is_some());
+        assert!(fits.is_some());
     }
 }

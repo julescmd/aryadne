@@ -1,6 +1,8 @@
 //! Atelier de matériaux (façon Substance Painter + Designer) : un matériau est une pile de calques.
-//! Chaque calque est une *instance* d'un matériau maître (un graphe de nodes .arymat qui expose des
-//! paramètres), posée selon un *masque* (plein, usure des arêtes, saleté des creux, poussière…).
+//! Chaque calque a son graphe de nodes : le sien (calque « graphe », enregistré dans le matériau), ou
+//! celui d'un matériau maître du coffre (un .arymat qui expose des paramètres, dont le calque est une
+//! *instance*). Il se pose selon un *masque* (plein, usure des arêtes, saleté des creux, poussière…, ou
+//! son propre graphe). Un ancien matériau en nodes est une pile d'un seul calque « graphe ».
 //! La pile entière se ramène à un seul graphe de nodes (`flatten`) : c'est lui que voient la 3D,
 //! le rendu et l'éditeur de nodes (« pile = graphe »).
 use crate::nodes::{Graph, GraphKind, Link, Param};
@@ -13,11 +15,32 @@ pub struct Stack {
     pub layers: Vec<Layer>,
 }
 
+/// Un graphe rangé dans un calque (son remplissage ou son masque).
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct Inner(pub Box<Graph>);
+
+impl PartialEq for Inner {
+    fn eq(&self, o: &Inner) -> bool {
+        serde_json::to_string(&self.0).ok() == serde_json::to_string(&o.0).ok()
+    }
+}
+
+impl std::fmt::Debug for Inner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "graphe de {} nodes", self.0.nodes.len())
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
 pub struct Layer {
     pub name: String,
-    /// Matériau maître : chemin d'un .arymat dans le coffre
+    /// Matériau maître : chemin d'un .arymat dans le coffre (vide pour un calque « graphe »)
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub master: String,
+    /// Calque « graphe » : son propre graphe de nodes, enregistré dans le matériau
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub graph: Option<Inner>,
     /// Valeurs des paramètres exposés par le maître (nom → valeur), à la place de leurs valeurs par défaut
     #[serde(default)]
     pub params: BTreeMap<String, [f32; 4]>,
@@ -27,6 +50,63 @@ pub struct Layer {
     pub opacity: f32,
     #[serde(default = "yes")]
     pub visible: bool,
+}
+
+impl Layer {
+    /// Instance d'un matériau maître du coffre.
+    pub fn linked(name: impl Into<String>, master: impl Into<String>) -> Layer {
+        Layer { name: name.into(), master: master.into(), graph: None, params: Default::default(), mask: Default::default(), opacity: 1.0, visible: true }
+    }
+
+    /// Calque « graphe » : il porte son propre graphe.
+    pub fn own(name: impl Into<String>, graph: Graph) -> Layer {
+        Layer { graph: Some(Inner(Box::new(graph))), ..Layer::linked(name, "") }
+    }
+
+    /// Le graphe du remplissage : celui du calque, sinon celui de son maître.
+    pub fn fill(&self, root: &str) -> Option<Graph> {
+        match &self.graph {
+            Some(g) => Some((*g.0).clone()),
+            None => load_master(root, &self.master),
+        }
+    }
+}
+
+/// Nom du calque unique d'un ancien matériau en nodes.
+pub const GRAPH_LAYER: &str = "graphe";
+
+fn default_name(n: &str) -> bool {
+    let n = n.trim().to_lowercase();
+    n == GRAPH_LAYER || n == "graph"
+}
+
+/// Nom montré d'un calque : celui d'un ancien matériau en nodes se dit dans la langue de l'interface.
+pub fn shown_name(n: &str) -> String {
+    if default_name(n) { crate::i18n::t(GRAPH_LAYER) } else { n.to_string() }
+}
+
+/// Le matériau tel que l'atelier l'édite : toujours une pile. Un ancien matériau en nodes (sans pile)
+/// devient une pile d'un seul calque « graphe » qui porte tout son graphe, groupes et cadres compris.
+pub fn to_stack(g: Graph) -> Graph {
+    if g.kind != GraphKind::Material || g.stack.is_some() {
+        return g;
+    }
+    Graph { stack: Some(Stack { layers: vec![Layer::own(GRAPH_LAYER, g)] }), ..Graph::empty(GraphKind::Material) }
+}
+
+/// Le matériau tel qu'on l'écrit : une pile d'un seul calque « graphe » nu (posé partout, opaque, sans
+/// réglage) redevient un simple graphe. Un ancien fichier se relit et se réécrit donc sans changer de forme.
+pub fn to_file(g: &Graph) -> std::borrow::Cow<'_, Graph> {
+    if let (GraphKind::Material, Some(st)) = (g.kind, &g.stack) {
+        if let [l] = st.layers.as_slice() {
+            if let Some(inner) = &l.graph {
+                if g.nodes.is_empty() && l.master.is_empty() && l.params.is_empty() && l.mask == Mask::default() && l.opacity >= 1.0 && l.visible && default_name(&l.name) && inner.0.stack.is_none() {
+                    return std::borrow::Cow::Owned((*inner.0).clone());
+                }
+            }
+        }
+    }
+    std::borrow::Cow::Borrowed(g)
 }
 
 fn one() -> f32 {
@@ -39,7 +119,8 @@ fn yes() -> bool {
 /// Où le calque se pose.
 #[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
 pub struct Mask {
-    /// « plein », « arêtes », « creux », « dessus », « coulures », « rayures », « grunge », « bruit »
+    /// « plein », « arêtes », « creux », « dessus », « coulures », « rayures », « grunge », « bruit »…
+    /// ou « graphe » : le masque est alors la couleur de sortie de `graph`
     pub kind: String,
     pub amount: f32,
     pub contrast: f32,
@@ -56,6 +137,9 @@ pub struct Mask {
     /// Masque « peint » : le canal de masque peint à la main sur l'objet (0 à 3, « masque 1 » à « masque 4 »)
     #[serde(default, skip_serializing_if = "is_zero")]
     pub paint: u8,
+    /// Masque en nodes : un graphe dont la couleur de sortie dit où le calque se pose (blanc : partout)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub graph: Option<Inner>,
 }
 
 fn is_zero(v: &u8) -> bool {
@@ -71,13 +155,13 @@ fn eight() -> f32 {
 
 impl Default for Mask {
     fn default() -> Self {
-        Mask { kind: "plein".into(), amount: 0.5, contrast: 0.5, scale: 8.0, invert: false, breakup: String::new(), breakup_amount: 0.5, breakup_scale: 8.0, paint: 0 }
+        Mask { kind: "plein".into(), amount: 0.5, contrast: 0.5, scale: 8.0, invert: false, breakup: String::new(), breakup_amount: 0.5, breakup_scale: 8.0, paint: 0, graph: None }
     }
 }
 
 /// Masques intelligents tout prêts : nom, puis le masque (générateur, réglages, cassure)
 pub fn smart_masks() -> Vec<(&'static str, Mask)> {
-    let m = |kind: &str, amount: f32, contrast: f32, scale: f32, invert: bool, breakup: &str, ba: f32, bs: f32| Mask { kind: kind.into(), amount, contrast, scale, invert, breakup: breakup.into(), breakup_amount: ba, breakup_scale: bs, paint: 0 };
+    let m = |kind: &str, amount: f32, contrast: f32, scale: f32, invert: bool, breakup: &str, ba: f32, bs: f32| Mask { kind: kind.into(), amount, contrast, scale, invert, breakup: breakup.into(), breakup_amount: ba, breakup_scale: bs, paint: 0, graph: None };
     vec![
         ("peinture écaillée sur les arêtes", m("arêtes", 0.55, 0.75, 14.0, false, "grunge", 0.7, 6.0)),
         ("rouille dans les creux", m("creux", 0.6, 0.6, 8.0, false, "taches", 0.6, 10.0)),
@@ -90,7 +174,7 @@ pub fn smart_masks() -> Vec<(&'static str, Mask)> {
 }
 
 /// Les masques proposés : identifiant, nom affiché, node générateur.
-pub const MASKS: [(&str, &str, &str); 11] = [
+pub const MASKS: [(&str, &str, &str); 12] = [
     ("plein", "partout", ""),
     ("arêtes", "usure des arêtes", "edgewear"),
     ("creux", "saleté des creux", "cavdirt"),
@@ -103,6 +187,8 @@ pub const MASKS: [(&str, &str, &str); 11] = [
     ("taches", "taches", "voronoi"),
     // Peint à la main sur l'objet de la scène, dans un calque de peinture « masque 1 » à « masque 4 »
     ("peint", "peint à la main", "paintmask"),
+    // Le masque a son propre graphe de nodes
+    ("graphe", "graphe de nodes", ""),
 ];
 
 /// Un matériau intelligent : une pile de calques enregistrée, à reposer sur un autre objet
@@ -159,6 +245,114 @@ fn generator(g: &mut Graph, kind: &str, amount: f32, contrast: f32, scale: f32, 
     Some(m)
 }
 
+/// Le graphe d'un nouveau calque de remplissage : une couleur, une rugosité et un métal, tous trois
+/// exposés (ils se règlent depuis la pile, sans ouvrir les nodes).
+pub fn fill_graph(color: [f32; 3]) -> Graph {
+    let mut g = Graph::empty(GraphKind::Material);
+    let out = g.add("mat_out", [320.0, 0.0]);
+    for (k, (name, kind, v)) in [("couleur", "couleur", [color[0], color[1], color[2], 1.0]), ("rugosité", "valeur", [0.5; 4]), ("métal", "valeur", [0.0; 4])].into_iter().enumerate() {
+        let id = g.add("param", [0.0, k as f32 * 170.0]);
+        if let Some(n) = g.nodes.iter_mut().find(|n| n.id == id) {
+            n.label = name.to_string();
+            n.preview = false;
+            n.values[0] = v;
+            n.params.insert("type".into(), Param::S(kind.into()));
+        }
+        g.links.push(Link { from: id, out: if kind == "couleur" { 0 } else { 1 }, to: out, inp: k });
+    }
+    g
+}
+
+/// Le masque d'un calque dans `g` : générateur, cassure, inversion. Rien : le calque se pose partout.
+fn mask_src(g: &mut Graph, lm: &Mask, x0: f32, dy: f32) -> Option<Src> {
+    let mut m = if lm.kind == "graphe" {
+        // Masque en nodes : ce qui entre dans la couleur de sa sortie
+        let sub = lm.graph.as_ref()?;
+        let src = splice(g, &sub.0, [x0 - 900.0, dy], None)?;
+        match src.first().copied()? {
+            Src::Const(v) => Src::Const([v[0]; 4]),
+            s => s,
+        }
+    } else {
+        let mut m = generator(g, &lm.kind, lm.amount, lm.contrast, lm.scale, lm.paint, [x0 - 400.0, dy])?;
+        // Masque intelligent : le second générateur casse le premier (m × mélange(1, cassure, force))
+        if let Some(b) = generator(g, &lm.breakup, 0.5, 0.5, lm.breakup_scale, lm.paint, [x0 - 400.0, dy + 160.0]) {
+            let mx = g.add("mixf", [x0 - 150.0, dy + 120.0]);
+            set_value(g, mx, 0, [lm.breakup_amount; 4]);
+            set_value(g, mx, 1, [1.0; 4]);
+            wire(g, b, mx, 2);
+            let mul = g.add("math", [x0, dy + 60.0]);
+            set_choice(g, mul, "opération", "multiplier");
+            wire(g, m, mul, 0);
+            wire(g, Src::Link(mx, 0), mul, 1);
+            m = Src::Link(mul, 0);
+        }
+        m
+    };
+    if lm.invert {
+        let inv = g.add("math", [x0 + 150.0, dy]);
+        set_choice(g, inv, "opération", "soustraire");
+        set_value(g, inv, 0, [1.0; 4]);
+        wire(g, m, inv, 1);
+        m = Src::Link(inv, 0);
+    }
+    Some(m)
+}
+
+/// Le masque d'un calque, écrit en graphe de nodes : le point de départ quand on l'ouvre en nodes.
+/// Le générateur choisi, sa cassure et son inversion y sont déjà, branchés sur la couleur de la sortie.
+pub fn mask_graph(mask: &Mask) -> Graph {
+    let mut g = Graph::empty(GraphKind::Material);
+    let out = g.add("mat_out", [520.0, 0.0]);
+    let m = if mask.kind == "graphe" { None } else { mask_src(&mut g, mask, 200.0, 0.0) };
+    match m {
+        Some(m) => wire(&mut g, m, out, 0),
+        // Posé partout : du blanc
+        None => set_value(&mut g, out, 0, [1.0, 1.0, 1.0, 1.0]),
+    }
+    // Un masque se lit en gris mat : ni métal, ni brillance
+    set_value(&mut g, out, 1, [1.0; 4]);
+    g
+}
+
+/// Copie le graphe `sub` dans `g` (groupes dépliés, sans sa sortie). Rend ce qui entrait dans chaque
+/// prise de sa sortie. `params` : valeurs données aux paramètres exposés.
+fn splice(g: &mut Graph, sub: &Graph, at: [f32; 2], params: Option<&BTreeMap<String, [f32; 4]>>) -> Option<Vec<Src>> {
+    let flat = sub.effective();
+    let flat = crate::nodeflow::lower(&flat, true).ok()?.graph;
+    let mo = flat.nodes.iter().find(|n| n.op == "mat_out").cloned()?;
+    let off = g.nodes.iter().map(|n| n.id).max().unwrap_or(0) + 1;
+    for n in &flat.nodes {
+        if n.id == mo.id {
+            continue;
+        }
+        let mut n2 = n.clone();
+        n2.id += off;
+        n2.pos = [n.pos[0] + at[0], n.pos[1] + at[1]];
+        n2.preview = false;
+        if n.op == "param" {
+            if let Some(v) = params.and_then(|p| p.get(&param_name(n))) {
+                if let Some(x) = n2.values.first_mut() {
+                    *x = *v;
+                }
+            }
+        }
+        g.nodes.push(n2);
+    }
+    let mut src: Vec<Src> = mo.values.iter().map(|v| Src::Const(*v)).collect();
+    for l in &flat.links {
+        if l.to == mo.id {
+            if l.inp < src.len() {
+                src[l.inp] = Src::Link(l.from + off, l.out);
+            }
+        } else if l.from != mo.id {
+            g.links.push(Link { from: l.from + off, out: l.out, to: l.to + off, inp: l.inp });
+        }
+    }
+    g.next_id = g.nodes.iter().map(|n| n.id).max().unwrap_or(0) + 1;
+    Some(src)
+}
+
 /// Un paramètre exposé par un matériau maître (node « Paramètre exposé ») : nom, valeur par défaut, couleur ou nombre.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Exposed {
@@ -171,10 +365,11 @@ pub fn param_name(n: &crate::nodes::Node) -> String {
     if n.label.trim().is_empty() { format!("paramètre {}", n.id) } else { n.label.trim().to_string() }
 }
 
-/// Les paramètres qu'un maître expose.
+/// Les paramètres qu'un graphe expose (à sa racine ou dans ses groupes).
 pub fn exposed(g: &Graph) -> Vec<Exposed> {
     g.nodes
         .iter()
+        .chain(g.groups.iter().flat_map(|gr| gr.nodes.iter()))
         .filter(|n| n.op == "param")
         .map(|n| Exposed { name: param_name(n), default: n.values.first().copied().unwrap_or([0.5; 4]), color: matches!(n.params.get("type"), Some(Param::S(s)) if s == "couleur") })
         .collect()
@@ -196,6 +391,11 @@ pub fn load_master(root: &str, rel: &str) -> Option<Graph> {
     Some(g)
 }
 
+/// Oublie un maître gardé en mémoire (on vient de le réécrire).
+pub fn forget(rel: &str) {
+    CACHE.with(|c| c.borrow_mut().remove(rel));
+}
+
 #[derive(Clone, Copy)]
 enum Src {
     Const([f32; 4]),
@@ -213,64 +413,14 @@ pub fn flatten(stack: &Stack, root: &str) -> Graph {
         if !layer.visible || layer.opacity <= 0.0 {
             continue;
         }
-        let Some(master) = load_master(root, &layer.master) else { continue };
-        let master = master.effective().into_owned();
-        let Some(mo) = master.nodes.iter().find(|n| n.op == "mat_out").cloned() else { continue };
-        let off = g.nodes.iter().map(|n| n.id).max().unwrap_or(0) + 1;
+        let Some(fill) = layer.fill(root) else { continue };
         let dy = li as f32 * 600.0;
-        for n in &master.nodes {
-            if n.id == mo.id {
-                continue;
-            }
-            let mut n2 = n.clone();
-            n2.id += off;
-            n2.pos = [n.pos[0], n.pos[1] + dy];
-            n2.preview = false;
-            if n.op == "param" {
-                if let Some(v) = layer.params.get(&param_name(n)) {
-                    if let Some(x) = n2.values.first_mut() {
-                        *x = *v;
-                    }
-                }
-            }
-            g.nodes.push(n2);
-        }
-        let mut src: Vec<Src> = mo.values.iter().map(|v| Src::Const(*v)).collect();
+        let Some(mut src) = splice(&mut g, &fill, [0.0, dy], Some(&layer.params)) else { continue };
         src.resize(cur.len(), Src::Const([0.0; 4]));
-        for l in &master.links {
-            if l.to == mo.id {
-                if l.inp < src.len() {
-                    src[l.inp] = Src::Link(l.from + off, l.out);
-                }
-            } else if l.from != mo.id {
-                g.links.push(Link { from: l.from + off, out: l.out, to: l.to + off, inp: l.inp });
-            }
-        }
-        g.next_id = g.nodes.iter().map(|n| n.id).max().unwrap_or(0) + 1;
         // Facteur du calque : masque × opacité
         let x0 = -400.0;
         let mut factor = Src::Const([layer.opacity; 4]);
-        let lm = &layer.mask;
-        if let Some(mut m) = generator(&mut g, &lm.kind, lm.amount, lm.contrast, lm.scale, lm.paint, [x0 - 400.0, dy]) {
-            // Masque intelligent : le second générateur casse le premier (m × mélange(1, cassure, force))
-            if let Some(b) = generator(&mut g, &lm.breakup, 0.5, 0.5, lm.breakup_scale, lm.paint, [x0 - 400.0, dy + 160.0]) {
-                let mx = g.add("mixf", [x0 - 150.0, dy + 120.0]);
-                set_value(&mut g, mx, 0, [lm.breakup_amount; 4]);
-                set_value(&mut g, mx, 1, [1.0; 4]);
-                wire(&mut g, b, mx, 2);
-                let mul = g.add("math", [x0, dy + 60.0]);
-                set_choice(&mut g, mul, "opération", "multiplier");
-                wire(&mut g, m, mul, 0);
-                wire(&mut g, Src::Link(mx, 0), mul, 1);
-                m = Src::Link(mul, 0);
-            }
-            if layer.mask.invert {
-                let inv = g.add("math", [x0 + 150.0, dy]);
-                set_choice(&mut g, inv, "opération", "soustraire");
-                set_value(&mut g, inv, 0, [1.0; 4]);
-                wire(&mut g, m, inv, 1);
-                m = Src::Link(inv, 0);
-            }
+        if let Some(mut m) = mask_src(&mut g, &layer.mask, x0, dy) {
             if layer.opacity < 1.0 {
                 let mul = g.add("math", [x0 + 300.0, dy]);
                 set_choice(&mut g, mul, "opération", "multiplier");
@@ -359,8 +509,8 @@ mod tests {
         params.insert("teinte".to_string(), [0.9, 0.1, 0.1, 1.0]);
         let stack = Stack {
             layers: vec![
-                Layer { name: "métal".into(), master: "metal.arymat".into(), params, mask: Mask::default(), opacity: 1.0, visible: true },
-                Layer { name: "peinture".into(), master: "paint.arymat".into(), params: BTreeMap::new(), mask: Mask { kind: "arêtes".into(), invert: true, breakup: "taches".into(), ..Mask::default() }, opacity: 0.8, visible: true },
+                Layer { params, ..Layer::linked("métal", "metal.arymat") },
+                Layer { mask: Mask { kind: "arêtes".into(), invert: true, breakup: "taches".into(), ..Mask::default() }, opacity: 0.8, ..Layer::linked("peinture", "paint.arymat") },
             ],
         };
         let g = flatten(&stack, &root);
@@ -392,5 +542,49 @@ mod tests {
         let json = serde_json::to_string(&hand).unwrap();
         assert_eq!(serde_json::from_str::<Stack>(&json).unwrap(), hand);
         assert_eq!(serde_json::from_str::<Mask>(r#"{"kind":"peint","amount":0.5,"contrast":0.5,"scale":8.0}"#).unwrap().paint, 0);
+        // Une pile d'avant les calques « graphe » (maître obligatoire, pas de graphe) se relit telle quelle
+        let old: Stack = serde_json::from_str(r#"{"layers":[{"name":"métal","master":"metal.arymat","mask":{"kind":"plein","amount":0.5,"contrast":0.5,"scale":8.0}}]}"#).unwrap();
+        assert!(old.layers[0].graph.is_none() && old.layers[0].master == "metal.arymat" && old.layers[0].visible);
+        assert!(!serde_json::to_string(&old).unwrap().contains("graph"));
+    }
+
+    #[test]
+    fn ancien_materiau_en_un_calque_graphe() {
+        // Un matériau en nodes d'avant, avec un groupe et un cadre : rien ne se perd à l'aller-retour
+        let mut old = Graph::new_material();
+        let sel: std::collections::BTreeSet<u32> = old.nodes.iter().filter(|n| n.op == "ramp").map(|n| n.id).collect();
+        crate::nodeflow::make_group(&mut old, &sel, "groupe").unwrap();
+        old.frames.push(crate::nodes::Frame { rect: [0.0, 0.0, 300.0, 200.0], label: "cadre".into(), color: [90, 120, 200], note: "note".into() });
+        crate::nodeflow::sync(&mut old);
+        let json = serde_json::to_string(&old).unwrap();
+        let st = to_stack(old.clone());
+        let layers = &st.stack.as_ref().unwrap().layers;
+        assert!(layers.len() == 1 && layers[0].graph.is_some() && layers[0].master.is_empty() && st.nodes.is_empty());
+        // Ce qu'on écrit : exactement l'ancien fichier
+        assert_eq!(serde_json::to_string(&*to_file(&st)).unwrap(), json);
+        // Et le rendu est le même, groupe compris
+        let c = crate::nodes::Ctx { masks: [0.0; 4], curv: 0.0, uv: [0.3, 0.6], pos: [0.1, 0.2, 0.3], nrm: [0.0, 1.0, 0.0], view: [0.0, 0.0, 1.0], vcol: [1.0; 4], res: [64.0, 64.0] };
+        let look = |g: &Graph| crate::nodes::Program::compile(g, "", 64).map_err(|e| e.1).unwrap().material(&c, &mut vec![]).color;
+        assert_eq!(look(&st), look(&old));
+        // Dès que la pile dit autre chose (un nom, une opacité, un deuxième calque), elle s'écrit en pile
+        let mut named = st.clone();
+        named.stack.as_mut().unwrap().layers[0].name = "base".into();
+        assert!(to_file(&named).stack.is_some());
+        let mut faded = st.clone();
+        faded.stack.as_mut().unwrap().layers[0].opacity = 0.5;
+        assert!(to_file(&faded).stack.is_some());
+        let mut two = st.clone();
+        two.stack.as_mut().unwrap().layers.push(Layer::own("dessus", fill_graph([1.0, 0.0, 0.0])));
+        let back: Graph = serde_json::from_str(&serde_json::to_string(&*to_file(&two)).unwrap()).unwrap();
+        assert_eq!(back.stack, two.stack);
+        // Le calque du dessus, opaque et posé partout, cache celui du dessous : son rouge exposé se règle
+        assert!(look(&two)[0] > 0.95 && look(&two)[1] < 0.05);
+        assert_eq!(exposed(&fill_graph([1.0, 0.0, 0.0])).iter().map(|e| e.name.as_str()).collect::<Vec<_>>(), vec!["couleur", "rugosité", "métal"]);
+        two.stack.as_mut().unwrap().layers[1].params.insert("couleur".into(), [0.0, 0.0, 1.0, 1.0]);
+        assert!(look(&two)[2] > 0.95 && look(&two)[0] < 0.05);
+        // Un matériau à calques d'avant (pile vide) et les autres genres de graphe ne changent pas
+        let empty = Graph { stack: Some(Stack::default()), ..Graph::empty(GraphKind::Material) };
+        assert!(to_stack(empty.clone()).stack == Some(Stack::default()) && to_file(&empty).stack.is_some());
+        assert!(to_stack(Graph::new_compositor()).stack.is_none());
     }
 }

@@ -813,10 +813,6 @@ impl App {
         // (nom, extension, à quoi ça sert)
         let mut kinds: Vec<(&str, &str, &str)> = vec![("note", "md", "Texte en Markdown : notes, listes, liens entre notes")];
         kinds.extend(formats::ALL.iter().filter(|f| f.ready).map(|f| (f.label, f.ext, f.help)));
-        // L'atelier (peinture de textures à calques, façon Substance Painter) partage l'extension des matériaux
-        if let Some(i) = kinds.iter().position(|k| k.1 == "arymat") {
-            kinds.insert(i + 1, ("matériau à calques (atelier)", "arymat:atelier", "Peindre les textures d'un modèle par calques, avec masques, générateurs et export des textures"));
-        }
         kinds.push(("code ou texte", "code", "Script, page web, réglages, texte brut"));
         kinds.push(("dossier", "/", "Pour ranger"));
         kind = kind.min(kinds.len() - 1);
@@ -954,7 +950,6 @@ impl App {
                     let g = if o.preset == 0 { nodes::Graph::new_material() } else { nodes::material_preset(nodes::MATERIAL_PRESETS[o.preset - 1]).unwrap_or_else(nodes::Graph::new_material) };
                     self.new_untitled(ext, move |p| g.save(p));
                 }
-                "arymat:atelier" => self.new_untitled("arymat", |p| nodes::Graph::new_layered().save(p)),
                 "arycomp" => self.new_untitled(ext, |p| nodes::Graph::new_compositor().save(p)),
                 "arygeo" => self.new_untitled(ext, |p| nodes::Graph::new_geometry().save(p)),
                 "aryvec" => self.new_untitled(ext, |p| vector::Doc::starter().save(p)),
@@ -999,7 +994,7 @@ impl App {
         let e = ext(&rel);
         let fallback = match e.as_str() {
             "md" => self.notes_dir(),
-            "arymat" | "arycomp" => "nodes".to_string(),
+            "arymat" | "arycomp" | "arygeo" => "nodes".to_string(),
             "aryscene" => "3d".to_string(),
             "aryseq" => "montage".to_string(),
             "arymotion" => "motion".to_string(),
@@ -1186,7 +1181,8 @@ impl App {
             "vector" => ("Logos, illustrations et maquettes d'écrans en vecteurs, comme Illustrator et Figma : plume, formes, textes, booléens, plans de travail exportés en SVG ou PNG.", vec![("Nouveau dessin vectoriel", extras::Cmd::NewVector)]),
             "comp" => ("Retoucher une image en nodes : couleurs, flous, masques, et l'étalonnage des clips du montage.", vec![("Nouveau compositing", extras::Cmd::NewCompositor)]),
             "scene" => ("Modèles, lumières, caméras et animation. Un modèle ouvert seul arrive dans une scène toute prête.", vec![("Nouvelle scène 3D", extras::Cmd::NewScene), ("Importer des modèles…", extras::Cmd::Import)]),
-            "mat" => ("Les matériaux des modèles : en nodes, ou à calques comme Substance.", vec![("Nouveau matériau (nodes)", extras::Cmd::NewMaterial), ("Nouveau matériau à calques", extras::Cmd::NewLayered)]),
+            "mat" => ("Les matériaux des modèles : une pile de calques comme dans Substance Painter, et chaque calque s'ouvre en nodes.", vec![("Nouveau matériau", extras::Cmd::NewMaterial)]),
+            "sim" => ("Géométrie et simulation en nodes : points, attributs, tissu et particules, avec une lecture image par image.", vec![("Nouvelle géométrie en nodes", extras::Cmd::NewGeometry)]),
             "music" => ("Composer avec des synthés et une batterie intégrés : régions, rouleau de piano, idées d'accords et de rythmes.", vec![("Nouveau morceau", extras::Cmd::NewMusic)]),
             "audio" => ("Voix, musiques et ambiances sur plusieurs pistes : couper, nettoyer, mixer, exporter.", vec![("Nouvelle session audio", extras::Cmd::NewAudio), ("Importer des sons…", extras::Cmd::Import)]),
             "motion" => ("Titres, formes et images animés par clés, avec des préréglages, puis exportés en MP4.", vec![("Nouvelle composition", extras::Cmd::NewMotion)]),
@@ -1351,7 +1347,7 @@ impl App {
                         ("Moodboard", "toile libre", "2d", extras::Cmd::NewBoard, 1),
                         ("Scène 3D", "cube, lumière, caméra", "3d", extras::Cmd::NewScene, 2),
                         ("Montage", "vidéo et son", "video", extras::Cmd::NewMontage, 3),
-                        ("Matériau", "nodes", "mat", extras::Cmd::NewMaterial, 4),
+                        ("Matériau", "calques et nodes", "mat", extras::Cmd::NewMaterial, 4),
                         ("Fichier de code", "script, shader, page", "code", extras::Cmd::NewFile, 5),
                     ];
                     let gap = 14.0;
@@ -2931,8 +2927,8 @@ impl App {
                                 ("depuis un modèle…", extras::Cmd::FromTemplate),
                                 ("board", extras::Cmd::NewBoard),
                                 ("scène 3D", extras::Cmd::NewScene),
-                                ("matériau en nodes", extras::Cmd::NewMaterial),
-                                ("matériau à calques (atelier)", extras::Cmd::NewLayered),
+                                ("matériau", extras::Cmd::NewMaterial),
+                                ("géométrie et simulation en nodes", extras::Cmd::NewGeometry),
                                 ("dessin vectoriel", extras::Cmd::NewVector),
                                 ("compositing en nodes", extras::Cmd::NewCompositor),
                                 ("composition animée (motion)", extras::Cmd::NewMotion),
@@ -3120,8 +3116,8 @@ impl App {
                             ("composition animée (motion)", extras::Cmd::NewMotion),
                             ("session audio", extras::Cmd::NewAudio),
                             ("morceau (séquenceur)", extras::Cmd::NewMusic),
-                            ("matériau en nodes", extras::Cmd::NewMaterial),
-                            ("matériau à calques (atelier)", extras::Cmd::NewLayered),
+                            ("matériau", extras::Cmd::NewMaterial),
+                            ("géométrie et simulation en nodes", extras::Cmd::NewGeometry),
                             ("compositing en nodes", extras::Cmd::NewCompositor),
                             ("dessin vectoriel", extras::Cmd::NewVector),
                         ] {
