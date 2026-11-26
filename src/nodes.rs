@@ -250,7 +250,7 @@ pub const DEFS: &[Def] = &[
     Def { op: "sim_move", label: "Avancer", cat: "simulation", inputs: &[("géométrie", Sock::Geo, ZERO), ("pas de temps", Sock::Float, f(1.0 / 24.0))], outputs: &[("géométrie", Sock::Geo)], params: &[], mat: false, comp: false },
     Def { op: "sim_collide", label: "Collision", cat: "simulation", inputs: &[("géométrie", Sock::Geo, ZERO), ("hauteur du sol", Sock::Float, f(0.0)), ("rebond", Sock::Float, f(0.4)), ("adhérence", Sock::Float, f(0.2)), ("centre de la boule", Sock::Vector, ZERO), ("rayon de la boule", Sock::Float, f(0.0))], outputs: &[("géométrie", Sock::Geo)], params: &[], mat: false, comp: false },
     Def { op: "sim_emit", label: "Émettre des particules", cat: "simulation", inputs: &[("état", Sock::Geo, ZERO), ("source", Sock::Geo, ZERO), ("par image", Sock::Int, f(20.0)), ("vitesse", Sock::Vector, [0.0, 2.0, 0.0, 0.0]), ("dispersion", Sock::Float, f(0.5)), ("durée de vie (s)", Sock::Float, f(3.0)), ("pas de temps", Sock::Float, f(1.0 / 24.0))], outputs: &[("géométrie", Sock::Geo)], params: &[], mat: false, comp: false },
-    Def { op: "sim_solver", label: "Solveur", cat: "simulation", inputs: &[("géométrie", Sock::Geo, ZERO), ("itérations", Sock::Int, f(16.0)), ("souplesse", Sock::Float, f(0.0)), ("amortissement", Sock::Float, f(0.02)), ("pas de temps", Sock::Float, f(1.0 / 24.0)), ("hauteur du sol", Sock::Float, f(0.0)), ("centre de la boule", Sock::Vector, ZERO), ("rayon de la boule", Sock::Float, f(0.0)), ("adhérence", Sock::Float, f(0.6))], outputs: &[("géométrie", Sock::Geo)], params: &[ParamDef::Choice("solveur", crate::geo::SOLVER_NAMES), ParamDef::Choice("sol", &["oui", "non"])], mat: false, comp: false },
+    Def { op: "sim_solver", label: "Solveur", cat: "simulation", inputs: &[("géométrie", Sock::Geo, ZERO), ("itérations", Sock::Int, f(16.0)), ("souplesse", Sock::Float, f(0.0)), ("amortissement", Sock::Float, f(0.02)), ("pas de temps", Sock::Float, f(1.0 / 24.0)), ("hauteur du sol", Sock::Float, f(0.0)), ("centre de la boule", Sock::Vector, ZERO), ("rayon de la boule", Sock::Float, f(0.0)), ("adhérence", Sock::Float, f(0.6)), ("raideur", Sock::Float, f(1000.0)), ("flexion", Sock::Float, f(0.1)), ("sous-pas", Sock::Int, f(8.0)), ("centre de la boîte", Sock::Vector, ZERO), ("taille de la boîte", Sock::Vector, ZERO)], outputs: &[("géométrie", Sock::Geo)], params: &[ParamDef::Choice("solveur", crate::geo::SOLVER_NAMES), ParamDef::Choice("sol", &["oui", "non"])], mat: false, comp: false },
     Def { op: "grainmatch", label: "Grain assorti (mesuré sur la plaque)", cat: "filtre", inputs: &[("image", Sock::Color, GRAY), ("plaque", Sock::Color, GRAY)], outputs: &[("image", Sock::Color), ("force mesurée", Sock::Float)], params: &[ParamDef::Float("taille du grain", 0.5, 4.0, 1.0), ParamDef::Float("dosage", 0.0, 2.0, 1.0)], mat: false, comp: true },
 ];
 
@@ -5405,6 +5405,10 @@ impl Editor {
                     }
                     let mut child = ui.new_child(egui::UiBuilder::new().max_rect(row).layout(egui::Layout::left_to_right(egui::Align::Center)));
                     child.spacing_mut().interact_size.y = ROW - 4.0;
+                    // Un réglage que le solveur choisi ne lit pas reste visible, mais en retrait
+                    if d.op == "sim_solver" && !crate::geo::solver_uses(pstr(&node.params, "solveur"), name) {
+                        child.disable();
+                    }
                     child.label(RichText::new(crate::i18n::t(name)).size(11.0));
                     let v = &mut node.values[k];
                     let resp = match sock {
@@ -6593,6 +6597,12 @@ impl Editor {
             _ => {}
         }
         geo.viewport(ui, rect);
+        // Puce du solveur de tissu : ses réglages changent le graphe
+        if self.level.is_none() && geo.solver_chip(ui, rect, &mut self.graph) {
+            self.geo = Some(geo);
+            self.changed();
+            return;
+        }
         let mut time = doc.time.unwrap_or_default();
         let bar = Rect::from_min_size(rect.left_bottom() + vec2(0.0, 4.0), vec2(rect.width(), 36.0));
         if geo.transport(ui, bar, &mut time) {

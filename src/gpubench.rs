@@ -3,6 +3,9 @@
 //! mémoire : on mesure donc d'abord le débit réel (copie, puis itération de pression à 7 points),
 //! puis un pas de fumée simple (advection semi-lagrangienne, flottabilité, pression par Jacobi).
 //!
+//! Puis le tissu en VBD (`gpucloth`) : temps par passe sur 250 000 et 1 million de sommets, contre
+//! le processeur, et la comparaison avec le XPBD à nombre de passes égal.
+//!
 //! Lancement : menu Aide, « Mesurer la carte graphique », ou `aryadne --banc-gpu` dans un terminal.
 
 use eframe::egui;
@@ -120,6 +123,98 @@ pub struct Rapport {
     /// Écart maximal entre la carte et le processeur sur une itération de Jacobi (contrôle)
     pub ecart: f32,
     pub notes: Vec<String>,
+    /// Tissu en VBD, par taille
+    pub tissu: Vec<Tissu>,
+    /// Écart maximal entre la carte et le processeur sur un petit tissu, en mètres (contrôle)
+    pub ecart_tissu: Option<f32>,
+    /// VBD contre XPBD à budget égal
+    pub comparaison: Option<crate::gpucloth::Comparison>,
+}
+
+/// Mesure d'un tissu carré : une « passe » met à jour tous les sommets une fois (toutes les couleurs).
+#[derive(Clone, Debug)]
+pub struct Tissu {
+    pub points: usize,
+    pub couleurs: usize,
+    /// Calculé sur la carte (sinon le tissu n'y tient pas, ou il n'y a pas de carte)
+    pub carte: bool,
+    /// Préparation au chargement : voisinages, couleurs, rangement
+    pub preparation_ms: f64,
+    pub passe_ms: f64,
+    /// Relecture des positions et des vitesses
+    pub relecture_ms: f64,
+    pub passe_processeur_ms: f64,
+    /// Octets lus et écrits par passe, et mémoire gardée sur la carte
+    pub octets: f64,
+    pub memoire: u64,
+}
+
+/// Passes par image du tissu mesuré : 4 sous-pas de 8 itérations, accélération de Tchebychev comprise
+const PASSES: usize = 32;
+
+fn tissu(cote: usize, images: usize) -> Tissu {
+    use crate::gpucloth::{grid, rest_lengths, Cloth, Params, Topo};
+    let n = cote * cote;
+    let (p, e) = grid(cote, cote, 2.0, 1.6);
+    let rest = rest_lengths(&e, &p);
+    let pinned: Vec<bool> = (0..n).map(|i| i / cote == 0).collect();
+    let t = Instant::now();
+    let topo = Topo::build(n, &e, &rest, &p, &pinned, None);
+    let preparation_ms = t.elapsed().as_secs_f64() * 1000.0;
+    let (couleurs, octets, memoire) = (topo.colors.len(), topo.bytes_per_iteration() as f64, topo.gpu_bytes());
+    let par = Params { iterations: PASSES, substeps: 4, floor: Some(0.0), ball: Some(([0.0, 0.7, 0.0], 0.55)), ..Default::default() };
+    let dt = 1.0 / 24.0;
+    let chute = [vec![0.0; n], vec![-0.4; n], vec![0.0; n]];
+    // Le processeur d'abord : un pas d'image, soit 32 passes
+    let mut c = Cloth::new(topo, &p, false);
+    c.set_velocities(&chute);
+    let t = Instant::now();
+    c.step(dt, &par);
+    let passe_processeur_ms = t.elapsed().as_secs_f64() * 1000.0 / PASSES as f64;
+    // Puis la carte, avec la même topologie
+    let mut c = Cloth::new(c.into_topo(), &p, true);
+    let carte = c.on_gpu();
+    c.set_velocities(&chute);
+    // Échauffement : compilation des noyaux, envoi des tampons
+    c.step(dt, &par);
+    c.sync();
+    let t = Instant::now();
+    for _ in 0..images {
+        c.step(dt, &par);
+    }
+    if let Some(g) = crate::gpusim::gpu().filter(|_| carte) {
+        g.finish();
+    }
+    let passe_ms = t.elapsed().as_secs_f64() * 1000.0 / (images * PASSES) as f64;
+    let t = Instant::now();
+    c.sync();
+    let relecture_ms = t.elapsed().as_secs_f64() * 1000.0;
+    Tissu { points: n, couleurs, carte: carte && c.on_gpu(), preparation_ms, passe_ms, relecture_ms, passe_processeur_ms, octets, memoire }
+}
+
+/// Le même petit tissu sur la carte et sur le processeur : écart maximal des positions après trois images.
+fn ecart_tissu() -> Option<f32> {
+    use crate::gpucloth::{grid, rest_lengths, Cloth, Params, Topo};
+    let cote = 48;
+    let (p, e) = grid(cote, cote, 2.0, 1.6);
+    let rest = rest_lengths(&e, &p);
+    let pinned: Vec<bool> = (0..cote * cote).map(|i| i / cote == 0).collect();
+    let par = Params { iterations: PASSES, substeps: 4, floor: Some(0.0), ball: Some(([0.0, 0.7, 0.0], 0.55)), ..Default::default() };
+    let run = |carte: bool| {
+        let mut c = Cloth::new(Topo::build(cote * cote, &e, &rest, &p, &pinned, None), &p, carte);
+        if c.on_gpu() != carte {
+            return None;
+        }
+        for _ in 0..3 {
+            let (_, mut v) = c.read();
+            v[1].iter_mut().for_each(|y| *y -= 9.8 / 24.0);
+            c.set_velocities(&v);
+            c.step(1.0 / 24.0, &par);
+        }
+        Some(c.read().0)
+    };
+    let (a, b) = (run(false)?, run(true)?);
+    Some((0..3).flat_map(|k| a[k].iter().zip(&b[k]).map(|(x, y)| (x - y).abs())).fold(0.0, f32::max))
 }
 
 struct Ctx {
@@ -347,6 +442,23 @@ pub fn run(quick: bool, progress: &dyn Fn(String)) -> Result<Rapport, String> {
     if r.ecart > 1e-4 {
         r.notes.push(format!("{} : {}", crate::i18n::t("écart avec le processeur trop grand"), r.ecart));
     }
+    // Tissu en VBD : d'abord le contrôle, puis la vitesse sur de grands tissus
+    r.ecart_tissu = ecart_tissu();
+    if r.ecart_tissu.is_some_and(|e| e > 1e-3) {
+        r.notes.push(format!("{} : {:?}", crate::i18n::t("tissu : écart avec le processeur trop grand"), r.ecart_tissu));
+    }
+    for cote in if quick { vec![64usize] } else { vec![500, 1000] } {
+        let m = tissu(cote, if quick { 1 } else { 3 });
+        progress(format!("{} : {:.3} ms", crate::i18n::t("tissu, {} sommets, une passe").replace("{}", &m.points.to_string()), m.passe_ms));
+        if !m.carte {
+            r.notes.push(format!("{} ({} Mo)", crate::i18n::t("tissu de {} sommets : il ne tient pas sur cette carte, mesuré sur le processeur").replace("{}", &m.points.to_string()), max_bind >> 20));
+        }
+        r.tissu.push(m);
+    }
+    if !quick {
+        progress(crate::i18n::t("comparaison du tissu avec le XPBD, moins d'une minute"));
+        r.comparaison = Some(crate::geo::cloth_comparison(40, &[16, 64, 256]));
+    }
     Ok(r)
 }
 
@@ -354,6 +466,7 @@ impl Rapport {
     /// Le rapport lisible, avec ce que ces chiffres veulent dire pour les simulations prévues
     pub fn texte(&self) -> String {
         let t = crate::i18n::t;
+        let tm = crate::i18n::t_mid;
         let mut s = format!("{} : {}\n\n", t("carte graphique utilisée"), self.carte);
         for m in &self.mesures {
             s += &format!("{} : {:.3} ms ({:.0} {})\n", m.nom, m.ms, m.debit(), crate::i18n::t_mid("Go/s"));
@@ -376,6 +489,25 @@ impl Rapport {
                 t("efficacité de la pression contre la copie"),
                 j / c * 100.0
             );
+        }
+        if !self.tissu.is_empty() {
+            s += &format!("\n{} :\n", t("tissu en VBD (une passe = tous les sommets mis à jour une fois)"));
+        }
+        for m in &self.tissu {
+            let ou = tm(if m.carte { "carte" } else { "processeur" });
+            s += &format!("- {} {} ({} {}, {}) : {:.3} ms {}, {:.0} {}, {:.2} ns {}, ~{:.0} {}\n", m.points, tm("sommets"), m.couleurs, tm("couleurs"), ou, m.passe_ms, tm("par passe"), 1000.0 / m.passe_ms, tm("passes par seconde"), m.passe_ms * 1e6 / m.points as f64, tm("par sommet et par passe"), m.octets / (m.passe_ms / 1000.0) / 1e9, tm("Go/s"));
+            s += &format!("  {} : {:.0} {} · {} : {:.1} ms · {} : {:.1} ms\n", t("à 24 images par seconde"), 1000.0 / 24.0 / m.passe_ms, tm("passes par image"), tm("une image de 32 passes"), m.passe_ms * PASSES as f64, tm("relecture"), m.relecture_ms);
+            s += &format!("  {} : {:.2} ms {} (×{:.1}) · {} : {:.0} ms · {} : {:.0} Mo\n", t("processeur"), m.passe_processeur_ms, tm("par passe"), m.passe_processeur_ms / m.passe_ms, tm("préparation"), m.preparation_ms, tm("mémoire sur la carte"), m.memoire as f64 / 1e6);
+        }
+        if let Some(e) = self.ecart_tissu {
+            s += &format!("{} : {:.1e} m\n", t("écart du tissu entre la carte et le processeur (contrôle)"), e);
+        }
+        if let Some(c) = &self.comparaison {
+            s += &format!("\n{} ({} {}, {} N/m) :\n", t("VBD contre XPBD, à nombre de passes égal"), c.points, tm("sommets"), c.stiffness);
+            s += &format!("{} : {:.3} %, {:.4} J\n", t("tissu pendu, calculé jusqu'au bout : allongement, énergie élastique"), c.reference.0 * 100.0, c.reference.1);
+            for row in &c.rows {
+                s += &format!("- {} {:3} {} : {} {:5.1} %, {} {:.3} %, {} {:.4} J · {} : {} {:.1} %, {} {:.2} %\n", if row.vbd { "VBD " } else { "XPBD" }, row.budget, tm("passes"), tm("raideur obtenue"), row.stiffness * 100.0, tm("allongement"), row.elongation * 100.0, tm("énergie"), row.energy, tm("chute sur une boule"), tm("pire arête"), row.worst * 100.0, tm("moyenne"), row.mean * 100.0);
+            }
         }
         for n in &self.notes {
             s += &format!("\n{} : {n}", t("note"));
@@ -486,6 +618,8 @@ mod tests {
         assert!(r.ecart < 1e-4, "écart {}", r.ecart);
         assert!(r.mesures.iter().all(|m| m.ms.is_finite() && m.ms > 0.0));
         assert!(!r.notes.iter().any(|n| n.contains("non finies")));
+        assert!(r.tissu.iter().all(|m| m.passe_ms > 0.0 && m.passe_processeur_ms > 0.0));
+        assert!(r.ecart_tissu.is_none_or(|e| e < 1e-3), "écart du tissu {:?}", r.ecart_tissu);
         eprintln!("{}", r.texte());
     }
 }

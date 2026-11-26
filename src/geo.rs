@@ -277,6 +277,13 @@ pub struct SolverParams {
     pub ball: Option<([f32; 3], f32)>,
     /// Adhérence au contact des obstacles (0 : glisse, 1 : colle)
     pub grip: f32,
+    /// Boîte : centre et demi-tailles
+    pub cube: Option<([f32; 3], [f32; 3])>,
+    /// Réglages propres au tissu sur carte graphique : raideur des arêtes (N/m), raideur de
+    /// flexion (N·m), nombre de sous-pas par image
+    pub stiffness: f32,
+    pub bending: f32,
+    pub substeps: usize,
 }
 
 /// Un solveur fait avancer un état d'un pas de temps. Il reçoit l'état en colonnes et le modifie
@@ -290,10 +297,20 @@ pub trait Solver: Send + Sync {
 
 /// Les solveurs disponibles. Pour en ajouter un : l'écrire, et l'inscrire ici et dans la liste du node.
 pub fn solvers() -> &'static [&'static dyn Solver] {
-    &[&XpbdCloth]
+    &[&XpbdCloth, &VbdCloth]
 }
 
-pub const SOLVER_NAMES: &[&str] = &["tissu et fils, XPBD (processeur)"];
+pub const SOLVER_NAMES: &[&str] = &["tissu et fils, XPBD (processeur)", "tissu (carte graphique)"];
+
+/// Ce solveur lit-il cette entrée du node « Solveur » ? Les autres sont montrées en retrait.
+pub fn solver_uses(solver: &str, input: &str) -> bool {
+    let gpu = solver == SOLVER_NAMES[1];
+    match input {
+        "souplesse" => !gpu,
+        "raideur" | "flexion" | "sous-pas" => gpu,
+        _ => true,
+    }
+}
 
 /// Contraintes de distance le long des arêtes, façon XPBD, sur le processeur. Petit et lisible :
 /// il sert de référence et d'exemple pour les solveurs à venir.
@@ -410,6 +427,18 @@ impl Solver for XpbdCloth {
                             }
                         }
                     }
+                    if let Some((c, half)) = p.cube {
+                        let q = [x[0][i] - c[0], x[1][i] - c[1], x[2][i] - c[2]];
+                        let pen = [half[0] - q[0].abs(), half[1] - q[1].abs(), half[2] - q[2].abs()];
+                        if pen.iter().all(|d| *d > 0.0) {
+                            // Sorti par la face la plus proche, freiné le long de cette face
+                            let axis = (0..3).min_by(|a, b| pen[*a].total_cmp(&pen[*b])).unwrap_or(1);
+                            for k in 0..3 {
+                                x[k][i] = prev[k][i] + (x[k][i] - prev[k][i]) * slide;
+                            }
+                            x[axis][i] = c[axis] + half[axis].copysign(q[axis]);
+                        }
+                    }
                 }
             }
             for k in 0..3 {
@@ -421,6 +450,134 @@ impl Solver for XpbdCloth {
         g.set("P", Column::new(x.into()));
         g.set("v", Column::new(nv.into()));
     }
+}
+
+/// Tissu en « Vertex Block Descent » sur la carte graphique (voir `gpucloth`). Sans carte, le même
+/// calcul se fait sur le processeur. Lit `P`, `v`, `pin`, et `mass` s'il existe ; garde la forme au
+/// repos dans `repos` (points) et `rest` (arêtes), mesurées au premier pas.
+struct VbdCloth;
+
+/// Un tissu déjà préparé : sa topologie rangée et coloriée, ses tampons sur la carte.
+struct ClothSession {
+    key: u64,
+    cloth: crate::gpucloth::Cloth,
+    /// Versions des colonnes `P` et `v` rendues au dernier pas : si elles reviennent telles
+    /// quelles, la carte a déjà cet état et on ne renvoie rien
+    out: (u64, u64),
+    used: u64,
+}
+
+static CLOTHS: std::sync::Mutex<Vec<ClothSession>> = std::sync::Mutex::new(Vec::new());
+static CLOTH_STATUS: std::sync::Mutex<Option<ClothStatus>> = std::sync::Mutex::new(None);
+
+/// Ce qu'a fait le dernier pas de tissu, pour le montrer dans l'aperçu.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ClothStatus {
+    /// Calculé sur la carte (sinon : sur le processeur)
+    pub on_gpu: bool,
+    /// Nom de la carte, si elle a servi
+    pub card: String,
+    pub points: usize,
+    pub colors: usize,
+    pub substeps: usize,
+    /// Itérations par sous-pas
+    pub per: usize,
+    /// Temps du pas, relecture comprise
+    pub ms: f32,
+}
+
+pub fn cloth_status() -> Option<ClothStatus> {
+    CLOTH_STATUS.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+impl Solver for VbdCloth {
+    fn name(&self) -> &'static str {
+        SOLVER_NAMES[1]
+    }
+
+    fn step(&self, g: &mut Geo, dt: f32, p: &SolverParams) {
+        let n = g.n;
+        if n == 0 || dt <= 0.0 {
+            return;
+        }
+        let t0 = std::time::Instant::now();
+        // Forme au repos : celle du premier pas, gardée dans l'état pour qu'une reprise au milieu
+        // de la simulation retrouve le même tissu
+        if !g.cols.get("repos").is_some_and(|c| c.width() >= 3) {
+            match g.cols.get("P").filter(|c| c.width() >= 3).cloned() {
+                Some(c) => {
+                    g.cols.insert("repos".into(), c);
+                }
+                None => return,
+            }
+        }
+        let edges = g.edges.clone();
+        if !g.ecols.contains_key("rest") {
+            let rest = crate::gpucloth::rest_lengths(&edges, &g.vec3("repos"));
+            g.ecols.insert("rest".into(), Arc::new(Column::new(vec![rest])));
+        }
+        let version = |name: &str| g.col(name).map(|c| c.version).unwrap_or(0);
+        let key = {
+            let mut h = hasher();
+            (n, g.edges_version, g.ecols["rest"].version, version("repos"), version("pin"), version("mass")).hash(&mut h);
+            h.finish()
+        };
+        let mut all = CLOTHS.lock().unwrap_or_else(|e| e.into_inner());
+        let clock = all.iter().map(|s| s.used).max().unwrap_or(0) + 1;
+        let at = match all.iter().position(|s| s.key == key) {
+            Some(k) => k,
+            None => {
+                let pinned: Vec<bool> = match g.col("pin") {
+                    Some(c) => c.data[0].iter().map(|x| *x > 0.5).collect(),
+                    None => vec![false; n],
+                };
+                let mass = g.col("mass").filter(|c| c.width() == 1).map(|c| c.data[0].as_slice());
+                let topo = crate::gpucloth::Topo::build(n, &edges, &g.ecols["rest"].data[0], &g.vec3("repos"), &pinned, mass);
+                // Quelques tissus restent prêts ; le plus ancien cède sa place (et sa mémoire sur la carte)
+                if all.len() >= 4 {
+                    if let Some(old) = (0..all.len()).min_by_key(|k| all[*k].used) {
+                        all.swap_remove(old);
+                    }
+                }
+                all.push(ClothSession { key, cloth: crate::gpucloth::Cloth::new(topo, &g.vec3("P"), true), out: (0, 0), used: 0 });
+                all.len() - 1
+            }
+        };
+        let s = &mut all[at];
+        s.used = clock;
+        if s.out.0 == 0 || version("P") != s.out.0 {
+            s.cloth.set_positions(&g.vec3("P"));
+        }
+        if s.out.1 == 0 || version("v") != s.out.1 {
+            s.cloth.set_velocities(&g.vec3("v"));
+        }
+        let par = crate::gpucloth::Params { stiffness: p.stiffness, bending: p.bending, damping: p.damping, iterations: p.iterations, substeps: p.substeps, rho: crate::gpucloth::RHO, floor: p.floor, ball: p.ball, cube: p.cube, grip: p.grip };
+        s.cloth.step(dt, &par);
+        let (x, v) = s.cloth.read();
+        let (x, v) = (Column::new(x.into()), Column::new(v.into()));
+        s.out = (x.version, v.version);
+        g.set("P", x);
+        g.set("v", v);
+        let (substeps, per) = par.split();
+        let on_gpu = s.cloth.on_gpu();
+        let status = ClothStatus { on_gpu, card: if on_gpu { crate::gpusim::gpu().map(|c| c.name.clone()).unwrap_or_default() } else { String::new() }, points: n, colors: s.cloth.topo.colors.len(), substeps, per, ms: t0.elapsed().as_secs_f32() * 1000.0 };
+        *CLOTH_STATUS.lock().unwrap_or_else(|e| e.into_inner()) = Some(status);
+    }
+}
+
+/// VBD contre le XPBD de ce fichier, à nombre égal de passes par image (voir `gpucloth::compare`).
+pub fn cloth_comparison(n: usize, budgets: &[usize]) -> crate::gpucloth::Comparison {
+    crate::gpucloth::compare(n, budgets, &|pos, vel, edges, rest, pinned, dt, par, compliance| {
+        let mut g = Geo::points(pos.clone());
+        g.set_edges(edges.to_vec());
+        g.ecols.insert("rest".into(), Arc::new(Column::new(vec![rest.to_vec()])));
+        g.set("v", Column::new(vel.clone().into()));
+        g.set("pin", Column::new(vec![pinned.iter().map(|p| *p as u8 as f32).collect()]));
+        let p = SolverParams { iterations: par.iterations, compliance, damping: par.damping, floor: par.floor, ball: par.ball, grip: par.grip, cube: par.cube, stiffness: 0.0, bending: 0.0, substeps: 1 };
+        XpbdCloth.step(&mut g, dt, &p);
+        *pos = g.vec3("P");
+        *vel = g.vec3("v");
+    })
 }
 
 // ---------- moteur ----------
@@ -1349,12 +1506,20 @@ impl Run<'_> {
                 let mut g = gin[0].clone();
                 let (floor, ball_c, ball_r) = (num!(5)[0], v3(num!(6)), num!(7)[0]);
                 let p = SolverParams {
-                    iterations: (num!(1)[0].round() as usize).clamp(1, 200),
+                    iterations: (num!(1)[0].round() as usize).clamp(1, 2000),
                     compliance: num!(2)[0],
                     damping: num!(3)[0],
                     floor: (pstr(n, "sol") != "non").then_some(floor),
                     ball: (ball_r > 0.0).then_some((ball_c, ball_r)),
                     grip: num!(8)[0],
+                    cube: {
+                        let (c, size) = (v3(num!(12)), v3(num!(13)));
+                        size.iter().all(|s| *s > 0.0).then_some((c, [size[0] * 0.5, size[1] * 0.5, size[2] * 0.5]))
+                    },
+                    stiffness: num!(9)[0].max(0.0),
+                    // Le réglage est en millièmes de N·m : 0,1 pour un coton, 1 pour une toile épaisse
+                    bending: num!(10)[0].max(0.0) * 1e-3,
+                    substeps: (num!(11)[0].round() as usize).clamp(1, 64),
                 };
                 let dt = num!(4)[0];
                 let name = pstr(n, "solveur");
@@ -1532,15 +1697,40 @@ pub fn starter() -> Graph {
 }
 
 /// Exemples proposés dans l'éditeur : chacun montre une façon de se servir des nodes de géométrie.
-pub const EXAMPLES: [&str; 3] = ["tissu sur une boule", "fontaine de particules", "vagues animées"];
+pub const EXAMPLES: [&str; 4] = ["tissu sur une boule", "tissu sur la carte graphique", "fontaine de particules", "vagues animées"];
 
 pub fn example(name: &str) -> Option<Graph> {
     match name {
         "tissu sur une boule" => Some(starter()),
+        "tissu sur la carte graphique" => Some(cloth_gpu()),
         "fontaine de particules" => Some(fountain()),
         "vagues animées" => Some(waves()),
         _ => None,
     }
+}
+
+/// Le tissu de départ, plus fin, calculé par le solveur sur carte graphique, et posé sur une
+/// boule et une boîte.
+fn cloth_gpu() -> Graph {
+    let mut g = starter();
+    let id = |g: &Graph, op: &str| g.nodes.iter().find(|n| n.op == op).map(|n| n.id).unwrap_or(0);
+    let (grid, solver) = (id(&g, "geo_grid"), id(&g, "sim_solver"));
+    set_value(&mut g, grid, 2, [48.0; 4]);
+    set_value(&mut g, grid, 3, [48.0; 4]);
+    set_param(&mut g, solver, "solveur", SOLVER_NAMES[1]);
+    set_value(&mut g, solver, 1, [32.0; 4]);
+    set_value(&mut g, solver, 6, [0.25, 0.7, 0.1, 0.0]);
+    set_value(&mut g, solver, 7, [0.5; 4]);
+    set_value(&mut g, solver, 12, [-0.55, 0.3, 0.0, 0.0]);
+    set_value(&mut g, solver, 13, [0.5, 0.6, 0.8, 0.0]);
+    // La boule montrée suit celle du solveur
+    let shown: Vec<u32> = g.nodes.iter().filter(|n| n.op == "geo_transform").map(|n| n.id).collect();
+    if let Some(ball_at) = shown.last().copied() {
+        set_value(&mut g, ball_at, 1, [0.25, 0.7, 0.1, 0.0]);
+    }
+    let ball = id(&g, "geo_sphere");
+    set_value(&mut g, ball, 1, [0.48; 4]);
+    g
 }
 
 fn hide_thumbs(g: &mut Graph, ids: &[u32]) {
@@ -1935,6 +2125,96 @@ mod tests {
             assert!(p.iter().all(|x| x.is_finite()));
         }
         assert!((0..r.n).any(|i| r.pos(i)[1] < 1.2), "le tissu est tombé");
+    }
+
+    /// Le solveur sur carte graphique, par les nodes : l'exemple de tissu bascule dessus d'un
+    /// réglage, et l'exemple dédié drape sur la boule et la boîte sans les traverser.
+    #[test]
+    fn tissu_sur_carte_par_les_nodes() {
+        let check = |g: &Graph, side: usize, frame: i32, ball: ([f32; 3], f32), cube: Option<([f32; 3], [f32; 3])>| {
+            let mut eng = Engine::default();
+            let end = g.nodes.iter().find(|n| n.op == "sim_out").unwrap().id;
+            let first = eng.eval_node(g, end, 0, 1, "").map_err(|x| x.1).unwrap();
+            let r = eng.eval_node(g, end, 0, frame, "").map_err(|x| x.1).unwrap();
+            assert_eq!(r.n, side * side);
+            assert_eq!(eng.stats.steps as i32, frame - 1);
+            // La forme au repos est gardée dans l'état : une reprise retrouve le même tissu
+            assert_eq!(r.vec3("repos"), first.vec3("P"));
+            let mut pins = 0;
+            let mut low = f32::MAX;
+            for i in 0..r.n {
+                let p = r.pos(i);
+                assert!(p.iter().all(|x| x.is_finite()));
+                if r.col("pin").unwrap().data[0][i] > 0.5 {
+                    assert_eq!(p, first.pos(i), "un point épinglé ne bouge pas");
+                    pins += 1;
+                }
+                assert!(p[1] >= -1e-4, "sous le sol : {p:?}");
+                let d = ((p[0] - ball.0[0]).powi(2) + (p[1] - ball.0[1]).powi(2) + (p[2] - ball.0[2]).powi(2)).sqrt();
+                assert!(d > ball.1 - 1e-3, "dans la boule : {p:?}");
+                if let Some((c, h)) = cube {
+                    assert!(!(0..3).all(|k| (p[k] - c[k]).abs() < h[k] - 1e-3), "dans la boîte : {p:?}");
+                }
+                low = low.min(p[1]);
+            }
+            assert_eq!(pins, side);
+            assert!(low < 1.2, "le tissu est tombé");
+            let (worst, mean) = crate::gpucloth::stretch(&r.edges, &r.ecols["rest"].data[0], &r.vec3("P"));
+            assert!(worst < 0.35 && mean < 0.03, "allongement {worst} / {mean}");
+            let st = cloth_status().expect("le solveur a tourné");
+            assert_eq!(st.on_gpu, crate::gpusim::gpu().is_some());
+            // Revenir en arrière ne recalcule rien, et la suite repart de l'image connue
+            eng.eval_node(g, end, 0, frame - 5, "").map_err(|x| x.1).unwrap();
+            assert_eq!(eng.stats.steps, 0);
+            eng.eval_node(g, end, 0, frame + 1, "").map_err(|x| x.1).unwrap();
+            assert_eq!(eng.stats.steps, 1);
+        };
+        // L'exemple existant, basculé sur l'autre solveur
+        let mut g = starter();
+        let solver = g.nodes.iter().find(|n| n.op == "sim_solver").unwrap().id;
+        set_param(&mut g, solver, "solveur", SOLVER_NAMES[1]);
+        check(&g, 28, 30, ([0.0, 0.7, 0.0], 0.55), None);
+        // L'exemple dédié : plus fin, avec une boîte
+        let g = example("tissu sur la carte graphique").unwrap();
+        check(&g, 48, 24, ([0.25, 0.7, 0.1], 0.5), Some(([-0.55, 0.3, 0.0], [0.25, 0.3, 0.4])));
+    }
+
+    /// Le XPBD connaît aussi la boîte : les deux solveurs se posent sur les mêmes obstacles.
+    #[test]
+    fn xpbd_ne_traverse_pas_la_boite() {
+        let mut g = starter();
+        let solver = g.nodes.iter().find(|n| n.op == "sim_solver").unwrap().id;
+        set_value(&mut g, solver, 7, [0.0; 4]);
+        set_value(&mut g, solver, 12, [0.0, 0.5, 0.0, 0.0]);
+        set_value(&mut g, solver, 13, [0.8, 1.0, 0.8, 0.0]);
+        let end = g.nodes.iter().find(|n| n.op == "sim_out").unwrap().id;
+        let r = Engine::default().eval_node(&g, end, 0, 40, "").map_err(|x| x.1).unwrap();
+        let mut on_top = 0;
+        for i in 0..r.n {
+            let p = r.pos(i);
+            assert!(!(p[0].abs() < 0.399 && p[1] < 0.999 && p[2].abs() < 0.399), "dans la boîte : {p:?}");
+            on_top += (p[0].abs() < 0.4 && (p[1] - 1.0).abs() < 1e-3 && p[2].abs() < 0.4) as usize;
+        }
+        assert!(on_top > 20, "le tissu repose sur la boîte ({on_top} points)");
+    }
+
+    /// Écrit les exemples dans le dossier donné par ARY_EXEMPLES, pour les essais à l'écran.
+    #[test]
+    #[ignore]
+    fn ecrire_les_exemples() {
+        let Some(dir) = std::env::var_os("ARY_EXEMPLES") else { return };
+        for name in EXAMPLES {
+            example(name).unwrap().save(&std::path::Path::new(&dir).join(format!("{name}.arygeo"))).unwrap();
+        }
+    }
+
+    /// La comparaison à budget égal donne des nombres sensés (les vrais chiffres : `aryadne --banc-gpu`).
+    #[test]
+    #[ignore]
+    fn comparaison_vbd_xpbd() {
+        let c = cloth_comparison(40, &[16, 64, 256]);
+        eprintln!("{c:#?}");
+        assert!(c.rows.iter().all(|r| r.elongation.is_finite() && r.worst < 1.0));
     }
 
     #[test]

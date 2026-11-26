@@ -43,6 +43,55 @@ pub struct GeoView {
     /// Zones de simulation du graphe (node de fin), pour la barre de cache
     zones: Vec<u32>,
     table: Option<((u64, i32, u32), Result<Geo, String>)>,
+    /// Obstacles des solveurs du graphe, dessinés en fil de fer
+    obstacles: Vec<Obstacle>,
+}
+
+/// Un obstacle réglé dans un node « Solveur » : boule (centre, rayon) ou boîte (centre, demi-tailles).
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Obstacle {
+    Ball([f32; 3], f32),
+    Cube([f32; 3], [f32; 3]),
+}
+
+/// Rangs des entrées du node « Solveur »
+mod inp {
+    pub const ITERATIONS: usize = 1;
+    pub const COMPLIANCE: usize = 2;
+    pub const DAMPING: usize = 3;
+    pub const BALL: usize = 6;
+    pub const BALL_RADIUS: usize = 7;
+    pub const GRIP: usize = 8;
+    pub const STIFFNESS: usize = 9;
+    pub const BENDING: usize = 10;
+    pub const SUBSTEPS: usize = 11;
+    pub const CUBE: usize = 12;
+    pub const CUBE_SIZE: usize = 13;
+}
+
+/// Valeur réglée à la main d'une entrée, ou rien si elle est reliée.
+fn const_input(g: &Graph, n: &crate::nodes::Node, k: usize) -> Option<[f32; 4]> {
+    if g.links.iter().any(|l| l.to == n.id && l.inp == k) {
+        return None;
+    }
+    n.values.get(k).copied().or_else(|| n.def().and_then(|d| d.inputs.get(k)).map(|i| i.2))
+}
+
+fn obstacles_of(g: &Graph) -> Vec<Obstacle> {
+    let mut out = vec![];
+    for n in g.nodes.iter().filter(|n| n.op == "sim_solver" && !n.muted) {
+        if let (Some(c), Some(r)) = (const_input(g, n, inp::BALL), const_input(g, n, inp::BALL_RADIUS)) {
+            if r[0] > 0.0 {
+                out.push(Obstacle::Ball([c[0], c[1], c[2]], r[0]));
+            }
+        }
+        if let (Some(c), Some(s)) = (const_input(g, n, inp::CUBE), const_input(g, n, inp::CUBE_SIZE)) {
+            if s[..3].iter().all(|x| *x > 0.0) {
+                out.push(Obstacle::Cube([c[0], c[1], c[2]], [s[0] * 0.5, s[1] * 0.5, s[2] * 0.5]));
+            }
+        }
+    }
+    out
 }
 
 /// Couleur d'un point d'après son attribut `Cd` (ou la teinte par défaut).
@@ -60,7 +109,7 @@ fn point_color(g: &Geo, i: usize, base: Color32) -> Color32 {
 impl GeoView {
     pub fn new(g: &Graph) -> GeoView {
         let start = g.time.unwrap_or_default().start;
-        GeoView { engine: Engine::default(), frame: start, playing: false, last_tick: None, acc: 0.0, yaw: 0.6, pitch: 0.35, dist: 5.0, target: [0.0, 0.8, 0.0], framed: false, auto: true, seen: None, result: None, key: None, error: None, stats: Stats::default(), ms: 0.0, thumbs: HashMap::new(), solo: None, zones: vec![], table: None }
+        GeoView { engine: Engine::default(), frame: start, playing: false, last_tick: None, acc: 0.0, yaw: 0.6, pitch: 0.35, dist: 5.0, target: [0.0, 0.8, 0.0], framed: false, auto: true, seen: None, result: None, key: None, error: None, stats: Stats::default(), ms: 0.0, thumbs: HashMap::new(), solo: None, zones: vec![], table: None, obstacles: vec![] }
     }
 
     /// Les caches figés sur le disque, d'après le réglage « cache » des fins de zone.
@@ -105,6 +154,7 @@ impl GeoView {
         if self.key.map(|k| k.0) != Some(version) {
             self.sync_baked(doc, root);
             self.zones = doc.nodes.iter().filter(|n| n.op == "sim_out").map(|n| n.id).collect();
+            self.obstacles = obstacles_of(doc);
         }
         self.key = Some(key);
         let t0 = std::time::Instant::now();
@@ -221,6 +271,43 @@ impl GeoView {
                 }
             }
         }
+        // Obstacles des solveurs : en fil de fer, pour voir sur quoi le tissu se pose
+        let wire = Stroke::new(1.0, Color32::from_rgba_unmultiplied(110, 150, 220, 120));
+        let segment = |a: [f32; 3], b: [f32; 3]| {
+            let ((pa, da), (pb, db)) = (self.project(rect, a), self.project(rect, b));
+            if da > 0.05 && db > 0.05 {
+                painter.line_segment([pa, pb], wire);
+            }
+        };
+        for o in &self.obstacles {
+            match *o {
+                Obstacle::Cube(c, h) => {
+                    let corner = |k: usize| [c[0] + if k & 1 == 0 { -h[0] } else { h[0] }, c[1] + if k & 2 == 0 { -h[1] } else { h[1] }, c[2] + if k & 4 == 0 { -h[2] } else { h[2] }];
+                    for k in 0..8usize {
+                        for bit in [1, 2, 4] {
+                            if k & bit == 0 {
+                                segment(corner(k), corner(k | bit));
+                            }
+                        }
+                    }
+                }
+                Obstacle::Ball(c, r) => {
+                    // Trois grands cercles
+                    for axis in 0..3 {
+                        let at = |t: f32| {
+                            let (s, co) = (t * std::f32::consts::TAU).sin_cos();
+                            let mut q = c;
+                            q[(axis + 1) % 3] += r * co;
+                            q[(axis + 2) % 3] += r * s;
+                            q
+                        };
+                        for k in 0..48 {
+                            segment(at(k as f32 / 48.0), at((k + 1) as f32 / 48.0));
+                        }
+                    }
+                }
+            }
+        }
         if let Some(g) = &self.result {
             let base = Color32::from_rgb(0xe6, 0xdc, 0xd2);
             let mut mesh = egui::Mesh::default();
@@ -285,9 +372,102 @@ impl GeoView {
             painter.text(rect.left_bottom() + vec2(10.0, -8.0), egui::Align2::LEFT_BOTTOM, cost, egui::FontId::proportional(10.5), Color32::from_gray(130));
         }
         if self.engine.incomplete {
-            painter.text(rect.right_top() + vec2(-10.0, 8.0), egui::Align2::RIGHT_TOP, crate::i18n::t("simulation en cours…"), egui::FontId::proportional(11.0), p.accent);
+            painter.text(rect.right_top() + vec2(-46.0, 10.0), egui::Align2::RIGHT_TOP, crate::i18n::t("simulation en cours…"), egui::FontId::proportional(11.0), p.accent);
         }
         resp.on_hover_text(crate::i18n::t("Glisser : tourner · clic droit glissé : déplacer · molette : zoom · double-clic : recadrer"));
+    }
+
+    /// La puce du solveur, en haut à droite de l'aperçu : elle dit où se fait le calcul du tissu
+    /// (processeur ou carte graphique) et ouvre ses réglages. Rend vrai si le graphe a changé.
+    pub fn solver_chip(&mut self, ui: &mut egui::Ui, rect: Rect, graph: &mut Graph) -> bool {
+        let ids: Vec<u32> = graph.nodes.iter().filter(|n| n.op == "sim_solver").map(|n| n.id).collect();
+        if ids.is_empty() {
+            return false;
+        }
+        let p = theme::pal();
+        let t = crate::i18n::t;
+        let on_card = crate::geo::SOLVER_NAMES[1];
+        let choice = |n: &crate::nodes::Node| matches!(n.params.get("solveur"), Some(crate::nodes::Param::S(s)) if s == on_card);
+        let wants_card = graph.nodes.iter().any(|n| n.op == "sim_solver" && choice(n));
+        let status = crate::geo::cloth_status().filter(|_| wants_card);
+        let runs_on_card = status.as_ref().is_some_and(|s| s.on_gpu);
+        let area = Rect::from_min_size(pos2(rect.right() - 38.0, rect.top() + 5.0), vec2(32.0, 24.0));
+        let mut child = ui.new_child(egui::UiBuilder::new().max_rect(area).layout(egui::Layout::right_to_left(egui::Align::Center)));
+        let icon = if wants_card { crate::lucide::GPU } else { crate::lucide::CPU };
+        let mut changed = false;
+        let button = egui::containers::menu::MenuButton::new(RichText::new(icon).size(15.0).color(if runs_on_card { p.accent } else { Color32::from_gray(190) }));
+        let (resp, _) = button.ui(&mut child, |ui| {
+            ui.set_min_width(270.0);
+            ui.set_max_width(290.0);
+            ui.spacing_mut().item_spacing.y = 5.0;
+            for (rank, id) in ids.iter().enumerate() {
+                let linked: Vec<bool> = (0..16).map(|k| graph.links.iter().any(|l| l.to == *id && l.inp == k)).collect();
+                let Some(n) = graph.nodes.iter_mut().find(|n| n.id == *id) else { continue };
+                if let Some(d) = n.def() {
+                    while n.values.len() < d.inputs.len() {
+                        n.values.push(d.inputs[n.values.len()].2);
+                    }
+                }
+                if rank > 0 {
+                    ui.separator();
+                }
+                let card = choice(n);
+                ui.label(RichText::new(if n.label.is_empty() { t("solveur de tissu") } else { n.label.clone() }).size(12.0).strong());
+                // Où calculer : deux puces
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 6.0;
+                    for (to_card, icon, label, tip) in [(false, crate::lucide::CPU, "processeur", "XPBD : contraintes de distance, calculées sur le processeur"), (true, crate::lucide::GPU, "carte graphique", "VBD : raideur et flexion réglables, calculé sur la carte graphique (sur le processeur s'il n'y en a pas)")] {
+                        let b = egui::Button::new(RichText::new(format!("{icon}  {}", t(label))).size(12.0)).selected(card == to_card).corner_radius(11.0).min_size(vec2(0.0, 24.0));
+                        if ui.add(b).on_hover_text(t(tip)).clicked() && card != to_card {
+                            n.params.insert("solveur".into(), crate::nodes::Param::S(crate::geo::SOLVER_NAMES[to_card as usize].to_string()));
+                            changed = true;
+                        }
+                    }
+                });
+                ui.add_space(2.0);
+                let mut slide = |ui: &mut egui::Ui, k: usize, label: &str, tip: &str, range: std::ops::RangeInclusive<f32>, log: bool, whole: bool| {
+                    if linked.get(k).copied().unwrap_or(false) || k >= n.values.len() {
+                        return;
+                    }
+                    let mut v = n.values[k][0];
+                    let mut s = egui::Slider::new(&mut v, range).logarithmic(log).smallest_positive(0.01);
+                    if whole {
+                        s = s.integer();
+                    }
+                    let r = ui.scope(|ui| crate::modifiers::row_slider(ui, label, s)).response.on_hover_text(t(tip));
+                    let _ = r;
+                    if v != n.values[k][0] {
+                        n.values[k] = [v; 4];
+                        changed = true;
+                    }
+                };
+                slide(ui, inp::ITERATIONS, "itérations", "Passes de calcul par image : plus il y en a, moins le tissu paraît élastique", 1.0..=256.0, true, true);
+                if card {
+                    slide(ui, inp::SUBSTEPS, "sous-pas", "L'image est coupée en sous-pas : beaucoup de sous-pas et peu d'itérations chacun donnent le tissu le plus ferme", 1.0..=32.0, false, true);
+                    slide(ui, inp::STIFFNESS, "raideur", "Résistance à l'étirement, en N/m : 50 pour un jersey, 1000 pour un coton, 5000 pour un jean", 10.0..=20000.0, true, false);
+                    slide(ui, inp::BENDING, "flexion", "Résistance au pli : 0 pour une soie, 0,1 pour un coton, 1 pour une toile épaisse, 10 pour un carton", 0.0..=10.0, true, false);
+                } else {
+                    slide(ui, inp::COMPLIANCE, "souplesse", "0 : le tissu ne s'étire pas ; plus grand : il devient élastique", 0.0..=0.01, false, false);
+                }
+                slide(ui, inp::DAMPING, "amortissement", "Part de vitesse perdue à chaque image", 0.0..=0.5, false, false);
+                slide(ui, inp::GRIP, "adhérence", "Au contact des obstacles : 0 glisse, 1 colle", 0.0..=1.0, false, false);
+            }
+            // Ce qu'a fait le dernier pas
+            ui.separator();
+            let note = match &status {
+                Some(s) if s.on_gpu => format!("{}  {}\n{} {} · {} {} · {} × {} {} · {:.1} ms", crate::lucide::GPU, s.card, s.points, crate::i18n::t_mid("points"), s.colors, crate::i18n::t_mid("couleurs"), s.substeps, s.per, crate::i18n::t_mid("passes"), s.ms),
+                Some(s) => format!("{}  {}\n{} {} · {} × {} {} · {:.1} ms", crate::lucide::CPU, t("pas de carte graphique utilisable : calcul sur le processeur"), s.points, crate::i18n::t_mid("points"), s.substeps, s.per, crate::i18n::t_mid("passes"), s.ms),
+                None if wants_card => t("lance la lecture pour voir où se fait le calcul"),
+                None => format!("{}  {}", crate::lucide::CPU, t("calcul sur le processeur")),
+            };
+            ui.label(RichText::new(note).size(11.0).color(p.muted));
+        });
+        resp.on_hover_text(match (&status, wants_card) {
+            (Some(s), _) if s.on_gpu => format!("{} : {}", t("Tissu calculé sur la carte graphique"), s.card),
+            (_, true) => t("Tissu : solveur pour carte graphique (réglages)"),
+            _ => t("Tissu calculé sur le processeur (réglages, passage sur la carte graphique)"),
+        });
+        changed
     }
 
     /// La barre de lecture : première image, lecture, image courante, réglages ; dessous, les images en cache.
