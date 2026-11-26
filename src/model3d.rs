@@ -42,6 +42,9 @@ pub struct Model {
     pub total_vertices: usize,
     /// Y en haut par défaut ; STL et la plupart des exports « Z up ».
     pub z_up: bool,
+    /// UV par coin de triangle, quand le maillage en apporte (géométrie de nodes dans une scène).
+    /// Un triangle sans UV y vaut NaN : il garde la projection par défaut.
+    pub uv: Option<std::sync::Arc<Vec<[[f32; 2]; 3]>>>,
 }
 
 fn sub(a: V3, b: V3) -> V3 {
@@ -97,7 +100,7 @@ impl Model {
             }
         }
         let (total_tris, total_vertices) = (tris.len(), positions.len());
-        let mut m = Self { positions, tris, colors, edges, min, max, total_tris, total_vertices, z_up };
+        let mut m = Self { positions, tris, colors, edges, min, max, total_tris, total_vertices, z_up, uv: None };
         if simplify {
             m.simplify(MAX_TRIS);
         }
@@ -1006,6 +1009,20 @@ impl Prepared {
     }
     pub fn tri_count(&self) -> usize {
         self.tris.len()
+    }
+
+    /// UV venues de la scène (une entrée par triangle). Un triangle sans UV (NaN) reçoit la
+    /// projection par défaut des matériaux, calculée ici depuis ses sommets : le rendu est le même
+    /// qu'avant pour les objets qui n'apportent pas d'UV.
+    pub fn set_scene_uv(&mut self, uv: &[[[f32; 2]; 3]]) {
+        if uv.len() != self.tris.len() {
+            return;
+        }
+        self.uv = uv
+            .iter()
+            .zip(&self.tris)
+            .map(|(u, t)| if u[0][0].is_nan() { t.map(|v| [self.pos[v as usize][0] + 0.5, self.pos[v as usize][1] + 0.5]) } else { *u })
+            .collect();
     }
 
     /// Depuis un maillage modifié : recentré et remis à l'échelle pour tenir dans la vue.
@@ -2398,6 +2415,66 @@ fn lighting_ui(look: &mut Look, hdr_files: &[(String, std::path::PathBuf)], load
 }
 
 
+/// Les géométries de nodes du coffre (`.arygeo`), triées par nom. Les dossiers cachés et la
+/// corbeille sont ignorés ; la recherche s'arrête à 300 fichiers.
+fn vault_geos(root: &str) -> Vec<std::path::PathBuf> {
+    let mut out = vec![];
+    if root.is_empty() {
+        return out;
+    }
+    let mut stack = vec![(std::path::PathBuf::from(root), 0usize)];
+    while let Some((dir, depth)) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&dir) else { continue };
+        for e in rd.flatten() {
+            let (path, name) = (e.path(), e.file_name().to_string_lossy().to_string());
+            if name.starts_with('.') {
+                continue;
+            }
+            if path.is_dir() {
+                if depth < 6 {
+                    stack.push((path, depth + 1));
+                }
+            } else if crate::geoscene::is_geo(&name) && out.len() < 300 {
+                out.push(path);
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+/// Sous-menu « géométrie de nodes » du menu « ajouter » d'une scène : un drapeau simulé tout
+/// neuf, ou une géométrie du coffre. Rend le fichier choisi (chemin vide : le drapeau neuf).
+fn geo_menu(ui: &mut egui::Ui, root: &str, files: &mut Option<(std::time::Instant, Vec<std::path::PathBuf>)>) -> Option<std::path::PathBuf> {
+    let mut pick = None;
+    ui.menu_button(format!("{}  {}", crate::lucide::WAVES, crate::i18n::t("géométrie de nodes")), |ui| {
+        ui.set_min_width(240.0);
+        if ui.button(format!("{}  {}", crate::lucide::FLAG, crate::i18n::t("nouveau drapeau simulé"))).on_hover_text(crate::i18n::t("Crée à côté de la scène un graphe de simulation (un tissu tenu par un bord, dans le vent) et le pose dans la scène : il suit la timeline, reçoit un matériau et sort au rendu")).clicked() {
+            pick = Some(std::path::PathBuf::new());
+            ui.close();
+        }
+        if files.as_ref().is_none_or(|(t, _)| t.elapsed().as_secs_f32() > 2.0) {
+            *files = Some((std::time::Instant::now(), vault_geos(root)));
+        }
+        let list = files.as_ref().map(|f| f.1.as_slice()).unwrap_or(&[]);
+        if !list.is_empty() {
+            ui.separator();
+            ui.label(egui::RichText::new(crate::i18n::t("DU COFFRE")).size(10.0).color(theme::pal().muted));
+        }
+        egui::ScrollArea::vertical().max_height(260.0).show(ui, |ui| {
+            for f in list {
+                let rel = f.strip_prefix(root).map(|r| r.to_string_lossy().replace('\\', "/")).unwrap_or_else(|_| f.to_string_lossy().to_string());
+                let name = f.file_stem().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                if ui.button(name).on_hover_text(rel).clicked() {
+                    pick = Some(f.clone());
+                    ui.close();
+                }
+            }
+        });
+    });
+    pick
+}
+
 /// Rend chaque image d'une scène (début → fin) et les envoie à ffmpeg, qui écrit la vidéo `out`.
 /// La caméra de la scène sert de point de vue ; sans caméra, `view_cam`.
 #[allow(clippy::too_many_arguments)]
@@ -2445,6 +2522,9 @@ fn encode_animation(ff: std::path::PathBuf, scene: crate::scene::Scene, path: &s
         let origin = [-mc[0] / l2, -mc[1] / l2, -mc[2] / l2];
         let base = crate::modifiers::Mesh::from_model(&m, m.z_up);
         let mut prep = Prepared::from_mesh_fixed(crate::modifiers::apply(&[], base, origin), floor);
+        if let Some(uv) = &m.uv {
+            prep.set_scene_uv(uv);
+        }
         // Un matériau par objet, comme à l'écran
         if ranges.last().map(|r| r.2) == Some(prep.tris.len()) {
             prep.mat = vec![0; prep.tris.len()];
@@ -3121,6 +3201,13 @@ pub struct Viewer {
     hdr_key: Option<(Key, egui::Modifiers)>,
     /// Objet à ajouter depuis le menu « ajouter »
     hdr_add: Option<&'static str>,
+    /// Géométrie de nodes à ajouter à la scène (chemin vide : un drapeau simulé tout neuf)
+    geo_add: Option<std::path::PathBuf>,
+    /// Les `.arygeo` du coffre, relus de temps en temps pendant que le menu est ouvert
+    geo_files: Option<(std::time::Instant, Vec<std::path::PathBuf>)>,
+    /// Export d'une simulation en suite d'OBJ : l'objet demandé, puis les messages du travail en cours
+    geo_export_req: Option<usize>,
+    geo_export: Option<Receiver<String>>,
     /// Triangles, sommets, taille : affichés en bas de la vue
     stats_text: String,
     /// Un champ avait le clavier à l'image précédente (Tab y sert alors à passer au champ suivant)
@@ -3353,6 +3440,10 @@ impl Viewer {
             curve_ed: Default::default(),
             hdr_key: None,
             hdr_add: None,
+            geo_add: None,
+            geo_files: None,
+            geo_export_req: None,
+            geo_export: None,
             stats_text: String::new(),
             kb_busy: false,
             scene_saved: None,
@@ -4044,6 +4135,9 @@ impl Viewer {
     fn own_mesh_file(&mut self, k: usize) -> Result<std::path::PathBuf, String> {
         let scene = self.scene.as_mut().ok_or_else(|| crate::i18n::t("pas de scène"))?;
         let o = scene.objects.get(k).filter(|o| crate::scene::kind(o) == crate::scene::Kind::Model).ok_or_else(|| crate::i18n::t("seuls les objets à maillage se modifient"))?;
+        if crate::geoscene::is_geo(&o.file) {
+            return Err(crate::i18n::t("une géométrie de nodes se modifie dans son graphe (onglet Simulation)"));
+        }
         let stem = self.path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "scène".into());
         let dir = self.path.parent().unwrap_or(std::path::Path::new("")).to_path_buf();
         let prefix = format!("{stem} - ");
@@ -4378,6 +4472,10 @@ impl Viewer {
             self.capture_msg = Some(crate::i18n::t("seuls les objets à maillage se modifient en mode édition"));
             return;
         };
+        if crate::geoscene::is_geo(&o.file) {
+            self.capture_msg = Some(crate::i18n::t("une géométrie de nodes se modifie dans son graphe (onglet Simulation)"));
+            return;
+        }
         let stem = self.path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "scène".into());
         let dir = self.path.parent().unwrap_or(std::path::Path::new("")).to_path_buf();
         let prefix = format!("{stem} - ");
@@ -6273,6 +6371,66 @@ impl Viewer {
             self.scene_multi.clear();
             changed = true;
         }
+        // Géométrie de nodes : un fichier du coffre, ou un drapeau simulé créé à côté de la scène
+        if let Some(f) = self.geo_add.take() {
+            let file = if f.as_os_str().is_empty() {
+                let dir = path.parent().unwrap_or(std::path::Path::new("")).to_path_buf();
+                let stem = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "scène".into());
+                let base = crate::i18n::t_mid("drapeau");
+                let mut out = dir.join(format!("{stem} - {base}.arygeo"));
+                let mut n = 2;
+                while out.exists() {
+                    out = dir.join(format!("{stem} - {base} {n}.arygeo"));
+                    n += 1;
+                }
+                crate::geo::example("drapeau dans le vent").ok_or_else(|| "exemple introuvable".to_string()).and_then(|g| g.save(&out)).map(|_| out)
+            } else {
+                Ok(f)
+            };
+            match file {
+                Ok(file) => {
+                    self.scene_sel = Some(scene.add_geo(&path, &file));
+                    self.scene_multi.clear();
+                    changed = true;
+                }
+                Err(e) => self.capture_msg = Some(e),
+            }
+        }
+        // Export d'une simulation en suite d'OBJ, en arrière-plan : un dossier à côté de la scène
+        if let Some(k) = self.geo_export_req.take().filter(|_| self.geo_export.is_none()) {
+            if let Some(o) = scene.objects.get(k) {
+                let stem = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "scène".into());
+                let dir = path.parent().unwrap_or(std::path::Path::new("")).join(format!("{stem} - {} (OBJ)", o.name));
+                let (tx, rx) = channel();
+                let (sc, sp, ctx) = (scene.clone(), path.clone(), ui.ctx().clone());
+                std::thread::spawn(move || {
+                    let label = crate::i18n::t("export OBJ");
+                    let tick = |done: usize, total: usize| {
+                        let _ = tx.send(format!("{label} : {done} / {total}"));
+                        ctx.request_repaint();
+                    };
+                    let msg = match crate::geoscene::export_obj_sequence(&sc, &sp, k, &dir, &tick) {
+                        Ok(n) => format!("{} {n} OBJ : {}", crate::i18n::t("suite exportée,"), dir.file_name().map(|d| d.to_string_lossy().to_string()).unwrap_or_default()),
+                        Err(e) => format!("{} {}", crate::i18n::t("export impossible :"), crate::i18n::t_mid(&e)),
+                    };
+                    let _ = tx.send(msg);
+                    ctx.request_repaint();
+                });
+                self.geo_export = Some(rx);
+            }
+        }
+        if let Some(rx) = &self.geo_export {
+            loop {
+                match rx.try_recv() {
+                    Ok(m) => self.capture_msg = Some(m),
+                    Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        self.geo_export = None;
+                        break;
+                    }
+                }
+            }
+        }
         // Menu « ajouter » sous le curseur (Maj+A), comme dans Blender
         if let Some(at) = self.add_popup {
             let mut close = false;
@@ -6513,10 +6671,11 @@ impl Viewer {
         let mut morph_op: Option<(u8, usize)> = None;
         let editing_obj = self.mesh.as_ref().map(|m| m.obj);
         let frame_now = self.anim_frame.round() as i32;
+        let (scene_start, scene_fps) = (scene.start, scene.fps);
         let bone_roots: Vec<String> = (0..scene.objects.len()).filter(|&k| crate::rig::is_bone(scene, k) && crate::rig::root_of(scene, k) == k).map(|k| scene.objects[k].name.clone()).collect();
         for f in std::mem::take(&mut self.scene_add) {
             let image = crate::scene::kind(&crate::scene::Object::new(String::new(), f.to_string_lossy().to_string())) == crate::scene::Kind::Image;
-            if (is_model(&f.to_string_lossy()) || image) && !crate::scene::is_scene(&f) {
+            if (is_model(&f.to_string_lossy()) || image || crate::geoscene::is_geo(&f.to_string_lossy())) && !crate::scene::is_scene(&f) {
                 scene.add(&path, &f);
                 self.scene_sel = Some(scene.objects.len() - 1);
                 changed = true;
@@ -6550,6 +6709,9 @@ impl Viewer {
                         if ui.button(format!("{}  {}", crate::lucide::TYPE, crate::i18n::t("texte 3D…"))).clicked() {
                             self.text3d = Some((String::new(), 1.0, 0.25, 1));
                             ui.close();
+                        }
+                        if let Some(f) = geo_menu(ui, &self.root, &mut self.geo_files) {
+                            self.geo_add = Some(f);
                         }
                         if ui.add_enabled(self.mm_job.is_none(), egui::Button::new(format!("{}  {}", crate::lucide::VIDEO, crate::i18n::t("caméra suivie depuis une vidéo…")))).on_hover_text(crate::i18n::t("Suivi de caméra : retrouve le mouvement de la caméra d'une vidéo et des repères de la scène filmée, avec la vidéo en fond")).clicked() {
                             self.want_matchmove = true;
@@ -6688,6 +6850,7 @@ impl Viewer {
                     ui.horizontal(|ui| {
                         // Rangée de 24 px : icône Lucide, nom en Inter 12,5, œil à droite
                         let icon = match crate::scene::kind(o) {
+                            crate::scene::Kind::Model if crate::geoscene::is_geo(&o.file) => crate::lucide::WAVES,
                             crate::scene::Kind::Model => crate::lucide::BOX,
                             crate::scene::Kind::Image => crate::lucide::IMAGE,
                             crate::scene::Kind::Empty => crate::lucide::SQUARE,
@@ -6925,6 +7088,7 @@ impl Viewer {
                                         let kind = crate::scene::kind(o);
                                         ui.horizontal(|ui| {
                                             let (icon, what) = match kind {
+                                                crate::scene::Kind::Model if crate::geoscene::is_geo(&o.file) => (crate::lucide::WAVES, "géométrie de nodes"),
                                                 crate::scene::Kind::Model => (crate::lucide::BOX, "maillage"),
                                                 crate::scene::Kind::Image => (crate::lucide::IMAGE, "image"),
                                                 crate::scene::Kind::Empty => (crate::lucide::SQUARE, "groupe vide"),
@@ -7100,7 +7264,30 @@ impl Viewer {
                                             });
                                         }
 
-                                        if crate::scene::kind(o) == crate::scene::Kind::Model {
+                                        if crate::geoscene::is_geo(&o.file) {
+                                            // Géométrie de nodes : son graphe, le départ de sa simulation, son export
+                                            let file = crate::scene::resolve(&path, &o.file);
+                                            ui.label(egui::RichText::new(crate::i18n::t("Simulation")).size(11.0).color(p.muted));
+                                            ui.horizontal(|ui| {
+                                                ui.label(egui::RichText::new(file.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()).size(11.5).color(p.text));
+                                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                                    if ui.add_enabled(self.geo_export.is_none(), egui::Button::new(egui::RichText::new(crate::lucide::DOWNLOAD).size(14.0)).frame(false)).on_hover_text(crate::i18n::t("Exporter la simulation en suite d'OBJ : un fichier par image de la scène, dans un dossier à côté d'elle (pour Blender, Houdini, un moteur de jeu…)")).clicked() {
+                                                        self.geo_export_req = self.scene_sel;
+                                                    }
+                                                    if ui.add(egui::Button::new(egui::RichText::new(crate::lucide::WORKFLOW).size(14.0)).frame(false)).on_hover_text(crate::i18n::t("Ouvrir le graphe dans l'onglet Simulation : ce qu'on y enregistre se voit aussitôt dans la scène")).clicked() {
+                                                        self.open_request = Some(file.clone());
+                                                    }
+                                                });
+                                            });
+                                            crate::modifiers::row(ui, "départ (images)", |ui| {
+                                                changed |= ui.add(egui::DragValue::new(&mut o.sim_offset).speed(0.2)).on_hover_text(crate::i18n::t("Décalage de départ de la simulation. 10 : elle part à la dixième image de la scène. -10 : elle a déjà tourné dix images quand la scène commence (le tissu est déjà posé)")).changed();
+                                            });
+                                            if let Some(t) = crate::geoscene::time_of(&file) {
+                                                let now = crate::geoscene::sim_frame(self.anim_frame, scene_start, scene_fps, o.sim_offset, t);
+                                                ui.label(egui::RichText::new(format!("{} {now} ({} → {})", crate::i18n::t("image de la simulation :"), t.start, t.end)).size(10.5).color(p.muted)).on_hover_text(crate::i18n::t("L'image de la scène pilote celle de la simulation. Après sa dernière image, la simulation reste sur place : allonge-la dans l'onglet Simulation"));
+                                            }
+                                            ui.add_space(4.0);
+                                        } else if crate::scene::kind(o) == crate::scene::Kind::Model {
                                             let on = self.mesh.is_some();
                                             if ui.add(egui::Button::new(egui::RichText::new(crate::i18n::t(if on { "sortir du mode édition (Tab)" } else { "mode édition (Tab)" })).size(11.5).color(if on { p.on_accent } else { p.text })).fill(if on { p.accent } else { p.panel })).on_hover_text(crate::i18n::t("Modifier le maillage : sommets, extrusion, faces. Le maillage devient un fichier OBJ à côté de la scène ; le modèle d'origine n'est pas touché.")).clicked() {
                                                 self.mesh_toggle = true;
@@ -7149,7 +7336,7 @@ impl Viewer {
                                             }
                                         }
                                         // Formes (blendshapes)
-                                        if crate::scene::kind(o) == crate::scene::Kind::Model {
+                                        if crate::scene::kind(o) == crate::scene::Kind::Model && !crate::geoscene::is_geo(&o.file) {
                                             ui.add_space(4.0);
                                             ui.horizontal(|ui| {
                                                 ui.label(egui::RichText::new(crate::i18n::t("Formes")).size(11.0).color(p.muted)).on_hover_text(crate::i18n::t("Blendshapes : d'autres versions du même maillage (sourire, clignement…), mélangées par un curseur qui s'anime"));
@@ -8440,10 +8627,15 @@ impl Viewer {
                 let origin = if z_up { [o[0], o[2], -o[1]] } else { o };
                 let base = applied.map(|a| (*a).clone()).unwrap_or_else(|| crate::modifiers::Mesh::from_model(&m, z_up));
                 let mesh = crate::modifiers::apply(&stack, base, origin);
-                let _ = tx.send(match fixed_floor {
+                let mut prep = match fixed_floor {
                     Some(f) => Prepared::from_mesh_fixed(mesh, f),
                     None => Prepared::from_mesh(mesh),
-                });
+                };
+                // Scène : les UV apportées par ses objets (géométries de nodes)
+                if let (Some(uv), Some(_)) = (&m.uv, fixed_floor) {
+                    prep.set_scene_uv(uv);
+                }
+                let _ = tx.send(prep);
                 ctx.request_repaint();
             });
             self.job = Some((key, rx));
@@ -8821,6 +9013,9 @@ impl Viewer {
                             }
                             // Les mêmes ajouts que le « + » de la liste de la scène
                             ui.separator();
+                            if let Some(f) = geo_menu(ui, &self.root, &mut self.geo_files) {
+                                self.geo_add = Some(f);
+                            }
                             if ui.button(format!("{}  {}", crate::lucide::TYPE, crate::i18n::t("texte 3D…"))).clicked() {
                                 self.text3d = Some((String::new(), 1.0, 0.25, 1));
                                 ui.close();

@@ -79,6 +79,7 @@ mod keys;
 mod remesh;
 mod motion_ui;
 mod scene;
+mod geoscene;
 mod workspace;
 mod retopo;
 mod bvh;
@@ -7648,7 +7649,7 @@ impl App {
                 }
                 Some(Content::Model(v)) if v.is_scene() => {
                     let n = rel.to_lowercase();
-                    if model3d::is_model(&n) || [".png", ".jpg", ".jpeg", ".webp", ".aryimg"].iter().any(|e| n.ends_with(e)) {
+                    if model3d::is_model(&n) || geoscene::is_geo(&n) || [".png", ".jpg", ".jpeg", ".webp", ".aryimg"].iter().any(|e| n.ends_with(e)) {
                         v.scene_add.push(abs);
                         return;
                     }
@@ -7686,7 +7687,7 @@ impl App {
             }
             let for_scene = |f: &PathBuf| {
                 let n = f.to_string_lossy().to_lowercase();
-                model3d::is_model(&n) || [".png", ".jpg", ".jpeg", ".webp"].iter().any(|e| n.ends_with(e))
+                model3d::is_model(&n) || geoscene::is_geo(&n) || [".png", ".jpg", ".jpeg", ".webp"].iter().any(|e| n.ends_with(e))
             };
             if self.view() == View::Files && paths.iter().any(for_scene) {
                 if let Some(Content::Model(v)) = self.active.and_then(|i| self.docs.get_mut(i)).map(|d| &mut d.content) {

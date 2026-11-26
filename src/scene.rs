@@ -134,6 +134,26 @@ pub struct Object {
     /// Caméra : champ de vision sur le petit côté de l'image, en degrés (0 : celui de la vue)
     #[serde(default, skip_serializing_if = "zero_f32")]
     pub fov: f32,
+    /// Géométrie de nodes (`file` est un `.arygeo`) : décalage de départ de sa simulation, en
+    /// images de la scène. 10 : elle part à la dixième image ; -10 : elle a déjà tourné dix images
+    /// quand la scène commence.
+    #[serde(default, skip_serializing_if = "zero_i32")]
+    pub sim_offset: i32,
+}
+
+fn zero_i32(x: &i32) -> bool {
+    *x == 0
+}
+
+/// Une valeur de travail qui n'est ni écrite dans le fichier ni comparée : deux scènes qui ne
+/// diffèrent que par elle sont la même scène (pour l'annulation, pour savoir s'il faut enregistrer).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Transient<T>(pub T);
+
+impl<T> PartialEq for Transient<T> {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
 }
 
 fn zero_f32(x: &f32) -> bool {
@@ -529,7 +549,7 @@ impl Object {
     }
 
     pub fn new(name: String, file: String) -> Object {
-        Object { name, file, pos: [0.0; 3], rot: [0.0; 3], scale: [1.0; 3], visible: true, color: None, mods: vec![], material: String::new(), paint: String::new(), parent: String::new(), opacity: 0.5, role: String::new(), energy: 1.2, point: false, range: 8.0, shape: 0, spot: spot_deg(), blend: spot_blend(), size: area_size(), keys: vec![], cycle: Default::default(), aim: String::new(), length: 1.0, rest: None, skin: String::new(), ik: String::new(), ik_chain: 2, reach: 1.0, morphs: vec![], copy_loc: String::new(), copy_rot: String::new(), limit: None, layer_keys: vec![], fov: 0.0, paint_layers: vec![] }
+        Object { name, file, pos: [0.0; 3], rot: [0.0; 3], scale: [1.0; 3], visible: true, color: None, mods: vec![], material: String::new(), paint: String::new(), parent: String::new(), opacity: 0.5, role: String::new(), energy: 1.2, point: false, range: 8.0, shape: 0, spot: spot_deg(), blend: spot_blend(), size: area_size(), keys: vec![], cycle: Default::default(), aim: String::new(), length: 1.0, rest: None, skin: String::new(), ik: String::new(), ik_chain: 2, reach: 1.0, morphs: vec![], copy_loc: String::new(), copy_rot: String::new(), limit: None, layer_keys: vec![], fov: 0.0, paint_layers: vec![], sim_offset: 0 }
     }
 }
 
@@ -589,7 +609,7 @@ pub fn kind(o: &Object) -> Kind {
 
 impl Default for Scene {
     fn default() -> Scene {
-        Scene { version: 1, objects: vec![], fps: 24.0, start: 0, end: 120, layers: vec![], active_layer: String::new(), backdrop: None, camera: String::new(), actions: vec![], strips: vec![] }
+        Scene { version: 1, objects: vec![], fps: 24.0, start: 0, end: 120, layers: vec![], active_layer: String::new(), backdrop: None, camera: String::new(), actions: vec![], strips: vec![], frame: Transient(0.0) }
     }
 }
 
@@ -621,6 +641,10 @@ pub struct Scene {
     pub actions: Vec<crate::nla::Action>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub strips: Vec<crate::nla::Strip>,
+    /// Image courante (posée par `apply_frame`) : les géométries de nodes s'en servent pour savoir
+    /// quelle image de leur simulation montrer. Elle n'est pas écrite dans le fichier.
+    #[serde(skip)]
+    pub frame: Transient<f32>,
 }
 
 fn fps() -> f32 {
@@ -650,7 +674,9 @@ impl Scene {
 
     /// Met chaque objet animé dans sa pose de l'image `f`. Renvoie vrai si quelque chose a bougé.
     pub fn apply_frame(&mut self, f: f32) -> bool {
-        let mut moved = false;
+        // Une géométrie de nodes change avec l'image, même si aucun objet ne bouge
+        let mut moved = self.frame.0 != f && self.objects.iter().any(|o| crate::geoscene::is_geo(&o.file));
+        self.frame = Transient(f);
         for o in &mut self.objects {
             for m in &mut o.morphs {
                 if let Some(v) = m.value_at(f) {
@@ -792,6 +818,12 @@ impl Scene {
             n += 1;
         }
         self.objects.push(Object::new(name, file));
+    }
+
+    /// Ajoute une géométrie de nodes (un fichier `.arygeo` du coffre) et renvoie son indice.
+    pub fn add_geo(&mut self, scene_path: &Path, file: &Path) -> usize {
+        self.add(scene_path, file);
+        self.objects.len() - 1
     }
 
     /// Ajoute une forme de base (« @cube », « @sphere »…) et renvoie son indice.
@@ -1206,6 +1238,9 @@ fn cached(path: &Path) -> Result<Arc<crate::model3d::Model>, String> {
 pub fn source_model(scene_path: &Path, o: &Object) -> Result<Arc<crate::model3d::Model>, String> {
     if o.file.starts_with('@') {
         primitive(&o.file).map(Arc::new).ok_or_else(|| format!("forme inconnue : {}", o.file))
+    } else if crate::geoscene::is_geo(&o.file) {
+        // Hors de la timeline : la géométrie à sa première image
+        crate::geoscene::still(&resolve(scene_path, &o.file))
     } else {
         cached(&resolve(scene_path, &o.file))
     }
@@ -1244,6 +1279,10 @@ pub fn blend_morphs(scene_path: &Path, o: &Object, m: Arc<crate::model3d::Model>
 pub fn build_ranges(scene: &Scene, scene_path: &Path) -> (Result<crate::model3d::Model, String>, Vec<Option<String>>, Vec<(usize, usize, usize)>) {
     let mut ranges = vec![];
     let (mut pos, mut tris, mut colors, mut edges) = (vec![], vec![], vec![], vec![]);
+    // UV par coin de triangle, pour les objets qui en apportent (géométries de nodes) ; les autres
+    // triangles sont marqués « sans UV » (NaN) et gardent la projection par défaut
+    let mut uvs: Vec<[[f32; 2]; 3]> = vec![];
+    let mut any_uv = false;
     let mut errors = vec![None; scene.objects.len()];
     for (k, o) in scene.objects.iter().enumerate() {
         if !scene.shown(k) || kind(o) != Kind::Model {
@@ -1255,7 +1294,14 @@ pub fn build_ranges(scene: &Scene, scene_path: &Path) -> (Result<crate::model3d:
             errors[k] = Some("une scène ne peut pas en contenir une autre".into());
             continue;
         }
-        let loaded = if o.file.starts_with('@') { primitive(&o.file).map(Arc::new).ok_or_else(|| format!("forme inconnue : {}", o.file)) } else { cached(&path) };
+        let loaded = if o.file.starts_with('@') {
+            primitive(&o.file).map(Arc::new).ok_or_else(|| format!("forme inconnue : {}", o.file))
+        } else if crate::geoscene::is_geo(&o.file) {
+            // Géométrie de nodes : le graphe calculé à l'image de la scène
+            crate::geoscene::model(scene, scene_path, k)
+        } else {
+            cached(&path)
+        };
         let loaded = loaded.map(|m| blend_morphs(scene_path, o, m));
         match loaded {
             Ok(m) => {
@@ -1277,6 +1323,7 @@ pub fn build_ranges(scene: &Scene, scene_path: &Path) -> (Result<crate::model3d:
                     }
                     edges.extend(mesh.edges.iter().copied());
                     crate::rig::deform(scene, k, &mut pos[base as usize..]);
+                    uvs.resize(tris.len(), [[f32::NAN; 2]; 3]);
                     continue;
                 }
                 ranges.push((k, tris.len(), tris.len() + m.tris.len()));
@@ -1288,6 +1335,13 @@ pub fn build_ranges(scene: &Scene, scene_path: &Path) -> (Result<crate::model3d:
                     None => colors.extend(m.colors.iter().copied()),
                 }
                 edges.extend(m.edges.iter().copied());
+                match m.uv.as_ref().filter(|u| u.len() == m.tris.len()) {
+                    Some(u) => {
+                        uvs.extend(u.iter().copied());
+                        any_uv = true;
+                    }
+                    None => uvs.resize(tris.len(), [[f32::NAN; 2]; 3]),
+                }
             }
             Err(e) => errors[k] = Some(e),
         }
@@ -1307,7 +1361,14 @@ pub fn build_ranges(scene: &Scene, scene_path: &Path) -> (Result<crate::model3d:
         }
         return (crate::model3d::Model::exact(vec![lo, hi], vec![[0, 0, 0]], None, None), errors, vec![]);
     }
-    (crate::model3d::Model::exact(pos, tris, Some(colors), Some(edges)), errors, ranges)
+    let count = tris.len();
+    let mut model = crate::model3d::Model::exact(pos, tris, Some(colors), Some(edges));
+    if let Ok(m) = model.as_mut() {
+        if any_uv && m.tris.len() == count && uvs.len() == count {
+            m.uv = Some(Arc::new(uvs));
+        }
+    }
+    (model, errors, ranges)
 }
 
 #[cfg(test)]

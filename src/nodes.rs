@@ -231,7 +231,7 @@ pub const DEFS: &[Def] = &[
     // Géométrie : des points, leurs attributs, des arêtes. Les entrées de nombre, de vecteur et de
     // couleur sont des champs : on y branche n'importe quelle chaîne de nodes, calculée point par point.
     Def { op: "geo_out", label: "Sortie géométrie", cat: "sortie", inputs: &[("géométrie", Sock::Geo, ZERO)], outputs: &[], params: &[], mat: false, comp: false },
-    Def { op: "geo_grid", label: "Grille", cat: "géométrie", inputs: &[("largeur", Sock::Float, f(2.0)), ("profondeur", Sock::Float, f(2.0)), ("points en largeur", Sock::Int, f(20.0)), ("points en profondeur", Sock::Int, f(20.0))], outputs: &[("géométrie", Sock::Geo)], params: &[ParamDef::Choice("plan", &["sol (XZ)", "mur (XY)"]), ParamDef::Choice("arêtes", &["oui", "avec diagonales", "non"])], mat: false, comp: false },
+    Def { op: "geo_grid", label: "Grille", cat: "géométrie", inputs: &[("largeur", Sock::Float, f(2.0)), ("profondeur", Sock::Float, f(2.0)), ("points en largeur", Sock::Int, f(20.0)), ("points en profondeur", Sock::Int, f(20.0))], outputs: &[("géométrie", Sock::Geo)], params: &[ParamDef::Choice("plan", &["sol (XZ)", "mur (XY)"]), ParamDef::Choice("arêtes", &["oui", "avec diagonales", "non"]), ParamDef::Choice("faces", &["oui", "non"])], mat: false, comp: false },
     Def { op: "geo_sphere", label: "Points sur une sphère", cat: "géométrie", inputs: &[("points", Sock::Int, f(500.0)), ("rayon", Sock::Float, f(1.0))], outputs: &[("géométrie", Sock::Geo)], params: &[], mat: false, comp: false },
     Def { op: "geo_circle", label: "Cercle", cat: "géométrie", inputs: &[("points", Sock::Int, f(32.0)), ("rayon", Sock::Float, f(1.0))], outputs: &[("géométrie", Sock::Geo)], params: &[], mat: false, comp: false },
     Def { op: "geo_line", label: "Ligne", cat: "géométrie", inputs: &[("points", Sock::Int, f(10.0)), ("départ", Sock::Vector, ZERO), ("arrivée", Sock::Vector, [0.0, 1.0, 0.0, 0.0])], outputs: &[("géométrie", Sock::Geo)], params: &[], mat: false, comp: false },
@@ -242,6 +242,10 @@ pub const DEFS: &[Def] = &[
     Def { op: "geo_merge", label: "Réunir", cat: "géométrie", inputs: &[("géométrie A", Sock::Geo, ZERO), ("géométrie B", Sock::Geo, ZERO)], outputs: &[("géométrie", Sock::Geo)], params: &[], mat: false, comp: false },
     Def { op: "geo_delete", label: "Supprimer des points", cat: "géométrie", inputs: &[("géométrie", Sock::Geo, ZERO), ("sélection", Sock::Bool, f(0.0))], outputs: &[("géométrie", Sock::Geo)], params: &[], mat: false, comp: false },
     Def { op: "geo_copy", label: "Copier sur des points", cat: "géométrie", inputs: &[("points", Sock::Geo, ZERO), ("modèle", Sock::Geo, ZERO), ("taille", Sock::Float, f(1.0))], outputs: &[("géométrie", Sock::Geo)], params: &[], mat: false, comp: false },
+    // Entrée de la scène 3D : la boîte d'un objet de la scène où cette géométrie est posée (centre,
+    // rayon de la boule qui la contient, tailles), dans le repère de la géométrie. Hors d'une scène,
+    // ou si l'objet n'existe pas : les valeurs réglées sur le node.
+    Def { op: "geo_scene_obj", label: "Objet de la scène", cat: "simulation", inputs: &[("centre hors scène", Sock::Vector, ZERO), ("dimensions hors scène", Sock::Vector, [1.0, 1.0, 1.0, 0.0])], outputs: &[("centre", Sock::Vector), ("rayon", Sock::Float), ("dimensions", Sock::Vector)], params: &[ParamDef::Line("objet", "")], mat: false, comp: false },
     Def { op: "position", label: "Position", cat: "géométrie", inputs: &[], outputs: &[("position", Sock::Vector)], params: &[], mat: false, comp: false },
     Def { op: "index", label: "Numéro du point", cat: "géométrie", inputs: &[], outputs: &[("numéro", Sock::Float)], params: &[], mat: false, comp: false },
     Def { op: "attribute", label: "Lire un attribut", cat: "géométrie", inputs: &[], outputs: &[("valeur", Sock::Float), ("vecteur", Sock::Vector)], params: &[ParamDef::Line("nom", "v")], mat: false, comp: false },
@@ -1770,6 +1774,17 @@ impl Program {
                 params.insert("_image".into(), Param::F(frame));
                 params.insert("_secondes".into(), Param::F(frame / fps.max(1e-3)));
             }
+            if n.op == "geo_scene_obj" {
+                // La boîte de l'objet à l'image en cours, donnée par la scène qui calcule ce graphe
+                if let Some((c, size)) = crate::geo::scene_object(pstr(&n.params, "objet")) {
+                    for (k, name) in ["_cx", "_cy", "_cz"].iter().enumerate() {
+                        params.insert((*name).into(), Param::F(c[k]));
+                    }
+                    for (k, name) in ["_sx", "_sy", "_sz"].iter().enumerate() {
+                        params.insert((*name).into(), Param::F(size[k]));
+                    }
+                }
+            }
             let image = if n.op == "exr" {
                 let rel = pstr(&n.params, "fichier");
                 if rel.is_empty() {
@@ -2983,6 +2998,14 @@ fn pixel(s: &Step, i: &[V], c: &Ctx) -> [V; 4] {
             [one(m(h(0.0))), [m(h(0.0)), m(h(17.0)), m(h(41.0)), 1.0], z, z]
         }
         "time" => [one(pnum(&s.params, "_image", 0.0)), one(pnum(&s.params, "_secondes", 0.0)), z, z],
+        "geo_scene_obj" => {
+            let (c, size) = if s.params.contains_key("_sx") {
+                ([pnum(&s.params, "_cx", 0.0), pnum(&s.params, "_cy", 0.0), pnum(&s.params, "_cz", 0.0)], [pnum(&s.params, "_sx", 0.0), pnum(&s.params, "_sy", 0.0), pnum(&s.params, "_sz", 0.0)])
+            } else {
+                ([i[0][0], i[0][1], i[0][2]], [i[1][0], i[1][1], i[1][2]])
+            };
+            [[c[0], c[1], c[2], 1.0], one(size[0].max(size[1]).max(size[2]) * 0.5), [size[0], size[1], size[2], 1.0], z]
+        }
         "expr" => match &s.shader {
             Some(sh) => {
                 let mut v = vec![0.0f32; sh.slots];

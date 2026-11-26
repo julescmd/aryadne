@@ -75,7 +75,11 @@ impl Column {
     }
 }
 
-/// Une géométrie : des points, leurs attributs, et des arêtes qui les relient (fils, tissu).
+/// Quatrième indice d'une face à trois sommets.
+pub const NO_VERT: u32 = u32::MAX;
+
+/// Une géométrie : des points, leurs attributs, des arêtes qui les relient (fils, tissu), et des
+/// faces qui en font une surface (ce qu'une scène 3D ombre et rend).
 #[derive(Clone, Default, Debug)]
 pub struct Geo {
     pub n: usize,
@@ -84,6 +88,10 @@ pub struct Geo {
     /// Attributs des arêtes (longueur au repos, raideur…)
     pub ecols: BTreeMap<String, Arc<Column>>,
     edges_version: u64,
+    /// Faces : des quads, ou des triangles (quatrième indice : `NO_VERT`). Elles ne servent pas
+    /// aux solveurs ; elles suivent les points à travers les nodes et la simulation.
+    pub faces: Arc<Vec<[u32; 4]>>,
+    faces_version: u64,
 }
 
 impl Geo {
@@ -109,6 +117,35 @@ impl Geo {
         self.ecols.clear();
     }
 
+    pub fn set_faces(&mut self, f: Vec<[u32; 4]>) {
+        self.faces = Arc::new(f);
+        self.faces_version = next_version();
+    }
+
+    /// Les faces en triangles (un quad en donne deux), avec pour chacun ses vrais côtés (pas la
+    /// diagonale du quad) : bit 0 v0-v1, bit 1 v1-v2, bit 2 v2-v0. Les faces qui pointent hors des
+    /// points sont ignorées.
+    pub fn triangles(&self) -> (Vec<[u32; 3]>, Vec<u8>) {
+        let mut tris = Vec::with_capacity(self.faces.len() * 2);
+        let mut sides = Vec::with_capacity(self.faces.len() * 2);
+        let n = self.n as u32;
+        for f in self.faces.iter() {
+            if f[0] >= n || f[1] >= n || f[2] >= n {
+                continue;
+            }
+            if f[3] == NO_VERT {
+                tris.push([f[0], f[1], f[2]]);
+                sides.push(0b111);
+            } else if f[3] < n {
+                tris.push([f[0], f[1], f[2]]);
+                sides.push(0b011);
+                tris.push([f[0], f[2], f[3]]);
+                sides.push(0b110);
+            }
+        }
+        (tris, sides)
+    }
+
     /// Les trois composantes d'un attribut vectoriel, copiées (zéros s'il manque).
     pub fn vec3(&self, name: &str) -> [Vec<f32>; 3] {
         match self.col(name) {
@@ -124,7 +161,7 @@ impl Geo {
         }
     }
 
-    /// Empreinte : change dès qu'une colonne, le nombre de points ou les arêtes changent.
+    /// Empreinte : change dès qu'une colonne, le nombre de points, les arêtes ou les faces changent.
     pub fn stamp(&self) -> u64 {
         let mut h = std::collections::hash_map::DefaultHasher::new();
         self.n.hash(&mut h);
@@ -137,11 +174,12 @@ impl Geo {
             c.version.hash(&mut h);
         }
         self.edges_version.hash(&mut h);
+        self.faces_version.hash(&mut h);
         h.finish()
     }
 
     pub fn bytes(&self) -> usize {
-        self.cols.values().chain(self.ecols.values()).map(|c| c.bytes()).sum::<usize>() + self.edges.len() * 8
+        self.cols.values().chain(self.ecols.values()).map(|c| c.bytes()).sum::<usize>() + self.edges.len() * 8 + self.faces.len() * 16
     }
 
     /// Coupure anticipée : chaque colonne identique à celle de `old` reprend l'ancienne (et son
@@ -168,6 +206,10 @@ impl Geo {
             self.edges = old.edges.clone();
             self.edges_version = old.edges_version;
         }
+        if self.faces_version != old.faces_version && (Arc::ptr_eq(&self.faces, &old.faces) || *self.faces == *old.faces) {
+            self.faces = old.faces.clone();
+            self.faces_version = old.faces_version;
+        }
     }
 
     /// Boîte englobante (min, max), ou rien sans point.
@@ -187,7 +229,9 @@ impl Geo {
     }
 
     /// Cache disque d'une image : en-tête, puis chaque colonne en nombres bruts. Les colonnes se
-    /// relisent telles quelles, sans conversion.
+    /// relisent telles quelles, sans conversion. Les faces viennent à la fin, dans un bloc « FACE »
+    /// facultatif : un cache écrit avant elles se relit toujours (sans faces), et une ancienne
+    /// version de l'application relit un cache récent en ignorant ce bloc.
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut b = Vec::with_capacity(self.bytes() + 64);
         b.extend_from_slice(b"ARYGEO1\0");
@@ -211,6 +255,15 @@ impl Geo {
         for e in self.edges.iter() {
             put(&mut b, e[0]);
             put(&mut b, e[1]);
+        }
+        if !self.faces.is_empty() {
+            b.extend_from_slice(b"FACE");
+            put(&mut b, self.faces.len() as u32);
+            for f in self.faces.iter() {
+                for i in f {
+                    put(&mut b, *i);
+                }
+            }
         }
         b
     }
@@ -259,6 +312,18 @@ impl Geo {
         }
         g.edges = Arc::new(edges);
         g.edges_version = next_version();
+        if b.get(at..at + 4) == Some(b"FACE") {
+            at += 4;
+            let nf = u32_at(&mut at)? as usize;
+            if b.len() < at + nf.saturating_mul(16) {
+                return Err(bad());
+            }
+            let mut faces = Vec::with_capacity(nf);
+            for _ in 0..nf {
+                faces.push([u32_at(&mut at)?, u32_at(&mut at)?, u32_at(&mut at)?, u32_at(&mut at)?]);
+            }
+            g.set_faces(faces);
+        }
         Ok(g)
     }
 }
@@ -659,6 +724,49 @@ pub fn cloth_comparison(n: usize, budgets: &[usize]) -> crate::gpucloth::Compari
     })
 }
 
+// ---------- entrées de la scène ----------
+
+/// Ce qu'une scène 3D montre au graphe qu'elle calcule : la boîte de ses objets (centre, tailles),
+/// dans le repère de la géométrie, à chaque image de la simulation depuis `start`.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SceneInputs {
+    pub start: i32,
+    pub objects: BTreeMap<String, Vec<([f32; 3], [f32; 3])>>,
+}
+
+impl SceneInputs {
+    /// La boîte d'un objet à une image de la simulation (la première ou la dernière connue au-delà).
+    pub fn at(&self, name: &str, frame: i32) -> Option<([f32; 3], [f32; 3])> {
+        let track = self.objects.get(name).filter(|t| !t.is_empty())?;
+        Some(track[((frame - self.start).max(0) as usize).min(track.len() - 1)])
+    }
+
+    /// Empreinte de toute la trajectoire d'un objet : elle entre dans la clé d'une zone de simulation.
+    fn track_hash(&self, name: &str, h: &mut impl Hasher) {
+        self.start.hash(h);
+        for (c, s) in self.objects.get(name).map(|t| t.as_slice()).unwrap_or(&[]) {
+            for x in c.iter().chain(s) {
+                x.to_bits().hash(h);
+            }
+        }
+    }
+}
+
+thread_local! {
+    /// Les entrées de la scène et l'image du calcul en cours sur ce fil
+    static SCENE_NOW: std::cell::RefCell<Option<(Arc<SceneInputs>, i32)>> = const { std::cell::RefCell::new(None) };
+}
+
+/// La boîte (centre, tailles) d'un objet de la scène à l'image que le moteur calcule en ce moment.
+/// Rien hors d'une scène, ou si l'objet n'y est pas.
+pub fn scene_object(name: &str) -> Option<([f32; 3], [f32; 3])> {
+    SCENE_NOW.with(|s| s.borrow().as_ref().and_then(|(inputs, frame)| inputs.at(name, *frame)))
+}
+
+fn scene_now(inputs: &Option<Arc<SceneInputs>>, frame: i32) {
+    SCENE_NOW.with(|s| *s.borrow_mut() = inputs.clone().map(|i| (i, frame)));
+}
+
 // ---------- moteur ----------
 
 /// Ce qu'a coûté le dernier calcul : de quoi montrer à l'artiste que seul le nécessaire est refait.
@@ -701,11 +809,13 @@ pub struct Engine {
     sim_frames: HashMap<u32, (u64, std::collections::BTreeSet<i32>)>,
     /// Dossier d'un cache figé sur le disque, par zone (node de fin)
     pub baked: HashMap<u32, std::path::PathBuf>,
+    /// Entrées de la scène 3D qui calcule ce graphe (node « Objet de la scène ») ; rien hors d'une scène
+    pub scene: Option<Arc<SceneInputs>>,
 }
 
 impl Default for Engine {
     fn default() -> Self {
-        Engine { memo: HashMap::new(), last: HashMap::new(), bytes: 0, budget: 512 << 20, clock: 0.0, stats: Stats::default(), deadline: None, incomplete: false, sim_frames: HashMap::new(), baked: HashMap::new() }
+        Engine { memo: HashMap::new(), last: HashMap::new(), bytes: 0, budget: 512 << 20, clock: 0.0, stats: Stats::default(), deadline: None, incomplete: false, sim_frames: HashMap::new(), baked: HashMap::new(), scene: None }
     }
 }
 
@@ -753,8 +863,8 @@ impl Field {
 
 impl Engine {
     pub fn clear(&mut self) {
-        let budget = self.budget;
-        *self = Engine { budget, ..Default::default() };
+        let (budget, scene) = (self.budget, self.scene.take());
+        *self = Engine { budget, scene, ..Default::default() };
     }
 
     /// Mémoire tenue par le cache, en octets (les colonnes partagées sont comptées à chaque usage).
@@ -835,6 +945,15 @@ impl Engine {
             into.entry(l.to).or_default().push(l);
         }
         let nodes: HashMap<u32, &Node> = g.nodes.iter().map(|n| (n.id, n)).collect();
+        // Le node « Objet de la scène » lit la scène à l'image en cours (rien après le calcul)
+        struct Leave;
+        impl Drop for Leave {
+            fn drop(&mut self) {
+                scene_now(&None, 0);
+            }
+        }
+        let _leave = Leave;
+        scene_now(&self.scene, frame);
         let mut run = Run { g, into, nodes, frame, time, root, env: None, body: HashSet::new(), e: self, src_hash: HashMap::new(), depth: 0 };
         if input {
             return run.geo_in(node, 0);
@@ -951,6 +1070,14 @@ impl Run<'_> {
             hash_params(&mut h, n);
             if n.op == "time" {
                 self.frame.hash(&mut h);
+            }
+            if n.op == "geo_scene_obj" {
+                // L'objet bouge d'une image à l'autre : sa boîte du moment entre dans l'empreinte
+                if let Some((c, size)) = scene_object(pstr(n, "objet")) {
+                    for x in c.iter().chain(&size) {
+                        x.to_bits().hash(&mut h);
+                    }
+                }
             }
             let count = n.def().map(|d| d.inputs.len()).unwrap_or(0);
             for i in 0..count {
@@ -1135,6 +1262,12 @@ impl Run<'_> {
             }
             self.time.fps.to_bits().hash(&mut h);
             start.hash(&mut h);
+            // Les objets de la scène que le graphe regarde : toute leur trajectoire compte
+            if let Some(inputs) = self.e.scene.clone() {
+                for n in self.g.nodes.iter().filter(|n| n.op == "geo_scene_obj") {
+                    inputs.track_hash(pstr(n, "objet"), &mut h);
+                }
+            }
             h.finish()
         };
         match self.e.sim_frames.get_mut(&end) {
@@ -1211,6 +1344,7 @@ impl Run<'_> {
         if self.frame != f {
             self.frame = f;
             self.src_hash.clear();
+            scene_now(&self.e.scene, f);
         }
     }
 
@@ -1308,6 +1442,26 @@ impl Run<'_> {
                         }
                     }
                     g.set_edges(e);
+                }
+                // Faces (des quads tournés vers +Y pour le sol, vers +Z pour le mur) et UV : c'est
+                // ce qui fait de la grille une surface qu'une scène 3D ombre, texture et rend
+                if pstr(n, "faces") != "non" && nx > 1 && nz > 1 {
+                    let mut faces = Vec::with_capacity((nx - 1) * (nz - 1));
+                    for j in 0..nz - 1 {
+                        for i in 0..nx - 1 {
+                            let a = (j * nx + i) as u32;
+                            faces.push([a, a + nx as u32, a + nx as u32 + 1, a + 1]);
+                        }
+                    }
+                    g.set_faces(faces);
+                    let mut uv = [Vec::with_capacity(total), Vec::with_capacity(total)];
+                    for j in 0..nz {
+                        for i in 0..nx {
+                            uv[0].push(i as f32 / (nx - 1) as f32);
+                            uv[1].push(1.0 - j as f32 / (nz - 1) as f32);
+                        }
+                    }
+                    g.set("uv", Column::new(uv.into()));
                 }
                 g
             }
@@ -1448,6 +1602,7 @@ impl Run<'_> {
                 let mp = model.vec3("P");
                 let mut p = [Vec::with_capacity(total), Vec::with_capacity(total), Vec::with_capacity(total)];
                 let mut edges = Vec::with_capacity(pts.n * model.edges.len());
+                let mut faces = Vec::with_capacity(pts.n * model.faces.len());
                 for i in 0..pts.n {
                     let (c, s) = (pts.pos(i), scale.at(i)[0]);
                     for j in 0..model.n {
@@ -1457,6 +1612,7 @@ impl Run<'_> {
                     }
                     let base = (i * model.n) as u32;
                     edges.extend(model.edges.iter().map(|e| [e[0] + base, e[1] + base]));
+                    faces.extend(model.faces.iter().map(|f| shift_face(*f, base)));
                 }
                 let mut g = Geo::points(p);
                 // Chaque copie garde les attributs de son point
@@ -1465,6 +1621,13 @@ impl Run<'_> {
                 }
                 if !edges.is_empty() {
                     g.set_edges(edges);
+                }
+                if !faces.is_empty() {
+                    g.set_faces(faces);
+                    // Chaque copie garde les UV du modèle
+                    if let (Some(c), false) = (model.col("uv"), pts.cols.contains_key("uv")) {
+                        g.set("uv", Column::new(c.data.iter().map(|comp| comp.iter().copied().cycle().take(total).collect()).collect()));
+                    }
                 }
                 g
             }
@@ -1633,6 +1796,11 @@ fn rand(i: u32, k: u32, seed: f32) -> f32 {
     (x >> 8) as f32 / (1u32 << 24) as f32
 }
 
+/// Une face dont les sommets sont décalés de `base` (le quatrième indice d'un triangle reste vide).
+fn shift_face(f: [u32; 4], base: u32) -> [u32; 4] {
+    [f[0] + base, f[1] + base, f[2] + base, if f[3] == NO_VERT { NO_VERT } else { f[3] + base }]
+}
+
 /// Réunit deux géométries. Un attribut absent d'un côté y vaut zéro.
 fn merge(a: &Geo, b: &Geo) -> Geo {
     if b.n == 0 {
@@ -1664,18 +1832,22 @@ fn merge(a: &Geo, b: &Geo) -> Geo {
         let off = a.n as u32;
         g.set_edges(a.edges.iter().copied().chain(b.edges.iter().map(|e| [e[0] + off, e[1] + off])).collect());
     }
+    if !a.faces.is_empty() || !b.faces.is_empty() {
+        let off = a.n as u32;
+        g.set_faces(a.faces.iter().copied().chain(b.faces.iter().map(|f| shift_face(*f, off))).collect());
+    }
     g
 }
 
-/// Ne garde que les points marqués ; les arêtes dont un bout disparaît partent avec lui.
+/// Ne garde que les points marqués ; les arêtes et les faces dont un sommet disparaît partent avec lui.
 fn filter(g: &Geo, keep: &[bool]) -> Geo {
     let n = keep.iter().filter(|k| **k).count();
     let mut out = Geo { n, ..Default::default() };
     for (name, c) in &g.cols {
         out.set(name, Column::new(c.data.iter().map(|comp| comp.iter().zip(keep).filter(|(_, k)| **k).map(|(x, _)| *x).collect()).collect()));
     }
-    if !g.edges.is_empty() {
-        let mut map = vec![u32::MAX; g.n];
+    let mut map = vec![u32::MAX; g.n];
+    if !g.edges.is_empty() || !g.faces.is_empty() {
         let mut k = 0;
         for (i, keep) in keep.iter().enumerate() {
             if *keep {
@@ -1683,6 +1855,18 @@ fn filter(g: &Geo, keep: &[bool]) -> Geo {
                 k += 1;
             }
         }
+    }
+    if !g.faces.is_empty() {
+        let at = |i: u32| map.get(i as usize).copied().unwrap_or(u32::MAX);
+        let faces: Vec<[u32; 4]> = g
+            .faces
+            .iter()
+            .filter(|f| f.iter().enumerate().all(|(k, i)| (k == 3 && *i == NO_VERT) || at(*i) != u32::MAX))
+            .map(|f| [at(f[0]), at(f[1]), at(f[2]), if f[3] == NO_VERT { NO_VERT } else { at(f[3]) }])
+            .collect();
+        out.set_faces(faces);
+    }
+    if !g.edges.is_empty() {
         let kept: Vec<bool> = g.edges.iter().map(|e| map[e[0] as usize] != u32::MAX && map[e[1] as usize] != u32::MAX).collect();
         out.set_edges(g.edges.iter().zip(&kept).filter(|(_, k)| **k).map(|(e, _)| [map[e[0] as usize], map[e[1] as usize]]).collect());
         for (name, c) in &g.ecols {
@@ -1787,13 +1971,14 @@ pub fn starter() -> Graph {
 }
 
 /// Exemples proposés dans l'éditeur : chacun montre une façon de se servir des nodes de géométrie.
-pub const EXAMPLES: [&str; 5] = ["tissu sur une boule", "tissu sur la carte graphique", "tissu qui se replie", "fontaine de particules", "vagues animées"];
+pub const EXAMPLES: [&str; 6] = ["tissu sur une boule", "tissu sur la carte graphique", "tissu qui se replie", "drapeau dans le vent", "fontaine de particules", "vagues animées"];
 
 pub fn example(name: &str) -> Option<Graph> {
     match name {
         "tissu sur une boule" => Some(starter()),
         "tissu sur la carte graphique" => Some(cloth_gpu()),
         "tissu qui se replie" => Some(cloth_fold()),
+        "drapeau dans le vent" => Some(flag()),
         "fontaine de particules" => Some(fountain()),
         "vagues animées" => Some(waves()),
         _ => None,
@@ -1854,6 +2039,71 @@ fn cloth_fold() -> Graph {
         g.remove(node);
     }
     unpin(&mut g);
+    g
+}
+
+/// Un drapeau debout, tenu par son bord gauche, dans un vent qui souffle par rafales. Rien d'autre
+/// dans le graphe (ni sol, ni boule) : il est fait pour être posé dans une scène 3D, où ses faces
+/// sont ombrées et ses UV reçoivent un matériau.
+fn flag() -> Graph {
+    let mut g = Graph::empty(crate::nodes::GraphKind::Geometry);
+    g.time = Some(TimeRange { fps: 24.0, start: 1, end: 120 });
+    let grid = g.add("geo_grid", [0.0, 0.0]);
+    set_value(&mut g, grid, 0, [3.0; 4]);
+    set_value(&mut g, grid, 1, [2.0; 4]);
+    set_value(&mut g, grid, 2, [36.0; 4]);
+    set_value(&mut g, grid, 3, [24.0; 4]);
+    set_param(&mut g, grid, "plan", "mur (XY)");
+    set_param(&mut g, grid, "arêtes", "avec diagonales");
+    // Le bas du drapeau à un mètre du sol
+    let lift = g.add("geo_transform", [250.0, 0.0]);
+    set_value(&mut g, lift, 1, [0.0, 2.0, 0.0, 0.0]);
+    // Épinglés : les points du bord gauche (la hampe)
+    let pos = g.add("position", [250.0, 330.0]);
+    let sep = g.add("sepxyz", [480.0, 330.0]);
+    let cmp = g.add("compare", [710.0, 330.0]);
+    set_param(&mut g, cmp, "comparaison", "inférieur");
+    set_value(&mut g, cmp, 1, [-1.49; 4]);
+    let pin = g.add("geo_attr", [960.0, 0.0]);
+    set_param(&mut g, pin, "nom", "pin");
+    set_param(&mut g, pin, "type", "nombre");
+    let (begin, end) = crate::nodeflow::add_zone(&mut g, "sim", [0.0, 620.0]);
+    // Le vent : une poussée le long du drapeau, et des rafales de côté qui vont et viennent
+    let time = g.add("time", [-500.0, 900.0]);
+    let gust = g.add("expr", [-250.0, 900.0]);
+    set_param(&mut g, gust, "formule", "sin(a * 0.31) * 7 + sin(a * 0.13 + y * 2) * 4");
+    let wind = g.add("combxyz", [0.0, 900.0]);
+    set_value(&mut g, wind, 0, [22.0; 4]);
+    let forces = g.add("sim_forces", [250.0, 620.0]);
+    set_value(&mut g, forces, 3, [0.6; 4]);
+    let solver = g.add("sim_solver", [500.0, 620.0]);
+    set_param(&mut g, solver, "sol", "non");
+    set_value(&mut g, solver, 1, [24.0; 4]);
+    if let Some(n) = g.nodes.iter_mut().find(|n| n.id == end) {
+        n.pos = [750.0, 620.0];
+    }
+    let tint = g.add("geo_attr", [1010.0, 620.0]);
+    set_value(&mut g, tint, 1, [0.8, 0.16, 0.14, 1.0]);
+    let out = g.add("geo_out", [1260.0, 620.0]);
+    g.connect(grid, 0, lift, 0);
+    g.connect(lift, 0, pin, 0);
+    g.connect(pos, 0, sep, 0);
+    g.connect(sep, 0, cmp, 0);
+    g.connect(cmp, 0, pin, 1);
+    g.connect(pin, 0, begin, 0);
+    g.connect(time, 0, gust, 0);
+    g.connect(gust, 0, wind, 2);
+    g.connect(wind, 0, forces, 2);
+    g.connect(begin, 1, forces, 0);
+    g.connect(begin, 0, forces, 4);
+    g.connect(forces, 0, solver, 0);
+    g.connect(begin, 0, solver, 4);
+    g.connect(solver, 0, end, 0);
+    g.connect(end, 0, tint, 0);
+    g.connect(tint, 0, out, 0);
+    hide_thumbs(&mut g, &[pos, sep, cmp, time, gust, wind, tint]);
+    g.frames.push(crate::nodes::Frame { rect: [230.0, 290.0, 690.0, 190.0], label: "ce qui est épinglé : le bord gauche, la hampe".into(), color: [90, 120, 200], note: String::new() });
+    g.frames.push(crate::nodes::Frame { rect: [-520.0, 860.0, 730.0, 190.0], label: "le vent : il pousse le long du drapeau, avec des rafales de côté".into(), color: [80, 160, 110], note: String::new() });
     g
 }
 
@@ -1967,6 +2217,141 @@ fn waves() -> Graph {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Une petite grille (4 × 3 points, 6 quads) suivie d'une chaîne de nodes, jusqu'à la sortie.
+    fn grid_then(build: impl FnOnce(&mut Graph, u32) -> u32) -> Geo {
+        let mut g = Graph::empty(crate::nodes::GraphKind::Geometry);
+        let grid = g.add("geo_grid", [0.0, 0.0]);
+        set_value(&mut g, grid, 2, [4.0; 4]);
+        set_value(&mut g, grid, 3, [3.0; 4]);
+        let last = build(&mut g, grid);
+        let out = g.add("geo_out", [900.0, 0.0]);
+        g.connect(last, 0, out, 0);
+        Engine::default().eval(&g, 1, "").unwrap()
+    }
+
+    #[test]
+    fn grid_has_quads_and_uv() {
+        let g = grid_then(|_, grid| grid);
+        assert_eq!((g.n, g.faces.len()), (12, 6));
+        assert!(g.faces.iter().all(|f| f.iter().all(|i| (*i as usize) < g.n)), "des quads, tous dans les points");
+        let (tris, sides) = g.triangles();
+        assert_eq!((tris.len(), sides[0], sides[1]), (12, 0b011, 0b110));
+        // UV : un coin à (0, 1), le coin opposé à (1, 0)
+        let uv = g.col("uv").unwrap();
+        assert_eq!((uv.width(), uv.get(0)[0], uv.get(0)[1], uv.get(11)[0], uv.get(11)[1]), (2, 0.0, 1.0, 1.0, 0.0));
+        // Le réglage « faces : non » rend l'ancienne grille : des points et des arêtes, rien d'autre
+        let bare = grid_then(|g, grid| {
+            set_param(g, grid, "faces", "non");
+            grid
+        });
+        assert!(bare.faces.is_empty() && bare.col("uv").is_none() && !bare.edges.is_empty());
+    }
+
+    #[test]
+    fn an_old_grid_without_the_setting_still_loads() {
+        // Un graphe enregistré avant les faces : sa grille n'a pas le réglage « faces »
+        let mut g = Graph::empty(crate::nodes::GraphKind::Geometry);
+        let grid = g.add("geo_grid", [0.0, 0.0]);
+        let out = g.add("geo_out", [200.0, 0.0]);
+        g.connect(grid, 0, out, 0);
+        if let Some(n) = g.nodes.iter_mut().find(|n| n.id == grid) {
+            n.params.remove("faces");
+        }
+        let text = serde_json::to_string(&g).unwrap();
+        assert!(!text.contains("faces"));
+        let old: Graph = serde_json::from_str(&text).unwrap();
+        let geo = Engine::default().eval(&old, 1, "").unwrap();
+        // Mêmes points et mêmes arêtes qu'avant, avec en plus de quoi l'ombrer
+        assert_eq!((geo.n, geo.edges.len(), geo.faces.len()), (400, 2 * 20 * 19, 19 * 19));
+    }
+
+    #[test]
+    fn faces_follow_the_points_through_the_nodes() {
+        let base = grid_then(|_, grid| grid);
+        // Déplacer, placer les points, définir un attribut : les faces passent telles quelles
+        let moved = grid_then(|g, grid| {
+            let t = g.add("geo_transform", [200.0, 0.0]);
+            set_value(g, t, 1, [0.0, 3.0, 0.0, 0.0]);
+            let p = g.add("geo_set_pos", [400.0, 0.0]);
+            set_value(g, p, 3, [1.0, 0.0, 0.0, 0.0]);
+            let a = g.add("geo_attr", [600.0, 0.0]);
+            g.connect(grid, 0, t, 0);
+            g.connect(t, 0, p, 0);
+            g.connect(p, 0, a, 0);
+            a
+        });
+        assert_eq!(*moved.faces, *base.faces);
+        assert!(moved.col("uv").is_some() && moved.col("Cd").is_some());
+        assert!((moved.pos(0)[1] - 3.0).abs() < 1e-6 && (moved.pos(0)[0] - base.pos(0)[0] - 1.0).abs() < 1e-6);
+        // Réunir : les faces de la seconde géométrie sont décalées du nombre de points de la première
+        let both = grid_then(|g, grid| {
+            let m = g.add("geo_merge", [200.0, 0.0]);
+            g.connect(grid, 0, m, 0);
+            g.connect(grid, 0, m, 1);
+            m
+        });
+        assert_eq!((both.n, both.faces.len()), (24, 12));
+        assert_eq!(both.faces[6], base.faces[0].map(|i| i + 12));
+        // Supprimer des points : les faces qui perdent un sommet partent, les autres sont renumérotées
+        let cut = grid_then(|g, grid| {
+            let idx = g.add("index", [0.0, 300.0]);
+            let cmp = g.add("compare", [200.0, 300.0]);
+            set_param(g, cmp, "comparaison", "inférieur");
+            set_value(g, cmp, 1, [4.0; 4]);
+            let d = g.add("geo_delete", [400.0, 0.0]);
+            g.connect(idx, 0, cmp, 0);
+            g.connect(grid, 0, d, 0);
+            g.connect(cmp, 0, d, 1);
+            d
+        });
+        // La première rangée de points (4) disparaît : il reste une rangée de quads (3)
+        assert_eq!((cut.n, cut.faces.len()), (8, 3));
+        assert!(cut.faces.iter().all(|f| f.iter().all(|i| (*i as usize) < cut.n)));
+        // Copier sur des points : chaque copie garde les faces et les UV du modèle
+        let copies = grid_then(|g, grid| {
+            let pts = g.add("geo_line", [0.0, 300.0]);
+            set_value(g, pts, 0, [3.0; 4]);
+            let c = g.add("geo_copy", [300.0, 0.0]);
+            g.connect(pts, 0, c, 0);
+            g.connect(grid, 0, c, 1);
+            c
+        });
+        assert_eq!((copies.n, copies.faces.len()), (36, 18));
+        assert_eq!(copies.faces[17], base.faces[5].map(|i| i + 24));
+        assert_eq!(copies.col("uv").map(|c| c.get(35)), base.col("uv").map(|c| c.get(11)));
+    }
+
+    #[test]
+    fn faces_survive_the_cloth_simulation_and_its_cache() {
+        for name in ["tissu sur une boule", "drapeau dans le vent"] {
+            let g = example(name).unwrap();
+            let mut e = Engine::default();
+            let rest = e.eval(&g, 1, "").unwrap();
+            let later = e.eval(&g, 12, "").unwrap();
+            assert!(!rest.faces.is_empty(), "{name} : la grille apporte des faces");
+            assert_eq!(*later.faces, *rest.faces, "{name} : mêmes faces après douze images");
+            assert!(later.col("uv").is_some());
+            assert!((0..rest.n).any(|i| later.pos(i) != rest.pos(i)), "{name} : le tissu a bougé");
+            // Le cache d'une image garde les faces
+            let back = Geo::from_bytes(&later.to_bytes()).unwrap();
+            assert_eq!((*back.faces).clone(), (*later.faces).clone());
+            assert_eq!(back.pos(5), later.pos(5));
+        }
+        // Un cache écrit avant les faces (rien après les arêtes) se relit, sans faces
+        let mut old = Geo::points([vec![0.0, 1.0], vec![0.0; 2], vec![0.0; 2]]);
+        old.set_edges(vec![[0, 1]]);
+        let bytes = old.to_bytes();
+        assert!(!bytes.windows(4).any(|w| w == b"FACE"));
+        let back = Geo::from_bytes(&bytes).unwrap();
+        assert!(back.faces.is_empty() && back.edges.len() == 1);
+        // Un bloc de faces tronqué est refusé plutôt que lu de travers
+        let mut tri = old.clone();
+        tri.set_faces(vec![[0, 1, 0, NO_VERT]]);
+        let full = tri.to_bytes();
+        assert_eq!(Geo::from_bytes(&full).unwrap().faces[0], [0, 1, 0, NO_VERT]);
+        assert!(Geo::from_bytes(&full[..full.len() - 3]).is_err());
+    }
     use crate::nodes::GraphKind;
 
     #[test]
