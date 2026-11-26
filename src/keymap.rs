@@ -54,10 +54,39 @@ pub fn bindings(id: &str) -> Vec<KeyboardShortcut> {
 }
 
 /// Vrai (et la touche est consommée) si un raccourci de l'action vient d'être pressé.
+/// Raccourcis que l'éditeur affiché garde pour lui cette image (Ctrl+J dupliquer un calque, Ctrl+K couper
+/// au montage…) : ceux de l'app ne les prennent pas.
+static CLAIMED: std::sync::Mutex<Vec<KeyboardShortcut>> = std::sync::Mutex::new(Vec::new());
+
+/// L'éditeur affiché réserve ces raccourcis (à appeler avant les raccourcis de l'app, à chaque image)
+pub fn claim(v: Vec<KeyboardShortcut>) {
+    *CLAIMED.lock().unwrap_or_else(|e| e.into_inner()) = v;
+}
+
+/// Une touche pressée cette image correspond exactement à un raccourci réservé par l'éditeur
+fn editor_has(ctx: &egui::Context) -> bool {
+    let claimed = CLAIMED.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    if claimed.is_empty() {
+        return false;
+    }
+    ctx.input(|i| {
+        i.events.iter().any(|e| match e {
+            egui::Event::Key { key, pressed: true, modifiers, .. } => {
+                claimed.iter().any(|c| c.logical_key == *key && c.modifiers.command == modifiers.command && c.modifiers.shift == modifiers.shift && c.modifiers.alt == modifiers.alt)
+            }
+            _ => false,
+        })
+    })
+}
+
 pub fn pressed(ctx: &egui::Context, id: &str) -> bool {
     // Souris sur la vue 3D d'une scène : ses raccourcis (Ctrl+B biseau, Ctrl+J joindre, Ctrl+L
     // pièces liées, Ctrl+N…) passent avant ceux de l'app ; ouvrir, chercher et les onglets restent
     if crate::model3d::mesh_keys() && matches!(id, "explorer" | "daily" | "assistant" | "new_note" | "split" | "compact" | "terminal") {
+        return false;
+    }
+    // Même chose pour les raccourcis réservés par l'éditeur affiché
+    if editor_has(ctx) {
         return false;
     }
     let b = bindings(id);

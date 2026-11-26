@@ -2778,6 +2778,27 @@ impl App {
         if self.vault.is_none() || self.dialog.is_some() || keymap::capturing(ctx) {
             return;
         }
+        // Les raccourcis propres à l'éditeur affiché passent avant ceux de l'app
+        {
+            let (c, cs) = (Modifiers::COMMAND, Modifiers::COMMAND | Modifiers::SHIFT);
+            let k = KeyboardShortcut::new;
+            let claims = if self.view() != View::Files || self.explorer_focus {
+                vec![]
+            } else {
+                match self.current().map(|d| (&d.content, vault::is_md(&d.rel))) {
+                    // Retouche : Ctrl+Maj+N nouveau calque, Ctrl+J dupliquer le calque
+                    Some((Content::Paint(_), _)) => vec![k(cs, Key::N), k(c, Key::J)],
+                    // Vectoriel : Ctrl+J joindre des tracés ; nodes : Ctrl+J cadre autour de la sélection
+                    Some((Content::Vector(_) | Content::Nodes(_), _)) => vec![k(c, Key::J)],
+                    // Montage : Ctrl+K couper à la tête de lecture, Ctrl+L lier
+                    Some((Content::Montage(_), _)) => vec![k(c, Key::K), k(c, Key::L)],
+                    // Code : Ctrl+L choisir la ligne, Ctrl+Maj+L toutes les occurrences, Ctrl+Maj+K supprimer la ligne
+                    Some((Content::Text(_), false)) => vec![k(c, Key::L), k(cs, Key::L), k(cs, Key::K)],
+                    _ => vec![],
+                }
+            };
+            keymap::claim(claims);
+        }
         let pressed = |m: Modifiers, k: Key| ctx.input_mut(|i| i.consume_shortcut(&KeyboardShortcut::new(m, k)));
         // Qui a reçu le dernier clic : l'explorateur ou le reste ?
         if let (true, Some(at)) = ctx.input(|i| (i.pointer.any_pressed(), i.pointer.interact_pos())) {
