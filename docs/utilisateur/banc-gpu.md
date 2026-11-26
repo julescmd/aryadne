@@ -16,7 +16,7 @@ Les rapports de recherche du projet montrent que la simulation est bornée par l
 
 Dans l'application, une fenêtre s'ouvre : « Measuring, a few seconds ». Elle peut sortir de la fenêtre principale. À la fin, le rapport s'affiche. `Copy the report` le met dans le presse-papiers.
 
-Dans un terminal, l'interface ne s'ouvre pas. L'avancement s'écrit ligne par ligne, puis le rapport complet. La mesure du terminal est la version longue.
+Dans un terminal, l'interface ne s'ouvre pas. L'avancement s'écrit ligne par ligne, puis le rapport complet.
 
 ## Ce qui est mesuré
 
@@ -108,6 +108,6 @@ Pour forcer le repli sur le processeur sans débrancher la carte (essai de déve
 
 - Le banc mesure le calcul, pas l'affichage. La vue 3D d'Aryadne reste sur le processeur.
 - Les chiffres varient avec la charge de la machine. Ferme les autres logiciels lourds et lance deux fois.
-- Le banc dans l'application peut faire une version plus courte que celle du terminal.
+- Sur un rendu logiciel, le banc passe tout seul à de petites tailles : les chiffres ne se comparent pas à ceux d'une vraie carte.
 
 Voir aussi : [Simulation sur carte graphique](../technique/simulation-gpu.md), [Feuille de route du moteur](../technique/feuille-de-route-moteur.md).
