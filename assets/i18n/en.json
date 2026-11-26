@@ -3994,5 +3994,6 @@
   "énergie": "energy",
   "chute sur une boule": "falling on a ball",
   "pire arête": "worst edge",
-  "moyenne": "mean"
+  "moyenne": "mean",
+  "pas de carte graphique utilisable : tissu calculé sur le processeur": "no usable graphics card: cloth computed on the CPU"
 }

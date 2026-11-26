@@ -494,7 +494,7 @@ impl Rapport {
             s += &format!("\n{} :\n", t("tissu en VBD (une passe = tous les sommets mis à jour une fois)"));
         }
         for m in &self.tissu {
-            let ou = tm(if m.carte { "carte" } else { "processeur" });
+            let ou = tm(if m.carte { "carte graphique" } else { "processeur" });
             s += &format!("- {} {} ({} {}, {}) : {:.3} ms {}, {:.0} {}, {:.2} ns {}, ~{:.0} {}\n", m.points, tm("sommets"), m.couleurs, tm("couleurs"), ou, m.passe_ms, tm("par passe"), 1000.0 / m.passe_ms, tm("passes par seconde"), m.passe_ms * 1e6 / m.points as f64, tm("par sommet et par passe"), m.octets / (m.passe_ms / 1000.0) / 1e9, tm("Go/s"));
             s += &format!("  {} : {:.0} {} · {} : {:.1} ms · {} : {:.1} ms\n", t("à 24 images par seconde"), 1000.0 / 24.0 / m.passe_ms, tm("passes par image"), tm("une image de 32 passes"), m.passe_ms * PASSES as f64, tm("relecture"), m.relecture_ms);
             s += &format!("  {} : {:.2} ms {} (×{:.1}) · {} : {:.0} ms · {} : {:.0} Mo\n", t("processeur"), m.passe_processeur_ms, tm("par passe"), m.passe_processeur_ms / m.passe_ms, tm("préparation"), m.preparation_ms, tm("mémoire sur la carte"), m.memoire as f64 / 1e6);

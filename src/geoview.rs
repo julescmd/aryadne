@@ -395,7 +395,8 @@ impl GeoView {
         let mut child = ui.new_child(egui::UiBuilder::new().max_rect(area).layout(egui::Layout::right_to_left(egui::Align::Center)));
         let icon = if wants_card { crate::lucide::GPU } else { crate::lucide::CPU };
         let mut changed = false;
-        let button = egui::containers::menu::MenuButton::new(RichText::new(icon).size(15.0).color(if runs_on_card { p.accent } else { Color32::from_gray(190) }));
+        // Le menu reste ouvert quand on change de solveur : on règle, on regarde, on règle encore
+        let button = egui::containers::menu::MenuButton::new(RichText::new(icon).size(15.0).color(if runs_on_card { p.accent } else { Color32::from_gray(190) })).config(egui::containers::menu::MenuConfig::new().close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside));
         let (resp, _) = button.ui(&mut child, |ui| {
             ui.set_min_width(270.0);
             ui.set_max_width(290.0);
@@ -456,7 +457,7 @@ impl GeoView {
             ui.separator();
             let note = match &status {
                 Some(s) if s.on_gpu => format!("{}  {}\n{} {} · {} {} · {} × {} {} · {:.1} ms", crate::lucide::GPU, s.card, s.points, crate::i18n::t_mid("points"), s.colors, crate::i18n::t_mid("couleurs"), s.substeps, s.per, crate::i18n::t_mid("passes"), s.ms),
-                Some(s) => format!("{}  {}\n{} {} · {} × {} {} · {:.1} ms", crate::lucide::CPU, t("pas de carte graphique utilisable : calcul sur le processeur"), s.points, crate::i18n::t_mid("points"), s.substeps, s.per, crate::i18n::t_mid("passes"), s.ms),
+                Some(s) => format!("{}  {}\n{} {} · {} × {} {} · {:.1} ms", crate::lucide::CPU, t("pas de carte graphique utilisable : tissu calculé sur le processeur"), s.points, crate::i18n::t_mid("points"), s.substeps, s.per, crate::i18n::t_mid("passes"), s.ms),
                 None if wants_card => t("lance la lecture pour voir où se fait le calcul"),
                 None => format!("{}  {}", crate::lucide::CPU, t("calcul sur le processeur")),
             };

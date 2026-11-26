@@ -661,8 +661,8 @@ struct GpuCloth {
     slot: u64,
     /// Nombre d'itérations par sous-pas pour lequel les cases de réglages sont remplies
     slots_for: (usize, f32),
-    solve: Kernels,
-    mv: Kernels,
+    solve: &'static Kernels,
+    mv: &'static Kernels,
     g_solve: wgpu::BindGroup,
     /// Les deux branchements des passes simples : les tampons de Tchebychev y sont échangés
     g_move: [wgpu::BindGroup; 2],
@@ -697,12 +697,18 @@ impl GpuCloth {
         let slot = g.slot_size(16);
         let consts = g.uniform("tissu-reglages", std::mem::size_of::<Consts>() as u64);
         let slots = g.uniform("tissu-cases", slot * (t.colors.len() + MAX_PER) as u64);
-        let solve = g.kernels("tissu-vbd", &format!("{STRUCTS}{SOLVE}"), &[Bind::Uniform, Bind::Slot(16), Bind::Write, Bind::Read, Bind::Read, Bind::Read, Bind::Read, Bind::Read], &["solve"]);
-        let mv = g.kernels("tissu-pas", &format!("{STRUCTS}{MOVE}"), &[Bind::Uniform, Bind::Slot(16), Bind::Write, Bind::Write, Bind::Write, Bind::Write, Bind::Write, Bind::Write], &["predict", "accel", "finish"]);
+        // Les noyaux sont les mêmes pour tous les tissus : compilés une fois, gardés
+        static KERNELS: std::sync::OnceLock<(Kernels, Kernels)> = std::sync::OnceLock::new();
+        let (solve, mv) = KERNELS.get_or_init(|| {
+            (
+                g.kernels("tissu-vbd", &format!("{STRUCTS}{SOLVE}"), &[Bind::Uniform, Bind::Slot(16), Bind::Write, Bind::Read, Bind::Read, Bind::Read, Bind::Read, Bind::Read], &["solve"]),
+                g.kernels("tissu-pas", &format!("{STRUCTS}{MOVE}"), &[Bind::Uniform, Bind::Slot(16), Bind::Write, Bind::Write, Bind::Write, Bind::Write, Bind::Write, Bind::Write], &["predict", "accel", "finish"]),
+            )
+        });
         let one = |c: &Column| c.pages[0].clone();
         let (bp, bv, bt, bpr, b0, b1) = (one(&pos), one(&vel), one(&tgt), one(&prev), one(&s0), one(&s1));
-        let g_solve = g.group(&solve, &[&consts, &slots, &bp, &bt, &bpr, &off.pages[0], &springs.pages[0], &bends.pages[0]]);
-        let g_move = [g.group(&mv, &[&consts, &slots, &bp, &bv, &bt, &bpr, &b0, &b1]), g.group(&mv, &[&consts, &slots, &bp, &bv, &bt, &bpr, &b1, &b0])];
+        let g_solve = g.group(solve, &[&consts, &slots, &bp, &bt, &bpr, &off.pages[0], &springs.pages[0], &bends.pages[0]]);
+        let g_move = [g.group(mv, &[&consts, &slots, &bp, &bv, &bt, &bpr, &b0, &b1]), g.group(mv, &[&consts, &slots, &bp, &bv, &bt, &bpr, &b1, &b0])];
         Some(GpuCloth { pos, vel, consts, slots, slot, slots_for: (0, -1.0), solve, mv, g_solve, g_move, _keep: vec![tgt, prev, s0, s1, off, springs, bends] })
     }
 
