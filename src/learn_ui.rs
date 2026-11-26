@@ -540,13 +540,15 @@ impl App {
                 ui.label(RichText::new(lucide::GRADUATION_CAP).size(26.0).color(p.accent));
                 ui.add_space(6.0);
                 ui.vertical(|ui| {
+                    // Le bouton de droite garde sa place : le texte se coupe avant lui
+                    ui.set_max_width((ui.available_width() - 170.0).max(80.0));
                     let (title, sub) = match &resume {
                         Some((_, lesson, course, true)) => (crate::i18n::t("Continuer là où tu t'es arrêté"), format!("{course} · {lesson}")),
                         Some((_, lesson, course, false)) => (crate::i18n::t("Apprendre Aryadne pas à pas"), format!("{}{} {course} · {lesson}", crate::i18n::t("première leçon"), colon())),
                         None => (crate::i18n::t("Toutes les leçons sont terminées"), crate::i18n::t("Tu peux les revoir quand tu veux")),
                     };
-                    ui.label(RichText::new(title).size(14.0).family(theme::bold()));
-                    ui.label(RichText::new(sub).size(11.5).color(p.muted));
+                    ui.add(egui::Label::new(RichText::new(title).size(14.0).family(theme::bold())).truncate());
+                    ui.add(egui::Label::new(RichText::new(format!("{sub} · {done}/{total} {}", crate::i18n::t_mid("leçons"))).size(11.5).color(p.muted)).truncate());
                 });
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let label = match &resume {
@@ -560,7 +562,6 @@ impl App {
                     if icon_button(ui, lucide::BOOK_OPEN, &crate::i18n::t("Tous les parcours")) {
                         go = Some(Page::Home);
                     }
-                    ui.label(RichText::new(format!("{done}/{total} {}", crate::i18n::t_mid("leçons"))).size(11.0).color(p.muted));
                 });
             });
             if done > 0 {
