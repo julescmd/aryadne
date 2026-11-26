@@ -110,7 +110,30 @@ Un matériau à calques est un `Graph` dont le champ `stack` est rempli. `Graph:
 
 Tout le reste (vue 3D, rendu, éditeur de nœuds) ne voit qu'un graphe ordinaire. Il n'y a pas de second moteur pour les calques.
 
-> **En cours de refonte.** Le flux des matériaux change : l'Atelier doit devenir l'entrée, et les calques s'ouvriront en nœuds. Le principe « pile = graphe » est la base de ce chantier. Les détails de `flatten` peuvent bouger.
+#### Calques « graphe », calques liés, masques en nœuds
+
+Un calque (`atelier::Layer`) tire son graphe de l'un de deux endroits :
+
+- `graph` : son propre graphe, rangé dans le fichier du matériau (calque « graphe ») ;
+- `master` : le chemin d'un `.arymat` du coffre (calque lié), relu quand le fichier change.
+
+`Layer::fill` rend l'un ou l'autre. `flatten` le copie par `splice`, qui déplie d'abord les groupes (`nodeflow::lower`) : un calque peut donc contenir des groupes.
+
+Un masque de genre `graphe` porte lui aussi un graphe (`Mask::graph`). `flatten` y lit ce qui entre dans la **couleur** de sa sortie, et s'en sert comme facteur. `atelier::mask_graph` écrit ce graphe à partir d'un masque simple, quand on l'ouvre en nœuds pour la première fois.
+
+#### Un matériau s'édite toujours en pile
+
+- `atelier::to_stack` : à l'ouverture dans l'éditeur, un matériau sans pile (un ancien fichier) devient une pile d'un seul calque « graphe » qui porte tout son graphe.
+- `atelier::to_file` : à l'écriture (`Graph::save`), une pile d'un seul calque « graphe » nu redevient un simple graphe. Un ancien fichier se relit et se réécrit sans changer de forme.
+- `Graph::load` ne change rien : la vue 3D et le rendu lisent les deux formes, par `Graph::effective`.
+
+#### Entrer dans un calque (`Editor::inside`)
+
+Dans l'éditeur, `inside` dit si l'on édite le graphe d'un calque. Pendant ce temps `Editor::graph` **est** ce graphe (un graphe ordinaire, sans pile), et le matériau entier attend dans `Inside::outer` avec son historique d'annulation. Tout le code du graphe marche donc sans cas particulier.
+
+- `enter_layer(calque, Part::Fill | Part::Mask)` échange les deux graphes. Pour un calque lié, le graphe est relu du fichier du maître.
+- `leave_layer` remet le graphe dans son calque (`put_inner`), ou l'écrit dans le fichier du maître, puis pose un seul point d'annulation dans la pile.
+- `save_if_due` écrit toujours le matériau entier, même depuis l'intérieur d'un calque.
 
 ## Le moteur de géométrie (`geo`)
 
@@ -218,7 +241,17 @@ Il occupe la seconde moitié de `nodes.rs`. Il gère le dessin du graphe, la sé
 
 Le presse-papiers passe par celui du système, en texte : des nœuds se collent d'un graphe à un autre, et d'une fenêtre d'Aryadne à une autre. Les groupes dont ils dépendent voyagent avec eux.
 
-> **En cours de refonte.** La bibliothèque de nœuds (ajout par glisser-déposer depuis une liste à gauche) est en train de changer cette partie.
+### La bibliothèque de nœuds
+
+Le panneau de gauche (`dock::area("node-lib", …)`) liste ce que rend `Editor::picks` : les mêmes choix que le menu d'ajout. Une recherche passe par `search_picks`. Les catégories repliées sont gardées dans `LIB_CLOSED`, commun à tous les éditeurs.
+
+Glisser une rangée remplit `Editor::lib_drag`. Tant qu'il est rempli, `show` dessine le fantôme sous la souris et cherche le lien survolé :
+
+- `link_at` : le lien qui passe sous un point du graphe (mêmes courbes que le dessin, voir `port_pos` et `link_curve`) ;
+- `link_fit` : l'entrée et la sortie du nœud qui vont avec les types du lien, ou rien ;
+- `insert_on_link` : coupe le lien et le fait passer par le nœud.
+
+Au relâchement, `add_pick` pose le nœud, puis `insert_on_link` l'insère si un lien était visé.
 
 ## Tests
 

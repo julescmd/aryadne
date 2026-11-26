@@ -4,6 +4,8 @@ Fichier : `.arygeo`. Dans l'esprit des Geometry Nodes de Blender et de Houdini, 
 
 Un graphe de géométrie fabrique des **points**, leur donne des **attributs** (une couleur, une vitesse), les relie par des **arêtes**, et peut les faire bouger dans le temps avec une **zone de simulation**.
 
+Ces fichiers s'ouvrent dans l'outil `Simulation` de l'étape 3D, à côté de `Scene` et `Materials`.
+
 Pour les gestes de l'éditeur, voir [L'éditeur de nœuds](noeuds-editeur.md). Pour le tissu en détail, voir [Simulation de tissu](simulation-tissu.md).
 
 ## Créer

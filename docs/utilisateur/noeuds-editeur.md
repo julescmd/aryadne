@@ -1,19 +1,18 @@
 # L'éditeur de nœuds
 
-> **En cours de refonte.** La bibliothèque de nœuds change au moment où cette page est écrite : l'ajout se fera par glisser-déposer depuis une liste à gauche. Cette page décrit le code actuel. Les gestes du graphe lui-même (lier, grouper, zones) ne sont pas concernés.
-
 Un graphe de nœuds est une suite de petites boîtes reliées par des fils. Chaque boîte fait une chose. Les données vont de gauche à droite, jusqu'à un nœud de sortie.
 
 Le même éditeur sert à trois genres de fichiers :
 
 | Fichier | Sert à | Page |
 |---|---|---|
-| `.arymat` | Un matériau pour la 3D | [Matériaux en nœuds](noeuds-materiaux.md) |
+| `.arymat` | Un matériau pour la 3D : le graphe d'un calque de l'[Atelier](3d-atelier.md) | [Matériaux en nœuds](noeuds-materiaux.md) |
 | `.arycomp` | Retoucher une image, étalonner un clip | [Compositing](noeuds-compositing.md) |
 | `.arygeo` | Des points, des attributs, une simulation | [Géométrie et simulation](noeuds-geometrie.md) |
 
 ## L'écran
 
+- **La bibliothèque de nœuds**, à gauche (panneau `Node library`) : la recherche, puis tous les nœuds rangés par catégories.
 - **Le graphe**, au centre.
 - **L'aperçu et les réglages**, sur le côté (panneau `Preview and settings (nodes)`) : le résultat en direct, puis les réglages du nœud choisi.
 - **Une miniature** sous chaque nœud montre ce qui en sort.
@@ -33,8 +32,27 @@ Le même éditeur sert à trois genres de fichiers :
 - Le menu est rangé par catégories. Survole une catégorie pour voir ses nœuds.
 - Tape pour chercher : `Search for a node…`. `↑` `↓` choisissent, `Entrée` pose.
 - Tirer un lien et le lâcher dans le vide ouvre le même menu. Le nœud choisi arrive déjà relié.
-- Depuis la liste du panneau, un clic ajoute le nœud au centre du graphe.
+- Depuis la bibliothèque, à gauche : glisse un nœud dans le graphe, ou clique-le. Voir ci-dessous.
 - Une image glissée depuis l'explorateur devient un nœud `Image texture` (ou `Image`, ou `Video texture`). Lâchée sur un nœud qui prend un fichier, elle remplace son image.
+
+### La bibliothèque de nœuds
+
+La liste à gauche du graphe montre tous les nœuds utilisables ici.
+
+| Geste | Effet |
+|---|---|
+| Glisser un nœud dans le graphe | Il se pose là où on le lâche. Un fantôme suit la souris pendant le glisser |
+| Le lâcher sur un lien | Il s'insère dans ce lien, si les types vont ensemble. Le lien s'allume et le fantôme le dit avant qu'on lâche |
+| Clic sur un nœud | Il arrive au centre du graphe |
+| Clic sur le nom d'une catégorie | Replie ou déplie la catégorie. Le nombre à droite compte ses nœuds |
+| Taper dans `Search nodes` | Les meilleurs résultats d'abord, toutes catégories confondues. Les noms français et anglais et les opérations (« multiplier ») sont compris |
+| `Échap` pendant un glisser | Annule |
+
+Pour s'insérer, un nœud doit avoir une entrée qui accepte ce qui arrive par le lien et une sortie qui convient à sa destination. Un nœud sans entrée (des coordonnées, une texture) ne s'insère pas : il se pose à côté. Une géométrie ne passe que par un nœud de géométrie.
+
+Les catégories repliées le restent dans tous les graphes ouverts, le temps de la session.
+
+Le panneau se détache comme les autres, par sa poignée. Voir [Fenêtres et dispositions](fenetres-et-dispositions.md). Détaché dans sa propre fenêtre, le glisser ne traverse pas d'une fenêtre à l'autre : le clic, lui, marche toujours.
 
 ### Les catégories
 

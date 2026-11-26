@@ -97,6 +97,7 @@ pub enum Cmd {
     UpgradeExtensions,
     NewCompositor,
     NewGeometry,
+    Documentation,
     Stats,
     RunFile,
     NewBoard,
@@ -145,6 +146,7 @@ impl App {
             ("épingler au-dessus des autres fenêtres", "", Cmd::Pin),
             ("mode compact", "Ctrl+Maj+M", Cmd::Compact),
             ("temps passé par projet", "", Cmd::TimeReport),
+            ("documentation d'Aryadne", "", Cmd::Documentation),
             ("minuteur : 25 min de concentration", "", Cmd::Timer(25)),
             ("minuteur : 50 min", "", Cmd::Timer(50)),
             ("minuteur : pause 5 min", "", Cmd::Timer(5)),
@@ -211,6 +213,12 @@ impl App {
                 }
             }
             Cmd::TimeReport => self.time_report = Some(1),
+            Cmd::Documentation => {
+                // La documentation embarquée, copiée dans le coffre (.app/docs), s'ouvre en lecture comme une note
+                if let Some(rel) = self.report(crate::docs::install(&self.root())) {
+                    self.open(rel);
+                }
+            }
             Cmd::GitHistory => {
                 if let Some(rel) = self.current().map(|d| d.rel.clone()) {
                     self.flush_all();

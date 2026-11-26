@@ -1,8 +1,8 @@
 # Matériaux en nœuds
 
-> **En cours de refonte.** Le flux des matériaux change : l'[Atelier](3d-atelier.md) doit devenir l'entrée des matériaux, et ses calques s'ouvriront en nœuds. Cette page décrit le code actuel. La façon de créer et d'appliquer un matériau peut changer. La liste des nœuds reste valable.
+Fichier : `.arymat`. Un graphe de matériau décrit l'aspect d'une surface : sa couleur, sa rugosité, son caractère métallique, son relief.
 
-Fichier : `.arymat`. Un matériau en nœuds décrit l'aspect d'une surface : sa couleur, sa rugosité, son caractère métallique, son relief.
+Un matériau s'ouvre d'abord dans l'[Atelier](3d-atelier.md), en pile de calques. Les nœuds de cette page sont ceux d'**un calque** : on y entre par un double-clic sur le calque, et on revient à la pile par `← Layers` dans la barre du graphe (ou `Échap`). Voir [Entrer dans les nœuds d'un calque](3d-atelier.md#entrer-dans-les-nœuds-dun-calque).
 
 Pour les gestes de l'éditeur (ajouter, relier, grouper), voir [L'éditeur de nœuds](noeuds-editeur.md).
 
@@ -13,15 +13,19 @@ Pour les gestes de l'éditeur (ajouter, relier, grouper), voir [L'éditeur de n�
 | La vue 3D | `Nodes ▾ › New material…` : crée le matériau, l'applique à l'objet et l'ouvre à côté du modèle |
 | Les propriétés d'un objet | Onglet `Material` : choisir un `.arymat` du coffre, ou `Create a node material for this object` |
 | Un ID de matériau | Mode `UV & materials`, onglet `Materials`, bouton `＋ Nodes` sur l'ID |
-| Le menu Fichier | `File › New › Node material`, avec un préréglage ou `Empty (output only)` |
+| Le menu Fichier | `File › New › Material`, ou la fenêtre `New file` avec un préréglage ou `Empty (output only)` |
 
-Un matériau appliqué se met à jour en direct dans la vue 3D pendant que tu modifies ses nœuds.
+Dans tous les cas le matériau s'ouvre dans l'Atelier, avec un calque `Graph` qui porte le graphe de départ. Double-clic sur ce calque pour voir ses nœuds.
 
-`Open this material in the node editor` rouvre le graphe depuis l'objet.
+Un matériau appliqué se met à jour en direct dans la vue 3D pendant que tu modifies ses calques et leurs nœuds.
+
+`Open this material in the node editor` rouvre le matériau depuis l'objet.
 
 ## L'aperçu
 
 Dans l'éditeur : sur `Sphere`, sur `Cube` (arêtes adoucies, pour juger l'usure), ou sur un modèle 3D déposé dans l'aperçu. `Light ▾` : `Studio` ou `Outdoor`.
+
+Dans les nœuds d'un calque, l'aperçu montre ce calque seul. Le matériau entier se regarde sur la pile.
 
 `Preview node` (clic droit sur un nœud) montre ce nœud seul. `Back to full material` revient au matériau complet.
 
@@ -50,7 +54,7 @@ Dans l'éditeur : sur `Sphere`, sur `Cube` (arêtes adoucies, pour juger l'usure
 
 Vingt et un matériaux prêts : carrelage en relief, béton fissuré, métal brossé rayé, velours, cire, tissu tissé, métal peint usé, pierre aux creux sombres, bois, pierre, métal rouillé, toon, céramique, or, verre, verre dépoli, eau, toon 3 bandes, peinture de voiture, plastique, néon.
 
-Ouvre-les pour apprendre : chacun est un petit graphe lisible.
+Ouvre-les pour apprendre : chacun est un petit graphe lisible. Dans l'Atelier, un clic sur un préréglage l'ajoute comme calque. Dans les nœuds d'un calque, la bande `Presets` remplace le graphe du calque.
 
 ## Les nœuds
 

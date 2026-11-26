@@ -55,6 +55,7 @@ mod formats;
 mod boardlive;
 mod gizmo;
 mod paint;
+mod docs;
 mod untitled;
 mod meshedit;
 mod montage;
@@ -2293,7 +2294,9 @@ impl App {
                     code.base_rx = Some(rx);
                 }
             }
-            self.docs.push(Doc { rel, content, dirty_since: None, preview: false, code });
+            // Une page de la documentation s'ouvre en lecture
+            let preview = docs::is_doc(&rel);
+            self.docs.push(Doc { rel, content, dirty_since: None, preview, code });
             self.active = Some(self.docs.len() - 1);
         }
         self.update_backlinks();
@@ -2434,6 +2437,16 @@ impl App {
                     let heading = name.split_once('#').map(|(_, h)| h.trim().to_string()).filter(|h| !h.is_empty() && !h.starts_with('^'));
                     let name = name.split(['#', '^']).next().unwrap_or(&name).trim().to_string();
                     if name.is_empty() {
+                        continue;
+                    }
+                    // Lien Markdown relatif : un fichier précis (une page de la documentation, une note),
+                    // et l'ancre d'un de ses titres
+                    if name.to_lowercase().ends_with(".md") && (docs::is_doc(&name) || self.entries.iter().any(|e| e.rel == name && !e.is_dir)) && std::path::Path::new(&root).join(&name).is_file() {
+                        self.open(name.clone());
+                        if let Some(h) = heading {
+                            let title = std::fs::read_to_string(std::path::Path::new(&root).join(&name)).ok().and_then(|t| docs::heading_of(&t, &h)).unwrap_or(h);
+                            self.goto_heading(&name, &title);
+                        }
                         continue;
                     }
                     if self.entries.iter().any(|e| e.rel == name && !e.is_dir) {
@@ -3044,6 +3057,9 @@ impl App {
                         ui.set_min_width(220.0);
                         if item(ui, "Accueil", "") {
                             self.home_open = true;
+                        }
+                        if item(ui, "Documentation", "") {
+                            cmd = Some(extras::Cmd::Documentation);
                         }
                         if item(ui, "Raccourcis clavier", "") {
                             cmd = Some(extras::Cmd::Settings(settings::Tab::Shortcuts));
@@ -4174,7 +4190,10 @@ impl App {
                             ui.set_max_width((680.0 + 64.0_f32).min(ui.available_width()));
                             egui::Frame::new().inner_margin(egui::Margin { left: 32, right: 32, top: 40, bottom: 80 }).show(ui, |ui| {
                                 ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
-                                    match preview::show_doc(ui, text, &existing, &paths) {
+                                    preview::set_base(&rel);
+                                    let shown = preview::show_doc(ui, text, &existing, &paths);
+                                    preview::set_base("");
+                                    match shown {
                                         Some(preview::Out::Open(n)) => goto = Some(n),
                                         Some(preview::Out::Toggle(l)) => toggle = Some(l),
                                         Some(preview::Out::SetProp { key, vals, list }) => set_prop = Some((key, vals, list)),

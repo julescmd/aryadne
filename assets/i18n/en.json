@@ -4035,5 +4035,7 @@
   "Matériau des modèles et des objets d'une scène : une pile de calques avec masques, chaque calque s'ouvre en nodes": "Material for models and scene objects: a layer stack with masks, each layer opens in nodes",
   "matériau maître": "master material",
   "Nouveau calque de remplissage : couleur, rugosité et métal se règlent ici, et un double-clic ouvre son graphe en nodes": "New fill layer: color, roughness and metal are set here, and a double-click opens its graph in nodes",
-  "Clique un matériau à gauche, ou le + ci-dessus : il devient un calque, posé partout ou selon un masque (usure, saleté, poussière…). Un double-clic sur un calque ouvre ses nodes.": "Click a material on the left, or the + above: it becomes a layer, laid everywhere or through a mask (wear, dirt, dust…). Double-click a layer to open its nodes."
+  "Clique un matériau à gauche, ou le + ci-dessus : il devient un calque, posé partout ou selon un masque (usure, saleté, poussière…). Un double-clic sur un calque ouvre ses nodes.": "Click a material on the left, or the + above: it becomes a layer, laid everywhere or through a mask (wear, dirt, dust…). Double-click a layer to open its nodes.",
+  "Documentation": "Documentation",
+  "documentation d'Aryadne": "Aryadne documentation"
 }

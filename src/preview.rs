@@ -10,7 +10,7 @@ use std::sync::LazyLock;
 static LINK: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\[\[([^\]|#]+)(?:#[^\]|]*)?(?:\|([^\]]+))?\]\]").unwrap());
 /// Morceaux d'une ligne : lien de note, lien web, gras, italique, barré, surligné, étiquette
 static TOKENS: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"\[\[[^\]]+\]\]|\[([^\]]+)\]\((https?://[^)\s]+)\)|\*\*([^*]+)\*\*|__([^_]+)__|\*([^*\s][^*]*)\*|~~([^~]+)~~|==([^=]+)==|(?:^|\s)(#[\p{L}\p{N}_/-]+)|(https?://[^\s)]+)|\[\^([^\]\s]+)\]").unwrap()
+    Regex::new(r"\[\[[^\]]+\]\]|\[([^\]]+)\]\((https?://[^)\s]+)\)|\*\*([^*]+)\*\*|__([^_]+)__|\*([^*\s][^*]*)\*|~~([^~]+)~~|==([^=]+)==|(?:^|\s)(#[\p{L}\p{N}_/-]+)|(https?://[^\s)]+)|\[\^([^\]\s]+)\]|\[([^\]]+)\]\(([^)\s]+)\)").unwrap()
 });
 static MATH_INLINE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\$([^\s$](?:[^$]*[^\s$])?)\$").unwrap());
 static TASK: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(\s*)[-*+] \[([ xX])\] (.*)$").unwrap());
@@ -39,6 +39,11 @@ pub enum Out {
     RenameProp { from: String, to: Option<String> },
     /// Changer une propriété d'une autre note (kanban d'une base)
     SetPropOf { rel: String, key: String, value: String },
+}
+
+/// Dit quelle page va être affichée, pour résoudre ses liens relatifs (vide : depuis la racine du coffre).
+pub fn set_base(rel: &str) {
+    BASE.with(|b| *b.borrow_mut() = rel.to_string());
 }
 
 /// Affiche la note et retourne le nom de la note cliquée, s'il y en a une (lecture seule)
@@ -385,6 +390,8 @@ static BLOCK_ID: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(||
 thread_local! {
     /// Profondeur des notes intégrées : une note qui s'intègre elle-même ne boucle pas
     static DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    /// La page qu'on est en train de lire (chemin dans le coffre) : ses liens relatifs partent de là
+    static BASE: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
 }
 
 /// « ![[Note]] » ou « ![[Note#Titre]] » : la note du coffre visée et la section, si ce n'est pas une image
@@ -742,8 +749,29 @@ fn inline(ui: &mut egui::Ui, text: &str, ctx: &Ctx, out: &mut Option<Out>, size:
                 }
             } else if let (Some(label), Some(url)) = (cap.get(1), cap.get(2)) {
                 ui.hyperlink_to(base(label.as_str()).color(p.link), url.as_str());
+            } else if let (Some(label), Some(t)) = (cap.get(11), cap.get(12)) {
+                // Lien relatif vers une autre page (« [texte](../page.md#titre) ») : résolu depuis la page lue
+                let label = label.as_str().replace(['`', '*'], "");
+                // Seules les pages Markdown s'ouvrent ici ; un lien vers un dossier ou un autre fichier reste du texte
+                match crate::docs::resolve(&BASE.with(|b| b.borrow().clone()), t.as_str()).filter(|(page, _)| page.to_lowercase().ends_with(".md")) {
+                    Some((page, anchor)) => {
+                        let resp = ui.add(egui::Label::new(base(&label).color(p.link).underline()).sense(egui::Sense::click()));
+                        if resp.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(t.as_str()).clicked() {
+                            *out = Some(Out::Open(match anchor {
+                                Some(a) => format!("{page}#{a}"),
+                                None => page,
+                            }));
+                        }
+                    }
+                    None => {
+                        ui.label(base(&label));
+                    }
+                }
             } else if let Some(t) = cap.get(3).or(cap.get(4)) {
-                ui.label(base(t.as_str()).family(theme::bold()).color(p.text));
+                // Un lien mis en gras (« **[texte](cible)** ») : on montre son texte
+                let t = t.as_str();
+                let t = t.strip_prefix('[').and_then(|r| r.strip_suffix(')')).and_then(|r| r.split_once("](")).map(|(label, _)| label).unwrap_or(t);
+                ui.label(base(t).family(theme::bold()).color(p.text));
             } else if let Some(t) = cap.get(5) {
                 ui.label(base(t.as_str()).italics());
             } else if let Some(t) = cap.get(6) {

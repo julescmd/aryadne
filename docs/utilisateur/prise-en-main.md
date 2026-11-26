@@ -20,7 +20,7 @@ De haut en bas :
 
 - **La barre de menus** : `File`, `Edit`, `View`, `Window`, `Help`. Au centre, un champ **Search or run a command** ouvre la [palette de commandes](palette-de-commandes.md).
 - **La barre des étapes** : `Notes`, `2D`, `3D`, `Motion`, `Video`, `Sound`, `Code`. Un clic change d'étape. `Ctrl+1` à `Ctrl+7` font de même.
-- **Les outils de l'étape** : par exemple `Scene` et `Materials` en 3D. `Alt+1`, `Alt+2`… les choisissent.
+- **Les outils de l'étape** : par exemple `Scene`, `Materials` et `Simulation` en 3D. `Alt+1`, `Alt+2`… les choisissent.
 - **Les onglets** des fichiers ouverts.
 - **Le document** au centre, avec ses panneaux autour.
 - **La barre du bas** : aide contextuelle (les raccourcis utiles de l'outil en cours), état d'enregistrement, minuteur, version.
@@ -33,7 +33,7 @@ La barre du bas change selon ce que tu fais. C'est le premier endroit où regard
 |---|---|---|---|
 | Notes | celle des réglages | `Notes`, `Tasks`, `Brain` | Files, Search |
 | 2D | rose | `Moodboard`, `Retouch`, `Vector`, `Compositing` | Files, References |
-| 3D | bleu | `Scene`, `Materials` | Files, References |
+| 3D | bleu | `Scene`, `Materials`, `Simulation` | Files, References |
 | Motion | doré | `Comps` | Files, References |
 | Video | violet | `Storyboard`, `Edit`, `Review` | Files, Media |
 | Sound | bleu-vert | `Audio`, `Music` | Files, Search |

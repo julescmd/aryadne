@@ -95,8 +95,6 @@ Tout a été écrit en lisant le code source (dossier `src/`), pas en essayant c
 
 ## Parties en cours de refonte
 
-Au moment où ces pages sont écrites, trois chantiers changent le code. Les pages concernées décrivent le code actuel et portent un encadré.
+Au moment où ces pages sont écrites, un chantier change le code. Les pages concernées décrivent le code actuel et portent un encadré.
 
-- **Flux des matériaux.** L'Atelier doit devenir l'entrée des matériaux. Les calques s'ouvriront en nœuds. Pages : [Atelier](utilisateur/3d-atelier.md), [Matériaux en nœuds](utilisateur/noeuds-materiaux.md).
-- **Bibliothèque de nœuds.** L'ajout se fera par glisser-déposer depuis une liste à gauche. Page : [L'éditeur de nœuds](utilisateur/noeuds-editeur.md).
 - **Tissu sur carte graphique.** Le solveur est en cours d'optimisation. Pages : [Simulation de tissu](utilisateur/simulation-tissu.md), [Simulation sur carte graphique](technique/simulation-gpu.md).

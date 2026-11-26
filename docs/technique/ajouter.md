@@ -2,8 +2,6 @@
 
 Des recettes, fichier par fichier. Elles décrivent le code tel qu'il est organisé aujourd'hui.
 
-> **En cours de refonte.** La bibliothèque de nœuds et le flux des matériaux changent. Les étapes sur les définitions (`DEFS`) et l'évaluation restent valables. Ce qui touche au menu d'ajout peut bouger.
-
 Règles communes :
 
 - les textes visibles sont en **français** dans le code, et passent par `i18n` (voir [Traductions](traductions.md)) ;
@@ -31,7 +29,7 @@ Def {
 
 Catégories existantes : `entrée`, `motif`, `usure`, `couleur`, `math`, `filtre`, `shader`, `géométrie`, `simulation`, `structure`, `sortie`, `interne`.
 
-Le nœud apparaît tout seul dans le menu d'ajout, avec ses prises et ses réglages. L'éditeur lit tout dans `DEFS`.
+Le nœud apparaît tout seul dans le menu d'ajout et dans la bibliothèque de nœuds (la liste à gauche du graphe), avec ses prises et ses réglages. L'éditeur lit tout dans `DEFS`.
 
 ### 2. Le calcul
 
