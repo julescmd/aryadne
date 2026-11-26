@@ -2000,7 +2000,7 @@ impl App {
         let mut again = false;
         let text = r.out.lock().map(|s| s.clone()).unwrap_or_default();
         let running = !r.done.load(std::sync::atomic::Ordering::Relaxed);
-        egui::Panel::bottom("run-output").resizable(true).default_size(180.0).min_size(60.0).max_size((ui.available_height() * 0.7).max(80.0)).frame(egui::Frame::new().fill(egui::Color32::from_gray(22)).inner_margin(8)).show(ui, |ui| {
+        crate::dock::panel(ui, "run-output", "sortie du programme", egui::Panel::bottom("run-output").resizable(true).default_size(180.0).min_size(60.0).max_size((ui.available_height() * 0.7).max(80.0)), egui::Frame::new().fill(egui::Color32::from_gray(22)).inner_margin(8), |ui| {
             ui.horizontal(|ui| {
                 ui.label(RichText::new(format!("sortie · {}", vault::display_rel(&r.rel))).color(egui::Color32::from_gray(170)).size(11.0));
                 if running {

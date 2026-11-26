@@ -337,7 +337,7 @@ mod tests {
     fn espaces_aller_retour() {
         let mut s = Set { current: 1, list: (0..PRESETS.len()).map(preset).collect(), seeded: 1 };
         s.list[1].tabs = vec!["modele.glb".into()];
-        s.list[1].places.insert("side".into(), crate::dock::Place { side: crate::dock::Side::Window, pos: [1.0, 2.0], size: [300.0, 400.0] });
+        s.list[1].places.insert("side".into(), crate::dock::Place::new(crate::dock::Side::Window, [1.0, 2.0], [300.0, 400.0]));
         let back: Set = serde_json::from_slice(&serde_json::to_vec(&s).unwrap()).unwrap();
         assert_eq!(back.current, 1);
         assert_eq!(back.list[1].tabs, vec!["modele.glb".to_string()]);

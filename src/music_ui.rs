@@ -478,12 +478,12 @@ impl Editor {
         self.keyboard(ui);
         let frame = egui::Frame::new().fill(p.panel).stroke(Stroke::new(1.0, p.line));
         let full_h = ui.available_height();
-        egui::Panel::top("music-transport").exact_size(44.0).frame(frame).show(ui, |ui| self.transport(ui));
-        egui::Panel::right("music-inspector").resizable(true).default_size(290.0).min_size(240.0).max_size(460.0).frame(frame).show(ui, |ui| {
+        crate::dock::panel(ui, "music-transport", "transport (musique)", egui::Panel::top("music-transport").exact_size(44.0), frame, |ui| self.transport(ui));
+        crate::dock::panel(ui, "music-inspector", "inspecteur (musique)", egui::Panel::right("music-inspector").resizable(true).default_size(290.0).min_size(240.0).max_size(460.0), frame, |ui| {
             egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| self.inspector(ui));
         });
-        egui::Panel::bottom("music-roll").resizable(true).default_size((full_h * 0.5).clamp(220.0, 480.0)).min_size(160.0).max_size((full_h * 0.8).max(200.0)).frame(egui::Frame::new().fill(p.code_bg).stroke(Stroke::new(1.0, p.line))).show(ui, |ui| self.roll(ui));
-        egui::CentralPanel::default().frame(egui::Frame::new().fill(p.code_bg)).show(ui, |ui| self.arrange(ui));
+        crate::dock::panel(ui, "music-roll", "piano roll", egui::Panel::bottom("music-roll").resizable(true).default_size((full_h * 0.5).clamp(220.0, 480.0)).min_size(160.0).max_size((full_h * 0.8).max(200.0)), egui::Frame::new().fill(p.code_bg).stroke(Stroke::new(1.0, p.line)), |ui| self.roll(ui));
+        crate::dock::central(ui, "music-arrange", "arrangement (musique)", egui::Frame::new().fill(p.code_bg), |ui| self.arrange(ui));
     }
 
     // ---------- Transport ----------

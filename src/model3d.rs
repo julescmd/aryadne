@@ -5709,7 +5709,7 @@ impl Viewer {
         if let Some((mut w, mut h, mut spp)) = self.render_dialog {
             let mut go = false;
             let mut close = false;
-            egui::Window::new(crate::i18n::t("rendu final")).collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]).show(ctx, |ui| {
+            crate::dock::window(ctx, "3d-render-dialog", &crate::i18n::t("rendu final"), egui::Window::new(crate::i18n::t("rendu final")).collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]), |ui| {
                 ui.horizontal(|ui| {
                     ui.add(egui::DragValue::new(&mut w).range(16..=32768).suffix(" px"));
                     ui.label("×");
@@ -6069,7 +6069,7 @@ impl Viewer {
         }
         if let Some((file, auto, fov)) = self.mm_dialog.as_mut() {
             let (mut go, mut open) = (false, true);
-            egui::Window::new(crate::i18n::t("Suivi de caméra")).collapsible(false).resizable(false).open(&mut open).anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]).show(ui.ctx(), |ui| {
+            crate::dock::window(&ui.ctx().clone(), "3d-matchmove", &crate::i18n::t("Suivi de caméra"), egui::Window::new(crate::i18n::t("Suivi de caméra")).collapsible(false).resizable(false).open(&mut open).anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]), |ui| {
                 ui.label(egui::RichText::new(format!("{}  {}", crate::lucide::VIDEO, file.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default())).strong());
                 ui.label(egui::RichText::new(crate::i18n::t("La caméra doit se déplacer dans le plan (un simple panoramique sur trépied ne donne pas de relief). Les premières secondes sont suivies.")).size(11.0).color(p.muted));
                 ui.add_space(4.0);
@@ -7256,8 +7256,8 @@ impl Viewer {
         } else {
             // Comme la maquette : la scène à gauche (240 px), les propriétés à droite (290 px)
             let frame = egui::Frame::new().fill(p.panel).stroke(Stroke::new(1.0, p.line));
-            egui::Panel::left("scene-outliner").resizable(true).default_size(240.0).min_size(180.0).max_size((ui.available_width() * 0.35).max(200.0)).frame(frame).show(ui, |ui| sub_body(ui, 0));
-            egui::Panel::right("scene-inspector").resizable(true).default_size(290.0).min_size(240.0).max_size((ui.available_width() * 0.45).max(260.0)).frame(frame).show(ui, |ui| sub_body(ui, 1));
+            crate::dock::panel(ui, "3d-scene", "scène (3D)", egui::Panel::left("scene-outliner").resizable(true).default_size(240.0).min_size(180.0).max_size((ui.available_width() * 0.35).max(200.0)), frame, |ui| sub_body(ui, 0));
+            crate::dock::panel(ui, "3d-props", "propriétés (3D)", egui::Panel::right("scene-inspector").resizable(true).default_size(290.0).min_size(240.0).max_size((ui.available_width() * 0.45).max(260.0)), frame, |ui| sub_body(ui, 1));
         }
         let seek_before = seek;
         // Timeline (une bande) ou éditeur de courbes (un panneau qu'on agrandit)
@@ -7934,7 +7934,7 @@ impl Viewer {
         if let Some(sub_r) = crate::layout::offer("3d-timeline", "timeline 3D") {
             crate::layout::draw_in(ui, sub_r, p.panel, 6.0, sub_body);
         } else {
-            tl_panel.frame(tl_frame).show(ui, sub_body);
+            crate::dock::panel(ui, "3d-timeline", "timeline 3D", tl_panel, tl_frame, sub_body);
         }
         // La timeline se dessine après les panneaux de côté (elle reste sous la vue, comme la maquette) :
         // une image choisie là s'applique tout de suite
@@ -9036,7 +9036,7 @@ impl Viewer {
         // Panneaux de droite : de vrais panneaux qui prennent leur place, la vue occupe ce qui reste
         let side_frame = egui::Frame::new().fill(p.panel).stroke(Stroke::new(1.0, p.line)).inner_margin(8);
         if let Some(e) = &mut self.edit {
-            egui::Panel::right("model-edit-panel").resizable(true).default_size(430.0).min_size(300.0).max_size((ui.available_width() * 0.5).max(320.0)).frame(side_frame).show(ui, |ui| {
+            crate::dock::panel(ui, "model-edit", "édition du modèle", egui::Panel::right("model-edit-panel").resizable(true).default_size(430.0).min_size(300.0).max_size((ui.available_width() * 0.5).max(320.0)), side_frame, |ui| {
                 egui::ScrollArea::vertical().id_salt("edit-panel").show(ui, |ui| {
                     e.panel(ui);
                 });
@@ -9045,7 +9045,7 @@ impl Viewer {
         if self.show_mods {
             let mut changed = false;
             {
-                egui::Panel::right("model-mods-panel").resizable(true).default_size(290.0).min_size(240.0).max_size((ui.available_width() * 0.45).max(260.0)).frame(side_frame).show(ui, |ui| {
+                crate::dock::panel(ui, "model-mods", "modificateurs", egui::Panel::right("model-mods-panel").resizable(true).default_size(290.0).min_size(240.0).max_size((ui.available_width() * 0.45).max(260.0)), side_frame, |ui| {
                     egui::ScrollArea::vertical().id_salt("mods").show(ui, |ui| {
                         changed = crate::modifiers::panel(ui, &mut self.stack, self.applied.is_some(), &mut mod_request);
                         ui.add_space(8.0);
@@ -9178,7 +9178,7 @@ impl Viewer {
         if let Some((fmt, path)) = &mut self.export_dlg {
             let mut close = false;
             let mut go = false;
-            egui::Window::new(crate::i18n::t("exporter le modèle")).collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]).show(ui.ctx(), |ui| {
+            crate::dock::window(&ui.ctx().clone(), "3d-export", &crate::i18n::t("exporter le modèle"), egui::Window::new(crate::i18n::t("exporter le modèle")).collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]), |ui| {
                 ui.set_min_width(460.0);
                 ui.label(crate::theme::section(&crate::i18n::t("FORMAT")));
                 for (f, help) in [("obj", "OBJ : quads et n-gones gardés"), ("fbx", "FBX : Maya, 3ds Max, Blender, Unity, Unreal (quads, UV, matériaux ; une scène garde ses os et l'animation)"), ("glb", "glTF binaire : Blender, Unity, Unreal, web (une scène garde ses os, ses poids et l'animation)"), ("stl", "STL binaire : impression 3D"), ("ply", "PLY : scans, MeshLab")] {

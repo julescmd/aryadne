@@ -157,20 +157,33 @@ pub fn editor_pane(id: &str) -> String {
     format!("ed:{id}")
 }
 
-/// L'éditeur propose ce panneau cette image-ci. Renvoie la case où le dessiner s'il est rangé dans la disposition.
-pub fn offer(id: &str, title: &str) -> Option<egui::Rect> {
+/// Où dessiner un panneau d'éditeur sorti de son éditeur.
+#[derive(Clone)]
+pub struct Slot {
+    /// Identifiant de case (« ed:… »)
+    pub key: String,
+    /// Clé française du titre
+    pub title: String,
+    /// Sa case dans la disposition ; None : il est dans sa propre fenêtre du système
+    pub rect: Option<egui::Rect>,
+}
+
+/// L'éditeur propose ce panneau cette image-ci. Renvoie où le dessiner s'il n'est pas dans l'éditeur :
+/// rangé dans une case de la disposition, ou détaché dans sa propre fenêtre.
+pub fn offer(id: &str, title: &str) -> Option<Slot> {
     let key = editor_pane(id);
     OFFERED.with(|o| o.borrow_mut().insert(key.clone(), title.to_string()));
     TITLES.with(|t| t.borrow_mut().insert(key.clone(), title.to_string()));
-    if DOCKED.with(|d| d.borrow().contains(&key)) { RECTS.with(|r| r.borrow().get(&key).copied()) } else { None }
+    if crate::dock::is_out(&key) {
+        return Some(Slot { key, title: title.to_string(), rect: None });
+    }
+    let rect = if DOCKED.with(|d| d.borrow().contains(&key)) { RECTS.with(|r| r.borrow().get(&key).copied()) } else { None };
+    rect.map(|r| Slot { key, title: title.to_string(), rect: Some(r) })
 }
 
-/// Dessine `body` dans la case `r` d'un panneau d'éditeur rangé dans la disposition.
-pub fn draw_in<R>(ui: &mut egui::Ui, r: egui::Rect, fill: egui::Color32, margin: f32, body: impl FnOnce(&mut egui::Ui) -> R) -> R {
-    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(r.shrink(margin)).layout(egui::Layout::top_down(egui::Align::Min)));
-    child.set_clip_rect(r);
-    child.painter().rect_filled(r, 0.0, fill);
-    body(&mut child)
+/// Dessine `body` là où se trouve le panneau d'éditeur : dans sa case, ou dans sa fenêtre.
+pub fn draw_in<R>(ui: &mut egui::Ui, slot: Slot, fill: egui::Color32, margin: f32, body: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    crate::dock::slot(ui, slot, fill, margin, body)
 }
 
 /// Panneaux proposés à l'image précédente (id de case → titre), et début d'une nouvelle image.

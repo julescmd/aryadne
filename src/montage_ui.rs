@@ -945,7 +945,7 @@ impl Editor {
         // inspecteur à droite, moniteurs source et programme côte à côte, timeline dessous
         if bin_r.is_none() && tl_r.is_none() && fx_r.is_none() && prog_r.is_none() {
             // Médias à gauche, avec la source en second onglet (on y choisit l'entrée et la sortie d'un média)
-            egui::Panel::left("montage-media").resizable(true).default_size(280.0).min_size(200.0).max_size(480.0).frame(panel_frame).show(ui, |ui| {
+            crate::dock::panel(ui, "montage-media", "médias (montage)", egui::Panel::left("montage-media").resizable(true).default_size(280.0).min_size(200.0).max_size(480.0), panel_frame, |ui| {
                 let left = if self.source.is_some() && self.left_tab == 1 { 1 } else { 0 };
                 let k = tab_chips(ui, left, &[&crate::i18n::t("Médias"), &crate::i18n::t("Source")]);
                 if let Some(k) = k {
@@ -953,7 +953,7 @@ impl Editor {
                 }
                 egui::Frame::new().inner_margin(8).show(ui, |ui| if left == 1 { self.source_panel(ui) } else { self.bin_panel(ui) });
             });
-            egui::Panel::right("montage-inspector").resizable(true).default_size(290.0).min_size(240.0).max_size(460.0).frame(panel_frame).show(ui, |ui| {
+            crate::dock::panel(ui, "montage-inspector", "inspecteur (montage)", egui::Panel::right("montage-inspector").resizable(true).default_size(290.0).min_size(240.0).max_size(460.0), panel_frame, |ui| {
                 // Clip (cartes), Effets (bibliothèque), Avancé (toutes les options d'effet)
                 let cur = match self.top_tab { 2 => 1, 3 => 2, _ => 0 };
                 if let Some(k) = tab_chips(ui, cur, &[&crate::i18n::t("Clip"), &crate::i18n::t("Effets"), &crate::i18n::t("Avancé")]) {
@@ -967,9 +967,9 @@ impl Editor {
                     });
                 });
             });
-            egui::Panel::bottom("montage-lower").resizable(true).default_size((full_h * 0.4).max(240.0)).min_size(180.0).max_size((full_h * 0.75).max(200.0)).frame(egui::Frame::new()).show(ui, |ui| timeline_block(self, ui));
+            crate::dock::panel(ui, "montage-lower", "bande de montage", egui::Panel::bottom("montage-lower").resizable(true).default_size((full_h * 0.4).max(240.0)).min_size(180.0).max_size((full_h * 0.75).max(200.0)), egui::Frame::new().fill(p.panel), |ui| timeline_block(self, ui));
             // Un seul moniteur : le montage
-            egui::CentralPanel::default().frame(egui::Frame::new().fill(p.code_bg).inner_margin(egui::Margin::symmetric(16, 10))).show(ui, |ui| self.program_monitor(ui));
+            crate::dock::central(ui, "montage-monitor", "moniteur (montage)", egui::Frame::new().fill(p.code_bg).inner_margin(egui::Margin::symmetric(16, 10)), |ui| self.program_monitor(ui));
             return;
             #[allow(unreachable_code)]
             egui::CentralPanel::default().frame(egui::Frame::new().fill(p.code_bg).inner_margin(egui::Margin::symmetric(16, 12))).show(ui, |ui| {
@@ -1011,6 +1011,7 @@ impl Editor {
         if let Some(r) = tl_r {
             crate::layout::draw_in(ui, r, p.bg, 0.0, |ui| timeline_block(self, ui));
         }
+        let both = fx_r.is_some() && prog_r.is_some();
         match fx_r {
             Some(r) => crate::layout::draw_in(ui, r, p.panel, 8.0, |ui| top_left(self, ui)),
             None if prog_r.is_some() => {
@@ -1026,7 +1027,7 @@ impl Editor {
                 egui::CentralPanel::default().frame(egui::Frame::new().fill(p.panel).inner_margin(8)).show(ui, |ui| self.program_monitor(ui));
             }
         }
-        if fx_r.is_some() && prog_r.is_some() {
+        if both {
             egui::CentralPanel::default().frame(egui::Frame::new().fill(p.panel)).show(ui, |ui| {
                 ui.centered_and_justified(|ui| ui.label(RichText::new(crate::i18n::t("Les panneaux du montage sont dans leurs cases.")).color(p.muted)));
             });

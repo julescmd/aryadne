@@ -3323,7 +3323,7 @@ impl Editor {
             self.anim_panel(ui);
         }
         // ---- Colonne des outils à gauche, comme Photoshop, avec les couleurs en bas
-        egui::Panel::left(egui::Id::unique(("paint-tools", self.path.to_string_lossy().to_string()))).resizable(false).exact_size(44.0).frame(egui::Frame::new().fill(p.panel).stroke(Stroke::new(1.0, p.line)).inner_margin(egui::Margin::symmetric(4, 8))).show(ui, |ui| {
+        crate::dock::panel(ui, "paint-tools", "outils (retouche)", egui::Panel::left(egui::Id::unique(("paint-tools", self.path.to_string_lossy().to_string()))).resizable(false).exact_size(44.0), egui::Frame::new().fill(p.panel).stroke(Stroke::new(1.0, p.line)).inner_margin(egui::Margin::symmetric(4, 8)), |ui| {
             ui.vertical_centered(|ui| {
                 ui.spacing_mut().item_spacing.y = 2.0;
                 for (k, (t, icon, label, key)) in TOOLS.into_iter().enumerate() {
@@ -3387,7 +3387,7 @@ impl Editor {
         match crate::layout::offer("paint-layers", "calques (retouche)") {
             Some(r) => crate::layout::draw_in(ui, r, p.panel, 8.0, |ui| self.side_panel(ui)),
             None => {
-                egui::Panel::right(egui::Id::unique(("paint-layers", self.path.to_string_lossy().to_string()))).resizable(true).max_size(480.0).default_size(230.0).min_size(180.0).frame(egui::Frame::new().fill(p.panel).stroke(Stroke::new(1.0, p.line)).inner_margin(8)).show(ui, |ui| {
+                crate::dock::panel(ui, "paint-layers", "calques (retouche)", egui::Panel::right(egui::Id::unique(("paint-layers", self.path.to_string_lossy().to_string()))).resizable(true).max_size(480.0).default_size(230.0).min_size(180.0), egui::Frame::new().fill(p.panel).stroke(Stroke::new(1.0, p.line)).inner_margin(8), |ui| {
                     self.panel_w = ui.max_rect().width() + 16.0;
                     self.side_panel(ui)
                 });
@@ -3396,7 +3396,8 @@ impl Editor {
         // ---- Réglage en cours : fenêtre avec aperçu en direct
         if let Some((kind, _, mut v)) = self.adjust.clone() {
             let mut close = None;
-            egui::Window::new(crate::i18n::t(if kind == Adjust::BrightContrast { "luminosité et contraste" } else { "teinte et saturation" })).collapsible(false).resizable(false).show(&ctx, |ui| {
+            let adjust_title = crate::i18n::t(if kind == Adjust::BrightContrast { "luminosité et contraste" } else { "teinte et saturation" });
+            crate::dock::window(&ctx, "paint-adjust", &adjust_title, egui::Window::new(adjust_title.clone()).collapsible(false).resizable(false), |ui| {
                 let (a, b) = if kind == Adjust::BrightContrast { ("luminosité", "contraste") } else { ("teinte", "saturation") };
                 let r1 = if kind == Adjust::HueSat { -0.5..=0.5 } else { -1.0..=1.0 };
                 let mut ch = ui.add(egui::Slider::new(&mut v[0], r1).clamping(egui::SliderClamping::Never).text(crate::i18n::t(a))).changed();
@@ -4585,7 +4586,7 @@ impl Editor {
                 self.set_frame((self.cur_frame() + 1) % frames.len());
             }
         }
-        egui::Panel::bottom(egui::Id::unique(("paint-anim", self.path.to_string_lossy().to_string()))).resizable(false).exact_size(96.0).frame(egui::Frame::new().fill(p.panel).stroke(Stroke::new(1.0, p.line)).inner_margin(egui::Margin::symmetric(8, 6))).show(ui, |ui| {
+        crate::dock::panel(ui, "paint-anim", "animation (retouche)", egui::Panel::bottom(egui::Id::unique(("paint-anim", self.path.to_string_lossy().to_string()))).resizable(false).exact_size(96.0), egui::Frame::new().fill(p.panel).stroke(Stroke::new(1.0, p.line)).inner_margin(egui::Margin::symmetric(8, 6)), |ui| {
             ui.horizontal(|ui| {
                 let b = |ui: &mut egui::Ui, icon: &str, tip: &str| ui.add(egui::Button::new(egui::RichText::new(icon).size(14.0)).min_size(vec2(26.0, 22.0))).on_hover_text(crate::i18n::t(tip)).clicked();
                 let playing = self.anim_play.is_some();

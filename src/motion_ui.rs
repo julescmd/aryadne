@@ -559,12 +559,12 @@ impl Editor {
         }
         let frame = egui::Frame::new().fill(p.panel).stroke(Stroke::new(1.0, p.line));
         let full_h = ui.available_height();
-        egui::Panel::left("motion-project").resizable(true).default_size(240.0).min_size(190.0).max_size(420.0).frame(frame).show(ui, |ui| self.project_panel(ui));
-        egui::Panel::right("motion-inspector").resizable(true).default_size(290.0).min_size(240.0).max_size(460.0).frame(frame).show(ui, |ui| {
+        crate::dock::panel(ui, "motion-project", "projet (motion)", egui::Panel::left("motion-project").resizable(true).default_size(240.0).min_size(190.0).max_size(420.0), frame, |ui| self.project_panel(ui));
+        crate::dock::panel(ui, "motion-inspector", "inspecteur (motion)", egui::Panel::right("motion-inspector").resizable(true).default_size(290.0).min_size(240.0).max_size(460.0), frame, |ui| {
             egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| self.inspector(ui));
         });
-        egui::Panel::bottom("motion-timeline").resizable(true).default_size((full_h * 0.36).clamp(230.0, 320.0)).min_size(160.0).max_size((full_h * 0.7).max(200.0)).frame(frame).show(ui, |ui| self.timeline(ui));
-        egui::CentralPanel::default().frame(egui::Frame::new().fill(p.code_bg)).show(ui, |ui| self.viewer(ui));
+        crate::dock::panel(ui, "motion-timeline", "timeline (motion)", egui::Panel::bottom("motion-timeline").resizable(true).default_size((full_h * 0.36).clamp(230.0, 320.0)).min_size(160.0).max_size((full_h * 0.7).max(200.0)), frame, |ui| self.timeline(ui));
+        crate::dock::central(ui, "motion-viewer", "vue (motion)", egui::Frame::new().fill(p.code_bg), |ui| self.viewer(ui));
     }
 
     // ---------- Projet ----------

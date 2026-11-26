@@ -479,7 +479,7 @@ impl Editor {
             return;
         }
         // Outils à gauche
-        egui::Panel::left(egui::Id::unique(("vec-tools", &key))).resizable(false).exact_size(44.0).frame(egui::Frame::new().fill(p.panel).stroke(Stroke::new(1.0, p.line)).inner_margin(egui::Margin::symmetric(4, 8))).show(ui, |ui| {
+        crate::dock::panel(ui, "vec-tools", "outils (vectoriel)", egui::Panel::left(egui::Id::unique(("vec-tools", &key))).resizable(false).exact_size(44.0), egui::Frame::new().fill(p.panel).stroke(Stroke::new(1.0, p.line)).inner_margin(egui::Margin::symmetric(4, 8)), |ui| {
             ui.vertical_centered(|ui| {
                 ui.spacing_mut().item_spacing.y = 2.0;
                 for (k, (t, icon, label, hk)) in TOOLS.into_iter().enumerate() {
@@ -502,11 +502,11 @@ impl Editor {
             });
         });
         // Propriétés à droite
-        egui::Panel::right(egui::Id::unique(("vec-props", &key))).resizable(true).default_size(260.0).min_size(220.0).max_size(420.0).frame(egui::Frame::new().fill(p.panel).stroke(Stroke::new(1.0, p.line)).inner_margin(10)).show(ui, |ui| {
+        crate::dock::panel(ui, "vec-props", "propriétés (vectoriel)", egui::Panel::right(egui::Id::unique(("vec-props", &key))).resizable(true).default_size(260.0).min_size(220.0).max_size(420.0), egui::Frame::new().fill(p.panel).stroke(Stroke::new(1.0, p.line)).inner_margin(10), |ui| {
             egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| self.props(ui));
         });
         // Calques à gauche de la toile
-        egui::Panel::left(egui::Id::unique(("vec-layers", &key))).resizable(true).default_size(200.0).min_size(150.0).max_size(360.0).frame(egui::Frame::new().fill(p.panel).stroke(Stroke::new(1.0, p.line)).inner_margin(8)).show(ui, |ui| self.layers(ui));
+        crate::dock::panel(ui, "vec-layers", "calques (vectoriel)", egui::Panel::left(egui::Id::unique(("vec-layers", &key))).resizable(true).default_size(200.0).min_size(150.0).max_size(360.0), egui::Frame::new().fill(p.panel).stroke(Stroke::new(1.0, p.line)).inner_margin(8), |ui| self.layers(ui));
         self.toolbar(ui);
         self.icon_window(&ui.ctx().clone());
         self.comment_window(&ui.ctx().clone());
@@ -2075,7 +2075,7 @@ impl Editor {
         if let Some(at) = self.comment_at {
             win = win.default_pos(at);
         }
-        win.collapsible(false).resizable(false).default_width(280.0).show(ctx, |ui| {
+        crate::dock::window(ctx, "vec-comment", &format!("{} {}", crate::i18n::t("Commentaire"), i + 1), win.collapsible(false).resizable(false).default_width(280.0), |ui| {
             let c = &mut self.doc.comments[i];
             let r = ui.add(egui::TextEdit::multiline(&mut c.text).desired_rows(4).desired_width(f32::INFINITY).hint_text(crate::i18n::t("Ce qui est à revoir ici…")));
             if c.text.is_empty() {

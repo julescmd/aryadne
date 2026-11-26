@@ -511,13 +511,13 @@ impl Editor {
         }
         self.open_spectral();
         let frame = egui::Frame::new().fill(p.panel).stroke(Stroke::new(1.0, p.line));
-        egui::Panel::left("audio-sounds").resizable(true).default_size(230.0).min_size(180.0).max_size(420.0).frame(frame).show(ui, |ui| self.sounds_panel(ui));
-        egui::Panel::right("audio-inspector").resizable(true).default_size(290.0).min_size(240.0).max_size(460.0).frame(frame).show(ui, |ui| {
+        crate::dock::panel(ui, "audio-sounds", "sons (audio)", egui::Panel::left("audio-sounds").resizable(true).default_size(230.0).min_size(180.0).max_size(420.0), frame, |ui| self.sounds_panel(ui));
+        crate::dock::panel(ui, "audio-inspector", "inspecteur (audio)", egui::Panel::right("audio-inspector").resizable(true).default_size(290.0).min_size(240.0).max_size(460.0), frame, |ui| {
             egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| self.inspector(ui));
         });
-        egui::Panel::bottom("audio-status").exact_size(34.0).frame(frame).show(ui, |ui| self.status(ui));
-        egui::Panel::top("audio-transport").exact_size(44.0).frame(frame).show(ui, |ui| self.transport(ui));
-        egui::CentralPanel::default().frame(egui::Frame::new().fill(p.code_bg)).show(ui, |ui| {
+        crate::dock::panel(ui, "audio-status", "état (audio)", egui::Panel::bottom("audio-status").exact_size(34.0), frame, |ui| self.status(ui));
+        crate::dock::panel(ui, "audio-transport", "transport (audio)", egui::Panel::top("audio-transport").exact_size(44.0), frame, |ui| self.transport(ui));
+        crate::dock::central(ui, "audio-tracks", "pistes (audio)", egui::Frame::new().fill(p.code_bg), |ui| {
             if self.spectral.is_some() {
                 self.spectral_panel(ui);
             } else {

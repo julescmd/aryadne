@@ -42,6 +42,7 @@ mod hl;
 mod palette;
 mod bridge;
 mod layout;
+mod screens;
 mod icons;
 mod atelier;
 mod oidn;
@@ -1794,7 +1795,15 @@ impl App {
     /// Dessine un panneau (dans sa case, ou dans sa propre fenêtre s'il en est sorti).
     fn pane_body(&mut self, ui: &mut egui::Ui, id: &str) {
         match id {
-            layout::MAIN => self.main_view(ui),
+            layout::MAIN => {
+                if dock::is_out(layout::MAIN) {
+                    // La zone du document dans sa propre fenêtre (sur un deuxième écran, par exemple)
+                    let p = theme::pal();
+                    dock::show_ex(ui, layout::MAIN, &crate::i18n::t("document"), dock::Side::Home, 900.0, 320.0, egui::Frame::new().fill(p.bg), false, |ui| self.main_view(ui));
+                } else {
+                    self.main_view(ui);
+                }
+            }
             "explorer" => {
                 self.explorer(ui);
                 if crate::dock::closed("explorer") {
@@ -1858,9 +1867,10 @@ impl App {
         let outside: Vec<String> = panes.iter().filter(|p| dock::side_of(p) == Some(dock::Side::Window)).cloned().collect();
         dock::set_managed(panes.iter().filter(|p| !outside.contains(p)).cloned().collect());
         layout::set_visibility(&mut tree, &|p| !outside.iter().any(|o| o == p) && self.pane_open(p));
-        layout::set_docked(panes.iter().filter(|p| p.starts_with("ed:") && self.offered_now.contains_key(*p)).cloned().collect());
+        layout::set_docked(panes.iter().filter(|p| p.starts_with("ed:") && self.offered_now.contains_key(*p) && !outside.contains(p)).cloned().collect());
         for o in &outside {
-            if self.pane_open(o) && o != layout::MAIN {
+            // Les panneaux d'éditeur sortis sont dessinés par leur éditeur, dans leur fenêtre
+            if self.pane_open(o) && !o.starts_with("ed:") {
                 self.pane_body(ui, o);
             }
         }
@@ -1898,7 +1908,7 @@ impl App {
                 }
                 if ctx.input(|i| i.pointer.any_released()) {
                     let a = at.unwrap_or(area.center());
-                    dock::put(&pane, dock::Side::Window, [a.x - 40.0, a.y - 12.0], [560.0, 440.0]);
+                    dock::detach_at(&ctx, &pane, Some(dock::desk(&ctx, a - egui::vec2(40.0, 12.0))), [560.0, 440.0]);
                     ctx.request_repaint();
                 }
             }
@@ -3205,6 +3215,17 @@ impl App {
             }
         }
         ui.separator();
+        // La zone du document elle-même, dans sa propre fenêtre (pour un deuxième écran)
+        let mut main_out = dock::is_out(layout::MAIN);
+        if ui.checkbox(&mut main_out, format!("{}  {}", crate::lucide::EXTERNAL_LINK, crate::i18n::t("document dans sa propre fenêtre"))).on_hover_text(crate::i18n::t("La zone du document (vue 3D, toile, montage, texte…) sort dans une vraie fenêtre, qu'on pose sur un autre écran. Décoché, ou la fenêtre fermée : elle revient.")).changed() {
+            if main_out {
+                dock::detach_at(ctx, layout::MAIN, None, [900.0, 640.0]);
+            } else {
+                dock::set_side(layout::MAIN, dock::Side::Home);
+            }
+            ui.close();
+        }
+        ui.separator();
         // Nouvelles fenêtres : autant qu'on veut, chacune se place par son en-tête
         ui.label(caps(&crate::i18n::t("ajouter une fenêtre")));
         for (label, kind) in VIEW_WINDOWS {
@@ -3556,7 +3577,7 @@ impl App {
         let p = theme::pal();
         let total = ui.available_width();
         let w = total / 2.0;
-        egui::Panel::right("split-pane").resizable(true).default_size(w).min_size(240.0).max_size((total - 260.0).max(260.0)).frame(egui::Frame::new().fill(p.bg).stroke(egui::Stroke::new(1.0, p.line))).show(ui, |ui| {
+        crate::dock::panel(ui, "split-pane", "vue côte à côte", egui::Panel::right("split-pane").resizable(true).default_size(w).min_size(240.0).max_size((total - 260.0).max(260.0)), egui::Frame::new().fill(p.bg).stroke(egui::Stroke::new(1.0, p.line)), |ui| {
             let keep = self.active;
             self.active = Some(j);
             self.in_split = true;
@@ -5150,8 +5171,8 @@ impl App {
         // Comme la maquette : les calques à gauche, les couleurs à droite, le board au centre
         // Pendant le diaporama, l'image prend toute la place
         if self.slideshow.is_none() {
-            egui::Panel::left("board-layers").resizable(true).default_size(240.0).min_size(180.0).max_size(360.0).frame(frame).show(ui, |ui| self.board_layers(ui));
-            egui::Panel::right("board-inspector").resizable(true).default_size(300.0).min_size(260.0).max_size(420.0).frame(frame).show(ui, |ui| self.board_inspector(ui));
+            crate::dock::panel(ui, "board-layers", "calques (moodboard)", egui::Panel::left("board-layers").resizable(true).default_size(240.0).min_size(180.0).max_size(360.0), frame, |ui| self.board_layers(ui));
+            crate::dock::panel(ui, "board-inspector", "inspecteur (moodboard)", egui::Panel::right("board-inspector").resizable(true).default_size(300.0).min_size(260.0).max_size(420.0), frame, |ui| self.board_inspector(ui));
         }
         egui::CentralPanel::default().frame(egui::Frame::new().fill(p.bg)).show(ui, |ui| {
             let canvas = ui.available_rect_before_wrap();
@@ -5917,9 +5938,7 @@ impl App {
 
         // Panneau de détails
         if let Some(sel) = self.refs.selected.clone() {
-            egui::Panel::right("ref-detail").resizable(true).default_size(320.0).min_size(240.0).max_size((ui.available_width() * 0.5).max(260.0))
-                .frame(egui::Frame::new().fill(p.panel).stroke(egui::Stroke::new(1.0, p.line)).inner_margin(12))
-                .show(ui, |ui| {
+            crate::dock::panel(ui, "ref-detail", "détail de la référence", egui::Panel::right("ref-detail").resizable(true).default_size(320.0).min_size(240.0).max_size((ui.available_width() * 0.5).max(260.0)), egui::Frame::new().fill(p.panel).stroke(egui::Stroke::new(1.0, p.line)).inner_margin(12), |ui| {
                     ui.label(caps(&crate::i18n::t("référence")));
                     ui.label(RichText::new(&sel).size(11.5));
                     ui.add_space(6.0);
@@ -7668,6 +7687,8 @@ impl eframe::App for App {
                 self.tiles(ui);
             }
             self.internal_drop(&ctx);
+            // Fenêtres détachées : places retenues sur le disque, zone de rattachement
+            dock::tick(&ctx);
             if let Some(m) = NOTICES.lock().unwrap_or_else(|e| e.into_inner()).drain(..).last() {
                 self.toast(m);
             }
@@ -8012,6 +8033,12 @@ impl egui_tiles::Behavior<String> for Panes<'_> {
                 child.set_clip_rect(ui.clip_rect().intersect(rect));
                 dock::inline(&id, || self.app.pane_body(&mut child, &id));
             }
+            // La poignée discrète en haut de la case : un clic (ou la tirer dehors) sort le panneau dans sa fenêtre
+            let ask = dock::grip(ui, full, &id, &App::pane_title(&id), false);
+            if let dock::Grip::Detach(at) = ask {
+                let c = ui.ctx().clone();
+                dock::detach_at(&c, &id, Some(at.unwrap_or_else(|| dock::desk(&c, full.min))), [full.width().max(260.0), full.height().max(200.0)]);
+            }
             // L'en-tête après le contenu : ses boutons passent au-dessus
             let rect = full;
             if header {
@@ -8050,6 +8077,19 @@ impl egui_tiles::Behavior<String> for Panes<'_> {
                     }
                 } else {
                     ui.painter().text(egui::pos2(h.left() + 12.0, h.center().y), egui::Align2::LEFT_CENTER, App::pane_title(&id), egui::FontId::new(13.0, theme::bold()), p.text);
+                }
+                {
+                    // Sortir le panneau dans sa propre fenêtre, d'un clic
+                    let dr = egui::Rect::from_center_size(egui::pos2(h.right() - 44.0, h.center().y), egui::vec2(24.0, 24.0));
+                    let dresp = ui.interact(dr, ui.scope_id().with(("pane-out", &id)), egui::Sense::click());
+                    if dresp.hovered() {
+                        ui.painter().rect_filled(dr, 2.0, p.raised);
+                    }
+                    ui.painter().text(dr.center(), egui::Align2::CENTER_CENTER, lucide::EXTERNAL_LINK, egui::FontId::proportional(12.5), if dresp.hovered() { p.text } else { p.muted });
+                    if dresp.on_hover_text(crate::i18n::t("détacher dans sa propre fenêtre")).clicked() {
+                        let c = ui.ctx().clone();
+                        dock::detach_at(&c, &id, Some(dock::desk(&c, rect.min)), [rect.width().max(260.0), rect.height().max(200.0)]);
+                    }
                 }
                 if !id.starts_with("ed:") {
                     let xr = egui::Rect::from_center_size(egui::pos2(h.right() - 18.0, h.center().y), egui::vec2(24.0, 24.0));
@@ -8125,6 +8165,17 @@ impl egui_tiles::Behavior<String> for Panes<'_> {
 
     fn tab_bar_height(&self, _style: &egui::Style) -> f32 {
         26.0
+    }
+
+    /// À droite de la rangée d'onglets : sortir l'onglet affiché dans sa propre fenêtre
+    fn top_bar_right_ui(&mut self, tiles: &egui_tiles::Tiles<String>, ui: &mut egui::Ui, _tile_id: egui_tiles::TileId, tabs: &egui_tiles::Tabs, _scroll_offset: &mut f32) {
+        let Some(pane) = tabs.active.and_then(|a| tiles.get_pane(&a).cloned()) else { return };
+        let p = theme::pal();
+        if ui.add(egui::Button::new(egui::RichText::new(lucide::EXTERNAL_LINK).size(12.0).color(p.muted)).frame(false)).on_hover_text(format!("{} · {}", crate::i18n::t("détacher dans sa propre fenêtre"), App::pane_title(&pane))).clicked() {
+            let c = ui.ctx().clone();
+            let at = ui.max_rect().left_bottom();
+            dock::detach_at(&c, &pane, Some(dock::desk(&c, at)), [560.0, 440.0]);
+        }
     }
 
     /// L'éditeur principal seul dans sa case : pas de barre d'onglets au-dessus (les documents ont déjà la leur)
