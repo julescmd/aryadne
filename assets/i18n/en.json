@@ -3923,5 +3923,11 @@
   "cache de géométrie illisible": "unreadable geometry cache",
   "graphe trop profond": "graph too deep",
   "Image de l'animation montrée par l'aperçu (lue par le node Temps)": "Animation frame shown by the preview (read by the Time node)",
-  "mélange": "mix"
+  "mélange": "mix",
+  "Exemples": "Examples",
+  "tissu sur une boule": "cloth on a ball",
+  "fontaine de particules": "particle fountain",
+  "vagues animées": "animated waves",
+  "la couleur suit l'âge": "color follows age",
+  "le champ : une hauteur par point, qui lit le temps": "the field: one height per point, reading time"
 }

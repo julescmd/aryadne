@@ -28,6 +28,10 @@ pub struct GeoView {
     dist: f32,
     target: [f32; 3],
     framed: bool,
+    /// Tant que l'artiste n'a pas touché à la caméra, le cadre s'élargit pour suivre ce qui grandit
+    auto: bool,
+    /// Boîte englobante de tout ce qui a été vu depuis le dernier recadrage
+    seen: Option<([f32; 3], [f32; 3])>,
     result: Option<Geo>,
     key: Option<(u64, i32, Option<u32>)>,
     pub error: Option<(u32, String)>,
@@ -56,7 +60,7 @@ fn point_color(g: &Geo, i: usize, base: Color32) -> Color32 {
 impl GeoView {
     pub fn new(g: &Graph) -> GeoView {
         let start = g.time.unwrap_or_default().start;
-        GeoView { engine: Engine::default(), frame: start, playing: false, last_tick: None, acc: 0.0, yaw: 0.6, pitch: 0.35, dist: 5.0, target: [0.0, 0.8, 0.0], framed: false, result: None, key: None, error: None, stats: Stats::default(), ms: 0.0, thumbs: HashMap::new(), solo: None, zones: vec![], table: None }
+        GeoView { engine: Engine::default(), frame: start, playing: false, last_tick: None, acc: 0.0, yaw: 0.6, pitch: 0.35, dist: 5.0, target: [0.0, 0.8, 0.0], framed: false, auto: true, seen: None, result: None, key: None, error: None, stats: Stats::default(), ms: 0.0, thumbs: HashMap::new(), solo: None, zones: vec![], table: None }
     }
 
     /// Les caches figés sur le disque, d'après le réglage « cache » des fins de zone.
@@ -115,7 +119,11 @@ impl GeoView {
         let incomplete = self.engine.incomplete;
         match r {
             Ok(g) => {
-                if !self.framed && g.n > 0 {
+                if !self.framed {
+                    self.seen = None;
+                    self.auto = true;
+                }
+                if (!self.framed || self.auto) && g.n > 0 {
                     self.frame_on(&g);
                 }
                 self.result = Some(g);
@@ -132,13 +140,22 @@ impl GeoView {
         }
     }
 
+    /// Cadre la vue sur tout ce qui a été vu depuis le dernier recadrage : une fontaine qui grandit
+    /// reste entière à l'écran, sans que la caméra saute à chaque image.
     fn frame_on(&mut self, g: &Geo) {
-        if let Some((lo, hi)) = g.bounds() {
-            self.target = [(lo[0] + hi[0]) * 0.5, (lo[1] + hi[1]) * 0.5, (lo[2] + hi[2]) * 0.5];
-            let d = ((hi[0] - lo[0]).powi(2) + (hi[1] - lo[1]).powi(2) + (hi[2] - lo[2]).powi(2)).sqrt();
-            self.dist = (d * 1.25).clamp(0.5, 500.0);
-            self.framed = true;
+        let Some((lo, hi)) = g.bounds() else { return };
+        let (lo, hi) = match self.seen {
+            Some((a, b)) => ([a[0].min(lo[0]), a[1].min(lo[1]), a[2].min(lo[2])], [b[0].max(hi[0]), b[1].max(hi[1]), b[2].max(hi[2])]),
+            None => (lo, hi),
+        };
+        if self.seen == Some((lo, hi)) && self.framed {
+            return;
         }
+        self.seen = Some((lo, hi));
+        self.target = [(lo[0] + hi[0]) * 0.5, (lo[1] + hi[1]) * 0.5, (lo[2] + hi[2]) * 0.5];
+        let d = ((hi[0] - lo[0]).powi(2) + (hi[1] - lo[1]).powi(2) + (hi[2] - lo[2]).powi(2)).sqrt();
+        self.dist = (d * 1.25).clamp(0.5, 500.0);
+        self.framed = true;
     }
 
     /// Projette un point du monde dans le rectangle. Rend aussi sa profondeur (négative : derrière la caméra).
@@ -161,6 +178,9 @@ impl GeoView {
         let painter = ui.painter_at(rect);
         painter.rect_filled(rect, 6.0, Color32::from_gray(26));
         let resp = ui.interact(rect, ui.scope_id().with("geo-view"), Sense::click_and_drag());
+        if resp.dragged() || (resp.hovered() && ui.input(|i| i.smooth_scroll_delta.y != 0.0)) {
+            self.auto = false;
+        }
         if resp.dragged_by(egui::PointerButton::Primary) {
             let d = resp.drag_delta();
             self.yaw += d.x * 0.01;
@@ -182,6 +202,8 @@ impl GeoView {
         }
         if resp.double_clicked() {
             if let Some(g) = self.result.clone() {
+                self.seen = None;
+                self.framed = false;
                 self.frame_on(&g);
             }
         }

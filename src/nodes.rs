@@ -3967,6 +3967,7 @@ impl Editor {
         // ---- En-tête flottant du graphe (une zone au-dessus du graphe, qui garde ses clics)
         let hdr_w = (graph_rect.width() - 24.0).max(120.0);
         let mut frame_changed = false;
+        let mut example: Option<&'static str> = None;
         crate::dock::overlay(ui, "node-header", "barre du graphe (nodes)", egui::Area::new(ui.scope_id().with("node-hdr")).order(egui::Order::Middle).fixed_pos(graph_rect.min + vec2(12.0, 10.0)), |ui| {
             {
                 let v = &mut ui.style_mut().visuals.widgets;
@@ -4014,6 +4015,15 @@ impl Editor {
                     }
                 });
             }
+            if kind == GraphKind::Geometry {
+                egui::containers::menu::MenuButton::new(crate::i18n::t("Exemples")).ui(ui, |ui| {
+                    for name in crate::geo::EXAMPLES {
+                        if ui.button(crate::i18n::t(name)).on_hover_text(crate::i18n::t("remplace le graphe actuel")).clicked() {
+                            example = Some(name);
+                        }
+                    }
+                });
+            }
             egui::containers::menu::MenuButton::new(crate::i18n::t("Vue")).ui(ui, |ui| {
                 if ui.button(format!("{}  {}", crate::lucide::SCAN, crate::i18n::t("Tout cadrer   Origine"))).clicked() {
                     self.scene = Rect::ZERO;
@@ -4057,6 +4067,15 @@ impl Editor {
         if frame_changed {
             self.program = self.compile_doc();
             self.version += 1;
+        }
+        if let Some(g) = example.and_then(crate::geo::example) {
+            // Un exemple remplace le graphe (Ctrl+Z pour revenir) et repart de la première image
+            self.leave();
+            self.graph = g;
+            self.scene = Rect::ZERO;
+            self.selected.clear();
+            self.geo = Some(Box::new(crate::geoview::GeoView::new(&self.graph)));
+            self.changed();
         }
         let mut child = ui.new_child(egui::UiBuilder::new().max_rect(graph_rect));
         let over_graph = ctx.pointer_latest_pos().is_some_and(|pt| graph_rect.contains(pt));
@@ -4262,7 +4281,7 @@ impl Editor {
                     let h = Self::node_size(n, d);
                     g[0] >= n.pos[0] && g[0] <= n.pos[0] + NW && g[1] >= n.pos[1] && g[1] <= n.pos[1] + h && d.params.iter().any(|pp| matches!(pp, ParamDef::File(_))) && ((n.op == "video") == is_vid)
                 }).map(|n| (n.id, n.pos));
-                if is_vid || is_img {
+                if (is_vid || is_img) && kind != GraphKind::Geometry {
                     // Pendant le glisser : le node visé s'allume
                     if let Some((_, pos)) = target {
                         let k = graph_rect.width() / self.scene.width().max(1e-3);
@@ -4286,7 +4305,7 @@ impl Editor {
         }
         // Images glissées depuis l'ordinateur : un node texture / image par fichier
         let dropped: Vec<PathBuf> = ctx.input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).collect());
-        if !dropped.is_empty() && over_graph {
+        if !dropped.is_empty() && over_graph && kind != GraphKind::Geometry {
             let mut at = ctx.pointer_latest_pos().map(to_graph).unwrap_or([0.0, 0.0]);
             let op = if kind == GraphKind::Material { "texture" } else { "image" };
             let mut added = vec![];

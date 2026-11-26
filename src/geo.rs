@@ -744,6 +744,10 @@ impl Run<'_> {
             let n = self.nodes[&node];
             return Ok(Field::Const(n.values.get(inp).copied().or_else(|| n.def().and_then(|d| d.inputs.get(inp)).map(|i| i.2)).unwrap_or([0.0; 4])));
         }
+        // Sans point, rien à calculer (et un attribut pas encore né n'est pas une erreur)
+        if geo.n == 0 {
+            return Ok(Field::Per(vec![]));
+        }
         let mut attrs: Vec<String> = vec!["index".into(), "P".into()];
         attrs.extend(geo.cols.keys().filter(|k| k.as_str() != "P").cloned());
         let prog = Program::compile_field(self.g, node, inp, &attrs, self.root, self.frame as f32, self.time.fps)?;
@@ -1538,10 +1542,141 @@ pub fn starter() -> Graph {
     g
 }
 
+/// Exemples proposés dans l'éditeur : chacun montre une façon de se servir des nodes de géométrie.
+pub const EXAMPLES: [&str; 3] = ["tissu sur une boule", "fontaine de particules", "vagues animées"];
+
+pub fn example(name: &str) -> Option<Graph> {
+    match name {
+        "tissu sur une boule" => Some(starter()),
+        "fontaine de particules" => Some(fountain()),
+        "vagues animées" => Some(waves()),
+        _ => None,
+    }
+}
+
+fn hide_thumbs(g: &mut Graph, ids: &[u32]) {
+    for n in g.nodes.iter_mut().filter(|n| ids.contains(&n.id)) {
+        n.preview = false;
+    }
+}
+
+/// Des particules jaillissent d'un petit cercle, retombent, rebondissent, et changent de couleur en vieillissant.
+fn fountain() -> Graph {
+    let mut g = Graph::empty(crate::nodes::GraphKind::Geometry);
+    g.time = Some(TimeRange { fps: 24.0, start: 1, end: 160 });
+    let src = g.add("geo_circle", [0.0, 300.0]);
+    set_value(&mut g, src, 0, [24.0; 4]);
+    set_value(&mut g, src, 1, [0.12; 4]);
+    let (begin, end) = crate::nodeflow::add_zone(&mut g, "sim", [0.0, 0.0]);
+    let emit = g.add("sim_emit", [250.0, 0.0]);
+    set_value(&mut g, emit, 2, [40.0; 4]);
+    set_value(&mut g, emit, 3, [0.0, 5.5, 0.0, 0.0]);
+    set_value(&mut g, emit, 4, [0.9; 4]);
+    set_value(&mut g, emit, 5, [2.6; 4]);
+    let forces = g.add("sim_forces", [500.0, 0.0]);
+    set_value(&mut g, forces, 3, [0.05; 4]);
+    let mv = g.add("sim_move", [750.0, 0.0]);
+    let hit = g.add("sim_collide", [1000.0, 0.0]);
+    set_value(&mut g, hit, 2, [0.45; 4]);
+    set_value(&mut g, hit, 3, [0.15; 4]);
+    if let Some(n) = g.nodes.iter_mut().find(|n| n.id == end) {
+        n.pos = [1250.0, 0.0];
+    }
+    // La couleur suit l'âge : du jaune chaud au bleu
+    let age = g.add("attribute", [750.0, 330.0]);
+    set_param(&mut g, age, "nom", "age");
+    let ratio = g.add("math", [1000.0, 330.0]);
+    set_param(&mut g, ratio, "opération", "diviser");
+    set_value(&mut g, ratio, 1, [2.6; 4]);
+    let ramp = g.add("colorramp", [1250.0, 330.0]);
+    set_param(&mut g, ramp, "dégradé", "0,1,0.85,0.35,1;0.5,0.95,0.4,0.25,1;1,0.2,0.3,0.9,1");
+    let tint = g.add("geo_attr", [1500.0, 0.0]);
+    let out = g.add("geo_out", [1750.0, 0.0]);
+    g.connect(begin, 1, emit, 0);
+    g.connect(src, 0, emit, 1);
+    g.connect(emit, 0, forces, 0);
+    g.connect(forces, 0, mv, 0);
+    g.connect(mv, 0, hit, 0);
+    g.connect(hit, 0, end, 0);
+    for node in [emit, forces, mv] {
+        let k = g.nodes.iter().find(|n| n.id == node).and_then(|n| n.def()).map(|d| d.inputs.len() - 1).unwrap_or(0);
+        g.connect(begin, 0, node, k);
+    }
+    g.connect(end, 0, tint, 0);
+    g.connect(age, 0, ratio, 0);
+    g.connect(ratio, 0, ramp, 0);
+    g.connect(ramp, 0, tint, 1);
+    g.connect(tint, 0, out, 0);
+    hide_thumbs(&mut g, &[age, ratio, ramp]);
+    g.frames.push(crate::nodes::Frame { rect: [730.0, 290.0, 730.0, 250.0], label: "la couleur suit l'âge".into(), color: [200, 140, 60], note: String::new() });
+    g
+}
+
+/// Une grille dont la hauteur et la couleur suivent une formule qui lit le temps : pas de simulation,
+/// seulement un champ recalculé à chaque image.
+fn waves() -> Graph {
+    let mut g = Graph::empty(crate::nodes::GraphKind::Geometry);
+    g.time = Some(TimeRange { fps: 24.0, start: 1, end: 96 });
+    let grid = g.add("geo_grid", [0.0, 0.0]);
+    set_value(&mut g, grid, 0, [3.0; 4]);
+    set_value(&mut g, grid, 1, [3.0; 4]);
+    set_value(&mut g, grid, 2, [60.0; 4]);
+    set_value(&mut g, grid, 3, [60.0; 4]);
+    set_param(&mut g, grid, "arêtes", "non");
+    let time = g.add("time", [0.0, 330.0]);
+    let wave = g.add("expr", [250.0, 330.0]);
+    set_param(&mut g, wave, "formule", "sin(x * 4 + a * 0.26) * cos(z * 3 - a * 0.13) * 0.18");
+    let up = g.add("combxyz", [500.0, 330.0]);
+    let lift = g.add("geo_set_pos", [750.0, 0.0]);
+    let level = g.add("map", [500.0, 520.0]);
+    set_value(&mut g, level, 1, [-0.18; 4]);
+    set_value(&mut g, level, 2, [0.18; 4]);
+    let ramp = g.add("colorramp", [750.0, 520.0]);
+    set_param(&mut g, ramp, "dégradé", "0,0.05,0.15,0.45,1;0.6,0.15,0.6,0.75,1;1,0.95,0.98,1,1");
+    let tint = g.add("geo_attr", [1000.0, 0.0]);
+    let out = g.add("geo_out", [1250.0, 0.0]);
+    g.connect(time, 0, wave, 0);
+    g.connect(wave, 0, up, 1);
+    g.connect(grid, 0, lift, 0);
+    g.connect(up, 0, lift, 3);
+    g.connect(wave, 0, level, 0);
+    g.connect(level, 0, ramp, 0);
+    g.connect(lift, 0, tint, 0);
+    g.connect(ramp, 0, tint, 1);
+    g.connect(tint, 0, out, 0);
+    hide_thumbs(&mut g, &[time, wave, up, level, ramp]);
+    g.frames.push(crate::nodes::Frame { rect: [-20.0, 290.0, 960.0, 420.0], label: "le champ : une hauteur par point, qui lit le temps".into(), color: [80, 160, 110], note: String::new() });
+    g
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::nodes::GraphKind;
+
+    #[test]
+    fn exemples_se_calculent() {
+        for name in EXAMPLES {
+            let g = example(name).unwrap();
+            let mut e = Engine::default();
+            let a = e.eval(&g, 1, "").map_err(|x| format!("{name} : {}", x.1)).unwrap();
+            let b = e.eval(&g, 30, "").map_err(|x| format!("{name} : {}", x.1)).unwrap();
+            assert!(b.n > 0, "{name}");
+            assert!((0..b.n).all(|i| b.pos(i).iter().all(|x| x.is_finite())), "{name}");
+            assert!(b.col("Cd").is_some(), "{name} : chaque exemple colore ses points");
+            // Chaque exemple bouge : l'image 30 n'est pas l'image 1
+            assert!(a.n != b.n || (0..a.n).any(|i| a.pos(i) != b.pos(i)), "{name}");
+            // Enregistré puis relu, il donne la même chose
+            let back: Graph = serde_json::from_str(&serde_json::to_string(&g).unwrap()).unwrap();
+            let mut e2 = Engine::default();
+            assert_eq!(e2.eval(&back, 30, "").map_err(|x| x.1).unwrap().n, b.n);
+        }
+        // La fontaine : pas de particule sous le sol
+        let g = example("fontaine de particules").unwrap();
+        let r = Engine::default().eval(&g, 120, "").map_err(|x| x.1).unwrap();
+        assert!(r.n > 1000);
+        assert!((0..r.n).all(|i| r.pos(i)[1] >= -1e-4));
+    }
 
     fn base() -> (Graph, u32, u32) {
         let mut g = Graph::empty(GraphKind::Geometry);
