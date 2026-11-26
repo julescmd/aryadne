@@ -124,7 +124,8 @@ La flexion est nulle quand les trois points sont alignés. Elle est quadratique,
 C'est elle qui borne la vitesse. Trois choix :
 
 - **Rangement.** Les sommets sont rangés par couleur, puis le long d'une **courbe de Morton**. Une passe lit une plage contiguë, et les voisins d'un sommet sont proches en mémoire.
-- **Voisinage par sommet.** Chaque sommet a sa liste de ressorts et de termes de flexion. Le noyau ne fait que **rassembler** : aucune écriture concurrente. Coût : 8 octets par ressort, 16 par terme de flexion.
+- **Voisinage par sommet.** Chaque sommet a sa liste de voisins. Le noyau ne fait que **rassembler** : aucune écriture concurrente. Depuis le commit `064fa57`, ressorts et flexion tiennent dans **une seule liste de 12 octets par entrée** : le voisin, le sommet qui prolonge l'arête, et les deux longueurs au repos sur 16 bits chacune. Les poids de flexion sont recalculés à partir des longueurs. Le message du commit donne, pour une grille avec diagonales : 904 octets lus et écrits par sommet et par passe avant, 468 après.
+- **Rangement par grappes** (option). Avec la variable d'environnement `ARY_TISSU_GRAPPES`, les sommets sont rangés par grappes de 64. Une grappe est chargée une fois dans la mémoire partagée du groupe de fils, et ses couleurs y sont résolues. Environ 300 octets par sommet et par passe d'après le même commit. Chaque rangement a sa version processeur et son test.
 - **Positions relatives.** Les positions sont relatives au centre du tissu. En `f32`, un tissu posé à 100 m de l'origine garde la précision d'un tissu posé à l'origine.
 
 ### La topologie (`Topo`)
@@ -133,11 +134,14 @@ Tout ce qui ne dépend que du maillage au repos. Construite une fois, par `Topo:
 
 | Champ | Contenu |
 |---|---|
+| `layout` | Rangement : par couleurs, ou par grappes |
 | `perm`, `inv` | Rang d'origine du sommet rangé en k, et l'inverse |
-| `colors` | Plage de chaque couleur : début, nombre. Les sommets fixes sont après la dernière |
-| `off` | Par sommet : début de ses ressorts, début de ses termes de flexion |
-| `springs` | Voisin, longueur au repos |
-| `bends` | Deux autres sommets, et deux poids |
+| `groups` | Plages traitées l'une après l'autre : début, nombre. Par couleur (les sommets fixes sont alors après la dernière), ou par couleur de grappes |
+| `cluster` | Sommets traités d'un bloc : 1, ou la taille d'une grappe |
+| `phases` | Nombre de couleurs de sommets |
+| `off` | Par sommet : début de ses ressorts, puis leur nombre et sa couleur |
+| `springs` | Une entrée par voisin : son rang, le sommet qui prolonge l'arête (pour la flexion), et deux longueurs au repos codées sur 16 bits |
+| `rest_scale` | Échelle des longueurs codées : longueur au repos = code² × cette échelle |
 | `mass` | Masse. 0 : sommet fixe |
 
 Sans masse fournie, elle est déduite de la taille des mailles, avec `DENSITY = 0.2` kg/m².
