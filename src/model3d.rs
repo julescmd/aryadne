@@ -7552,7 +7552,7 @@ impl Viewer {
                                                         changed = true;
                                                     }
                                                 }
-                                            } else if ui.small_button("✎").on_hover_text(crate::i18n::t("Ouvrir ce matériau dans l'éditeur de nodes")).clicked() {
+                                            } else if ui.small_button("✎").on_hover_text(crate::i18n::t("Ouvrir ce matériau dans l'Atelier (onglet Matériaux)")).clicked() {
                                                 let raw = std::path::PathBuf::from(&o.material);
                                                 self.open_request = Some(if raw.is_absolute() { raw } else { std::path::Path::new(&self.root).join(raw) });
                                             }

@@ -3703,6 +3703,11 @@ impl App {
             }
             self.active = Some(if j == 0 { 1 } else { j - 1 });
         }
+        // Jamais le même document dans les deux volets (identifiants en double, deux éditions concurrentes)
+        if self.active == Some(j) || self.current().is_some_and(|d| d.rel == sp) {
+            self.split = None;
+            return;
+        }
         let p = theme::pal();
         let total = ui.available_width();
         let w = total / 2.0;
@@ -4560,13 +4565,12 @@ impl App {
                 self.open(rel);
             }
         }
+        // Un matériau s'ouvre dans l'onglet Matériaux (l'Atelier) ; l'ancienne vue côte à côte avec la scène
+        // affichait le même document deux fois une fois rangé dans cet onglet
         if let Some(path) = open_material {
             if let Some(rel) = vault::inside(&self.root(), &path) {
-                let model = self.active;
                 self.refresh();
-                self.open(rel.clone());
-                self.split = Some(rel);
-                self.active = model;
+                self.open(rel);
             }
         }
         if let Some(n) = lsp_note {

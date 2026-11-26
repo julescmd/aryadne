@@ -4234,5 +4234,6 @@
   "ce fichier n'est pas une géométrie de nodes": "this file is not a node geometry",
   "choisis une géométrie de nodes": "pick a node geometry",
   "ce qui est épinglé : le bord gauche, la hampe": "what is pinned: the left edge, the pole",
-  "le vent : il pousse le long du drapeau, avec des rafales de côté": "the wind: it pushes along the flag, with gusts from the side"
+  "le vent : il pousse le long du drapeau, avec des rafales de côté": "the wind: it pushes along the flag, with gusts from the side",
+  "Ouvrir ce matériau dans l'Atelier (onglet Matériaux)": "Open this material in the Atelier (Materials tab)"
 }
