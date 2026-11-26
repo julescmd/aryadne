@@ -105,4 +105,4 @@ Le morceau exporté se pose ensuite dans une [session audio](son-audio.md), un [
 - Pas d'enregistrement depuis un clavier MIDI.
 - Pas d'échantillons : tout est synthétisé. Pas de greffons.
 - L'écoute demande ffplay (installé avec ffmpeg).
-- Une seule signature rythmique. **Incertain :** les mesures semblent fixées à 4 temps.
+- Le fichier porte un nombre de temps par mesure, mais aucun réglage n'a été trouvé dans l'interface pour le changer. En pratique : des mesures à 4 temps.

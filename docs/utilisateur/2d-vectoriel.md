@@ -245,7 +245,7 @@ Par plan de travail, section **Export** :
 
 | Format | Notes |
 |---|---|
-| SVG | Le document est écrit en SVG. Le même SVG sert au rendu et aux aperçus |
+| SVG | Le dessin est converti en SVG. Ce même SVG sert au rendu à l'écran et aux aperçus : ce que tu vois est ce qui est exporté |
 | PNG | À la résolution choisie |
 | PDF | Avec `Bleed` (fonds perdus, 3 mm d'habitude), `Resolution`, `Crop marks`, `CMYK colors (print)` |
 
