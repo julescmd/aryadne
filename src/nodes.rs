@@ -4506,7 +4506,16 @@ impl Editor {
                 w = graph_rect.width();
                 h = graph_rect.height();
             }
-            self.scene = Rect::from_center_size(bb.center(), vec2(w, h));
+            // Jamais si loin que les nodes deviennent illisibles : au-delà, on montre le début du graphe
+            // (les entrées, à gauche) à une taille lisible, et la molette recule si on veut tout voir
+            const MIN_ZOOM: f32 = 0.65;
+            if w > graph_rect.width() / MIN_ZOOM {
+                w = graph_rect.width() / MIN_ZOOM;
+                h = graph_rect.height() / MIN_ZOOM;
+                self.scene = Rect::from_min_size(bb.min, vec2(w, h));
+            } else {
+                self.scene = Rect::from_center_size(bb.center(), vec2(w, h));
+            }
         }
         let mut scene = self.scene;
         let mut pan = egui::Vec2::ZERO;

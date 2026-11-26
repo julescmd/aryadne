@@ -3096,7 +3096,7 @@ impl App {
                         egui::containers::menu::SubMenuButton::new(crate::i18n::t("Fenêtre")).ui(ui, |ui| self.window_menu(ui, &mut cmd, &ctx));
                     });
                     // Le reste de la rangée : le titre (on tire pour déplacer la fenêtre), puis les boutons de la fenêtre
-                    let title = match self.active.and_then(|i| self.docs.get(i)) {
+                    let title = match self.current().filter(|d| workspace::accepts(&self.ws.cur().kind, &d.rel)) {
                         Some(d) => format!("{} · Aryadne", std::path::Path::new(&d.rel).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| d.rel.clone())),
                         None => "Aryadne".to_string(),
                     };
