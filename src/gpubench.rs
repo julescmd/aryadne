@@ -3,8 +3,10 @@
 //! mémoire : on mesure donc d'abord le débit réel (copie, puis itération de pression à 7 points),
 //! puis un pas de fumée simple (advection semi-lagrangienne, flottabilité, pression par Jacobi).
 //!
-//! Puis le tissu en VBD (`gpucloth`) : temps par passe sur 250 000 et 1 million de sommets, contre
-//! le processeur, et la comparaison avec le XPBD à nombre de passes égal.
+//! Puis le tissu en VBD (`gpucloth`) sur 250 000 et 1 million de sommets, dans ses deux rangements
+//! (par couleur, par grappes) : temps et octets par passe, une image à 16 passes sans et avec
+//! niveaux grossiers, contre le processeur. Enfin la raideur obtenue à 16, 32 et 64 passes par
+//! image : XPBD, VBD, VBD avec niveaux grossiers.
 //!
 //! Lancement : menu Aide, « Mesurer la carte graphique », ou `aryadne --banc-gpu` dans un terminal.
 
@@ -674,6 +676,15 @@ mod tests {
         assert!(!r.notes.iter().any(|n| n.contains("non finies")));
         assert!(r.tissu.iter().all(|m| m.passe_ms > 0.0 && m.passe_processeur_ms > 0.0));
         assert!(r.ecart_tissu.is_none_or(|e| e < 1e-3), "écart du tissu {:?}", r.ecart_tissu);
+        eprintln!("{}", r.texte());
+    }
+
+    /// La comparaison à budget égal, à la demande (une minute en mode release) :
+    /// `cargo test --release comparaison_a_la_demande -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn comparaison_a_la_demande() {
+        let r = super::Rapport { comparaison: Some(crate::geo::cloth_comparison(40, &[16, 32, 64])), ..Default::default() };
         eprintln!("{}", r.texte());
     }
 

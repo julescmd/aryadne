@@ -16,13 +16,24 @@
 //! Ce qui garde la mémoire sobre (c'est elle qui borne la vitesse) :
 //! - les sommets sont rangés par couleur, puis le long d'une courbe de Morton : une passe lit une
 //!   plage contiguë, et ses voisins sont proches en mémoire ;
-//! - le voisinage est une liste par sommet (rassemblement, aucune écriture concurrente) : 8 octets
-//!   par ressort, 16 par terme de flexion ;
+//! - le voisinage est une seule liste par sommet (rassemblement, aucune écriture concurrente), de
+//!   12 octets par entrée : le voisin, le sommet qui prolonge l'arête au-delà de lui (pour la
+//!   flexion), et les deux longueurs au repos sur 16 bits. Les poids de flexion se recalculent à
+//!   partir des longueurs. Sur une grille avec diagonales : 468 octets lus et écrits par sommet et
+//!   par passe, contre 904 avec des listes séparées ;
+//! - en option, les sommets sont rangés par grappes de 64 traitées chacune par un groupe de fils
+//!   en mémoire partagée (`Layout::Clusters`) : 300 octets, au prix de plus de calcul ;
 //! - les positions sont relatives au centre du tissu : en f32, un tissu posé à 100 m de l'origine
-//!   garde la précision d'un tissu posé à l'origine.
+//!   garde la précision d'un tissu posé à l'origine ;
+//! - la relecture rend positions et vitesses dans l'ordre de la géométrie, 24 octets par sommet.
 //!
-//! Accélération de Tchebychev entre les itérations (sauf sur les sommets au contact, où elle est
-//! instable). Obstacles : sol, boule, boîte, résolus comme des contraintes dans le bloc du sommet.
+//! Raideur à petit budget : une correction grossière multi-niveaux au début de chaque sous-pas
+//! (voir « niveaux grossiers »), qui donne en quelques passes la raideur qu'il faudrait des
+//! centaines de passes pour obtenir sommet par sommet. Sans elle, accélération de Tchebychev
+//! entre les itérations (sauf sur les sommets au contact, où elle est instable).
+//!
+//! Les forces de l'image (gravité, vent) arrivent comme un changement de vitesse, réparti sur les
+//! sous-pas. Obstacles : sol, boule, boîte, résolus comme des contraintes dans le bloc du sommet.
 //! L'auto-collision n'est pas faite.
 
 use crate::gpusim::{self, Bind, Column, Gpu, Kernels};
