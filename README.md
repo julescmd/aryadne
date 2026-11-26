@@ -6,6 +6,15 @@ Le fil entre tes idées. Notes, code, références et moodboards dans un dossier
 
 100 % Rust ([egui](https://github.com/emilk/egui)). Un seul exécutable portable pour Windows et Linux : **aucune installation, aucun droit admin**. Look éditeur de code (JetBrains Mono, angles droits), mode clair par défaut, mode sombre en un clic.
 
+## Documentation
+
+Tout est expliqué dans le dossier [`docs/`](docs/README.md) :
+
+- le [guide d'utilisation](docs/README.md#guide-dutilisation), un fichier par mode et par grand outil ;
+- la [partie technique](docs/README.md#partie-technique), pour comprendre et modifier le code.
+
+La liste de fonctionnalités ci-dessous date de la version 0.19. Elle est incomplète : la documentation suit le code actuel.
+
 ## Fonctionnalités (v0.19)
 
 **3D**
