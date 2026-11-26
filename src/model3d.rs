@@ -972,7 +972,22 @@ pub struct Prepared {
     bvh: std::sync::OnceLock<crate::bvh::Bvh>,
     /// Dernier tracé (pixols) de ce maillage : changer l'éclairage ou le matériau ne retrace rien
     pix: std::sync::Mutex<Option<std::sync::Arc<Pixols>>>,
+    /// Part de lumière reçue à chaque sommet, par lumière : ne dépend pas de la caméra, donc sert
+    /// encore quand on tourne autour du modèle. Clé des lumières, puis valeurs (bits de f32, NaN : à calculer)
+    vshadow: std::sync::Mutex<Option<std::sync::Arc<(String, Vec<std::sync::atomic::AtomicU32>)>>>,
+    /// Même chose pour l'ombre posée sur le sol : une grille dans le plan du sol (clé, rectangle x0 z0 x1 z1, valeurs)
+    fshadow: std::sync::Mutex<Option<std::sync::Arc<FloorShadow>>>,
 }
+
+/// Grille d'ombre du sol : ne dépend que des lumières et du maillage, pas de la caméra
+struct FloorShadow {
+    key: String,
+    rect: [f32; 4],
+    vals: Vec<std::sync::atomic::AtomicU32>,
+}
+
+/// Côté de la grille d'ombre du sol, en cases
+const FLOOR_GRID: usize = 1024;
 
 impl Prepared {
     pub fn new(model: &Model, z_up: bool, levels: u8) -> Self {
@@ -987,7 +1002,7 @@ impl Prepared {
         let floor = pos.iter().map(|v| v[1]).fold(f32::MAX, f32::min);
         let lin = |c: u8| (c as f32 / 255.0).powf(2.2);
         let colors = colors.iter().map(|c| [lin(c.r()), lin(c.g()), lin(c.b())]).collect();
-        Self { pos, nrm, tris, colors, edges, floor, uv: vec![], mat: vec![], curv: std::sync::OnceLock::new(), bvh: std::sync::OnceLock::new(), pix: Default::default() }
+        Self { pos, nrm, tris, colors, edges, floor, uv: vec![], mat: vec![], curv: std::sync::OnceLock::new(), bvh: std::sync::OnceLock::new(), pix: Default::default(), vshadow: Default::default(), fshadow: Default::default() }
     }
     pub fn tri_count(&self) -> usize {
         self.tris.len()
@@ -1000,7 +1015,7 @@ impl Prepared {
         let nrm = vertex_normals(&m.pos, &m.tris);
         let lin = |c: u8| (c as f32 / 255.0).powf(2.2);
         let colors = m.colors.iter().map(|c| [lin(c.r()), lin(c.g()), lin(c.b())]).collect();
-        Self { pos: m.pos, nrm, tris: m.tris, colors, edges: m.edges, floor, uv: vec![], mat: vec![], curv: std::sync::OnceLock::new(), bvh: std::sync::OnceLock::new(), pix: Default::default() }
+        Self { pos: m.pos, nrm, tris: m.tris, colors, edges: m.edges, floor, uv: vec![], mat: vec![], curv: std::sync::OnceLock::new(), bvh: std::sync::OnceLock::new(), pix: Default::default(), vshadow: Default::default(), fshadow: Default::default() }
     }
 
     pub fn from_mesh(m: crate::modifiers::Mesh) -> Self {
@@ -1020,7 +1035,7 @@ impl Prepared {
         let floor = pos.iter().map(|v| v[1]).fold(f32::MAX, f32::min);
         let lin = |c: u8| (c as f32 / 255.0).powf(2.2);
         let colors = m.colors.iter().map(|c| [lin(c.r()), lin(c.g()), lin(c.b())]).collect();
-        Self { pos, nrm, tris: m.tris, colors, edges: m.edges, floor, uv: vec![], mat: vec![], curv: std::sync::OnceLock::new(), bvh: std::sync::OnceLock::new(), pix: Default::default() }
+        Self { pos, nrm, tris: m.tris, colors, edges: m.edges, floor, uv: vec![], mat: vec![], curv: std::sync::OnceLock::new(), bvh: std::sync::OnceLock::new(), pix: Default::default(), vshadow: Default::default(), fshadow: Default::default() }
     }
 }
 
@@ -1284,7 +1299,7 @@ fn patch_vertices(prep: &Prepared, t0: usize, t1: usize, map: &[(u32, u32)], now
     for &(v, _) in map {
         nrm[v as usize] = norm(nrm[v as usize]);
     }
-    Prepared { pos, nrm, tris: prep.tris.clone(), colors: prep.colors.clone(), edges: prep.edges.clone(), floor: prep.floor, uv: prep.uv.clone(), mat: prep.mat.clone(), curv: std::sync::OnceLock::new(), bvh: std::sync::OnceLock::new(), pix: Default::default() }
+    Prepared { pos, nrm, tris: prep.tris.clone(), colors: prep.colors.clone(), edges: prep.edges.clone(), floor: prep.floor, uv: prep.uv.clone(), mat: prep.mat.clone(), curv: std::sync::OnceLock::new(), bvh: std::sync::OnceLock::new(), pix: Default::default(), vshadow: Default::default(), fshadow: Default::default() }
 }
 
 /// Déplacement rapide : si seules les poses des objets ont changé depuis `built`, renvoie le
@@ -1338,7 +1353,7 @@ fn fast_move(built: &crate::scene::Scene, scene: &crate::scene::Scene, ranges: &
     if !any {
         return None;
     }
-    Some(Prepared { pos, nrm, tris: prep.tris.clone(), colors: prep.colors.clone(), edges: prep.edges.clone(), floor: prep.floor, uv: prep.uv.clone(), mat: prep.mat.clone(), curv: std::sync::OnceLock::new(), bvh: std::sync::OnceLock::new(), pix: Default::default() })
+    Some(Prepared { pos, nrm, tris: prep.tris.clone(), colors: prep.colors.clone(), edges: prep.edges.clone(), floor: prep.floor, uv: prep.uv.clone(), mat: prep.mat.clone(), curv: std::sync::OnceLock::new(), bvh: std::sync::OnceLock::new(), pix: Default::default(), vshadow: Default::default(), fshadow: Default::default() })
 }
 
 /// Réglages d'affichage (comme le panneau d'affichage de Substance).
@@ -1648,6 +1663,9 @@ fn persp_bary(w: [f32; 3], inv_depth: [f32; 3]) -> (f32, [f32; 2]) {
     (z, [w[0] * inv_depth[0] / z, w[1] * inv_depth[1] / z])
 }
 
+/// Sous cette taille à l'écran (pixels), un triangle prend les ombres de ses sommets
+const VERTEX_SHADOW_PX: f32 = 6.0;
+
 /// Hauteur des bandes d'image traitées par un même cœur
 const PIX_BAND: usize = 16;
 
@@ -1853,6 +1871,92 @@ pub fn render(m: &Prepared, cam: &Camera, look: &Look, w: usize, h: usize) -> Fr
             _ => vec![f32::NAN; w * h * nl],
         }
     };
+    // Ombres par sommet (pour les triangles petits à l'écran : l'interpolation ne se voit pas)
+    let vsh = bvh.map(|_| {
+        let mut g = m.vshadow.lock().unwrap_or_else(|e| e.into_inner());
+        match g.as_ref() {
+            Some(v) if v.0 == sh_key && v.1.len() == m.pos.len() * nl => v.clone(),
+            _ => {
+                let v = std::sync::Arc::new((sh_key.clone(), (0..m.pos.len() * nl).map(|_| std::sync::atomic::AtomicU32::new(f32::NAN.to_bits())).collect::<Vec<_>>()));
+                *g = Some(v.clone());
+                v
+            }
+        }
+    });
+    let vertex_shadow = |b: &crate::bvh::Bvh, vi: usize, li: usize, lamp: &Lamp| -> f32 {
+        use std::sync::atomic::Ordering::Relaxed;
+        let Some(vs) = vsh.as_ref() else { return 1.0 };
+        let cell = &vs.1[vi * nl + li];
+        let v = f32::from_bits(cell.load(Relaxed));
+        if !v.is_nan() {
+            return v;
+        }
+        let (p, n) = (m.pos[vi], m.nrm[vi]);
+        let (dir, reach, _) = if lamp.point { lamp.sample(p, [0.5, 0.5]) } else { (lamp.at, f32::MAX, 1.0) };
+        let side = if dot(n, dir) >= 0.0 { 1.0 } else { -1.0 };
+        let o = [p[0] + n[0] * side * 2e-3, p[1] + n[1] * side * 2e-3, p[2] + n[2] * side * 2e-3];
+        let v = shadow(b, o, dir, if lamp.point { reach - 4e-3 } else { 1e6 }, lamp.point, vi % 4093, vi / 4093);
+        cell.store(v.to_bits(), Relaxed);
+        v
+    };
+    // Ombre du sol : grille dans le plan du sol, autour du modèle (assez large pour une lumière rasante)
+    let fsh = bvh.map(|_| {
+        let mut g = m.fshadow.lock().unwrap_or_else(|e| e.into_inner());
+        match g.as_ref() {
+            Some(f) if f.key == sh_key && f.vals.len() == FLOOR_GRID * FLOOR_GRID * nl => f.clone(),
+            _ => {
+                let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
+                for p in &m.pos {
+                    for i in 0..3 {
+                        lo[i] = lo[i].min(p[i]);
+                        hi[i] = hi[i].max(p[i]);
+                    }
+                }
+                let size = (hi[0] - lo[0]).max(hi[2] - lo[2]).max(1e-3);
+                let pad = size * 0.5 + (hi[1] - m.floor).max(0.0) * 2.5;
+                let (cx, cz) = ((lo[0] + hi[0]) / 2.0, (lo[2] + hi[2]) / 2.0);
+                let half = size / 2.0 + pad;
+                let f = std::sync::Arc::new(FloorShadow {
+                    key: sh_key.clone(),
+                    rect: [cx - half, cz - half, cx + half, cz + half],
+                    vals: (0..FLOOR_GRID * FLOOR_GRID * nl).map(|_| std::sync::atomic::AtomicU32::new(f32::NAN.to_bits())).collect(),
+                });
+                *g = Some(f.clone());
+                f
+            }
+        }
+    });
+    // Ombre en un point du sol : interpolée entre quatre cases calculées une fois ; hors de la grille, un rayon direct
+    let floor_shadow = |b: &crate::bvh::Bvh, hit: V3, li: usize, lamp: &Lamp, x: usize, y: usize| -> f32 {
+        use std::sync::atomic::Ordering::Relaxed;
+        let direct = |p: V3, x: usize, y: usize| {
+            let (dir, reach, _) = if lamp.point { lamp.sample(p, [0.5, 0.5]) } else { (lamp.at, 1e6, 1.0) };
+            shadow(b, p, dir, reach, lamp.point, x, y)
+        };
+        let Some(f) = fsh.as_ref() else { return direct(hit, x, y) };
+        let n = FLOOR_GRID as f32;
+        let gx = (hit[0] - f.rect[0]) / (f.rect[2] - f.rect[0]) * n - 0.5;
+        let gz = (hit[2] - f.rect[1]) / (f.rect[3] - f.rect[1]) * n - 0.5;
+        if !(gx >= 0.0 && gz >= 0.0 && gx < n - 1.0 && gz < n - 1.0) {
+            return direct(hit, x, y);
+        }
+        let (ix, iz) = (gx as usize, gz as usize);
+        let (fx, fz) = (gx - ix as f32, gz - iz as f32);
+        let cell = |i: usize, j: usize| -> f32 {
+            let c = &f.vals[(j * FLOOR_GRID + i) * nl + li];
+            let v = f32::from_bits(c.load(Relaxed));
+            if !v.is_nan() {
+                return v;
+            }
+            let p = [f.rect[0] + (i as f32 + 0.5) / n * (f.rect[2] - f.rect[0]), hit[1], f.rect[1] + (j as f32 + 0.5) / n * (f.rect[3] - f.rect[1])];
+            let v = direct(p, i, j);
+            c.store(v.to_bits(), Relaxed);
+            v
+        };
+        let a = cell(ix, iz) * (1.0 - fx) + cell(ix + 1, iz) * fx;
+        let c = cell(ix, iz + 1) * (1.0 - fx) + cell(ix + 1, iz + 1) * fx;
+        a * (1.0 - fz) + c * fz
+    };
     rgba.par_chunks_mut(w * 4 * band).zip(sh.par_chunks_mut(w * band * nl)).enumerate().for_each(|(bi, (chunk, sh))| {
         let y0 = bi * band;
         let rows = chunk.len() / (w * 4);
@@ -1890,7 +1994,7 @@ pub fn render(m: &Prepared, cam: &Camera, look: &Look, w: usize, h: usize) -> Fr
                             let hit = [eye[0] + ray[0] * tt, m.floor + 1e-3, eye[2] + ray[2] * tt];
                             let (mut dark, mut total) = (0.0f32, 0.0f32);
                             for (li, lamp) in lamps.iter().enumerate() {
-                                let (dir, reach, fall) = if lamp.point { lamp.sample(hit, [0.5, 0.5]) } else { (lamp.at, 1e6, 1.0) };
+                                let (dir, _, fall) = if lamp.point { lamp.sample(hit, [0.5, 0.5]) } else { (lamp.at, 1e6, 1.0) };
                                 let e = lamp.intensity * fall * dir[1].max(0.0);
                                 if e <= 0.0 {
                                     continue;
@@ -1898,7 +2002,7 @@ pub fn render(m: &Prepared, cam: &Camera, look: &Look, w: usize, h: usize) -> Fr
                                 total += e;
                                 let c = &mut sh[k * nl + li];
                                 if c.is_nan() {
-                                    *c = shadow(b, hit, dir, reach, lamp.point, x, y);
+                                    *c = floor_shadow(b, hit, li, lamp, x, y);
                                 }
                                 dark += e * (1.0 - *c);
                             }
@@ -2052,7 +2156,14 @@ pub fn render(m: &Prepared, cam: &Camera, look: &Look, w: usize, h: usize) -> Fr
                             let o = [here[0] + face[0] * side * 2e-3, here[1] + face[1] * side * 2e-3, here[2] + face[2] * side * 2e-3];
                             let c = &mut sh[k * nl + li];
                             if c.is_nan() {
-                                *c = shadow(b, o, dir, if lamp.point { reach - 4e-3 } else { 1e6 }, lamp.point, x, y);
+                                // Triangle de quelques pixels : les ombres de ses sommets, gardées d'une vue à l'autre
+                                let (sa, sb, sc) = (screen[t[0] as usize], screen[t[1] as usize], screen[t[2] as usize]);
+                                let extent = (sa[0].max(sb[0]).max(sc[0]) - sa[0].min(sb[0]).min(sc[0])).max(sa[1].max(sb[1]).max(sc[1]) - sa[1].min(sb[1]).min(sc[1]));
+                                *c = if extent < VERTEX_SHADOW_PX {
+                                    vertex_shadow(b, t[0] as usize, li, lamp) * w0 + vertex_shadow(b, t[1] as usize, li, lamp) * w1 + vertex_shadow(b, t[2] as usize, li, lamp) * w2
+                                } else {
+                                    shadow(b, o, dir, if lamp.point { reach - 4e-3 } else { 1e6 }, lamp.point, x, y)
+                                };
                             }
                             lit *= *c;
                         }
@@ -11384,6 +11495,22 @@ mod bench_pixols {
 
     #[test]
     #[ignore]
+    fn image_ombres() {
+        let s = dense_sphere(200_000);
+        let cam = Camera { yaw: 0.5, pitch: 0.45, dist: 3.4, ..Default::default() };
+        for (i, soft) in [0.0f32, 0.6].into_iter().enumerate() {
+            let look = Look { material: Material::Clay, shadows: true, shadow_soft: soft, shadow_samples: 8, ..Default::default() };
+            let f = render(&s, &cam, &look, 900, 600);
+            let img = image::RgbaImage::from_raw(900, 600, f.rgba).unwrap();
+            // Fond transparent : on pose l'image sur du gris pour voir l'ombre
+            let mut out = image::RgbaImage::from_pixel(900, 600, image::Rgba([60, 60, 64, 255]));
+            image::imageops::overlay(&mut out, &img, 0, 0);
+            out.save(format!("/home/claude/ombres-{i}.png")).unwrap();
+        }
+    }
+
+    #[test]
+    #[ignore]
     fn mesure_vue() {
         let cam = Camera { yaw: 0.5, pitch: 0.3, dist: 2.6, ..Default::default() };
         let ms = |t: std::time::Instant, k: usize| t.elapsed().as_secs_f32() * 1000.0 / k as f32;
@@ -11412,6 +11539,22 @@ mod bench_pixols {
                     let _ = render(&s, &cam, &Look { exposure: i as f32 * 0.1, ..look.clone() }, 1280, 720);
                 }
                 eprintln!("MESURE {} tris, ombres {shadows} : {moving:.0} ms en mouvement, {:.0} ms en changeant l'éclairage", s.tri_count(), ms(t, k));
+                if shadows {
+                    // Orbite continue : la caméra tourne un peu à chaque image (ombres par sommet déjà calculées)
+                    let _ = render(&s, &Camera { yaw: 0.8, ..cam }, &look, 1280, 720);
+                    let t = std::time::Instant::now();
+                    for i in 1..=k {
+                        let _ = render(&s, &Camera { yaw: 0.8 + i as f32 * 0.02, ..cam }, &look, 1280, 720);
+                    }
+                    eprintln!("MESURE {} tris, orbite avec ombres : {:.0} ms", s.tri_count(), ms(t, k));
+                    let nofloor = Look { show_bg: true, ..look.clone() };
+                    let _ = render(&s, &Camera { yaw: 0.8, ..cam }, &nofloor, 1280, 720);
+                    let t = std::time::Instant::now();
+                    for i in 1..=k {
+                        let _ = render(&s, &Camera { yaw: 0.8 + i as f32 * 0.02, ..cam }, &nofloor, 1280, 720);
+                    }
+                    eprintln!("MESURE {} tris, orbite avec ombres, sans sol : {:.0} ms", s.tri_count(), ms(t, k));
+                }
             }
         }
     }
