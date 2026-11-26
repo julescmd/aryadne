@@ -118,6 +118,7 @@ Le board est un cas à part : c'est une page (`View::Boards`), pas une variante 
 | `ai` | Appels à une API compatible OpenAI |
 | `ollama` | Installation et gestion d'Ollama |
 | `chat` | Chat avec le coffre |
+| `aigraph` | L'assistant et les graphes de nœuds : contexte envoyé au modèle, blocs `graphe`, validation et application |
 | `aitasks` | L'IA dans l'éditeur de texte |
 | `transcribe` | Parole vers sous-titres |
 
@@ -245,6 +246,8 @@ Les tests sont dans chaque module (`#[cfg(test)]`). Ils couvrent surtout la logi
 |---|---|
 | `ARY_SANS_GPU` | Force le repli des simulations sur le processeur |
 | `ARYADNE_VAULT` | Donnée aux scripts lancés par `F5` : la racine du coffre |
+| `ARY_AI_FAKE` | Chemin d'un fichier texte : l'assistant et le chat « répondent » son contenu, par morceaux, sans rien envoyer sur le réseau. Pour essayer l'interface sans fournisseur |
+| `ARY_AI_DUMP` | Chemin où écrire les messages envoyés au modèle (JSON), pour relire le contexte |
 | `ARY_DEMO`, `ARY_OUT`, `ARY_EXEMPLES`, `ARY_BIG` | Lues par des tests pour écrire des fichiers de démonstration. Sans effet en usage normal |
 
 ### Options de ligne de commande

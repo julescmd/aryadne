@@ -4124,7 +4124,6 @@
   "pose une zone de répétition": "adds a repeat zone",
   "Application automatique : les changements de graphe proposés sont appliqués dès la réponse (Ctrl+Z pour annuler). Clic : revenir à la carte « appliquer ».": "Automatic apply: proposed graph changes are applied as soon as the answer arrives (Ctrl+Z to undo). Click: go back to the “apply” card.",
   "Appliquer automatiquement les changements de graphe proposés, sans passer par la carte « appliquer »": "Apply proposed graph changes automatically, without going through the “apply” card",
-  "Demande un changement à ce graphe (« fais un drapeau en tissu », « ajoute du vent »…). L'assistant connaît les nodes : il propose le changement sur une carte, à appliquer d'un clic et à annuler d'un Ctrl+Z.": "Ask for a change to this graph (“make a cloth flag”, “add wind”…). The assistant knows the nodes: it proposes the change on a card, applied in one click and undone with Ctrl+Z.",
   "expliquer": "explain",
   "drapeau": "flag",
   "encadrer": "frame",
@@ -4133,5 +4132,10 @@
   "Explique ce que fait ce graphe, étape par étape.": "Explain what this graph does, step by step.",
   "Fais un drapeau qui flotte au vent, en simulation de tissu sur la carte graphique.": "Make a flag waving in the wind, as a cloth simulation on the graphics card.",
   "Entoure les parties de ce graphe de cadres titrés pour le rendre lisible.": "Wrap the parts of this graph in titled frames to make it readable.",
-  "Propose une amélioration de ce graphe et applique-la.": "Suggest an improvement to this graph and apply it."
+  "Propose une amélioration de ce graphe et applique-la.": "Suggest an improvement to this graph and apply it.",
+  "Demande un changement à ce graphe : « fais un drapeau en tissu », « ajoute du vent »…": "Ask for a change to this graph: “make a cloth flag”, “add wind”…",
+  "Demande un changement à ce matériau : « ajoute de la rouille dans les creux », « rends-le plus brillant »…": "Ask for a change to this material: “add rust in the cavities”, “make it shinier”…",
+  "Demande un changement à ce compositing : « ajoute un halo et du grain », « réchauffe les couleurs »…": "Ask for a change to this composite: “add glow and grain”, “warm up the colors”…",
+  "L'assistant connaît les nodes : il propose le changement sur une carte, à appliquer d'un clic et à annuler d'un Ctrl+Z.": "The assistant knows the nodes: it proposes the change on a card, applied in one click and undone with Ctrl+Z.",
+  "lecture de l'animation": "playback"
 }

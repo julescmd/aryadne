@@ -267,6 +267,10 @@ Le nœud `Time` donne l'image courante (`Frame`) et le temps en secondes (`Secon
 
 `Espace` (souris sur l'aperçu) lance la lecture dans un graphe de géométrie.
 
+## Demander à l'assistant
+
+L'assistant (`Ctrl+L`) connaît les nœuds et modifie le graphe ouvert : tu décris ce que tu veux, il propose les changements sur une carte, tu appliques d'un clic. Le tout s'annule d'un `Ctrl+Z`. Voir [Modifier un graphe de nœuds](assistant-ia.md#modifier-un-graphe-de-nœuds).
+
 ## Erreurs
 
 Un nœud en erreur est marqué. Le message s'affiche en clair. Exemples : « The output node is missing », « This node reads a geometry attribute: it belongs in a geometry graph ».

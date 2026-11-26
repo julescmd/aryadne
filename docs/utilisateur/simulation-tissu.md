@@ -8,6 +8,8 @@ Le tissu se simule dans un graphe de [géométrie en nœuds](noeuds-geometrie.md
 2. Le graphe de départ est déjà un tissu qui tombe sur une boule.
 3. Souris sur l'aperçu, `Espace` : la simulation se lit.
 
+Autre chemin : ouvre l'assistant (`Ctrl+L`) dans le graphe et demande « fais un drapeau qui flotte au vent ». Il pose la grille, l'épinglage du bord, la zone de simulation et le solveur sur carte graphique. Voir [Modifier un graphe de nœuds](assistant-ia.md#modifier-un-graphe-de-nœuds).
+
 Pour l'essayer sur la carte graphique, ouvre l'exemple « Cloth on the graphics card » : une nappe lâchée sur une boule et une boîte. L'exemple « Cloth folding onto itself » montre l'auto-collision.
 
 ## Ce qu'il faut dans le graphe

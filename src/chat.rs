@@ -667,6 +667,12 @@ fn stream_ollama(s: &crate::ai::Settings, messages: Vec<Value>, stop: &AtomicBoo
         .collect();
     let mut body = json!({ "model": s.model, "messages": msgs, "stream": true, "keep_alive": "30m", "options": { "temperature": 0.3 } });
     body["think"] = json!(s.think);
+    // Ollama ne lit par défaut que 4096 jetons : une longue demande (catalogue de nodes, fichiers du
+    // coffre) serait coupée par le début, consignes comprises. On lui donne la place qu'il faut.
+    let chars: usize = body["messages"].as_array().map(|a| a.iter().filter_map(|m| m["content"].as_str()).map(str::len).sum()).unwrap_or(0);
+    if let Some(ctx) = ollama_context(chars) {
+        body["options"]["num_ctx"] = json!(ctx);
+    }
     let send = |body: &Value| crate::ollama::agent(1800).post(&format!("{host}/api/chat")).send_json(body);
     let mut resp = match send(&body) {
         Ok(r) => r,
@@ -699,6 +705,13 @@ fn stream_ollama(s: &crate::ai::Settings, messages: Vec<Value>, stop: &AtomicBoo
         }
     }
     Ok(())
+}
+
+/// Taille de contexte à demander à Ollama pour une demande de `chars` octets (environ trois par
+/// jeton, plus la place de la réponse). Rien : la taille par défaut suffit.
+fn ollama_context(chars: usize) -> Option<usize> {
+    let need = chars / 3 + 2048;
+    (need > 4096).then(|| need.next_power_of_two().min(32_768))
 }
 
 /// Requête en streaming (Server-Sent Events) vers une API compatible OpenAI.
@@ -749,6 +762,8 @@ mod tests {
         assert_eq!(b, vec![("boards/a.board.json".to_string(), "{\"x\": 1}\n".to_string())]);
         let (_, c) = split_choices("ok\n?> `notes/a.md` | **Les deux**");
         assert_eq!(c, vec!["notes/a.md".to_string(), "Les deux".to_string()]);
+        // Une courte demande garde le contexte par défaut d'Ollama ; un catalogue de nodes en demande plus
+        assert_eq!((ollama_context(3000), ollama_context(18_000), ollama_context(400_000)), (None, Some(8192), Some(32_768)));
     }
 
     #[test]

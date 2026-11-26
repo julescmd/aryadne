@@ -253,6 +253,59 @@ Glisser une rangée remplit `Editor::lib_drag`. Tant qu'il est rempli, `show` de
 
 Au relâchement, `add_pick` pose le nœud, puis `insert_on_link` l'insère si un lien était visé.
 
+## L'assistant et les graphes (`aigraph`)
+
+Devant un graphe, l'assistant reçoit de quoi le comprendre et un moyen d'agir. Tout est dans `src/aigraph.rs`, sans interface : des fonctions de `Graph` vers du texte, et de texte vers `Graph`.
+
+### Ce qui part au modèle
+
+`Editor::ai_context(rel)` appelle `aigraph::context`, ajouté au message système par `chat::build_messages` :
+
+1. `notice(kind, stack, rel)` : le format des blocs, puis ce qu'il faut savoir du genre de graphe (zone de simulation, solveur, calques). Elle contient un exemple complet, le drapeau, écrit avec le chemin du document ouvert.
+2. `describe(g, rel, level)` : le niveau affiché, un nœud par ligne (`n<id> type @x,y : ce qui s'écarte des valeurs par défaut`), les liens par nom de prise, les groupes, les cadres. Une pile de calques est décrite calque par calque.
+3. `catalog(kind)` : une ligne par nœud de `DEFS` qui convient à ce genre (`Def::fits`), avec les prises typées, les valeurs par défaut et les choix permis.
+
+Le catalogue est tiré des tables de définitions : un nœud ajouté à `DEFS` y apparaît sans rien faire d'autre. Un test borne sa taille (environ 16 000 caractères pour la géométrie). Pour Ollama, `chat::ollama_context` demande une fenêtre de contexte assez grande, sans quoi le début de la demande serait coupé.
+
+### Le format : un bloc de texte, pas des outils
+
+Le modèle écrit un bloc ` ```graphe ` contenant du JSON : `{"fichier": …, "remplacer": false, "ops": [ … ]}`. Les opérations : `ajouter`, `relier`, `delier`, `regler`, `supprimer`, `zone`, `grouper`, `degrouper`, `cadre`, `lecture`, et pour la pile de l'Atelier `ajouter_calque`, `regler_calque`, `supprimer_calque`, `deplacer_calque`.
+
+Pourquoi pas les outils (« tool use », « function calling ») des API :
+
+- `ai.rs` parle à trois familles d'API : Ollama en natif, Claude en natif, et le format OpenAI pour les autres (y compris une adresse personnalisée). Chacune a son format d'outils et son format de flux. Beaucoup de modèles locaux, et certains serveurs compatibles, ne gèrent pas les outils : Ollama répond alors par une erreur.
+- Le bloc de texte marche partout, y compris en flux, et suit la convention déjà en place pour les fichiers (` ```fichier:chemin `).
+- L'application demande un clic : il n'y a pas de résultat d'outil à renvoyer au modèle dans le même tour. La boucle de correction passe par un message ordinaire (`Ask for a fix`).
+
+La lecture est tolérante : accents et majuscules indifférents dans les clés, virgule en trop, commentaires `//`, liste nue, bloc ` ```json ` qui a la forme d'un changement. Un bloc non refermé (réponse en cours) est ignoré et caché.
+
+### Vérifier et appliquer
+
+`aigraph::apply(&mut Graph, &Edit, root)` travaille sur une copie. Chaque opération est vérifiée contre le catalogue : type connu et permis dans ce genre de graphe, prise et réglage existants, valeur du bon type, choix dans la liste, types de prises compatibles (`nodes::socks_fit`), pas de boucle. Les erreurs sont toutes relevées, avec le rang de l'opération. S'il y en a une, la copie est jetée : rien n'est appliqué à moitié.
+
+Les références : `n<id>` pour un nœud existant, l'`id` donné par le bloc pour un nœud qu'il pose, `sortie` pour le nœud de sortie, ou un type présent une seule fois. Une prise s'écrit `noeud.prise`, par son nom.
+
+`Work::layout` range ensuite les nœuds posés sans position : chacun à droite de ce qui l'alimente, glissé vers le bas tant qu'il recouvre un autre nœud (mêmes tailles que le dessin, `Editor::node_size`).
+
+Côté éditeur :
+
+- `Editor::ai_check` essaie le bloc sur une copie et rend le résumé ou les erreurs. Si le graphe se calculait, il doit encore se calculer après (`nodeflow::lower`, ou `Program::compile_at` en petite taille). La carte garde ce résultat tant que `ai_version()` ne change pas.
+- `Editor::ai_apply` remplace `graph` puis appelle `changed()` : un seul point d'annulation.
+
+Le bloc s'applique au niveau en cours d'édition (`Editor::graph`) : la racine, l'intérieur d'un groupe, le graphe d'un calque, ou la pile. Dans la pile, les opérations de nœuds visent un calque (`"calque": "c2"`, `"partie": "masque"`).
+
+### L'interface
+
+`App::assistant_ui` (`main.rs`) envoie le contexte, cache le corps des blocs dans la réponse et dessine `extras::graph_card` sous le message. `App::apply_ai_graph` applique au graphe ouvert. L'option d'application automatique est `ai::Settings::auto_graph` (`ai.json`).
+
+### Essayer sans fournisseur
+
+`ARY_AI_FAKE=/chemin/reponse.txt` fait « répondre » le contenu du fichier. `ARY_AI_DUMP=/chemin/messages.json` écrit ce qui serait envoyé. Les tests de `aigraph.rs` jouent la réponse « drapeau » de la notice : ils vérifient le graphe obtenu (grille, épinglage, zone, solveur sur carte graphique, vent, sortie), puis le simulent avec le solveur de référence.
+
+### Ajouter une opération
+
+Dans `Work::op` pour les nœuds, `layer_op` pour les calques : lire les champs avec `get` (qui accepte plusieurs noms), rendre une erreur claire, pousser une ligne dans `done`. Décrire l'opération dans `notice` et ajouter un cas au test.
+
 ## Tests
 
 Les tests de `geo.rs` vérifient notamment que seul le nécessaire est refait. Exemple lu dans le code : après un déplacement refait à l'identique, `(computed, cutoffs) == (1, 1)`, c'est-à-dire que la couleur posée en aval vient du cache.

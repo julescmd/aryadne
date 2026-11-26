@@ -111,54 +111,69 @@ fn parse_edit(body: &str) -> Result<Edit, String> {
     })
 }
 
-/// Les blocs ```graphe d'une réponse, dans l'ordre. Un bloc pas encore refermé (réponse en cours)
-/// est ignoré.
-pub fn blocks(text: &str) -> Vec<Result<Edit, String>> {
-    let mut out = vec![];
-    let mut cur: Option<String> = None;
-    for line in text.lines() {
+/// Un bloc de code de la réponse : sa langue, son corps, et s'il est refermé.
+struct Fence {
+    lang: String,
+    body: String,
+    closed: bool,
+    /// Rangs de ses lignes dans le texte (barrières comprises)
+    lines: (usize, usize),
+}
+
+fn fences(text: &str) -> Vec<Fence> {
+    let mut out: Vec<Fence> = vec![];
+    let mut open = false;
+    for (k, line) in text.lines().enumerate() {
         if let Some(rest) = line.trim_start().strip_prefix("```") {
-            match cur.take() {
-                Some(body) => out.push(parse_edit(&body)),
-                None => {
-                    if matches!(plain(rest).as_str(), "graphe" | "graph" | "aryadne-graphe" | "noeuds" | "nodes") {
-                        cur = Some(String::new());
-                    }
+            if open {
+                if let Some(f) = out.last_mut() {
+                    f.closed = true;
+                    f.lines.1 = k;
                 }
+                open = false;
+            } else {
+                out.push(Fence { lang: plain(rest), body: String::new(), closed: false, lines: (k, usize::MAX) });
+                open = true;
             }
             continue;
         }
-        if let Some(b) = &mut cur {
-            b.push_str(line);
-            b.push('\n');
+        if open {
+            if let Some(f) = out.last_mut() {
+                f.body.push_str(line);
+                f.body.push('\n');
+            }
         }
     }
     out
 }
 
-/// Le texte d'une réponse sans le corps de ses blocs ```graphe (la carte « Appliquer » les résume).
-pub fn strip_blocks(text: &str) -> String {
-    let mut out = String::new();
-    let mut inside = false;
-    let mut other = false;
-    for line in text.lines() {
-        if let Some(rest) = line.trim_start().strip_prefix("```") {
-            if inside {
-                inside = false;
-                continue;
-            }
-            if !other && matches!(plain(rest).as_str(), "graphe" | "graph" | "aryadne-graphe" | "noeuds" | "nodes") {
-                inside = true;
-                continue;
-            }
-            other = !other;
-        }
-        if !inside {
-            out.push_str(line);
-            out.push('\n');
-        }
+/// Ce bloc est-il un changement de graphe ? Un bloc ```graphe, ou un bloc ```json qui en a la forme
+/// (certains modèles reviennent à « json » par habitude).
+fn is_edit(f: &Fence) -> bool {
+    if matches!(f.lang.as_str(), "graphe" | "graph" | "aryadne-graphe" | "noeuds" | "nodes") {
+        return true;
     }
-    out.trim_end().to_string()
+    matches!(f.lang.as_str(), "json" | "") && f.closed && serde_json::from_str::<Value>(&tidy_json(&f.body)).ok().is_some_and(|v| {
+        let ops = match &v {
+            Value::Object(o) => get(o, &["ops", "operations"]).and_then(|x| x.as_array()).cloned(),
+            _ => None,
+        };
+        ops.is_some_and(|a| !a.is_empty() && a.iter().all(|x| x.get("op").is_some_and(|k| k.is_string())))
+    })
+}
+
+/// Les blocs ```graphe d'une réponse, dans l'ordre. Un bloc pas encore refermé (réponse en cours)
+/// est ignoré.
+pub fn blocks(text: &str) -> Vec<Result<Edit, String>> {
+    fences(text).iter().filter(|f| f.closed && is_edit(f)).map(|f| parse_edit(&f.body)).collect()
+}
+
+/// Le texte d'une réponse sans ses blocs ```graphe (la carte « Appliquer » les résume). Un bloc
+/// en cours d'écriture est caché lui aussi.
+pub fn strip_blocks(text: &str) -> String {
+    let hide: Vec<(usize, usize)> = fences(text).iter().filter(|f| is_edit(f)).map(|f| f.lines).collect();
+    let kept: Vec<&str> = text.lines().enumerate().filter(|(k, _)| !hide.iter().any(|(a, b)| k >= a && k <= b)).map(|(_, l)| l).collect();
+    kept.join("\n").trim_end().to_string()
 }
 
 // ---------- ce que le modèle voit ----------
@@ -469,6 +484,7 @@ pub fn notice(kind: GraphKind, stack: bool, rel: &str) -> String {
              - sim_solver, réglage « solveur » : « tissu (carte graphique) » est le simulateur de tissu sur carte graphique (rapide, pour les maillages fins ; entrées raideur, flexion, sous-pas, cisaillement, amortissement des plis, épaisseur ; réglage « auto-collision ») ; « tissu et fils, XPBD (processeur) » est le solveur de référence (entrée souplesse). Obstacles du solveur : le sol (réglage « sol », entrée « hauteur du sol »), une boule (rayon 0 : aucune), une boîte (taille 0 : aucune).\n\
              - Particules : zone { sim_emit → sim_forces → sim_move → sim_collide }.\n\
              - Une grille « mur (XY) » de largeur L va de x = -L/2 à x = L/2, debout. Une grille « sol (XZ) » est à plat.\n\
+             - L'éditeur a des exemples tout faits (menu « Exemples ») : EXEMPLES. Tu peux y renvoyer l'utilisateur, mais fais d'abord ce qu'il demande.\n\
              Exemple, « un drapeau qui flotte au vent » dans un graphe vide :\n\
              ```graphe\n\
              {\"fichier\":\"drapeau.arygeo\",\"remplacer\":true,\"ops\":[\n\
@@ -511,7 +527,7 @@ pub fn notice(kind: GraphKind, stack: bool, rel: &str) -> String {
         }
         GraphKind::Compositor => s.push_str("COMPOSITING. L'image part d'un node image, exr ou video (réglage « fichier » : chemin dans le coffre), traverse les corrections et les filtres, et arrive sur comp_out. Insérer un effet dans une chaîne = relier la sortie d'avant vers son entrée « image » ou « couleur », puis sa sortie vers l'entrée d'après.\n"),
     }
-    s.replace("drapeau.arygeo", rel).replace("<chemin du document>", rel)
+    s.replace("drapeau.arygeo", rel).replace("<chemin du document>", rel).replace("EXEMPLES", &crate::geo::EXAMPLES.join(", "))
 }
 
 /// Tout ce que le modèle reçoit quand un graphe est ouvert : la notice, le résumé, le catalogue.
@@ -1051,7 +1067,7 @@ impl Work<'_> {
                     return Err("la dernière image doit venir après la première".into());
                 }
                 self.g.time = Some(t);
-                self.done.push(format!("{} : {} i/s, {} → {}", crate::i18n::t("lecture"), num(t.fps), t.start, t.end));
+                self.done.push(format!("{} : {} i/s, {} → {}", crate::i18n::t("lecture de l'animation"), num(t.fps), t.start, t.end));
             }
             other => return Err(format!("opération « {other} » inconnue (ajouter, relier, delier, regler, supprimer, zone, grouper, degrouper, cadre, lecture)")),
         }
@@ -1486,6 +1502,10 @@ mod tests {
         assert!(b[1].is_err());
         let s = strip_blocks(t);
         assert!(s.contains("fn a(){}") && !s.contains("supprimer") && s.contains("fin"));
+        // Un bloc ```json qui a la forme d'un changement est pris aussi ; un autre JSON ne l'est pas
+        let j = "```json\n{\"ops\":[{\"op\":\"zone\"}]}\n```\n```json\n{\"a\":1}\n```";
+        assert_eq!(blocks(j).len(), 1);
+        assert!(strip_blocks(j).contains("\"a\":1") && !strip_blocks(j).contains("zone"));
         // Une liste nue, ou une opération seule
         assert_eq!(one("```graphe\n[{\"op\":\"zone\"}]\n```").ops.len(), 1);
         assert_eq!(one("```graphe\n{\"op\":\"zone\"}\n```").ops.len(), 1);

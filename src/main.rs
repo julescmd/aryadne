@@ -6326,8 +6326,18 @@ impl App {
                 });
                 egui::ScrollArea::vertical().stick_to_bottom(true).auto_shrink(false).show(ui, |ui| {
                     if self.assistant.msgs.is_empty() && !self.assistant.busy() {
-                        let hint = if graph_kind.is_some() { "Demande un changement à ce graphe (« fais un drapeau en tissu », « ajoute du vent »…). L'assistant connaît les nodes : il propose le changement sur une carte, à appliquer d'un clic et à annuler d'un Ctrl+Z." } else { "Pose une question sur ce que tu as à l'écran. Les blocs de code proposés peuvent être insérés directement dans le fichier ouvert." };
-                        ui.add(egui::Label::new(RichText::new(crate::i18n::t(hint)).color(p.muted).size(11.5)).wrap());
+                        let hint = match graph_kind {
+                            Some(k) => {
+                                let ex = match k {
+                                    nodes::GraphKind::Geometry => "Demande un changement à ce graphe : « fais un drapeau en tissu », « ajoute du vent »…",
+                                    nodes::GraphKind::Material => "Demande un changement à ce matériau : « ajoute de la rouille dans les creux », « rends-le plus brillant »…",
+                                    nodes::GraphKind::Compositor => "Demande un changement à ce compositing : « ajoute un halo et du grain », « réchauffe les couleurs »…",
+                                };
+                                format!("{} {}", crate::i18n::t(ex), crate::i18n::t("L'assistant connaît les nodes : il propose le changement sur une carte, à appliquer d'un clic et à annuler d'un Ctrl+Z."))
+                            }
+                            None => crate::i18n::t("Pose une question sur ce que tu as à l'écran. Les blocs de code proposés peuvent être insérés directement dans le fichier ouvert."),
+                        };
+                        ui.add(egui::Label::new(RichText::new(hint).color(p.muted).size(11.5)).wrap());
                     }
                     let n = self.assistant.msgs.len();
                     let mut reply = None;
