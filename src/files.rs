@@ -210,33 +210,20 @@ impl App {
                             self.files.grid = !g;
                             self.files.save();
                         }
-                        egui::containers::menu::MenuButton::from_button(egui::Button::new(RichText::new(crate::lucide::PLUS).size(15.0).color(p.muted)).frame(false).min_size(egui::vec2(24.0, 24.0))).ui(ui, |ui| {
-                            ui.set_min_width(210.0);
-                            let dir = self.target_dir(&self.notes_dir());
-                            if ui.button(format!("{}  {}", crate::lucide::FILE_TEXT, crate::i18n::t("note"))).clicked() {
-                                self.new_note();
-                            }
-                            if ui.add(egui::Button::new(format!("{}  {}", crate::lucide::FILE, crate::i18n::t("fichier…")))).clicked() {
-                                self.actions.push(Action::NewFile(dir.clone()));
-                            }
-                            if ui.button(format!("{}  {}", crate::lucide::FOLDER_PLUS, crate::i18n::t("dossier…"))).clicked() {
-                                self.actions.push(Action::NewDir(self.target_dir("")));
-                            }
-                            ui.separator();
+                        // Le + ouvre la même fenêtre « nouveau fichier » que partout ailleurs ; clic droit : importer, lier un dossier
+                        let r = icon_btn(ui, crate::lucide::PLUS, &crate::i18n::t("nouveau fichier (clic droit : importer)"));
+                        if r.clicked() {
                             let ctx = ui.ctx().clone();
-                            for (l, c) in [("fichier… (choisir le genre)", extras::Cmd::NewFile), ("note du jour", extras::Cmd::Daily), ("depuis un modèle…", extras::Cmd::FromTemplate), ("board…", extras::Cmd::NewBoard), ("scène 3D", extras::Cmd::NewScene), ("montage vidéo", extras::Cmd::NewMontage), ("matériau en nodes", extras::Cmd::NewMaterial), ("compositing en nodes", extras::Cmd::NewCompositor)] {
-                                if ui.button(crate::i18n::t(l)).clicked() {
-                                    self.run_cmd(c, &ctx);
-                                }
-                            }
-                            ui.separator();
+                            self.run_cmd(extras::Cmd::NewFile, &ctx);
+                        }
+                        r.context_menu(|ui| {
                             if ui.add(egui::Button::new(format!("{}  {}", crate::lucide::UPLOAD, crate::i18n::t("importer des fichiers…")))).clicked() {
                                 self.pick_import(false);
                             }
                             if ui.add(egui::Button::new(format!("{}  {}", crate::lucide::FOLDER_PLUS, crate::i18n::t("lier un dossier…")))).clicked() {
                                 self.pick_import(true);
                             }
-                        }).0.on_hover_text(crate::i18n::t("nouveau…"));
+                        });
                     });
                 });
                 ui.add_space(4.0);

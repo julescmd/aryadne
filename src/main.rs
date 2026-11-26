@@ -813,6 +813,10 @@ impl App {
         // (nom, extension, à quoi ça sert)
         let mut kinds: Vec<(&str, &str, &str)> = vec![("note", "md", "Texte en Markdown : notes, listes, liens entre notes")];
         kinds.extend(formats::ALL.iter().filter(|f| f.ready).map(|f| (f.label, f.ext, f.help)));
+        // L'atelier (peinture de textures à calques, façon Substance Painter) partage l'extension des matériaux
+        if let Some(i) = kinds.iter().position(|k| k.1 == "arymat") {
+            kinds.insert(i + 1, ("matériau à calques (atelier)", "arymat:atelier", "Peindre les textures d'un modèle par calques, avec masques, générateurs et export des textures"));
+        }
         kinds.push(("code ou texte", "code", "Script, page web, réglages, texte brut"));
         kinds.push(("dossier", "/", "Pour ranger"));
         kind = kind.min(kinds.len() - 1);
@@ -829,7 +833,7 @@ impl App {
                         let mut job = egui::text::LayoutJob::default();
                         job.append(&crate::i18n::t(label), 0.0, egui::TextFormat { font_id: egui::FontId::new(13.0, if on { theme::bold() } else { egui::FontFamily::Proportional }), color: if on { p.text } else { p.muted }, ..Default::default() });
                         if !matches!(*ext, "/" | "code") {
-                            job.append(&format!("  .{ext}"), 0.0, egui::TextFormat { font_id: egui::FontId::monospace(10.5), color: p.accent, ..Default::default() });
+                            job.append(&format!("  .{}", ext.split(':').next().unwrap_or(ext)), 0.0, egui::TextFormat { font_id: egui::FontId::monospace(10.5), color: p.accent, ..Default::default() });
                         }
                         if ui.add(egui::Button::selectable(on, job).min_size(egui::vec2(214.0, 26.0))).clicked() {
                             kind = k;
@@ -900,7 +904,7 @@ impl App {
                     }
                     ui.add_space(12.0);
                     if !matches!(ext, "/" | "aryboard") {
-                        let shown = if ext == "code" { format!("untitled.{}", NF_CODE[o.code].0) } else { format!("untitled.{ext}") };
+                        let shown = if ext == "code" { format!("untitled.{}", NF_CODE[o.code].0) } else { format!("untitled.{}", ext.split(':').next().unwrap_or(ext)) };
                         ui.label(RichText::new(format!("{} {shown} · {}", crate::i18n::t("s'ouvre sous le nom"), crate::i18n::t("Ctrl+S pour choisir son nom et son dossier"))).size(10.5).color(p.muted));
                     }
                     ui.add_space(8.0);
@@ -950,6 +954,7 @@ impl App {
                     let g = if o.preset == 0 { nodes::Graph::new_material() } else { nodes::material_preset(nodes::MATERIAL_PRESETS[o.preset - 1]).unwrap_or_else(nodes::Graph::new_material) };
                     self.new_untitled(ext, move |p| g.save(p));
                 }
+                "arymat:atelier" => self.new_untitled("arymat", |p| nodes::Graph::new_layered().save(p)),
                 "arycomp" => self.new_untitled(ext, |p| nodes::Graph::new_compositor().save(p)),
                 "arygeo" => self.new_untitled(ext, |p| nodes::Graph::new_geometry().save(p)),
                 "aryvec" => self.new_untitled(ext, |p| vector::Doc::starter().save(p)),

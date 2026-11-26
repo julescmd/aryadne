@@ -1471,8 +1471,8 @@
   "rayures d'usure": "scratches",
   "saleté (grunge)": "grunge",
   "bruit": "noise",
-  "matériau à calques (atelier)": "layered material (workshop)",
-  "nouveau matériau à calques (atelier)": "new layered material (workshop)",
+  "matériau à calques (atelier)": "layered material (Atelier)",
+  "nouveau matériau à calques (atelier)": "new layered material (Atelier)",
   "Paramètre exposé": "Exposed parameter",
   "tracé de chemins pendant le mouvement": "path tracing while moving",
   "Décoché : l'aperçu rapide prend le relais quand on tourne autour de la scène.": "Unchecked: the fast preview takes over while you orbit the scene.",
@@ -3995,5 +3995,7 @@
   "chute sur une boule": "falling on a ball",
   "pire arête": "worst edge",
   "moyenne": "mean",
-  "pas de carte graphique utilisable : tissu calculé sur le processeur": "no usable graphics card: cloth computed on the CPU"
+  "pas de carte graphique utilisable : tissu calculé sur le processeur": "no usable graphics card: cloth computed on the CPU",
+  "Peindre les textures d'un modèle par calques, avec masques, générateurs et export des textures": "Paint a model's textures in layers, with masks, generators and texture export",
+  "nouveau fichier (clic droit : importer)": "new file (right-click: import)"
 }
