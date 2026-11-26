@@ -47,10 +47,6 @@ impl Column {
         Column { data, version: next_version() }
     }
 
-    pub fn filled(width: usize, n: usize, v: V) -> Column {
-        Column::new((0..width).map(|c| vec![v[c.min(3)]; n]).collect())
-    }
-
     pub fn width(&self) -> usize {
         self.data.len()
     }
@@ -225,7 +221,7 @@ impl Geo {
             return Err(bad());
         }
         let mut at = 8;
-        let mut u32_at = |at: &mut usize| -> Result<u32, String> {
+        let u32_at = |at: &mut usize| -> Result<u32, String> {
             let s = b.get(*at..*at + 4).ok_or_else(bad)?;
             *at += 4;
             Ok(u32::from_le_bytes([s[0], s[1], s[2], s[3]]))
@@ -515,13 +511,6 @@ impl Field {
         match self {
             Field::Const(v) => *v,
             Field::Per(v) => v[i],
-        }
-    }
-    /// Valeur unique, pour un réglage qui vaut pour toute la géométrie (celle du premier point sinon).
-    pub fn one(&self) -> V {
-        match self {
-            Field::Const(v) => *v,
-            Field::Per(v) => v.first().copied().unwrap_or([0.0; 4]),
         }
     }
 }

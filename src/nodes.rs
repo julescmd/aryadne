@@ -3407,7 +3407,17 @@ impl Editor {
     pub fn save_if_due(&mut self, force: bool) {
         if let Some(t) = self.dirty {
             if force || t.elapsed() > std::time::Duration::from_millis(500) {
-                if let Err(e) = self.doc().save(&self.path) {
+                // Un groupe que plus aucun node ne pose n'est pas écrit dans le fichier (sauf celui qu'on édite)
+                let mut doc = self.doc();
+                loop {
+                    let before = doc.groups.len();
+                    let names: Vec<String> = doc.groups.iter().map(|g| g.name.clone()).filter(|n| crate::nodeflow::group_uses(&doc, n) == 0 && self.level.as_ref() != Some(n)).collect();
+                    doc.groups.retain(|g| !names.contains(&g.name));
+                    if doc.groups.len() == before {
+                        break;
+                    }
+                }
+                if let Err(e) = doc.save(&self.path) {
                     self.message = Some(e);
                 }
                 self.dirty = None;
@@ -6679,6 +6689,7 @@ fn search_score(hay: &str, words: &[&str], q: &str) -> Option<i32> {
     Some(total)
 }
 
+#[cfg(test)]
 fn search_defs(q: &str, kind: GraphKind, need_input: bool) -> Vec<(i32, &'static Def)> {
     let q = crate::chat::fold(q);
     let words: Vec<&str> = q.split_whitespace().collect();
@@ -7228,5 +7239,41 @@ mod tests_comp_cache {
             prog.composite(size)
         };
         assert_eq!(direct.px, fresh.px);
+    }
+}
+
+#[cfg(test)]
+mod tests_compat {
+    use super::*;
+
+    /// Un fichier écrit avant les groupes, les zones et les prises typées s'ouvre et se calcule tel quel.
+    #[test]
+    fn ancien_fichier_lu_tel_quel() {
+        let old = r#"{"kind":"Material","nodes":[
+            {"id":0,"op":"mat_out","pos":[460.0,40.0],"values":[[0.8,0.5,0.4,1.0],[0.5,0.5,0.5,0.5]],"params":{},"preview":false},
+            {"id":1,"op":"noise","pos":[0.0,40.0],"values":[[4.0,4.0,4.0,4.0],[4.0,4.0,4.0,4.0],[0.5,0.5,0.5,0.5],[0.0,0.0,0.0,0.0]],"params":{},"muted":false,"collapsed":false,"preview":true},
+            {"id":2,"op":"math","pos":[220.0,40.0],"values":[[0.5,0.5,0.5,0.5],[2.0,2.0,2.0,2.0]],"params":{"opération":"multiplier"},"label":"double"}],
+            "links":[{"from":1,"out":0,"to":2,"inp":0},{"from":2,"out":0,"to":0,"inp":0}],"next_id":3,
+            "frames":[{"rect":[0.0,0.0,400.0,200.0],"label":"cadre 1","color":[90,120,200]}]}"#;
+        let g: Graph = serde_json::from_str(old).unwrap();
+        assert!(g.groups.is_empty() && g.time.is_none());
+        assert_eq!(g.frames[0].note, "");
+        let prog = Program::compile(&g, "", 64).map_err(|e| e.1).unwrap();
+        let c = Ctx { uv: [0.3, 0.6], pos: [0.1, 0.2, 0.3], nrm: [0.0, 1.0, 0.0], view: [0.0, 0.0, 1.0], vcol: [1.0; 4], res: [64.0, 64.0], ..Default::default() };
+        let v = prog.material(&c, &mut vec![]).color[0];
+        assert!(v > 0.0 && v < 2.0);
+        // Réenregistré sans rien de nouveau, il ne gagne aucun champ que l'ancienne version ne connaît pas
+        let again = serde_json::to_string(&g).unwrap();
+        for key in ["groups", "\"time\"", "\"ins\"", "\"outs\"", "\"note\""] {
+            assert!(!again.contains(key), "{key}");
+        }
+        // Les trois genres de graphe gardent leur nom dans le fichier
+        assert!(serde_json::to_string(&Graph::new_compositor()).unwrap().contains("\"kind\":\"Compositor\""));
+        assert!(serde_json::to_string(&Graph::new_geometry()).unwrap().contains("\"kind\":\"Geometry\""));
+        // Un node muet est ignoré partout, pas seulement dans l'éditeur : c'est la compilation qui s'en charge
+        let mut g = g;
+        g.nodes.iter_mut().find(|n| n.id == 2).unwrap().muted = true;
+        let direct = Program::compile(&g, "", 64).map_err(|e| e.1).unwrap().material(&c, &mut vec![]).color[0];
+        assert!((direct * 2.0 - v).abs() < 1e-5);
     }
 }
