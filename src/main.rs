@@ -2,6 +2,7 @@
 
 mod cloud;
 mod gpubench;
+mod titlebar;
 mod gpucloth;
 #[allow(dead_code)]
 mod gpusim;
@@ -146,6 +147,8 @@ fn main() -> eframe::Result {
             .with_inner_size([1360.0, 860.0])
             .with_min_inner_size([760.0, 480.0])
             .with_drag_and_drop(true)
+            // Aryadne dessine sa barre de titre (menus et boutons de la fenêtre sur une seule rangée)
+            .with_decorations(!titlebar::own())
             .with_icon(std::sync::Arc::new(theme::window_icon().unwrap_or_default())),
         ..Default::default()
     };
@@ -2922,8 +2925,8 @@ impl App {
         };
         let cs = Modifiers::COMMAND | Modifiers::SHIFT;
         egui::Panel::top("menubar")
-            .exact_size(24.0)
-            .frame(egui::Frame::new().fill(p.bg).inner_margin(egui::Margin::symmetric(8, 0)))
+            .exact_size(if titlebar::own() { titlebar::HEIGHT } else { 26.0 })
+            .frame(egui::Frame::new().fill(p.bg).inner_margin(egui::Margin { left: 8, right: 0, top: 0, bottom: 0 }))
             .show(ui, |ui| {
                 ui.horizontal_centered(|ui| {
                     ui.spacing_mut().item_spacing.x = 2.0;
@@ -2931,6 +2934,7 @@ impl App {
                     ui.add_space(6.0);
                     let item = |ui: &mut egui::Ui, label: &str, short: &str| ui.add(egui::Button::new(crate::i18n::t(label)).shortcut_text(short)).clicked();
                     let top = |t: &str| RichText::new(crate::i18n::t(t)).size(12.5);
+                    // Deux menus seulement, dans la barre de titre : Fichier (et l'aide), Édition (affichage, disposition, fenêtres)
                     ui.menu_button(top("Fichier"), |ui| {
                         ui.set_min_width(240.0);
                         ui.menu_button(crate::i18n::t("Nouveau"), |ui| {
@@ -2997,6 +3001,42 @@ impl App {
                         if item(ui, "Quitter", "") {
                             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                         }
+                                            ui.separator();
+                        egui::containers::menu::SubMenuButton::new(crate::i18n::t("Aide")).ui(ui, |ui| {
+                            ui.set_min_width(220.0);
+                            if item(ui, "Accueil", "") {
+                                self.home_open = true;
+                            }
+                            if item(ui, "Documentation", "") {
+                                cmd = Some(extras::Cmd::Documentation);
+                            }
+                            if item(ui, "Raccourcis clavier", "") {
+                                cmd = Some(extras::Cmd::Settings(settings::Tab::Shortcuts));
+                            }
+                            if item(ui, "Temps passé par projet", "") {
+                                cmd = Some(extras::Cmd::TimeReport);
+                            }
+                            if item(ui, "Vérifier les mises à jour", "") {
+                                cmd = Some(extras::Cmd::Updates);
+                            }
+                            // API de scripts : un exemple prêt à lancer (F5) dans le dossier scripts
+                            if item(ui, "Script Python d'exemple (API)", "") {
+                                let rel = "scripts/exemple aryadne.py".to_string();
+                                let full = std::path::Path::new(&self.root()).join(&rel);
+                                if !full.exists() {
+                                    let _ = std::fs::create_dir_all(full.parent().unwrap_or(std::path::Path::new(".")));
+                                    let _ = std::fs::write(&full, extras::SCRIPT_EXAMPLE);
+                                }
+                                extras::install_script_api(&self.root());
+                                self.open(rel);
+                            }
+                            // Ce que la carte graphique fait vraiment, avant d'y mettre les simulations
+                            if item(ui, "Mesurer la carte graphique", "") {
+                                gpubench::start();
+                            }
+                            ui.separator();
+                            ui.label(RichText::new(format!("Aryadne {}", env!("CARGO_PKG_VERSION"))).size(11.0).color(p.muted));
+                                            });
                     });
                     ui.menu_button(top("Édition"), |ui| {
                         ui.set_min_width(220.0);
@@ -3021,73 +3061,46 @@ impl App {
                         if item(ui, "Raccourcis clavier…", "") {
                             cmd = Some(extras::Cmd::Settings(settings::Tab::Shortcuts));
                         }
-                    });
-                    ui.menu_button(top("Affichage"), |ui| {
-                        ui.set_min_width(240.0);
-                        ui.checkbox(&mut self.explorer_open, format!("{}   {}", crate::i18n::t("Fichiers"), keymap::text("explorer")));
-                        ui.checkbox(&mut self.assistant_open, format!("{}   {}", crate::i18n::t("Assistant"), keymap::text("assistant")));
-                        if item(ui, "Terminal", &keymap::text("terminal")) {
-                            keys = Some((Modifiers::COMMAND, Key::Backtick));
-                        }
-                        ui.separator();
-                        if item(ui, "Vue côte à côte", &keymap::text("split")) {
-                            cmd = Some(extras::Cmd::Split);
-                        }
-                        if item(ui, "Mode compact", &keymap::text("compact")) {
-                            cmd = Some(extras::Cmd::Compact);
-                        }
-                        if item(ui, "Plein écran", "F11") {
-                            let full = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
-                            ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(!full));
-                        }
-                        ui.separator();
-                        if item(ui, if theme::is_dark() { "Thème clair" } else { "Thème sombre" }, "") {
-                            cmd = Some(extras::Cmd::Theme);
-                        }
-                        if ui.add(egui::Button::new(crate::i18n::t("Épingler au-dessus")).selected(self.pinned)).clicked() {
-                            cmd = Some(extras::Cmd::Pin);
-                        }
-                    });
-                    let stay = egui::containers::menu::MenuConfig::new().close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
-                    egui::containers::menu::MenuButton::new(top("Disposition")).config(stay).ui(ui, |ui| {
-                        self.disp_items(ui, &names, &cur, &mut go, &mut act);
-                    });
-                    ui.menu_button(top("Fenêtre"), |ui| self.window_menu(ui, &mut cmd, &ctx));
-                    ui.menu_button(top("Aide"), |ui| {
-                        ui.set_min_width(220.0);
-                        if item(ui, "Accueil", "") {
-                            self.home_open = true;
-                        }
-                        if item(ui, "Documentation", "") {
-                            cmd = Some(extras::Cmd::Documentation);
-                        }
-                        if item(ui, "Raccourcis clavier", "") {
-                            cmd = Some(extras::Cmd::Settings(settings::Tab::Shortcuts));
-                        }
-                        if item(ui, "Temps passé par projet", "") {
-                            cmd = Some(extras::Cmd::TimeReport);
-                        }
-                        if item(ui, "Vérifier les mises à jour", "") {
-                            cmd = Some(extras::Cmd::Updates);
-                        }
-                        // API de scripts : un exemple prêt à lancer (F5) dans le dossier scripts
-                        if item(ui, "Script Python d'exemple (API)", "") {
-                            let rel = "scripts/exemple aryadne.py".to_string();
-                            let full = std::path::Path::new(&self.root()).join(&rel);
-                            if !full.exists() {
-                                let _ = std::fs::create_dir_all(full.parent().unwrap_or(std::path::Path::new(".")));
-                                let _ = std::fs::write(&full, extras::SCRIPT_EXAMPLE);
+                                            ui.separator();
+                        egui::containers::menu::SubMenuButton::new(crate::i18n::t("Affichage")).ui(ui, |ui| {
+                            ui.set_min_width(240.0);
+                            ui.checkbox(&mut self.explorer_open, format!("{}   {}", crate::i18n::t("Fichiers"), keymap::text("explorer")));
+                            ui.checkbox(&mut self.assistant_open, format!("{}   {}", crate::i18n::t("Assistant"), keymap::text("assistant")));
+                            if item(ui, "Terminal", &keymap::text("terminal")) {
+                                keys = Some((Modifiers::COMMAND, Key::Backtick));
                             }
-                            extras::install_script_api(&self.root());
-                            self.open(rel);
-                        }
-                        // Ce que la carte graphique fait vraiment, avant d'y mettre les simulations
-                        if item(ui, "Mesurer la carte graphique", "") {
-                            gpubench::start();
-                        }
-                        ui.separator();
-                        ui.label(RichText::new(format!("Aryadne {}", env!("CARGO_PKG_VERSION"))).size(11.0).color(p.muted));
+                            ui.separator();
+                            if item(ui, "Vue côte à côte", &keymap::text("split")) {
+                                cmd = Some(extras::Cmd::Split);
+                            }
+                            if item(ui, "Mode compact", &keymap::text("compact")) {
+                                cmd = Some(extras::Cmd::Compact);
+                            }
+                            if item(ui, "Plein écran", "F11") {
+                                let full = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
+                                ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(!full));
+                            }
+                            ui.separator();
+                            if item(ui, if theme::is_dark() { "Thème clair" } else { "Thème sombre" }, "") {
+                                cmd = Some(extras::Cmd::Theme);
+                            }
+                            if ui.add(egui::Button::new(crate::i18n::t("Épingler au-dessus")).selected(self.pinned)).clicked() {
+                                cmd = Some(extras::Cmd::Pin);
+                            }
+                                            });
+                        let stay = egui::containers::menu::MenuConfig::new().close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
+                        egui::containers::menu::SubMenuButton::new(crate::i18n::t("Disposition")).config(stay).ui(ui, |ui| {
+                            self.disp_items(ui, &names, &cur, &mut go, &mut act);
+                        });
+                        egui::containers::menu::SubMenuButton::new(crate::i18n::t("Fenêtre")).ui(ui, |ui| self.window_menu(ui, &mut cmd, &ctx));
                     });
+                    // Le reste de la rangée : le titre (on tire pour déplacer la fenêtre), puis les boutons de la fenêtre
+                    let title = match self.active.and_then(|i| self.docs.get(i)) {
+                        Some(d) => format!("{} · Aryadne", std::path::Path::new(&d.rel).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| d.rel.clone())),
+                        None => "Aryadne".to_string(),
+                    };
+                    titlebar::drag_area(ui, &title);
+                    titlebar::controls(ui);
                 });
             });
         self.disp_apply(go, act, &cur, &ctx);
@@ -7715,7 +7728,9 @@ impl eframe::App for App {
             }
         }
 
+        titlebar::resize_edges(&ctx);
         if self.vault.is_none() {
+            titlebar::strip(ui, "Aryadne");
             self.welcome(ui);
         } else {
             self.handle_dropped_files(&ctx);
