@@ -524,7 +524,8 @@ pub fn page_text(id: &str) -> Option<&'static str> {
 /// Fichier fourni avec les leçons (« fichiers/scene.aryscene »).
 pub fn asset(rel: &str) -> Option<&'static [u8]> {
     let full = format!("apprendre/{}", rel.trim_start_matches("./"));
-    crate::docs::ASSETS.iter().find(|a| a.0 == full).map(|a| a.1)
+    // Une note fournie (Markdown) est embarquée avec les pages ; le reste avec les fichiers d'exercice
+    crate::docs::ASSETS.iter().find(|a| a.0 == full).map(|a| a.1).or_else(|| crate::docs::FILES.iter().find(|f| f.0 == full).map(|f| f.1.as_bytes()))
 }
 
 /// La leçon d'avant et celle d'après, dans l'ordre des parcours (on passe d'un parcours au suivant).
@@ -1229,6 +1230,31 @@ mod tests {
                 for p in &l.meta.prerequis {
                     if page_text(p).is_none() {
                         bad.push(format!("{} : prérequis introuvable {p}", l.id));
+                    }
+                }
+            }
+        }
+        assert!(bad.is_empty(), "{bad:#?}");
+    }
+
+    #[test]
+    fn verifications_des_lecons_connues() {
+        // Chaque `verifier:` des leçons du dépôt est une vérification du tableau de FORMAT.md, et
+        // chaque node cité par `graphe.contient` existe (nom interne, sa fin, ou nom affiché)
+        let mut all = GraphStats::default();
+        for d in crate::nodes::DEFS {
+            all.ops.push((d.op.to_string(), d.label.to_string()));
+        }
+        let mut bad = vec![];
+        for c in catalog() {
+            for l in &c.lessons {
+                for b in &Lesson::parse(page_text(&l.id).unwrap()).blocks {
+                    match b {
+                        Block::Etape { verifier: Some(Check::Inconnue(raw)), .. } => bad.push(format!("{} : vérification inconnue « {raw} »", l.id)),
+                        Block::Etape { verifier: Some(Check::GrapheContient(op)), .. } if !all.contains(op) => bad.push(format!("{} : node inconnu « {op} »", l.id)),
+                        Block::Etape { verifier: Some(Check::Onglet(m)), .. } if !crate::workspace::KINDS.iter().any(|k| mode_matches(k, m)) => bad.push(format!("{} : onglet inconnu « {m} »", l.id)),
+                        Block::Etape { verifier: Some(Check::SousOnglet(t)), .. } if !["scene", "mat", "sim", "board", "image", "vector", "comp", "story", "seq", "review", "audio", "music", "notes", "tasks", "brain", "motion", "code"].iter().any(|id| tool_names(id).contains(&crate::chat::fold(t).to_lowercase().as_str())) => bad.push(format!("{} : sous-onglet inconnu « {t} »", l.id)),
+                        _ => {}
                     }
                 }
             }
