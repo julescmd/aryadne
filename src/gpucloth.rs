@@ -130,6 +130,8 @@ struct Consts {
     /// Part de l'impulsion de l'image appliquée à chaque sous-pas (0 : pas d'impulsion)
     kick: f32,
     pad: [f32; 2],
+    /// Centre du tissu : les positions des noyaux lui sont relatives, la relecture le rajoute
+    origin: [f32; 4],
 }
 
 impl Consts {
@@ -137,7 +139,7 @@ impl Consts {
         let (sub, _) = p.split();
         let h = dt / sub as f32;
         let rel = |c: [f32; 3]| [c[0] - origin[0], c[1] - origin[1], c[2] - origin[2]];
-        let mut c = Consts { h, inv_h2: 1.0 / (h * h), k: p.stiffness.max(0.0), d: p.bending.max(0.0), keep: (1.0 - p.damping).clamp(0.0, 1.0).powf(1.0 / sub as f32), slide: 1.0 - p.grip.clamp(0.0, 1.0), rest_scale, ..Default::default() };
+        let mut c = Consts { h, inv_h2: 1.0 / (h * h), k: p.stiffness.max(0.0), d: p.bending.max(0.0), keep: (1.0 - p.damping).clamp(0.0, 1.0).powf(1.0 / sub as f32), slide: 1.0 - p.grip.clamp(0.0, 1.0), rest_scale, origin: [origin[0], origin[1], origin[2], 0.0], ..Default::default() };
         if let Some(y) = p.floor {
             c.floor_y = y - origin[1];
             c.floor_on = 1.0;
@@ -776,7 +778,7 @@ impl Topo {
 
     /// Octets que la carte garde pour ce tissu
     pub fn gpu_bytes(&self) -> u64 {
-        (self.n * 16 * 7 + self.off.len() * 8 + self.springs.len() * 12) as u64 + self.coarse.as_ref().map_or(0, |c| self.n as u64 * 16 + c.gpu_bytes())
+        (self.n * (16 * 7 + 4 + 24) + self.off.len() * 8 + self.springs.len() * 12) as u64 + self.coarse.as_ref().map_or(0, |c| self.n as u64 * 16 + c.gpu_bytes())
     }
 
     /// Octets lus et écrits par passe complète sur tous les sommets (pour estimer le débit).
@@ -1303,6 +1305,7 @@ struct C {
     cube_c: vec4<f32>,
     cube_h: vec4<f32>,
     rest_scale: f32, kick: f32, p1: f32, p2: f32,
+    origin: vec4<f32>,
 }
 struct S { start: u32, count: u32, omega: f32, phases: u32 }
 struct E { j: u32, k: u32, codes: u32 }
@@ -1718,11 +1721,42 @@ fn finish(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups
 }
 "#;
 
+/// Relecture : positions (centre rajouté) et vitesses, dans l'ordre de la géométrie et composante
+/// par composante, comme les colonnes de l'état. 24 octets par sommet au lieu de 32, et rien à
+/// réordonner du côté du processeur.
+const PACK: &str = r#"
+@group(0) @binding(0) var<uniform> c: C;
+@group(0) @binding(1) var<uniform> s: S;
+@group(0) @binding(2) var<storage, read> pos: array<vec4<f32>>;
+@group(0) @binding(3) var<storage, read> vel: array<vec4<f32>>;
+@group(0) @binding(4) var<storage, read> perm: array<u32>;
+@group(0) @binding(5) var<storage, read_write> packed: array<f32>;
+
+@compute @workgroup_size(WG)
+fn pack(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>) {
+    let k = lin(gid, nwg);
+    let n = s.count;
+    if (k >= n) { return; }
+    let i = perm[k];
+    let p = pos[k].xyz + c.origin.xyz;
+    let v = vel[k].xyz;
+    packed[i] = p.x;
+    packed[n + i] = p.y;
+    packed[2u * n + i] = p.z;
+    packed[3u * n + i] = v.x;
+    packed[4u * n + i] = v.y;
+    packed[5u * n + i] = v.z;
+}
+"#;
+
 /// Le tissu sur la carte : ses colonnes, ses noyaux, ses branchements.
 struct GpuCloth {
     pos: Column,
     vel: Column,
     kick: Column,
+    /// Ce qui est relu : positions et vitesses dans l'ordre de la géométrie
+    packed: Column,
+    g_pack: wgpu::BindGroup,
     consts: wgpu::Buffer,
     slots: wgpu::Buffer,
     slot: u64,
@@ -1753,6 +1787,7 @@ struct Programs {
     coarse: Kernels,
     down: Kernels,
     up: Kernels,
+    pack: Kernels,
 }
 
 fn programs(g: &Gpu) -> &'static Programs {
@@ -1770,6 +1805,7 @@ fn programs(g: &Gpu) -> &'static Programs {
             coarse: g.kernels("tissu-niveau", &format!("{STRUCTS}{COARSE}"), &[Uniform, Slot(16), Read, Read, Read, Read, Write, Write], &["relax", "remain"]),
             down: g.kernels("tissu-descente", &format!("{STRUCTS}{DOWN}"), &[Slot(16), Read, Read, Read, Write, Write], &["gather"]),
             up: g.kernels("tissu-remontee", &format!("{STRUCTS}{UP}"), &[Slot(16), Read, Read, Read, Write], &["prolong"]),
+            pack: g.kernels("tissu-relecture", &format!("{STRUCTS}{PACK}"), &[Uniform, Slot(16), Read, Read, Read, Write], &["pack"]),
         }
     })
 }
@@ -1817,10 +1853,17 @@ impl GpuCloth {
         let kick = v4("tissu-impulsion");
         let bk = one(&kick);
         let g_move = [g.group(mv, &[&consts, &slots, &bp, &bv, &bt, &bpr, &b0, &b1, &bk]), g.group(mv, &[&consts, &slots, &bp, &bv, &bt, &bpr, &b1, &b0, &bk])];
+        let perm = g.column("tissu-ordre", t.n, 4);
+        let packed = g.column("tissu-relecture", t.n * 6, 4);
+        if packed.pages.len() != 1 {
+            return None;
+        }
+        g.write(&perm, &t.perm);
+        let g_pack = g.group(&progs.pack, &[&consts, &slots, &bp, &bv, &perm.pages[0], &packed.pages[0]]);
         // Niveaux grossiers : chacun a ses colonnes et ses passages avec le niveau d'au-dessus
         let mut levels = Vec::new();
         let mut g_rest = None;
-        let mut keep = vec![tgt, prev, s0, s1, off, springs];
+        let mut keep = vec![tgt, prev, s0, s1, off, springs, perm];
         if t.coarse.is_some() {
             let res = g.column("tissu-reste", t.n, 16);
             g_rest = Some(g.group(&progs.rest, &[&consts, &slots, &bp, &bt, &keep[4].pages[0], &keep[5].pages[0], &res.pages[0]]));
@@ -1864,7 +1907,7 @@ impl GpuCloth {
                 next = co.coarse.as_deref();
             }
         }
-        Some(GpuCloth { pos, vel, kick, consts, slots, slot, slots_for: (0, -1.0), solve, mv, g_solve, g_move, g_rest, levels, _keep: keep })
+        Some(GpuCloth { pos, vel, kick, packed, g_pack, consts, slots, slot, slots_for: (0, -1.0), solve, mv, g_solve, g_move, g_rest, levels, _keep: keep })
     }
 
     /// Le cycle en V à partir du niveau grossier `l`, dans une passe déjà ouverte. Même suite que `cycle`.
@@ -1947,9 +1990,13 @@ pub struct Cloth {
     pub topo: Topo,
     /// Centre du tissu au chargement : les positions des noyaux lui sont relatives
     origin: [f32; 3],
-    /// État connu côté processeur, dans l'ordre de rangement
+    /// État côté processeur, dans l'ordre de rangement. À jour seulement si `sorted_fresh` :
+    /// tant que la carte calcule, c'est `geom` qui tient l'état.
     pos: Vec<V4>,
     vel: Vec<V4>,
+    sorted_fresh: bool,
+    /// Dernier état relu de la carte : positions et vitesses dans l'ordre de la géométrie
+    geom: Option<State>,
     /// Changement de vitesse demandé pour le prochain pas (vide : aucun)
     kick: Vec<V4>,
     gpu: Option<GpuCloth>,
@@ -1958,6 +2005,9 @@ pub struct Cloth {
     /// Pas envoyés à la carte et pas encore relus : de quoi les refaire sur le processeur si elle échoue
     ahead: Vec<(Consts, Params, Vec<V4>)>,
 }
+
+/// Positions et vitesses, dans l'ordre de la géométrie
+pub type State = ([Vec<f32>; 3], [Vec<f32>; 3]);
 
 impl Cloth {
     /// `positions` : l'état de départ, dans l'ordre de la géométrie. `on_gpu` : essayer la carte.
@@ -1971,7 +2021,7 @@ impl Cloth {
             }
         }
         let gpu = if on_gpu { gpusim::gpu().and_then(|g| GpuCloth::new(g, &topo)) } else { None };
-        let mut cloth = Cloth { topo, origin, pos: vec![[0.0; 4]; n], vel: vec![[0.0; 4]; n], kick: Vec::new(), gpu, send: (true, true, false), ahead: Vec::new() };
+        let mut cloth = Cloth { topo, origin, pos: vec![[0.0; 4]; n], vel: vec![[0.0; 4]; n], sorted_fresh: true, geom: None, kick: Vec::new(), gpu, send: (true, true, false), ahead: Vec::new() };
         cloth.set_positions(positions);
         cloth
     }
@@ -1986,8 +2036,23 @@ impl Cloth {
         self.topo
     }
 
+    /// Met à jour l'état rangé à partir du dernier état relu de la carte
+    fn sort_state(&mut self) {
+        if let Some((p, v)) = self.geom.as_ref().filter(|_| !self.sorted_fresh) {
+            let o = self.origin;
+            (self.pos.par_iter_mut(), self.vel.par_iter_mut(), self.topo.perm.par_iter()).into_par_iter().with_min_len(1024).for_each(|(x, u, &i)| {
+                let i = i as usize;
+                *x = [p[0][i] - o[0], p[1][i] - o[1], p[2][i] - o[2], 0.0];
+                *u = [v[0][i], v[1][i], v[2][i], 0.0];
+            });
+        }
+        self.sorted_fresh = true;
+    }
+
     pub fn set_positions(&mut self, p: &[Vec<f32>; 3]) {
         self.sync();
+        self.sort_state();
+        self.geom = None;
         let o = self.origin;
         let perm = &self.topo.perm;
         self.pos.par_iter_mut().zip(perm.par_iter()).for_each(|(x, &i)| {
@@ -2000,6 +2065,8 @@ impl Cloth {
     /// Impose les vitesses : pour un état de départ, ou une reprise.
     pub fn set_velocities(&mut self, v: &[Vec<f32>; 3]) {
         self.sync();
+        self.sort_state();
+        self.geom = None;
         let perm = &self.topo.perm;
         self.vel.par_iter_mut().zip(perm.par_iter()).for_each(|(x, &i)| {
             let i = i as usize;
@@ -2015,12 +2082,18 @@ impl Cloth {
     /// chaque image, d'autant plus fort que le tissu est raide.
     pub fn push_velocities(&mut self, v: &[Vec<f32>; 3]) {
         self.sync();
-        let (perm, vel) = (&self.topo.perm, &self.vel);
+        let perm = &self.topo.perm;
         self.kick.resize(self.topo.n, [0.0; 4]);
-        self.kick.par_iter_mut().zip(perm.par_iter()).zip(vel.par_iter()).for_each(|((k, &i), old)| {
-            let i = i as usize;
-            *k = [v[0][i] - old[0], v[1][i] - old[1], v[2][i] - old[2], 0.0];
-        });
+        match self.geom.as_ref().filter(|_| !self.sorted_fresh) {
+            Some((_, old)) => self.kick.par_iter_mut().zip(perm.par_iter()).with_min_len(1024).for_each(|(k, &i)| {
+                let i = i as usize;
+                *k = [v[0][i] - old[0][i], v[1][i] - old[1][i], v[2][i] - old[2][i], 0.0];
+            }),
+            None => self.kick.par_iter_mut().zip(perm.par_iter()).zip(self.vel.par_iter()).with_min_len(1024).for_each(|((k, &i), old)| {
+                let i = i as usize;
+                *k = [v[0][i] - old[0], v[1][i] - old[1], v[2][i] - old[2], 0.0];
+            }),
+        }
         self.send.2 = true;
     }
 
@@ -2051,13 +2124,24 @@ impl Cloth {
             return;
         }
         self.gpu = None;
+        self.sort_state();
+        self.geom = None;
         step_cpu(&self.topo, &mut self.pos, &mut self.vel, (!kick.is_empty()).then_some(&kick[..]), &c, p);
     }
 
     /// Demande à la carte l'état courant, sans attendre. `None` : rien à relire (calcul sur le processeur).
     pub fn request(&self) -> Option<Pending> {
         let (gc, g) = (self.gpu.as_ref()?, gpusim::gpu()?);
-        (!self.ahead.is_empty()).then(|| Pending { pos: g.read(&gc.pos), vel: g.read(&gc.vel) })
+        if self.ahead.is_empty() {
+            return None;
+        }
+        let mut enc = g.device.create_command_encoder(&Default::default());
+        {
+            let mut pass = enc.begin_compute_pass(&Default::default());
+            g.launch(&mut pass, &programs(g).pack.pipelines[0], &gc.g_pack, &[(self.topo.groups.len() as u64 * gc.slot) as u32], self.topo.n as u64);
+        }
+        g.queue.submit([enc.finish()]);
+        Some(Pending { packed: g.read(&gc.packed) })
     }
 
     /// Range dans l'état ce que la carte a rendu. Si elle a rendu une erreur, les pas en attente
@@ -2066,15 +2150,18 @@ impl Cloth {
         if self.ahead.is_empty() {
             return;
         }
-        let got = pending.and_then(|p| Some((p.pos.take::<V4>().ok()?, p.vel.take::<V4>().ok()?))).filter(|(p, v)| p.len() == self.topo.n && v.len() == self.topo.n);
-        match got {
-            Some((p, v)) => {
-                self.pos = p;
-                self.vel = v;
+        let n = self.topo.n;
+        match pending.and_then(|p| p.packed.wait().ok()).filter(|b| b.len() == n * 24) {
+            Some(b) => {
+                let part = |k: usize| gpusim::from_bytes::<f32>(&b[k * n * 4..(k + 1) * n * 4]);
+                self.geom = Some(([part(0), part(1), part(2)], [part(3), part(4), part(5)]));
+                self.sorted_fresh = false;
                 self.ahead.clear();
             }
             None => {
                 self.gpu = None;
+                self.sort_state();
+                self.geom = None;
                 self.send = (true, true, false);
                 for (c, p, kick) in std::mem::take(&mut self.ahead) {
                     step_cpu(&self.topo, &mut self.pos, &mut self.vel, (!kick.is_empty()).then_some(&kick[..]), &c, &p);
@@ -2090,8 +2177,11 @@ impl Cloth {
     }
 
     /// Positions et vitesses courantes, dans l'ordre de la géométrie.
-    pub fn read(&mut self) -> ([Vec<f32>; 3], [Vec<f32>; 3]) {
+    pub fn read(&mut self) -> State {
         self.sync();
+        if let Some(state) = self.geom.as_ref().filter(|_| !self.sorted_fresh) {
+            return state.clone();
+        }
         let (n, o) = (self.topo.n, self.origin);
         let mut p = [vec![0.0; n], vec![0.0; n], vec![0.0; n]];
         let mut v = [vec![0.0; n], vec![0.0; n], vec![0.0; n]];
@@ -2108,15 +2198,13 @@ impl Cloth {
 
 /// Une relecture de l'état demandée à la carte.
 pub struct Pending {
-    pos: gpusim::Readback,
-    vel: gpusim::Readback,
+    packed: gpusim::Readback,
 }
 
 impl Pending {
     /// Le résultat est-il arrivé ? Ne bloque pas.
-    #[allow(dead_code)]
     pub fn ready(&self) -> bool {
-        self.pos.ready() && self.vel.ready()
+        self.packed.ready()
     }
 }
 

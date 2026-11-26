@@ -465,6 +465,42 @@ struct ClothSession {
     /// quelles, la carte a déjà cet état et on ne renvoie rien
     out: (u64, u64),
     used: u64,
+    /// Un pas envoyé à la carte, dont le résultat n'est pas encore revenu
+    waiting: Option<ClothWait>,
+}
+
+/// Un pas de tissu en cours sur la carte : pour quelles entrées, et de quoi finir quand il revient.
+struct ClothWait {
+    /// Versions de `P` et de `v` reçues, pas de temps, nombre de points
+    inputs: (u64, u64, u32, usize),
+    par: crate::gpucloth::Params,
+    pending: crate::gpucloth::Pending,
+    /// La forme au repos rangée dans l'état à ce pas (le même état doit ressortir quand le pas revient)
+    repos: Option<Arc<Column>>,
+    rest: Option<Arc<Column>>,
+    since: std::time::Instant,
+}
+
+thread_local! {
+    /// Le moteur accepte-t-il qu'un solveur rende la main avant d'avoir fini (calcul en tranches) ?
+    static SIM_DEFER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Un solveur a rendu la main : son pas tourne encore sur la carte, l'image n'est pas prête
+    static SIM_WAIT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+impl ClothSession {
+    /// Range le résultat du pas dans l'état, et note ce qu'il a coûté.
+    fn finish(&mut self, g: &mut Geo, par: &crate::gpucloth::Params, since: std::time::Instant) {
+        let (x, v) = self.cloth.read();
+        let (x, v) = (Column::new(x.into()), Column::new(v.into()));
+        self.out = (x.version, v.version);
+        g.set("P", x);
+        g.set("v", v);
+        let (substeps, per) = par.split();
+        let on_gpu = self.cloth.on_gpu();
+        let status = ClothStatus { on_gpu, card: if on_gpu { crate::gpusim::gpu().map(|c| c.name.clone()).unwrap_or_default() } else { String::new() }, points: g.n, colors: self.cloth.topo.colors(), substeps, per, ms: since.elapsed().as_secs_f32() * 1000.0 };
+        *CLOTH_STATUS.lock().unwrap_or_else(|e| e.into_inner()) = Some(status);
+    }
 }
 
 static CLOTHS: std::sync::Mutex<Vec<ClothSession>> = std::sync::Mutex::new(Vec::new());
@@ -501,6 +537,31 @@ impl Solver for VbdCloth {
             return;
         }
         let t0 = std::time::Instant::now();
+        let par = crate::gpucloth::Params { stiffness: p.stiffness, bending: p.bending, damping: p.damping, iterations: p.iterations, substeps: p.substeps, rho: crate::gpucloth::RHO, floor: p.floor, ball: p.ball, cube: p.cube, grip: p.grip, ..Default::default() }.with_levels();
+        let version = |g: &Geo, name: &str| g.col(name).map(|c| c.version).unwrap_or(0);
+        let inputs = (version(g, "P"), version(g, "v"), dt.to_bits(), n);
+        // Le moteur calcule par tranches : plutôt que d'attendre la carte, on lui rend la main, et
+        // il redemandera ce même pas à la prochaine image de l'interface
+        let defer = SIM_DEFER.with(|d| d.get());
+        let mut all = CLOTHS.lock().unwrap_or_else(|e| e.into_inner());
+        // Ce pas est déjà parti sur la carte : est-il revenu ?
+        if let Some(s) = all.iter_mut().find(|s| s.waiting.as_ref().is_some_and(|w| w.inputs == inputs && w.par == par)) {
+            let Some(w) = s.waiting.take() else { return };
+            if defer && !w.pending.ready() {
+                s.waiting = Some(w);
+                SIM_WAIT.with(|x| x.set(true));
+                return;
+            }
+            if let Some(c) = w.repos {
+                g.cols.insert("repos".into(), c);
+            }
+            if let Some(c) = w.rest {
+                g.ecols.insert("rest".into(), c);
+            }
+            s.cloth.accept(Some(w.pending));
+            s.finish(g, &par, w.since);
+            return;
+        }
         // Forme au repos : celle du premier pas, gardée dans l'état pour qu'une reprise au milieu
         // de la simulation retrouve le même tissu
         if !g.cols.get("repos").is_some_and(|c| c.width() >= 3) {
@@ -516,13 +577,11 @@ impl Solver for VbdCloth {
             let rest = crate::gpucloth::rest_lengths(&edges, &g.vec3("repos"));
             g.ecols.insert("rest".into(), Arc::new(Column::new(vec![rest])));
         }
-        let version = |name: &str| g.col(name).map(|c| c.version).unwrap_or(0);
         let key = {
             let mut h = hasher();
-            (n, g.edges_version, g.ecols["rest"].version, version("repos"), version("pin"), version("mass")).hash(&mut h);
+            (n, g.edges_version, g.ecols["rest"].version, version(g, "repos"), version(g, "pin"), version(g, "mass")).hash(&mut h);
             h.finish()
         };
-        let mut all = CLOTHS.lock().unwrap_or_else(|e| e.into_inner());
         let clock = all.iter().map(|s| s.used).max().unwrap_or(0) + 1;
         let at = match all.iter().position(|s| s.key == key) {
             Some(k) => k,
@@ -539,36 +598,43 @@ impl Solver for VbdCloth {
                         all.swap_remove(old);
                     }
                 }
-                all.push(ClothSession { key, cloth: crate::gpucloth::Cloth::new(topo, &g.vec3("P"), true), out: (0, 0), used: 0 });
+                all.push(ClothSession { key, cloth: crate::gpucloth::Cloth::new(topo, &g.vec3("P"), true), out: (0, 0), used: 0, waiting: None });
                 all.len() - 1
             }
         };
         let s = &mut all[at];
         s.used = clock;
+        // Un pas parti pour d'autres entrées (on a changé d'image ou de réglages entre-temps) :
+        // son résultat ne sert plus, et la carte n'est plus dans l'état qu'on croyait
+        if let Some(w) = s.waiting.take() {
+            s.cloth.accept(Some(w.pending));
+            s.out = (0, 0);
+        }
         // Positions venues d'ailleurs que du dernier pas : un nouvel état, vitesses imposées. Sinon
         // les vitesses n'ont changé que par les forces de l'image : le solveur les répartit sur ses sous-pas
-        let fresh = s.out.0 == 0 || version("P") != s.out.0;
+        let fresh = s.out.0 == 0 || inputs.0 != s.out.0;
         if fresh {
             s.cloth.set_positions(&g.vec3("P"));
         }
-        if s.out.1 == 0 || version("v") != s.out.1 {
+        if s.out.1 == 0 || inputs.1 != s.out.1 {
             if fresh {
                 s.cloth.set_velocities(&g.vec3("v"));
             } else {
                 s.cloth.push_velocities(&g.vec3("v"));
             }
         }
-        let par = crate::gpucloth::Params { stiffness: p.stiffness, bending: p.bending, damping: p.damping, iterations: p.iterations, substeps: p.substeps, rho: crate::gpucloth::RHO, floor: p.floor, ball: p.ball, cube: p.cube, grip: p.grip, ..Default::default() }.with_levels();
         s.cloth.step(dt, &par);
-        let (x, v) = s.cloth.read();
-        let (x, v) = (Column::new(x.into()), Column::new(v.into()));
-        s.out = (x.version, v.version);
-        g.set("P", x);
-        g.set("v", v);
-        let (substeps, per) = par.split();
-        let on_gpu = s.cloth.on_gpu();
-        let status = ClothStatus { on_gpu, card: if on_gpu { crate::gpusim::gpu().map(|c| c.name.clone()).unwrap_or_default() } else { String::new() }, points: n, colors: s.cloth.topo.colors(), substeps, per, ms: t0.elapsed().as_secs_f32() * 1000.0 };
-        *CLOTH_STATUS.lock().unwrap_or_else(|e| e.into_inner()) = Some(status);
+        if defer {
+            if let Some(pending) = s.cloth.request() {
+                if !pending.ready() {
+                    s.waiting = Some(ClothWait { inputs, par, pending, repos: g.cols.get("repos").cloned(), rest: g.ecols.get("rest").cloned(), since: t0 });
+                    SIM_WAIT.with(|x| x.set(true));
+                    return;
+                }
+                s.cloth.accept(Some(pending));
+            }
+        }
+        s.finish(g, &par, t0);
     }
 }
 
@@ -1098,6 +1164,9 @@ impl Run<'_> {
             let t0 = std::time::Instant::now();
             self.set_frame(f);
             self.env = Some(Env { begin, state: state.clone() });
+            // Quand le calcul se fait par tranches, un solveur sur carte graphique peut rendre la
+            // main avant d'avoir fini : l'image n'est alors pas rangée, et sera redemandée
+            SIM_DEFER.with(|d| d.set(self.e.deadline.is_some()));
             let next: Result<Vec<Geo>, Fail> = (0..ports)
                 .map(|k| match self.link(end, k).map(|l| (l.from, l.out)) {
                     Some((from, out)) => self.geo(from, out),
@@ -1106,6 +1175,11 @@ impl Run<'_> {
                 })
                 .collect();
             self.env = None;
+            SIM_DEFER.with(|d| d.set(false));
+            if SIM_WAIT.with(|w| w.replace(false)) {
+                self.e.incomplete = true;
+                break;
+            }
             match next {
                 Ok(s) => state = s,
                 Err(e) => {
@@ -2184,6 +2258,43 @@ mod tests {
         // L'exemple dédié : plus fin, avec une boîte
         let g = example("tissu sur la carte graphique").unwrap();
         check(&g, 48, 24, ([0.25, 0.7, 0.1], 0.5), Some(([-0.55, 0.3, 0.0], [0.25, 0.3, 0.4])));
+    }
+
+    /// Calcul par tranches : tant que la carte n'a pas fini son pas, le tissu rend la main au
+    /// moteur, qui redemande l'image plus tard. Le résultat est le même qu'en attendant.
+    #[test]
+    fn tissu_sans_bloquer_le_moteur() {
+        if crate::gpusim::gpu().is_none() {
+            return;
+        }
+        let g = example("tissu sur la carte graphique").unwrap();
+        let end = g.nodes.iter().find(|n| n.op == "sim_out").unwrap().id;
+        let want = Engine::default().eval_node(&g, end, 0, 6, "").map_err(|x| x.1).unwrap();
+        let mut eng = Engine::default();
+        let (mut rounds, mut waited, mut steps) = (0, 0, 0);
+        let got = loop {
+            eng.deadline = Some(std::time::Instant::now() + std::time::Duration::from_millis(30));
+            let r = eng.eval_node(&g, end, 0, 6, "").map_err(|x| x.1).unwrap();
+            steps += eng.stats.steps;
+            if !eng.incomplete {
+                break r;
+            }
+            // Une image inachevée rend l'état de la dernière image finie, jamais un état à moitié calculé
+            assert!(r.n == want.n && (0..r.n).all(|i| r.pos(i).iter().all(|x| x.is_finite())));
+            waited += 1;
+            rounds += 1;
+            assert!(rounds < 200_000, "la simulation ne finit jamais");
+            std::thread::sleep(std::time::Duration::from_micros(200));
+        };
+        eprintln!("{waited} attentes pour {steps} pas");
+        // Chaque image n'est simulée qu'une fois, même redemandée plusieurs fois
+        assert_eq!(steps, 5);
+        let gap = (0..want.n).flat_map(|i| (0..3).map(move |k| (i, k))).map(|(i, k)| (want.pos(i)[k] - got.pos(i)[k]).abs()).fold(0.0f32, f32::max);
+        assert!(gap < 1e-6, "écart {gap}");
+        // Sans tranches (cuisson, rendu), le même moteur attend la carte comme avant
+        eng.deadline = None;
+        let more = eng.eval_node(&g, end, 0, 8, "").map_err(|x| x.1).unwrap();
+        assert!(!eng.incomplete && eng.stats.steps == 2 && more.n == want.n);
     }
 
     /// Le XPBD connaît aussi la boîte : les deux solveurs se posent sur les mêmes obstacles.
