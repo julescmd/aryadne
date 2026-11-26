@@ -82,6 +82,7 @@ Le board est un cas à part : c'est une page (`View::Boards`), pas une variante 
 | `files` | Le panneau des fichiers |
 | `formats` | La table des formats propres à Aryadne |
 | `untitled` | Fichiers sans titre et récupération après plantage |
+| `learn`, `learn_ui` | Le mode Apprendre : leçons embarquées, vérifications, progression, panneau. Voir [Mode Apprendre](apprendre.md) |
 | `workspace` | Les étapes, leurs outils, leurs pages, leurs dispositions |
 | `layout` | Disposition en cases (`egui_tiles`) |
 | `dock` | Panneaux ancrables, flottants, fenêtres détachées |

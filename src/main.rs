@@ -8391,6 +8391,7 @@ impl egui_tiles::Behavior<String> for Panes<'_> {
             "explorer" => self.app.explorer_open = false,
             "terminal" => self.app.terminal = None,
             "assistant" => self.app.assistant_open = false,
+            "learn" => self.app.toggle_learn(),
             "side" => self.app.side_hidden = true,
             v => {
                 if let Some(k) = v.strip_prefix("view:") {

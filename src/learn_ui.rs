@@ -127,13 +127,18 @@ fn markdown(ui: &mut egui::Ui, base: &str, salt: impl std::hash::Hash + std::fmt
         static NONE: HashSet<String> = HashSet::new();
     }
     let mut out = None;
+    // Le texte tient dans la largeur du panneau ; un tableau trop large défile de côté sans élargir la page
+    let w = ui.available_width();
     ui.push_id(salt, |ui| {
-        preview::set_base(base);
-        let shown = NONE.with(|none| preview::show_doc(ui, text, none, none));
-        preview::set_base("");
-        if let Some(preview::Out::Open(t)) = shown {
-            out = Some(t);
-        }
+        egui::ScrollArea::horizontal().auto_shrink([false, true]).max_width(w).show(ui, |ui| {
+            ui.set_max_width(w);
+            preview::set_base(base);
+            let shown = NONE.with(|none| preview::show_doc(ui, text, none, none));
+            preview::set_base("");
+            if let Some(preview::Out::Open(t)) = shown {
+                out = Some(t);
+            }
+        });
     });
     out
 }
@@ -189,7 +194,7 @@ impl App {
             Some(l) if open => Page::Lesson(l),
             _ => Page::Home,
         };
-        self.learn = Panel { open, page, progress, root, offer, focus: open, ..Default::default() };
+        self.learn = Panel { open, page, progress, root, offer, focus: open, widen: open, ..Default::default() };
     }
 
     pub(crate) fn toggle_learn(&mut self) {
@@ -303,21 +308,12 @@ impl App {
             return vec![];
         }
         let Some((_, lesson)) = self.learn.lesson.as_ref() else { return vec![] };
-        let checks: Vec<(usize, Check)> = lesson
-            .blocks
-            .iter()
-            .filter_map(|b| if let Block::Etape { verifier, .. } = b { Some(verifier.clone()) } else { None })
-            .enumerate()
-            .filter_map(|(k, c)| c.filter(|c| c.automatic()).map(|c| (k, c)))
-            .filter(|(k, _)| !self.learn.progress.step_done(&id, *k))
-            .collect();
-        if checks.is_empty() {
+        let steps: Vec<Option<Check>> = lesson.blocks.iter().filter_map(|b| if let Block::Etape { verifier, .. } = b { Some(verifier.clone()) } else { None }).collect();
+        let done: Vec<bool> = (0..steps.len()).map(|k| self.learn.progress.step_done(&id, k)).collect();
+        if !steps.iter().zip(&done).any(|(c, d)| !d && c.as_ref().is_some_and(|c| c.automatic())) {
             return vec![];
         }
-        let now: Vec<usize> = {
-            let state = self.learn_state();
-            checks.into_iter().filter(|(_, c)| c.holds(&state)).map(|(k, _)| k).collect()
-        };
+        let now = learn::newly_done(&steps, &done, &self.learn_state());
         for k in &now {
             self.learn.progress.set_step(&id, *k, true);
             self.learn.dirty = true;

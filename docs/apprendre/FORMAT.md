@@ -79,6 +79,15 @@ Le texte de l'étape est tout ce qui précède la ligne `verifier:`. Sans ligne 
 
 Le moteur affiche les vérifications qu'il ne connaît pas comme une case à cocher.
 
+Précisions du moteur :
+
+- Les étapes vérifiées se cochent **dans l'ordre**. Une étape n'est regardée que si les étapes vérifiées d'avant sont faites. Écris donc les étapes dans l'ordre des gestes. Les étapes sans `verifier:` ne retiennent pas les suivantes.
+- `graphe.contient` accepte le nom interne (`sim_solver`), sa fin (`solver`) ou le nom affiché (`Solveur`, `Solver`), sans tenir compte des majuscules ni des accents.
+- `graphe.noeuds` et `graphe.liens` comptent tous les niveaux : la racine, l'intérieur des groupes, les graphes des calques d'un matériau.
+- `fichier.enregistre` est faux pour un fichier sans titre (`untitled`) : il faut `Ctrl+S` pour lui donner sa place. Un fichier créé par `essayer` a déjà sa place.
+- `sous_onglet` accepte aussi les outils des autres espaces : `moodboard`, `retouche`, `vectoriel`, `compositing`, `storyboard`, `montage`, `revue`, `audio`, `musique`, `notes`, `taches`, `cerveau`.
+- `calques` compte, pour un dessin vectoriel, les formes et les groupes de premier niveau du panneau **Layers**.
+
 ### `quiz` : question à choix
 
 ```quiz
@@ -107,6 +116,12 @@ indice: Le node Solver a un réglage Box center.
 ## Exemples intégrés utilisables dans `essayer: exemple:`
 
 Géométrie et simulation : `tissu sur une boule`, `tissu sur la carte graphique`, `tissu qui se replie`, `fontaine de particules`, `vagues animées`.
+
+Matériaux (les préréglages de la fenêtre « nouveau fichier ») : `carrelage en relief`, `béton fissuré`, `métal brossé rayé`, `velours`, `cire`, `tissu tissé`, `métal peint usé`, `pierre aux creux sombres`, `bois`, `pierre`, `métal rouillé`, `toon`, `céramique`, `or`, `verre`, `verre dépoli`, `eau`, `toon 3 bandes`, `peinture de voiture`, `plastique`, `néon`.
+
+Documents de départ : `scène de départ`, `morceau de départ`, `session audio de départ`, `dessin de départ`, `storyboard de départ`.
+
+`nouveau:` accepte aussi un fichier de texte ou de code vide : `txt`, `py`, `js`, `html`, `css`, `json`, `glsl`, `wgsl`, `fountain`, `csv`…
 
 ## Progression
 

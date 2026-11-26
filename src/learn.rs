@@ -793,6 +793,25 @@ impl Check {
     }
 }
 
+/// Les étapes qui se cochent à l'instant. `steps` : la vérification de chaque étape de la leçon ;
+/// `done` : celles déjà cochées. Les étapes vérifiées se cochent dans l'ordre : une étape n'est
+/// regardée que si les étapes vérifiées d'avant sont faites (sinon « fichier enregistré » serait vrai
+/// avant même d'avoir commencé). Les étapes à cocher à la main ne retiennent pas les suivantes.
+pub fn newly_done(steps: &[Option<Check>], done: &[bool], state: &State) -> Vec<usize> {
+    let mut out = vec![];
+    for (k, c) in steps.iter().enumerate() {
+        let Some(c) = c.as_ref().filter(|c| c.automatic()) else { continue };
+        if done.get(k).copied().unwrap_or(false) {
+            continue;
+        }
+        if !c.holds(state) {
+            break;
+        }
+        out.push(k);
+    }
+    out
+}
+
 // ---------------------------------------------------------------------------------------------- progression
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
@@ -1156,6 +1175,26 @@ mod tests {
         // calques
         let s = State { layers: Some(2), ..Default::default() };
         assert!(Check::Calques(2).holds(&s) && !Check::Calques(3).holds(&s) && !Check::Calques(0).holds(&vide));
+    }
+
+    #[test]
+    fn etapes_cochees_dans_l_ordre() {
+        let steps = vec![None, Some(Check::FichierOuvert("md".into())), Some(Check::Inconnue("x".into())), Some(Check::TexteContient("bonjour".into())), Some(Check::FichierEnregistre)];
+        // Un autre fichier ouvert et enregistré : rien ne se coche (la première étape vérifiée attend)
+        let other = State { ext: "aryscene".into(), saved: true, ..Default::default() };
+        assert!(newly_done(&steps, &[false; 5], &other).is_empty());
+        // La note ouverte : la première étape vérifiée seulement ; les étapes à la main ne retiennent rien
+        let open = State { ext: "md".into(), saved: true, text: Some(""), ..Default::default() };
+        assert_eq!(newly_done(&steps, &[false; 5], &open), vec![1]);
+        // Le mot écrit, pas encore enregistré : jusqu'à l'étape du texte
+        let typed = State { ext: "md".into(), saved: false, text: Some("Bonjour"), ..Default::default() };
+        assert_eq!(newly_done(&steps, &[false, true, false, false, false], &typed), vec![3]);
+        // Tout est vrai d'un coup : toutes les étapes vérifiées, dans l'ordre
+        let all = State { ext: "md".into(), saved: true, text: Some("Bonjour"), ..Default::default() };
+        assert_eq!(newly_done(&steps, &[false; 5], &all), vec![1, 3, 4]);
+        // Une étape vérifiée cochée à la main ne bloque pas la suite
+        assert_eq!(newly_done(&steps, &[false, true, false, true, false], &other), vec![4]);
+        assert!(newly_done(&steps, &[true; 5], &all).is_empty());
     }
 
     #[test]

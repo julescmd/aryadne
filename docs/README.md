@@ -26,6 +26,7 @@ Tout a été écrit en lisant le code source (dossier `src/`), pas en essayant c
 | Page | Contenu |
 |---|---|
 | [Prise en main](utilisateur/prise-en-main.md) | La fenêtre, les espaces de travail, créer un fichier |
+| [Apprendre](utilisateur/apprendre.md) | Les leçons pas à pas dans le logiciel : parcours, étapes vérifiées, quiz |
 | [Coffre et fichiers](utilisateur/coffre-et-fichiers.md) | Le coffre, l'explorateur, les liens, l'historique, la sauvegarde |
 | [Notes et liens](utilisateur/notes.md) | Markdown, liens entre notes, tâches, cerveau, recherche |
 | [Fenêtres et dispositions](utilisateur/fenetres-et-dispositions.md) | Panneaux, fenêtres détachables, dispositions par étape |
@@ -90,6 +91,7 @@ Tout a été écrit en lisant le code source (dossier `src/`), pas en essayant c
 | [Système de nœuds](technique/noeuds.md) | Mise à plat, évaluation incrémentale, colonnes, `Solver` |
 | [Simulation sur carte graphique](technique/simulation-gpu.md) | `gpusim`, `gpucloth`, `gpubench` |
 | [Traductions](technique/traductions.md) | `i18n`, `t` et `t_mid`, la table anglaise |
+| [Mode Apprendre](technique/apprendre.md) | Leçons embarquées, vérifications des étapes, progression |
 | [Ajouter un nœud, un format, un mode, une icône](technique/ajouter.md) | Les étapes, fichier par fichier |
 | [Feuille de route du moteur](technique/feuille-de-route-moteur.md) | Résumé des rapports de recherche |
 
