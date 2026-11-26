@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod cloud;
+mod gpubench;
 mod rig;
 mod scopes;
 mod story;
@@ -121,6 +122,14 @@ use vault::Entry;
 const APP: &str = "aryadne";
 
 fn main() -> eframe::Result {
+    // `aryadne --banc-gpu` : mesure la carte graphique dans le terminal, sans ouvrir l'interface
+    if std::env::args().any(|a| a == "--banc-gpu") {
+        match gpubench::run(false, &|l| eprintln!("{l}")) {
+            Ok(r) => println!("\n{}", r.texte()),
+            Err(e) => eprintln!("{e}"),
+        }
+        return Ok(());
+    }
     let prefs = settings::Prefs::load();
     if prefs.menu_entry && !desktop::installed() {
         let _ = desktop::install();
@@ -3052,12 +3061,17 @@ impl App {
                             extras::install_script_api(&self.root());
                             self.open(rel);
                         }
+                        // Ce que la carte graphique fait vraiment, avant d'y mettre les simulations
+                        if item(ui, "Mesurer la carte graphique", "") {
+                            gpubench::start();
+                        }
                         ui.separator();
                         ui.label(RichText::new(format!("Aryadne {}", env!("CARGO_PKG_VERSION"))).size(11.0).color(p.muted));
                     });
                 });
             });
         self.disp_apply(go, act, &cur, &ctx);
+        gpubench::ui(&ctx);
         if let Some(k) = keys {
             self.inject.push(k);
         }
