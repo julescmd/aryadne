@@ -275,7 +275,8 @@ pub struct SolverParams {
     /// Obstacles simples, traités comme des contraintes pendant la résolution : le sol, une boule
     pub floor: Option<f32>,
     pub ball: Option<([f32; 3], f32)>,
-    /// Adhérence au contact des obstacles (0 : glisse, 1 : colle)
+    /// Frottement au contact des obstacles. XPBD : part du glissement retenue (0 : glisse,
+    /// 1 : colle). Tissu sur carte graphique : coefficient de Coulomb.
     pub grip: f32,
     /// Boîte : centre et demi-tailles
     pub cube: Option<([f32; 3], [f32; 3])>,
@@ -284,6 +285,11 @@ pub struct SolverParams {
     pub stiffness: f32,
     pub bending: f32,
     pub substeps: usize,
+    /// Raideur des diagonales en part de celle des arêtes, amortissement interne (0 à 1)
+    pub shear: f32,
+    pub calm: f32,
+    /// Auto-collision : distance minimale entre deux sommets du tissu (0 : choisie d'après la maille), ou rien
+    pub thickness: Option<f32>,
 }
 
 /// Un solveur fait avancer un état d'un pas de temps. Il reçoit l'état en colonnes et le modifie
@@ -307,7 +313,7 @@ pub fn solver_uses(solver: &str, input: &str) -> bool {
     let gpu = solver == SOLVER_NAMES[1];
     match input {
         "souplesse" => !gpu,
-        "raideur" | "flexion" | "sous-pas" => gpu,
+        "raideur" | "flexion" | "sous-pas" | "cisaillement" | "amortissement des plis" | "épaisseur" => gpu,
         _ => true,
     }
 }
@@ -537,7 +543,7 @@ impl Solver for VbdCloth {
             return;
         }
         let t0 = std::time::Instant::now();
-        let par = crate::gpucloth::Params { stiffness: p.stiffness, bending: p.bending, damping: p.damping, iterations: p.iterations, substeps: p.substeps, rho: crate::gpucloth::RHO, floor: p.floor, ball: p.ball, cube: p.cube, grip: p.grip, ..Default::default() }.with_levels();
+        let par = crate::gpucloth::Params { stiffness: p.stiffness, shear: p.shear, bending: p.bending, damping: p.damping, calm: p.calm, iterations: p.iterations, substeps: p.substeps, rho: crate::gpucloth::RHO, floor: p.floor, ball: p.ball, cube: p.cube, friction: p.grip, ..Default::default() }.with_levels();
         let version = |g: &Geo, name: &str| g.col(name).map(|c| c.version).unwrap_or(0);
         let inputs = (version(g, "P"), version(g, "v"), dt.to_bits(), n);
         // Le moteur calcule par tranches : plutôt que d'attendre la carte, on lui rend la main, et
@@ -646,7 +652,7 @@ pub fn cloth_comparison(n: usize, budgets: &[usize]) -> crate::gpucloth::Compari
         g.ecols.insert("rest".into(), Arc::new(Column::new(vec![rest.to_vec()])));
         g.set("v", Column::new(vel.clone().into()));
         g.set("pin", Column::new(vec![pinned.iter().map(|p| *p as u8 as f32).collect()]));
-        let p = SolverParams { iterations: par.iterations, compliance, damping: par.damping, floor: par.floor, ball: par.ball, grip: par.grip, cube: par.cube, stiffness: 0.0, bending: 0.0, substeps: 1 };
+        let p = SolverParams { iterations: par.iterations, compliance, damping: par.damping, floor: par.floor, ball: par.ball, grip: 0.6, cube: par.cube, stiffness: 0.0, bending: 0.0, substeps: 1, shear: 1.0, calm: 0.0, thickness: None };
         XpbdCloth.step(&mut g, dt, &p);
         *pos = g.vec3("P");
         *vel = g.vec3("v");
@@ -1601,6 +1607,9 @@ impl Run<'_> {
                     // Le réglage est en millièmes de N·m : 0,1 pour un coton, 1 pour une toile épaisse
                     bending: num!(10)[0].max(0.0) * 1e-3,
                     substeps: (num!(11)[0].round() as usize).clamp(1, 64),
+                    shear: num!(14)[0].clamp(0.0, 1.0),
+                    calm: num!(15)[0].clamp(0.0, 1.0),
+                    thickness: (pstr(n, "auto-collision") == "oui").then_some(num!(16)[0].max(0.0)),
                 };
                 let dt = num!(4)[0];
                 let name = pstr(n, "solveur");

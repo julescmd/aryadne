@@ -3,10 +3,10 @@
 //! mémoire : on mesure donc d'abord le débit réel (copie, puis itération de pression à 7 points),
 //! puis un pas de fumée simple (advection semi-lagrangienne, flottabilité, pression par Jacobi).
 //!
-//! Puis le tissu en VBD (`gpucloth`) sur 250 000 et 1 million de sommets, dans ses deux rangements
-//! (par couleur, par grappes) : temps et octets par passe, une image à 16 passes sans et avec
-//! niveaux grossiers, contre le processeur. Enfin la raideur obtenue à 16, 32 et 64 passes par
-//! image : XPBD, VBD, VBD avec niveaux grossiers.
+//! Puis le tissu en VBD (`gpucloth`) sur 250 000 et 1 million de sommets : temps, octets et
+//! lancements par passe, une image au budget de 16 et de 32 passes sans et avec niveaux grossiers,
+//! le surcoût de l'auto-collision, contre le processeur. Enfin la raideur obtenue et la chute sur
+//! une boule à 16, 32 et 64 passes par image : XPBD, VBD, VBD avec niveaux grossiers.
 //!
 //! Lancement : menu Aide, « Mesurer la carte graphique », ou `aryadne --banc-gpu` dans un terminal.
 
@@ -138,20 +138,15 @@ pub struct Rapport {
 pub struct Tissu {
     pub points: usize,
     pub couleurs: usize,
-    /// Rangement des sommets : par couleur, ou par grappes
-    pub rangement: crate::gpucloth::Layout,
-    /// Lancements par passe (une plage chacun)
-    pub plages: usize,
+    /// Lancements de noyaux par passe, dans la mesure d'une passe
+    pub lancements: f64,
     /// Octets par passe du même tissu avant le rangement compact
     pub octets_avant: f64,
     /// Niveaux grossiers, et coût d'une correction en passes du niveau fin
     pub niveaux: usize,
     pub correction: f64,
-    /// Une image au budget de 16 passes : sans niveaux (16 sous-pas d'une passe), puis avec
-    /// (`sous_pas_niveaux` sous-pas d'une correction et d'une passe)
-    pub image16_ms: f64,
-    pub image16_niveaux_ms: f64,
-    pub sous_pas_niveaux: usize,
+    /// Des images entières, à budget donné
+    pub images: Vec<Image>,
     /// Calculé sur la carte (sinon le tissu n'y tient pas, ou il n'y a pas de carte)
     pub carte: bool,
     /// Préparation au chargement : voisinages, couleurs, rangement
@@ -165,29 +160,45 @@ pub struct Tissu {
     pub memoire: u64,
 }
 
-/// Passes par image du tissu mesuré : 4 sous-pas de 8 itérations, accélération de Tchebychev comprise
+/// Une image de tissu au budget de `budget` passes, découpée comme le solveur le conseille.
+#[derive(Clone, Debug)]
+pub struct Image {
+    pub budget: usize,
+    pub niveaux: bool,
+    pub auto_collision: bool,
+    pub sous_pas: usize,
+    pub lancements: usize,
+    pub ms: f64,
+}
+
+/// Passes par image de la mesure d'une passe : 4 sous-pas de 8 passes, sans rien d'autre
 const PASSES: usize = 32;
 
-fn tissu(cote: usize, images: usize, rangement: crate::gpucloth::Layout) -> Tissu {
-    use crate::gpucloth::{grid, rest_lengths, Cloth, Params, Topo};
+fn tissu(cote: usize, images: usize) -> Tissu {
+    use crate::gpucloth::{grid, rest_lengths, split_budget, Cloth, Params, Topo};
     let n = cote * cote;
     let (p, e) = grid(cote, cote, 2.0, 1.6);
     let rest = rest_lengths(&e, &p);
     let pinned: Vec<bool> = (0..n).map(|i| i / cote == 0).collect();
     let t = Instant::now();
-    let topo = Topo::build_with(n, &e, &rest, &p, &pinned, None, rangement, true).with_levels(crate::gpucloth::MAX_LEVELS);
+    let topo = Topo::build(n, &e, &rest, &p, &pinned, None);
     let preparation_ms = t.elapsed().as_secs_f64() * 1000.0;
-    let (couleurs, octets, memoire) = (topo.colors(), topo.bytes_per_pass(true, true) as f64, topo.gpu_bytes());
-    let (octets_avant, plages) = (topo.bytes_per_pass_before() as f64, topo.groups.len());
-    // Budget de 16 passes par image, sans puis avec niveaux grossiers : le découpage conseillé pour chacun
+    let (couleurs, octets, memoire) = (topo.colors(), topo.bytes_per_pass(true, false) as f64, topo.gpu_bytes());
+    let octets_avant = topo.bytes_per_pass_before() as f64;
     let niveaux = topo.levels();
     let correction = topo.correction_cost(true, &Default::default(), niveaux);
-    let decoupe = |levels: usize| {
-        let (substeps, iterations) = crate::gpucloth::split_budget(&topo, 16, true, levels);
-        Params { iterations, substeps, levels, floor: Some(0.0), ball: Some(([0.0, 0.7, 0.0], 0.55)), ..Default::default() }
-    };
-    let (seize, seize_niveaux) = (decoupe(0), decoupe(niveaux));
-    let par = Params { iterations: PASSES, substeps: 4, floor: Some(0.0), ball: Some(([0.0, 0.7, 0.0], 0.55)), ..Default::default() };
+    let scene = Params { floor: Some(0.0), ball: Some(([0.0, 0.7, 0.0], 0.55)), ..Default::default() };
+    // Les images mesurées : budgets de 16 et de 32 passes, sans et avec niveaux, puis avec l'auto-collision en plus
+    let mut plans = Vec::new();
+    for (budget, with_levels, auto) in [(16, false, false), (16, true, false), (32, false, false), (32, true, false), (16, true, true)] {
+        if with_levels && niveaux == 0 {
+            continue;
+        }
+        let levels = if with_levels { niveaux } else { 0 };
+        plans.push((budget, with_levels, auto, split_budget(&topo, budget, &Params { levels, thickness: auto.then_some(0.0), ..scene })));
+    }
+    // Une passe seule : ni accélération, ni amortissement interne, ni niveaux
+    let par = Params { iterations: PASSES, substeps: 4, rho: 0.0, calm: 0.0, ..scene };
     let dt = 1.0 / 24.0;
     let chute = [vec![0.0; n], vec![-0.4; n], vec![0.0; n]];
     // Le processeur d'abord : un pas d'image, soit 32 passes
@@ -200,18 +211,8 @@ fn tissu(cote: usize, images: usize, rangement: crate::gpucloth::Layout) -> Tiss
     let mut c = Cloth::new(c.into_topo(), &p, true);
     let carte = c.on_gpu();
     c.set_velocities(&chute);
-    // Échauffement : compilation des noyaux, envoi des tampons
-    c.step(dt, &par);
-    c.sync();
-    let t = Instant::now();
-    for _ in 0..images {
-        c.step(dt, &par);
-    }
-    if let Some(g) = crate::gpusim::gpu().filter(|_| carte) {
-        g.finish();
-    }
-    let passe_ms = t.elapsed().as_secs_f64() * 1000.0 / (images * PASSES) as f64;
-    let mut image = |par: &Params| {
+    // Échauffement (compilation des noyaux, envoi des tampons), puis la mesure
+    let mut mesure = |par: &Params| {
         c.step(dt, par);
         c.sync();
         let t = Instant::now();
@@ -221,13 +222,18 @@ fn tissu(cote: usize, images: usize, rangement: crate::gpucloth::Layout) -> Tiss
         if let Some(g) = crate::gpusim::gpu().filter(|_| carte) {
             g.finish();
         }
-        t.elapsed().as_secs_f64() * 1000.0 / images as f64
+        (t.elapsed().as_secs_f64() * 1000.0 / images as f64, c.launches())
     };
-    let (image16_ms, image16_niveaux_ms) = (image(&seize), if niveaux > 0 { image(&seize_niveaux) } else { 0.0 });
+    let (ms, lances) = mesure(&par);
+    let (passe_ms, lancements) = (ms / PASSES as f64, lances as f64 / PASSES as f64);
+    let images = plans.iter().map(|(budget, niveaux, auto, par)| {
+        let (ms, lancements) = mesure(par);
+        Image { budget: *budget, niveaux: *niveaux, auto_collision: *auto, sous_pas: par.substeps, lancements, ms }
+    }).collect();
     let t = Instant::now();
     c.sync();
     let relecture_ms = t.elapsed().as_secs_f64() * 1000.0;
-    Tissu { points: n, couleurs, rangement, plages, octets_avant, niveaux, correction, image16_ms, image16_niveaux_ms, sous_pas_niveaux: seize_niveaux.substeps, carte: carte && c.on_gpu(), preparation_ms, passe_ms, relecture_ms, passe_processeur_ms, octets, memoire }
+    Tissu { points: n, couleurs, lancements, octets_avant, niveaux, correction, images, carte: carte && c.on_gpu(), preparation_ms, passe_ms, relecture_ms, passe_processeur_ms, octets, memoire }
 }
 
 /// Le même petit tissu sur la carte et sur le processeur : écart maximal des positions après trois images.
@@ -237,7 +243,7 @@ fn ecart_tissu() -> Option<f32> {
     let (p, e) = grid(cote, cote, 2.0, 1.6);
     let rest = rest_lengths(&e, &p);
     let pinned: Vec<bool> = (0..cote * cote).map(|i| i / cote == 0).collect();
-    let par = Params { iterations: PASSES, substeps: 4, floor: Some(0.0), ball: Some(([0.0, 0.7, 0.0], 0.55)), ..Default::default() };
+    let par = Params { iterations: 32, substeps: 4, floor: Some(0.0), ball: Some(([0.0, 0.7, 0.0], 0.55)), ..Default::default() };
     let run = |carte: bool| {
         let mut c = Cloth::new(Topo::build(cote * cote, &e, &rest, &p, &pinned, None), &p, carte);
         if c.on_gpu() != carte {
@@ -253,13 +259,6 @@ fn ecart_tissu() -> Option<f32> {
     };
     let (a, b) = (run(false)?, run(true)?);
     Some((0..3).flat_map(|k| a[k].iter().zip(&b[k]).map(|(x, y)| (x - y).abs())).fold(0.0, f32::max))
-}
-
-fn nom_rangement(r: crate::gpucloth::Layout) -> &'static str {
-    match r {
-        crate::gpucloth::Layout::Colors => "rangé par couleur",
-        crate::gpucloth::Layout::Clusters => "rangé par grappes de 64",
-    }
 }
 
 struct Ctx {
@@ -493,14 +492,12 @@ pub fn run(quick: bool, progress: &dyn Fn(String)) -> Result<Rapport, String> {
         r.notes.push(format!("{} : {:?}", crate::i18n::t("tissu : écart avec le processeur trop grand"), r.ecart_tissu));
     }
     for cote in if quick { vec![64usize] } else { vec![500, 1000] } {
-        for rangement in [crate::gpucloth::Layout::Colors, crate::gpucloth::Layout::Clusters] {
-            let m = tissu(cote, if quick { 1 } else { 3 }, rangement);
-            progress(format!("{}, {} : {:.3} ms", crate::i18n::t("tissu, {} sommets, une passe").replace("{}", &m.points.to_string()), crate::i18n::t_mid(nom_rangement(rangement)), m.passe_ms));
-            if !m.carte && rangement == crate::gpucloth::Layout::Colors {
-                r.notes.push(format!("{} ({} Mo)", crate::i18n::t("tissu de {} sommets : il ne tient pas sur cette carte, mesuré sur le processeur").replace("{}", &m.points.to_string()), max_bind >> 20));
-            }
-            r.tissu.push(m);
+        let m = tissu(cote, if quick { 1 } else { 3 });
+        progress(format!("{} : {:.3} ms", crate::i18n::t("tissu, {} sommets, une passe").replace("{}", &m.points.to_string()), m.passe_ms));
+        if !m.carte {
+            r.notes.push(format!("{} ({} Mo)", crate::i18n::t("tissu de {} sommets : il ne tient pas sur cette carte, mesuré sur le processeur").replace("{}", &m.points.to_string()), max_bind >> 20));
         }
+        r.tissu.push(m);
     }
     if !quick {
         progress(crate::i18n::t("comparaison du tissu avec le XPBD, moins d'une minute"));
@@ -542,12 +539,25 @@ impl Rapport {
         }
         for m in &self.tissu {
             let ou = tm(if m.carte { "carte graphique" } else { "processeur" });
-            s += &format!("- {} {}, {} ({} {}, {} {}, {}) : {:.3} ms {}, {:.2} ns {}, ~{:.0} {}\n", m.points, tm("sommets"), tm(nom_rangement(m.rangement)), m.couleurs, tm("couleurs"), m.plages, tm("lancements par passe"), ou, m.passe_ms, tm("par passe"), m.passe_ms * 1e6 / m.points as f64, tm("par sommet et par passe"), m.octets / (m.passe_ms / 1000.0) / 1e9, tm("Go/s"));
+            s += &format!("- {} {} ({} {}, {}) : {:.3} ms {}, {:.1} {}, {:.2} ns {}, ~{:.0} {}\n", m.points, tm("sommets"), m.couleurs, tm("couleurs"), ou, m.passe_ms, tm("par passe"), m.lancements, tm("lancements par passe"), m.passe_ms * 1e6 / m.points as f64, tm("par sommet et par passe"), m.octets / (m.passe_ms / 1000.0) / 1e9, tm("Go/s"));
             s += &format!("  {} : {:.0} ({} : {:.0}, ÷{:.1})\n", t("octets lus et écrits par sommet et par passe"), m.octets / m.points as f64, tm("avant le rangement compact"), m.octets_avant / m.points as f64, m.octets_avant / m.octets);
-            if m.niveaux > 0 {
-                s += &format!("  {} : {:.1} ms · {} ({} {}, {} {}, {} {:.1} {}) : {:.1} ms\n", t("une image au budget de 16 passes"), m.image16_ms, tm("avec niveaux grossiers"), m.niveaux, tm("niveaux"), m.sous_pas_niveaux, tm("sous-pas"), tm("une correction coûte"), m.correction, tm("passes"), m.image16_niveaux_ms);
+            for im in &m.images {
+                let quoi = match (im.niveaux, im.auto_collision) {
+                    (false, _) => tm("sans niveaux"),
+                    (true, false) => tm("avec niveaux grossiers"),
+                    (true, true) => tm("avec niveaux et auto-collision"),
+                };
+                s += &format!("  {} {} {}, {} : {:.1} ms ({} {}, {} {})", t("une image au budget de"), im.budget, tm("passes"), quoi, im.ms, im.sous_pas, tm("sous-pas"), im.lancements, tm("lancements"));
+                // Le surcoût de l'auto-collision : contre la même image sans elle, par sous-pas
+                if let Some(base) = m.images.iter().find(|b| im.auto_collision && b.budget == im.budget && b.niveaux && !b.auto_collision) {
+                    s += &format!(" · {} : {:.2} ms {} ({} {:.2})", tm("l'auto-collision coûte"), im.ms / im.sous_pas.max(1) as f64 - base.ms / base.sous_pas.max(1) as f64, tm("par sous-pas"), tm("sans elle"), base.ms / base.sous_pas.max(1) as f64);
+                }
+                s += "\n";
             }
-            s += &format!("  {} : {:.0} {} · {} : {:.1} ms · {} : {:.1} ms\n", t("à 24 images par seconde"), 1000.0 / 24.0 / m.passe_ms, tm("passes par image"), tm("une image de 32 passes"), m.passe_ms * PASSES as f64, tm("relecture"), m.relecture_ms);
+            if m.niveaux > 0 {
+                s += &format!("  {} : {} · {} {:.1} {}\n", t("niveaux grossiers"), m.niveaux, tm("une correction coûte"), m.correction, tm("passes"));
+            }
+            s += &format!("  {} : {:.0} {} · {} : {:.1} ms\n", t("à 24 images par seconde"), 1000.0 / 24.0 / m.passe_ms, tm("passes par image"), tm("relecture"), m.relecture_ms);
             s += &format!("  {} : {:.2} ms {} (×{:.1}) · {} : {:.0} ms · {} : {:.0} Mo\n", t("processeur"), m.passe_processeur_ms, tm("par passe"), m.passe_processeur_ms / m.passe_ms, tm("préparation"), m.preparation_ms, tm("mémoire sur la carte"), m.memoire as f64 / 1e6);
         }
         if let Some(e) = self.ecart_tissu {
@@ -562,7 +572,7 @@ impl Rapport {
                     budget = row.budget;
                     s += &format!("{} {} :\n", budget, tm("passes par image"));
                 }
-                s += &format!("- {:13} ({:2} {}, {} {:.1}) : {} {:5.1} %, {} {:.3} % · {} : {} {:.1} %, {} {:.2} %\n", row.solver, row.substeps, tm("sous-pas"), tm("coût réel"), row.cost, tm("raideur obtenue"), row.stiffness * 100.0, tm("allongement"), row.elongation * 100.0, tm("chute sur une boule"), tm("pire arête"), row.worst * 100.0, tm("moyenne"), row.mean * 100.0);
+                s += &format!("- {:13} ({:2} {}, {} {:4.1}) : {} {:5.1} %, {} {:.3} % · {} : {} {:.1} %, {} {:.2} %\n", row.solver, row.substeps, tm("sous-pas"), tm("coût réel"), row.cost, tm("raideur obtenue"), row.stiffness * 100.0, tm("allongement"), row.elongation * 100.0, tm("chute sur une boule"), tm("pire arête"), row.worst * 100.0, tm("moyenne"), row.mean * 100.0);
             }
         }
         for n in &self.notes {
@@ -693,9 +703,7 @@ mod tests {
     #[ignore]
     fn mesure_tissu() {
         let cote = std::env::var("ARY_COTE").ok().and_then(|s| s.parse().ok()).unwrap_or(250);
-        for rangement in [crate::gpucloth::Layout::Colors, crate::gpucloth::Layout::Clusters] {
-            let m = super::tissu(cote, 2, rangement);
-            eprintln!("{rangement:?} : {:.3} ms par passe, 16 passes {:.1} ms, avec {} niveaux ({} sous-pas, correction {:.2} passes) {:.1} ms, processeur {:.2} ms, {:.0} octets par sommet (avant {:.0}), {} plages, préparation {:.0} ms, relecture {:.1} ms", m.passe_ms, m.image16_ms, m.niveaux, m.sous_pas_niveaux, m.correction, m.image16_niveaux_ms, m.passe_processeur_ms, m.octets / m.points as f64, m.octets_avant / m.points as f64, m.plages, m.preparation_ms, m.relecture_ms);
-        }
+        let r = super::Rapport { tissu: vec![super::tissu(cote, 2)], ..Default::default() };
+        eprintln!("{}", r.texte());
     }
 }

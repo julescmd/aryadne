@@ -67,6 +67,9 @@ mod inp {
     pub const SUBSTEPS: usize = 11;
     pub const CUBE: usize = 12;
     pub const CUBE_SIZE: usize = 13;
+    pub const SHEAR: usize = 14;
+    pub const CALM: usize = 15;
+    pub const THICKNESS: usize = 16;
 }
 
 /// Valeur réglée à la main d'une entrée, ou rien si elle est reliée.
@@ -402,7 +405,7 @@ impl GeoView {
             ui.set_max_width(290.0);
             ui.spacing_mut().item_spacing.y = 5.0;
             for (rank, id) in ids.iter().enumerate() {
-                let linked: Vec<bool> = (0..16).map(|k| graph.links.iter().any(|l| l.to == *id && l.inp == k)).collect();
+                let linked: Vec<bool> = (0..20).map(|k| graph.links.iter().any(|l| l.to == *id && l.inp == k)).collect();
                 let Some(n) = graph.nodes.iter_mut().find(|n| n.id == *id) else { continue };
                 if let Some(d) = n.def() {
                     while n.values.len() < d.inputs.len() {
@@ -450,8 +453,25 @@ impl GeoView {
                 } else {
                     slide(ui, inp::COMPLIANCE, "souplesse", "0 : le tissu ne s'étire pas ; plus grand : il devient élastique", 0.0..=0.01, false, false);
                 }
-                slide(ui, inp::DAMPING, "amortissement", "Part de vitesse perdue à chaque image", 0.0..=0.5, false, false);
-                slide(ui, inp::GRIP, "adhérence", "Au contact des obstacles : 0 glisse, 1 colle", 0.0..=1.0, false, false);
+                if card {
+                    slide(ui, inp::SHEAR, "cisaillement", "Résistance à la déformation en biais, en part de la raideur : 0,1 pour un tissu tissé qui épouse les formes, 1 pour du papier", 0.01..=1.0, true, false);
+                    slide(ui, inp::CALM, "amortissement des plis", "Les plis cessent de frémir : 0 aucun, 0,3 un coton, 1 très amorti. Ne ralentit ni la chute ni le balancement", 0.0..=1.0, false, false);
+                }
+                slide(ui, inp::DAMPING, "amortissement", "Part de vitesse perdue à chaque image, comme un frein de l'air", 0.0..=0.5, false, false);
+                slide(ui, inp::GRIP, "frottement", if card { "Au contact des obstacles : 0 glisse, 0,4 un coton sur du bois, 1 accroche fort" } else { "Au contact des obstacles : 0 glisse, 1 colle" }, 0.0..=1.0, false, false);
+                if card {
+                    // Auto-collision : une puce, puis l'épaisseur
+                    let on = matches!(n.params.get("auto-collision"), Some(crate::nodes::Param::S(s)) if s == "oui");
+                    let b = egui::Button::new(RichText::new(format!("{}  {}", crate::lucide::LAYERS, t("auto-collision"))).size(12.0)).selected(on).corner_radius(11.0).min_size(vec2(0.0, 24.0));
+                    let flip = ui.add(b).on_hover_text(t("Le tissu ne se traverse plus lui-même quand il se replie (plus lent)")).clicked();
+                    if on {
+                        slide(ui, inp::THICKNESS, "épaisseur", "Distance gardée entre deux couches du tissu, en mètres. 0 : choisie d'après la taille des mailles", 0.0..=0.2, false, false);
+                    }
+                    if flip {
+                        n.params.insert("auto-collision".into(), crate::nodes::Param::S(if on { "non" } else { "oui" }.to_string()));
+                        changed = true;
+                    }
+                }
             }
             // Ce qu'a fait le dernier pas
             ui.separator();
