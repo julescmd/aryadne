@@ -4,7 +4,8 @@
 //!
 //! - **Une seule carte pour toutes les simulations.** `gpu()` ouvre la carte à la première
 //!   demande, avec les limites réelles de la machine (taille des tampons, nombre de tampons par
-//!   noyau), et la garde. L'interface dessine en OpenGL de son côté : les deux ne se gênent pas.
+//!   noyau), et la garde. Quand l'interface dessine avec wgpu (voir `gfx`), c'est **sa** carte qui
+//!   est prise : les vues dessinent alors les tampons des solveurs sans les relire.
 //! - **Tampons en colonnes.** Un attribut = un tampon (`Column`). Un noyau ne lit que les colonnes
 //!   dont il a besoin : c'est la mémoire qui borne la vitesse, donc moins d'octets = plus vite.
 //!   Une colonne plus grosse que ce que la carte accepte de brancher d'un coup est coupée en pages.
@@ -41,6 +42,8 @@ pub struct Gpu {
     pub max_groups: u32,
     /// Tampons de stockage permis par noyau
     pub max_storage: u32,
+    /// C'est aussi la carte de l'interface : une vue peut dessiner les tampons sans relecture
+    pub shared: bool,
     broken: Arc<AtomicBool>,
 }
 
@@ -62,16 +65,27 @@ fn open() -> Option<Gpu> {
     if std::env::var_os("ARY_SANS_GPU").is_some() {
         return None;
     }
-    let instance = wgpu::Instance::default();
-    let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions { power_preference: wgpu::PowerPreference::HighPerformance, ..Default::default() })).ok()?;
-    let info = adapter.get_info();
-    // On demande tout ce que la carte permet : les valeurs par défaut de WebGPU (128 Mo par
-    // branchement, 8 tampons par noyau) plafonneraient vers 600 000 sommets
-    let limits = adapter.limits();
-    if limits.max_storage_buffers_per_shader_stage < 8 || limits.max_compute_workgroup_size_x < WG {
-        return None;
-    }
-    let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor { label: Some("aryadne-simulation"), required_limits: limits.clone(), ..Default::default() })).ok()?;
+    // L'interface dessine avec wgpu : les simulations prennent la même carte, pour qu'une vue
+    // puisse dessiner leurs tampons sans les relire. Sinon (mode compatible, banc en ligne de
+    // commande, tests), elles ouvrent la leur.
+    let shared = crate::gfx::ui().map(|s| (s.device.clone(), s.queue.clone(), s.adapter.get_info(), s.device.limits())).filter(|(_, _, _, l)| enough(l));
+    let is_shared = shared.is_some();
+    let (device, queue, info, limits) = match shared {
+        Some(x) => x,
+        None => {
+            let instance = wgpu::Instance::default();
+            let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions { power_preference: wgpu::PowerPreference::HighPerformance, ..Default::default() })).ok()?;
+            let info = adapter.get_info();
+            // On demande tout ce que la carte permet : les valeurs par défaut de WebGPU (128 Mo par
+            // branchement, 8 tampons par noyau) plafonneraient vers 600 000 sommets
+            let limits = adapter.limits();
+            if !enough(&limits) {
+                return None;
+            }
+            let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor { label: Some("aryadne-simulation"), required_limits: limits.clone(), ..Default::default() })).ok()?;
+            (device, queue, info, limits)
+        }
+    };
     let broken = Arc::new(AtomicBool::new(false));
     // Une erreur de la carte ne doit pas fermer le logiciel : on la note, et tout repasse au processeur
     let b = broken.clone();
@@ -90,8 +104,14 @@ fn open() -> Option<Gpu> {
         max_buffer: limits.max_buffer_size,
         max_groups: limits.max_compute_workgroups_per_dimension,
         max_storage: limits.max_storage_buffers_per_shader_stage,
+        shared: is_shared,
         broken,
     })
+}
+
+/// Ce qu'une carte doit offrir pour les solveurs : 8 tampons de stockage par noyau, des groupes de 64 fils
+fn enough(l: &wgpu::Limits) -> bool {
+    l.max_storage_buffers_per_shader_stage >= 8 && l.max_compute_workgroup_size_x >= WG
 }
 
 /// Vue en octets d'un tableau de nombres simples (f32, u32 et leurs petits tableaux : pas de remplissage).

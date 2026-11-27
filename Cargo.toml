@@ -9,7 +9,7 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "std"
 ab_glyph = "0.2"
 arboard = "3.7.0"
 dirs = "7.0.0"
-eframe = "0.37.0"
+eframe = { version = "0.37.0", features = ["glow"] }
 egui_tiles = "0.18"
 egui_extras = { version = "0.37.0", features = ["all_loaders", "syntect"] }
 resvg = { version = "0.45", default-features = false }

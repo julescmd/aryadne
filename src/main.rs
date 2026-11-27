@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod cloud;
+mod gfx;
 mod gpubench;
 mod titlebar;
 mod gpucloth;
@@ -131,6 +132,7 @@ use vault::Entry;
 const APP: &str = "aryadne";
 
 fn main() -> eframe::Result {
+    gfx::clock();
     // `aryadne --banc-gpu` : mesure la carte graphique dans le terminal, sans ouvrir l'interface
     if std::env::args().any(|a| a == "--banc-gpu") {
         match gpubench::run(false, &|l| eprintln!("{l}")) {
@@ -143,6 +145,28 @@ fn main() -> eframe::Result {
     if prefs.menu_entry && !desktop::installed() {
         let _ = desktop::install();
     }
+    // Moteur d'affichage : la carte (wgpu) sauf demande contraire, ou si son dernier démarrage a raté
+    let dir = config("").unwrap_or_default();
+    let mark = gfx::carry_over(&dir);
+    let env = std::env::var("ARY_RENDU").ok();
+    let (kind, why) = gfx::pick(env.as_deref(), &prefs.renderer, mark.as_deref(), updater::CURRENT);
+    if kind == gfx::Kind::Wgpu {
+        gfx::mark_starting(&dir, updater::CURRENT);
+        match run(&prefs, kind, why) {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                // La carte a refusé de démarrer : on s'en souvient, et on ouvre en mode compatible
+                eprintln!("affichage sur carte impossible ({e}) : mode compatible (OpenGL)");
+                gfx::mark_failed(&dir, updater::CURRENT);
+                return run(&prefs, gfx::Kind::Glow, gfx::Why::Failed);
+            }
+        }
+    }
+    run(&prefs, kind, why)
+}
+
+/// Ouvre la fenêtre avec le moteur d'affichage donné, et y reste jusqu'à sa fermeture.
+fn run(prefs: &settings::Prefs, kind: gfx::Kind, why: gfx::Why) -> eframe::Result {
     #[allow(unused_mut)]
     let mut options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -154,8 +178,14 @@ fn main() -> eframe::Result {
             // Aryadne dessine sa barre de titre (menus et boutons de la fenêtre sur une seule rangée)
             .with_decorations(!titlebar::own())
             .with_icon(std::sync::Arc::new(theme::window_icon().unwrap_or_default())),
+        renderer: match kind {
+            gfx::Kind::Wgpu => eframe::Renderer::Wgpu,
+            gfx::Kind::Glow => eframe::Renderer::Glow,
+        },
         ..Default::default()
     };
+    // L'interface et les simulations partagent la même carte : on lui demande toutes ses limites
+    options.wgpu_options.wgpu_setup = gfx::wgpu_setup();
     // Sous Wayland, winit ne gère pas le glisser-déposer de fichiers : on passe par
     // XWayland (X11) sauf si l'utilisateur préfère Wayland natif.
     #[cfg(target_os = "linux")]
@@ -165,7 +195,16 @@ fn main() -> eframe::Result {
             b.with_x11();
         }));
     }
-    eframe::run_native(APP, options, Box::new(|cc| Ok(Box::new(App::new(&cc.egui_ctx)))))
+    #[cfg(not(target_os = "linux"))]
+    let _ = prefs;
+    eframe::run_native(
+        APP,
+        options,
+        Box::new(move |cc| {
+            gfx::started(kind, why, cc.wgpu_render_state.as_ref());
+            Ok(Box::new(App::new(&cc.egui_ctx)))
+        }),
+    )
 }
 
 // ---------- config utilisateur (aucun admin requis) ----------
@@ -515,6 +554,10 @@ impl App {
         prefs.apply(ctx);
         let mut app = Self { view: Some(View::Files), ai: Some(ai::Settings::load()), prefs, ..Default::default() };
         app.ctx = Some(ctx.clone());
+        // L'affichage sur carte n'a pas démarré : on le dit une fois, avec le chemin pour réessayer
+        if matches!(gfx::active(), Some((_, gfx::Why::Crashed | gfx::Why::Failed))) {
+            app.toast = Some((crate::i18n::t("L'affichage sur carte graphique n'a pas démarré : mode compatible (OpenGL). Réglages › Mises à jour › Affichage pour réessayer."), Instant::now()));
+        }
         { let u = app.ai.clone().unwrap_or_default().url; app.local.refresh(if ollama::is_local(&u) { &u } else { ai::PROVIDERS[0].url }, ctx); }
         app.github_token = load_config("github_token").unwrap_or_default();
         // Vérifie les mises à jour au plus toutes les 6 h (pas en mode dev).
@@ -7846,6 +7889,7 @@ pub fn drop_of<T: std::any::Any + Send + Sync>(r: &egui::Response) -> Option<std
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        gfx::frame_shown(&config("").unwrap_or_default());
         // Les entrées de menu qui reviennent à un raccourci : on le rejoue, chaque éditeur réagit comme au clavier
         for (m, k) in std::mem::take(&mut self.inject) {
             ctx.input_mut(|i| {
@@ -8028,7 +8072,7 @@ impl eframe::App for App {
         }
     }
 
-    fn on_exit(&mut self) {
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         self.flush_all();
         self.save_board();
         self.local.stop();

@@ -4235,5 +4235,15 @@
   "choisis une géométrie de nodes": "pick a node geometry",
   "ce qui est épinglé : le bord gauche, la hampe": "what is pinned: the left edge, the pole",
   "le vent : il pousse le long du drapeau, avec des rafales de côté": "the wind: it pushes along the flag, with gusts from the side",
-  "Ouvrir ce matériau dans l'Atelier (onglet Matériaux)": "Open this material in the Atelier (Materials tab)"
+  "Ouvrir ce matériau dans l'Atelier (onglet Matériaux)": "Open this material in the Atelier (Materials tab)",
+  "En service : carte graphique,": "In use: graphics card,",
+  "En service : mode compatible (OpenGL)": "In use: compatibility mode (OpenGL)",
+  "L'affichage sur carte graphique n'a pas démarré : mode compatible (OpenGL). Réglages › Mises à jour › Affichage pour réessayer.": "Graphics card display did not start: compatibility mode (OpenGL). Settings › Updates › Display to try again.",
+  "compatible (OpenGL)": "compatibility (OpenGL)",
+  "La carte graphique, et le mode compatible si elle ne démarre pas": "The graphics card, and compatibility mode if it does not start",
+  "Vulkan, DirectX 12 ou Metal : les simulations s'affichent sans quitter la carte": "Vulkan, DirectX 12 or Metal: simulations are displayed without leaving the card",
+  "Pour une machine où l'affichage sur carte pose problème. Les simulations restent calculées sur la carte, mais leur affichage repasse par le processeur": "For a machine where graphics card display causes trouble. Simulations are still computed on the card, but displaying them goes back through the processor",
+  "L'affichage sur carte n'a pas démarré la dernière fois : Aryadne est resté en mode compatible. Choisis « carte graphique » pour réessayer.": "Graphics card display did not start last time: Aryadne stayed in compatibility mode. Choose \"graphics card\" to try again.",
+  "L'affichage sur carte a refusé de démarrer : Aryadne est en mode compatible. Choisis « carte graphique » pour réessayer au prochain démarrage.": "Graphics card display refused to start: Aryadne is in compatibility mode. Choose \"graphics card\" to try again at the next start.",
+  "Choisi par la variable d'environnement ARY_RENDU.": "Chosen by the ARY_RENDU environment variable."
 }

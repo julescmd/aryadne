@@ -73,9 +73,36 @@ Aucune adresse ni clé n'est écrite dans le code ni dans le coffre.
 |---|---|
 | `Check at startup (every 6 h)` | Vérifie les nouvelles versions |
 | `Check now` | Vérifie tout de suite |
+| `System › Display` | Le moteur d'affichage : `automatic`, `graphics card` ou `compatibility (OpenGL)`. Voir plus bas. Prend effet au prochain démarrage |
 | `System › Native Wayland` | Linux seulement. Plus net si l'écran est mis à l'échelle, mais le glisser-déposer de fichiers ne marche pas. Prend effet au prochain démarrage |
 
 Sous Wayland, Aryadne passe par défaut par XWayland pour que le glisser-déposer de fichiers fonctionne.
+
+### Affichage : carte graphique ou mode compatible
+
+Aryadne dessine son interface avec la carte graphique (Vulkan, DirectX 12 ou Metal selon la machine, OpenGL s'il n'y a rien d'autre). Les simulations calculées sur la carte s'affichent alors **sans quitter la carte** : c'est ce qui rend un gros tissu fluide à l'écran.
+
+| Choix | Ce qu'il fait |
+|---|---|
+| `automatic` | La carte graphique. Si elle ne démarre pas, le mode compatible |
+| `graphics card` | Force la carte. À choisir pour réessayer après un échec |
+| `compatibility (OpenGL)` | L'ancien moteur. Les simulations restent calculées sur la carte, mais chaque image repasse par le processeur pour être affichée : c'est plus lent sur un gros tissu |
+
+Sous les choix, une ligne dit ce qui est en service, avec le nom de la carte.
+
+**Si l'affichage sur carte échoue.** Deux filets, sans rien avoir à faire :
+
+- la carte refuse de démarrer : Aryadne ouvre tout de suite en mode compatible ;
+- Aryadne se ferme avant d'avoir affiché sa première image (pilote qui plante) : le démarrage suivant se fait en mode compatible.
+
+Dans les deux cas un message le dit à l'ouverture, et Aryadne reste en mode compatible jusqu'à la prochaine mise à jour, ou jusqu'à ce que tu choisisses `graphics card`.
+
+**En dernier recours**, si la fenêtre ne s'ouvre plus du tout : lance Aryadne avec la variable d'environnement `ARY_RENDU=glow` (ou `ARY_RENDU=wgpu` pour forcer la carte). Elle passe avant le réglage.
+
+| Système | Commande |
+|---|---|
+| Windows (PowerShell) | `$env:ARY_RENDU="glow"; .\aryadne.exe` |
+| Linux | `ARY_RENDU=glow aryadne` |
 
 ## Shortcuts (raccourcis)
 

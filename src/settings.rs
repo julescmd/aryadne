@@ -45,6 +45,8 @@ pub struct Prefs {
     pub theme: String,
     /// Correcteur orthographique des notes (français et anglais)
     pub spell: bool,
+    /// Moteur d'affichage : vide = automatique, « wgpu » (carte) ou « glow » (mode compatible OpenGL)
+    pub renderer: String,
 }
 
 /// Unités de longueur proposées : nom et nombre d'unités dans un mètre.
@@ -102,6 +104,7 @@ impl Default for Prefs {
             reduce_motion: false,
             nav3d: "blender".into(),
             theme: String::new(),
+            renderer: String::new(),
         }
     }
 }
@@ -567,6 +570,41 @@ impl App {
                 desktop::uninstall();
             }
         }
+        // Moteur d'affichage : la carte par défaut, OpenGL en secours
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            ui.label(crate::i18n::t("Affichage"));
+            for (value, label, tip) in [
+                (crate::gfx::AUTO, "automatique", "La carte graphique, et le mode compatible si elle ne démarre pas"),
+                (crate::gfx::WGPU, "carte graphique", "Vulkan, DirectX 12 ou Metal : les simulations s'affichent sans quitter la carte"),
+                (crate::gfx::GLOW, "compatible (OpenGL)", "Pour une machine où l'affichage sur carte pose problème. Les simulations restent calculées sur la carte, mais leur affichage repasse par le processeur"),
+            ] {
+                if ui.selectable_label(self.prefs.renderer == value, crate::i18n::t(label)).on_hover_text(crate::i18n::t(tip)).clicked() {
+                    self.prefs.renderer = value.to_string();
+                    if value == crate::gfx::WGPU {
+                        // Redemander la carte efface le souvenir d'un démarrage raté
+                        crate::gfx::forget_failure(&config("").unwrap_or_default());
+                    }
+                }
+            }
+        });
+        if let Some((kind, why)) = crate::gfx::active() {
+            let now = match kind {
+                crate::gfx::Kind::Wgpu => format!("{} {}", crate::i18n::t("En service : carte graphique,"), crate::gfx::card().unwrap_or_default()),
+                crate::gfx::Kind::Glow => crate::i18n::t("En service : mode compatible (OpenGL)"),
+            };
+            ui.label(RichText::new(now).color(p.muted).size(11.0));
+            let note = match why {
+                crate::gfx::Why::Crashed => "L'affichage sur carte n'a pas démarré la dernière fois : Aryadne est resté en mode compatible. Choisis « carte graphique » pour réessayer.",
+                crate::gfx::Why::Failed => "L'affichage sur carte a refusé de démarrer : Aryadne est en mode compatible. Choisis « carte graphique » pour réessayer au prochain démarrage.",
+                crate::gfx::Why::Env => "Choisi par la variable d'environnement ARY_RENDU.",
+                _ => "",
+            };
+            if !note.is_empty() {
+                ui.label(RichText::new(crate::i18n::t(note)).color(p.muted).size(11.0));
+            }
+        }
+        ui.label(RichText::new(crate::i18n::t("Prend effet au prochain démarrage.")).color(p.muted).size(11.0));
         if cfg!(target_os = "linux") {
             ui.checkbox(&mut self.prefs.wayland_native, crate::i18n::t("Wayland natif (plus net si l'écran est mis à l'échelle, mais le glisser-déposer de fichiers ne marche pas)"));
             ui.label(RichText::new(crate::i18n::t("Prend effet au prochain démarrage.")).color(p.muted).size(11.0));
