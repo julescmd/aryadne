@@ -2373,7 +2373,7 @@ fn lighting_ui(look: &mut Look, hdr_files: &[(String, std::path::PathBuf)], load
                     ui.separator();
                     ui.label(egui::RichText::new(crate::i18n::t("environnement (HDRI)")).color(p.muted).size(11.0));
                     for (i, name) in PRESETS.iter().enumerate() {
-                        if ui.selectable_label(look.env.name == *name, *name).clicked() {
+                        if ui.selectable_label(look.env.name == *name, crate::i18n::t_mid(name)).clicked() {
                             look.env = Env::preset(i);
                         }
                     }
@@ -2398,7 +2398,7 @@ fn lighting_ui(look: &mut Look, hdr_files: &[(String, std::path::PathBuf)], load
                     ui.add(egui::Slider::new(&mut look.env_strength, 0.0..=3.0).clamping(egui::SliderClamping::Never).text(crate::i18n::t("intensité")));
                     ui.add(egui::Slider::new(&mut look.exposure, -4.0..=4.0).clamping(egui::SliderClamping::Never).text(crate::i18n::t("exposition (EV)")));
                     ui.checkbox(&mut look.show_bg, crate::i18n::t("afficher le HDRI en fond"));
-                    ui.add_enabled(look.show_bg, egui::Checkbox::new(&mut look.blur_bg, "fond flou"));
+                    ui.add_enabled(look.show_bg, egui::Checkbox::new(&mut look.blur_bg, crate::i18n::t_mid("fond flou")));
                     ui.separator();
                     ui.label(egui::RichText::new(crate::i18n::t("lumière directionnelle (L + glisser)")).color(p.muted).size(11.0));
                     ui.add(egui::Slider::new(&mut look.light.intensity, 0.0..=5.0).clamping(egui::SliderClamping::Never).text(crate::i18n::t("intensité")));

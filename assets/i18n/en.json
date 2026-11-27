@@ -4377,5 +4377,6 @@
   "nom.md, script.py, sous/dossier/notes.md…": "name.md, script.py, sub/folder/notes.md…",
   "nom du dossier": "folder name",
   "nouveau/chemin.md": "new/path.md",
-  "avec ombres, matériau en textures et contour de sélection": "with shadows, textured material and selection outline"
+  "avec ombres, matériau en textures et contour de sélection": "with shadows, textured material and selection outline",
+  "fond flou": "blurred background"
 }
