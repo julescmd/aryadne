@@ -126,6 +126,13 @@ pub fn inputs(scene: &Scene, scene_path: &Path, k: usize, graph: &Graph) -> Opti
 /// quand son fichier change ; les caches figés sur le disque (« figer » dans l'onglet Simulation)
 /// sont lus tels quels quand ils existent.
 pub fn eval_file(file: &Path, pick: &dyn Fn(&Graph) -> (i32, Option<Arc<SceneInputs>>)) -> Result<Geo, String> {
+    eval_file_within(file, pick, None).map(|r| r.0)
+}
+
+/// Comme `eval_file`, avec un temps accordé : passé ce délai, une simulation rend l'image qu'elle a
+/// atteinte, et le second résultat dit qu'il faut redemander (l'interface reste vivante pendant
+/// qu'une longue simulation se rattrape). Sans délai, le calcul va jusqu'au bout.
+pub fn eval_file_within(file: &Path, pick: &dyn Fn(&Graph) -> (i32, Option<Arc<SceneInputs>>), budget: Option<std::time::Duration>) -> Result<(Geo, bool), String> {
     let mtime = std::fs::metadata(file).and_then(|m| m.modified()).ok();
     let mut all = ENGINES.lock().unwrap_or_else(|e| e.into_inner());
     let map = all.get_or_insert_with(HashMap::new);
@@ -154,8 +161,37 @@ pub fn eval_file(file: &Path, pick: &dyn Fn(&Graph) -> (i32, Option<Arc<SceneInp
     TIMES.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(HashMap::new).insert(file.to_path_buf(), e.graph.time.unwrap_or_default());
     let (frame, scene) = pick(&e.graph);
     e.engine.scene = scene;
+    e.engine.deadline = budget.map(|b| std::time::Instant::now() + b);
+    let r = e.engine.eval(&e.graph, frame, &root).map_err(|(_, msg)| msg);
+    let incomplete = e.engine.incomplete;
     e.engine.deadline = None;
-    e.engine.eval(&e.graph, frame, &root).map_err(|(_, msg)| msg)
+    r.map(|g| (g, incomplete))
+}
+
+/// La géométrie de l'objet `k` à l'image courante de la scène, pour l'afficher : le calcul rend la
+/// main après quelques millisecondes (voir `eval_file_within`), et rien n'est relu de la carte.
+pub fn geo_live(scene: &Scene, scene_path: &Path, k: usize) -> Result<(Geo, bool), String> {
+    let o = scene.objects.get(k).ok_or("objet introuvable")?;
+    let file = crate::scene::resolve(scene_path, &o.file);
+    eval_file_within(&file, &|g| (sim_frame(scene.frame.0, scene.start, scene.fps, o.sim_offset, g.time.unwrap_or_default()), inputs(scene, scene_path, k, g)), Some(std::time::Duration::from_millis(12)))
+}
+
+/// À partir de combien de points une géométrie de nodes est dessinée directement par la carte
+/// dans la vue 3D d'une scène. En dessous, le rendu logiciel de la vue est assez rapide, et il
+/// garde les ombres, les matériaux et la sélection au clic.
+pub const DIRECT_MIN: usize = 20_000;
+
+/// Cette géométrie doit-elle être dessinée directement par la carte dans la vue de la scène ?
+/// `ARY_DIRECT=toujours` ou `jamais` force la réponse (pour essayer, ou pour comparer).
+pub fn wants_direct(g: &Geo) -> bool {
+    if g.faces.is_empty() || !crate::gpudraw::shared() {
+        return false;
+    }
+    match std::env::var("ARY_DIRECT").ok().as_deref() {
+        Some("toujours") => true,
+        Some("jamais") => false,
+        _ => g.n >= DIRECT_MIN,
+    }
 }
 
 /// La durée de la simulation d'un fichier `.arygeo` (pour l'afficher dans la scène).

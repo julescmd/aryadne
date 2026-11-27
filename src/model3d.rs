@@ -2475,6 +2475,243 @@ fn geo_menu(ui: &mut egui::Ui, root: &str, files: &mut Option<(std::time::Instan
     pick
 }
 
+/// Les géométries de nodes d'une scène que la vue dessine directement sur la carte graphique.
+///
+/// Une simulation lourde reste sur la carte : la relire à chaque image pour la passer au rendu
+/// logiciel de la vue coûterait plus que de la calculer. La vue retire donc ces objets du modèle
+/// de la scène, et les dessine par-dessus son image avec `gpudraw`, en lui donnant la profondeur
+/// de cette image : ce qui est derrière un autre objet reste caché, ce qui est devant le cache.
+///
+/// Limites de ce dessin direct, assumées : pas d'ombres portées ni reçues, pas de matériau (la
+/// couleur de l'objet ou son attribut `Cd`), pas de contour de sélection ni de sélection au clic
+/// dans la vue (l'objet se choisit dans la liste). Le rendu final, lui, relit la géométrie et la
+/// traite comme tout autre objet.
+#[derive(Default)]
+struct DirectGeo {
+    /// Objets suivis : la géométrie à l'image courante, calculée sans rien relire
+    items: Vec<DirectItem>,
+    /// Objets à dessiner ici, avec leur boîte dans le monde (pour le cadre de la scène)
+    want: Vec<(usize, Option<(V3, V3)>)>,
+    /// Objets que le modèle de la scène en cours ne contient pas
+    built: Vec<usize>,
+    canvas: crate::gpudraw::Canvas,
+    /// Profondeur de la dernière image de l'aperçu (plus petit = plus près), sa taille, sa version
+    soft: Option<(usize, usize, std::sync::Arc<Vec<f32>>, u64)>,
+    /// Triangles par objet et par morceau : (objet, premier sommet) → (clé des faces, triangles)
+    tris: std::collections::HashMap<(usize, usize), (u64, std::sync::Arc<Vec<[u32; 3]>>)>,
+}
+
+struct DirectItem {
+    k: usize,
+    /// Image de la scène et version de la scène pour lesquelles `geo` a été calculée
+    key: (u32, u64),
+    geo: crate::geo::Geo,
+    /// La simulation n'a pas encore rattrapé l'image demandée
+    incomplete: bool,
+    bounds: Option<(V3, V3)>,
+}
+
+impl Viewer {
+    /// Met à jour les géométries de nodes de la scène pour l'image courante, sans rien relire de la
+    /// carte, et décide lesquelles la vue dessine elle-même. À appeler à chaque image de l'interface.
+    fn direct_update(&mut self, ctx: &egui::Context) {
+        let eligible = self.engine == 0 && self.edit.is_none() && self.mesh.is_none() && self.sub.is_none() && crate::gpudraw::shared();
+        let mut want = vec![];
+        let mut seen = vec![];
+        if let (true, Some(scene)) = (eligible, self.scene.as_ref()) {
+            let key = (scene.frame.0.to_bits(), self.scene_ver);
+            for (k, o) in scene.objects.iter().enumerate() {
+                // Un objet déformé après coup (modificateurs, formes, squelette) passe par le chemin habituel
+                if !scene.shown(k) || crate::scene::kind(o) != crate::scene::Kind::Model || !crate::geoscene::is_geo(&o.file) || o.mods.iter().any(|m| m.on) || !o.morphs.is_empty() || !o.skin.is_empty() {
+                    continue;
+                }
+                let at = self.direct.items.iter().position(|i| i.k == k);
+                if at.is_none_or(|a| self.direct.items[a].key != key || self.direct.items[a].incomplete) {
+                    match crate::geoscene::geo_live(scene, &self.path, k) {
+                        Ok((geo, incomplete)) => {
+                            let bounds = at.and_then(|a| self.direct.items[a].bounds);
+                            let item = DirectItem { k, key, geo, incomplete, bounds };
+                            match at {
+                                Some(a) => self.direct.items[a] = item,
+                                None => self.direct.items.push(item),
+                            }
+                            if incomplete {
+                                ctx.request_repaint();
+                            }
+                        }
+                        Err(_) => continue,
+                    }
+                }
+                let Some(item) = self.direct.items.iter_mut().find(|i| i.k == k) else { continue };
+                seen.push(k);
+                if !crate::geoscene::wants_direct(&item.geo) {
+                    continue;
+                }
+                // Boîte dans le monde, pour le cadre de la scène : sans attendre la carte
+                if let Some((lo, hi)) = item.geo.bounds_now() {
+                    let (mut a, mut b) = ([f32::MAX; 3], [f32::MIN; 3]);
+                    for corner in 0..8 {
+                        let p = scene.world(k, [if corner & 1 == 0 { lo[0] } else { hi[0] }, if corner & 2 == 0 { lo[1] } else { hi[1] }, if corner & 4 == 0 { lo[2] } else { hi[2] }]);
+                        for x in 0..3 {
+                            a[x] = a[x].min(p[x]);
+                            b[x] = b[x].max(p[x]);
+                        }
+                    }
+                    item.bounds = Some((a, b));
+                }
+                want.push((k, item.bounds));
+            }
+        }
+        self.direct.items.retain(|i| seen.contains(&i.k));
+        // La liste a changé : le modèle de la scène est à refaire, avec ou sans ces objets
+        if want.iter().map(|w| w.0).ne(self.direct.built.iter().copied()) && self.scene_rx.is_none() {
+            self.scene_dirty = true;
+        }
+        self.direct.want = want;
+    }
+
+    /// Dessine sur la carte les géométries de nodes retirées du modèle de la scène, par-dessus
+    /// l'image de l'aperçu et en respectant sa profondeur.
+    fn direct_paint(&mut self, ui: &egui::Ui, painter: &egui::Painter, rect: egui::Rect) {
+        let (Some(scene), Some((lo, hi))) = (self.scene.as_ref(), self.scene_frame) else { return };
+        if self.direct.built.is_empty() || self.engine != 0 || rect.width() < 2.0 || rect.height() < 2.0 {
+            return;
+        }
+        let longest = (hi[0] - lo[0]).max(hi[1] - lo[1]).max(hi[2] - lo[2]).max(1e-9);
+        let c = [(lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0, (lo[2] + hi[2]) / 2.0];
+        let ppp = ui.ctx().pixels_per_point();
+        let size = [(rect.width() * ppp).round().max(1.0) as u32, (rect.height() * ppp).round().max(1.0) as u32];
+        let (w, h) = (size[0] as f32, size[1] as f32);
+        let pr = Proj::new(&self.cam, w, h);
+        // Une ligne de la vue, appliquée à un point du monde : q = R·(p − c)/L + t
+        let row = |r: V3, t: f32| [r[0] / longest, r[1] / longest, r[2] / longest, t - dot(r, c) / longest];
+        let (qx, qy, qz) = (row(pr.r[0], pr.pan[0]), row(pr.r[1], pr.pan[1]), row(pr.r[2], -pr.dist));
+        let depth_row = [-qz[0], -qz[1], -qz[2], -qz[3]];
+        let (near, far) = (0.02f32, pr.dist + 20.0);
+        let mul = |r: [f32; 4], k: f32| [r[0] * k, r[1] * k, r[2] * k, r[3] * k];
+        let view_proj = if pr.ortho {
+            let z = mul(depth_row, 1.0 / (far - near));
+            crate::gpudraw::from_rows([mul(qx, 2.0 * pr.scale / w), mul(qy, 2.0 * pr.scale / h), [z[0], z[1], z[2], z[3] - near / (far - near)], [0.0, 0.0, 0.0, 1.0]])
+        } else {
+            let f = far / (far - near);
+            let z = mul(depth_row, f);
+            crate::gpudraw::from_rows([mul(qx, 2.0 * pr.focal / w), mul(qy, 2.0 * pr.focal / h), [z[0], z[1], z[2], z[3] - near * f], depth_row])
+        };
+        let eye_view = pr.unrotate([-pr.pan[0], -pr.pan[1], pr.dist]);
+        let eye = [c[0] + eye_view[0] * longest, c[1] + eye_view[1] * longest, c[2] + eye_view[2] * longest];
+        // La lumière : le premier soleil de la scène, sinon celle de la vue
+        let light = scene.lights().iter().map(|l| lamp_of(l, c, longest)).find(|l| !l.point).map(|l| l.at).unwrap_or_else(|| self.look.light.dir());
+        let soft = self.direct.soft.clone();
+        let negate = || soft.as_ref().map(|s| s.2.iter().map(|d| if *d == f32::MIN { f32::MAX } else { -*d }).collect::<Vec<f32>>()).unwrap_or_default();
+        let lin = |v: u8| (v as f32 / 255.0).powf(2.2);
+        // Les morceaux à dessiner, objet par objet
+        struct Piece {
+            k: usize,
+            first: usize,
+            col: std::sync::Arc<crate::geo::Column>,
+            live: Option<crate::gpucloth::Live>,
+            tris: (u64, std::sync::Arc<Vec<[u32; 3]>>),
+            model: [[f32; 4]; 4],
+            base: [f32; 3],
+            cd: Option<std::sync::Arc<crate::geo::Column>>,
+        }
+        let mut pieces: Vec<Piece> = vec![];
+        let mut waiting = false;
+        for item in self.direct.items.iter().filter(|i| self.direct.built.contains(&i.k)) {
+            let (k, g) = (item.k, &item.geo);
+            let Some(o) = scene.objects.get(k) else { continue };
+            // Place de l'objet dans le monde : son origine et ses trois axes
+            let o0 = scene.world(k, [0.0; 3]);
+            let axis = |v: V3| {
+                let p = scene.world(k, v);
+                [p[0] - o0[0], p[1] - o0[1], p[2] - o0[2], 0.0]
+            };
+            let model = [axis([1.0, 0.0, 0.0]), axis([0.0, 1.0, 0.0]), axis([0.0, 0.0, 1.0]), [o0[0], o0[1], o0[2], 1.0]];
+            let base = o.color.map(|c| [lin(c[0]), lin(c[1]), lin(c[2])]).unwrap_or([0.8, 0.8, 0.8]);
+            let cd = if o.color.is_some() { None } else { g.cols.get("Cd").filter(|c| c.width() >= 3 && c.resolved()).cloned() };
+            let mut all: Option<Vec<[u32; 3]>> = None;
+            for (first, col) in g.position_parts() {
+                let n = col.len();
+                let live = col.positions_of().and_then(|s| s.live.clone()).filter(|l| l.current());
+                if live.is_none() && !col.ready() {
+                    waiting = true;
+                    continue;
+                }
+                let tris = match self.direct.tris.get(&(k, first)).filter(|t| t.0 == g.faces_key()) {
+                    Some(t) => t.clone(),
+                    None => {
+                        let all = all.get_or_insert_with(|| g.triangles().0);
+                        let (a, b) = (first as u32, (first + n) as u32);
+                        let t = (g.faces_key(), std::sync::Arc::new(all.iter().filter(|t| t.iter().all(|v| *v >= a && *v < b)).map(|t| [t[0] - a, t[1] - a, t[2] - a]).collect::<Vec<_>>()));
+                        self.direct.tris.insert((k, first), t.clone());
+                        t
+                    }
+                };
+                if tris.1.is_empty() {
+                    continue;
+                }
+                pieces.push(Piece { k, first, col: col.clone(), live, tris, model, base, cd: cd.clone() });
+            }
+        }
+        if waiting {
+            ui.ctx().request_repaint();
+        }
+        if pieces.is_empty() {
+            return;
+        }
+        let tris_of: Vec<Box<dyn Fn() -> Vec<[u32; 3]>>> = pieces.iter().map(|p| { let t = p.tris.1.clone(); Box::new(move || (*t).clone()) as Box<dyn Fn() -> Vec<[u32; 3]>> }).collect();
+        let data_of: Vec<Box<dyn Fn() -> Vec<[f32; 4]>>> = pieces
+            .iter()
+            .map(|p| {
+                let col = p.col.clone();
+                Box::new(move || {
+                    let d = col.data();
+                    (0..col.len()).map(|i| [d[0][i], d[1][i], d[2][i], 0.0]).collect()
+                }) as Box<dyn Fn() -> Vec<[f32; 4]>>
+            })
+            .collect();
+        let colors_of: Vec<Box<dyn Fn() -> Vec<[u8; 4]>>> = pieces
+            .iter()
+            .map(|p| {
+                let (cd, first, n) = (p.cd.clone(), p.first, p.col.len());
+                Box::new(move || {
+                    let Some(d) = cd.as_ref().map(|c| c.data()) else { return vec![] };
+                    let q = |x: f32| (x.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
+                    (first..first + n).map(|i| [q(d[0][i]), q(d[1][i]), q(d[2][i]), 255]).collect()
+                }) as Box<dyn Fn() -> Vec<[u8; 4]>>
+            })
+            .collect();
+        let salt = |p: &Piece| ((p.k as u64) << 32 | p.first as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        let parts: Vec<crate::gpudraw::Part> = pieces
+            .iter()
+            .enumerate()
+            .map(|(i, p)| crate::gpudraw::Part {
+                n: p.col.len(),
+                source: match &p.live {
+                    Some(l) => crate::gpudraw::Source::Live(l),
+                    None => crate::gpudraw::Source::Data(p.col.version, &*data_of[i]),
+                },
+                tris: (p.tris.0 ^ salt(p), &*tris_of[i]),
+                colors: p.cd.as_ref().map(|c| (c.version ^ salt(p), &*colors_of[i])),
+                base: p.base,
+                model: p.model,
+            })
+            .collect();
+        let cam = crate::gpudraw::Cam {
+            view_proj,
+            depth_row,
+            light,
+            eye,
+            soft: soft.as_ref().map(|s| crate::gpudraw::Soft { w: s.0 as u32, h: s.1 as u32, version: s.3, depth: &negate, bias: 0.004 }),
+        };
+        if crate::gpudraw::paint(&mut self.direct.canvas, size, &cam, &parts) {
+            if let Some(tex) = self.direct.canvas.texture() {
+                painter.image(tex, rect, egui::Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+            }
+        }
+    }
+}
+
 /// La scène telle qu'elle est posée (image courante comprise), prête pour le rendu dans le cadre
 /// `frame_box` : ses maillages réunis, les UV que ses objets apportent, un matériau par objet.
 fn scene_prepared(sc: &crate::scene::Scene, path: &std::path::Path, frame_box: (V3, V3), floor: f32) -> Result<Prepared, String> {
@@ -3087,6 +3324,8 @@ pub struct Viewer {
     orbit_pivot: Option<V3>,
     scene_errors: Vec<Option<String>>,
     scene_rx: Option<Receiver<(Result<Model, String>, Vec<Option<String>>, Vec<(usize, usize, usize)>)>>,
+    /// Géométries de nodes que la vue dessine elle-même, directement sur la carte graphique
+    direct: DirectGeo,
     /// Triangles de chaque objet dans le modèle réuni (objet, début, fin)
     scene_ranges: Vec<(usize, usize, usize)>,
     /// Axe de la poignée de déplacement en cours de glissement
@@ -3387,6 +3626,7 @@ impl Viewer {
             orbit_pivot: None,
             scene_errors: vec![],
             scene_rx: None,
+            direct: Default::default(),
             scene_ranges: vec![],
             gizmo_hold: None,
             gizmo_hot: None,
@@ -6173,6 +6413,8 @@ impl Viewer {
         if let Some(sc) = &self.scene {
             sc.set_anim_context();
         }
+        // Géométries de nodes simulées : calculées ici sans rien relire, dessinées par la carte
+        self.direct_update(ui.ctx());
         // Résultat d'une reconstruction lancée après un changement
         if let Some(rx) = &self.scene_rx {
             if let Ok((m, errs, ranges)) = rx.try_recv() {
@@ -8495,8 +8737,11 @@ impl Viewer {
             self.scene_built = Some(scene.clone());
             let (tx, rx) = channel();
             let (sc, ctx) = (scene.clone(), ui.ctx().clone());
+            // Les géométries que la vue dessine elle-même n'entrent pas dans le modèle (leur boîte, si)
+            let skip = self.direct.want.clone();
+            self.direct.built = skip.iter().map(|s| s.0).collect();
             std::thread::spawn(move || {
-                let _ = tx.send(crate::scene::build_ranges(&sc, &path));
+                let _ = tx.send(crate::scene::build_ranges_without(&sc, &path, &skip));
                 ctx.request_repaint();
             });
             self.scene_rx = Some(rx);
@@ -10396,6 +10641,8 @@ impl Viewer {
                 crate::matchmove::composite(&mut frame.rgba, &frame.ids, frame.w, frame.h, fr, &b.px[*k], b.w, b.h);
             }
             let img = egui::ColorImage::from_rgba_unmultiplied([frame.w, frame.h], &frame.rgba);
+            // La profondeur de l'image sert au dessin direct des géométries simulées
+            self.direct.soft = (!self.direct.built.is_empty()).then(|| (frame.w, frame.h, std::sync::Arc::new(std::mem::take(&mut frame.depth)), self.ids_rev + 1));
             self.ids = Some((frame.w, frame.h, frame.ids));
             self.ids_rev += 1;
             match &mut self.tex {
@@ -10499,6 +10746,7 @@ impl Viewer {
         if let Some(t) = &self.tex {
             painter.image(t.id(), rect, egui::Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
         }
+        self.direct_paint(ui, &painter, rect);
         self.draw_outline(ui, &painter, rect);
         if self.paint3d.is_some() {
             self.paint_ui(ui, rect, &resp);

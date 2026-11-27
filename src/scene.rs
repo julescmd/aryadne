@@ -1277,6 +1277,32 @@ pub fn blend_morphs(scene_path: &Path, o: &Object, m: Arc<crate::model3d::Model>
 /// Comme `build`, avec en plus la plage de triangles de chaque objet (objet, début, fin) :
 /// c'est ce qui permet de retrouver l'objet sous le curseur.
 pub fn build_ranges(scene: &Scene, scene_path: &Path) -> (Result<crate::model3d::Model, String>, Vec<Option<String>>, Vec<(usize, usize, usize)>) {
+    build_ranges_without(scene, scene_path, &[])
+}
+
+/// Comme `build_ranges`, sans les objets de `skip` : ceux que la vue dessine elle-même, directement
+/// sur la carte graphique (géométries de nodes simulées). Chacun vient avec sa boîte englobante
+/// dans le monde, pour que le cadre de la scène les contienne quand même.
+pub fn build_ranges_without(scene: &Scene, scene_path: &Path, skip: &[(usize, Option<([f32; 3], [f32; 3])>)]) -> (Result<crate::model3d::Model, String>, Vec<Option<String>>, Vec<(usize, usize, usize)>) {
+    let (model, errors, ranges) = build_ranges_inner(scene, scene_path, &skip.iter().map(|s| s.0).collect::<Vec<_>>());
+    let model = model.map(|mut m| {
+        // Sans autre objet, le modèle n'est qu'un cadre de principe : celui des objets retirés le remplace
+        let only = ranges.is_empty() && skip.iter().any(|s| s.1.is_some());
+        if only {
+            (m.min, m.max) = ([f32::MAX; 3], [f32::MIN; 3]);
+        }
+        for (lo, hi) in skip.iter().filter_map(|s| s.1) {
+            for a in 0..3 {
+                m.min[a] = m.min[a].min(lo[a]);
+                m.max[a] = m.max[a].max(hi[a]);
+            }
+        }
+        m
+    });
+    (model, errors, ranges)
+}
+
+fn build_ranges_inner(scene: &Scene, scene_path: &Path, skip: &[usize]) -> (Result<crate::model3d::Model, String>, Vec<Option<String>>, Vec<(usize, usize, usize)>) {
     let mut ranges = vec![];
     let (mut pos, mut tris, mut colors, mut edges) = (vec![], vec![], vec![], vec![]);
     // UV par coin de triangle, pour les objets qui en apportent (géométries de nodes) ; les autres
@@ -1285,7 +1311,7 @@ pub fn build_ranges(scene: &Scene, scene_path: &Path) -> (Result<crate::model3d:
     let mut any_uv = false;
     let mut errors = vec![None; scene.objects.len()];
     for (k, o) in scene.objects.iter().enumerate() {
-        if !scene.shown(k) || kind(o) != Kind::Model {
+        if !scene.shown(k) || kind(o) != Kind::Model || skip.contains(&k) {
             continue;
         }
         let path = resolve(scene_path, &o.file);
