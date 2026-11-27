@@ -4303,5 +4303,17 @@
   "Fumée des nodes : un pas complet, pression par multigrille (MGPCG). À comparer au pas à 40 itérations de Jacobi ci-dessus.": "Node smoke: one full step, multigrid pressure (MGPCG). Compare with the 40 Jacobi iterations step above.",
   "Mo sur la carte": "MB on the card",
   "par pas": "per step",
-  "4 itérations, avec le transfert de chaque image pour le cache": "4 iterations, with each frame transferred for the cache"
+  "4 itérations, avec le transfert de chaque image pour le cache": "4 iterations, with each frame transferred for the cache",
+  "Choisir un matériau du coffre (.arymat) pour cet ID : la cuisson le lira": "Pick a material from the vault (.arymat) for this ID: baking will read it",
+  "Exporter en OBJ : écrit la retopologie dans un fichier à côté, sans toucher à l'objet": "Export as OBJ: writes the retopology to a file next to the model, leaving the object untouched",
+  "Maillage d'avant la retopologie repris. Ctrl+Z y revient": "Mesh from before the retopology restored. Ctrl+Z goes back",
+  "Place le modèle dans une scène pour appliquer la retopologie à son objet.": "Place the model in a scene to apply the retopology to its object.",
+  "Remplace le maillage de l'objet par cette retopologie. L'ancien maillage est gardé : Ctrl+Z dans la scène, ou la flèche de retour ici, le reprend. Les IDs de matériau suivent ; les UV sont à redéplier, et la cuisson reportera les détails de l'ancien maillage.": "Replaces the object's mesh with this retopology. The old mesh is kept: Ctrl+Z in the scene, or the back arrow here, restores it. Material IDs follow; UVs need a new unwrap, and baking will carry over the details of the old mesh.",
+  "Reprendre le maillage d'avant la retopologie. Celui-ci est gardé à son tour : le même bouton y revient.": "Restore the mesh from before the retopology. This one is kept in turn: the same button goes back to it.",
+  "Retopologie appliquée. Ctrl+Z reprend l'ancien maillage": "Retopology applied. Ctrl+Z restores the old mesh",
+  "la retopologie est vide": "the retopology is empty",
+  "maillage d'avant": "previous mesh",
+  "matériau illisible": "unreadable material",
+  "matériaux du coffre": "vault materials",
+  "retopologie non appliquée": "retopology not applied"
 }

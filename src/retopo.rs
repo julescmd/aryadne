@@ -5157,6 +5157,92 @@ mod tests {
     }
 
     #[test]
+    fn appliquer_la_retopo_et_annuler() {
+        use crate::uvedit::{EditData, Slot, Topo};
+        // Un coffre, une scène, et son objet : une boule dense, décalée et agrandie dans son fichier
+        let root = std::env::temp_dir().join(format!("aryadne-retopo-appliquer-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("3d")).unwrap();
+        let rs = root.to_string_lossy().to_string();
+        let (p, t) = sphere(3);
+        let dense = Result { pos: p, faces: t.iter().map(|t| t.to_vec()).collect(), stats: Stats::default() };
+        let old = root.join("3d/scène - boule.obj");
+        export_obj(&dense, &|p| [p[0] * 3.0 + 10.0, p[1] * 3.0 - 2.0, p[2] * 3.0], &old).unwrap();
+        let old_bytes = std::fs::read(&old).unwrap();
+        let scene_path = root.join("3d/scène.aryscene");
+        let mut scene = crate::scene::Scene::default();
+        scene.objects.push(crate::scene::Object::new("boule".into(), "scène - boule.obj".into()));
+        scene.write(&scene_path).unwrap();
+        // L'édition de l'objet : deux IDs, le haut de la boule porte le second et son matériau
+        let model = crate::model3d::load(&old).unwrap();
+        let mesh = crate::modifiers::Mesh::from_model(&model, false);
+        let src = Topo::new(&mesh.pos, &mesh.tris, &mesh.edges);
+        let mut data = EditData::fresh(&src);
+        data.slots.push(Slot { name: "haut".into(), color: [200, 30, 30], material: "nodes/haut.arymat".into() });
+        let top = |t: &Topo, f: usize| t.polys[f].iter().map(|&v| t.pos[v as usize][1]).sum::<f32>() / t.polys[f].len() as f32;
+        data.face_mat = (0..src.polys.len()).map(|f| (top(&src, f) > 0.0) as u16).collect();
+        let r = remesh(&mesh.pos, &mesh.tris, &[], &Options { faces: 300, ..Default::default() }, &|_| {});
+        assert!(r.faces.len() > 100 && r.faces.len() < src.polys.len());
+        // Appliquer : un fichier neuf à côté, l'ancien intact
+        let out = crate::model3d::apply_retopo(&r, &src, &data, &model, false, &old, &rs).unwrap();
+        assert_eq!(out, root.join("3d/scène - boule retopo.obj"));
+        assert_eq!(std::fs::read(&old).unwrap(), old_bytes, "l'ancien maillage n'est pas touché");
+        let m2 = crate::model3d::load(&out).unwrap();
+        let dst = Topo::new(&m2.normalized(false), &m2.tris, &m2.edges);
+        assert_eq!(dst.polys.len(), r.faces.len());
+        // Il reste à la même place et à la même taille dans la scène
+        for k in 0..3 {
+            assert!((m2.min[k] - model.min[k]).abs() < 0.25 && (m2.max[k] - model.max[k]).abs() < 0.25, "{:?} {:?} / {:?} {:?}", m2.min, m2.max, model.min, model.max);
+        }
+        // Ses données : les IDs ont suivi (le haut reste « haut »), l'ancien maillage est noté pour la cuisson
+        let d2: EditData = serde_json::from_str(&std::fs::read_to_string(crate::model3d::meshdata_file(&rs, &out)).unwrap()).unwrap();
+        assert!(d2.fits(&dst) && !d2.has_uv());
+        assert!(d2.slots == data.slots);
+        assert_eq!(d2.high, "3d/scène - boule.obj");
+        let (mut ok, mut seen) = (0, 0);
+        for f in 0..dst.polys.len() {
+            let y = top(&dst, f);
+            if y.abs() > 0.08 {
+                seen += 1;
+                ok += (d2.face_mat[f] == (y > 0.0) as u16) as usize;
+            }
+        }
+        assert!(seen > 50 && ok == seen, "{ok} / {seen} faces ont gardé leur ID");
+        assert!(d2.face_mat.iter().any(|&m| m == 0) && d2.face_mat.iter().any(|&m| m == 1));
+        // Dans la scène : une étape. L'état d'avant est celui que garde l'historique de la vue (Ctrl+Z)
+        let tris_of = |s: &crate::scene::Scene| crate::scene::build(s, &scene_path).0.unwrap().tris.len();
+        let dense_tris = tris_of(&scene);
+        let before = scene.clone();
+        assert!(scene.replace_mesh(0, "scène - boule retopo.obj".into()));
+        assert!(!scene.replace_mesh(0, "scène - boule retopo.obj".into()), "le même fichier : rien à faire");
+        assert_eq!(scene.objects[0].mesh_before, "scène - boule.obj");
+        let after = scene.clone();
+        assert!(tris_of(&scene) < dense_tris && tris_of(&scene) >= r.faces.len());
+        // Elle s'enregistre et se relit avec la scène
+        scene.write(&scene_path).unwrap();
+        assert_eq!(crate::scene::Scene::read(&scene_path).unwrap().objects[0].mesh_before, "scène - boule.obj");
+        // Annuler : l'ancien maillage revient, son fichier est toujours là. Rétablir : la retopo
+        scene = before.clone();
+        assert!(scene.objects[0].file == "scène - boule.obj" && scene.objects[0].mesh_before.is_empty());
+        assert_eq!(tris_of(&scene), dense_tris);
+        scene = after.clone();
+        assert!(tris_of(&scene) < dense_tris);
+        // Sans l'historique (scène rouverte plus tard) : l'ancien maillage se reprend, et l'on peut y revenir
+        assert!(scene.restore_mesh(0));
+        assert!(scene.objects[0].file == "scène - boule.obj" && scene.objects[0].mesh_before == "scène - boule retopo.obj");
+        assert_eq!(tris_of(&scene), dense_tris);
+        assert!(scene.restore_mesh(0));
+        assert_eq!(scene, after);
+        assert!(!crate::scene::Scene::default().restore_mesh(0) && !before.clone().restore_mesh(0));
+        // Une scène d'avant (sans ce champ) se relit, et un objet sans retopo ne l'écrit pas
+        assert!(!serde_json::to_string(&before).unwrap().contains("mesh_before"));
+        // Une seconde retopo ne remplace aucun fichier : chaque étape reste récupérable
+        assert_eq!(crate::model3d::retopo_file(&out), root.join("3d/scène - boule retopo 2.obj"));
+        assert_eq!(crate::model3d::retopo_file(&old), root.join("3d/scène - boule retopo 2.obj"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn sphere_en_quads() {
         let (p, t) = sphere(3);
         let pq = remesh(&p, &t, &[], &Options { faces: 600, ..Default::default() }, &|_| {});

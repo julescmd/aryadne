@@ -133,6 +133,10 @@ pub struct EditData {
     /// Empreinte de ce qui a été cuit la dernière fois (0 : jamais cuit)
     #[serde(default, skip_serializing_if = "is_zero_u64")]
     pub bake_stamp: u64,
+    /// Modèle haute définition dont la cuisson reporte les détails (chemin dans le coffre, vide si aucun).
+    /// Une retopologie appliquée y note le maillage qu'elle remplace.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub high: String,
 }
 
 fn is_false(v: &bool) -> bool {
@@ -158,7 +162,7 @@ fn margin_default() -> f32 {
 
 impl EditData {
     pub fn fresh(t: &Topo) -> EditData {
-        EditData { polys: t.polys.len(), face_mat: vec![0; t.polys.len()], slots: vec![Slot { name: "matériau 1".into(), color: PALETTE[0], material: String::new() }], seams: BTreeSet::new(), uv: vec![], chart: vec![], texture_px: 2048, margin_px: 8.0, guides: vec![], density: vec![], pins: BTreeSet::new(), auto_bake: false, bake_stamp: 0 }
+        EditData { polys: t.polys.len(), face_mat: vec![0; t.polys.len()], slots: vec![Slot { name: "matériau 1".into(), color: PALETTE[0], material: String::new() }], seams: BTreeSet::new(), uv: vec![], chart: vec![], texture_px: 2048, margin_px: 8.0, guides: vec![], density: vec![], pins: BTreeSet::new(), auto_bake: false, bake_stamp: 0, high: String::new() }
     }
 
     pub fn fits(&self, t: &Topo) -> bool {
@@ -1202,9 +1206,159 @@ pub fn bake_to(topo: &Topo, data: &EditData, size: u32, rays_in: u32, progs: &[O
     Ok(out)
 }
 
+/// Reporte les IDs de matériau d'un maillage sur un autre de même forme (une retopologie) : chaque face
+/// reçoit l'ID de la face d'origine la plus proche de son centre. Les UV ne suivent pas : les faces ne
+/// sont plus les mêmes, il faut redéplier. `to_src` place un point du nouveau maillage dans l'espace de l'ancien.
+pub fn transfer_ids(src: &Topo, src_data: &EditData, dst: &Topo, to_src: &dyn Fn(V3) -> V3) -> EditData {
+    let mut out = EditData::fresh(dst);
+    out.slots = src_data.slots.clone();
+    out.texture_px = src_data.texture_px;
+    out.margin_px = src_data.margin_px;
+    if out.slots.is_empty() {
+        out.slots = EditData::fresh(dst).slots;
+    }
+    if src_data.slots.len() < 2 || src_data.face_mat.len() != src.polys.len() || src.polys.is_empty() {
+        return out;
+    }
+    // Triangles de l'ancien maillage, chacun avec sa face
+    let (mut tris, mut owner): (Vec<[u32; 3]>, Vec<u32>) = (vec![], vec![]);
+    for (f, p) in src.polys.iter().enumerate() {
+        for tr in poly_tris(&src.pos, p) {
+            tris.push([p[tr[0]], p[tr[1]], p[tr[2]]]);
+            owner.push(f as u32);
+        }
+    }
+    if tris.is_empty() {
+        return out;
+    }
+    let bvh = crate::bvh::Bvh::new(&src.pos, &tris);
+    let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
+    for q in &src.pos {
+        for k in 0..3 {
+            lo[k] = lo[k].min(q[k]);
+            hi[k] = hi[k].max(q[k]);
+        }
+    }
+    let reach = ((hi[0] - lo[0]).powi(2) + (hi[1] - lo[1]).powi(2) + (hi[2] - lo[2]).powi(2)).sqrt().max(1e-9) * 0.08;
+    let centers: Vec<V3> = src.polys.iter().map(|p| { let n = p.len().max(1) as f32; let mut c = [0.0f32; 3]; for &v in p { for k in 0..3 { c[k] += src.pos[v as usize][k] / n; } } c }).collect();
+    for (f, p) in dst.polys.iter().enumerate() {
+        if p.len() < 3 {
+            continue;
+        }
+        let q: Vec<V3> = p.iter().map(|&v| to_src(dst.pos[v as usize])).collect();
+        let n = q.len() as f32;
+        let c = [q.iter().map(|v| v[0]).sum::<f32>() / n, q.iter().map(|v| v[1]).sum::<f32>() / n, q.iter().map(|v| v[2]).sum::<f32>() / n];
+        // Normale de la face (somme des produits vectoriels autour du polygone)
+        let mut nm = [0.0f32; 3];
+        for i in 0..q.len() {
+            let (a, b) = (q[i], q[(i + 1) % q.len()]);
+            nm[0] += (a[1] - b[1]) * (a[2] + b[2]);
+            nm[1] += (a[2] - b[2]) * (a[0] + b[0]);
+            nm[2] += (a[0] - b[0]) * (a[1] + b[1]);
+        }
+        let l = (nm[0] * nm[0] + nm[1] * nm[1] + nm[2] * nm[2]).sqrt();
+        let mut best: Option<(f32, u32)> = None;
+        if l > 1e-12 {
+            let nm = [nm[0] / l, nm[1] / l, nm[2] / l];
+            // Un rayon de part et d'autre de la face : la surface d'origine est juste dessous ou juste dessus
+            for s in [1.0f32, -1.0] {
+                let d = [nm[0] * s, nm[1] * s, nm[2] * s];
+                if let Some(h) = bvh.closest(c, d, 0.0, reach) {
+                    if best.is_none_or(|b| h.t < b.0) {
+                        best = Some((h.t, owner[h.tri as usize]));
+                    }
+                }
+            }
+        }
+        let from = match best {
+            Some((_, f)) => f as usize,
+            // Rien sous la face : la face d'origine au centre le plus proche
+            None => centers.iter().enumerate().min_by(|a, b| { let d = |x: &V3| (x[0] - c[0]).powi(2) + (x[1] - c[1]).powi(2) + (x[2] - c[2]).powi(2); d(a.1).total_cmp(&d(b.1)) }).map(|x| x.0).unwrap_or(0),
+        };
+        out.face_mat[f] = src_data.face_mat[from].min(out.slots.len().saturating_sub(1) as u16);
+    }
+    out
+}
+
+/// Les matériaux des IDs, compilés pour la cuisson : un par ID, rien pour un ID sans matériau ou
+/// dont le fichier ne se lit pas. `root` : le coffre (les calques liés à un maître y sont cherchés).
+pub fn slot_programs(data: &EditData, root: &str) -> Vec<Option<std::sync::Arc<crate::nodes::Program>>> {
+    data.slots
+        .iter()
+        .map(|s| {
+            if s.material.is_empty() {
+                return None;
+            }
+            let g = crate::nodes::Graph::load(std::path::Path::new(&s.material)).ok()?;
+            crate::nodes::Program::compile(&g, root, 1024).ok().map(std::sync::Arc::new)
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn arymat_du_coffre_sur_un_id() {
+        // Un coffre avec un maître vert et un matériau à calques : le maître dessous, un calque bleu dessus
+        let root = std::env::temp_dir().join(format!("aryadne-id-arymat-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("nodes")).unwrap();
+        let rs = root.to_string_lossy().to_string();
+        crate::atelier::fill_graph([0.0, 1.0, 0.0]).save(&root.join("nodes/vert.arymat")).unwrap();
+        let stacked = |top: Option<[f32; 3]>| {
+            let mut layers = vec![crate::atelier::Layer::linked("vert", "nodes/vert.arymat")];
+            if let Some(c) = top {
+                layers.push(crate::atelier::Layer::own("dessus", crate::atelier::fill_graph(c)));
+            }
+            crate::nodes::Graph { stack: Some(crate::atelier::Stack { layers }), ..crate::nodes::Graph::empty(crate::nodes::GraphKind::Material) }
+        };
+        let (bleu, lie) = (root.join("nodes/bleu.arymat"), root.join("nodes/lié.arymat"));
+        stacked(Some([0.0, 0.0, 1.0])).save(&bleu).unwrap();
+        stacked(None).save(&lie).unwrap();
+        // Un cube déplié, deux IDs
+        let t = cube();
+        let n = t.polys.len();
+        let file = root.join(".app/meshdata/cube.json");
+        let mut e = Edit { topo: t, ..Edit::open(&crate::modifiers::Mesh { pos: vec![], tris: vec![], colors: vec![], edges: vec![] }, file.clone(), 1.0) };
+        e.data = EditData::fresh(&e.topo);
+        e.auto_now(true);
+        e.data.slots.push(Slot { name: "second".into(), color: [200, 30, 30], material: String::new() });
+        e.data.face_mat = (0..n).map(|f| (f % 2) as u16).collect();
+        // Ni un ID absent, ni un fichier qui n'est pas un matériau
+        assert!(!e.assign_material(5, &bleu));
+        std::fs::write(root.join("note.md"), "x").unwrap();
+        assert!(!e.assign_material(0, &root.join("note.md")));
+        assert!(!e.assign_material(0, &root.join("nodes/absent.arymat")));
+        assert!(e.data.slots[0].material.is_empty());
+        assert!(e.assign_material(0, &bleu) && e.assign_material(1, &lie));
+        // L'assignation est enregistrée à côté du modèle : elle se relit
+        let back: EditData = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        assert_eq!(back.slots[0].material, bleu.to_string_lossy());
+        assert_eq!(back.slots[1].material, lie.to_string_lossy());
+        // La cuisson lit ces matériaux : bleu sur l'ID 0 (le calque du dessus), vert du maître sur l'ID 1
+        let progs = slot_programs(&back, &rs);
+        assert!(progs.len() == 2 && progs.iter().all(|p| p.is_some()));
+        e.bake_size = 64;
+        e.bake_rays = 0;
+        let files = e.bake(&progs, &root.join("textures"), "cube", None).unwrap();
+        let col = image::open(files.iter().find(|f| f.to_string_lossy().ends_with("cube_couleur.png")).unwrap()).unwrap().to_rgb8();
+        let (mut blue, mut green, mut other) = (0, 0, 0);
+        for px in col.pixels() {
+            match px.0 {
+                [r, g, b] if r < 8 && g < 8 && b > 247 => blue += 1,
+                [r, g, b] if r < 8 && g > 247 && b < 8 => green += 1,
+                [128, 128, 128] => {}
+                _ => other += 1,
+            }
+        }
+        assert!(blue > 200 && green > 200 && other == 0, "bleu {blue}, vert {green}, autres {other}");
+        // Retirer le matériau : l'ID reprend sa couleur
+        e.data.slots[0].material.clear();
+        assert!(slot_programs(&e.data, &rs)[0].is_none());
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn udim_et_recuisson() {
@@ -2106,11 +2260,19 @@ pub struct Edit {
     pub retopo_job: Option<RetopoJob>,
     /// Demande à la vue d'exporter le résultat (elle connaît la transformation vers le monde)
     pub retopo_export: bool,
+    /// Demande à la vue de remplacer le maillage de l'objet par la retopologie (« Appliquer »)
+    pub retopo_apply: bool,
+    /// Le maillage que la dernière retopologie appliquée a remplacé (son nom), s'il est encore là
+    pub retopo_prev: Option<String>,
+    /// Demande à la vue de reprendre ce maillage d'avant
+    pub retopo_restore: bool,
     pub retopo_show: bool,
     /// Trait de guide en cours
     pub guide_now: Vec<V3>,
     /// ID dont on veut créer ou ouvrir le matériau en nodes (traité par la vue 3D)
     pub mat_request: Option<usize>,
+    /// Matériaux du coffre qu'un ID peut recevoir (nom, fichier) : la vue 3D les fournit
+    pub mat_files: Vec<(String, PathBuf)>,
     /// ID de matériau de chaque triangle affiché
     pub tri_mat: Vec<u16>,
     /// Demande de bake des textures (traitée par la vue 3D, qui connaît les matériaux)
@@ -2174,7 +2336,8 @@ impl Edit {
         let data = std::fs::read_to_string(&file).ok().and_then(|t| serde_json::from_str::<EditData>(&t).ok()).filter(|d| d.fits(&topo)).unwrap_or_else(|| EditData::fresh(&topo));
         let n = topo.polys.len();
         let checker = data.has_uv();
-        Edit { topo, data, sel: BTreeSet::new(), tool: Tool::Faces, tab: 0, version: 1, seam_angle: 45.0, smart_angle: 66.0, min_faces: (n / 400).clamp(4, 300), optimize: true, rotate: true, density_target: 1024.0, file, scale, message: None, owner: vec![], checker, auto: AutoOptions::default(), retopo_opt: crate::retopo::Options { faces: (n * 2).clamp(200, 8000) / 100 * 100, ..Default::default() }, retopo: None, retopo_job: None, retopo_export: false, retopo_show: true, guide_now: vec![], mat_request: None, tri_mat: vec![], bake_request: false, bake_size: 1024, bake_rays: 24, bake_high: String::new(), bake_job: None, bake_seen: None, udim_count: 0, pending: Default::default(), tools: tools::State::new(), last: None, undo: vec![], redo: vec![] }
+        let high = data.high.clone();
+        Edit { topo, data, sel: BTreeSet::new(), tool: Tool::Faces, tab: 0, version: 1, seam_angle: 45.0, smart_angle: 66.0, min_faces: (n / 400).clamp(4, 300), optimize: true, rotate: true, density_target: 1024.0, file, scale, message: None, owner: vec![], checker, auto: AutoOptions::default(), retopo_opt: crate::retopo::Options { faces: (n * 2).clamp(200, 8000) / 100 * 100, ..Default::default() }, retopo: None, retopo_job: None, retopo_export: false, retopo_apply: false, retopo_prev: None, retopo_restore: false, retopo_show: true, guide_now: vec![], mat_request: None, mat_files: vec![], tri_mat: vec![], bake_request: false, bake_size: 1024, bake_rays: 24, bake_high: high, bake_job: None, bake_seen: None, udim_count: 0, pending: Default::default(), tools: tools::State::new(), last: None, undo: vec![], redo: vec![] }
     }
 
     pub fn save(&self) {
@@ -2192,6 +2355,21 @@ impl Edit {
     fn changed(&mut self) {
         self.version += 1;
         self.save();
+    }
+
+    /// Donne à l'ID `k` un matériau qui existe déjà dans le coffre (un .arymat, à calques ou en nodes).
+    /// La cuisson et la vue le lisent comme un matériau créé par « ＋ nodes ». Faux si l'ID n'existe pas
+    /// ou si le fichier n'est pas un matériau lisible.
+    pub fn assign_material(&mut self, k: usize, file: &std::path::Path) -> bool {
+        if k >= self.data.slots.len() || !crate::formats::has(&file.to_string_lossy(), "mat") {
+            return false;
+        }
+        if !crate::nodes::Graph::load(file).is_ok_and(|g| g.kind == crate::nodes::GraphKind::Material) {
+            return false;
+        }
+        self.data.slots[k].material = file.to_string_lossy().to_string();
+        self.changed();
+        true
     }
 
     /// Maillage d'affichage : couleur du matériau de chaque face, sélection en surbrillance.
@@ -2339,6 +2517,8 @@ impl Edit {
         let mut remove = None;
         let counts: Vec<usize> = (0..self.data.slots.len()).map(|k| self.data.face_mat.iter().filter(|&&m| m as usize == k).count()).collect();
         let mut mat_req = None;
+        let mut pick: Option<(usize, PathBuf)> = None;
+        let files = std::mem::take(&mut self.mat_files);
         for (k, s) in self.data.slots.iter_mut().enumerate() {
             ui.horizontal(|ui| {
                 let mut c = Color32::from_rgb(s.color[0], s.color[1], s.color[2]);
@@ -2362,6 +2542,22 @@ impl Edit {
                 if ui.small_button(crate::i18n::t(if has { "nodes ✎" } else { "＋ nodes" })).on_hover_text(crate::i18n::t(if has { "ouvrir le matériau en nodes de cet ID" } else { "créer un matériau en nodes pour cet ID et l'ouvrir" })).clicked() {
                     mat_req = Some(k);
                 }
+                // Un matériau qui existe déjà dans le coffre : la liste des .arymat
+                if !files.is_empty() {
+                    egui::containers::menu::MenuButton::from_button(egui::Button::new(RichText::new(crate::lucide::FOLDER_OPEN).size(13.0)).min_size(egui::vec2(24.0, 18.0))).ui(ui, |ui| {
+                        ui.set_min_width(220.0);
+                        ui.label(RichText::new(crate::i18n::t("matériaux du coffre")).color(p.muted).size(11.0));
+                        egui::ScrollArea::vertical().max_height(260.0).show(ui, |ui| {
+                            for (name, path) in files.iter() {
+                                let on = std::path::Path::new(&s.material) == path.as_path();
+                                if ui.selectable_label(on, name).on_hover_text(path.to_string_lossy()).clicked() {
+                                    pick = Some((k, path.clone()));
+                                    ui.close();
+                                }
+                            }
+                        });
+                    }).0.on_hover_text(crate::i18n::t("Choisir un matériau du coffre (.arymat) pour cet ID : la cuisson le lira"));
+                }
                 if has && ui.small_button("⌫").on_hover_text(crate::i18n::t("retirer le matériau en nodes")).clicked() {
                     s.material.clear();
                     assign = Some(usize::MAX);
@@ -2370,6 +2566,20 @@ impl Edit {
                     remove = Some(k);
                 }
             });
+            if !s.material.is_empty() {
+                // Le matériau que porte l'ID : c'est lui que la cuisson lira
+                ui.horizontal(|ui| {
+                    ui.add_space(30.0);
+                    let name = std::path::Path::new(&s.material).file_name().map(|n| crate::formats::strip(&n.to_string_lossy()).to_string()).unwrap_or_default();
+                    ui.add(egui::Label::new(RichText::new(format!("{}  {name}", crate::lucide::LINK)).size(10.5).color(p.muted)).truncate()).on_hover_text(&s.material);
+                });
+            }
+        }
+        // Le matériau porté par l'ID, sous sa ligne
+        self.mat_files = files;
+        if let Some((k, path)) = pick {
+            let name = path.file_name().map(|n| crate::formats::strip(&n.to_string_lossy()).to_string()).unwrap_or_default();
+            self.message = Some(if self.assign_material(k, &path) { format!("ID {k} : {name}") } else { crate::i18n::t("matériau illisible") });
         }
         if mat_req.is_some() {
             self.mat_request = mat_req;
@@ -2691,11 +2901,26 @@ impl Edit {
         if let Some(r) = &self.retopo {
             ui.add_space(6.0);
             ui.label(RichText::new(format!("{} quads · {} pôles · {} sommets", r.quads(), r.stats.poles, r.pos.len())).color(p.muted).size(11.0));
+            ui.add_space(2.0);
             ui.horizontal(|ui| {
-                ui.checkbox(&mut self.retopo_show, crate::i18n::t("afficher"));
-                if ui.button(format!("{}  {}", crate::lucide::DOWNLOAD, crate::i18n::t("exporter en OBJ"))).clicked() {
+                ui.spacing_mut().item_spacing.x = 8.0;
+                if ui.add(egui::Button::new(RichText::new(format!("{}  {}", crate::lucide::CHECK, crate::i18n::t("appliquer"))).strong().color(p.on_accent)).fill(p.accent).corner_radius(8).min_size(egui::vec2(0.0, 26.0))).on_hover_text(crate::i18n::t("Remplace le maillage de l'objet par cette retopologie. L'ancien maillage est gardé : Ctrl+Z dans la scène, ou la flèche de retour ici, le reprend. Les IDs de matériau suivent ; les UV sont à redéplier, et la cuisson reportera les détails de l'ancien maillage.")).clicked() {
+                    self.retopo_apply = true;
+                }
+                if ui.add(egui::Button::new(RichText::new(crate::lucide::DOWNLOAD).size(14.0)).min_size(egui::vec2(28.0, 26.0)).corner_radius(8)).on_hover_text(crate::i18n::t("Exporter en OBJ : écrit la retopologie dans un fichier à côté, sans toucher à l'objet")).clicked() {
                     self.retopo_export = true;
                 }
+                ui.checkbox(&mut self.retopo_show, crate::i18n::t("afficher"));
+            });
+        }
+        if let Some(prev) = self.retopo_prev.clone() {
+            // Le maillage d'avant la dernière retopologie appliquée est toujours là
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                if ui.add(egui::Button::new(RichText::new(crate::lucide::UNDO_2).size(14.0)).min_size(egui::vec2(28.0, 24.0)).corner_radius(8)).on_hover_text(crate::i18n::t("Reprendre le maillage d'avant la retopologie. Celui-ci est gardé à son tour : le même bouton y revient.")).clicked() {
+                    self.retopo_restore = true;
+                }
+                ui.add(egui::Label::new(RichText::new(format!("{} : {prev}", crate::i18n::t("maillage d'avant"))).size(10.5).color(p.muted)).truncate());
             });
         }
     }
@@ -2792,7 +3017,11 @@ impl Edit {
         let p = crate::theme::pal();
         ui.horizontal(|ui| {
             ui.label(RichText::new(crate::i18n::t("haute définition")).size(11.0).color(p.muted));
-            ui.add(egui::TextEdit::singleline(&mut self.bake_high).hint_text(crate::i18n::t("chemin du sculpt (facultatif)")).desired_width(220.0)).on_hover_text(crate::i18n::t("Les détails de ce modèle sont reportés dans une normale en espace tangent. Il doit occuper la même place que le modèle ouvert."));
+            if ui.add(egui::TextEdit::singleline(&mut self.bake_high).hint_text(crate::i18n::t("chemin du sculpt (facultatif)")).desired_width(220.0)).on_hover_text(crate::i18n::t("Les détails de ce modèle sont reportés dans une normale en espace tangent. Il doit occuper la même place que le modèle ouvert.")).changed() {
+                // Gardé avec le modèle : la prochaine ouverture le retrouve
+                self.data.high = self.bake_high.trim().to_string();
+                self.write();
+            }
         });
         ui.horizontal(|ui| {
             if ui.add_enabled(self.data.has_uv(), egui::Button::new(crate::i18n::t("baker les textures"))).on_hover_text(crate::i18n::t("Écrit couleur, rugosité, métal, normale et courbure dans le dossier textures/, à partir des UV et des matériaux de chaque ID")).clicked() {

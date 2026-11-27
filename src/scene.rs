@@ -56,6 +56,10 @@ pub struct Object {
     /// Matériau en nodes de l'objet : chemin dans le coffre (vide = aucun)
     #[serde(default)]
     pub material: String,
+    /// Le maillage qu'une retopologie appliquée a remplacé (même forme de chemin que `file`), gardé
+    /// pour pouvoir le reprendre. Vide : rien à reprendre.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub mesh_before: String,
     /// Peinture sur l'objet (texture PNG sur ses UV, chemin dans le coffre ; vide = aucune)
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub paint: String,
@@ -549,7 +553,7 @@ impl Object {
     }
 
     pub fn new(name: String, file: String) -> Object {
-        Object { name, file, pos: [0.0; 3], rot: [0.0; 3], scale: [1.0; 3], visible: true, color: None, mods: vec![], material: String::new(), paint: String::new(), parent: String::new(), opacity: 0.5, role: String::new(), energy: 1.2, point: false, range: 8.0, shape: 0, spot: spot_deg(), blend: spot_blend(), size: area_size(), keys: vec![], cycle: Default::default(), aim: String::new(), length: 1.0, rest: None, skin: String::new(), ik: String::new(), ik_chain: 2, reach: 1.0, morphs: vec![], copy_loc: String::new(), copy_rot: String::new(), limit: None, layer_keys: vec![], fov: 0.0, paint_layers: vec![], sim_offset: 0 }
+        Object { name, file, pos: [0.0; 3], rot: [0.0; 3], scale: [1.0; 3], visible: true, color: None, mods: vec![], material: String::new(), mesh_before: String::new(), paint: String::new(), parent: String::new(), opacity: 0.5, role: String::new(), energy: 1.2, point: false, range: 8.0, shape: 0, spot: spot_deg(), blend: spot_blend(), size: area_size(), keys: vec![], cycle: Default::default(), aim: String::new(), length: 1.0, rest: None, skin: String::new(), ik: String::new(), ik_chain: 2, reach: 1.0, morphs: vec![], copy_loc: String::new(), copy_rot: String::new(), limit: None, layer_keys: vec![], fov: 0.0, paint_layers: vec![], sim_offset: 0 }
     }
 }
 
@@ -918,6 +922,28 @@ impl Scene {
             return None;
         }
         self.objects.iter().position(|o| &o.name == p).filter(|&i| i != k)
+    }
+
+    /// Retopologie appliquée : le maillage de l'objet `k` devient `file`. L'ancien n'est pas effacé :
+    /// son chemin reste noté dans l'objet, et `restore_mesh` le reprend.
+    pub fn replace_mesh(&mut self, k: usize, file: String) -> bool {
+        let Some(o) = self.objects.get_mut(k) else { return false };
+        if file.is_empty() || o.file == file {
+            return false;
+        }
+        o.mesh_before = std::mem::replace(&mut o.file, file);
+        true
+    }
+
+    /// Reprend le maillage d'avant la retopologie. Celui qu'on quitte est gardé à son tour : un
+    /// second appel y revient.
+    pub fn restore_mesh(&mut self, k: usize) -> bool {
+        let Some(o) = self.objects.get_mut(k) else { return false };
+        if o.mesh_before.is_empty() {
+            return false;
+        }
+        std::mem::swap(&mut o.file, &mut o.mesh_before);
+        true
     }
 
     /// Fait passer un point de l'espace du parent de `k` à celui de la scène.

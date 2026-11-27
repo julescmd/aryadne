@@ -3626,8 +3626,91 @@ pub struct Viewer {
     start_edit: bool,
     /// Demande d'ouvrir les UV, matériaux et retopo de l'objet choisi (scène)
     uv_request: bool,
+    /// Demande faite à la scène par la visionneuse de son objet : changer le maillage de cet objet
+    pub mesh_request: Option<MeshRequest>,
+    /// Le maillage que la dernière retopologie appliquée a remplacé (son nom), donné par la scène
+    mesh_before: Option<String>,
     /// Scène à ouvrir dans un onglet (« ouvrir dans une scène » depuis la visionneuse)
     pub scene_request: Option<std::path::PathBuf>,
+}
+
+/// Ce que la visionneuse d'un objet demande à sa scène
+pub enum MeshRequest {
+    /// Retopologie appliquée : ce fichier devient le maillage de l'objet
+    Apply(std::path::PathBuf),
+    /// Reprendre le maillage d'avant la retopologie
+    Restore,
+}
+
+/// Nom du fichier de données d'un modèle dans `.app/` (modificateurs, UV et IDs) : tiré de son chemin
+fn path_key(path: &Path) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    path.hash(&mut h);
+    format!("{:016x}.json", h.finish())
+}
+
+/// Où sont gardés les UV, IDs de matériau et guides d'un modèle
+pub fn meshdata_file(root: &str, path: &Path) -> std::path::PathBuf {
+    Path::new(root).join(".app/meshdata").join(path_key(path))
+}
+
+/// Le fichier d'une retopologie appliquée, à côté de l'ancien maillage : « nom retopo.obj », puis
+/// « nom retopo 2.obj »… Un fichier qui existe n'est jamais écrasé : chaque ancien maillage reste récupérable.
+pub fn retopo_file(old: &Path) -> std::path::PathBuf {
+    let stem = old.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "modele".into());
+    // « nom retopo » ou « nom retopo 3 » : on repart de « nom »
+    let base = match stem.rfind(" retopo") {
+        Some(i) if stem[i + 7..].trim().is_empty() || stem[i + 7..].trim().parse::<u32>().is_ok() => stem[..i].to_string(),
+        _ => stem,
+    };
+    let mut out = old.with_file_name(format!("{base} retopo.obj"));
+    let mut n = 2;
+    while out.exists() {
+        out = old.with_file_name(format!("{base} retopo {n}.obj"));
+        n += 1;
+    }
+    out
+}
+
+/// « Appliquer » une retopologie : l'écrit dans un fichier neuf à côté de `old` (qui n'est pas touché)
+/// et prépare ses données : les IDs de matériau de l'ancien maillage y sont reportés, et l'ancien
+/// maillage y est noté comme modèle haute définition, pour que la cuisson reporte ses détails.
+/// `src`, `src_data` : l'ancien maillage tel que l'édition le voit (espace ramené à 1) ; `model`,
+/// `z_up` : le modèle d'où il vient. Rend le fichier écrit : à la scène d'en faire le maillage de l'objet.
+pub fn apply_retopo(r: &crate::retopo::Result, src: &crate::uvedit::Topo, src_data: &crate::uvedit::EditData, model: &Model, z_up: bool, old: &Path, root: &str) -> Result<std::path::PathBuf, String> {
+    if r.faces.is_empty() {
+        return Err(crate::i18n::t("la retopologie est vide"));
+    }
+    let s = model.size();
+    let longest = s[0].max(s[1]).max(s[2]).max(1e-9);
+    let c = [(model.min[0] + model.max[0]) / 2.0, (model.min[1] + model.max[1]) / 2.0, (model.min[2] + model.max[2]) / 2.0];
+    let world = move |p: V3| -> V3 {
+        let o = if z_up { [p[0], -p[2], p[1]] } else { p };
+        [o[0] * longest + c[0], o[1] * longest + c[1], o[2] * longest + c[2]]
+    };
+    let out = retopo_file(old);
+    crate::retopo::export_obj(r, &world, &out)?;
+    // Le nouveau maillage tel qu'il se rouvrira, et le chemin de ses points vers l'espace de l'ancien
+    let m2 = load(&out)?;
+    let s2 = m2.size();
+    let l2 = s2[0].max(s2[1]).max(s2[2]).max(1e-9);
+    let c2 = [(m2.min[0] + m2.max[0]) / 2.0, (m2.min[1] + m2.max[1]) / 2.0, (m2.min[2] + m2.max[2]) / 2.0];
+    let dst = crate::uvedit::Topo::new(&m2.normalized(false), &m2.tris, &m2.edges);
+    let to_src = move |p: V3| -> V3 {
+        let f = [(p[0] * l2 + c2[0] - c[0]) / longest, (p[1] * l2 + c2[1] - c[1]) / longest, (p[2] * l2 + c2[2] - c[2]) / longest];
+        if z_up { [f[0], f[2], -f[1]] } else { f }
+    };
+    let mut data = crate::uvedit::transfer_ids(src, src_data, &dst, &to_src);
+    data.high = old.strip_prefix(root).ok().filter(|_| !root.is_empty()).map(|p| p.to_string_lossy().replace('\\', "/")).unwrap_or_else(|| old.to_string_lossy().to_string());
+    if !root.is_empty() {
+        let f = meshdata_file(root, &out);
+        if let Some(d) = f.parent() {
+            let _ = std::fs::create_dir_all(d);
+        }
+        crate::vault::atomic_write(&f, serde_json::to_string(&data).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+    }
+    Ok(out)
 }
 
 impl Viewer {
@@ -3851,6 +3934,8 @@ impl Viewer {
             sub: None,
             start_edit: false,
             uv_request: false,
+            mesh_request: None,
+            mesh_before: None,
             scene_request: None,
         }
     }
@@ -4394,10 +4479,7 @@ impl Viewer {
     }
 
     fn mods_file(&self) -> std::path::PathBuf {
-        use std::hash::{Hash, Hasher};
-        let mut h = std::collections::hash_map::DefaultHasher::new();
-        self.path.hash(&mut h);
-        std::path::Path::new(&self.root).join(".app/modifiers").join(format!("{:016x}.json", h.finish()))
+        std::path::Path::new(&self.root).join(".app/modifiers").join(path_key(&self.path))
     }
 
     /// Tour complet du modèle en GIF animé (48 images, 520 px).
@@ -4539,6 +4621,8 @@ impl Viewer {
                 v.hdr_files = self.hdr_files.clone();
                 v.mat_files = self.mat_files.clone();
                 v.look = self.look.clone();
+                // Le maillage d'avant une retopologie appliquée, s'il est encore sur le disque
+                v.mesh_before = self.scene.as_ref().and_then(|s| s.objects.get(k)).map(|o| o.mesh_before.clone()).filter(|b| !b.is_empty() && crate::scene::resolve(&self.path, b).exists());
                 self.sub = Some((Box::new(v), k));
                 self.capture_msg = None;
             }
@@ -8907,6 +8991,37 @@ impl Viewer {
                     self.open_request = Some(f);
                 }
             }
+            // Retopologie appliquée ou reprise : l'objet change de maillage, en une étape que Ctrl+Z annule
+            // (la scène n'est pas rechargée : son historique reste)
+            if let Some(req) = sub.mesh_request.take() {
+                let dir = self.path.parent().unwrap_or(std::path::Path::new("")).to_path_buf();
+                let mut done = false;
+                if let Some(scene) = self.scene.as_mut() {
+                    match req {
+                        MeshRequest::Apply(f) => {
+                            let rel = f.strip_prefix(&dir).map(|p| p.to_string_lossy().replace('\\', "/")).unwrap_or_else(|_| f.to_string_lossy().to_string());
+                            if scene.replace_mesh(k, rel) {
+                                self.capture_msg = Some(crate::i18n::t("Retopologie appliquée. Ctrl+Z reprend l'ancien maillage"));
+                                done = true;
+                            }
+                        }
+                        MeshRequest::Restore => {
+                            if scene.restore_mesh(k) {
+                                self.capture_msg = Some(crate::i18n::t("Maillage d'avant la retopologie repris. Ctrl+Z y revient"));
+                                done = true;
+                            }
+                        }
+                    }
+                    if done {
+                        let _ = scene.write(&self.path);
+                    }
+                }
+                if done {
+                    self.sub = None;
+                    self.scene_dirty = true;
+                    return;
+                }
+            }
             if back {
                 self.sub = None;
                 // L'objet a pu changer (retopo, maillage) : la scène se recharge
@@ -9104,6 +9219,10 @@ impl Viewer {
         }
         // Matériaux en nodes des IDs : créés à la demande, rechargés dès que leur fichier change
         if let Some(e) = &mut self.edit {
+            // Les matériaux du coffre qu'un ID peut recevoir
+            if e.mat_files.len() != self.mat_files.len() {
+                e.mat_files = self.mat_files.clone();
+            }
             if let Some(k) = e.mat_request.take() {
                 if e.data.slots.get(k).is_some_and(|s| s.material.is_empty()) && !self.root.is_empty() {
                     let dir = std::path::Path::new(&self.root).join("nodes");
@@ -9152,8 +9271,23 @@ impl Viewer {
                     let raw = std::path::PathBuf::from(e.bake_high.trim());
                     if raw.is_absolute() { raw } else { std::path::Path::new(&self.root).join(raw) }
                 });
+                // Le modèle ouvert, dans son fichier : centre et plus grand côté
+                let (low_c, low_l) = {
+                    let s = model.size();
+                    ([(model.min[0] + model.max[0]) / 2.0, (model.min[1] + model.max[1]) / 2.0, (model.min[2] + model.max[2]) / 2.0], s[0].max(s[1]).max(s[2]).max(1e-9))
+                };
                 let high = move || {
                     let m = load(&high_path?).ok()?;
+                    let s = m.size();
+                    let (hc, hl) = ([(m.min[0] + m.max[0]) / 2.0, (m.min[1] + m.max[1]) / 2.0, (m.min[2] + m.max[2]) / 2.0], s[0].max(s[1]).max(s[2]).max(1e-9));
+                    // Les deux modèles occupent la même place dans leurs fichiers (un sculpt et sa retopologie) :
+                    // le sculpt est ramené à 1 avec la mesure du modèle ouvert, pour retomber exactement dessus.
+                    // Sinon (autre taille, autre origine), chacun est ramené à 1 pour lui-même, comme avant.
+                    let near = (0..3).all(|k| (hc[k] - low_c[k]).abs() < low_l * 0.1) && (hl / low_l - 1.0).abs() < 0.1;
+                    if near {
+                        let pos = m.positions.iter().map(|v| { let v = [(v[0] - low_c[0]) / low_l, (v[1] - low_c[1]) / low_l, (v[2] - low_c[2]) / low_l]; if z_up { [v[0], v[2], -v[1]] } else { v } }).collect();
+                        return Some((pos, m.tris.clone()));
+                    }
                     let mesh = crate::modifiers::Mesh::from_model(&m, z_up);
                     Some((mesh.pos, mesh.tris))
                 };
@@ -9827,6 +9961,28 @@ impl Viewer {
                         }
                         Err(e) => format!("export impossible : {e}"),
                     });
+                }
+            }
+        }
+        // Retopologie : « Appliquer » écrit le nouveau maillage et demande à la scène de le prendre ;
+        // la flèche de retour lui demande de reprendre celui d'avant
+        if let (Some(e), Some(model)) = (&mut self.edit, Some(&*model)) {
+            if e.retopo_prev != self.mesh_before {
+                e.retopo_prev = self.mesh_before.clone();
+            }
+            if std::mem::take(&mut e.retopo_restore) {
+                self.mesh_request = Some(MeshRequest::Restore);
+            }
+            if std::mem::take(&mut e.retopo_apply) {
+                if let Some(r) = e.retopo.clone() {
+                    if !self.embedded {
+                        e.message = Some(crate::i18n::t("Place le modèle dans une scène pour appliquer la retopologie à son objet."));
+                    } else {
+                        match apply_retopo(&r, &e.topo, &e.data, model, z_up, &self.path, &self.root) {
+                            Ok(out) => self.mesh_request = Some(MeshRequest::Apply(out)),
+                            Err(err) => e.message = Some(format!("{} : {err}", crate::i18n::t("retopologie non appliquée"))),
+                        }
+                    }
                 }
             }
         }
