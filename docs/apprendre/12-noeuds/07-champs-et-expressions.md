@@ -94,6 +94,8 @@ verifier: lecture.image >= 30
 Change la formule : `if(z > 0, sin(x * 6 + a * 0.2) * 0.2, 0)`
 ```
 
+![Le node Expression avec la formule if(z > 0, …) : seule la moitié avant de la grille ondule, l'autre reste plate](images/node-expression.png)
+
 Une moitié de la grille ondule, l'autre reste plate. `if` prend une condition, la valeur si elle est vraie, la valeur sinon.
 
 ## Les fonctions

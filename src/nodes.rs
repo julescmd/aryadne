@@ -964,7 +964,7 @@ fn lex(s: &str) -> Result<Vec<Tok<'_>>, String> {
             out.push(Tok::Op(c));
             i += 1;
         } else {
-            return Err(format!("caractère inattendu « {c} »"));
+            return Err(format!("{} « {c} »", crate::i18n::t_mid("caractère inattendu")));
         }
     }
     Ok(out)
@@ -988,7 +988,7 @@ impl<'a> Parser<'a> {
                 self.i += 1;
                 let e = self.expr(0)?;
                 if self.peek() != Some(Tok::Op(')')) {
-                    return Err("« ) » manquante".into());
+                    return Err(crate::i18n::t_mid("« ) » manquante"));
                 }
                 self.i += 1;
                 e
@@ -1004,7 +1004,7 @@ impl<'a> Parser<'a> {
                             match self.peek() {
                                 Some(Tok::Op(',')) => self.i += 1,
                                 Some(Tok::Op(')')) => break,
-                                _ => return Err(format!("« , » ou « ) » attendue dans {name}(…)")),
+                                _ => return Err(format!("{} {name}(…)", crate::i18n::t_mid("« , » ou « ) » attendue dans"))),
                             }
                         }
                     }
@@ -1035,18 +1035,20 @@ impl<'a> Parser<'a> {
                         "noise" => (Func::Noise, 3),
                         "fbm" => (Func::Fbm, 3),
                         "if" => (Func::If, 3),
-                        _ => return Err(format!("fonction inconnue : {name}")),
+                        _ => return Err(format!("{} {name}", crate::i18n::t_mid("fonction inconnue :"))),
                     };
                     if args.len() != n {
-                        return Err(format!("{name} attend {n} argument(s)"));
+                        return Err(format!("{name} : {n} {}", crate::i18n::t_mid("argument(s) attendu(s)")));
                     }
                     Expr::Call(func, args)
                 } else {
-                    let slot = self.names.iter().position(|n| n == name).ok_or(format!("variable inconnue : {name}"))?;
+                    let slot = self.names.iter().position(|n| n == name).ok_or(format!("{} {name}", crate::i18n::t_mid("variable inconnue :")))?;
                     Expr::Var(slot)
                 }
             }
-            t => return Err(format!("expression attendue, trouvé {t:?}")),
+            // Une formule coupée en route (« sin(x * ») : on le dit simplement, sans nom interne de jeton
+            None => return Err(crate::i18n::t_mid("la formule s'arrête trop tôt : il manque une valeur à la fin")),
+            Some(Tok::Op(c)) => return Err(format!("{} « {c} »", crate::i18n::t_mid("une valeur est attendue avant"))),
         };
         loop {
             let Some(Tok::Op(op)) = self.peek() else { break };
@@ -1080,15 +1082,15 @@ impl Shader {
         for (ln, raw) in code.lines().enumerate() {
             let line = raw.split("//").next().unwrap_or("").trim();
             for st in line.split(';').map(str::trim).filter(|s| !s.is_empty()) {
-                let toks = lex(st).map_err(|e| format!("ligne {} : {e}", ln + 1))?;
+                let toks = lex(st).map_err(|e| format!("{} {} : {e}", crate::i18n::t_mid("ligne"), ln + 1))?;
                 let (Some(Tok::Id(target)), Some(Tok::Op('='))) = (toks.first().copied(), toks.get(1).copied()) else {
-                    return Err(format!("ligne {} : il faut « nom = expression »", ln + 1));
+                    return Err(format!("{} {} : {}", crate::i18n::t_mid("ligne"), ln + 1, crate::i18n::t_mid("il faut « nom = expression »")));
                 };
                 let target = target.to_string();
                 let mut p = Parser { toks: toks[2..].to_vec(), i: 0, names: &mut names };
-                let e = p.expr(0).map_err(|e| format!("ligne {} : {e}", ln + 1))?;
+                let e = p.expr(0).map_err(|e| format!("{} {} : {e}", crate::i18n::t_mid("ligne"), ln + 1))?;
                 if p.i != p.toks.len() {
-                    return Err(format!("ligne {} : texte en trop après l'expression", ln + 1));
+                    return Err(format!("{} {} : {}", crate::i18n::t_mid("ligne"), ln + 1, crate::i18n::t_mid("texte en trop après l'expression")));
                 }
                 let slot = match names.iter().position(|n| *n == target) {
                     Some(s) => s,
@@ -4573,7 +4575,9 @@ impl Editor {
             if w > graph_rect.width() / MIN_ZOOM {
                 w = graph_rect.width() / MIN_ZOOM;
                 h = graph_rect.height() / MIN_ZOOM;
-                self.scene = Rect::from_min_size(bb.min, vec2(w, h));
+                // Un graphe large mais bas se centre en hauteur : ses nodes ne passent pas sous l'en-tête flottant
+                let y = if bb.height() + 2.0 * 56.0 / MIN_ZOOM < h { bb.center().y - h / 2.0 } else { bb.min.y - 56.0 / MIN_ZOOM };
+                self.scene = Rect::from_min_size(pos2(bb.min.x, y), vec2(w, h));
             } else {
                 self.scene = Rect::from_center_size(bb.center(), vec2(w, h));
             }
@@ -4967,6 +4971,8 @@ impl Editor {
                         }
                         NodeOp::Rename => {
                             let cur = self.graph.nodes.iter().find(|n| n.id == id).map(|n| n.label.clone()).unwrap_or_default();
+                            // Un groupe sans nom propre s'édite à partir du nom du groupe
+                            let cur = if cur.is_empty() { self.group_of(id).unwrap_or_default() } else { cur };
                             self.rename = Some((id, cur));
                         }
                         _ => {
@@ -5216,7 +5222,11 @@ impl Editor {
                         }
                     });
                     let w = ui.available_width() - if defaults && matches!(port.sock, Sock::Float | Sock::Int) { 86.0 } else { 30.0 };
-                    if ui.add(egui::TextEdit::singleline(&mut port.name).desired_width(w.max(40.0)).id_salt((salt, k))).changed() {
+                    // Un nom de prise fourni (« valeur », « échelle ») se montre traduit, comme sur le node ;
+                    // le modifier l'enregistre tel que tapé
+                    let mut shown = sock_label(&port.name);
+                    if ui.add(egui::TextEdit::singleline(&mut shown).desired_width(w.max(40.0)).id_salt((salt, k))).changed() {
+                        port.name = shown;
                         changed = true;
                     }
                     if defaults && matches!(port.sock, Sock::Float | Sock::Int) {
@@ -5397,7 +5407,8 @@ impl Editor {
             self.message = Some(crate::i18n::t("Ces deux prises ne vont pas ensemble : une géométrie ne se branche que sur une géométrie."));
             return;
         }
-        let named = |name: &str, other: &str| if name.is_empty() || name == VIRTUAL { if other.is_empty() || other == VIRTUAL { "valeur".to_string() } else { other.to_string() } } else { name.to_string() };
+        // La prise créée prend le nom affiché de celle qu'on vise : c'est ce que l'utilisateur lit, et il le renommera dans sa langue
+        let named = |name: &str, other: &str| sock_label(if name.is_empty() || name == VIRTUAL { if other.is_empty() || other == VIRTUAL { "valeur" } else { other } } else { name });
         let typed = |s: Sock, other: Sock| if s == Sock::Any { if other == Sock::Any { Sock::Float } else { other } } else { s };
         let (free_out, free_in) = (virtual_output(&a) == Some(out), virtual_input(&b) == Some(inp));
         if free_out && free_in {
@@ -5779,6 +5790,9 @@ impl Editor {
             // Un node à choix se nomme d'après son opération : on lit le graphe sans ouvrir les menus
             let title = if !label.is_empty() {
                 label.clone()
+            } else if d.op == "group" && !pstr(&self.graph.nodes[ni].params, "groupe").is_empty() {
+                // Un groupe porte son nom (« nuages »), pas le mot « Groupe »
+                pstr(&self.graph.nodes[ni].params, "groupe").to_string()
             } else if matches!(d.op, "math" | "vmath" | "compare" | "logic") {
                 match d.params.first().map(|pd| if let ParamDef::Choice(k, _) = pd { pstr(&self.graph.nodes[ni].params, k) } else { "" }) {
                     Some(o) if !o.is_empty() => crate::i18n::t(o),
@@ -5888,7 +5902,9 @@ impl Editor {
                 let sp = out_pos[&(*id, k)];
                 let free = *sock == Sock::Any && *name == crate::nodeflow::VIRTUAL;
                 if !is_collapsed {
-                    painter.text(pos2(r.right() - 12.0, sp.y), egui::Align2::RIGHT_CENTER, sock_label(name), egui::FontId::proportional(11.0), if free { p.muted } else { p.text });
+                    // « image » en nombre : le numéro d'image du node Temps (Frame), pas une image
+                    let label = if *name == "image" && *sock == Sock::Float { crate::i18n::t("image") } else { sock_label(name) };
+                    painter.text(pos2(r.right() - 12.0, sp.y), egui::Align2::RIGHT_CENTER, label, egui::FontId::proportional(11.0), if free { p.muted } else { p.text });
                 }
                 let hov = pointer.is_some_and(|pt| sp.distance(pt) < 9.0);
                 if free {
@@ -6323,8 +6339,15 @@ impl Editor {
         }
         self.geo = geo_view;
         if let Some((id, text)) = rename_done {
+            // F2 sur un groupe posé une seule fois : c'est le groupe qu'on nomme (menu Add, fil d'Ariane),
+            // pas seulement ce node. Posé plusieurs fois, chaque exemplaire garde son propre nom.
+            let group = self.group_of(id).filter(|name| crate::nodeflow::group_uses(&self.doc(), name) == 1);
+            let named = match group {
+                Some(old) => self.with_doc(|g| crate::nodeflow::group_rename(g, &old, &text)),
+                None => false,
+            };
             if let Some(n) = self.graph.nodes.iter_mut().find(|n| n.id == id) {
-                n.label = text.trim().to_string();
+                n.label = if named { String::new() } else { text.trim().to_string() };
             }
             self.rename = None;
             actions.push(Act::Changed);
@@ -7884,9 +7907,44 @@ fn choice_label(opts: &[&str], o: &str) -> String {
     }
 }
 
-/// Libellé d'une prise : « image » y est une image, pas une image de l'animation
+/// Libellé d'une prise : « image » y est une image, pas une image de l'animation.
+/// Une prise nommée par l'utilisateur (groupe, zone) s'affiche telle quelle : seuls les noms des
+/// nodes fournis se traduisent, sinon « taille » deviendrait « Scale » sous les yeux de qui l'a tapé.
 fn sock_label(name: &str) -> String {
-    if name == "image" { crate::i18n::t("Image") } else { crate::i18n::t(name) }
+    if name == "image" {
+        crate::i18n::t("Image")
+    } else if builtin_sock(name) {
+        crate::i18n::t(name)
+    } else {
+        name.to_string()
+    }
+}
+
+/// Vrai si ce nom est celui d'une prise d'un node fourni (ou l'anneau « nouvelle prise »).
+fn builtin_sock(name: &str) -> bool {
+    static NAMES: std::sync::OnceLock<std::collections::HashSet<&'static str>> = std::sync::OnceLock::new();
+    NAMES
+        .get_or_init(|| {
+            let mut set: std::collections::HashSet<&'static str> = DEFS.iter().flat_map(|d| d.inputs.iter().map(|i| i.0).chain(d.outputs.iter().map(|o| o.0))).collect();
+            set.insert(crate::nodeflow::VIRTUAL);
+            set.insert("valeur");
+            set
+        })
+        .contains(name)
+}
+
+#[cfg(test)]
+mod tests_prises {
+    use super::*;
+
+    #[test]
+    fn nom_de_prise_utilisateur_non_traduit() {
+        // Une prise d'un node fourni se traduit ; un nom tapé par l'utilisateur reste tel quel
+        assert!(builtin_sock("échelle"));
+        assert!(!builtin_sock("taille de mes nuages"));
+        assert_eq!(sock_label("taille de mes nuages"), "taille de mes nuages");
+        assert_eq!(sock_label("échelle"), crate::i18n::t("échelle"));
+    }
 }
 
 #[cfg(test)]

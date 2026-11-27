@@ -54,9 +54,13 @@ Ce menu propose aussi **Rename frame**, **Write a note in the frame** et **Delet
 Fais un clic droit dans une zone vide du graphe. Choisis **Drop a note here**.
 ```
 
+![Le menu du clic droit dans le vide : Frame around selection (Ctrl+J) et Drop a note here](images/menu-clic-droit.png)
+
 ```etape
 Écris dans la note : « Le Solver porte l'obstacle. La boule du bas ne fait que le montrer. »
 ```
+
+![Les trois nodes de la boule dans un cadre en pointillés, et la note posée sous le graphe](images/cadre-et-note.png)
 
 Une note est un cadre qui porte du texte. Elle se déplace et se colore comme un cadre.
 

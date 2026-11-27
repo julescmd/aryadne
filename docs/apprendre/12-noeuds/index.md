@@ -10,6 +10,8 @@ objectifs: Relier des nodes ; Trouver et poser n'importe quel node ; Ranger un g
 
 Un graphe de nodes est une suite de petites boîtes reliées par des fils. Chaque boîte fait une seule chose. Les données vont de gauche à droite, jusqu'à un node de sortie.
 
+![Un graphe de compositing : un dégradé passe par Map range, Clamp et Color ramp avant d'arriver à Output](images/graphe-de-nodes.png)
+
 Aryadne se sert du même éditeur pour trois genres de fichiers.
 
 | Fichier | Sert à | Parcours |

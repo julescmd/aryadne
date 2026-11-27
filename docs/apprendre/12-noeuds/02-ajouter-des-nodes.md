@@ -15,9 +15,11 @@ nouveau: arycomp
 nom: ajouter-des-nodes
 ```
 
+Le graphe s'ouvre avec sa chaîne de départ : **Image**, **Brightness / contrast**, **Vignette** et **Output**. Garde-la : tes liens vers **Output** remplaceront le sien.
+
 ## La bibliothèque, à gauche
 
-À gauche du graphe, le panneau **Node library** liste tous les nodes utilisables ici. Ils sont rangés par catégories.
+À gauche du graphe, le panneau **Nodes** liste tous les nodes utilisables ici. Ils sont rangés par catégories.
 
 | Catégorie | Contenu |
 |---|---|
@@ -42,6 +44,8 @@ Dans **Pattern**, attrape **Noise** et glisse-le dans le graphe. Un fantôme sui
 verifier: graphe.contient = noise
 ```
 
+![Noise glissé depuis la catégorie Pattern : un fantôme du node suit la souris dans le graphe](images/glisser-depuis-la-bibliotheque.png)
+
 ```etape
 Relie la sortie **Color** de **Noise** à **Output**.
 verifier: graphe.liens >= 1
@@ -55,6 +59,8 @@ Un simple clic sur un node de la bibliothèque le pose au centre du graphe.
 Dans **Filter**, attrape **Blur**. Amène-le sur le lien entre **Noise** et **Output**. Le lien s'allume. Lâche.
 verifier: graphe.contient = blur
 ```
+
+![Blur, trouvé par la recherche de la bibliothèque, amené sur le lien : le lien s'allume et le message Release to insert it on this link apparaît](images/lacher-sur-un-lien.png)
 
 Le flou s'est inséré tout seul : deux liens ont remplacé l'ancien.
 
@@ -103,7 +109,7 @@ Supprime le lien entre **Blur** et **Output** avec un Ctrl+clic.
 ```
 
 ```etape
-Relie la sortie de **Blur** à l'entrée **Frame** de **Vignette**. Puis relie **Vignette** à **Output**.
+Relie la sortie de **Blur** à l'entrée **Image** de **Vignette**. Puis relie **Vignette** à **Output**.
 verifier: graphe.liens >= 4
 ```
 
@@ -111,6 +117,8 @@ verifier: graphe.liens >= 4
 Tire maintenant un lien depuis la sortie de **Vignette** et lâche-le dans le vide. Le menu s'ouvre. Choisis **Grain**. Il arrive déjà relié.
 verifier: graphe.contient = grain
 ```
+
+![Un lien lâché dans le vide depuis la sortie de Blur ouvre le menu des nodes, avec sa recherche et ses catégories](images/lien-dans-le-vide.png)
 
 Relie **Grain** à **Output** pour finir la chaîne.
 

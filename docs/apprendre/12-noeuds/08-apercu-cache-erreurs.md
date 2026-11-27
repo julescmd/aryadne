@@ -18,7 +18,7 @@ nom: enquete
 ## Construis un petit graphe
 
 ```etape
-Pose **Noise**, **Color ramp**, **Blur** et **Vignette**, reliés dans cet ordre jusqu'à **Output**. Relie la sortie **Value** de **Noise** à **Factor**.
+Pose **Noise**, **Color ramp** et **Blur**. Relie-les dans cet ordre jusqu'à l'entrée **Image** de la **Vignette** de départ, qui va déjà à **Output**. Relie la sortie **Value** de **Noise** à **Factor**.
 verifier: graphe.liens >= 4
 ```
 
@@ -34,8 +34,10 @@ verifier: graphe.liens >= 4
 Fais un clic droit sur **Color ramp**. Choisis **Preview node**. L'aperçu montre le dégradé net, avant le flou.
 ```
 
+![Le menu du clic droit sur un node : Preview node montre ce node seul dans l'aperçu](images/previsualiser-un-node.png)
+
 ```etape
-Refais un clic droit sur le même node. Choisis **Back to full material**. L'aperçu revient à la sortie.
+Refais un clic droit sur le même node. Choisis **Back to the full result**. L'aperçu revient à la sortie.
 ```
 
 ```astuce
@@ -85,6 +87,8 @@ verifier: graphe.contient = expr
 ```etape
 Relie **Expression** à **Factor** de **Color ramp**. Le graphe passe en erreur, et le message dit pourquoi.
 ```
+
+![Une formule incomplète : le message d'erreur s'affiche sous le node Expression et dans le panneau de côté](images/erreur-de-formule.png)
 
 ```etape
 Clique le message d'erreur dans le panneau de côté. Le node en cause est choisi et cadré.

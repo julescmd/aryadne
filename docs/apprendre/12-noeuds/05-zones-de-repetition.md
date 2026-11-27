@@ -31,6 +31,8 @@ Ouvre **Add**, puis **Structure**, puis **Repeat zone**. Deux nodes arrivent : l
 verifier: graphe.contient = repeat_in
 ```
 
+![Le menu Add de la barre du graphe : Structure, puis Repeat zone](images/menu-repeat-zone.png)
+
 Une zone est délimitée par ces deux nodes. Ce qui est branché **entre les deux** s'exécute plusieurs fois.
 
 ## Mets le flou dans la zone
@@ -59,6 +61,8 @@ La chaîne se lit ainsi : le damier entre dans la zone, passe dans le flou, ress
 ```etape
 Sur le node de début, mets **Iterations** à 5. Le damier est flouté cinq fois de suite.
 ```
+
+![La zone de répétition : Checker entre dans Repeat, Blur est dans la zone, Repeat end part vers Output. L'aperçu montre le damier flouté cinq fois](images/zone-de-repetition.png)
 
 ```etape
 Mets **Iterations** à 1, puis à 10. Compare.

@@ -15,7 +15,7 @@ nouveau: arycomp
 nom: premiers-nodes
 ```
 
-Le graphe s'ouvre presque vide. Il n'a qu'un node : **Output**, la sortie. Ce qui y arrive est ce que montre l'aperçu.
+Le graphe s'ouvre avec une petite chaîne de départ : **Image**, **Brightness / contrast**, **Vignette**, puis **Output**, la sortie. Ce qui arrive à **Output** est ce que montre l'aperçu.
 
 ## Trois mots
 
@@ -34,19 +34,23 @@ Pose la souris dans le graphe. Appuie sur Maj+A. Tape « checker ». Appuie sur 
 verifier: graphe.contient = checker
 ```
 
+![Maj+A ouvre la recherche de nodes sous la souris ; « checker » filtre la liste](images/maj-a-checker.png)
+
 Un node **Checker** est posé. Il fabrique un damier. Mais l'aperçu ne change pas : rien n'est relié à la sortie.
 
 ## Tire ton premier lien
 
 ```etape
-Glisse de la sortie **Color** de **Checker** jusqu'à l'entrée **Frame** de **Output**.
+Glisse de la sortie **Color** de **Checker** jusqu'à l'entrée **Image** de **Output**. Ce lien remplace celui qui venait de **Vignette**.
 verifier: graphe.liens >= 1
 ```
+
+![Le lien tiré de la sortie Color de Checker jusqu'à l'entrée Image de Output : le damier remplit l'aperçu](images/premier-lien.png)
 
 Le damier apparaît dans l'aperçu.
 
 ```attention
-Dans l'interface en anglais, la prise d'image s'appelle **Frame**.
+Une entrée ne reçoit qu'un lien. En tirer un nouveau remplace l'ancien.
 ```
 
 ## Règle une entrée à la main
@@ -111,7 +115,7 @@ La couleur d'une prise dit ce qui y passe.
 Nombres, vecteurs et couleurs se branchent entre eux : la valeur est convertie. Une géométrie ne se branche que sur une géométrie.
 
 ```etape
-Relie la sortie **Value** de **Checker** à l'entrée **Frame** de **Output**. Le damier passe en noir et blanc : un nombre est devenu un gris.
+Relie la sortie **Value** de **Checker** à l'entrée **Image** de **Output**. Le damier passe en noir et blanc : un nombre est devenu un gris.
 ```
 
 ```etape
@@ -124,6 +128,8 @@ Rebranche la sortie **Color** à la place.
 Ajoute un node **Hue / saturation**. Relie **Checker** à son entrée **Color**, puis sa sortie à **Output**.
 verifier: graphe.contient = hsv
 ```
+
+![Hue / saturation inséré entre Checker et Output](images/inserer-un-node.png)
 
 ```etape
 Sur **Hue / saturation**, bouge **Hue**. Toutes les couleurs tournent ensemble.

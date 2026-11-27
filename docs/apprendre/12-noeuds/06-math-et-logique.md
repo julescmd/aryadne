@@ -72,6 +72,8 @@ Insère un node **Color ramp** après **Clamp**. Règle son dégradé : un bleu 
 verifier: graphe.contient = colorramp
 ```
 
+![La chaîne Gradient, Map range, Clamp, Color ramp jusqu'à Output : un ciel violet qui passe à l'orange à mi-hauteur](images/chaine-de-nombres.png)
+
 Tu as un ciel.
 
 ## Compare : poser une question

@@ -41,6 +41,8 @@ Les liens qui entraient et sortaient de la sélection sont devenus les prises du
 Choisis le groupe et appuie sur F2. Nomme-le « nuages ».
 ```
 
+![Noise et Color ramp réunis dans un seul node « nuages », relié à Vignette](images/groupe-nuages.png)
+
 ## Entre et ressors
 
 ```etape
@@ -68,6 +70,8 @@ Entre dans le groupe avec Tab. Clique le node **Group inputs**.
 ```etape
 Tire un lien depuis l'anneau vide de **Group inputs**, marqué « new socket », jusqu'à l'entrée **Scale** de **Noise**. Une prise est créée.
 ```
+
+![À l'intérieur du groupe : le fil d'Ariane Graph › Group, le node Group inputs et son anneau vide New socket, entouré](images/dans-le-groupe.png)
 
 Dans le panneau de côté, chaque prise a un nom, un type et une valeur de départ. Les types proposés : **Decimal number**, **Integer**, **True / false**, **Vector**, **Color**, **Geometry**.
 
