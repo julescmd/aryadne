@@ -28,6 +28,8 @@ La 2,5D, ce sont des plans à des distances différentes. Ce n'est pas de la vra
 Choisis le fond. Dans la section **Depth (2.5D)**, coche **3D layer**. Règle **Depth** sur une grande valeur : il est loin.
 ```
 
+![La section Depth (2.5D) du fond : 3D layer coché, puis la profondeur à régler](images/profondeur.png)
+
 ```etape
 Coche **3D layer** sur les deux autres calques. Laisse le plan moyen à zéro. Donne une valeur négative au premier plan : il passe devant le plan de la composition.
 ```

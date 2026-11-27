@@ -48,9 +48,13 @@ Va sur la première case. Dans **Scene**, tape `EXT. PLAGE – MATIN`.
 Choisis la valeur de plan d'ensemble. Laisse la caméra fixe.
 ```
 
+![La liste Plane : Extreme wide shot, Wide shot, Medium shot, Cowboy shot, Medium close-up, Close-up…](images/valeur-de-plan.png)
+
 ```etape
 Règle **Duration** sur 4 secondes. Dans **Action**, écris ce qu'on voit.
 ```
+
+![La première case remplie : scène EXT. PLAGE – MATIN, Wide shot, 4 secondes, et l'action](images/infos-de-la-case.png)
 
 Le panneau affiche l'instant où commence la case et la durée totale du storyboard.
 

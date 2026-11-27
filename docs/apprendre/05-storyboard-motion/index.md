@@ -15,6 +15,8 @@ Deux outils, deux étapes :
 - le **Storyboard**, dans l'étape **Video**. Fichier `.arystory`.
 - les compositions **Comps**, dans l'étape **Motion**. Fichier `.arymotion`.
 
+![Un storyboard : la case en cours, ses informations à droite, la bande des cases en bas](images/storyboard-ecran.png)
+
 ## Les leçons
 
 ### Storyboard

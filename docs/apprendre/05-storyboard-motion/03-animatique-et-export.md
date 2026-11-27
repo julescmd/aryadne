@@ -65,11 +65,13 @@ Le menu **Export** propose trois sorties.
 | **Send to edit** | Un montage, avec une image par case |
 
 ```etape
-Ouvre **Export**, puis **Contact sheet as PNG…**. Enregistre la planche. C'est le document à imprimer ou à montrer.
+Ouvre le menu d'export : l'icône de téléchargement, en haut à droite, à côté du format. Choisis **Contact sheet as PNG…**. Enregistre la planche. C'est le document à imprimer ou à montrer.
 ```
 
+![Le menu d'export du storyboard : Animatic as MP4…, Contact sheet as PNG…, Send to edit](images/menu-export-storyboard.png)
+
 ```etape
-Ouvre **Export**, puis **Animatic as MP4…**.
+Ouvre le menu d'export, puis **Animatic as MP4…**.
 ```
 
 ```attention
@@ -81,9 +83,11 @@ L'export MP4 demande ffmpeg. S'il manque, Aryadne propose de l'installer dans to
 **Send to edit** est le passage normal vers l'étape suivante.
 
 ```etape
-Ouvre **Export**, puis **Send to edit**. Un montage s'ouvre dans l'outil **Edit**.
+Ouvre le menu d'export, puis **Send to edit**. Un montage s'ouvre dans l'outil **Edit**.
 verifier: fichier.ouvert = aryseq
 ```
+
+![Send to edit : le montage s'ouvre dans l'outil Edit, une case par plan sur la piste V1, à sa durée](images/envoye-au-montage.png)
 
 Ce montage contient :
 

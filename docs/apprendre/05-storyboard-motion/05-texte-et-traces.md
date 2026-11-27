@@ -49,6 +49,8 @@ Place la tête de lecture au début avec `Origine`. Dans les propriétés du tex
 Choisis le découpage par **Word**. Relis avec `Espace` : les mots arrivent l'un après l'autre.
 ```
 
+![Le Text animator du titre : Animate in piece by piece coché, découpage Word, Offset, Start y, Duration, Order](images/text-animator.png)
+
 | Réglage | Effet |
 |---|---|
 | **Letter**, **Word**, **Line** | La taille des morceaux |

@@ -43,6 +43,8 @@ Choisis le calque du titre dans la timeline. Ouvre le menu **Layer** et clique *
 | **Inspector (motion)** | Deux onglets : **Properties** et **Composition** |
 | **Timeline (motion)** | Les calques et leurs clés |
 
+![L'étape Motion : 1 Project, 2 la vue de la composition, 3 l'inspecteur, 4 la timeline](images/motion-ecran.png)
+
 ## Ajouter des calques
 
 Les outils de la vue créent un calque en le traçant.
@@ -98,6 +100,8 @@ Glisse le bandeau hors de la vue, à gauche. C'est sa position de départ.
 ```etape
 Avance la tête de lecture d'une vingtaine d'images. Glisse le bandeau au centre. Une deuxième clé se pose toute seule.
 ```
+
+![Le losange de Location (entouré) pose une clé ; la timeline montre les deux clés du bandeau, au début et vers 1 s 11](images/deux-cles.png)
 
 Une fois qu'un calque a des clés, le glisser dans la vue pose une clé à l'instant courant.
 

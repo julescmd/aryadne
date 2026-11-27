@@ -28,6 +28,8 @@ verifier: onglet = video
 | À droite | Les informations de la case |
 | En bas | La bande des cases |
 
+![Le storyboard : 1 la case en cours, 2 ses informations, 3 la bande des cases. Sur la case 2, la pelure d'oignon (icône entourée) montre la case 1 en gris](images/storyboard-ecran.png)
+
 Chaque case est une image PNG. Aryadne les range dans un dossier « nom - cases », à côté du fichier.
 
 ## Les outils de dessin

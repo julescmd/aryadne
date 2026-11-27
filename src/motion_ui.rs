@@ -70,6 +70,8 @@ enum TlDrag {
 }
 
 pub struct Editor {
+    /// Un calque de texte vient d'être posé : son champ prend le clavier, tout le texte choisi
+    focus_text: bool,
     pub path: PathBuf,
     pub compo: Compo,
     /// Champs d'expression ouverts : (calque, propriété)
@@ -216,6 +218,7 @@ impl Editor {
             time: 2.0,
             playing: None,
             sel_key: None,
+            focus_text: false,
             tool: Tool::Select,
             cache: motion::Cache::new(std::path::Path::new(root)),
             tex: None,
@@ -1009,6 +1012,8 @@ impl Editor {
                     Tool::Text => {
                         self.add_layer(Kind::Text { text: crate::i18n::t("Texte"), size: 120.0, color: [0xf4, 0xee, 0xf1], font: "inter-bold".into(), tracking: 0.0, align: 1 }, Some(cp));
                         self.tool = Tool::Select;
+                        // On tape son titre tout de suite, comme dans le dessin vectoriel
+                        self.focus_text = true;
                     }
                     _ => {
                         self.sel = motion::pick(&self.compo, self.time, cp, &mut self.cache);
@@ -1178,6 +1183,7 @@ impl Editor {
     // ---------- Inspecteur ----------
 
     fn inspector(&mut self, ui: &mut egui::Ui) {
+        let focus_new = std::mem::take(&mut self.focus_text);
         let p = crate::theme::pal();
         if let Some(k) = crate::montage_ui::tab_chips(ui, self.insp_tab, &[&crate::i18n::t("Propriétés"), &crate::i18n::t("Composition")]) {
             self.insp_tab = k;
@@ -1347,7 +1353,15 @@ impl Editor {
             match &mut lay.kind {
                 Kind::Text { text, size, color, font, tracking, align } => {
                     section(ui, "Texte");
-                    changed |= ui.add(egui::TextEdit::multiline(text).desired_rows(2).desired_width(f32::INFINITY)).changed();
+                    let te = ui.add(egui::TextEdit::multiline(text).desired_rows(2).desired_width(f32::INFINITY));
+                    if focus_new {
+                        te.request_focus();
+                        if let Some(mut st) = egui::TextEdit::load_state(ui.ctx(), te.id) {
+                            st.cursor.set_char_range(Some(egui::text::CCursorRange::select_all_str(text)));
+                            st.store(ui.ctx(), te.id);
+                        }
+                    }
+                    changed |= te.changed();
                     let mut pick_font = false;
                     ui.horizontal(|ui| {
                         let shown = motion::FONTS.iter().find(|f| f.0 == font).map(|f| f.1.to_string()).unwrap_or_else(|| font.rsplit('/').next().unwrap_or(font).to_string());
@@ -1430,7 +1444,7 @@ impl Editor {
                 Kind::Rect { w, h, radius, color } => {
                     section(ui, "Forme");
                     ui.horizontal(|ui| {
-                        changed |= ui.add(egui::DragValue::new(w).speed(1.0).range(1.0..=10000.0).prefix("l ")).changed();
+                        changed |= ui.add(egui::DragValue::new(w).speed(1.0).range(1.0..=10000.0).prefix(format!("{} ", crate::i18n::t_mid("L (largeur)").replace(" (largeur)", "")))).changed();
                         changed |= ui.add(egui::DragValue::new(h).speed(1.0).range(1.0..=10000.0).prefix("h ")).changed();
                         changed |= ui.color_edit_button_srgb(color).changed();
                     });
@@ -1439,7 +1453,7 @@ impl Editor {
                 Kind::Ellipse { w, h, color } => {
                     section(ui, "Forme");
                     ui.horizontal(|ui| {
-                        changed |= ui.add(egui::DragValue::new(w).speed(1.0).range(1.0..=10000.0).prefix("l ")).changed();
+                        changed |= ui.add(egui::DragValue::new(w).speed(1.0).range(1.0..=10000.0).prefix(format!("{} ", crate::i18n::t_mid("L (largeur)").replace(" (largeur)", "")))).changed();
                         changed |= ui.add(egui::DragValue::new(h).speed(1.0).range(1.0..=10000.0).prefix("h ")).changed();
                         changed |= ui.color_edit_button_srgb(color).changed();
                     });
@@ -1999,7 +2013,7 @@ impl Editor {
             }
         });
         ui.horizontal(|ui| {
-            changed |= ui.add(egui::DragValue::new(&mut c.w).speed(2.0).range(16..=8192).prefix("l ")).changed();
+            changed |= ui.add(egui::DragValue::new(&mut c.w).speed(2.0).range(16..=8192).prefix(format!("{} ", crate::i18n::t_mid("L (largeur)").replace(" (largeur)", "")))).changed();
             changed |= ui.add(egui::DragValue::new(&mut c.h).speed(2.0).range(16..=8192).prefix("h ")).changed();
         });
         section(ui, "Temps");

@@ -28,6 +28,8 @@ Un calque peut suivre un autre calque : son **Parent**. Déplacer, tourner ou ag
 Choisis la lune. Dans l'onglet **Properties**, section **Layer**, règle **Parent** sur le calque de la planète.
 ```
 
+![La lune (Ellipse 2) choisie : dans la section Layer, la liste Parent propose la planète (Ellipse)](images/parente.png)
+
 ```etape
 Choisis la planète. Pose une clé de **Rotation** au début. Avance de deux secondes, tourne la planète d'un tour, la clé se pose. Relis : la lune tourne autour.
 ```
