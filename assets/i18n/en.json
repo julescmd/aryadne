@@ -4363,5 +4363,6 @@
   "T_Nom_BaseColor, T_Nom_Normal (vert vers le bas, DirectX) et T_Nom_ORM : occlusion en rouge, rugosité en vert, métal en bleu.": "T_Name_BaseColor, T_Name_Normal (green down, DirectX) and T_Name_ORM: occlusion in red, roughness in green, metal in blue.",
   "Nom_Albedo, Nom_Normal, Nom_MetallicSmoothness (métal en RVB, lissé dans l'alpha : 1 − rugosité), Nom_AO.": "Name_Albedo, Name_Normal, Name_MetallicSmoothness (metal in RGB, smoothness in alpha: 1 − roughness), Name_AO.",
   "Les noms des prises du Principled BSDF : Base_Color, Roughness, Metallic, Normal, Displacement. Node Wrangler (Ctrl+Maj+T) les branche tout seul.": "The Principled BSDF socket names: Base_Color, Roughness, Metallic, Normal, Displacement. Node Wrangler (Ctrl+Shift+T) wires them up by itself.",
-  "Nom_baseColor, Nom_normal et Nom_occlusionRoughnessMetallic : occlusion en rouge, rugosité en vert, métal en bleu, comme le format glTF le demande.": "Name_baseColor, Name_normal and Name_occlusionRoughnessMetallic: occlusion in red, roughness in green, metal in blue, as glTF requires."
+  "Nom_baseColor, Nom_normal et Nom_occlusionRoughnessMetallic : occlusion en rouge, rugosité en vert, métal en bleu, comme le format glTF le demande.": "Name_baseColor, Name_normal and Name_occlusionRoughnessMetallic: occlusion in red, roughness in green, metal in blue, as glTF requires.",
+  "retopo exportée": "retopology exported"
 }

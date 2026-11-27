@@ -35,9 +35,12 @@ Chaque ID a une couleur et un nom.
 |---|---|
 | `Assign` | Donne cet ID aux faces choisies |
 | `Choose` | Sélectionne les faces de cet ID |
-| `＋ Nodes` | Crée un matériau en nœuds pour cet ID et l'ouvre |
-| `Nodes ✎` | Ouvre le matériau en nœuds de cet ID |
-| Retirer | Retire le matériau en nœuds |
+| `＋ Nodes` | Crée un matériau pour cet ID et l'ouvre dans l'Atelier |
+| Le dossier ouvert | Donne à cet ID un matériau qui existe déjà dans le coffre : la liste des `.arymat` |
+| `Nodes ✎` | Ouvre le matériau de cet ID |
+| ⌫ | Retire le matériau de l'ID |
+
+Le matériau porté par un ID s'affiche sous sa ligne, avec un maillon. Un matériau à calques ou en nœuds, c'est pareil : la vue le montre et la cuisson le lit. Le même `.arymat` peut servir à plusieurs IDs et à plusieurs objets.
 
 Les IDs sont exportés en OBJ (`usemtl` + fichier `.mtl`) et en GLB (un matériau par ID).
 
@@ -146,10 +149,12 @@ Avec 1, tout revient dans le carré de base.
 
 | Réglage | Effet |
 |---|---|
-| `High-poly` | Chemin d'un sculpt, facultatif. Ses détails sont reportés dans une normale en espace tangent. Il doit occuper la même place que le modèle ouvert |
+| `High-poly` | Chemin d'un sculpt, facultatif. Ses détails sont reportés dans une normale en espace tangent. Il doit occuper la même place que le modèle ouvert. Le chemin est gardé avec le modèle, et une retopologie appliquée le remplit avec l'ancien maillage |
 | Occlusion | `No occlusion`, ou un nombre de rayons : `8 (draft)` à `128 (smooth)` |
 | Taille | La taille des images, en pixels |
 | `Re-bake when the model changes` | Les textures sont recuites toutes seules, en arrière-plan, dès que la forme, les UV ou les matériaux changent |
+
+Cette cuisson traite tous les IDs de l'objet à la fois et ajoute courbure, occlusion et épaisseur. Pour des images nommées pour Unreal, Unity, Blender ou glTF, avec canaux empaquetés, en PNG 16 bits ou en EXR, passe par l'export de l'Atelier : voir [Atelier](3d-atelier.md#exporter-les-textures).
 
 ## Limites
 

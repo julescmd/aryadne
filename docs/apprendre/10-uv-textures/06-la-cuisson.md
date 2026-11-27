@@ -3,7 +3,7 @@ titre: La cuisson
 niveau: avancé
 duree: 15 min
 prerequis: 10-uv-textures/03-rangement-densite-udim, 11-materiaux-atelier/02-calques-de-remplissage
-objectifs: Donner un matériau à un ID ; Cuire les cinq textures ; Régler taille et occlusion ; Reporter les détails d'un sculpt ; Recuire automatiquement
+objectifs: Donner un matériau à un ID, neuf ou déjà dans le coffre ; Cuire les cinq textures ; Régler taille et occlusion ; Reporter les détails d'un sculpt ; Recuire automatiquement
 ---
 
 ## Ce que tu vas réussir
@@ -45,7 +45,9 @@ Chaque ID a une couleur, un nom et quelques boutons.
 | **Assign** | Donne cet ID aux faces choisies |
 | **Choose** | Sélectionne les faces de cet ID |
 | **＋ Nodes** | Crée un matériau pour cet ID et l'ouvre |
+| Le dossier ouvert | Donne à cet ID un `.arymat` qui existe déjà dans le coffre |
 | **Nodes ✎** | Ouvre le matériau de cet ID |
+| ⌫ | Retire le matériau de cet ID |
 
 ### Deux IDs sur un cube
 
@@ -84,9 +86,15 @@ verifier: sous_onglet = scene
 
 Ton cube est en métal, avec un couvercle rouge.
 
-```astuce
-Tu as rangé une pile en matériau intelligent ? Dans le matériau d'un ID, un clic dessus dans la bibliothèque repose toute la pile.
+### Un matériau déjà fait
+
+Le matériau existe déjà dans le coffre ? Inutile d'en créer un autre.
+
+```etape
+Sur la ligne d'un ID, clique le bouton au dossier ouvert. Au survol : **Pick a material from the vault**. La liste montre les `.arymat` du coffre.
 ```
+
+Un clic sur un nom, et l'ID le porte. Son nom s'affiche sous la ligne, avec un maillon. La cuisson le lit comme les autres, qu'il soit fait de calques ou de nodes. Le même matériau peut servir à plusieurs IDs et à plusieurs objets.
 
 ## Déplie
 
@@ -130,6 +138,10 @@ Deux conditions :
 
 C'est la dernière étape du trajet d'un sculpt : sculpter, retopologiser, déplier, cuire.
 
+```astuce
+Après une retopologie appliquée avec **Apply**, le champ **High-poly** est déjà rempli : il pointe l'ancien maillage. Ce que tu y écris est gardé avec le modèle.
+```
+
 ## Recuire tout seul
 
 ```etape
@@ -141,6 +153,15 @@ Les textures sont alors recuites en arrière-plan dès que la forme, les UV ou l
 ## Avec des UDIM
 
 Si tu as réparti les îlots sur plusieurs tuiles, chaque tuile reçoit ses propres images.
+
+## Des images nommées pour un moteur
+
+**Bake textures** donne des noms simples, et une image par carte. Pour Unreal, Unity, Blender ou glTF, l'Atelier a son propre export : **Export textures**, en haut de son aperçu. Il nomme les fichiers comme le logiciel les attend, range occlusion, rugosité et métal dans une seule image, et écrit en PNG 16 bits ou en EXR. Voir [Réutiliser, appliquer, cuire](../11-materiaux-atelier/07-reutiliser-appliquer-cuire.md).
+
+| Tu veux | Passe par |
+|---|---|
+| Tous les IDs d'un objet, avec courbure, occlusion et épaisseur | **Bake textures**, ici |
+| Un matériau, nommé pour un moteur | **Export textures**, dans l'Atelier |
 
 ## Exporter le modèle
 
@@ -180,7 +201,7 @@ indice: Change seulement la taille et l'occlusion. Regarde les bords des îlots 
 
 ## En trois lignes
 
-- Chaque ID de matériau porte son matériau : **＋ Nodes**.
+- Chaque ID de matériau porte son matériau : un neuf avec **＋ Nodes**, ou un `.arymat` du coffre avec le bouton au dossier ouvert.
 - **Bake textures** écrit couleur, rugosité, métal, normale et courbure.
 - **High-poly** reporte un sculpt. **Re-bake when the model changes** tient les images à jour.
 

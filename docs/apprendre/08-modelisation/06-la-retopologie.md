@@ -111,10 +111,29 @@ Forme mécanique : monte **Hard edges** vers 30 degrés. Forme organique : laiss
 Sous le résultat, une ligne donne le nombre de quads, de pôles et de sommets. La case **Show** affiche ou cache le fil de fer bleu.
 
 ```etape
-Quand le maillage te plaît, clique **Export as OBJ**. Le maillage est écrit dans un fichier OBJ, et il remplace celui de l'objet dans la scène.
+Quand le maillage te plaît, clique **Apply**. La retopologie remplace le maillage de l'objet, et tu reviens à la scène.
 ```
 
-Tu reviens à la scène. Un message confirme : « Retopology applied to the object ».
+Un message confirme : « Retopology applied. Ctrl+Z restores the old mesh ». En bas de la vue, le nombre de triangles a baissé.
+
+```etape
+Annule avec Ctrl+Z : le caillou dense revient. Rétablis avec Ctrl+Maj+Z : la retopologie est de nouveau là.
+```
+
+**Apply** tient en une seule étape de l'historique. Et rien n'est perdu.
+
+| Ce qui devient | Comment |
+|---|---|
+| L'ancien maillage | Son fichier reste à côté de la scène. Le nouveau s'appelle « … retopo.obj » |
+| Les IDs de matériau | Ils suivent : chaque face prend l'ID de la surface qu'elle recouvre |
+| Les UV | Ils ne suivent pas : les faces ont changé. Il faut redéplier |
+| Les détails | La cuisson les reporte depuis l'ancien maillage, dans une carte de normales |
+
+```astuce
+Plus tard, même après avoir fermé la scène, l'ancien maillage se reprend. Reviens dans l'onglet **Retopo** : une flèche de retour suit **Previous mesh**. Un clic le reprend, un second clic revient à la retopologie.
+```
+
+Le bouton à la flèche vers le bas, à côté d'**Apply**, écrit seulement un fichier OBJ à côté. L'objet ne change pas : c'est pour envoyer la retopologie ailleurs.
 
 ```etape
 Enregistre la scène avec Ctrl+S.
@@ -127,7 +146,9 @@ Le message « Retopology failed on this model » propose deux pistes : viser moi
 
 ## Et après
 
-Le nouveau maillage n'a pas d'UV. La suite se passe dans l'onglet **UV** : voir [UV et textures](../10-uv-textures/index.md). Les détails du modèle dense se reportent ensuite dans une carte de normales, à la cuisson.
+Le nouveau maillage n'a pas d'UV. La suite se passe dans l'onglet **UV** : voir [UV et textures](../10-uv-textures/index.md).
+
+Les détails du modèle dense ne sont pas perdus. Dans l'onglet **UV** du nouveau maillage, le champ **High-poly** est déjà rempli avec l'ancien. Une fois les UV dépliés, **Bake textures** écrit ses reliefs dans une carte de normales : voir [La cuisson](../10-uv-textures/06-la-cuisson.md).
 
 ```attention
 Il n'y a pas d'outil de retopologie manuelle, pour poser les quads un par un. Le guidage passe par les traits, la densité et les réglages.
@@ -139,6 +160,14 @@ Comment obtenir une boucle de quads autour d'un œil ?
 - [x] En dessinant un trait fermé tout autour.
 - [ ] En cochant Symmetry.
 explication: Un guide fermé demande une boucle. Automatic loops en trouve aussi tout seul sur les rebords nets.
+```
+
+```quiz
+Tu as cliqué Apply, et le résultat ne te plaît pas. Que faire ?
+- [ ] Rien : l'ancien maillage est effacé.
+- [x] Ctrl+Z dans la scène, ou la flèche Previous mesh dans l'onglet Retopo.
+- [ ] Recharger le fichier d'origine à la main.
+explication: Apply est une étape annulable, et le fichier de l'ancien maillage reste à côté de la scène.
 ```
 
 ```quiz
@@ -158,6 +187,6 @@ indice: Change seulement Target faces. Regarde à partir de quand les bosses son
 
 - La retopologie refait un maillage dense en quads propres.
 - Traits, densité peinte et **Follow curvature** guident le flux.
-- Après, il faut déplier : le nouveau maillage n'a pas d'UV.
+- **Apply** remplace le maillage en une étape annulable. Après, il faut déplier : le nouveau maillage n'a pas d'UV.
 
 Parcours terminé. Pour sculpter le détail, passe à [La sculpture](../09-sculpture/index.md).

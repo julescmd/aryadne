@@ -70,6 +70,7 @@ Préréglages fournis : bois, pierre, métal rouillé, toon, céramique, or, mé
 - `Sphere` : aperçu sur une sphère.
 - `Cube` : un cube aux arêtes adoucies. On y voit l'usure des arêtes et la saleté des creux.
 - Ou dépose un modèle 3D sur l'aperçu.
+- Le bouton à l'image fléchée, en haut à droite : `Export textures` (voir [Exporter les textures](#exporter-les-textures)).
 - `Light ▾` : `Studio` ou `Outdoor`.
 
 ## La pile de calques
@@ -172,6 +173,68 @@ Un matériau intelligent est une pile enregistrée, à reposer sur un autre obje
 - Enregistrer : la disquette de l'en-tête des calques. Le fichier `.arysmart` va dans le dossier `matériaux intelligents/` du coffre.
 - Réutiliser : il apparaît dans la bibliothèque, filtre `Smart materials`.
 
+## Exporter les textures
+
+Le bouton à l'image fléchée, en haut à droite de l'aperçu, ouvre `Export textures`. L'Atelier cuit la pile de calques sur un modèle et écrit les images.
+
+### Le modèle à cuire
+
+La liste `Bake on` propose, dans cet ordre :
+
+| Choix | Ce qui est cuit |
+|---|---|
+| Un objet marqué d'un maillon | Un objet d'une scène du coffre qui porte ce matériau |
+| `Preview model` | Le modèle déposé dans l'aperçu, s'il y en a un |
+| `Flat tile` | Un carré à plat : le matériau en UV, à répéter sur n'importe quel modèle |
+| `Preview sphere`, `Preview cube` | Les formes de l'aperçu |
+| Les autres objets | Tous les objets à maillage des scènes du coffre |
+
+- Un objet de scène est cuit **à sa place dans la scène** : le matériau y lit les mêmes positions que la vue 3D.
+- S'il a été déplié dans l'onglet `UV`, ses UV servent. Sinon il reçoit des UV automatiques, les mêmes que pour la peinture.
+- **UDIM.** Si ses UV occupent plusieurs tuiles, chaque tuile a ses images : `nom_carte.1001.png`, `nom_carte.1002.png`…
+- `Model occlusion` calcule l'ombre que le modèle se fait à lui-même (16 rayons par texel) et la multiplie à l'occlusion du matériau. Plus long.
+
+### Les images
+
+| Réglage | Choix |
+|---|---|
+| `Resolution` | `1K` (1024 px), `2K` (2048 px), `4K` (4096 px) |
+| `File` | `PNG 8-bit`, `PNG 16-bit`, `EXR 32-bit` |
+
+En PNG, la couleur et l'émission sont en sRGB. En EXR, elles sont en linéaire, et rien n'est borné à 1.
+
+Les cartes écrites :
+
+| Carte | D'où elle vient | Quand |
+|---|---|---|
+| Couleur, rugosité, métal | Les entrées de la sortie matériau | Toujours |
+| Normale | La pente du relief du matériau, en espace tangent. Plate si le matériau n'a pas de relief | Toujours |
+| Hauteur | Le relief | Si le matériau en branche un |
+| Occlusion | L'occlusion du matériau, fois celle du modèle si elle est cochée | Si l'une des deux existe |
+| Émission | La lumière émise | Si le matériau en émet |
+
+Autour de chaque îlot, une marge prolonge les texels du bord : pas de couture visible quand la texture est réduite.
+
+### Le nommage
+
+| Préréglage | Fichiers |
+|---|---|
+| `Aryadne` | `nom_couleur`, `nom_rugosite`, `nom_metal`, `nom_normale`, `nom_hauteur`, `nom_occlusion`, `nom_emission` |
+| `Unreal` | `T_nom_BaseColor`, `T_nom_Normal` (vert vers le bas, DirectX), `T_nom_ORM`, `T_nom_Emissive`, `T_nom_Height` |
+| `Unity` | `nom_Albedo`, `nom_Normal`, `nom_MetallicSmoothness` (métal en RVB, lissé dans l'alpha), `nom_AO`, `nom_Height`, `nom_Emission` |
+| `Blender` | `nom_Base_Color`, `nom_Roughness`, `nom_Metallic`, `nom_Normal`, `nom_Displacement`, `nom_Ambient_Occlusion`, `nom_Emission` |
+| `glTF` | `nom_baseColor`, `nom_normal`, `nom_occlusionRoughnessMetallic`, `nom_emissive` |
+
+Une image **ORM** range l'occlusion dans le rouge, la rugosité dans le vert, le métal dans le bleu. Sans occlusion, son rouge est blanc.
+
+Le champ `Name` change le nom au cœur de chaque fichier. La liste sous le champ montre ce qui sera écrit.
+
+### Le dossier
+
+Par défaut : `textures`, à côté du matériau. Le champ accepte un chemin dans le coffre ou un chemin complet. Le bouton au dossier en choisit un autre.
+
+`Export` lance la cuisson, en arrière-plan. Une barre avance. À la fin, un message donne le nombre d'images, et le petit dossier ouvre l'endroit.
+
 ## Exemple : un métal peint, usé et sale
 
 1. Nouveau matériau.
@@ -188,4 +251,4 @@ Un matériau intelligent est une pile enregistrée, à reposer sur un autre obje
 - Un calque couvre tous les canaux à la fois. On ne peut pas, par exemple, ne poser que la rugosité d'un calque.
 - Le masque en nœuds lit la couleur de la sortie de son graphe : les autres entrées de cette sortie ne servent pas.
 - Le masque peint est limité à quatre canaux par objet.
-- **Export des textures.** L'aide de l'application parle d'« export of textures ». Il se fait par la cuisson de l'onglet UV (voir [UV et UDIM](3d-uv.md#cuisson-des-textures-bake)). Un export direct depuis l'Atelier n'a pas été trouvé dans le code actuel.
+- **Export des textures.** Les masques peints à la main (`Hand-painted`) ne sont pas cuits : le calque qui en dépend n'apparaît pas dans les images. La normale vient du relief du matériau seulement ; pour y reporter les détails d'un sculpt, passe par la cuisson de l'onglet UV (voir [UV et UDIM](3d-uv.md#cuisson-des-textures-bake)).

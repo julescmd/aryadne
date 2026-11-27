@@ -66,6 +66,7 @@ Un fichier qui en cite un autre (une scène et ses modèles, un montage et ses m
 | `parent` | texte | Nom du parent |
 | `mods` | liste | Pile de modificateurs propre à l'objet |
 | `material` | texte | Chemin d'un `.arymat` |
+| `mesh_before` | texte | Le maillage qu'une retopologie appliquée a remplacé (même forme que `file`). Absent s'il n'y en a pas. `Scene::replace_mesh` le remplit, `Scene::restore_mesh` l'échange avec `file` |
 | `paint` | texte | Texture de peinture (PNG), ancienne forme à un seul calque |
 | `paint_layers` | liste | Calques de peinture : `name`, `channel`, `file`, `opacity`, `visible` |
 | `opacity` | nombre | Pour une image de référence |
@@ -115,7 +116,9 @@ Tout ne vit pas dans le `.aryscene` :
 | Donnée | Emplacement |
 |---|---|
 | Maillage modifié en mode édition | Un `.obj` à côté de la scène |
-| IDs de matériau, coutures, UV | `.app/meshdata/<identifiant>.json` |
+| IDs de matériau, coutures, UV | `.app/meshdata/<identifiant>.json` (`model3d::meshdata_file`). Le champ `high` y garde le modèle haute définition de la cuisson ; le `material` d'un ID est le chemin complet d'un `.arymat` |
+| Maillage d'une retopologie appliquée | Un `… retopo.obj` à côté de l'ancien, jamais par-dessus (`model3d::retopo_file`) |
+| Textures exportées depuis l'Atelier | `textures/` à côté du matériau, par défaut (`texexport::default_dir`) |
 | Pile de modificateurs d'un modèle ouvert seul, maillage après « appliquer » | `.app/modifiers/<empreinte>.json` |
 | Niveaux de multirésolution | À côté du maillage (voir `multires.rs`) |
 | Textures de peinture et de cuisson | `textures/` du coffre |

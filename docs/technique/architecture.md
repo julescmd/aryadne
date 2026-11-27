@@ -151,6 +151,7 @@ Le board est un cas à part : c'est une page (`View::Boards`), pas une variante 
 | `retopo` | Retopologie |
 | `paint3d` | Peinture sur le modèle |
 | `atelier` | Matériaux à calques |
+| `texexport` | Export des textures d'un matériau de l'Atelier : cuisson sur un maillage (`bake`), préréglages de nommage et canaux empaquetés (`PRESETS`), écriture PNG 8 et 16 bits et EXR (`write_image`), fenêtre d'export (`Dialog`) |
 | `gizmo` | Poignées de transformation |
 | `bvh` | Lancer de rayons sur un maillage |
 | `pathtrace`, `gputrace`, `oidn` | Tracé de chemins (processeur, carte graphique), débruitage |

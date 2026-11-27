@@ -1,14 +1,14 @@
 ---
 titre: Réutiliser, appliquer, cuire
 niveau: intermédiaire
-duree: 20 min
+duree: 25 min
 prerequis: 11-materiaux-atelier/03-les-masques, 07-3d-bases/01-ta-premiere-scene
-objectifs: Enregistrer une pile comme matériau intelligent ; Appliquer un matériau à un objet de la scène ; Le voir se mettre à jour en direct ; Cuire ses textures pour l'exporter
+objectifs: Enregistrer une pile comme matériau intelligent ; Appliquer un matériau à un objet de la scène ; Le voir se mettre à jour en direct ; Exporter ses textures pour un autre logiciel ; Donner un matériau du coffre à un ID
 ---
 
 ## Ce que tu vas réussir
 
-Tu vas ranger une pile entière dans ta bibliothèque. Tu vas poser un matériau sur un objet. Puis tu vas en tirer des images de texture, lisibles par d'autres logiciels.
+Tu vas ranger une pile entière dans ta bibliothèque. Tu vas poser un matériau sur un objet. Puis tu vas en tirer des images de texture, nommées pour le logiciel de ton choix.
 
 ## Partie 1 : un matériau intelligent
 
@@ -102,37 +102,123 @@ Dans la barre de la vue, ouvre **Render** et choisis le moteur **Path tracing (r
 
 L'aperçu rapide et le tracé de chemins lisent le même matériau. Le second montre les vrais reflets.
 
-## Partie 3 : cuire les textures
+## Partie 3 : exporter les textures
 
-Un `.arymat` ne se lit que dans Aryadne. Pour un moteur de jeu ou un autre logiciel, il faut des images : c'est la **cuisson**.
+Un `.arymat` ne se lit que dans Aryadne. Pour un moteur de jeu ou un autre logiciel, il faut des images. L'Atelier les écrit lui-même : il **cuit** la pile de calques sur un modèle.
 
-Dans le code actuel, la cuisson ne part pas de l'Atelier. Elle part de l'objet, et elle lit le matériau de chaque **ID de matériau**. Un ID est une étiquette posée sur des faces. Un objet neuf n'en a qu'un : l'ID 0, qui couvre tout.
+```etape
+Reviens au matériau « metal-use », dans l'Atelier.
+verifier: fichier.ouvert = arymat
+```
+
+```etape
+En haut à droite de l'aperçu, clique le bouton à l'image fléchée. Au survol : **Export textures**. Une fenêtre s'ouvre.
+```
+
+La fenêtre tient en quatre cartes.
+
+| Carte | Ce que tu y choisis |
+|---|---|
+| **Model to bake** | Le modèle qui reçoit le matériau |
+| **Images** | La taille et le format des images |
+| **Naming** | Le logiciel visé, et le nom des fichiers |
+| **Output folder** | Le dossier d'arrivée |
+
+### Sur quoi cuire
+
+```etape
+Ouvre la liste **Bake on**. Le cube de ta scène est en tête, avec un maillon : il porte ce matériau. Laisse-le choisi.
+```
+
+| Dans la liste | Ce qui est cuit |
+|---|---|
+| Un objet d'une scène | L'objet, à sa place dans la scène. Ceux qui portent le matériau viennent d'abord |
+| **Flat tile** | Un carré à plat : une texture à répéter sur n'importe quel modèle |
+| **Preview sphere**, **Preview cube** | La forme montrée dans l'aperçu |
+| **Preview model** | Le modèle 3D que tu as déposé dans l'aperçu |
+
+Un objet déplié dans l'onglet **UV** est cuit sur ses UV. Un objet sans UV en reçoit d'automatiques : tu n'as rien à déplier pour essayer. Si ses UV occupent plusieurs tuiles UDIM, chaque tuile a ses images, numérotées 1001, 1002…
+
+```astuce
+**Model occlusion** ajoute l'ombre que le modèle se fait à lui-même, dans ses creux. C'est plus long. Sur un carreau plat, laisse la case vide.
+```
+
+### Taille, format, nommage
+
+```etape
+Dans **Images**, choisis **1K** et **PNG 8-bit**.
+```
+
+| Format | Pour quoi |
+|---|---|
+| **PNG 8-bit** | Le plus léger, lu partout |
+| **PNG 16-bit** | La hauteur et la normale, sans marches visibles |
+| **EXR 32-bit** | Le compositing et le film. Couleur en linéaire, fichiers lourds |
+
+```etape
+Dans **Naming**, clique **glTF**. La liste des fichiers change sous le champ **Name**.
+```
+
+Chaque logiciel attend ses noms et ses canaux. Les préréglages s'en chargent.
+
+| Préréglage | Ce qu'il écrit |
+|---|---|
+| **Aryadne** | Une image par carte : `_couleur`, `_rugosite`, `_metal`, `_normale` |
+| **Unreal** | `T_nom_BaseColor`, `T_nom_Normal`, `T_nom_ORM` |
+| **Unity** | `nom_Albedo`, `nom_Normal`, `nom_MetallicSmoothness` |
+| **Blender** | `nom_Base_Color`, `nom_Roughness`, `nom_Metallic`, `nom_Normal` |
+| **glTF** | `nom_baseColor`, `nom_normal`, `nom_occlusionRoughnessMetallic` |
+
+Une image **ORM** range trois cartes grises dans une seule : l'occlusion dans le rouge, la rugosité dans le vert, le métal dans le bleu. Le moteur charge une image au lieu de trois.
+
+La hauteur, l'occlusion et l'émission ne s'écrivent que si le matériau les donne. La normale est tirée du relief du matériau. Pour Unreal, son vert est inversé : c'est ce que ce moteur attend.
+
+### Écrire les images
+
+Le dossier proposé s'appelle `textures`. Il est à côté du matériau. Le bouton au dossier en choisit un autre.
+
+```etape
+Clique **Export**. Une barre avance, puis un message confirme : « 3 images written to ».
+```
+
+```etape
+Clique le petit dossier à gauche du message : le dossier s'ouvre. Tes images y sont.
+```
+
+```attention
+Les masques **Hand-painted** ne sont pas cuits par cet export : le calque qui en dépend n'apparaît pas dans les images.
+```
+
+## Partie 4 : plusieurs matériaux sur un objet
+
+Un objet peut porter plusieurs matériaux, un par **ID de matériau**. Un ID est une étiquette posée sur des faces. Cette cuisson-là part de l'objet, et elle lit le matériau de chaque ID.
 
 ```etape
 Dans la scène, choisis le cube. Dans la barre de la vue, passe en mode **UV & materials**.
 ```
 
 ```etape
-Ouvre l'onglet **Materials**. Sur la ligne de l'ID 0, clique **＋ Nodes**. Un matériau neuf est créé pour cet ID, et il s'ouvre dans l'Atelier.
-verifier: fichier.ouvert = arymat
+Ouvre l'onglet **Materials**. Sur la ligne de l'ID 0, clique le bouton au dossier ouvert. Au survol : **Pick a material from the vault**. Choisis « metal-use ».
 ```
 
-C'est ici que ton matériau intelligent rend service.
+Le nom du matériau s'affiche sous la ligne, avec un maillon. Le cube le montre.
+
+| Bouton de la ligne | Effet |
+|---|---|
+| **＋ Nodes** | Crée un matériau neuf pour cet ID et l'ouvre |
+| Le dossier ouvert | Donne à l'ID un `.arymat` qui existe déjà dans le coffre |
+| **Nodes ✎** | Ouvre le matériau de l'ID |
+| ⌫ | Retire le matériau de l'ID |
 
 ```etape
-Dans la bibliothèque, filtre **Smart materials** et clique « metal-use ». Ta pile est reposée dans le matériau de l'ID.
-verifier: atelier.calques >= 3
-```
-
-```etape
-Reviens à la scène. Ouvre l'onglet **UV**. Clique **Auto (seams + UVs)**. Le cube est déplié.
+Ouvre l'onglet **UV**. Clique **Auto (seams + UVs)**. Le cube est déplié.
 ```
 
 ```etape
 Choisis la taille des images, puis clique **Bake textures**.
 ```
 
-Cinq images sont écrites dans le dossier `textures` du coffre : couleur, rugosité, métal, normale et courbure.
+Les images vont dans le dossier `textures` du coffre : couleur, rugosité, métal, normale et courbure, pour tous les IDs à la fois.
 
 | Réglage | Effet |
 |---|---|
@@ -145,11 +231,12 @@ Cinq images sont écrites dans le dossier `textures` du coffre : couleur, rugosi
 Reviens à la scène avec **Back to the scene**, ou Échap.
 ```
 
-Le dépliage et la cuisson ont leur parcours : [UV et textures](../10-uv-textures/index.md).
+Le dépliage et cette cuisson ont leur parcours : [UV et textures](../10-uv-textures/index.md).
 
-```attention
-Sans UV, pas de cuisson : les images n'ont nulle part où se poser. Déplie toujours avant.
-```
+| Tu veux | Passe par |
+|---|---|
+| Les textures d'un matériau, nommées pour un moteur | **Export textures**, dans l'Atelier |
+| Les textures d'un objet à plusieurs IDs, avec courbure et épaisseur | **Bake textures**, dans l'onglet **UV** |
 
 ```quiz
 Que contient un matériau intelligent ?
@@ -162,20 +249,28 @@ explication: C'est une pile enregistrée. Un clic dans la bibliothèque repose t
 ```quiz
 Comment obtenir des images de texture à partir d'un matériau ?
 - [ ] Avec Ctrl+S dans l'Atelier.
-- [x] En cuisant depuis l'onglet UV de l'objet, avec Bake textures.
+- [x] Avec le bouton Export textures, en haut de l'aperçu de l'Atelier.
 - [ ] En enregistrant un matériau intelligent.
-explication: La cuisson part des UV de l'objet et du matériau de chaque ID. Elle écrit les images dans le dossier textures.
+explication: L'export cuit la pile sur le modèle choisi et écrit les images dans le dossier textures, à côté du matériau.
+```
+
+```quiz
+Que contient une image ORM ?
+- [ ] La couleur, en trois canaux.
+- [x] L'occlusion, la rugosité et le métal, un par canal.
+- [ ] La normale, pour Unreal.
+explication: Rouge : occlusion. Vert : rugosité. Bleu : métal. Les préréglages Unreal et glTF l'écrivent.
 ```
 
 ```defi
 Pose deux matériaux différents sur un même cube : le dessus et le reste.
-indice: En mode UV & materials, onglet Materials : ajoute un ID avec le bouton Material, choisis les faces du dessus, clique Assign sur ce nouvel ID, puis ＋ Nodes.
+indice: En mode UV & materials, onglet Materials : ajoute un ID avec le bouton Material, choisis les faces du dessus, clique Assign sur ce nouvel ID, puis donne-lui un matériau du coffre avec le bouton au dossier ouvert.
 ```
 
 ## En trois lignes
 
 - Les étincelles enregistrent la pile en matériau intelligent, à reposer d'un clic.
 - L'onglet **Material** d'un objet lui donne un `.arymat`. Il se met à jour en direct.
-- **Bake textures**, dans l'onglet **UV**, écrit les images pour l'export.
+- **Export textures**, en haut de l'aperçu de l'Atelier, écrit les images pour Unreal, Unity, Blender ou glTF. Pour un objet à plusieurs IDs, chaque ID reçoit un `.arymat` du coffre, et **Bake textures** les cuit tous.
 
 [Suite : Projet, un métal peint, usé et sale](08-projet-metal-peint.md)

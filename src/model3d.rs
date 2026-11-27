@@ -9961,8 +9961,11 @@ impl Viewer {
                     let out = self.path.with_file_name(format!("{stem}-retopo.obj"));
                     self.capture_msg = Some(match crate::retopo::export_obj(r, &world, &out) {
                         Ok(()) => {
-                            self.open_request = Some(out.clone());
-                            format!("retopo exportée : {}", out.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default())
+                            // Dans une scène, l'export n'écrit que le fichier : c'est « Appliquer » qui change l'objet
+                            if !self.embedded {
+                                self.open_request = Some(out.clone());
+                            }
+                            format!("{} : {}", crate::i18n::t("retopo exportée"), out.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default())
                         }
                         Err(e) => format!("export impossible : {e}"),
                     });

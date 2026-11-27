@@ -15,7 +15,7 @@ La retopologie refait un maillage en **quads propres** à partir d'un modèle de
 3. `▶ Run retopology`.
 4. L'avancement s'affiche : `Preparing mesh`, `Computing flow`, `Placing poles`, `Building quads`.
 5. Le résultat apparaît en fil de fer bleu par-dessus le modèle, avec le nombre de pôles.
-6. Applique-le à l'objet (« Retopology applied to the object »), ou exporte-le en OBJ.
+6. Clique `Apply` : la retopologie remplace le maillage de l'objet, et tu reviens à la scène.
 
 `Cancel` arrête un calcul en cours.
 
@@ -63,9 +63,32 @@ Moins de pôles donne un maillage plus régulier, mais des boucles qui suivent m
 - **Formes mécaniques.** Monte `Hard edges` (par exemple 30°) pour que les arêtes franches restent des boucles nettes.
 - **Formes organiques.** Laisse `Hard edges` bas, coche `Automatic loops`, et dessine un guide fermé autour de chaque œil et de la bouche.
 
+## Appliquer le résultat
+
+Sous le résultat, trois commandes.
+
+| Commande | Effet |
+|---|---|
+| `Apply` | Remplace le maillage de l'objet par la retopologie et revient à la scène |
+| La flèche vers le bas | `Export as OBJ` : écrit la retopologie dans un fichier `…-retopo.obj` à côté, sans toucher à l'objet |
+| `Show` | Affiche ou cache le fil de fer bleu |
+
+`Apply` est une seule étape de l'historique de la scène. `Ctrl+Z` reprend l'ancien maillage, `Ctrl+Maj+Z` remet la retopologie.
+
+Rien n'est effacé :
+
+- **L'ancien maillage.** Son fichier reste à côté de la scène. Le nouveau s'appelle « nom retopo.obj », puis « nom retopo 2.obj » : un fichier existant n'est jamais remplacé.
+- **Le reprendre plus tard.** L'historique se vide quand la scène se ferme. L'ancien maillage, lui, reste noté dans l'objet. Rouvre l'onglet `Retopo` : la flèche de retour, suivie de `Previous mesh`, le reprend. Un second clic revient à la retopologie.
+- **Les IDs de matériau.** Ils suivent : chaque face reçoit l'ID de la surface qu'elle recouvre, avec son matériau.
+- **Les UV.** Ils ne suivent pas. Les faces ne sont plus les mêmes : il faut redéplier (`Auto (seams + UVs)`, onglet `UV`).
+- **Les détails.** Ils ne sont pas reportés dans le maillage, qui est plus léger par principe. Le champ `High-poly` du nouveau maillage est rempli avec l'ancien : une fois les UV dépliés, `Bake textures` écrit ses reliefs dans une carte de normales.
+- **La peinture.** Une peinture posée sur l'ancien maillage ne retombe pas au même endroit : ses UV ont changé.
+
+Un modèle ouvert seul, hors d'une scène, est en lecture. Place-le dans une scène (`Open in a scene`) pour lui appliquer une retopologie.
+
 ## Après la retopologie
 
-Le nouveau maillage n'a pas d'UV. Passe à l'onglet `UV` (voir [UV et UDIM](3d-uv.md)). Pour reporter les détails du sculpt sur le maillage propre, indique le chemin du sculpt dans `High-poly` avant la cuisson.
+Le nouveau maillage n'a pas d'UV. Passe à l'onglet `UV` (voir [UV et UDIM](3d-uv.md)). Les détails du modèle dense se reportent à la cuisson : `High-poly` pointe déjà l'ancien maillage. Pour un autre sculpt, écris son chemin à la place.
 
 ## Limites
 
