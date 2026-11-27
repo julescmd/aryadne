@@ -259,6 +259,17 @@ fn cells(l: &str) -> Vec<String> {
     t.split('|').map(|c| c.trim().to_string()).collect()
 }
 
+/// Une cellule d'en-tête de tableau, mise en gras. Vide, elle reste vide ; déjà en gras
+/// (« **Cloth** »), elle n'est pas doublée, sinon les astérisques s'afficheraient.
+fn header_cell(cell: &str) -> String {
+    let c = cell.trim();
+    if c.is_empty() || (c.starts_with("**") && c.ends_with("**") && c.len() > 4) {
+        c.to_string()
+    } else {
+        format!("**{c}**")
+    }
+}
+
 fn table(ui: &mut egui::Ui, rows: &[Vec<String>], ctx: &Ctx, out: &mut Option<Out>) {
     let p = theme::pal();
     let cols = rows.iter().map(|r| r.len()).max().unwrap_or(1);
@@ -270,7 +281,7 @@ fn table(ui: &mut egui::Ui, rows: &[Vec<String>], ctx: &Ctx, out: &mut Option<Ou
                     let cell = r.get(c).map(|s| s.as_str()).unwrap_or("");
                     ui.horizontal(|ui| {
                         if k == 0 {
-                            inline(ui, &format!("**{cell}**"), ctx, out, None);
+                            inline(ui, &header_cell(cell), ctx, out, None);
                         } else {
                             inline(ui, cell, ctx, out, None);
                         }
@@ -1209,6 +1220,13 @@ fn code_block(ui: &mut egui::Ui, code: &str, lang: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn en_tete_de_tableau_sans_asterisques_en_trop() {
+        assert_eq!(header_cell(""), "");
+        assert_eq!(header_cell("**Cloth**"), "**Cloth**");
+        assert_eq!(header_cell("Valeur"), "**Valeur**");
+    }
 
     #[test]
     fn image_agrandie_tient_dans_la_fenetre() {

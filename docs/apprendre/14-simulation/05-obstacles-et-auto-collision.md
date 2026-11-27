@@ -18,14 +18,16 @@ exemple: tissu sur la carte graphique
 
 Le node **Solver** connaît trois obstacles.
 
+![Le node Solver : Floor height, Ball center, Ball radius et Friction, puis Box center et Box size. L'aperçu montre la boule et la boîte](images/obstacles-du-solver.png)
+
 | Obstacle | Entrées | Pour l'enlever |
 |---|---|---|
-| Le sol | Réglage **Floor**, entrée **Floor height** | **Floor** sur **not** |
+| Le sol | Réglage **Floor**, entrée **Floor height** | **Floor** sur **no** |
 | Une boule | **Ball center**, **Ball radius** | Rayon à 0 |
 | Une boîte | **Box center**, **Box size** | Taille à 0 |
 
 ```attention
-Dans l'interface en anglais, le choix « non » s'affiche **not**.
+Le réglage **Floor** n'a pas d'étiquette sur le node : c'est la liste **yes** / **no** juste sous le choix du solveur.
 ```
 
 Les obstacles sont résolus en même temps que les fils. Ils n'étirent donc pas le tissu après coup.
@@ -112,6 +114,8 @@ Relis depuis la première image. Les couches passent maintenant les unes à trav
 ```etape
 Réactive **Self-collision**. Un curseur **Thickness** apparaît dessous.
 ```
+
+![La puce Self-collision active dans le menu du tissu, et le curseur Thickness qui apparaît dessous](images/auto-collision.png)
 
 ## L'épaisseur
 

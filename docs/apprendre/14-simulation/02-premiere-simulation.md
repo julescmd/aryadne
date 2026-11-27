@@ -21,6 +21,8 @@ Pose la souris sur l'aperçu. Appuie sur Espace. Laisse tourner jusqu'à l'image
 verifier: lecture.image >= 40
 ```
 
+![L'exemple tissu sur une boule à l'image 51 : le graphe à gauche, le tissu tombé sur la boule à droite](images/tissu-sur-une-boule.png)
+
 Le tissu tombe. Son bord du fond reste accroché. Le reste se pose sur la boule.
 
 ```etape
@@ -51,6 +53,8 @@ La zone donne cette mémoire.
 ```etape
 Repère la sortie **Time step** du node de début. Suis ses deux liens : l'un va vers **Forces**, l'autre vers **Solver**.
 ```
+
+![La zone de simulation : le node de début Simulation, puis Forces et Solver. Time step part vers les deux](images/zone-de-simulation.png)
 
 **Time step** est la durée d'une image. Les nodes de simulation en ont besoin pour avancer du bon pas.
 
@@ -84,6 +88,8 @@ verifier: graphe.liens >= 17
 ```etape
 Sur **Forces**, mets la composante Y de **Gravity** à -2. Reviens à la première image et lis.
 ```
+
+![Le node Forces avec Gravity réglée à 0, -2, 0 : le tissu tombe plus lentement](images/gravite.png)
 
 Le tissu tombe comme sur la Lune. Remets -9,8 ensuite.
 

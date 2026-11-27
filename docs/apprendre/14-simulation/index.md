@@ -10,6 +10,8 @@ objectifs: Comprendre une géométrie en colonnes ; Monter une zone de simulatio
 
 Dans Aryadne, une simulation est un graphe de nodes. Le fichier porte l'extension `.arygeo`. Il s'ouvre dans l'outil **Simulation** de l'étape **3D**.
 
+![Un tissu simulé, tombé sur une boule, dans l'aperçu de l'outil Simulation](images/simulation-apercu.png)
+
 Ce parcours part de zéro. À la fin, tu sais monter un tissu, le régler, le faire tenir sur des obstacles et le relire sans attendre.
 
 ## Les leçons

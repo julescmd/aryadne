@@ -55,6 +55,8 @@ Reviens à la première image et lis jusqu'à l'image 40. Le tissu pend maintena
 verifier: lecture.image >= 40
 ```
 
+![Compare réglé sur greater than avec B à 0,98 : le Set an attribute qui écrit pin épingle l'autre bord, et le tissu pend de ce côté](images/epingler-l-autre-bord.png)
+
 ## Épingle deux coins
 
 Un coin, c'est deux conditions à la fois : tout au fond, **et** tout au bord en X.
@@ -92,7 +94,7 @@ verifier: lecture.image >= 40
 ## Vérifie dans le tableau
 
 ```etape
-Clique le node **Set an attribute** qui écrit `pin`. Dans **ATTRIBUTES**, la colonne `pin` va de 0,00 à 1,00.
+Clique le node **Set an attribute** qui écrit `pin`. Dans **Attributes**, la colonne `pin` va de 0,00 à 1,00.
 ```
 
 Si elle va de 0,00 à 0,00, aucun point n'est choisi. Ton seuil est trop sévère.
@@ -107,6 +109,8 @@ Choisis le node **Set an attribute** qui écrit `pin`. Appuie sur M. Le node dev
 Reviens à la première image et lis. Le tissu tombe en entier sur la boule.
 verifier: lecture.image >= 40
 ```
+
+![Le node Set an attribute qui écrit pin rendu muet (M) : plus rien ne tient le tissu, qui tombe en entier sur la boule](images/epingle-muette.png)
 
 ```raccourci
 M : rendre un node muet, ou lui rendre la voix.

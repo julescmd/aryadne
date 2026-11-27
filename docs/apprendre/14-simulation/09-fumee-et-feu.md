@@ -21,6 +21,8 @@ Lance la lecture et laisse-la aller jusqu'à l'image 40. Une fumée sort d'une p
 verifier: lecture.image >= 40
 ```
 
+![La fumée qui monte à l'image 94 : Empty volume fixe la boîte de voxels, Smoke source pose la fumée chaude dans la zone, et le solveur la fait monter](images/fumee-qui-monte.png)
+
 ### Un volume, pas des points
 
 Jusqu'ici, une géométrie était un tableau de points. La fumée est autre chose : une **boîte découpée en petits cubes**, les voxels. Chaque voxel garde quelques nombres.
@@ -114,6 +116,8 @@ Ici, la source ne pose pas de fumée. Elle pose du **carburant chaud** : **Fuel*
 Clique le node **Combustion**, entre la source et le solveur.
 verifier: graphe.contient = vol_burn
 ```
+
+![Le feu de camp à l'image 89 : le node Combustion, entre la source et le solveur, règle Ignition, Burn rate, Heat et Smoke](images/feu-de-camp.png)
 
 Le carburant plus chaud que **Ignition** (allumage) brûle. En brûlant, il chauffe, il fait de la fumée, et il gonfle l'air autour de lui.
 

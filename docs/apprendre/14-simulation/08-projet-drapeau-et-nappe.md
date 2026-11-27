@@ -53,7 +53,7 @@ Sur **Compare**, garde **less than**. Mets **B** à -1,49.
 ```
 
 ```etape
-Clique le node **Set an attribute** qui écrit `pin`. Dans **ATTRIBUTES**, vérifie que `pin` va de 0,00 à 1,00.
+Clique le node **Set an attribute** qui écrit `pin`. Dans **Attributes**, vérifie que `pin` va de 0,00 à 1,00.
 ```
 
 ### 4. Fais souffler
@@ -67,11 +67,13 @@ Le vent pousse surtout le long du drapeau, avec un peu de travers. Sans ce trave
 ### 5. Choisis le solveur
 
 ```etape
-Sur **Solver**, choisis **Solver** : **cloth (graphics card)**. Mets **Floor** sur **not**.
+Sur **Solver**, choisis **Solver** : **cloth (graphics card)**. Dans la liste juste dessous, celle du sol (**Floor**), choisis **no**.
 verifier: graphe.contient = sim_solver
 ```
 
 ### 6. Allonge et lis
+
+![Le drapeau prêt : Wind à 14, 0, 3 et Air drag 0,3 sur Forces ; Ball radius à 0, cloth (graphics card) et sol sur no sur Solver. Le tissu debout commence à se creuser](images/drapeau-reglages.png)
 
 ```etape
 Ouvre la roue dentée de la barre de lecture. Mets **Last frame** à 240.
@@ -108,7 +110,7 @@ verifier: fichier.enregistre
 ```
 
 ```etape
-Clique **Simulation end**. Dans la carte **SIMULATION CACHE**, clique **Bake to disk**. Relis : plus aucun calcul.
+Clique **Simulation end**. Dans la carte **Simulation cache**, clique **Bake to disk**. Relis : plus aucun calcul.
 ```
 
 ```astuce

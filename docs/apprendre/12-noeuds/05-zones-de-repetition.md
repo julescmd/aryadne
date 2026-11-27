@@ -73,7 +73,7 @@ Mets **Iterations** à 1, puis à 10. Compare.
 Ce qui passe d'un tour au suivant s'appelle l'**état**. Au premier tour, il vient de ce qui est branché à l'entrée du début. Aux tours suivants, il vient de ce qui est arrivé à la fin du tour d'avant.
 
 ```etape
-Clique le node de début. Dans le panneau de côté, lis la carte **REPEAT STATE**.
+Clique le node de début. Dans le panneau de côté, lis la carte **Repeat state**.
 ```
 
 Par défaut, l'état porte une seule valeur. **Add a socket** en ajoute d'autres : par exemple un compteur, à côté de l'image.

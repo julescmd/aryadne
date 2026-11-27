@@ -54,7 +54,7 @@ Espace, souris sur l'aperçu : lire ou mettre en pause.
 ## Lis les colonnes
 
 ```etape
-Clique le node **Grid**. Regarde la carte **ATTRIBUTES**, sous l'aperçu.
+Clique le node **Grid**. Regarde la carte **Attributes**, sous l'aperçu.
 ```
 
 Tu vois une seule colonne : `P`, un vecteur. À droite, l'étendue de ses valeurs. En haut, le nombre de points.
@@ -62,6 +62,8 @@ Tu vois une seule colonne : `P`, un vecteur. À droite, l'étendue de ses valeur
 ```etape
 Clique maintenant le node **Set an attribute**, juste avant la sortie.
 ```
+
+![Le node Set an attribute choisi : la carte Attributes liste ses colonnes, Cd, P et uv, pour 3600 points](images/colonnes-des-attributs.png)
 
 Une colonne `Cd` est apparue. C'est une couleur. Ce node l'a écrite. Chaque node reçoit le tableau, le change, et le passe au suivant.
 
@@ -108,6 +110,8 @@ Relie la sortie de **Compare** à l'entrée **Select** de **Delete points**.
 verifier: graphe.liens >= 13
 ```
 
+![Location, Separate XYZ et Compare (greater than) choisissent les points dont X est positif ; Delete points les retire : il reste 200 points](images/supprimer-la-moitie.png)
+
 La moitié de la surface a disparu. Le test est fait pour chaque point : c'est un **champ**. Tu y reviens à la leçon 3.
 
 ```quiz
@@ -134,7 +138,7 @@ indice: Il te faut deux nodes Compare et un node Logic réglé sur and. Supprime
 ## En trois lignes
 
 - Une géométrie est un tableau : un point par ligne, un attribut par colonne.
-- La carte **ATTRIBUTES** montre les colonnes du node choisi.
+- La carte **Attributes** montre les colonnes du node choisi.
 - Une entrée **Select** reçoit un test fait pour chaque point.
 
 [Suite : Ta première simulation](02-premiere-simulation.md)

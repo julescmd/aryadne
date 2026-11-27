@@ -21,6 +21,8 @@ Lis jusqu'à l'image 60. Des particules jaillissent, retombent et rebondissent. 
 verifier: lecture.image >= 60
 ```
 
+![La fontaine de particules : Emit particles règle Per frame, Speed, Scatter et Lifetime, et les particules jaillissent dans l'aperçu](images/fontaine.png)
+
 ### La chaîne des particules
 
 Dans la zone de simulation, quatre nodes se suivent.
@@ -77,8 +79,10 @@ Remets 2,6.
 ### Les colonnes d'une particule
 
 ```etape
-Clique le node **Simulation end**. Lis la carte **ATTRIBUTES**.
+Clique le node **Simulation end**. Lis la carte **Attributes**.
 ```
+
+![Simulation end choisi : la carte Attributes compte 1000 points, avec P, age et id. Le node Collision, à gauche, règle Bounce, Grip et la boule](images/particules-attributs.png)
 
 Tu y trouves `P` et `v`, plus deux colonnes nouvelles : `age`, l'âge en secondes, et `id`, un numéro unique par particule.
 

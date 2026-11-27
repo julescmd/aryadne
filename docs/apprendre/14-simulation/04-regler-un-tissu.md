@@ -49,6 +49,8 @@ verifier: lecture.image >= 30
 Lis la ligne du bas du menu : le nom de ta carte, le nombre de **points**, de **colors**, de **passes**, et le temps du pas en millisecondes.
 ```
 
+![Le menu du tissu ouvert par l'icône de puce : Graphics card choisi, les curseurs Iterations à Friction, Self-collision, et en bas la carte, les points, les couleurs, les passes et le temps du pas](images/menu-du-tissu.png)
+
 Si tu lis « No usable graphics card: cloth computed on the CPU », le calcul se fait sur le processeur. Tout le reste de la leçon marche pareil.
 
 ## Raideur : le tissu s'étire ou non
@@ -152,6 +154,8 @@ Grâce à eux, un tissu fin reste aussi ferme qu'un tissu grossier, sans des cen
 ```etape
 Dans le menu du tissu, clique la puce **CPU**. Les curseurs changent : il reste **Iterations**, **Compliance**, **Damping** et **Friction**.
 ```
+
+![Avec la puce CPU, le menu ne garde que les réglages du solveur processeur](images/solveur-cpu.png)
 
 **Compliance** est la souplesse des fils. À 0, le tissu ne s'étire pas. Plus grand, il devient élastique. La flexion ne se règle pas : seule la finesse de la grille compte.
 

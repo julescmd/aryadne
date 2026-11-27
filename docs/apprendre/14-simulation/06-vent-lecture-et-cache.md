@@ -23,6 +23,8 @@ Sur **Forces**, mets **Wind** à (6, 0, 0). Reviens à la première image et lis
 verifier: lecture.image >= 40
 ```
 
+![Wind à 6, 0, 0 sur le node Forces : le tissu est poussé de côté pendant sa chute](images/vent.png)
+
 Le tissu est poussé vers les X positifs. Il s'enroule de côté sur la boule.
 
 ```etape
@@ -63,6 +65,8 @@ Le menu propose **First frame**, **Last frame** et **Frames per second**. Dessou
 ```etape
 Mets **Last frame** à 240. La simulation dure maintenant dix secondes à 24 images par seconde.
 ```
+
+![Le menu de la roue dentée de la barre de lecture : First frame, Last frame, Frames per second, la taille du cache et Clear the cache](images/duree-et-cadence.png)
 
 ## La barre de cache
 
@@ -105,12 +109,14 @@ verifier: fichier.enregistre
 ```
 
 ```etape
-Clique le node **Simulation end**. Dans le panneau de côté, trouve la carte **SIMULATION CACHE**.
+Clique le node **Simulation end**. Dans le panneau de côté, trouve la carte **Simulation cache**.
 ```
 
 ```etape
 Clique **Bake to disk**. Toutes les images sont calculées et écrites dans le coffre.
 ```
+
+![Simulation end choisi : sa carte Simulation cache offre Bake to disk](images/figer-sur-le-disque.png)
 
 La carte indique maintenant « Baked: frames come from disk. ». La bande de cache change de couleur sur toute sa longueur. La zone se relit sans calcul, même si tu changes l'amont.
 
