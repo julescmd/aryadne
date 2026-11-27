@@ -68,6 +68,7 @@ Tout a été écrit en lisant le code source (dossier `src/`), pas en essayant c
 | [Compositing](utilisateur/noeuds-compositing.md) | Fichiers `.arycomp`, filtres, incrustation |
 | [Géométrie et simulation](utilisateur/noeuds-geometrie.md) | Fichiers `.arygeo`, points, attributs, faces et UV, zone de simulation, pose dans une scène 3D |
 | [Simulation de tissu](utilisateur/simulation-tissu.md) | XPBD, VBD, carte graphique, cache |
+| [Fumée et feu](utilisateur/simulation-fumee.md) | Volumes, source, combustion, solveur de fumée, rendu |
 | [Banc de mesure de la carte graphique](utilisateur/banc-gpu.md) | Ce que mesure le banc et comment le lire |
 
 ### Mouvement, vidéo, son, code

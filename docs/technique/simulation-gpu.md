@@ -1,6 +1,6 @@
 # Simulation sur carte graphique
 
-Cinq modules.
+Neuf modules.
 
 | Module | Rôle |
 |---|---|
@@ -8,6 +8,10 @@ Cinq modules.
 | `gpusim` | Le socle : tout ce que les solveurs partagent, et rien d'autre |
 | `gpucloth` | Le tissu en Vertex Block Descent, avec sa version processeur |
 | `gpudraw` | Le dessin d'un maillage directement depuis les tampons d'un solveur |
+| `volume` | Les données d'un volume (grille dense, demi-précision), son cache, son rendu sur le processeur |
+| `smoke` | La fumée et le feu : réglages, opérations, version processeur de référence |
+| `gpusmoke` | La fumée et le feu sur la carte |
+| `gpuvolume` | Le dessin d'un volume directement par la carte (ray marching) |
 | `gpubench` | Le banc de mesure |
 
 La bibliothèque est **wgpu** : la même interface pour Vulkan, Metal et DirectX 12. Les noyaux de calcul sont écrits en **WGSL**, dans des chaînes de caractères du code Rust.
@@ -330,6 +334,7 @@ Le banc a ses propres noyaux WGSL : copie, itération de Jacobi à 7 points, adv
 | 1. Copie | Le plafond de débit de la carte |
 | 2. Pression | Une itération de Jacobi sur une grille 3D |
 | 3. Fumée | Un pas complet : advection, flottabilité, 40 itérations de pression |
+| 3 bis. Fumée des nodes | Le vrai solveur (`smoke::Sim`) en 128³ et 256³ : temps par pas à 2, 4 et 8 itérations de MGPCG, divergence avant et après, coût du transfert pour le cache, mémoire sur la carte (`Fumee`) |
 | 4. Tissu | Sur 250 000 et 1 million de sommets : temps et lancements par passe, une image au budget de 16 et de 32 passes sans et avec niveaux grossiers, le surcoût de l'auto-collision, contre le processeur |
 | 5. Comparaison | XPBD, VBD, VBD avec niveaux, à budget égal : raideur obtenue et chute sur une boule |
 | Contrôles | Écart entre la carte et le processeur, pour la pression et pour un petit tissu |
@@ -338,9 +343,144 @@ Le banc a ses propres noyaux WGSL : copie, itération de Jacobi à 7 points, adv
 
 `gpubench::start()` lance le banc dans un fil d'exécution. `gpubench::ui()` dessine la fenêtre. Une erreur de la carte ne laisse pas la fenêtre attendre pour rien.
 
-La fumée du banc est un **essai de charge**. Elle n'est branchée sur aucun nœud.
+La fumée de l'étape 3 est un **essai de charge**, gardée pour comparer : même taille, 40 itérations de Jacobi. Celle de l'étape 3 bis est le solveur des nœuds.
 
 Pour l'usage, voir [Banc de mesure](../utilisateur/banc-gpu.md).
+
+## La fumée et le feu
+
+### Les données (`volume`)
+
+`Volume` : une grille dense. `res` (voxels par axe), `origin` (coin bas), `voxel` (taille), et deux tableaux de quatre nombres **f16** par voxel (`Grids`) :
+
+| Tableau | Contenu |
+|---|---|
+| `sca` | densité, température, carburant, flamme |
+| `vel` | vitesse sur les trois faces basses du voxel (grille décalée), et l'expansion des gaz qui brûlent |
+
+Soit 16 octets par voxel, en mémoire comme sur la carte. `to_half` et `from_half` convertissent (arrondi au plus proche, valeurs bornées à ±65504, table de 65 536 entrées pour la lecture).
+
+Le volume voyage dans `Geo::volume`. Il entre dans `Geo::stamp`, `Geo::bytes`, `Geo::ready`, et dans le cache disque par un bloc `VOLU` (voir [Formats](formats.md#cache-de-géométrie-arygeocache)).
+
+Trois formes de contenu (`Base`) : vide (rien n'est alloué), des voxels, ou **l'état d'un solveur** (`smoke::Shot`), peut-être encore sur la carte.
+
+**Opérations en attente.** `Source de fumée` et `Combustion` ne touchent pas aux voxels : ils ajoutent une `Op` au volume (`with_op`). Le solveur les fait dans son pas, sur la carte. Sans solveur derrière, `Volume::grids` les fait sur le processeur à la première lecture (`smoke::apply_ops`). C'est le même principe que les forces notées sur une colonne de tissu.
+
+`Volume::live()` rend de quoi dessiner depuis la carte si les tampons du solveur montrent encore exactement ce volume.
+
+### Un pas (`smoke`, `gpusmoke`)
+
+1. **Advection** de la fumée, puis de la vitesse. MacCormack : un aller semi-lagrangien, un retour, correction de la moitié de l'écart, bornée par les huit voisins du point de départ. Chaque composante de la vitesse est advectée sur ses propres faces.
+2. **Sources** (`Emit`), une par lancement : sphère et boîte calculées dans le noyau, points d'une géométrie par un masque envoyé à la carte quand il change. L'irrégularité est un hasard entier par blocs de 4 voxels, identique des deux côtés.
+3. **Réaction** : dissipation, refroidissement, combustion (`Burn`). Le carburant plus chaud que l'allumage brûle ; le refroidissement par rayonnement suit la solution exacte de dT/dt = −k·T⁴.
+4. **Forces** sur les faces : flottabilité, confinement de vorticité (deux noyaux : rotationnel, puis force), vent, frein. Une face contre un solide est mise à zéro.
+5. **Pression**, puis **projection**.
+
+Types de voxels : fluide, solide, ouvert (pression nulle). La couche du bord n'est jamais fluide. Les types ne sont recalculés que si les obstacles ou les bords changent.
+
+### La pression : MGPCG sans matrice
+
+Le système `A·p = b` n'est jamais stocké : la diagonale d'un voxel est son nombre de voisins non solides, et chaque voisin fluide compte pour −1. `b` est l'expansion voulue moins le flux sortant.
+
+Gradient conjugué, préconditionné par **un cycle en V** de multigrille géométrique :
+
+| Élément | Choix |
+|---|---|
+| Lissage | Gauss-Seidel rouge-noir, 2 balayages avant et après (`SWEEPS`), rouge puis noir à la descente, noir puis rouge à la remontée : le cycle est symétrique, comme l'exige le gradient conjugué |
+| Restriction | Le résidu des huit enfants, réuni (fusionné avec le calcul du résidu : pas de tampon de plus) |
+| Prolongement | La correction du parent, ajoutée telle quelle |
+| Niveau grossier | Mêmes règles sur une grille deux fois plus petite. Un voxel grossier est ouvert si un enfant l'est, sinon fluide si un enfant l'est |
+| Fond | 8 balayages dans chaque sens (`COARSE_SWEEPS`) sur le dernier niveau (côtés pairs, au moins 8 voxels pour descendre encore) |
+| Départ | La pression du pas d'avant (projection amortie) |
+
+Mesuré sur une bouffée chaude en 32³ : la plus grande divergence est divisée par 5 environ à chaque itération (2,3 → 1,0e-1 → 2,4e-3 → 4,1e-6 pour 0, 2, 4, 8 itérations).
+
+**Rien n'attend le processeur.** Les produits scalaires sont réduits sur la carte : un premier étage par paquets de 64 voxels, des étages par 64, et un dernier fil qui range le résultat dans un petit tampon de scalaires. Les noyaux `update_pr` et `update_s` y lisent α et β. Le nombre d'itérations est fixe. La divergence avant et après est relue avec un pas de retard, pour l'afficher (`Sim::stats`).
+
+### Les noyaux WGSL
+
+Trois jeux, 8 tampons de stockage au plus chacun. Chaque lancement choisit sa case de réglages (128 octets, `Bind::Slot`) ; les cases identiques sont partagées, et au-delà de 512 cases le travail part en plusieurs envois.
+
+| Jeu | Noyaux |
+|---|---|
+| `fumée-champs` | `types`, `advect_sca_fwd`, `advect_sca_corr`, `advect_vel_fwd`, `advect_vel_corr`, `emit`, `react`, `curl`, `confine`, `forces`, `residual`, `project` |
+| `fumée-pression` | `dots`, `reduce_ab`, `reduce_ba`, `last_a`, `last_b`, `update_pr`, `update_s` |
+| `fumée-multigrille` | `relax`, `gather`, `prolong`, `coarsen` |
+
+Les champs en f16 se lisent par `unpack2x16float` et s'écrivent par `pack2x16float` : aucune fonctionnalité optionnelle de la carte n'est demandée.
+
+Mémoire sur la carte : environ 54 octets par voxel (quatre tampons de champs à 8 octets, types, pression, résidu, direction, niveaux). 256³ : 0,9 Go. 512³ : 7,3 Go.
+
+### `Sim`, `Shot`, `Live`
+
+`smoke::Sim` est l'interface : `new` (carte si la grille y tient, sinon processeur), `load`, `step` (rend la main dès l'envoi), `busy`, `wait`, `shot`, `stats`.
+
+`Shot` est l'état à la fin d'un pas. Sur la carte, la relecture des deux tampons de champs est **demandée, pas attendue** : comme ils sont déjà en f16, c'est une simple copie. `Shot::grids` attend et copie, à la première demande seulement.
+
+`Live` porte le tampon de la fumée et un compteur : `current()` est faux dès que le solveur a avancé.
+
+### Le lien avec les nœuds (`geo`)
+
+| Nœud | Opération |
+|---|---|
+| `vol_box` | Crée un `Volume` vide. Voxels par multiples de 8 |
+| `vol_source` | Ajoute une `Op::Emit` |
+| `vol_burn` | Ajoute une `Op::Burn` |
+| `sim_smoke` | `smoke_step` : trouve la session de cette grille (`SMOKES`, deux au plus), charge l'état s'il ne vient pas d'elle, avance, rend un volume paresseux |
+| `vol_look` | Change `Volume::look` (opacité, couleur, lueur, ombre) |
+
+`smoke_step` suit les règles du tissu : même pas redemandé, même résultat (`memo`) ; carte occupée et calcul par tranches, le moteur rend la main (`SIM_WAIT`) ; carte perdue, le calcul continue sur le processeur (`Sim::fall_back`). `geo::smoke_status()` donne de quoi remplir la ligne de l'aperçu.
+
+### Le dessin (`gpuvolume`)
+
+Un triangle couvre l'image. Pour chaque pixel, le fragment lance un rayon (inverse de la matrice de vue), traverse la boîte par pas de 0,9 voxel (128 pas au plus), et lit le tampon de la fumée par huit lectures (trilinéaire à la main).
+
+| Élément | Calcul |
+|---|---|
+| Fumée | Opacité `1 − exp(−densité × opacité × pas)` |
+| Ombre | Six pas de deux voxels vers la lumière principale |
+| Flamme | Champ `flamme` × lueur, couleur d'après la température (`volume::flame_color`, la même formule dans le noyau) |
+| Profondeur | Celle d'une image calculée ailleurs (`gpudraw::Soft`) arrête le rayon |
+
+`Source::Live` lit le tampon du solveur tel quel. `Source::Data` envoie les voxels d'un volume repris du cache, quand sa version change.
+
+L'image est à demi-résolution (au quart sur un rendu logiciel) et étirée : la fumée est douce.
+
+| Vue | Usage |
+|---|---|
+| Aperçu de l'onglet Simulation (`geoview::paint_volume`) | Par-dessus les points et les surfaces. Sans carte partagée : un petit rendu sur le processeur |
+| Vue 3D d'une scène (`Viewer::volumes_paint`) | Par-dessus l'image du rasteriseur, avec sa profondeur |
+
+Dans une scène, un volume seul donne un objet de deux triangles minuscules aux coins de sa boîte (`geoscene::to_model`) : il a ainsi sa place et sa taille.
+
+### Le rendu final
+
+`volume::composite` pose les volumes sur une image déjà rendue, sur le processeur, avec la même formule (`Sampler::march`). `model3d::volumes_over` lui donne les rayons de la caméra et la distance de la première surface.
+
+| Rendu | Où |
+|---|---|
+| Export vidéo (`encode_animation`) | Après chaque image, avec la profondeur du rendu rapide |
+| Rendu final (`pathtrace::Job::start_with`) | Chaque image du rendu passe par une retouche ; la distance des surfaces vient d'un rayon par pixel |
+
+### Les tests
+
+| Test | Ce qu'il vérifie |
+|---|---|
+| `smoke::la_pression_converge_vite` | La divergence baisse à chaque doublement des itérations, de 4 ordres de grandeur en 8 |
+| `smoke::la_pression_avec_un_obstacle_et_des_bords_fermes` | Convergence avec boule et boîte, rien ne traverse un solide |
+| `gpusmoke::carte_contre_processeur` | Quatre images avec sources, combustion, obstacles, vent : écart sous 2 %, même divergence de départ |
+| `gpusmoke::sans_maccormack_et_par_un_masque` | Advection simple, source par masque, grille non cubique |
+| `gpuvolume::la_carte_dessine_comme_le_processeur` | Même image des deux côtés, et occultation par la profondeur |
+| `geo::fumee::fumee_par_les_nodes` | Les trois exemples, le cache en mémoire et sur le disque |
+| `geoscene::a_scene_renders_its_smoke` | Une fumée dans une scène et dans le rendu |
+
+### Limites
+
+- Grille dense. Pas de tuiles creuses, pas de montée en résolution.
+- Obstacles analytiques seulement (une boule, une boîte), sans vitesse propre.
+- La relecture de chaque image pour le cache est toujours demandée : 16 octets par voxel. En 256³, c'est 270 Mo par image. Le banc mesure ce que ça coûte.
+- Le dessin ne lit que la lumière principale. La fumée ne projette pas d'ombre sur les surfaces et ne les éclaire pas.
+- Le rendu final de la fumée se fait sur le processeur.
 
 ## Écrire un nouveau solveur sur la carte
 
@@ -445,7 +585,8 @@ Dans la scène, la vue est un rasteriseur logiciel. Elle retire ces objets de so
 - **Auto-collision par triangles.** Elle se fait entre sommets, avec une épaisseur de l'ordre de la maille. Des faces, puis des bornes de déplacement par sommet (OGC), permettraient une épaisseur fine.
 - **Frottement entre les couches** du tissu.
 - **Collision avec un maillage** quelconque.
-- **Fumée, fluides, corps rigides, cheveux, destruction** : rien n'est branché. Le banc contient seulement des noyaux d'essai pour la fumée.
+- **Fumée : grille creuse, montée en résolution, obstacles en maillage.** Voir les limites de la fumée plus haut.
+- **Fluides, corps rigides, cheveux, destruction** : rien n'est branché.
 - **Affichage direct des particules et des fils.** Seules les surfaces (géométries avec faces) sont dessinées depuis la carte. Points et arêtes passent encore par le processeur.
 - **Ombres et matériaux dans le dessin direct.** Voir les limites de `gpudraw`.
 - **Sauter le transfert quand le cache ne sert pas.** Chaque pas demande encore sa relecture (jamais attendue). Le banc mesure ce qu'elle coûte : ligne « avec le transfert différé pour le cache ».

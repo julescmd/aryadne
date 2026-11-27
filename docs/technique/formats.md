@@ -199,6 +199,8 @@ Binaire, petit-boutiste. Un fichier par image et par prise : `<image sur 5 chiff
 | 4 | Nombre de faces (u32) |
 | 16 par face | Quatre numéros de points (u32). Le quatrième vaut `0xFFFFFFFF` pour un triangle |
 
+Après les faces, un bloc `VOLU` facultatif porte le volume de la géométrie (fumée, feu) : trois entiers (voxels par axe), quatre `f32` (coin de la grille, taille d'un voxel), le nombre de champs, puis pour chaque champ son nom (longueur, octets UTF-8), son nombre de composantes, et ses valeurs en **f16**, composante par composante. Champs écrits : `densité`, `température`, `carburant`, `flamme` (1 composante), `vitesse` (3). Soit 14 octets par voxel. Un champ de nom inconnu est sauté à la lecture.
+
 Le bloc `FACE` vient à la fin et n'existe que si la géométrie a des faces. Un cache écrit avant lui se relit (sans faces). Une version plus ancienne de l'application s'arrête après les arêtes et ignore ce bloc.
 
 Un bloc de colonnes : le nombre de colonnes (u32), puis pour chacune : longueur du nom (u32), nom en UTF-8, largeur (u32, nombre de composantes, au plus 16), puis chaque composante en entier, en `f32` bruts.

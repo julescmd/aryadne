@@ -173,11 +173,25 @@ Ils vont dans une zone de simulation.
 
 `Emit particles` refuse de dépasser 4 millions de particules.
 
+### Nœuds de volume : fumée et feu
+
+| Nœud | Effet |
+|---|---|
+| `Empty volume` | Crée une boîte de voxels vide |
+| `Smoke source` | Pose de la fumée, de la chaleur ou du carburant : sphère, boîte, ou points d'une géométrie |
+| `Combustion` | Brûle le carburant chaud : chaleur, flammes, fumée |
+| `Smoke solver` | Fait bouger l'air et la fumée, sur la carte graphique |
+| `Smoke look` | Opacité, couleur, lueur des flammes |
+
+Détail des entrées : [Fumée et feu](simulation-fumee.md).
+
 ### Chaînes types
 
 **Particules.** Début de zone → `Emit particles` → `Forces` → `Move forward` → `Collision` → fin de zone.
 
 **Tissu.** Début de zone → `Forces` → `Solver` → fin de zone. Le solveur déplace lui-même les points : pas de `Move forward`.
+
+**Fumée.** `Empty volume` → début de zone → `Smoke source` → `Smoke solver` → fin de zone. Pour un feu, `Combustion` entre la source et le solveur.
 
 ### Voir un nœud de l'intérieur de la zone
 

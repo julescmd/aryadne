@@ -250,4 +250,6 @@ indice: Avant la zone, supprime les points trop loin du centre : Location, Vecto
 - Une nappe : pas de point fixe, une boîte et le sol dans le **Solver**, l'auto-collision.
 - L'Assistant propose, tu appliques d'un clic, et Ctrl+Z annule tout.
 
-Parcours terminé. Pour mélanger la simulation avec le reste, va voir les [projets guidés](../16-projets/index.md).
+[Suite : Fumée et feu](09-fumee-et-feu.md)
+
+Pour mélanger la simulation avec le reste, va voir les [projets guidés](../16-projets/index.md).

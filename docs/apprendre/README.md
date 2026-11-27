@@ -51,7 +51,7 @@ Seize parcours, du premier lancement au projet fini. Fais le premier en entier. 
 |---|---|---|---|
 | 12 | [Les nodes](12-noeuds/index.md) | Relier, ranger, grouper, répéter, calculer | Débutant |
 | 13 | [Compositing](13-compositing/index.md) | Graphe d'image, couleur, filtres, incrustation | Intermédiaire |
-| 14 | [Simulation](14-simulation/index.md) | Zone de simulation, tissu, obstacles, vent, cache, particules, vagues | Intermédiaire |
+| 14 | [Simulation](14-simulation/index.md) | Zone de simulation, tissu, obstacles, vent, cache, particules, vagues, fumée et feu | Intermédiaire |
 
 ### Finir
 

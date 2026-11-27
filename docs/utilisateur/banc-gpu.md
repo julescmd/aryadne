@@ -37,6 +37,18 @@ Ce n'est **pas** une fumée utilisable dans Aryadne. C'est un essai de charge, p
 
 Si la fumée donne des valeurs non finies, le banc le signale : c'est une erreur du calcul, pas de ta carte.
 
+### 2 bis. La fumée des nœuds
+
+`Node smoke` : un pas complet de la vraie fumée d'Aryadne ([Fumée et feu](simulation-fumee.md)), en 128³ et 256³. La pression y est résolue par multigrille (MGPCG), pas par Jacobi.
+
+| Ligne | Sens |
+|---|---|
+| `N³ · X MB on the card` | La taille de la grille et la mémoire qu'elle occupe sur la carte |
+| `2 iterations`, `4 iterations`, `8 iterations` | Le temps d'un pas avec ce nombre d'itérations de pression, et la divergence avant → après. La divergence est l'erreur qui reste : plus elle est petite, plus le mouvement est juste |
+| `4 iterations, with each frame transferred for the cache` | Le même pas quand chaque image est recopiée vers le processeur. L'écart avec la ligne `4 iterations` est le prix du cache |
+
+À comparer avec la ligne `Smoke step N³ (40 pressure iterations)` : même taille, 40 itérations de Jacobi. La multigrille doit donner une divergence bien plus petite pour un temps du même ordre.
+
 ### 3. Le tissu
 
 `VBD cloth (one pass = every vertex updated once)`. Deux tailles : 250 000 et 1 million de sommets.

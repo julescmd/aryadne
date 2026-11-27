@@ -93,7 +93,6 @@ pub fn obstacle() -> Graph {
     g.connect(tint, 0, both, 1);
     g.connect(both, 0, out, 0);
     hide_thumbs(&mut g, &[ball, ball_at, tint]);
-    g.frames.push(crate::nodes::Frame { rect: [480.0, 720.0, 740.0, 250.0], label: "l'obstacle, montré en points : le même centre et le même rayon que dans le solveur".into(), color: [90, 120, 200], note: String::new() });
     g
 }
 

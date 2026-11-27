@@ -118,7 +118,7 @@ indice: Le node Solver a un réglage Box center.
 
 ## Exemples intégrés utilisables dans `essayer: exemple:`
 
-Géométrie et simulation : `tissu sur une boule`, `tissu sur la carte graphique`, `tissu qui se replie`, `drapeau dans le vent`, `fontaine de particules`, `vagues animées`.
+Géométrie et simulation : `tissu sur une boule`, `tissu sur la carte graphique`, `tissu qui se replie`, `drapeau dans le vent`, `fontaine de particules`, `vagues animées`, `fumée qui monte`, `feu de camp`, `fumée contre un obstacle`.
 
 Matériaux (les préréglages de la fenêtre « nouveau fichier ») : `carrelage en relief`, `béton fissuré`, `métal brossé rayé`, `velours`, `cire`, `tissu tissé`, `métal peint usé`, `pierre aux creux sombres`, `bois`, `pierre`, `métal rouillé`, `toon`, `céramique`, `or`, `verre`, `verre dépoli`, `eau`, `toon 3 bandes`, `peinture de voiture`, `plastique`, `néon`.
 

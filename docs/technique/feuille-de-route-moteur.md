@@ -44,7 +44,7 @@ Un « Houdini dans le logiciel » : tissu, corps mous, cheveux, rigides, destruc
 | 2. Petits triangles dessinés comme des points, plafond retiré | **Fait en partie.** Les triangles plus petits qu'un pixel sont posés comme des points. Le plafond est passé de 150 000 à 2 millions de triangles, pas retiré |
 | 3. Carte graphique : buffer de visibilité, amas de triangles avec niveaux de détail, rasterisation en calcul | **Pas fait.** La vue reste sur le processeur. Seuls le tracé de chemins et les simulations utilisent la carte |
 | 4. Simulation XPBD sur carte graphique (tissu d'abord), avec cache disque | **Fait, et dépassé.** Le socle `gpusim` existe. Le tissu est en VBD plutôt qu'en XPBD, comme le recommandaient les rapports. Le cache disque existe, sans compression |
-| 5. Fluides FLIP et APIC, fumée et feu, grilles creuses | **Pas fait.** Le banc contient des noyaux d'essai pour la fumée |
+| 5. Fluides FLIP et APIC, fumée et feu, grilles creuses | **Fumée et feu faits** en grille dense : MacCormack, MGPCG sans matrice, demi-précision, combustion, dessin direct (voir [Simulation sur carte graphique](simulation-gpu.md#la-fumée-et-le-feu)). Pas faits : grille creuse, montée en résolution, liquides |
 | 6. Graphe de nœuds façon Houdini | **Commencé.** Graphe de géométrie avec évaluation à la demande, coupure anticipée, zones de simulation et trait `Solver`. Voir [Système de nœuds](noeuds.md) |
 
 ## Les idées qui reviennent dans tous les rapports
