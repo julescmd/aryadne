@@ -11455,6 +11455,45 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Une fumée de nodes sort dans la vidéo exportée : la dernière image n'est pas la même avec
+    /// et sans l'objet.
+    #[test]
+    fn la_fumee_sort_dans_la_video() {
+        let Some(ff) = crate::ffmpeg::find("ffmpeg") else { return };
+        let dir = std::env::temp_dir().join(format!("aryadne-fumee-video-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut g = crate::geo::example("fumée qui monte").unwrap();
+        for n in g.nodes.iter_mut() {
+            if n.op == "vol_box" {
+                n.values[2] = [24.0; 4];
+            }
+            if n.op == "sim_smoke" {
+                n.params.insert("calcul".into(), crate::nodes::Param::S("processeur".into()));
+            }
+        }
+        g.save(&dir.join("fumee.arygeo")).unwrap();
+        let path = dir.join("s.aryscene");
+        let mut sc = crate::scene::Scene::default();
+        let k = sc.add_geo(&path, &dir.join("fumee.arygeo"));
+        sc.start = 0;
+        sc.end = 8;
+        let (w, h) = (96usize, 64usize);
+        let last = |sc: crate::scene::Scene, name: &str| -> Vec<u8> {
+            let out = dir.join(name);
+            encode_animation(ff.clone(), sc, &path, ([-1.5, -1.0, -1.5], [1.5, 2.0, 1.5]), &Look::default(), Camera { dist: 0.9, ..Default::default() }, (w, h), &out, &|| {}).unwrap();
+            let raw = crate::ffmpeg::command(ff.clone()).args(["-v", "error", "-i"]).arg(&out).args(["-f", "rawvideo", "-pix_fmt", "rgb24", "-"]).output().unwrap().stdout;
+            assert_eq!(raw.len(), w * h * 3 * 9, "neuf images");
+            raw[raw.len() - w * h * 3..].to_vec()
+        };
+        let with = last(sc.clone(), "avec.mp4");
+        sc.objects[k].visible = false;
+        let without = last(sc, "sans.mp4");
+        let changed = with.chunks(3).zip(without.chunks(3)).filter(|(a, b)| (0..3).any(|c| (a[c] as i32 - b[c] as i32).abs() > 24)).count();
+        assert!(changed > 40, "la fumée change {changed} pixels de la dernière image");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn animation_en_video() {
         let Some(ff) = crate::ffmpeg::find("ffmpeg") else { return };
