@@ -4245,5 +4245,6 @@
   "Pour une machine où l'affichage sur carte pose problème. Les simulations restent calculées sur la carte, mais leur affichage repasse par le processeur": "For a machine where graphics card display causes trouble. Simulations are still computed on the card, but displaying them goes back through the processor",
   "L'affichage sur carte n'a pas démarré la dernière fois : Aryadne est resté en mode compatible. Choisis « carte graphique » pour réessayer.": "Graphics card display did not start last time: Aryadne stayed in compatibility mode. Choose \"graphics card\" to try again.",
   "L'affichage sur carte a refusé de démarrer : Aryadne est en mode compatible. Choisis « carte graphique » pour réessayer au prochain démarrage.": "Graphics card display refused to start: Aryadne is in compatibility mode. Choose \"graphics card\" to try again at the next start.",
-  "Choisi par la variable d'environnement ARY_RENDU.": "Chosen by the ARY_RENDU environment variable."
+  "Choisi par la variable d'environnement ARY_RENDU.": "Chosen by the ARY_RENDU environment variable.",
+  "sans relecture": "no readback"
 }

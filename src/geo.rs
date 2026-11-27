@@ -36,42 +36,188 @@ fn next_version() -> u64 {
 
 /// Une colonne d'attribut : un tableau par composante. `version` change à chaque écriture, ce qui
 /// permet de savoir sans relire les données si deux colonnes sont la même.
-#[derive(Clone, Debug)]
+///
+/// Une colonne peut être **paresseuse** : ses données sont encore sur la carte graphique (l'état
+/// d'un solveur), ou sont la mise bout à bout d'autres colonnes. Elles ne sont copiées vers le
+/// processeur que si quelqu'un les lit (`data`). Sa taille et sa version se connaissent sans lire.
+#[derive(Clone)]
 pub struct Column {
-    pub data: Vec<Vec<f32>>,
+    data: std::sync::OnceLock<Vec<Vec<f32>>>,
+    lazy: Option<Lazy>,
+    /// Nombre de composantes, nombre d'éléments
+    shape: (usize, usize),
     pub version: u64,
+}
+
+/// D'où viennent les données d'une colonne paresseuse.
+#[derive(Clone)]
+pub enum Lazy {
+    /// Positions (ou vitesses, si `vel`) d'un cliché de tissu. `force` : des forces uniformes
+    /// posées dessus par le node « Forces », que le solveur appliquera sur la carte.
+    Shot { shot: Arc<crate::gpucloth::Shot>, vel: bool, force: Option<Force> },
+    /// Plusieurs colonnes l'une après l'autre (node « Réunir »)
+    Concat(Vec<Arc<Column>>),
+}
+
+/// Forces uniformes d'une image sur des vitesses : `v ← (v + add) × keep`, zéro pour les points fixes.
+#[derive(Clone)]
+pub struct Force {
+    pub add: [f32; 3],
+    pub keep: f32,
+    pin: Option<Arc<Column>>,
+}
+
+impl std::fmt::Debug for Column {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Column({}×{}, v{}{})", self.shape.0, self.shape.1, self.version, if self.resolved() { "" } else { ", sur la carte" })
+    }
 }
 
 impl Column {
     pub fn new(data: Vec<Vec<f32>>) -> Column {
-        Column { data, version: next_version() }
+        let shape = (data.len(), data.first().map(|c| c.len()).unwrap_or(0));
+        Column { data: data.into(), lazy: None, shape, version: next_version() }
+    }
+
+    /// Positions (ou vitesses) d'un cliché de tissu : lues seulement si quelqu'un les demande.
+    pub fn shot(shot: Arc<crate::gpucloth::Shot>, vel: bool) -> Column {
+        let shape = (3, shot.len());
+        Column { data: Default::default(), lazy: Some(Lazy::Shot { shot, vel, force: None }), shape, version: next_version() }
+    }
+
+    /// Les mêmes vitesses avec des forces uniformes par-dessus, sans les lire. `None` si cette
+    /// colonne n'est pas des vitesses encore sur la carte (le calcul se fait alors ici).
+    fn with_force(&self, force: Force) -> Option<Column> {
+        match &self.lazy {
+            Some(Lazy::Shot { shot, vel: true, force: None }) if !self.resolved() => Some(Column { data: Default::default(), lazy: Some(Lazy::Shot { shot: shot.clone(), vel: true, force: Some(force) }), shape: self.shape, version: next_version() }),
+            _ => None,
+        }
+    }
+
+    /// Les forces uniformes de cette colonne, si elle est exactement « les vitesses de `last`, plus
+    /// des forces » : le solveur les applique alors sur la carte, sans que rien ne la quitte.
+    fn force_over(&self, last: Option<&Arc<crate::gpucloth::Shot>>) -> Option<Force> {
+        match (&self.lazy, last) {
+            (Some(Lazy::Shot { shot, vel: true, force: Some(f) }), Some(l)) if Arc::ptr_eq(shot, l) => Some(f.clone()),
+            _ => None,
+        }
+    }
+
+    /// Ce qui distingue le contenu de cette colonne sans la lire : sa version, ou, pour des forces
+    /// posées sur un cliché, le cliché et les forces (le node « Forces » refait une colonne neuve à
+    /// chaque passage, mais le contenu est le même).
+    fn identity(&self) -> (u64, [u32; 4]) {
+        match &self.lazy {
+            Some(Lazy::Shot { shot, vel: true, force: Some(f) }) => (Arc::as_ptr(shot) as usize as u64, [f.add[0].to_bits(), f.add[1].to_bits(), f.add[2].to_bits(), f.keep.to_bits()]),
+            _ => (self.version, [0; 4]),
+        }
+    }
+
+    /// Plusieurs colonnes de même largeur l'une après l'autre, sans les copier.
+    fn concat(parts: Vec<Arc<Column>>) -> Column {
+        let shape = (parts.first().map(|c| c.width()).unwrap_or(0), parts.iter().map(|c| c.len()).sum());
+        Column { data: Default::default(), lazy: Some(Lazy::Concat(parts)), shape, version: next_version() }
     }
 
     pub fn width(&self) -> usize {
-        self.data.len()
+        self.shape.0
     }
 
     pub fn len(&self) -> usize {
-        self.data.first().map(|c| c.len()).unwrap_or(0)
+        self.shape.1
+    }
+
+    /// Les données sont-elles déjà du côté du processeur ?
+    pub fn resolved(&self) -> bool {
+        self.data.get().is_some()
+    }
+
+    /// `data` rendrait-il la main sans attendre la carte ? Ne bloque pas.
+    pub fn ready(&self) -> bool {
+        self.resolved()
+            || match &self.lazy {
+                Some(Lazy::Shot { shot, .. }) => shot.ready(),
+                Some(Lazy::Concat(parts)) => parts.iter().all(|c| c.ready()),
+                None => true,
+            }
+    }
+
+    /// Les morceaux de cette colonne, avec le rang de leur premier élément : elle-même, ou ce
+    /// qu'elle met bout à bout. Une vue y cherche ce qu'elle peut dessiner sans rien lire.
+    pub fn parts<'a>(self: &'a Arc<Column>, first: usize, out: &mut Vec<(usize, &'a Arc<Column>)>) {
+        match &self.lazy {
+            Some(Lazy::Concat(parts)) => {
+                let mut at = first;
+                for c in parts {
+                    c.parts(at, out);
+                    at += c.len();
+                }
+            }
+            _ => out.push((first, self)),
+        }
+    }
+
+    /// Le cliché de tissu dont cette colonne montre les positions telles quelles, s'il y en a un.
+    pub fn positions_of(&self) -> Option<&Arc<crate::gpucloth::Shot>> {
+        match &self.lazy {
+            Some(Lazy::Shot { shot, vel: false, force: None }) => Some(shot),
+            _ => None,
+        }
+    }
+
+    /// Les données, un tableau par composante. Une colonne paresseuse est lue ici, une seule fois :
+    /// si elle est encore sur la carte, on attend la fin de son calcul.
+    pub fn data(&self) -> &Vec<Vec<f32>> {
+        self.data.get_or_init(|| match &self.lazy {
+            Some(Lazy::Shot { shot, vel, force }) => {
+                if std::env::var_os("ARY_DBG_RELECTURE").is_some() {
+                    eprintln!("relecture d'une colonne (vitesses : {vel}) :\n{}", std::backtrace::Backtrace::force_capture());
+                }
+                let st = shot.state();
+                let mut v: Vec<Vec<f32>> = if *vel { st.1.to_vec() } else { st.0.to_vec() };
+                if let Some(f) = force {
+                    let pin = f.pin.as_ref().map(|c| c.data()).and_then(|d| d.first());
+                    for (k, comp) in v.iter_mut().enumerate() {
+                        for (i, x) in comp.iter_mut().enumerate() {
+                            *x = if pin.is_some_and(|p| p.get(i).is_some_and(|p| *p > 0.5)) { 0.0 } else { (*x + f.add[k]) * f.keep };
+                        }
+                    }
+                }
+                v
+            }
+            Some(Lazy::Concat(parts)) => (0..self.shape.0)
+                .map(|k| {
+                    let mut v = Vec::with_capacity(self.shape.1);
+                    for c in parts {
+                        v.extend_from_slice(&c.data()[k]);
+                    }
+                    v
+                })
+                .collect(),
+            None => Vec::new(),
+        })
     }
 
     /// Valeur d'un élément, étendue à quatre nombres comme partout dans les nodes.
     pub fn get(&self, i: usize) -> V {
-        match self.data.len() {
+        let d = self.data();
+        match d.len() {
             0 => [0.0; 4],
-            1 => [self.data[0][i]; 4],
-            2 => [self.data[0][i], self.data[1][i], 0.0, 1.0],
-            3 => [self.data[0][i], self.data[1][i], self.data[2][i], 1.0],
-            _ => [self.data[0][i], self.data[1][i], self.data[2][i], self.data[3][i]],
+            1 => [d[0][i]; 4],
+            2 => [d[0][i], d[1][i], 0.0, 1.0],
+            3 => [d[0][i], d[1][i], d[2][i], 1.0],
+            _ => [d[0][i], d[1][i], d[2][i], d[3][i]],
         }
     }
 
+    /// Même contenu ? Deux colonnes encore sur la carte ne se comparent que par leur version :
+    /// les lire pour le savoir coûterait plus que de refaire l'aval.
     fn same(&self, o: &Column) -> bool {
-        self.version == o.version || self.data == o.data
+        self.version == o.version || (self.resolved() && o.resolved() && self.data() == o.data())
     }
 
     fn bytes(&self) -> usize {
-        self.data.iter().map(|c| c.len() * 4).sum()
+        self.shape.0 * self.shape.1 * 4
     }
 }
 
@@ -149,14 +295,14 @@ impl Geo {
     /// Les trois composantes d'un attribut vectoriel, copiées (zéros s'il manque).
     pub fn vec3(&self, name: &str) -> [Vec<f32>; 3] {
         match self.col(name) {
-            Some(c) if c.width() >= 3 => [c.data[0].clone(), c.data[1].clone(), c.data[2].clone()],
+            Some(c) if c.width() >= 3 => [c.data()[0].clone(), c.data()[1].clone(), c.data()[2].clone()],
             _ => [vec![0.0; self.n], vec![0.0; self.n], vec![0.0; self.n]],
         }
     }
 
     pub fn pos(&self, i: usize) -> [f32; 3] {
         match self.col("P") {
-            Some(c) if c.width() >= 3 => [c.data[0][i], c.data[1][i], c.data[2][i]],
+            Some(c) if c.width() >= 3 => [c.data()[0][i], c.data()[1][i], c.data()[2][i]],
             _ => [0.0; 3],
         }
     }
@@ -212,13 +358,66 @@ impl Geo {
         }
     }
 
+    /// Clé de la topologie des faces : change quand elles changent.
+    pub fn faces_key(&self) -> u64 {
+        self.faces_version
+    }
+
+    /// Toutes les colonnes sont-elles lisibles sans attendre la carte ? Ne bloque pas.
+    pub fn ready(&self) -> bool {
+        self.cols.values().all(|c| c.ready())
+    }
+
+    /// Toutes les colonnes sont-elles déjà du côté du processeur ? (Les lire ne coûte alors rien.)
+    pub fn resolved(&self) -> bool {
+        self.cols.values().all(|c| c.resolved())
+    }
+
+    /// Les morceaux de la colonne des positions (voir `Column::parts`).
+    pub fn position_parts(&self) -> Vec<(usize, &Arc<Column>)> {
+        let mut out = vec![];
+        if let Some(c) = self.cols.get("P").filter(|c| c.width() >= 3) {
+            c.parts(0, &mut out);
+        }
+        out
+    }
+
+    /// Boîte englobante sans rien attendre ni copier : exacte pour ce qui est déjà lu, approchée
+    /// (un sommet sur quelques-uns) pour ce qui arrive de la carte. `None` si un morceau n'est pas
+    /// encore arrivé.
+    pub fn bounds_now(&self) -> Option<([f32; 3], [f32; 3])> {
+        let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
+        for (_, c) in self.position_parts() {
+            let (a, b) = if c.resolved() {
+                let d = c.data();
+                let mut r = ([f32::MAX; 3], [f32::MIN; 3]);
+                for k in 0..3 {
+                    for &x in &d[k] {
+                        if x.is_finite() {
+                            r.0[k] = r.0[k].min(x);
+                            r.1[k] = r.1[k].max(x);
+                        }
+                    }
+                }
+                r
+            } else {
+                c.positions_of()?.bounds_now((c.len() / 20_000).max(1))?
+            };
+            for k in 0..3 {
+                lo[k] = lo[k].min(a[k]);
+                hi[k] = hi[k].max(b[k]);
+            }
+        }
+        (lo[0] <= hi[0]).then_some((lo, hi))
+    }
+
     /// Boîte englobante (min, max), ou rien sans point.
     pub fn bounds(&self) -> Option<([f32; 3], [f32; 3])> {
         let c = self.col("P").filter(|c| c.width() >= 3 && self.n > 0)?;
         let mut lo = [f32::MAX; 3];
         let mut hi = [f32::MIN; 3];
         for k in 0..3 {
-            for &x in &c.data[k] {
+            for &x in &c.data()[k] {
                 if x.is_finite() {
                     lo[k] = lo[k].min(x);
                     hi[k] = hi[k].max(x);
@@ -244,7 +443,7 @@ impl Geo {
                 put(&mut b, name.len() as u32);
                 b.extend_from_slice(name.as_bytes());
                 put(&mut b, c.width() as u32);
-                for comp in &c.data {
+                for comp in c.data() {
                     debug_assert_eq!(comp.len(), count);
                     for x in comp {
                         b.extend_from_slice(&x.to_le_bytes());
@@ -402,7 +601,7 @@ impl Solver for XpbdCloth {
         let p0 = g.vec3("P");
         let v = g.vec3("v");
         let w: Vec<f32> = match g.col("pin") {
-            Some(c) => c.data[0].iter().map(|x| if *x > 0.5 { 0.0 } else { 1.0 }).collect(),
+            Some(c) => c.data()[0].iter().map(|x| if *x > 0.5 { 0.0 } else { 1.0 }).collect(),
             None => vec![1.0; n],
         };
         let edges = g.edges.clone();
@@ -413,7 +612,7 @@ impl Solver for XpbdCloth {
             }).collect();
             g.ecols.insert("rest".into(), Arc::new(Column::new(vec![rest])));
         }
-        let rest = g.ecols["rest"].data[0].clone();
+        let rest = g.ecols["rest"].data()[0].clone();
         // Petits pas : le pas de temps est coupé en sous-pas, chacun avec peu de passes sur les
         // contraintes. À nombre de passes égal, le tissu s'étire bien moins qu'avec un seul grand pas.
         let passes = p.iterations.max(1);
@@ -536,40 +735,40 @@ struct ClothSession {
     /// quelles, la carte a déjà cet état et on ne renvoie rien
     out: (u64, u64),
     used: u64,
-    /// Un pas envoyé à la carte, dont le résultat n'est pas encore revenu
-    waiting: Option<ClothWait>,
+    /// Le cliché rendu au dernier pas : des vitesses « ce cliché plus des forces uniformes »
+    /// se traitent sur la carte, sans relecture
+    last: Option<Arc<crate::gpucloth::Shot>>,
+    /// Le dernier pas : ses entrées, et ce qu'il a rendu. Redemandé tel quel (miniature d'un node
+    /// de la zone, tableau des attributs), il est rendu sans recalcul et sans déranger la carte.
+    memo: Option<(StepKey, crate::gpucloth::Params, Arc<Column>, Arc<Column>)>,
 }
 
-/// Un pas de tissu en cours sur la carte : pour quelles entrées, et de quoi finir quand il revient.
-struct ClothWait {
-    /// Versions de `P` et de `v` reçues, pas de temps, nombre de points
-    inputs: (u64, u64, u32, usize),
-    par: crate::gpucloth::Params,
-    pending: crate::gpucloth::Pending,
-    /// La forme au repos rangée dans l'état à ce pas (le même état doit ressortir quand le pas revient)
-    repos: Option<Arc<Column>>,
-    rest: Option<Arc<Column>>,
-    since: std::time::Instant,
-}
+/// Entrées d'un pas de tissu : version de `P`, identité de `v`, pas de temps, nombre de points
+type StepKey = (u64, (u64, [u32; 4]), u32, usize);
 
 thread_local! {
     /// Le moteur accepte-t-il qu'un solveur rende la main avant d'avoir fini (calcul en tranches) ?
     static SIM_DEFER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-    /// Un solveur a rendu la main : son pas tourne encore sur la carte, l'image n'est pas prête
+    /// Un solveur a rendu la main : la carte calcule encore le pas d'avant, l'image n'est pas faite
     static SIM_WAIT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 impl ClothSession {
-    /// Range le résultat du pas dans l'état, et note ce qu'il a coûté.
-    fn finish(&mut self, g: &mut Geo, par: &crate::gpucloth::Params, since: std::time::Instant) {
-        let (x, v) = self.cloth.read();
-        let (x, v) = (Column::new(x.into()), Column::new(v.into()));
+    /// Range le résultat du pas dans l'état, et note ce qu'il a coûté. Les colonnes `P` et `v`
+    /// sont paresseuses : sur la carte, elles ne sont relues que si quelqu'un les lit.
+    fn finish(&mut self, g: &mut Geo, par: &crate::gpucloth::Params, since: std::time::Instant, key: StepKey) {
+        let shot = self.cloth.shot();
+        let (x, v) = (Arc::new(Column::shot(shot.clone(), false)), Arc::new(Column::shot(shot.clone(), true)));
         self.out = (x.version, v.version);
-        g.set("P", x);
-        g.set("v", v);
+        self.last = Some(shot);
+        self.memo = Some((key, *par, x.clone(), v.clone()));
+        g.cols.insert("P".into(), x);
+        g.cols.insert("v".into(), v);
         let (substeps, per) = par.split();
         let on_gpu = self.cloth.on_gpu();
-        let status = ClothStatus { on_gpu, card: if on_gpu { crate::gpusim::gpu().map(|c| c.name.clone()).unwrap_or_default() } else { String::new() }, points: g.n, colors: self.cloth.topo.colors(), substeps, per, ms: since.elapsed().as_secs_f32() * 1000.0 };
+        // Sur la carte, le pas n'est pas fini quand on rend la main : on montre la durée du dernier pas fini
+        let ms = if on_gpu { self.cloth.last_ms() } else { since.elapsed().as_secs_f32() * 1000.0 };
+        let status = ClothStatus { on_gpu, card: if on_gpu { crate::gpusim::gpu().map(|c| c.name.clone()).unwrap_or_default() } else { String::new() }, points: g.n, colors: self.cloth.topo.colors(), substeps, per, ms };
         *CLOTH_STATUS.lock().unwrap_or_else(|e| e.into_inner()) = Some(status);
     }
 }
@@ -589,7 +788,7 @@ pub struct ClothStatus {
     pub substeps: usize,
     /// Itérations par sous-pas
     pub per: usize,
-    /// Temps du pas, relecture comprise
+    /// Temps du pas. Sur la carte : celui du dernier pas fini, de l'envoi à la fin du calcul
     pub ms: f32,
 }
 
@@ -610,29 +809,11 @@ impl Solver for VbdCloth {
         let t0 = std::time::Instant::now();
         let par = crate::gpucloth::Params { stiffness: p.stiffness, shear: p.shear, bending: p.bending, damping: p.damping, calm: p.calm, iterations: p.iterations, substeps: p.substeps, rho: crate::gpucloth::RHO, floor: p.floor, ball: p.ball, cube: p.cube, friction: p.grip, thickness: p.thickness, ..Default::default() }.with_levels();
         let version = |g: &Geo, name: &str| g.col(name).map(|c| c.version).unwrap_or(0);
-        let inputs = (version(g, "P"), version(g, "v"), dt.to_bits(), n);
+        let inputs = (version(g, "P"), version(g, "v"));
         // Le moteur calcule par tranches : plutôt que d'attendre la carte, on lui rend la main, et
         // il redemandera ce même pas à la prochaine image de l'interface
         let defer = SIM_DEFER.with(|d| d.get());
         let mut all = CLOTHS.lock().unwrap_or_else(|e| e.into_inner());
-        // Ce pas est déjà parti sur la carte : est-il revenu ?
-        if let Some(s) = all.iter_mut().find(|s| s.waiting.as_ref().is_some_and(|w| w.inputs == inputs && w.par == par)) {
-            let Some(w) = s.waiting.take() else { return };
-            if defer && !w.pending.ready() {
-                s.waiting = Some(w);
-                SIM_WAIT.with(|x| x.set(true));
-                return;
-            }
-            if let Some(c) = w.repos {
-                g.cols.insert("repos".into(), c);
-            }
-            if let Some(c) = w.rest {
-                g.ecols.insert("rest".into(), c);
-            }
-            s.cloth.accept(Some(w.pending));
-            s.finish(g, &par, w.since);
-            return;
-        }
         // Forme au repos : celle du premier pas, gardée dans l'état pour qu'une reprise au milieu
         // de la simulation retrouve le même tissu
         if !g.cols.get("repos").is_some_and(|c| c.width() >= 3) {
@@ -658,28 +839,40 @@ impl Solver for VbdCloth {
             Some(k) => k,
             None => {
                 let pinned: Vec<bool> = match g.col("pin") {
-                    Some(c) => c.data[0].iter().map(|x| *x > 0.5).collect(),
+                    Some(c) => c.data()[0].iter().map(|x| *x > 0.5).collect(),
                     None => vec![false; n],
                 };
-                let mass = g.col("mass").filter(|c| c.width() == 1).map(|c| c.data[0].as_slice());
-                let topo = crate::gpucloth::Topo::build(n, &edges, &g.ecols["rest"].data[0], &g.vec3("repos"), &pinned, mass);
+                let mass = g.col("mass").filter(|c| c.width() == 1).map(|c| c.data()[0].as_slice());
+                let topo = crate::gpucloth::Topo::build(n, &edges, &g.ecols["rest"].data()[0], &g.vec3("repos"), &pinned, mass);
                 // Quelques tissus restent prêts ; le plus ancien cède sa place (et sa mémoire sur la carte)
                 if all.len() >= 4 {
                     if let Some(old) = (0..all.len()).min_by_key(|k| all[*k].used) {
                         all.swap_remove(old);
                     }
                 }
-                all.push(ClothSession { key, cloth: crate::gpucloth::Cloth::new(topo, &g.vec3("P"), true), out: (0, 0), used: 0, waiting: None });
+                all.push(ClothSession { key, cloth: crate::gpucloth::Cloth::new(topo, &g.vec3("P"), true), out: (0, 0), used: 0, last: None, memo: None });
                 all.len() - 1
             }
         };
         let s = &mut all[at];
         s.used = clock;
-        // Un pas parti pour d'autres entrées (on a changé d'image ou de réglages entre-temps) :
-        // son résultat ne sert plus, et la carte n'est plus dans l'état qu'on croyait
-        if let Some(w) = s.waiting.take() {
-            s.cloth.accept(Some(w.pending));
-            s.out = (0, 0);
+        // Le même pas que le dernier (mêmes entrées, mêmes réglages) : son résultat, sans recalcul
+        let now: StepKey = (inputs.0, g.cols.get("v").map(|c| c.identity()).unwrap_or_default(), dt.to_bits(), n);
+        if let Some((_, _, x, v)) = s.memo.as_ref().filter(|m| m.0 == now && m.1 == par) {
+            g.cols.insert("P".into(), x.clone());
+            g.cols.insert("v".into(), v.clone());
+            return;
+        }
+        // La carte calcule encore le pas d'avant. Par tranches : on rend la main sans rien toucher,
+        // le moteur redemandera cette image. Sinon on attend qu'elle ait fini (sans rien relire) :
+        // jamais plus d'un pas en route, pour que l'interface, qui dessine sur la même carte, ne
+        // se retrouve pas derrière une file de calculs
+        if s.cloth.busy() {
+            if defer {
+                SIM_WAIT.with(|x| x.set(true));
+                return;
+            }
+            s.cloth.wait();
         }
         // Positions venues d'ailleurs que du dernier pas : un nouvel état, vitesses imposées. Sinon
         // les vitesses n'ont changé que par les forces de l'image : le solveur les répartit sur ses sous-pas
@@ -688,24 +881,16 @@ impl Solver for VbdCloth {
             s.cloth.set_positions(&g.vec3("P"));
         }
         if s.out.1 == 0 || inputs.1 != s.out.1 {
-            if fresh {
-                s.cloth.set_velocities(&g.vec3("v"));
-            } else {
-                s.cloth.push_velocities(&g.vec3("v"));
+            // Des forces uniformes sur les vitesses du dernier pas : tout se fait sur la carte
+            let uniform = if fresh { None } else { g.cols.get("v").and_then(|c| c.force_over(s.last.as_ref())) };
+            match uniform {
+                Some(f) => s.cloth.push_uniform(f.add, f.keep),
+                None if fresh => s.cloth.set_velocities(&g.vec3("v")),
+                None => s.cloth.push_velocities(&g.vec3("v")),
             }
         }
         s.cloth.step(dt, &par);
-        if defer {
-            if let Some(pending) = s.cloth.request() {
-                if !pending.ready() {
-                    s.waiting = Some(ClothWait { inputs, par, pending, repos: g.cols.get("repos").cloned(), rest: g.ecols.get("rest").cloned(), since: t0 });
-                    SIM_WAIT.with(|x| x.set(true));
-                    return;
-                }
-                s.cloth.accept(Some(pending));
-            }
-        }
-        s.finish(g, &par, t0);
+        s.finish(g, &par, t0, now);
     }
 }
 
@@ -1571,7 +1756,7 @@ impl Run<'_> {
                 let val = self.field(id, 1, &g)?;
                 let sel = self.field(id, 2, &g)?;
                 let mut data: Vec<Vec<f32>> = match g.col(name) {
-                    Some(c) if c.width() == width => c.data.clone(),
+                    Some(c) if c.width() == width => c.data().clone(),
                     _ => (0..width).map(|k| vec![if k == 3 { 1.0 } else { 0.0 }; g.n]).collect(),
                 };
                 for i in 0..g.n {
@@ -1617,7 +1802,7 @@ impl Run<'_> {
                 let mut g = Geo::points(p);
                 // Chaque copie garde les attributs de son point
                 for (name, c) in pts.cols.iter().filter(|(k, _)| *k != "P") {
-                    g.set(name, Column::new(c.data.iter().map(|comp| comp.iter().flat_map(|x| std::iter::repeat_n(*x, model.n)).collect()).collect()));
+                    g.set(name, Column::new(c.data().iter().map(|comp| comp.iter().flat_map(|x| std::iter::repeat_n(*x, model.n)).collect()).collect()));
                 }
                 if !edges.is_empty() {
                     g.set_edges(edges);
@@ -1626,7 +1811,7 @@ impl Run<'_> {
                     g.set_faces(faces);
                     // Chaque copie garde les UV du modèle
                     if let (Some(c), false) = (model.col("uv"), pts.cols.contains_key("uv")) {
-                        g.set("uv", Column::new(c.data.iter().map(|comp| comp.iter().copied().cycle().take(total).collect()).collect()));
+                        g.set("uv", Column::new(c.data().iter().map(|comp| comp.iter().copied().cycle().take(total).collect()).collect()));
                     }
                 }
                 g
@@ -1636,9 +1821,18 @@ impl Run<'_> {
                 let gravity = v3(num!(1));
                 let wind = self.field(id, 2, &g)?;
                 let (drag, dt) = (num!(3)[0].max(0.0), num!(4)[0]);
-                let mut v = g.vec3("v");
-                let pin = g.col("pin").map(|c| c.data[0].clone());
                 let keep = (1.0 - drag * dt).clamp(0.0, 1.0);
+                // Vitesses encore sur la carte et forces identiques partout : on note les forces
+                // sur la colonne sans la lire, et le solveur les appliquera sur la carte
+                if let (Field::Const(w), Some(c)) = (&wind, g.cols.get("v")) {
+                    let force = Force { add: [(gravity[0] + w[0]) * dt, (gravity[1] + w[1]) * dt, (gravity[2] + w[2]) * dt], keep, pin: g.cols.get("pin").cloned() };
+                    if let Some(col) = c.with_force(force) {
+                        g.cols.insert("v".into(), Arc::new(col));
+                        return Ok(g);
+                    }
+                }
+                let mut v = g.vec3("v");
+                let pin = g.col("pin").map(|c| c.data()[0].clone());
                 for i in 0..g.n {
                     if pin.as_ref().is_some_and(|p| p[i] > 0.5) {
                         for k in 0..3 {
@@ -1709,7 +1903,7 @@ impl Run<'_> {
                 let mut g = state.clone();
                 if g.n > 0 {
                     let age: Vec<f32> = match g.col("age") {
-                        Some(c) => c.data[0].iter().map(|a| a + dt).collect(),
+                        Some(c) => c.data()[0].iter().map(|a| a + dt).collect(),
                         None => vec![dt; g.n],
                     };
                     let keep: Vec<bool> = age.iter().map(|a| life <= 0.0 || *a <= life).collect();
@@ -1725,7 +1919,7 @@ impl Run<'_> {
                     return Err((id, "plus de 4 millions de particules : baisse le débit ou la durée de vie".into()));
                 }
                 // Chaque particule a un numéro unique : son hasard ne change pas quand d'autres naissent ou meurent
-                let first = g.col("id").map(|c| c.data[0].iter().fold(-1.0f32, |m, x| m.max(*x)) + 1.0).unwrap_or(0.0);
+                let first = g.col("id").map(|c| c.data()[0].iter().fold(-1.0f32, |m, x| m.max(*x)) + 1.0).unwrap_or(0.0);
                 let mut born = [Vec::with_capacity(per), Vec::with_capacity(per), Vec::with_capacity(per)];
                 let mut ids = Vec::with_capacity(per);
                 for k in 0..per {
@@ -1813,11 +2007,22 @@ fn merge(a: &Geo, b: &Geo) -> Geo {
     let names: std::collections::BTreeSet<&String> = a.cols.keys().chain(b.cols.keys()).collect();
     for name in names {
         let (ca, cb) = (a.cols.get(name), b.cols.get(name));
+        // Un côté est encore sur la carte : on met les deux colonnes bout à bout sans les lire
+        // (un attribut absent d'un côté y vaut zéro, ou un pour l'opacité d'une couleur)
+        if ca.is_some_and(|c| !c.resolved()) || cb.is_some_and(|c| !c.resolved()) {
+            let w = ca.or(cb).map(|c| c.width()).unwrap_or(0);
+            if ca.is_none_or(|c| c.width() == w) && cb.is_none_or(|c| c.width() == w) {
+                let blank = |n: usize| Arc::new(Column::new((0..w).map(|k| vec![if k == 3 { 1.0 } else { 0.0 }; n]).collect()));
+                let (x, y) = (ca.cloned().unwrap_or_else(|| blank(a.n)), cb.cloned().unwrap_or_else(|| blank(b.n)));
+                g.cols.insert(name.clone(), Arc::new(Column::concat(vec![x, y])));
+                continue;
+            }
+        }
         let width = ca.map(|c| c.width()).unwrap_or(0).max(cb.map(|c| c.width()).unwrap_or(0));
         let data = (0..width)
             .map(|k| {
                 let mut v = Vec::with_capacity(g.n);
-                let part = |c: Option<&Arc<Column>>, n: usize, v: &mut Vec<f32>| match c.and_then(|c| c.data.get(k)) {
+                let part = |c: Option<&Arc<Column>>, n: usize, v: &mut Vec<f32>| match c.and_then(|c| c.data().get(k)) {
                     Some(d) => v.extend_from_slice(d),
                     None => v.extend(std::iter::repeat_n(if k == 3 { 1.0 } else { 0.0 }, n)),
                 };
@@ -1844,7 +2049,7 @@ fn filter(g: &Geo, keep: &[bool]) -> Geo {
     let n = keep.iter().filter(|k| **k).count();
     let mut out = Geo { n, ..Default::default() };
     for (name, c) in &g.cols {
-        out.set(name, Column::new(c.data.iter().map(|comp| comp.iter().zip(keep).filter(|(_, k)| **k).map(|(x, _)| *x).collect()).collect()));
+        out.set(name, Column::new(c.data().iter().map(|comp| comp.iter().zip(keep).filter(|(_, k)| **k).map(|(x, _)| *x).collect()).collect()));
     }
     let mut map = vec![u32::MAX; g.n];
     if !g.edges.is_empty() || !g.faces.is_empty() {
@@ -1870,7 +2075,7 @@ fn filter(g: &Geo, keep: &[bool]) -> Geo {
         let kept: Vec<bool> = g.edges.iter().map(|e| map[e[0] as usize] != u32::MAX && map[e[1] as usize] != u32::MAX).collect();
         out.set_edges(g.edges.iter().zip(&kept).filter(|(_, k)| **k).map(|(e, _)| [map[e[0] as usize], map[e[1] as usize]]).collect());
         for (name, c) in &g.ecols {
-            out.ecols.insert(name.clone(), Arc::new(Column::new(c.data.iter().map(|comp| comp.iter().zip(&kept).filter(|(_, k)| **k).map(|(x, _)| *x).collect()).collect())));
+            out.ecols.insert(name.clone(), Arc::new(Column::new(c.data().iter().map(|comp| comp.iter().zip(&kept).filter(|(_, k)| **k).map(|(x, _)| *x).collect()).collect())));
         }
     }
     out
@@ -2410,8 +2615,8 @@ mod tests {
         // Cache disque : relu à l'identique
         let back = Geo::from_bytes(&r.to_bytes()).unwrap();
         assert_eq!(back.n, r.n);
-        assert_eq!(back.cols["P"].data, r.cols["P"].data);
-        assert_eq!(back.cols["Cd"].data, r.cols["Cd"].data);
+        assert_eq!(back.cols["P"].data(), r.cols["P"].data());
+        assert_eq!(back.cols["Cd"].data(), r.cols["Cd"].data());
         assert_eq!(*back.edges, *r.edges);
         assert!(Geo::from_bytes(b"n'importe quoi").is_err());
     }
@@ -2613,7 +2818,7 @@ mod tests {
         let r = eng.eval(&g, 40, "").map_err(|x| x.1).unwrap();
         assert_eq!(r.n, 70, "régime permanent : sept générations vivantes");
         // Les numéros sont uniques
-        let mut ids: Vec<i64> = r.col("id").unwrap().data[0].iter().map(|x| *x as i64).collect();
+        let mut ids: Vec<i64> = r.col("id").unwrap().data()[0].iter().map(|x| *x as i64).collect();
         ids.sort_unstable();
         ids.dedup();
         assert_eq!(ids.len(), 70);
@@ -2625,12 +2830,12 @@ mod tests {
         let first = eng.eval_node(&g, end, 0, 1, "").map_err(|x| x.1).unwrap();
         let r = eng.eval_node(&g, end, 0, 60, "").map_err(|x| x.1).unwrap();
         assert_eq!(r.n, 28 * 28);
-        let pins: Vec<usize> = (0..r.n).filter(|i| r.col("pin").unwrap().data[0][*i] > 0.5).collect();
+        let pins: Vec<usize> = (0..r.n).filter(|i| r.col("pin").unwrap().data()[0][*i] > 0.5).collect();
         assert_eq!(pins.len(), 28);
         for i in &pins {
             assert_eq!(r.pos(*i), first.pos(*i), "un point épinglé ne bouge pas");
         }
-        let rest = &r.ecols["rest"].data[0];
+        let rest = &r.ecols["rest"].data()[0];
         let mut worst = 0.0f32;
         for (k, e) in r.edges.iter().enumerate() {
             let (a, b) = (r.pos(e[0] as usize), r.pos(e[1] as usize));
@@ -2666,7 +2871,7 @@ mod tests {
             for i in 0..r.n {
                 let p = r.pos(i);
                 assert!(p.iter().all(|x| x.is_finite()));
-                if r.col("pin").unwrap().data[0][i] > 0.5 {
+                if r.col("pin").unwrap().data()[0][i] > 0.5 {
                     assert_eq!(p, first.pos(i), "un point épinglé ne bouge pas");
                     pins += 1;
                 }
@@ -2680,7 +2885,7 @@ mod tests {
             }
             assert_eq!(pins, pinned);
             assert!(low < 1.2, "le tissu est tombé");
-            let (worst, mean) = crate::gpucloth::stretch(&r.edges, &r.ecols["rest"].data[0], &r.vec3("P"));
+            let (worst, mean) = crate::gpucloth::stretch(&r.edges, &r.ecols["rest"].data()[0], &r.vec3("P"));
             assert!(worst < 0.35 && mean < 0.03, "allongement {worst} / {mean}");
             let st = cloth_status().expect("le solveur a tourné");
             assert_eq!(st.on_gpu, crate::gpusim::gpu().is_some());
@@ -2779,7 +2984,7 @@ mod tests {
             let first = eng.eval_node(&g, end, 0, 1, "").map_err(|x| x.1).unwrap();
             let r = eng.eval_node(&g, end, 0, 70, "").map_err(|x| x.1).unwrap();
             assert_eq!(r.n, 1600);
-            assert!(r.col("pin").is_none_or(|c| c.data[0].iter().all(|p| *p < 0.5)), "aucun point fixe");
+            assert!(r.col("pin").is_none_or(|c| c.data()[0].iter().all(|p| *p < 0.5)), "aucun point fixe");
             let (a, b) = (first.vec3("P"), r.vec3("P"));
             assert!(b[1].iter().all(|y| y.is_finite() && *y >= -1e-4));
             assert!(b[1].iter().cloned().fold(0.0, f32::max) < 0.6, "le tissu s'est affaissé");
@@ -2844,5 +3049,90 @@ mod tests {
         g.links.retain(|l| l.to != out);
         g.links.push(Link { from: noise, out: 0, to: out, inp: 0 });
         assert!(eng.eval(&g, 1, "").is_err());
+    }
+}
+
+#[cfg(test)]
+mod tests_paresse {
+    use super::*;
+
+    /// Le tissu sur carte par les nodes : les positions restent sur la carte tant que personne ne
+    /// les lit, les forces uniformes s'y appliquent sans relecture, et le résultat lu à la fin est
+    /// le même que si chaque image avait été relue.
+    #[test]
+    fn tissu_sans_relecture() {
+        let g = example("tissu sur la carte graphique").unwrap();
+        let on_gpu = crate::gpusim::gpu().is_some();
+        eprintln!("carte : {:?}", crate::gpusim::gpu().map(|c| &c.name));
+        let end = g.nodes.iter().find(|n| n.op == "sim_out").unwrap().id;
+        let last = 40;
+        // Référence : positions et vitesses lues (donc relues de la carte) à chaque image, comme
+        // avant ; les forces sont alors calculées ici, sommet par sommet
+        let mut eng = Engine::default();
+        let mut want = Geo::default();
+        for f in 1..=last {
+            let state = eng.eval_node(&g, end, 0, f, "").map_err(|e| e.1).unwrap();
+            let _ = (state.vec3("P"), state.vec3("v"));
+            want = eng.eval(&g, f, "").map_err(|e| e.1).unwrap();
+        }
+        // Sans rien lire entre les images
+        let mut eng = Engine::default();
+        let mut got = Geo::default();
+        for f in 1..=last {
+            got = eng.eval(&g, f, "").map_err(|e| e.1).unwrap();
+            let parts = got.position_parts();
+            // Deux morceaux : le tissu, puis la boule ajoutée par le node « Réunir »
+            if f > 1 {
+                assert_eq!(parts.len(), 2, "image {f}");
+                assert_eq!((parts[0].0, parts[1].0), (0, 48 * 48));
+                assert!(parts[1].1.resolved());
+                if on_gpu {
+                    assert!(!parts[0].1.resolved(), "image {f} : le tissu a été relu");
+                    assert!(parts[0].1.positions_of().is_some());
+                }
+            }
+        }
+        assert!(!got.resolved() || !on_gpu);
+        // Les vitesses non plus n'ont jamais quitté la carte : les forces s'y sont appliquées
+        if on_gpu {
+            for f in 2..last {
+                let state = eng.eval_node(&g, end, 0, f, "").map_err(|e| e.1).unwrap();
+                assert!(!state.cols["v"].resolved() && !state.cols["P"].resolved(), "image {f} relue");
+            }
+            assert_eq!(eng.stats.steps, 0);
+        }
+        // La boîte approchée, sans attendre ni copier, tient dans la vraie
+        if on_gpu {
+            let shot = got.position_parts()[0].1.positions_of().unwrap().clone();
+            shot.wait();
+            let (lo, hi) = got.bounds_now().expect("le cliché est arrivé");
+            assert!(!got.position_parts()[0].1.resolved());
+            let (tlo, thi) = got.bounds().unwrap();
+            for k in 0..3 {
+                assert!(lo[k] >= tlo[k] - 1e-6 && hi[k] <= thi[k] + 1e-6 && hi[k] - lo[k] > 0.5 * (thi[k] - tlo[k]), "boîte {lo:?} {hi:?} contre {tlo:?} {thi:?}");
+            }
+        }
+        // Même tissu qu'avec une relecture par image, au bit près ou presque : les forces sont
+        // calculées avec les mêmes arrondis sur la carte et sur le processeur
+        assert_eq!(got.n, want.n);
+        let gap = (0..want.n).flat_map(|i| (0..3).map(move |k| (i, k))).map(|(i, k)| (want.pos(i)[k] - got.pos(i)[k]).abs()).fold(0.0f32, f32::max);
+        assert!(gap < 1e-4, "écart {gap}");
+        let (lo, hi) = got.bounds().unwrap();
+        assert!(lo[1] > -0.01 && hi[1] < 1.7 && hi[0] - lo[0] < 3.0, "tissu parti : {lo:?} {hi:?}");
+    }
+
+    /// Des colonnes mises bout à bout sans copie se lisent comme une seule.
+    #[test]
+    fn colonnes_bout_a_bout() {
+        let a = Arc::new(Column::new(vec![vec![1.0, 2.0], vec![3.0, 4.0]]));
+        let b = Arc::new(Column::new(vec![vec![5.0], vec![6.0]]));
+        let c = Arc::new(Column::concat(vec![a.clone(), b.clone()]));
+        assert_eq!((c.width(), c.len()), (2, 3));
+        assert!(!c.resolved() && c.ready());
+        let mut parts = vec![];
+        c.parts(10, &mut parts);
+        assert_eq!(parts.iter().map(|p| (p.0, p.1.version)).collect::<Vec<_>>(), vec![(10, a.version), (12, b.version)]);
+        assert_eq!(c.data(), &vec![vec![1.0, 2.0, 5.0], vec![3.0, 4.0, 6.0]]);
+        assert!(c.resolved());
     }
 }

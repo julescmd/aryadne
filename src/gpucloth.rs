@@ -45,6 +45,8 @@
 //! Coulomb.
 
 use crate::gpusim::{self, Bind, Column, Gpu, Kernels};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use rayon::prelude::*;
 
 /// Masse surfacique prise quand la géométrie ne donne pas de masse (kg/m², un coton léger)
@@ -2386,6 +2388,31 @@ fn accel(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups)
 }
 "#;
 
+/// Impulsion de l'image quand les forces sont les mêmes pour tous les sommets (gravité, vent
+/// constant, frein) : calculée sur la carte à partir des vitesses qui y sont déjà, sans rien relire
+/// ni renvoyer. Le même calcul que `uniform_kick`.
+const KICK: &str = r#"
+struct K { add: vec3<f32>, keep: f32 }
+@group(0) @binding(0) var<uniform> k: K;
+@group(0) @binding(1) var<uniform> s: S;
+@group(0) @binding(2) var<storage, read> vel: array<vec4<f32>>;
+@group(0) @binding(3) var<storage, read_write> kick: array<vec4<f32>>;
+
+@compute @workgroup_size(WG)
+fn fill(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>) {
+    let i = lin(gid, nwg);
+    if (i >= s.count) { return; }
+    // Écrit comme le node « Forces » le calcule sur le processeur : mêmes arrondis, même tissu
+    let v = vel[i].xyz;
+    kick[i] = vec4<f32>((v + k.add) * k.keep - v, 0.0);
+}
+"#;
+
+/// Écart de vitesse qu'apportent des forces uniformes : `(v + add) × keep − v`, sommet par sommet.
+fn uniform_kick(vel: &[V4], add: [f32; 3], keep: f32) -> Vec<V4> {
+    vel.par_iter().with_min_len(1024).map(|v| [(v[0] + add[0]) * keep - v[0], (v[1] + add[1]) * keep - v[1], (v[2] + add[2]) * keep - v[2], 0.0]).collect()
+}
+
 /// Relecture : positions (centre rajouté) et vitesses, dans l'ordre de la géométrie et composante
 /// par composante, comme les colonnes de l'état. 24 octets par sommet au lieu de 32, et rien à
 /// réordonner du côté du processeur.
@@ -2433,6 +2460,9 @@ struct GpuCloth {
     g_solve: [wgpu::BindGroup; 2],
     g_accel: [wgpu::BindGroup; 2],
     g_predict: wgpu::BindGroup,
+    /// Impulsion uniforme : ses réglages (forces, frein), et son branchement
+    kick_k: wgpu::Buffer,
+    g_kick: wgpu::BindGroup,
     levels: Option<GpuLevels>,
     /// Créée au premier pas qui demande l'auto-collision
     selfc: Option<GpuSelf>,
@@ -2457,6 +2487,7 @@ struct Programs {
     levels: Kernels,
     up: Kernels,
     pack: Kernels,
+    kick: Kernels,
 }
 
 fn programs(g: &Gpu) -> &'static Programs {
@@ -2471,6 +2502,7 @@ fn programs(g: &Gpu) -> &'static Programs {
             levels: g.kernels("tissu-niveaux", &format!("{STRUCTS}{LEVELS}"), &[Uniform, Slot(16), Uniform, Read, Read, Read, Read, Write, Read], &["gather", "remain", "apply", "prolong", "post", "tail"]),
             up: g.kernels("tissu-remontee", &format!("{STRUCTS}{UP}{COLLIDE}"), &[Uniform, Slot(16), Read, Read, Read, Write, Write], &["lift"]),
             pack: g.kernels("tissu-relecture", &format!("{STRUCTS}{PACK}"), &[Uniform, Slot(16), Read, Read, Read, Write], &["pack"]),
+            kick: g.kernels("tissu-impulsion", &format!("{STRUCTS}{KICK}"), &[Uniform, Uniform, Read, Write], &["fill"]),
         }
     })
 }
@@ -2559,6 +2591,11 @@ impl GpuCloth {
         // L'accélération de la passe k relit l'itéré k−2 et y écrit le sien
         let g_accel = [g.group(&progs.accel, &[&consts, &slots, &bp, &bv, &bt, &bpr, &b0]), g.group(&progs.accel, &[&consts, &slots, &bp, &bv, &bt, &bpr, &b1])];
         let g_predict = g.group(&progs.predict, &[&consts, &slots, &bp, &bv, &bt, &bpr, &b0, &bk, &off.pages[0], &springs.pages[0]]);
+        // Impulsion uniforme : ses deux petits tampons de réglages (forces et frein ; nombre de sommets)
+        let kick_k = g.uniform("tissu-impulsion-forces", 16);
+        let kick_s = g.uniform("tissu-impulsion-plage", 16);
+        g.queue.write_buffer(&kick_s, 0, gpusim::bytes_of(&[0u32, t.n as u32, 1.0f32.to_bits(), 0]));
+        let g_kick = g.group(&progs.kick, &[&kick_k, &kick_s, &bv, &bk]);
         let perm = g.column("tissu-ordre", t.n, 4);
         let packed = g.column("tissu-relecture", t.n * 6, 4);
         if packed.pages.len() != 1 {
@@ -2603,7 +2640,7 @@ impl GpuCloth {
             let tail = co.levels.iter().position(|r| r[1] as usize <= t.tail).unwrap_or(co.levels.len());
             levels = Some(GpuLevels { counts: co.levels.iter().map(|r| r[1] as u64).collect(), tail, slots: ls, tail_for: (0, 0), g_rest, g_levels, g_up, _keep: vec![res, vert, ent, kids, par, work, up], _table: tb });
         }
-        Some(GpuCloth { pos, vel, kick, lag: [s0, s1], packed, g_pack, consts, slots, slot, slots_for: (0, -1.0, 0), g_solve, g_accel, g_predict, levels, selfc: None, launches: 0, all_slot: 0, _keep: vec![tgt, prev, off, springs, perm] })
+        Some(GpuCloth { pos, vel, kick, lag: [s0, s1], packed, g_pack, consts, slots, slot, slots_for: (0, -1.0, 0), g_solve, g_accel, g_predict, kick_k, g_kick, levels, selfc: None, launches: 0, all_slot: 0, _keep: vec![tgt, prev, off, springs, perm] })
     }
 
     /// Prépare l'auto-collision (grille, voisins, noyaux). Faux si cette carte ne peut pas la faire.
@@ -2635,6 +2672,17 @@ impl GpuCloth {
     }
 
     /// Envoie les positions (les sommets fixes sont aussi recopiés dans les tampons du début de passe, où les passes ne les écrivent jamais)
+    /// Remplit le tampon d'impulsion à partir des vitesses de la carte : forces uniformes, puis frein.
+    fn fill_kick(&self, g: &Gpu, n: usize, add: [f32; 3], keep: f32) {
+        g.queue.write_buffer(&self.kick_k, 0, gpusim::bytes_of(&[add[0], add[1], add[2], keep]));
+        let mut enc = g.device.create_command_encoder(&Default::default());
+        {
+            let mut pass = enc.begin_compute_pass(&Default::default());
+            g.launch(&mut pass, &programs(g).kick.pipelines[0], &self.g_kick, &[], n as u64);
+        }
+        g.queue.submit([enc.finish()]);
+    }
+
     fn send_positions(&self, g: &Gpu, pos: &[V4]) {
         g.write(&self.pos, pos);
         g.write(&self.lag[0], pos);
@@ -2796,12 +2844,160 @@ pub struct Cloth {
     geom: Option<State>,
     /// Changement de vitesse demandé pour le prochain pas (vide : aucun)
     kick: Vec<V4>,
+    /// Forces uniformes demandées pour le prochain pas : (vitesse ajoutée, part gardée après le frein)
+    uniform: Option<([f32; 3], f32)>,
     gpu: Option<GpuCloth>,
     /// Ce que la carte n'a pas encore reçu (positions, vitesses, impulsion)
     send: (bool, bool, bool),
     /// Pas envoyés à la carte et pas encore relus : de quoi les refaire sur le processeur si elle échoue
-    ahead: Vec<(Consts, Params, Vec<V4>)>,
+    ahead: Vec<(Consts, Params, Kick)>,
+    /// Numéro de ce tissu, et compteur de ses pas : une vue sait ainsi si les tampons de la carte
+    /// montrent encore l'image qu'elle veut dessiner
+    id: u64,
+    generation: Arc<AtomicU64>,
+    /// Ordre de rangement, partagé avec les vues (créé au premier cliché)
+    order: Option<(Arc<Vec<u32>>, Arc<Vec<u32>>)>,
+    /// Clichés demandés à la carte et pas encore arrivés, avec le nombre de pas en attente à ce moment-là
+    shots: std::collections::VecDeque<(Arc<Shot>, usize, std::time::Instant)>,
+    /// Le cliché de l'état courant, s'il a déjà été pris
+    shot_now: Option<Arc<Shot>>,
+    /// Dernier cliché arrivé entier : l'état d'où repartir si la carte échoue ensuite
+    base: Option<Arc<Shot>>,
+    /// Dernier état relu sans erreur, partagé avec les clichés (ce qu'ils rendent si leur relecture échoue)
+    good: Arc<Mutex<Option<Arc<State>>>>,
+    /// Durée du dernier pas fini sur la carte, de l'envoi à l'arrivée de son cliché, en millisecondes
+    last_ms: f32,
 }
+
+/// L'impulsion d'un pas : aucune, une par sommet, ou des forces uniformes (ajout, part gardée)
+enum Kick {
+    None,
+    Each(Vec<V4>),
+    Uniform([f32; 3], f32),
+}
+
+/// Ce qu'une vue doit savoir pour dessiner un tissu directement depuis la carte.
+#[derive(Clone)]
+pub struct Live {
+    /// Positions (`vec4<f32>`), dans l'ordre de rangement, relatives à `origin`
+    pub pos: wgpu::Buffer,
+    pub origin: [f32; 3],
+    /// Rang d'origine du sommet rangé en k, et l'inverse
+    pub perm: Arc<Vec<u32>>,
+    pub inv: Arc<Vec<u32>>,
+    /// Numéro du tissu : deux clichés du même tissu partagent leurs tampons
+    pub cloth: u64,
+    generation: u64,
+    now: Arc<AtomicU64>,
+}
+
+impl Live {
+    /// Les tampons de la carte montrent-ils encore cet état ? Faux dès que le tissu a avancé.
+    pub fn current(&self) -> bool {
+        self.now.load(Ordering::Acquire) == self.generation
+    }
+}
+
+/// L'état d'un tissu à la fin d'un pas : un « cliché ». Sur la carte, c'est une relecture demandée
+/// mais pas attendue : les données ne sont copiées vers le processeur que si quelqu'un les lit
+/// (`state`). Tant que le tissu n'a pas avancé, une vue peut le dessiner sans rien lire (`live`).
+pub struct Shot {
+    n: usize,
+    pending: Mutex<Option<Pending>>,
+    state: OnceLock<Arc<State>>,
+    failed: AtomicBool,
+    good: Arc<Mutex<Option<Arc<State>>>>,
+    /// De quoi dessiner depuis la carte (rien si le calcul se fait sur le processeur, ou si
+    /// l'interface n'utilise pas la même carte)
+    pub live: Option<Live>,
+}
+
+impl std::fmt::Debug for Shot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Shot({} sommets, {})", self.n, if self.resolved() { "lu" } else { "sur la carte" })
+    }
+}
+
+impl Shot {
+    pub fn len(&self) -> usize {
+        self.n
+    }
+
+    /// Les données sont-elles déjà du côté du processeur ?
+    pub fn resolved(&self) -> bool {
+        self.state.get().is_some()
+    }
+
+    /// `state` rendrait-il la main sans attendre la carte ? Ne bloque pas.
+    pub fn ready(&self) -> bool {
+        self.resolved() || self.pending.lock().unwrap_or_else(|e| e.into_inner()).as_ref().is_none_or(|p| p.ready())
+    }
+
+    /// Attend que la carte ait fini ce pas, sans rien copier.
+    pub fn wait(&self) {
+        if !self.resolved() {
+            if let Some(p) = self.pending.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+                p.packed.block();
+            }
+        }
+    }
+
+    /// La relecture a-t-elle échoué ? (`state` rend alors le dernier état connu du tissu.)
+    pub fn failed(&self) -> bool {
+        self.failed.load(Ordering::Relaxed)
+    }
+
+    /// Positions et vitesses, dans l'ordre de la géométrie. La première demande attend la carte
+    /// s'il le faut et copie les données ; les suivantes sont gratuites.
+    pub fn state(&self) -> Arc<State> {
+        self.state
+            .get_or_init(|| {
+                let n = self.n;
+                let pending = self.pending.lock().unwrap_or_else(|e| e.into_inner()).take();
+                match pending.and_then(|p| p.packed.wait().ok()).filter(|b| b.len() == n * 24) {
+                    Some(b) => {
+                        let part = |k: usize| gpusim::from_bytes::<f32>(&b[k * n * 4..(k + 1) * n * 4]);
+                        let st = Arc::new(([part(0), part(1), part(2)], [part(3), part(4), part(5)]));
+                        *self.good.lock().unwrap_or_else(|e| e.into_inner()) = Some(st.clone());
+                        st
+                    }
+                    None => {
+                        // La carte a échoué : plutôt qu'un tissu en miettes, le dernier état lu
+                        self.failed.store(true, Ordering::Relaxed);
+                        let last = self.good.lock().unwrap_or_else(|e| e.into_inner()).clone().filter(|s| s.0[0].len() == n);
+                        last.unwrap_or_else(|| Arc::new(([vec![0.0; n], vec![0.0; n], vec![0.0; n]], [vec![0.0; n], vec![0.0; n], vec![0.0; n]])))
+                    }
+                }
+            })
+            .clone()
+    }
+
+    /// Boîte englobante approchée (un sommet sur `stride`), si les données sont arrivées. Ne bloque
+    /// pas et ne copie rien : de quoi cadrer une vue pendant la lecture.
+    pub fn bounds_now(&self, stride: usize) -> Option<([f32; 3], [f32; 3])> {
+        let (n, stride) = (self.n, stride.max(1));
+        let fold = |get: &dyn Fn(usize, usize) -> f32| {
+            let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
+            for c in 0..3 {
+                for i in (0..n).step_by(stride) {
+                    let x = get(c, i);
+                    if x.is_finite() {
+                        lo[c] = lo[c].min(x);
+                        hi[c] = hi[c].max(x);
+                    }
+                }
+            }
+            (lo[0] <= hi[0]).then_some((lo, hi))
+        };
+        if let Some(st) = self.state.get() {
+            return fold(&|c, i| st.0[c][i]);
+        }
+        let g = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+        g.as_ref()?.packed.peek(|b| if b.len() == n * 24 { fold(&|c, i| f32::from_le_bytes([b[(c * n + i) * 4], b[(c * n + i) * 4 + 1], b[(c * n + i) * 4 + 2], b[(c * n + i) * 4 + 3]])) } else { None })?
+    }
+}
+
+static CLOTH_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Positions et vitesses, dans l'ordre de la géométrie
 pub type State = ([Vec<f32>; 3], [Vec<f32>; 3]);
@@ -2818,7 +3014,27 @@ impl Cloth {
             }
         }
         let gpu = if on_gpu { gpusim::gpu().and_then(|g| GpuCloth::new(g, &topo)) } else { None };
-        let mut cloth = Cloth { topo, origin, pos: vec![[0.0; 4]; n], vel: vec![[0.0; 4]; n], sorted_fresh: true, geom: None, kick: Vec::new(), gpu, send: (true, true, false), ahead: Vec::new() };
+        let mut cloth = Cloth {
+            topo,
+            origin,
+            pos: vec![[0.0; 4]; n],
+            vel: vec![[0.0; 4]; n],
+            sorted_fresh: true,
+            geom: None,
+            kick: Vec::new(),
+            uniform: None,
+            gpu,
+            send: (true, true, false),
+            ahead: Vec::new(),
+            id: CLOTH_ID.fetch_add(1, Ordering::Relaxed),
+            generation: Arc::new(AtomicU64::new(0)),
+            order: None,
+            shots: Default::default(),
+            shot_now: None,
+            base: None,
+            good: Arc::new(Mutex::new(None)),
+            last_ms: 0.0,
+        };
         cloth.set_positions(positions);
         cloth
     }
@@ -2877,6 +3093,7 @@ impl Cloth {
             *x = if *m > 0.0 { [v[0][i], v[1][i], v[2][i], 0.0] } else { [0.0; 4] };
         });
         self.kick.clear();
+        self.uniform = None;
         self.send.1 = true;
     }
 
@@ -2886,6 +3103,7 @@ impl Cloth {
     /// chaque image, d'autant plus fort que le tissu est raide.
     pub fn push_velocities(&mut self, v: &[Vec<f32>; 3]) {
         self.sync();
+        self.uniform = None;
         let perm = &self.topo.perm;
         self.kick.resize(self.topo.n, [0.0; 4]);
         match self.geom.as_ref().filter(|_| !self.sorted_fresh) {
@@ -2901,6 +3119,14 @@ impl Cloth {
         self.send.2 = true;
     }
 
+    /// Les mêmes forces pour tous les sommets au prochain pas : chaque vitesse devient
+    /// `(v + add) × keep` (gravité et vent d'une image, puis frein), répartie sur les sous-pas comme
+    /// avec `push_velocities`. Rien n'est relu ni envoyé : sur la carte, un noyau s'en charge.
+    pub fn push_uniform(&mut self, add: [f32; 3], keep: f32) {
+        self.kick.clear();
+        self.uniform = Some((add, keep));
+    }
+
     /// Avance d'une image. Sur la carte, rend la main dès que le travail est envoyé : `read`
     /// attend le résultat, `request` le demande sans attendre.
     pub fn step(&mut self, dt: f32, p: &Params) {
@@ -2908,10 +3134,14 @@ impl Cloth {
             return;
         }
         let mut c = Consts::new(p, dt, self.origin, &self.topo);
-        if !self.kick.is_empty() {
+        let kick = match self.uniform.take() {
+            Some((add, keep)) => Kick::Uniform(add, keep),
+            None if !self.kick.is_empty() => Kick::Each(std::mem::take(&mut self.kick)),
+            None => Kick::None,
+        };
+        if !matches!(kick, Kick::None) {
             c.kick = 1.0 / p.split().0 as f32;
         }
-        let kick = std::mem::take(&mut self.kick);
         // L'auto-collision demande plus de tampons par noyau que certaines cartes n'en permettent : le tissu passe alors sur le processeur
         if p.thickness.is_some() {
             let ready = match (self.gpu.as_mut(), gpusim::gpu()) {
@@ -2925,6 +3155,8 @@ impl Cloth {
                 self.gpu = None;
             }
         }
+        self.settle();
+        self.shot_now = None;
         if let (Some(gc), Some(g)) = (self.gpu.as_mut(), gpusim::gpu()) {
             if self.send.0 {
                 gc.send_positions(g, &self.pos);
@@ -2932,18 +3164,113 @@ impl Cloth {
             if self.send.1 {
                 g.write(&gc.vel, &self.vel);
             }
-            if self.send.2 && !kick.is_empty() {
-                g.write(&gc.kick, &kick);
+            match &kick {
+                Kick::Each(k) if self.send.2 => g.write(&gc.kick, k),
+                Kick::Uniform(add, keep) => gc.fill_kick(g, self.topo.n, *add, *keep),
+                _ => {}
             }
             self.send = (false, false, false);
             gc.step(g, &self.topo, &c, p);
             self.ahead.push((c, *p, kick));
+            self.generation.fetch_add(1, Ordering::AcqRel);
             return;
+        }
+        // La carte a lâché avec des pas en route : on les refait d'abord ici
+        if !self.ahead.is_empty() {
+            self.recover();
         }
         self.gpu = None;
         self.sort_state();
         self.geom = None;
-        step_cpu(&self.topo, &mut self.pos, &mut self.vel, (!kick.is_empty()).then_some(&kick[..]), &c, p);
+        self.generation.fetch_add(1, Ordering::AcqRel);
+        Self::step_on_cpu(&self.topo, &mut self.pos, &mut self.vel, &kick, &c, p);
+    }
+
+    /// Un pas sur le processeur, avec son impulsion telle qu'elle a été demandée.
+    fn step_on_cpu(t: &Topo, pos: &mut [V4], vel: &mut [V4], kick: &Kick, c: &Consts, p: &Params) {
+        let made;
+        let k = match kick {
+            Kick::None => None,
+            Kick::Each(k) => Some(&k[..]),
+            Kick::Uniform(add, keep) => {
+                made = uniform_kick(vel, *add, *keep);
+                Some(&made[..])
+            }
+        };
+        step_cpu(t, pos, vel, k, c, p);
+    }
+
+    /// Range les clichés que la carte a finis : le dernier devient l'état d'où repartir en cas
+    /// d'erreur, et les pas qu'il couvre n'ont plus à être gardés. Ne bloque pas.
+    fn settle(&mut self) {
+        while let Some((shot, count, since)) = self.shots.front() {
+            if !shot.ready() {
+                break;
+            }
+            let (count, ms) = (*count, since.elapsed().as_secs_f32() * 1000.0);
+            let Some((shot, _, _)) = self.shots.pop_front() else { break };
+            if shot.failed() || self.gpu.as_ref().is_none() || gpusim::gpu().is_none() {
+                // La carte a échoué : on garde les pas en attente, `accept` les refera
+                continue;
+            }
+            let done = count.min(self.ahead.len());
+            self.ahead.drain(..done);
+            for s in self.shots.iter_mut() {
+                s.1 = s.1.saturating_sub(done);
+            }
+            self.base = Some(shot);
+            self.last_ms = ms;
+        }
+    }
+
+    /// La carte calcule-t-elle encore un pas déjà envoyé ? Ne bloque pas.
+    pub fn busy(&mut self) -> bool {
+        self.settle();
+        !self.shots.is_empty()
+    }
+
+    /// Attend que la carte ait fini les pas envoyés, sans rien relire.
+    pub fn wait(&mut self) {
+        if let Some((shot, _, _)) = self.shots.back() {
+            shot.wait();
+        }
+        self.settle();
+    }
+
+    /// Durée du dernier pas fini sur la carte (envoi → arrivée de son cliché), en millisecondes.
+    /// Lue une fois par image de l'interface : elle est arrondie au temps d'une image.
+    pub fn last_ms(&self) -> f32 {
+        self.last_ms
+    }
+
+    /// Le cliché de l'état courant. Sur la carte, la relecture est demandée mais pas attendue :
+    /// rien ne bloque, et rien n'est copié tant que personne ne lit l'état.
+    pub fn shot(&mut self) -> Arc<Shot> {
+        if let Some(s) = &self.shot_now {
+            return s.clone();
+        }
+        let n = self.topo.n;
+        let pending = if self.ahead.is_empty() { None } else { self.request() };
+        let order = pending.as_ref().map(|_| self.order.get_or_insert_with(|| (Arc::new(self.topo.perm.clone()), Arc::new(self.topo.inv.clone()))).clone());
+        let shot = match (pending.zip(order), self.gpu.as_ref(), gpusim::gpu()) {
+            (Some((pending, (perm, inv))), Some(gc), Some(g)) => {
+                // De quoi dessiner ces tampons tels quels (une vue de l'interface ne le peut que si elle est sur la même carte)
+                let _ = g;
+                let live = (gc.pos.pages.len() == 1).then(|| {
+                    Live { pos: gc.pos.pages[0].clone(), origin: self.origin, perm, inv, cloth: self.id, generation: self.generation.load(Ordering::Acquire), now: self.generation.clone() }
+                });
+                let shot = Arc::new(Shot { n, pending: Mutex::new(Some(pending)), state: OnceLock::new(), failed: AtomicBool::new(false), good: self.good.clone(), live });
+                self.shots.push_back((shot.clone(), self.ahead.len(), std::time::Instant::now()));
+                shot
+            }
+            _ => {
+                let state = OnceLock::new();
+                let _ = state.set(Arc::new(self.read()));
+                Arc::new(Shot { n, pending: Mutex::new(None), state, failed: AtomicBool::new(false), good: self.good.clone(), live: None })
+            }
+        };
+        self.shot_now = Some(shot.clone());
+        shot
     }
 
     /// Demande à la carte l'état courant, sans attendre. `None` : rien à relire (calcul sur le processeur).
@@ -2974,21 +3301,61 @@ impl Cloth {
                 self.geom = Some(([part(0), part(1), part(2)], [part(3), part(4), part(5)]));
                 self.sorted_fresh = false;
                 self.ahead.clear();
+                self.shots.clear();
+                self.base = None;
             }
-            None => {
-                self.gpu = None;
-                self.sort_state();
-                self.geom = None;
-                self.send = (true, true, false);
-                for (c, p, kick) in std::mem::take(&mut self.ahead) {
-                    step_cpu(&self.topo, &mut self.pos, &mut self.vel, (!kick.is_empty()).then_some(&kick[..]), &c, &p);
-                }
+            None => self.recover(),
+        }
+    }
+
+    /// La carte a échoué : le tissu repart du dernier état arrivé entier, refait sur le processeur
+    /// les pas qui manquent, et y reste.
+    fn recover(&mut self) {
+        self.gpu = None;
+        self.shots.clear();
+        self.shot_now = None;
+        if let Some(base) = self.base.take() {
+            let st = base.state();
+            if !base.failed() {
+                self.geom = Some((*st).clone());
+                self.sorted_fresh = false;
             }
+        }
+        self.sort_state();
+        self.geom = None;
+        self.send = (true, true, false);
+        for (c, p, kick) in std::mem::take(&mut self.ahead) {
+            Self::step_on_cpu(&self.topo, &mut self.pos, &mut self.vel, &kick, &c, &p);
         }
     }
 
     /// Met l'état du processeur à jour (attend la carte s'il le faut).
     pub fn sync(&mut self) {
+        if self.ahead.is_empty() {
+            // Rien en route, mais le dernier cliché arrivé est plus récent que l'état gardé ici
+            if let Some(base) = self.base.take() {
+                let st = base.state();
+                if !base.failed() {
+                    self.geom = Some((*st).clone());
+                    self.sorted_fresh = false;
+                }
+            }
+            return;
+        }
+        // Le cliché de l'état courant a déjà demandé cette relecture : on la prend
+        if let Some(shot) = self.shot_now.clone() {
+            let st = shot.state();
+            if shot.failed() {
+                self.recover();
+            } else {
+                self.geom = Some((*st).clone());
+                self.sorted_fresh = false;
+                self.ahead.clear();
+                self.shots.clear();
+                self.base = None;
+            }
+            return;
+        }
         let pending = self.request();
         self.accept(pending);
     }

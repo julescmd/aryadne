@@ -5,6 +5,7 @@ mod gfx;
 mod gpubench;
 mod titlebar;
 mod gpucloth;
+mod gpudraw;
 #[allow(dead_code)]
 mod gpusim;
 mod rig;

@@ -11,6 +11,8 @@ use std::collections::HashMap;
 /// Miniature d'un node : quelques centaines de points déjà projetés, entre 0 et 1.
 struct Thumb {
     key: (u64, i32),
+    /// Les points montrés datent d'une image d'avant : la géométrie était encore sur la carte
+    stale: bool,
     pts: Vec<([f32; 2], Color32)>,
     lines: Vec<[[f32; 2]; 2]>,
     count: usize,
@@ -45,6 +47,17 @@ pub struct GeoView {
     table: Option<((u64, i32, u32), Result<Geo, String>)>,
     /// Obstacles des solveurs du graphe, dessinés en fil de fer
     obstacles: Vec<Obstacle>,
+    /// Les surfaces dessinées sur la carte graphique, et l'image qu'elles donnent
+    canvas: crate::gpudraw::Canvas,
+    /// Le cadre attend la boîte englobante d'une géométrie encore sur la carte
+    want_frame: bool,
+    /// Résultat calculé mais pas encore lisible sans attendre la carte : montré dès qu'il l'est
+    pending: Option<Geo>,
+    /// La dernière image a-t-elle été dessinée depuis la carte, sans relecture ?
+    direct: bool,
+    /// Triangles de la géométrie montrée, et pour chaque sommet s'il appartient à une face : refaits
+    /// seulement quand les faces changent (clé des faces, nombre de points)
+    tris: Option<(u64, usize, std::sync::Arc<Vec<[u32; 3]>>, std::sync::Arc<Vec<bool>>)>,
 }
 
 /// Un obstacle réglé dans un node « Solveur » : boule (centre, rayon) ou boîte (centre, demi-tailles).
@@ -112,7 +125,7 @@ fn point_color(g: &Geo, i: usize, base: Color32) -> Color32 {
 impl GeoView {
     pub fn new(g: &Graph) -> GeoView {
         let start = g.time.unwrap_or_default().start;
-        GeoView { engine: Engine::default(), frame: start, playing: false, last_tick: None, acc: 0.0, yaw: 0.6, pitch: 0.35, dist: 5.0, target: [0.0, 0.8, 0.0], framed: false, auto: true, seen: None, result: None, key: None, error: None, stats: Stats::default(), ms: 0.0, thumbs: HashMap::new(), solo: None, zones: vec![], table: None, obstacles: vec![] }
+        GeoView { engine: Engine::default(), frame: start, playing: false, last_tick: None, acc: 0.0, yaw: 0.6, pitch: 0.35, dist: 5.0, target: [0.0, 0.8, 0.0], framed: false, auto: true, seen: None, result: None, key: None, error: None, stats: Stats::default(), ms: 0.0, thumbs: HashMap::new(), solo: None, zones: vec![], table: None, obstacles: vec![], canvas: Default::default(), want_frame: false, pending: None, direct: false, tris: None }
     }
 
     /// Les caches figés sur le disque, d'après le réglage « cache » des fins de zone.
@@ -150,6 +163,21 @@ impl GeoView {
             self.last_tick = None;
         }
         self.frame = self.frame.clamp(time.start.min(time.end), time.end.max(time.start));
+        // Un résultat qui attendait la carte est arrivé : on le montre
+        if self.pending.as_ref().is_some_and(|g| g.ready()) {
+            if let Some(g) = self.pending.take() {
+                self.show_result(g);
+            }
+        }
+        // Le cadre attendait la boîte d'une géométrie encore sur la carte
+        if self.want_frame {
+            if let Some(g) = self.result.clone() {
+                self.want_frame = !self.frame_on(&g);
+            }
+        }
+        if self.want_frame || self.pending.is_some() {
+            ctx.request_repaint();
+        }
         let key = (version, self.frame, self.solo);
         if self.key == Some(key) && !self.engine.incomplete {
             return;
@@ -172,14 +200,14 @@ impl GeoView {
         let incomplete = self.engine.incomplete;
         match r {
             Ok(g) => {
-                if !self.framed {
-                    self.seen = None;
-                    self.auto = true;
+                // Sans dessin direct, une géométrie encore sur la carte attend d'être lisible : l'image
+                // d'avant reste à l'écran, et l'interface ne se fige pas
+                if !crate::gpudraw::shared() && !g.ready() {
+                    self.pending = Some(g);
+                } else {
+                    self.pending = None;
+                    self.show_result(g);
                 }
-                if (!self.framed || self.auto) && g.n > 0 {
-                    self.frame_on(&g);
-                }
-                self.result = Some(g);
                 self.error = None;
             }
             Err(e) => {
@@ -193,22 +221,162 @@ impl GeoView {
         }
     }
 
+    /// Montre une géométrie calculée, et cadre la vue dessus si l'artiste n'a pas pris la caméra.
+    fn show_result(&mut self, g: Geo) {
+        if !self.framed {
+            self.seen = None;
+            self.auto = true;
+        }
+        if (!self.framed || self.auto) && g.n > 0 {
+            self.want_frame = !self.frame_on(&g);
+        }
+        self.result = Some(g);
+    }
+
     /// Cadre la vue sur tout ce qui a été vu depuis le dernier recadrage : une fontaine qui grandit
-    /// reste entière à l'écran, sans que la caméra saute à chaque image.
-    fn frame_on(&mut self, g: &Geo) {
-        let Some((lo, hi)) = g.bounds() else { return };
+    /// reste entière à l'écran, sans que la caméra saute à chaque image. Rend faux si la boîte
+    /// englobante n'est pas encore connue (géométrie sur la carte) : à redemander plus tard.
+    fn frame_on(&mut self, g: &Geo) -> bool {
+        if g.n == 0 {
+            return true;
+        }
+        let Some((lo, hi)) = g.bounds_now() else { return false };
         let (lo, hi) = match self.seen {
             Some((a, b)) => ([a[0].min(lo[0]), a[1].min(lo[1]), a[2].min(lo[2])], [b[0].max(hi[0]), b[1].max(hi[1]), b[2].max(hi[2])]),
             None => (lo, hi),
         };
         if self.seen == Some((lo, hi)) && self.framed {
-            return;
+            return true;
         }
         self.seen = Some((lo, hi));
         self.target = [(lo[0] + hi[0]) * 0.5, (lo[1] + hi[1]) * 0.5, (lo[2] + hi[2]) * 0.5];
         let d = ((hi[0] - lo[0]).powi(2) + (hi[1] - lo[1]).powi(2) + (hi[2] - lo[2]).powi(2)).sqrt();
         self.dist = (d * 1.25).clamp(0.5, 500.0);
         self.framed = true;
+        true
+    }
+
+    /// La caméra de l'aperçu en matrices, pour le dessin sur la carte : la même projection que `project`.
+    fn camera(&self, w: f32, h: f32) -> ([[f32; 4]; 4], [f32; 4], [f32; 3], [f32; 3]) {
+        let (sy, cy) = self.yaw.sin_cos();
+        let (sp, cp) = self.pitch.sin_cos();
+        let t = self.target;
+        // Axes de la vue dans le monde : droite, haut, et vers l'œil
+        let (x, y, z) = ([cy, 0.0, -sy], [-sy * sp, cp, -cy * sp], [sy * cp, sp, cy * cp]);
+        let dot = |a: [f32; 3], b: [f32; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+        let m = w.min(h) * 0.9;
+        let (kx, ky) = (2.0 * m / w.max(1.0), 2.0 * m / h.max(1.0));
+        let (near, far) = ((self.dist * 0.02).max(0.01), self.dist * 60.0 + 100.0);
+        let f = far / (far - near);
+        // Profondeur d'un point : distance à l'œil le long de l'axe de visée
+        let depth = [-z[0], -z[1], -z[2], self.dist + dot(z, t)];
+        let vp = crate::gpudraw::from_rows([[x[0] * kx, x[1] * kx, x[2] * kx, -dot(x, t) * kx], [y[0] * ky, y[1] * ky, y[2] * ky, -dot(y, t) * ky], [depth[0] * f, depth[1] * f, depth[2] * f, (depth[3] - near) * f], depth]);
+        let eye = [t[0] + z[0] * self.dist, t[1] + z[1] * self.dist, t[2] + z[2] * self.dist];
+        // La lumière suit la vue : en haut à droite de l'œil
+        let l = [0.35f32, 0.6, 0.72];
+        let light = [x[0] * l[0] + y[0] * l[1] + z[0] * l[2], x[1] * l[0] + y[1] * l[1] + z[1] * l[2], x[2] * l[0] + y[2] * l[1] + z[2] * l[2]];
+        (vp, depth, light, eye)
+    }
+
+    /// Dessine sur la carte les morceaux de `g` qui ont des faces. Un tissu dont l'état est encore
+    /// dans les tampons du solveur est dessiné **sans relecture** ; un morceau venu du processeur
+    /// est envoyé à la carte, pour le même aspect. Rend les plages de sommets dessinées
+    /// (premier, nombre), et dit si au moins une l'a été sans relecture.
+    fn paint_surfaces(&mut self, ui: &egui::Ui, rect: Rect, g: &Geo) -> (Vec<(usize, usize)>, bool) {
+        if !crate::gpudraw::shared() || g.faces.is_empty() || rect.width() < 2.0 || rect.height() < 2.0 {
+            return (vec![], false);
+        }
+        let ppp = ui.ctx().pixels_per_point();
+        let size = [(rect.width() * ppp).round().max(1.0) as u32, (rect.height() * ppp).round().max(1.0) as u32];
+        let (vp, depth_row, light, eye) = self.camera(size[0] as f32, size[1] as f32);
+        let cd = g.cols.get("Cd").filter(|c| c.width() >= 3 && c.resolved());
+        if self.tris.as_ref().is_none_or(|t| t.0 != g.faces_key() || t.1 != g.n) {
+            let (tris, _) = g.triangles();
+            let mut used = vec![false; g.n];
+            for v in tris.iter().flatten() {
+                used[*v as usize] = true;
+            }
+            self.tris = Some((g.faces_key(), g.n, std::sync::Arc::new(tris), std::sync::Arc::new(used)));
+        }
+        let Some(all_tris) = self.tris.as_ref().map(|t| t.2.clone()) else { return (vec![], false) };
+        // Les morceaux : (premier sommet, colonne des positions, tissu dessinable tel quel)
+        let parts = g.position_parts();
+        let mut ranges = vec![];
+        let mut direct = false;
+        struct Piece<'a> {
+            first: usize,
+            col: &'a std::sync::Arc<crate::geo::Column>,
+            live: Option<&'a crate::gpucloth::Live>,
+        }
+        let mut pieces = vec![];
+        for (first, col) in &parts {
+            let (first, n) = (*first, col.len());
+            if !all_tris.iter().any(|t| (t[0] as usize) >= first && (t[0] as usize) < first + n) {
+                continue;
+            }
+            let live = col.positions_of().and_then(|s| s.live.as_ref()).filter(|l| l.current());
+            // Ni dans les tampons du solveur, ni encore arrivé : rien à dessiner cette fois-ci
+            if live.is_none() && !col.ready() {
+                ui.ctx().request_repaint();
+                ranges.push((first, n));
+                continue;
+            }
+            direct |= live.is_some();
+            ranges.push((first, n));
+            pieces.push(Piece { first, col, live });
+        }
+        if pieces.is_empty() {
+            return (ranges, false);
+        }
+        let key = g.faces_key();
+        let tris_of: Vec<Box<dyn Fn() -> Vec<[u32; 3]>>> = pieces
+            .iter()
+            .map(|p| {
+                let (first, n, all) = (p.first as u32, p.col.len() as u32, &all_tris);
+                Box::new(move || all.iter().filter(|t| t.iter().all(|v| *v >= first && *v < first + n)).map(|t| [t[0] - first, t[1] - first, t[2] - first]).collect()) as Box<dyn Fn() -> Vec<[u32; 3]>>
+            })
+            .collect();
+        let data_of: Vec<Box<dyn Fn() -> Vec<[f32; 4]>>> = pieces
+            .iter()
+            .map(|p| {
+                let col = p.col;
+                Box::new(move || {
+                    let d = col.data();
+                    (0..col.len()).map(|i| [d[0][i], d[1][i], d[2][i], 0.0]).collect()
+                }) as Box<dyn Fn() -> Vec<[f32; 4]>>
+            })
+            .collect();
+        let colors_of: Vec<Box<dyn Fn() -> Vec<[u8; 4]>>> = pieces
+            .iter()
+            .map(|p| {
+                let (first, n) = (p.first, p.col.len());
+                Box::new(move || {
+                    let Some(d) = cd.map(|c| c.data()) else { return vec![] };
+                    let q = |x: f32| (x.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
+                    (first..first + n).map(|i| [q(d[0][i]), q(d[1][i]), q(d[2][i]), 255]).collect()
+                }) as Box<dyn Fn() -> Vec<[u8; 4]>>
+            })
+            .collect();
+        let draw: Vec<crate::gpudraw::Part> = pieces
+            .iter()
+            .enumerate()
+            .map(|(k, p)| crate::gpudraw::Part {
+                n: p.col.len(),
+                source: match p.live {
+                    Some(l) => crate::gpudraw::Source::Live(l),
+                    None => crate::gpudraw::Source::Data(p.col.version, &*data_of[k]),
+                },
+                tris: (key ^ (p.first as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15), &*tris_of[k]),
+                colors: cd.map(|c| (c.version ^ (p.first as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15), &*colors_of[k])),
+                base: [0.79, 0.71, 0.64],
+                model: crate::gpudraw::IDENTITY,
+            })
+            .collect();
+        let cam = crate::gpudraw::Cam { view_proj: vp, depth_row, light, eye, soft: None };
+        if !crate::gpudraw::paint(&mut self.canvas, size, &cam, &draw) {
+            return (vec![], false);
+        }
+        (ranges, direct)
     }
 
     /// Projette un point du monde dans le rectangle. Rend aussi sa profondeur (négative : derrière la caméra).
@@ -257,7 +425,7 @@ impl GeoView {
             if let Some(g) = self.result.clone() {
                 self.seen = None;
                 self.framed = false;
-                self.frame_on(&g);
+                self.want_frame = !self.frame_on(&g);
             }
         }
         // Sol : une grille discrète à la hauteur zéro
@@ -311,18 +479,46 @@ impl GeoView {
                 }
             }
         }
-        if let Some(g) = &self.result {
+        if let Some(g) = self.result.clone() {
+            // Les surfaces d'abord, sur la carte : un tissu encore dans les tampons du solveur ne la quitte pas
+            let (on_card, direct) = self.paint_surfaces(ui, rect, &g);
+            self.direct = direct;
             let base = Color32::from_rgb(0xe6, 0xdc, 0xd2);
+            // Le reste (points, fils, et tout quand la carte ne dessine pas) : ici, morceau par morceau,
+            // sans toucher aux morceaux dessinés sur la carte (les lire les ferait revenir au processeur)
+            let parts = g.position_parts();
+            let part_of = |i: usize| parts.iter().rev().find(|(first, _)| *first <= i).map(|(first, c)| (*first, *c));
+            // Un point isolé (sans face) d'un morceau dessiné sur la carte reste à dessiner ici
+            let in_face = self.tris.as_ref().filter(|t| t.0 == g.faces_key() && t.1 == g.n).map(|t| t.3.clone());
+            let shown = |i: usize| !(on_card.iter().any(|(first, n)| i >= *first && i < first + n) && in_face.as_ref().is_none_or(|m| m[i]));
+            let pos = |i: usize| -> [f32; 3] {
+                match part_of(i) {
+                    Some((first, c)) => {
+                        let d = c.data();
+                        [d[0][i - first], d[1][i - first], d[2][i - first]]
+                    }
+                    None => [0.0; 3],
+                }
+            };
+            let cd = g.cols.get("Cd").filter(|c| c.width() >= 3);
+            let color = |i: usize| match cd {
+                Some(c) => {
+                    let v = c.get(i);
+                    let q = |x: f32| (x.clamp(0.0, 1.0).powf(1.0 / 2.2) * 255.0 + 0.5) as u8;
+                    Color32::from_rgb(q(v[0]), q(v[1]), q(v[2]))
+                }
+                None => base,
+            };
             let mut mesh = egui::Mesh::default();
             // Arêtes : de fins traits, en un seul maillage
             let stride_e = (g.edges.len() / 60_000).max(1);
             let line = Color32::from_rgba_unmultiplied(150, 160, 175, 150);
             for e in g.edges.iter().step_by(stride_e) {
                 let (a, b) = (e[0] as usize, e[1] as usize);
-                if a >= g.n || b >= g.n {
+                if a >= g.n || b >= g.n || !shown(a) || !shown(b) {
                     continue;
                 }
-                let ((pa, da), (pb, db)) = (self.project(rect, g.pos(a)), self.project(rect, g.pos(b)));
+                let ((pa, da), (pb, db)) = (self.project(rect, pos(a)), self.project(rect, pos(b)));
                 if da <= 0.05 || db <= 0.05 {
                     continue;
                 }
@@ -340,14 +536,17 @@ impl GeoView {
             }
             // Points : de petits carrés, plus gros quand ils sont peu nombreux
             let stride = (g.n / 150_000).max(1);
-            let shown = g.n / stride;
-            let size = if shown > 40_000 { 1.0 } else if shown > 4_000 { 1.4 } else if g.edges.is_empty() { 2.4 } else { 1.8 };
+            let count = g.n / stride;
+            let size = if count > 40_000 { 1.0 } else if count > 4_000 { 1.4 } else if g.edges.is_empty() { 2.4 } else { 1.8 };
             for i in (0..g.n).step_by(stride) {
-                let (q, depth) = self.project(rect, g.pos(i));
+                if !shown(i) {
+                    continue;
+                }
+                let (q, depth) = self.project(rect, pos(i));
                 if depth <= 0.05 || !rect.expand(4.0).contains(q) {
                     continue;
                 }
-                let c = point_color(g, i, base);
+                let c = color(i);
                 let k = mesh.vertices.len() as u32;
                 for o in [vec2(-size, -size), vec2(size, -size), vec2(size, size), vec2(-size, size)] {
                     mesh.colored_vertex(q + o, c);
@@ -355,6 +554,10 @@ impl GeoView {
                 mesh.indices.extend_from_slice(&[k, k + 1, k + 2, k, k + 2, k + 3]);
             }
             painter.add(egui::Shape::mesh(mesh));
+            // L'image des surfaces, par-dessus
+            if let Some(tex) = self.canvas.texture().filter(|_| !on_card.is_empty()) {
+                painter.image(tex, rect, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+            }
         }
         // Ce qu'on regarde, et ce que le calcul a coûté
         if let Some((_, e)) = &self.error {
@@ -372,6 +575,9 @@ impl GeoView {
                 cost += &format!(" · {} {}", s.steps, crate::i18n::t_mid("pas simulés"));
             }
             cost += &format!(" · {:.1} ms", self.ms);
+            if self.direct {
+                cost += &format!(" · {}", crate::i18n::t_mid("sans relecture"));
+            }
             painter.text(rect.left_bottom() + vec2(10.0, -8.0), egui::Align2::LEFT_BOTTOM, cost, egui::FontId::proportional(10.5), Color32::from_gray(130));
         }
         if self.engine.incomplete {
@@ -565,13 +771,27 @@ impl GeoView {
     pub fn thumb(&mut self, painter: &egui::Painter, rect: Rect, doc: &Graph, id: u32, version: u64, root: &str) {
         let p = theme::pal();
         let key = (version, self.frame);
-        if self.thumbs.get(&id).map(|t| t.key) != Some(key) {
+        if self.thumbs.get(&id).is_none_or(|t| t.key != key || (t.stale && !self.playing)) {
             let saved = (self.engine.stats, self.engine.incomplete, self.engine.deadline.take());
             // Une miniature ne lance pas une simulation : elle prend ce qui est déjà en cache
             self.engine.deadline = Some(std::time::Instant::now() + std::time::Duration::from_millis(4));
             let r = self.engine.eval_node(doc, id, 0, self.frame, root);
             (self.engine.stats, self.engine.incomplete, self.engine.deadline) = saved;
-            let mut t = Thumb { key, pts: vec![], lines: vec![], count: 0, error: r.is_err() };
+            // Géométrie encore sur la carte : pendant la lecture, une miniature ne la fait pas
+            // revenir au processeur. Elle garde ses points d'avant, et se met à jour à l'arrêt.
+            if let Some(g) = r.as_ref().ok().filter(|g| !g.resolved() && (self.playing || !g.ready())) {
+                match self.thumbs.get_mut(&id) {
+                    Some(t) => (t.key, t.stale, t.count, t.error) = (key, true, g.n, false),
+                    None => {
+                        self.thumbs.insert(id, Thumb { key, stale: true, pts: vec![], lines: vec![], count: g.n, error: false });
+                    }
+                }
+                if !self.playing {
+                    painter.ctx().request_repaint();
+                }
+                return self.thumb_paint(painter, rect, id);
+            }
+            let mut t = Thumb { key, stale: false, pts: vec![], lines: vec![], count: 0, error: r.is_err() };
             if let Ok(g) = r {
                 t.count = g.n;
                 if let Some((lo, hi)) = g.bounds() {
@@ -595,6 +815,11 @@ impl GeoView {
             }
             self.thumbs.insert(id, t);
         }
+        self.thumb_paint(painter, rect, id);
+    }
+
+    fn thumb_paint(&self, painter: &egui::Painter, rect: Rect, id: u32) {
+        let p = theme::pal();
         let Some(t) = self.thumbs.get(&id) else { return };
         painter.rect_filled(rect, 4.0, Color32::from_gray(30));
         let sq = Rect::from_center_size(rect.center(), vec2(rect.height(), rect.height()));
@@ -613,7 +838,10 @@ impl GeoView {
     pub fn attributes(&mut self, ui: &mut egui::Ui, doc: &Graph, id: u32, version: u64, root: &str) {
         let p = theme::pal();
         let key = (version, self.frame, id);
-        if self.table.as_ref().map(|t| t.0) != Some(key) {
+        // Pendant la lecture, le tableau ne fait pas revenir au processeur une géométrie encore
+        // sur la carte : il garde ses valeurs, et se met à jour à l'arrêt
+        let held = self.playing && self.table.as_ref().is_some_and(|t| t.1.is_ok());
+        if self.table.as_ref().map(|t| t.0) != Some(key) && !held {
             let saved = (self.engine.stats, self.engine.incomplete, self.engine.deadline.take());
             self.engine.deadline = Some(std::time::Instant::now() + std::time::Duration::from_millis(4));
             let is_out = doc.nodes.iter().any(|n| n.id == id && n.op == "geo_out");
@@ -649,7 +877,7 @@ impl GeoView {
                     _ => "valeurs",
                 };
                 let (mut lo, mut hi) = (f32::MAX, f32::MIN);
-                for comp in c.data.iter().take(3) {
+                for comp in c.data().iter().take(3) {
                     for x in comp {
                         lo = lo.min(*x);
                         hi = hi.max(*x);

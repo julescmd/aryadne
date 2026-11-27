@@ -193,7 +193,7 @@ pub fn to_model(g: &Geo) -> Result<crate::model3d::Model, String> {
     let (mut tris, mut sides) = g.triangles();
     let srgb = |x: f32| (x.clamp(0.0, 1.0).powf(1.0 / 2.2) * 255.0 + 0.5) as u8;
     let cd = g.col("Cd").filter(|c| c.width() >= 3);
-    let color_of = |i: usize| cd.map(|c| [c.data[0][i], c.data[1][i], c.data[2][i]]);
+    let color_of = |i: usize| cd.map(|c| [c.data()[0][i], c.data()[1][i], c.data()[2][i]]);
     let mut colors: Option<Vec<Color32>> = None;
     let mut uv = None;
     if tris.is_empty() {
@@ -237,7 +237,7 @@ pub fn to_model(g: &Geo) -> Result<crate::model3d::Model, String> {
             );
         }
         if let Some(c) = g.col("uv").filter(|c| c.width() >= 2) {
-            uv = Some(Arc::new(tris.iter().map(|t| t.map(|v| [c.data[0][v as usize], c.data[1][v as usize]])).collect::<Vec<_>>()));
+            uv = Some(Arc::new(tris.iter().map(|t| t.map(|v| [c.data()[0][v as usize], c.data()[1][v as usize]])).collect::<Vec<_>>()));
         }
     }
     let count = tris.len();
@@ -259,7 +259,7 @@ pub fn obj_text(g: &Geo, place: &dyn Fn([f32; 3]) -> [f32; 3]) -> String {
     let uv = g.col("uv").filter(|c| c.width() >= 2);
     if let Some(c) = uv {
         for i in 0..g.n {
-            let _ = writeln!(s, "vt {} {}", c.data[0][i], c.data[1][i]);
+            let _ = writeln!(s, "vt {} {}", c.data()[0][i], c.data()[1][i]);
         }
     }
     let n = g.n as u32;

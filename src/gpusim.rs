@@ -44,6 +44,8 @@ pub struct Gpu {
     pub max_storage: u32,
     /// C'est aussi la carte de l'interface : une vue peut dessiner les tampons sans relecture
     pub shared: bool,
+    /// La carte sait lisser un dessin à quatre échantillons par pixel
+    pub msaa4: bool,
     broken: Arc<AtomicBool>,
 }
 
@@ -68,12 +70,20 @@ fn open() -> Option<Gpu> {
     // L'interface dessine avec wgpu : les simulations prennent la même carte, pour qu'une vue
     // puisse dessiner leurs tampons sans les relire. Sinon (mode compatible, banc en ligne de
     // commande, tests), elles ouvrent la leur.
-    let shared = crate::gfx::ui().map(|s| (s.device.clone(), s.queue.clone(), s.adapter.get_info(), s.device.limits())).filter(|(_, _, _, l)| enough(l));
+    let smooth = |a: &wgpu::Adapter| [wgpu::TextureFormat::Rgba8Unorm, wgpu::TextureFormat::Depth32Float].iter().all(|f| a.get_texture_format_features(*f).flags.sample_count_supported(4));
+    let shared = crate::gfx::ui().map(|s| (s.device.clone(), s.queue.clone(), s.adapter.get_info(), s.device.limits(), smooth(&s.adapter))).filter(|x| enough(&x.3));
     let is_shared = shared.is_some();
-    let (device, queue, info, limits) = match shared {
+    let (device, queue, info, limits, msaa4) = match shared {
         Some(x) => x,
         None => {
-            let instance = wgpu::Instance::default();
+            // En mode compatible, l'interface tient déjà le contexte OpenGL de la fenêtre : wgpu ne
+            // doit pas y toucher. Les simulations prennent alors Vulkan, DirectX 12 ou Metal, ou
+            // à défaut le processeur.
+            let mut desc = wgpu::InstanceDescriptor::new_without_display_handle();
+            if matches!(crate::gfx::active(), Some((crate::gfx::Kind::Glow, _))) {
+                desc.backends = wgpu::Backends::PRIMARY;
+            }
+            let instance = wgpu::Instance::new(desc);
             let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions { power_preference: wgpu::PowerPreference::HighPerformance, ..Default::default() })).ok()?;
             let info = adapter.get_info();
             // On demande tout ce que la carte permet : les valeurs par défaut de WebGPU (128 Mo par
@@ -83,7 +93,8 @@ fn open() -> Option<Gpu> {
                 return None;
             }
             let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor { label: Some("aryadne-simulation"), required_limits: limits.clone(), ..Default::default() })).ok()?;
-            (device, queue, info, limits)
+            let msaa4 = smooth(&adapter);
+            (device, queue, info, limits, msaa4)
         }
     };
     let broken = Arc::new(AtomicBool::new(false));
@@ -105,6 +116,7 @@ fn open() -> Option<Gpu> {
         max_groups: limits.max_compute_workgroups_per_dimension,
         max_storage: limits.max_storage_buffers_per_shader_stage,
         shared: is_shared,
+        msaa4,
         broken,
     })
 }
@@ -203,14 +215,15 @@ impl Gpu {
         self.column_paged(label, len, stride, self.page_len(stride))
     }
 
-    /// Colonne coupée en pages de `page_len` éléments (les essais forcent de petites pages)
+    /// Colonne coupée en pages de `page_len` éléments (les essais forcent de petites pages). Une
+    /// colonne peut aussi servir de tampon de sommets : une vue dessine l'état d'un solveur tel quel.
     pub fn column_paged(&self, label: &str, len: usize, stride: usize, page_len: usize) -> Column {
         let page_len = page_len.max(1);
         let count = len.div_ceil(page_len).max(1);
         let mut c = Column { pages: Vec::with_capacity(count), len, stride, page_len };
         for k in 0..count {
             let size = ((c.page_elems(k) * stride) as u64).next_multiple_of(4).max(16);
-            c.pages.push(self.device.create_buffer(&wgpu::BufferDescriptor { label: Some(label), size, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false }));
+            c.pages.push(self.device.create_buffer(&wgpu::BufferDescriptor { label: Some(label), size, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false }));
         }
         c
     }
@@ -332,6 +345,27 @@ impl Readback {
     pub fn ready(&self) -> bool {
         let _ = self.device.poll(wgpu::PollType::Poll);
         self.left.load(Ordering::Acquire) == 0 || self.broken.load(Ordering::Relaxed)
+    }
+
+    /// Attend que les données soient arrivées, sans les copier. Faux si la carte a rendu une erreur.
+    pub fn block(&self) -> bool {
+        while self.left.load(Ordering::Acquire) > 0 {
+            if self.broken.load(Ordering::Relaxed) || self.device.poll(wgpu::PollType::wait_indefinitely()).is_err() {
+                return false;
+            }
+        }
+        !self.failed.load(Ordering::Relaxed)
+    }
+
+    /// Regarde les octets arrivés sans les copier ni rendre la relecture. `None` tant qu'ils ne
+    /// sont pas là (ne bloque pas), ou si la colonne tenait sur plusieurs pages.
+    pub fn peek<R>(&self, f: impl FnOnce(&[u8]) -> R) -> Option<R> {
+        if self.bufs.len() != 1 || self.left.load(Ordering::Acquire) > 0 || self.failed.load(Ordering::Relaxed) || self.broken.load(Ordering::Relaxed) {
+            return None;
+        }
+        let (buf, bytes) = &self.bufs[0];
+        let d = buf.slice(..).get_mapped_range().ok()?;
+        Some(f(&d[..*bytes]))
     }
 
     /// Les octets relus, en attendant la carte s'il le faut.

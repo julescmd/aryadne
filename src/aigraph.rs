@@ -1574,7 +1574,7 @@ mod tests {
             last = eng.eval(&g, f, "").map_err(|e| e.1).unwrap();
         }
         assert_eq!(first.n, 96);
-        let pin = last.col("pin").expect("attribut pin").data[0].clone();
+        let pin = last.col("pin").expect("attribut pin").data()[0].clone();
         let (mut pinned, mut moved) = (0, 0.0f32);
         for i in 0..first.n {
             let (a, b) = (first.pos(i), last.pos(i));
