@@ -97,6 +97,16 @@ impl BakeMesh {
     }
 }
 
+/// Cuit le matériau à plat, sur le carré des UV : ce qu'il donne à un maillage dont les UV vont de
+/// 0 à 1 (une grille de nodes), sans connaître ce maillage. Un matériau qui dépend de la position
+/// ou de la courbure y est vu comme sur un carreau plat. Sert au dessin direct par la carte
+/// graphique, qui ne peut pas évaluer le graphe pixel par pixel.
+pub fn bake_flat(prog: &Program, size: u32) -> Result<Maps, String> {
+    let mut mesh = BakeMesh::plane();
+    mesh.mat_uv = Some(mesh.uv.clone());
+    bake(&mesh, prog, size, 0, &|_| {})?.into_iter().next().ok_or_else(|| "rien à cuire".to_string())
+}
+
 /// Les cartes cuites d'une tuile d'UV, en nombres à virgule (une valeur par texel, rangée du haut d'abord).
 pub struct Maps {
     pub n: usize,
@@ -1007,6 +1017,21 @@ mod tests {
         let stack = crate::atelier::Stack { layers: vec![crate::atelier::Layer::own("fond", crate::atelier::fill_graph([0.5, 0.5, 0.5])), top] };
         let g = Graph { stack: Some(stack), ..Graph::empty(GraphKind::Material) };
         Program::compile(&g, "", 64).map_err(|e| e.1).unwrap()
+    }
+
+    /// La cuisson à plat pour le dessin par la carte : des cartes carrées, et leurs moyennes.
+    #[test]
+    fn cuisson_a_plat_pour_la_carte() {
+        let prog = uni([1.0, 0.0, 0.0], 0.3, 1.0);
+        let m = bake_flat(&prog, 16).unwrap();
+        assert_eq!((m.n, m.color.len(), m.rough.len(), m.metal.len()), (16, 256, 256, 256));
+        assert!(m.color.iter().all(|c| (c[0] - 1.0).abs() < 1e-4 && c[1].abs() < 1e-4 && c[2].abs() < 1e-4), "{:?}", m.color[0]);
+        assert!(m.rough.iter().all(|r| (r - 0.3).abs() < 1e-4) && m.metal.iter().all(|v| (v - 1.0).abs() < 1e-4));
+        let b = crate::model3d::bake_for_direct(&prog, 16).unwrap();
+        assert_eq!((b.n, b.color[17], b.orm[17][1]), (16, [255, 0, 0, 255], 255));
+        assert!((b.mean.1 - 0.3).abs() < 1e-3 && (b.mean.2 - 1.0).abs() < 1e-3);
+        // Deux cuissons : deux clés, pour que la carte reprenne les textures
+        assert_ne!(crate::model3d::bake_for_direct(&prog, 16).unwrap().key, b.key);
     }
 
     #[test]

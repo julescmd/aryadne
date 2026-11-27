@@ -387,9 +387,13 @@ impl GeoView {
                 colors: cd.map(|c| (c.version ^ (p.first as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15), &*colors_of[k])),
                 base: [0.79, 0.71, 0.64],
                 model: crate::gpudraw::IDENTITY,
+                uv: None,
+                surface: Default::default(),
+                id: 0,
+                select: 0,
             })
             .collect();
-        let cam = crate::gpudraw::Cam { view_proj: vp, depth_row, light, eye, soft: None };
+        let cam = crate::gpudraw::Cam { view_proj: vp, depth_row, light, eye, soft: None, shadow: None, outline: 0.0, front: None, scene: None };
         if !crate::gpudraw::paint(&mut self.canvas, size, &cam, &draw) {
             return (vec![], false);
         }
@@ -410,7 +414,7 @@ impl GeoView {
             let k = if crate::gpusim::hardware() { 0.5 } else { 0.25 };
             let size = [(rect.width() * ppp * k).round().max(1.0) as u32, (rect.height() * ppp * k).round().max(1.0) as u32];
             let (vp, depth_row, light, eye) = self.camera(size[0] as f32, size[1] as f32);
-            let cam = crate::gpudraw::Cam { view_proj: vp, depth_row, light, eye, soft: None };
+            let cam = crate::gpudraw::Cam { view_proj: vp, depth_row, light, eye, soft: None, shadow: None, outline: 0.0, front: None, scene: None };
             match crate::gpuvolume::paint_volume(&mut self.vol_canvas, size, &cam, vol, &crate::gpudraw::IDENTITY) {
                 Some((_, direct)) => self.direct |= direct,
                 // Les voxels ne sont pas encore arrivés : l'image d'avant reste

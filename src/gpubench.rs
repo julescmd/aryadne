@@ -232,6 +232,12 @@ pub struct Affichage {
     pub relu_ms: f64,
     /// Le dessin seul : normales et rasterisation
     pub dessin_ms: f64,
+    /// Comme `direct_ms`, avec tout ce qu'a un objet de la scène : ombres de la lumière principale
+    /// (reçues, avec une boule et un sol comme autres objets, et posées au sol), matériau en
+    /// textures cuites de 1024², image des identifiants et contour de sélection
+    pub complet_ms: f64,
+    /// Le dessin complet seul
+    pub dessin_complet_ms: f64,
 }
 
 /// Une image de tissu au budget de `budget` passes, découpée comme le solveur le conseille.
@@ -338,17 +344,60 @@ fn affichage(c: &mut crate::gpucloth::Cloth, cote: usize, par: &crate::gpucloth:
     let f = far / (far - near);
     let depth = [-z[0], -z[1], -z[2], dist + dot(z, target)];
     let vp = from_rows([[x[0] * kx, x[1] * kx, x[2] * kx, -dot(x, target) * kx], [y[0] * ky, y[1] * ky, y[2] * ky, -dot(y, target) * ky], [depth[0] * f, depth[1] * f, depth[2] * f, (depth[3] - near) * f], depth]);
-    let cam = Cam { view_proj: vp, depth_row: depth, light: [0.3, 0.8, 0.5], eye: [target[0] + z[0] * dist, target[1] + z[1] * dist, target[2] + z[2] * dist], soft: None };
+    let cam = Cam { view_proj: vp, depth_row: depth, light: [0.3, 0.8, 0.5], eye: [target[0] + z[0] * dist, target[1] + z[1] * dist, target[2] + z[2] * dist], soft: None, shadow: None, outline: 0.0, front: None, scene: None };
     let mut canvas = Canvas::default();
-    let mut draw = |c: &mut crate::gpucloth::Cloth| {
+    let mut full = false;
+    // Le dessin complet : une boule et un sol pour l'ombre reçue, un matériau en damier de 1024²
+    let (ball, floor) = (([0.0f32, 0.7, 0.0], 0.55f32), 0.0f32);
+    let occluders = move || {
+        let (mut pos, mut tris) = (vec![], vec![]);
+        let (seg, rings) = (64u32, 32u32);
+        for r in 0..=rings {
+            let th = std::f32::consts::PI * r as f32 / rings as f32;
+            for s in 0..=seg {
+                let ph = std::f32::consts::TAU * s as f32 / seg as f32;
+                pos.push([ball.0[0] + ball.1 * th.sin() * ph.cos(), ball.0[1] + ball.1 * th.cos(), ball.0[2] + ball.1 * th.sin() * ph.sin(), 0.0]);
+            }
+        }
+        for r in 0..rings {
+            for s in 0..seg {
+                let a = r * (seg + 1) + s;
+                tris.push([a, a + seg + 1, a + 1]);
+                tris.push([a + 1, a + seg + 1, a + seg + 2]);
+            }
+        }
+        let b = pos.len() as u32;
+        pos.extend([[-4.0, floor, -4.0, 0.0], [4.0, floor, -4.0, 0.0], [4.0, floor, 4.0, 0.0], [-4.0, floor, 4.0, 0.0]]);
+        tris.extend([[b, b + 1, b + 2], [b, b + 2, b + 3]]);
+        (pos, tris)
+    };
+    let side = 1024usize;
+    let checker: Vec<[f32; 3]> = (0..side * side).map(|i| if ((i % side) / 64 + (i / side) / 64) % 2 == 0 { [0.8, 0.3, 0.25] } else { [0.9, 0.85, 0.8] }).collect();
+    let baked = crate::gpudraw::Baked::new(0xBA2C_7E47, side, &checker, &vec![0.6; side * side], &vec![0.0; side * side])?;
+    let uvs = || (0..n).map(|i| [(i % cote) as f32 / (cote - 1) as f32, (i / cote) as f32 / (cote - 1) as f32]).collect::<Vec<[f32; 2]>>();
+    let mut draw = |c: &mut crate::gpucloth::Cloth, full: bool| {
         let Some(live) = c.live() else { return false };
-        paint(&mut canvas, [w as u32, h as u32], &cam, &[Part { n, source: Source::Live(&live), tris: (0xBA2C_0000 + cote as u64, &tris), colors: None, base: [0.79, 0.71, 0.64], model: IDENTITY }])
+        let shadow = full.then(|| crate::gpudraw::Shadow { center: target, radius: 2.5, occluders: Some(crate::gpudraw::Occluders { version: 1, mesh: &occluders, model: IDENTITY }), floor: Some(floor), on_surfaces: 0.5, on_floor: 0.42 });
+        let cam = Cam { view_proj: cam.view_proj, depth_row: cam.depth_row, light: cam.light, eye: cam.eye, shadow, outline: if full { 2.0 } else { 0.0 }, front: None, scene: None, soft: None };
+        let part = Part {
+            n,
+            source: Source::Live(&live),
+            tris: (0xBA2C_0000 + cote as u64, &tris),
+            colors: None,
+            base: [0.79, 0.71, 0.64],
+            model: IDENTITY,
+            uv: full.then_some((1, &uvs as &dyn Fn() -> Vec<[f32; 2]>)),
+            surface: if full { crate::gpudraw::Surface { rough: 0.6, metal: 0.0, maps: Some(&baked) } } else { Default::default() },
+            id: full as u32,
+            select: if full { 2 } else { 0 },
+        };
+        paint(&mut canvas, [w as u32, h as u32], &cam, &[part])
     };
     let gravity = [0.0, -9.81 * dt, 0.0];
     // Échauffement : pipelines, tampons du maillage
     c.push_uniform(gravity, 1.0);
     c.step(dt, par);
-    if !draw(c) {
+    if !draw(c, false) || !draw(c, true) {
         eprintln!("banc : le dessin direct n'a rien donné (carte : {}, erreur : {})", c.on_gpu(), g.broken());
         return None;
     }
@@ -359,7 +408,7 @@ fn affichage(c: &mut crate::gpucloth::Cloth, cote: usize, par: &crate::gpucloth:
     for _ in 0..images {
         c.push_uniform(gravity, 1.0);
         c.step(dt, par);
-        draw(c);
+        draw(c, full);
     }
     g.finish();
     let direct_ms = per(t);
@@ -371,7 +420,7 @@ fn affichage(c: &mut crate::gpucloth::Cloth, cote: usize, par: &crate::gpucloth:
         c.push_uniform(gravity, 1.0);
         c.step(dt, par);
         kept.push(c.shot());
-        draw(c);
+        draw(c, full);
     }
     g.finish();
     let cliche_ms = per(t);
@@ -388,11 +437,27 @@ fn affichage(c: &mut crate::gpucloth::Cloth, cote: usize, par: &crate::gpucloth:
     // 4. Le dessin seul
     let t = Instant::now();
     for _ in 0..images {
-        draw(c);
+        draw(c, full);
     }
     g.finish();
     let dessin_ms = per(t);
-    (c.on_gpu() && !g.broken()).then_some(Affichage { direct_ms, cliche_ms, relu_ms, dessin_ms })
+    // 5. Comme 1 et 4, avec ombres, matériau et sélection
+    full = true;
+    let t = Instant::now();
+    for _ in 0..images {
+        c.push_uniform(gravity, 1.0);
+        c.step(dt, par);
+        draw(c, full);
+    }
+    g.finish();
+    let complet_ms = per(t);
+    let t = Instant::now();
+    for _ in 0..images {
+        draw(c, full);
+    }
+    g.finish();
+    let dessin_complet_ms = per(t);
+    (c.on_gpu() && !g.broken()).then_some(Affichage { direct_ms, cliche_ms, relu_ms, dessin_ms, complet_ms, dessin_complet_ms })
 }
 
 /// Le même petit tissu sur la carte et sur le processeur : écart maximal des positions après trois images.
@@ -741,6 +806,7 @@ impl Rapport {
             s += &format!("  {} : {:.0} {} · {} : {:.1} ms\n", t("à 24 images par seconde"), 1000.0 / 24.0 / m.passe_ms, tm("passes par image"), tm("relecture"), m.relecture_ms);
             if let Some(a) = &m.affichage {
                 s += &format!("  {} : {:.1} ms ({:.0} {}) · {} : {:.1} ms · {} : {:.1} ms ({:.0} {}) · {} : {:.1} ms\n", t("image affichée sans relecture (pas à 16 passes + dessin direct)"), a.direct_ms, 1000.0 / a.direct_ms.max(1e-6), tm("images/s"), tm("avec le transfert différé pour le cache"), a.cliche_ms, tm("avec relecture comme avant, sans son dessin"), a.relu_ms, 1000.0 / a.relu_ms.max(1e-6), tm("images/s"), tm("dessin seul"), a.dessin_ms);
+                s += &format!("  {} : {:.1} ms ({:.0} {}) · {} : {:.1} ms\n", t("avec ombres, matériau en textures et contour de sélection"), a.complet_ms, 1000.0 / a.complet_ms.max(1e-6), tm("images/s"), tm("dessin seul"), a.dessin_complet_ms);
             }
             s += &format!("  {} : {:.2} ms {} (×{:.1}) · {} : {:.0} ms · {} : {:.0} Mo\n", t("processeur"), m.passe_processeur_ms, tm("par passe"), m.passe_processeur_ms / m.passe_ms, tm("préparation"), m.preparation_ms, tm("mémoire sur la carte"), m.memoire as f64 / 1e6);
         }
@@ -869,6 +935,8 @@ mod tests {
         assert!(r.mesures.iter().all(|m| m.ms.is_finite() && m.ms > 0.0));
         assert!(!r.notes.iter().any(|n| n.contains("non finies")));
         assert!(r.tissu.iter().all(|m| m.passe_ms > 0.0 && m.passe_processeur_ms > 0.0));
+        // Le dessin complet (ombres, matériau, sélection) est mesuré quand le dessin direct l'est
+        assert!(r.tissu.iter().filter_map(|m| m.affichage.as_ref()).all(|a| a.complet_ms > 0.0 && a.dessin_complet_ms > 0.0));
         // La fumée des nodes : chaque doublement des itérations réduit la divergence qui reste
         let f = &r.fumee[0];
         assert!(f.par_iterations.len() == 3 && f.par_iterations.iter().all(|m| m.1 > 0.0 && m.3.is_finite()));

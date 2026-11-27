@@ -7,7 +7,10 @@
 //! - **Les flammes** brillent : leur couleur vient de la température, leur force du champ `flamme`.
 //! - **L'ombre** : à chaque pas dans la fumée, quelques pas vers la lumière principale.
 //! - **La profondeur** d'une image calculée ailleurs (`gpudraw::Soft`) arrête le rayon : un objet
-//!   devant la fumée la cache, un objet dedans y est noyé.
+//!   devant la fumée la cache, un objet dedans y est noyé. Un maillage dessiné par la carte
+//!   (`Cam::front`) l'arrête de la même façon.
+//! - **L'ombre portée** : là où le rayon finit sur une surface ou sur le sol, la densité est
+//!   additionnée de ce point vers la lumière ; la fumée y pose une ombre douce (`Cam::shadow`).
 //!
 //! Le tampon lu est celui du solveur, tel quel (`Source::Live`) : **aucune relecture**. Un volume
 //! repris du cache est envoyé à la carte quand sa version change (`Source::Data`), pour le même aspect.
@@ -30,10 +33,15 @@ struct U {
     color: vec4<f32>,
     soft: vec4<f32>,
     size: vec4<f32>,
+    // Sol : hauteur, présent, force de l'ombre au sol, force sur les surfaces
+    floor: vec4<f32>,
+    // Ce qu'un autre dessin de la carte a posé devant : taille, présent
+    front: vec4<f32>,
 }
 @group(0) @binding(0) var<uniform> u: U;
 @group(0) @binding(1) var<storage, read> sca: array<vec2<u32>>;
 @group(0) @binding(2) var soft_depth: texture_2d<f32>;
+@group(0) @binding(3) var front_depth: texture_2d<u32>;
 
 @vertex
 fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
@@ -77,13 +85,27 @@ fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     let len = length(e - o);
     let dir = (e - o) / len;
     var tmax = len;
-    // Ce qui est déjà dessiné arrête le rayon
+    let d0 = dot(u.depth_row, vec4<f32>(o, 1.0));
+    let dd = dot(u.depth_row.xyz, dir);
+    // Ce qui est déjà dessiné arrête le rayon : une surface de l'image calculée ailleurs…
+    var t_soft = 1e30;
     if (u.soft.z > 0.5) {
         let px = clamp(vec2<i32>(pos.xy / u.size.xy * u.soft.xy), vec2<i32>(0), vec2<i32>(u.soft.xy) - vec2<i32>(1));
         let d = textureLoad(soft_depth, px, 0).r;
-        let d0 = dot(u.depth_row, vec4<f32>(o, 1.0));
-        let dd = dot(u.depth_row.xyz, dir);
-        if (dd > 1e-9 && d < 1e30) { tmax = min(tmax, (d + u.soft.w - d0) / dd); }
+        if (dd > 1e-9 && d < 1e30) {
+            t_soft = (d + u.soft.w - d0) / dd;
+            tmax = min(tmax, t_soft);
+        }
+    }
+    // … ou un maillage dessiné par la carte
+    var t_front = 1e30;
+    if (u.front.z > 0.5) {
+        let px = clamp(vec2<i32>(pos.xy / u.size.xy * u.front.xy), vec2<i32>(0), vec2<i32>(u.front.xy) - vec2<i32>(1));
+        let f = textureLoad(front_depth, px, 0);
+        if (dd > 1e-9 && f.g > 0u) {
+            t_front = (bitcast<f32>(f.r) - d0) / dd;
+            tmax = min(tmax, t_front);
+        }
     }
     let og = (u.to_grid * vec4<f32>(o, 1.0)).xyz;
     let dg = (u.to_grid * vec4<f32>(dir, 0.0)).xyz;
@@ -94,48 +116,84 @@ fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     let hi = max(ta, tb);
     let t0 = max(max(max(lo.x, lo.y), lo.z), 0.0);
     let t1 = min(min(min(hi.x, hi.y), hi.z), tmax);
-    if (t1 <= t0) { return vec4<f32>(0.0); }
-    let gl = length(dg);
-    var dt = 0.9 / gl;
-    if ((t1 - t0) / dt > 128.0) { dt = (t1 - t0) / 128.0; }
-    let ds = dt * gl * u.res.w;
     let jitter = fract(sin(dot(pos.xy, vec2<f32>(12.9898, 78.233))) * 43758.5453);
-    let lg = normalize((u.to_grid * vec4<f32>(u.light.xyz, 0.0)).xyz) * 2.0;
+    let lu = normalize((u.to_grid * vec4<f32>(u.light.xyz, 0.0)).xyz);
     var col = vec3<f32>(0.0);
     var trans = 1.0;
-    var t = t0 + dt * jitter;
-    for (var k = 0; k < 130; k++) {
-        if (t >= t1 || trans < 0.01) { break; }
-        let p = og + dg * t;
-        let s = at(p);
-        if (s.x > 1e-3 || s.w > 1e-3) {
-            let a = 1.0 - exp(-s.x * u.look.x * ds);
-            var shade = 1.0;
-            if (u.look.z > 0.0 && a > 1e-3) {
-                var d = 0.0;
-                for (var j = 1; j <= 6; j++) { d += at(p + lg * f32(j)).x; }
-                shade = exp(-d * u.look.x * 2.0 * u.res.w * u.look.z * 0.6);
+    if (t1 > t0) {
+        let gl = length(dg);
+        var dt = 0.9 / gl;
+        if ((t1 - t0) / dt > 128.0) { dt = (t1 - t0) / 128.0; }
+        let ds = dt * gl * u.res.w;
+        let lg = lu * 2.0;
+        var t = t0 + dt * jitter;
+        for (var k = 0; k < 130; k++) {
+            if (t >= t1 || trans < 0.01) { break; }
+            let p = og + dg * t;
+            let s = at(p);
+            if (s.x > 1e-3 || s.w > 1e-3) {
+                let a = 1.0 - exp(-s.x * u.look.x * ds);
+                var shade = 1.0;
+                if (u.look.z > 0.0 && a > 1e-3) {
+                    var d = 0.0;
+                    for (var j = 1; j <= 6; j++) { d += at(p + lg * f32(j)).x; }
+                    shade = exp(-d * u.look.x * 2.0 * u.res.w * u.look.z * 0.6);
+                }
+                let lit = 0.18 + 0.82 * shade;
+                let glow = s.w * u.look.y * ds / u.res.w * 0.25;
+                col += trans * (a * u.color.rgb * lit + glow * flame(s.y));
+                trans *= 1.0 - a;
             }
-            let lit = 0.18 + 0.82 * shade;
-            let glow = s.w * u.look.y * ds / u.res.w * 0.25;
-            col += trans * (a * u.color.rgb * lit + glow * flame(s.y));
-            trans *= 1.0 - a;
+            t += dt;
         }
-        t += dt;
+    }
+    // Ombre portée : là où le rayon finit (une surface calculée ailleurs, sinon le sol), la
+    // densité additionnée de ce point vers la lumière dit ce que la fumée lui cache
+    var under = 0.0;
+    if (u.look.z > 0.0 && (u.floor.z > 0.0 || u.floor.w > 0.0)) {
+        var ts = -1.0;
+        var k = 0.0;
+        if (t_soft < 1e29) {
+            if (t_soft <= t_front) { ts = t_soft; k = u.floor.w; }
+        } else if (t_front > 1e29 && u.floor.y > 0.5 && abs(dir.y) > 1e-5 && u.light.y > 0.0) {
+            ts = (u.floor.x - o.y) / dir.y;
+            k = u.floor.z;
+        }
+        if (ts > 0.0 && k > 0.0) {
+            let sg = og + dg * ts;
+            let ls = select(lu, vec3<f32>(1e-9), abs(lu) < vec3<f32>(1e-9));
+            let la = (vec3<f32>(0.0) - sg) / ls;
+            let lb = (u.res.xyz - sg) / ls;
+            let l0 = min(la, lb);
+            let l1 = max(la, lb);
+            let e0 = max(max(max(l0.x, l0.y), l0.z), 0.0);
+            let e1 = min(min(l1.x, l1.y), l1.z);
+            if (e1 > e0) {
+                let st = (e1 - e0) / 24.0;
+                var d = 0.0;
+                for (var j = 0; j < 24; j++) { d += at(sg + lu * (e0 + (f32(j) + jitter) * st)).x; }
+                under = k * (1.0 - exp(-d * st * u.res.w * u.look.x * u.look.z));
+            }
+        }
     }
     let alpha = clamp(max(1.0 - trans, max(col.r, max(col.g, col.b))), 0.0, 1.0);
-    if (alpha <= 0.0) { return vec4<f32>(0.0); }
-    return vec4<f32>(pow(clamp(col / alpha, vec3<f32>(0.0), vec3<f32>(1.0)), vec3<f32>(1.0 / 2.2)) * alpha, alpha);
+    if (alpha <= 0.0 && under <= 0.0) { return vec4<f32>(0.0); }
+    var rgb = vec3<f32>(0.0);
+    if (alpha > 0.0) { rgb = pow(clamp(col / alpha, vec3<f32>(0.0), vec3<f32>(1.0)), vec3<f32>(1.0 / 2.2)) * alpha; }
+    // L'ombre est sous la fumée : elle ne se voit qu'à travers elle
+    return vec4<f32>(rgb, alpha + (1.0 - alpha) * under);
 }
 "#;
 
-const U_SIZE: u64 = 64 * 2 + 16 * 7;
+const U_SIZE: u64 = 64 * 2 + 16 * 9;
 const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 
 struct Programs {
     layout: wgpu::BindGroupLayout,
     pipeline: wgpu::RenderPipeline,
     blank: wgpu::TextureView,
+    /// De même quand rien d'autre n'a été dessiné devant par la carte
+    blank_front: wgpu::TextureView,
 }
 
 fn programs(g: &Gpu) -> &'static Programs {
@@ -149,6 +207,7 @@ fn programs(g: &Gpu) -> &'static Programs {
                 wgpu::BindGroupLayoutEntry { binding: 0, visibility: wgpu::ShaderStages::FRAGMENT, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None }, count: None },
                 wgpu::BindGroupLayoutEntry { binding: 1, visibility: wgpu::ShaderStages::FRAGMENT, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None },
                 wgpu::BindGroupLayoutEntry { binding: 2, visibility: wgpu::ShaderStages::FRAGMENT, ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Float { filterable: false }, view_dimension: wgpu::TextureViewDimension::D2, multisampled: false }, count: None },
+                wgpu::BindGroupLayoutEntry { binding: 3, visibility: wgpu::ShaderStages::FRAGMENT, ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Uint, view_dimension: wgpu::TextureViewDimension::D2, multisampled: false }, count: None },
             ],
         });
         let pl = d.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("volume"), bind_group_layouts: &[Some(&layout)], immediate_size: 0 });
@@ -164,7 +223,8 @@ fn programs(g: &Gpu) -> &'static Programs {
             cache: None,
         });
         let blank = d.create_texture(&wgpu::TextureDescriptor { label: Some("volume-sans-profondeur"), size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 }, mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2, format: wgpu::TextureFormat::R32Float, usage: wgpu::TextureUsages::TEXTURE_BINDING, view_formats: &[] }).create_view(&Default::default());
-        Programs { layout, pipeline, blank }
+        let blank_front = d.create_texture(&wgpu::TextureDescriptor { label: Some("volume-rien-devant"), size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 }, mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2, format: wgpu::TextureFormat::Rg32Uint, usage: wgpu::TextureUsages::TEXTURE_BINDING, view_formats: &[] }).create_view(&Default::default());
+        Programs { layout, pipeline, blank, blank_front }
     })
 }
 
@@ -234,15 +294,32 @@ impl Canvas {
         self.id
     }
 
+    pub fn size(&self) -> [u32; 2] {
+        self.size
+    }
+
     /// Relit l'image (RGBA 8 bits, couleur déjà multipliée par l'opacité). Pour les tests et le banc.
     pub fn pixels(&self) -> Option<Vec<u8>> {
-        let (g, color) = (gpusim::gpu()?, self.color.as_ref()?);
         let [w, h] = self.size;
+        self.region(0, 0, w, h)
+    }
+
+    /// Un pixel de la dernière image : pour savoir au clic si la fumée est là.
+    pub fn pixel(&self, x: u32, y: u32) -> Option<[u8; 4]> {
+        if x >= self.size[0] || y >= self.size[1] {
+            return None;
+        }
+        let px = self.region(x, y, 1, 1)?;
+        Some([px[0], px[1], px[2], px[3]])
+    }
+
+    fn region(&self, x: u32, y: u32, w: u32, h: u32) -> Option<Vec<u8>> {
+        let (g, color) = (gpusim::gpu()?, self.color.as_ref()?);
         let row = (w * 4).next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
         let out = g.device.create_buffer(&wgpu::BufferDescriptor { label: Some("volume-relecture"), size: (row * h) as u64, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
         let mut enc = g.device.create_command_encoder(&Default::default());
         enc.copy_texture_to_buffer(
-            wgpu::TexelCopyTextureInfo { texture: color, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+            wgpu::TexelCopyTextureInfo { texture: color, mip_level: 0, origin: wgpu::Origin3d { x, y, z: 0 }, aspect: wgpu::TextureAspect::All },
             wgpu::TexelCopyBufferInfo { buffer: &out, layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(row), rows_per_image: Some(h) } },
             wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
         );
@@ -341,11 +418,23 @@ pub fn paint(canvas: &mut Canvas, size: [u32; 2], cam: &crate::gpudraw::Cam, ite
     put(48, &[item.look.color[0], item.look.color[1], item.look.color[2], 0.0]);
     put(52, &soft_u);
     put(56, &[size[0] as f32, size[1] as f32, 0.0, 0.0]);
+    if let Some(s) = &cam.shadow {
+        put(60, &[s.floor.unwrap_or(0.0), if s.floor.is_some() { 1.0 } else { 0.0 }, s.on_floor.clamp(0.0, 1.0), s.on_surfaces.clamp(0.0, 1.0)]);
+    }
+    // Ce que la carte a déjà dessiné devant : la fumée s'y arrête
+    let front_view = match &cam.front {
+        Some(f) => {
+            let t = f.texture().size();
+            put(64, &[t.width as f32, t.height as f32, 1.0, 0.0]);
+            f.clone()
+        }
+        None => progs.blank_front.clone(),
+    };
     g.queue.write_buffer(&uniform, 0, gpusim::bytes_of(&u));
     let group = g.device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: None,
         layout: &progs.layout,
-        entries: &[wgpu::BindGroupEntry { binding: 0, resource: uniform.as_entire_binding() }, wgpu::BindGroupEntry { binding: 1, resource: buf.as_entire_binding() }, wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&soft_view) }],
+        entries: &[wgpu::BindGroupEntry { binding: 0, resource: uniform.as_entire_binding() }, wgpu::BindGroupEntry { binding: 1, resource: buf.as_entire_binding() }, wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&soft_view) }, wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&front_view) }],
     });
     let mut enc = g.device.create_command_encoder(&Default::default());
     {
@@ -405,11 +494,13 @@ mod tests {
         let vp = crate::gpudraw::from_rows([[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, -0.25, 0.5], [0.0, 0.0, 0.0, 1.0]]);
         let (w, h) = (64u32, 64u32);
         let mut canvas = Canvas::default();
-        let cam = crate::gpudraw::Cam { view_proj: vp, depth_row, light: [0.0, 1.0, 0.0], eye: [0.0, 0.0, 2.0], soft: None };
+        let cam = crate::gpudraw::Cam { view_proj: vp, depth_row, light: [0.0, 1.0, 0.0], eye: [0.0, 0.0, 2.0], soft: None, shadow: None, outline: 0.0, front: None, scene: None };
         assert_eq!(paint_volume(&mut canvas, [w, h], &cam, &vol, &crate::gpudraw::IDENTITY), Some((true, false)));
         let px = canvas.pixels().unwrap();
         let at = |x: u32, y: u32| px[((y * w + x) * 4) as usize..][..4].to_vec();
         assert!(at(32, 32)[3] > 200 && at(32, 32)[0] > 150, "du feu au centre : {:?}", at(32, 32));
+        assert_eq!(canvas.pixel(32, 32).map(|p| p.to_vec()), Some(at(32, 32)));
+        assert_eq!(canvas.pixel(64, 0), None);
         assert_eq!(at(2, 2)[3], 0, "rien dans le coin");
         // Le processeur : la même formule
         let mut cpu = vec![0u8; (w * h * 4) as usize];
@@ -438,5 +529,39 @@ mod tests {
         assert!(paint_volume(&mut canvas, [w, h], &cam, &vol, &crate::gpudraw::IDENTITY).is_some());
         let px = canvas.pixels().unwrap();
         assert_eq!(px[((32 * w + 32) * 4 + 3) as usize], 0);
+    }
+    /// Une boule de fumée au-dessus du sol, la lumière venue d'en haut à droite : la fumée pose
+    /// une ombre douce sur le sol, à gauche, et rien à droite ; plus rien sans ombres.
+    #[test]
+    fn ombre_de_la_fumee_au_sol() {
+        if gpusim::gpu().is_none() {
+            return;
+        }
+        let n = 24usize;
+        let mut g = Grids::zero(n * n * n);
+        for (i, v) in g.sca.iter_mut().enumerate() {
+            let (x, y, z) = ((i % n) as f32, ((i / n) % n) as f32, (i / (n * n)) as f32);
+            if ((x - 11.5).powi(2) + (y - 11.5).powi(2) + (z - 11.5).powi(2)).sqrt() < 7.0 {
+                *v = pack([1.0, 0.5, 0.0, 0.0]);
+            }
+        }
+        let vol = Volume::from_grids([n, n, n], [-0.5, -0.5, -0.5], 1.0 / n as f32, g);
+        // Caméra orthographique au-dessus : x vers la droite, z vers le haut de l'image, profondeur = 2 − y
+        let depth_row = [0.0, -1.0, 0.0, 2.0];
+        let vp = crate::gpudraw::from_rows([[1.0, 0.0, 0.0, 0.0], [0.0, 0.0, -1.0, 0.0], [0.0, -0.25, 0.0, 0.5], [0.0, 0.0, 0.0, 1.0]]);
+        let (w, h) = (64u32, 64u32);
+        let shadow = crate::gpudraw::Shadow { center: [0.0; 3], radius: 2.0, occluders: None, floor: Some(-1.0), on_surfaces: 0.0, on_floor: 0.6 };
+        let cam = crate::gpudraw::Cam { view_proj: vp, depth_row, light: [0.5, 1.0, 0.0], eye: [0.0, 2.0, 0.0], soft: None, shadow: Some(shadow), outline: 0.0, front: None, scene: None };
+        let mut canvas = Canvas::default();
+        assert!(paint_volume(&mut canvas, [w, h], &cam, &vol, &crate::gpudraw::IDENTITY).is_some());
+        let px = canvas.pixels().unwrap();
+        let at = |x: u32, y: u32| px[((y * w + x) * 4) as usize..][..4].to_vec();
+        // La boule (rayon 0,29) monte de 1 m au-dessus du sol : son ombre est décalée de 0,5 m à gauche
+        let (dark, lit) = (at(16, 32), at(48, 32));
+        assert!(dark[3] > 60 && dark[0] < 20, "ombre {dark:?}");
+        assert_eq!(lit[3], 0, "à droite, rien {lit:?}");
+        let cam = crate::gpudraw::Cam { shadow: None, ..cam };
+        assert!(paint_volume(&mut canvas, [w, h], &cam, &vol, &crate::gpudraw::IDENTITY).is_some());
+        assert_eq!(canvas.pixels().unwrap()[((32 * w + 16) * 4 + 3) as usize], 0);
     }
 }

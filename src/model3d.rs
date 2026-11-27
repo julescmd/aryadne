@@ -2487,10 +2487,18 @@ fn geo_menu(ui: &mut egui::Ui, root: &str, files: &mut Option<(std::time::Instan
 /// de la scène, et les dessine par-dessus son image avec `gpudraw`, en lui donnant la profondeur
 /// de cette image : ce qui est derrière un autre objet reste caché, ce qui est devant le cache.
 ///
-/// Limites de ce dessin direct, assumées : pas d'ombres portées ni reçues, pas de matériau (la
-/// couleur de l'objet ou son attribut `Cd`), pas de contour de sélection ni de sélection au clic
-/// dans la vue (l'objet se choisit dans la liste). Le rendu final, lui, relit la géométrie et la
-/// traite comme tout autre objet.
+/// Ces objets gardent l'essentiel de ce qu'ont les autres :
+/// - **la sélection** : la carte tient une image des identifiants (`gpudraw::Canvas::pick`), lue
+///   au clic, et dessine le contour orange ;
+/// - **le matériau** : le graphe assigné est cuit à plat en textures (`texexport::bake_flat`),
+///   dans un fil à part, quand il change. Sans UV, sa couleur, sa rugosité et son métal moyens ;
+/// - **les ombres** de la lumière principale, quand « ombres portées » est coché : reçues (les
+///   autres objets sont envoyés une fois à la carte, comme ce qui cache la lumière) et portées
+///   sur le sol et sur les autres objets, par-dessus l'image du rasteriseur.
+///
+/// Limites assumées : une seule lumière fait de l'ombre ; un matériau qui dépend de la position
+/// est vu comme sur un carreau plat ; la peinture posée sur l'objet n'est pas montrée. Le rendu
+/// final, lui, relit la géométrie et la traite comme tout autre objet.
 #[derive(Default)]
 struct DirectGeo {
     /// Objets suivis : la géométrie à l'image courante, calculée sans rien relire
@@ -2506,6 +2514,30 @@ struct DirectGeo {
     tris: std::collections::HashMap<(usize, usize), (u64, std::sync::Arc<Vec<[u32; 3]>>)>,
     /// Volumes (fumée, feu) à dessiner par-dessus la vue : objet, et l'image que la carte en donne
     vols: Vec<(usize, crate::gpuvolume::Canvas)>,
+    /// Matériaux cuits en textures pour ces objets
+    mats: Vec<DirectMat>,
+    /// Le dernier dessin a-t-il rempli l'image des identifiants pour cette image de la vue ?
+    drawn: bool,
+    /// `soft`, avec sous le contour de sélection la profondeur de l'objet qu'il entoure : un tissu
+    /// derrière cet objet ne cache pas son contour, un tissu devant le cache. Clé, profondeur.
+    soft_outlined: Option<(u64, std::sync::Arc<Vec<f32>>)>,
+}
+
+/// Le matériau d'un objet dessiné par la carte, cuit en textures
+struct DirectMat {
+    k: usize,
+    /// Le programme pour lequel la cuisson a été lancée
+    prog: std::sync::Arc<crate::nodes::Program>,
+    baked: Option<std::sync::Arc<crate::gpudraw::Baked>>,
+    /// Cuisson en cours, dans un fil à part
+    rx: Option<std::sync::mpsc::Receiver<Option<crate::gpudraw::Baked>>>,
+}
+
+/// Cuit un matériau à plat pour le dessin direct : couleur, rugosité et métal.
+pub fn bake_for_direct(prog: &crate::nodes::Program, size: u32) -> Option<crate::gpudraw::Baked> {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let m = crate::texexport::bake_flat(prog, size).ok()?;
+    crate::gpudraw::Baked::new(NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed), m.n, &m.color, &m.rough, &m.metal)
 }
 
 struct DirectItem {
@@ -2580,6 +2612,38 @@ impl Viewer {
                 self.last = None;
             }
         }
+        // Matériaux de ces objets : cuits en textures quand ils changent, sans bloquer la vue
+        self.direct.mats.retain(|m| want.iter().any(|w| w.0 == m.k) && self.slot_progs.get(m.k).and_then(|p| p.as_ref()).is_some());
+        for (k, _) in &want {
+            let Some(prog) = self.slot_progs.get(*k).and_then(|p| p.as_ref()).map(|p| p.2.clone()) else { continue };
+            let at = self.direct.mats.iter().position(|m| m.k == *k);
+            if at.is_none_or(|a| !std::sync::Arc::ptr_eq(&self.direct.mats[a].prog, &prog)) {
+                let (tx, rx) = std::sync::mpsc::channel();
+                let (p2, ctx2) = (prog.clone(), ctx.clone());
+                let size = if crate::gpusim::hardware() { 1024 } else { 512 };
+                std::thread::spawn(move || {
+                    let _ = tx.send(bake_for_direct(&p2, size));
+                    ctx2.request_repaint();
+                });
+                // L'ancienne texture reste montrée pendant la cuisson
+                let baked = at.and_then(|a| self.direct.mats[a].baked.clone());
+                let m = DirectMat { k: *k, prog, baked, rx: Some(rx) };
+                match at {
+                    Some(a) => self.direct.mats[a] = m,
+                    None => self.direct.mats.push(m),
+                }
+            }
+        }
+        for m in self.direct.mats.iter_mut() {
+            match m.rx.as_ref().map(|r| r.try_recv()) {
+                Some(Ok(b)) => {
+                    m.baked = b.map(std::sync::Arc::new);
+                    m.rx = None;
+                }
+                Some(Err(std::sync::mpsc::TryRecvError::Disconnected)) => m.rx = None,
+                _ => {}
+            }
+        }
         // La liste a changé : le modèle de la scène est à refaire, avec ou sans ces objets
         if want.iter().map(|w| w.0).ne(self.direct.built.iter().copied()) && self.scene_rx.is_none() {
             self.scene_dirty = true;
@@ -2590,6 +2654,8 @@ impl Viewer {
     /// Dessine sur la carte les géométries de nodes retirées du modèle de la scène, par-dessus
     /// l'image de l'aperçu et en respectant sa profondeur.
     fn direct_paint(&mut self, ui: &egui::Ui, painter: &egui::Painter, rect: egui::Rect) {
+        self.direct.drawn = false;
+        let soft = self.soft_for_direct();
         let (Some(scene), Some((lo, hi))) = (self.scene.as_ref(), self.scene_frame) else { return };
         if self.direct.built.is_empty() || self.engine != 0 || rect.width() < 2.0 || rect.height() < 2.0 {
             return;
@@ -2617,8 +2683,8 @@ impl Viewer {
         let eye_view = pr.unrotate([-pr.pan[0], -pr.pan[1], pr.dist]);
         let eye = [c[0] + eye_view[0] * longest, c[1] + eye_view[1] * longest, c[2] + eye_view[2] * longest];
         // La lumière : le premier soleil de la scène, sinon celle de la vue
-        let light = scene.lights().iter().map(|l| lamp_of(l, c, longest)).find(|l| !l.point).map(|l| l.at).unwrap_or_else(|| self.look.light.dir());
-        let soft = self.direct.soft.clone();
+        let sun = main_sun(scene, &self.look, c, longest);
+        let light = sun.at;
         let negate = || soft.as_ref().map(|s| s.2.iter().map(|d| if *d == f32::MIN { f32::MAX } else { -*d }).collect::<Vec<f32>>()).unwrap_or_default();
         let lin = |v: u8| (v as f32 / 255.0).powf(2.2);
         // Les morceaux à dessiner, objet par objet
@@ -2631,6 +2697,9 @@ impl Viewer {
             model: [[f32; 4]; 4],
             base: [f32; 3],
             cd: Option<std::sync::Arc<crate::geo::Column>>,
+            uv: Option<std::sync::Arc<crate::geo::Column>>,
+            mat: Option<std::sync::Arc<crate::gpudraw::Baked>>,
+            select: u8,
         }
         let mut pieces: Vec<Piece> = vec![];
         let mut waiting = false;
@@ -2644,8 +2713,18 @@ impl Viewer {
                 [p[0] - o0[0], p[1] - o0[1], p[2] - o0[2], 0.0]
             };
             let model = [axis([1.0, 0.0, 0.0]), axis([0.0, 1.0, 0.0]), axis([0.0, 0.0, 1.0]), [o0[0], o0[1], o0[2], 1.0]];
-            let base = o.color.map(|c| [lin(c[0]), lin(c[1]), lin(c[2])]).unwrap_or([0.8, 0.8, 0.8]);
-            let cd = if o.color.is_some() { None } else { g.cols.get("Cd").filter(|c| c.width() >= 3 && c.resolved()).cloned() };
+            let mut base = o.color.map(|c| [lin(c[0]), lin(c[1]), lin(c[2])]).unwrap_or([0.8, 0.8, 0.8]);
+            let mut cd = if o.color.is_some() { None } else { g.cols.get("Cd").filter(|c| c.width() >= 3 && c.resolved()).cloned() };
+            // Le matériau assigné, cuit en textures : il lui faut des UV. Sans UV, ses valeurs moyennes
+            let mat = self.direct.mats.iter().find(|m| m.k == k).and_then(|m| m.baked.clone());
+            let uv = g.cols.get("uv").filter(|c| c.width() >= 2 && c.resolved() && mat.is_some()).cloned();
+            if let Some(m) = &mat {
+                cd = None;
+                if uv.is_none() {
+                    base = m.mean.0;
+                }
+            }
+            let select = if self.scene_sel == Some(k) { 2 } else if self.scene_multi.contains(&k) { 1 } else { 0 };
             let mut all: Option<Vec<[u32; 3]>> = None;
             for (first, col) in g.position_parts() {
                 let n = col.len();
@@ -2667,7 +2746,7 @@ impl Viewer {
                 if tris.1.is_empty() {
                     continue;
                 }
-                pieces.push(Piece { k, first, col: col.clone(), live, tris, model, base, cd: cd.clone() });
+                pieces.push(Piece { k, first, col: col.clone(), live, tris, model, base, cd: cd.clone(), uv: uv.clone(), mat: mat.clone(), select });
             }
         }
         if waiting {
@@ -2698,6 +2777,16 @@ impl Viewer {
                 }) as Box<dyn Fn() -> Vec<[u8; 4]>>
             })
             .collect();
+        let uvs_of: Vec<Box<dyn Fn() -> Vec<[f32; 2]>>> = pieces
+            .iter()
+            .map(|p| {
+                let (uv, first, n) = (p.uv.clone(), p.first, p.col.len());
+                Box::new(move || {
+                    let Some(d) = uv.as_ref().map(|c| c.data()) else { return vec![] };
+                    (first..first + n).map(|i| [d[0][i], d[1][i]]).collect()
+                }) as Box<dyn Fn() -> Vec<[f32; 2]>>
+            })
+            .collect();
         let salt = |p: &Piece| ((p.k as u64) << 32 | p.first as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
         let parts: Vec<crate::gpudraw::Part> = pieces
             .iter()
@@ -2712,16 +2801,37 @@ impl Viewer {
                 colors: p.cd.as_ref().map(|c| (c.version ^ salt(p), &*colors_of[i])),
                 base: p.base,
                 model: p.model,
+                uv: p.uv.as_ref().map(|c| (c.version ^ salt(p), &*uvs_of[i])),
+                surface: match &p.mat {
+                    Some(m) => crate::gpudraw::Surface { rough: m.mean.1, metal: m.mean.2, maps: p.uv.as_ref().map(|_| &**m) },
+                    None => Default::default(),
+                },
+                id: p.k as u32 + 1,
+                select: p.select,
             })
             .collect();
+        // Ombres de la lumière principale, si la vue en montre : les autres objets de la scène
+        // (le modèle du rasteriseur) sont envoyés à la carte comme ce qui cache la lumière
+        let prep = self.prepared.as_ref().map(|p| (p.1, p.2.clone()));
+        let occluders = || match &prep {
+            Some((_, p)) => (p.pos.iter().map(|v| [v[0], v[1], v[2], 0.0]).collect(), p.tris.clone()),
+            None => (vec![], vec![]),
+        };
+        let shadow = self.look.shadows.then(|| direct_shadow(&self.look, &sun, (lo, hi), prep.as_ref().map(|p| (p.0, p.1.floor)), &occluders));
         let cam = crate::gpudraw::Cam {
             view_proj,
             depth_row,
             light,
             eye,
             soft: soft.as_ref().map(|s| crate::gpudraw::Soft { w: s.0 as u32, h: s.1 as u32, version: s.3, depth: &negate, bias: 0.004 }),
+            shadow,
+            // Le contour : 2 points d'écran, comme celui des autres objets
+            outline: 2.0 * ppp,
+            front: None,
+            scene: Some(scene_lighting(&self.look, &sun)),
         };
         if crate::gpudraw::paint(&mut self.direct.canvas, size, &cam, &parts) {
+            self.direct.drawn = true;
             if let Some(tex) = self.direct.canvas.texture() {
                 painter.image(tex, rect, egui::Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
             }
@@ -2729,11 +2839,114 @@ impl Viewer {
     }
 }
 
+/// L'éclairage de la vue pour le dessin direct : le ciel (l'environnement, tourné et réglé comme
+/// dans le rasteriseur), le soleil principal et l'exposition.
+fn scene_lighting(look: &Look, sun: &Lamp) -> crate::gpudraw::Lighting {
+    // L'environnement tourne autour de l'axe vertical : le haut et le bas ne changent pas
+    let s = look.env_strength;
+    let (up, down) = (look.env.irradiance([0.0, 1.0, 0.0]), look.env.irradiance([0.0, -1.0, 0.0]));
+    crate::gpudraw::Lighting {
+        sky_up: up.map(|c| c * s),
+        sky_down: down.map(|c| c * s),
+        sun: sun.color.map(|c| c * sun.intensity.max(0.0)),
+        exposure: 2f32.powf(look.exposure),
+    }
+}
+
+/// La lumière principale d'une scène pour le dessin direct : son premier soleil, sinon la lumière de la vue.
+fn main_sun(scene: &crate::scene::Scene, look: &Look, c: V3, longest: f32) -> Lamp {
+    scene.lights().iter().map(|l| lamp_of(l, c, longest)).find(|l| !l.point).unwrap_or_else(|| Lamp::simple(false, look.light.dir(), look.light.color, look.light.intensity, 0.0))
+}
+
+/// De combien le rasteriser assombrit, à l'écran, une surface claire de normale `n` qui ne voit
+/// plus ce soleil (0 : pas du tout, 1 : noire). Les ombres posées par la carte par-dessus son image
+/// prennent cette force : sous un ciel fort, l'ombre d'un tissu reste aussi légère que celle d'une boule.
+fn shadow_strength(look: &Look, sun: &Lamp, n: V3) -> f32 {
+    let exposure = 2f32.powf(look.exposure);
+    let irr = look.env.irradiance(n);
+    let ndl = dot(n, norm(sun.at)).max(0.0) * sun.intensity.max(0.0);
+    let luma = |c: [u8; 3]| 0.2126 * c[0] as f32 + 0.7152 * c[1] as f32 + 0.0722 * c[2] as f32;
+    let albedo = 0.8;
+    let shade = |direct: f32| luma(tone([0, 1, 2].map(|ch| albedo * (irr[ch] * look.env_strength + direct * sun.color[ch])), exposure));
+    let (lit, dark) = (shade(ndl), shade(0.0));
+    if lit <= 1.0 {
+        return 0.0;
+    }
+    (1.0 - dark / lit).clamp(0.0, 0.85)
+}
+
+/// Les ombres du dessin direct pour une scène : la boule que la carte d'ombre couvre (le cadre de
+/// la scène, un peu élargi), les autres objets (version et hauteur du sol du modèle préparé, qui
+/// est centré sur le cadre et ramené à sa plus grande taille), et le sol si la vue y pose des ombres.
+fn direct_shadow<'a>(look: &Look, sun: &Lamp, frame_box: (V3, V3), prep: Option<(u64, f32)>, occluders: &'a dyn Fn() -> (Vec<[f32; 4]>, Vec<[u32; 3]>)) -> crate::gpudraw::Shadow<'a> {
+    let (lo, hi) = frame_box;
+    let longest = (hi[0] - lo[0]).max(hi[1] - lo[1]).max(hi[2] - lo[2]).max(1e-9);
+    let c = [(lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0, (lo[2] + hi[2]) / 2.0];
+    let diag = ((hi[0] - lo[0]).powi(2) + (hi[1] - lo[1]).powi(2) + (hi[2] - lo[2]).powi(2)).sqrt();
+    crate::gpudraw::Shadow {
+        center: c,
+        radius: (diag * 0.5 * 1.15).max(1e-6),
+        occluders: prep.map(|(version, _)| crate::gpudraw::Occluders { version, mesh: occluders, model: [[longest, 0.0, 0.0, 0.0], [0.0, longest, 0.0, 0.0], [0.0, 0.0, longest, 0.0], [c[0], c[1], c[2], 1.0]] }),
+        // Le rasteriseur ne pose des ombres au sol que sans arrière-plan
+        floor: prep.filter(|_| !look.show_bg).map(|(_, floor)| c[1] + floor * longest),
+        // Sur les objets, autant que le rasteriser assombrit une surface qui perd ce soleil ; au sol
+        // sans objet, comme ses ombres au sol
+        on_surfaces: shadow_strength(look, sun, [0.0, 1.0, 0.0]),
+        on_floor: 0.42,
+    }
+}
+
 impl Viewer {
+    /// La profondeur de l'aperçu que le dessin par la carte respecte : celle de l'image, et sous le
+    /// contour de sélection celle de l'objet entouré (voir `DirectGeo::soft_outlined`).
+    fn soft_for_direct(&mut self) -> Option<(usize, usize, std::sync::Arc<Vec<f32>>, u64)> {
+        let soft = self.direct.soft.clone()?;
+        let shown = self.scene.is_some() && self.edit.is_none() && self.mesh.is_none() && (self.scene_sel.is_some() || !self.scene_multi.is_empty());
+        let Some((key, under)) = self.outline_depth.as_ref().filter(|o| shown && o.1.len() == soft.2.len() && self.outline.as_ref().is_some_and(|t| t.0 == o.0)) else { return Some(soft) };
+        let merged_key = key ^ soft.3.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        if self.direct.soft_outlined.as_ref().map(|m| m.0) != Some(merged_key) {
+            let merged: Vec<f32> = soft.2.iter().zip(under.iter()).map(|(d, o)| d.max(*o)).collect();
+            self.direct.soft_outlined = Some((merged_key, std::sync::Arc::new(merged)));
+        }
+        let m = self.direct.soft_outlined.as_ref()?;
+        Some((soft.0, soft.1, m.1.clone(), m.0 | 1 << 63))
+    }
+
+    /// L'objet dessiné par la carte sous un point de la vue, s'il y est devant tout le reste.
+    /// Lit un pixel de l'image des identifiants du dernier dessin.
+    /// Avec `volumes`, une fumée ou un feu bien visible sous le point se choisit aussi.
+    fn direct_pick(&self, pt: Pos2, rect: egui::Rect, volumes: bool) -> Option<usize> {
+        if !rect.contains(pt) {
+            return None;
+        }
+        // La fumée est dessinée par-dessus le reste, en respectant sa profondeur : là où elle se
+        // voit assez (pas seulement son ombre, qui est noire), c'est elle qu'on vise
+        if volumes {
+            for (k, canvas) in &self.direct.vols {
+                let [w, h] = canvas.size();
+                if canvas.texture().is_none() || w == 0 || h == 0 {
+                    continue;
+                }
+                let (x, y) = (((pt.x - rect.left()) / rect.width().max(1.0) * w as f32) as u32, ((pt.y - rect.top()) / rect.height().max(1.0) * h as f32) as u32);
+                if canvas.pixel(x.min(w.saturating_sub(1)), y.min(h.saturating_sub(1))).is_some_and(|p| p[3] > 90 && p[0].max(p[1]).max(p[2]) > 40) {
+                    return Some(*k);
+                }
+            }
+        }
+        if !self.direct.drawn {
+            return None;
+        }
+        let [w, h] = self.direct.canvas.size();
+        let (x, y) = (((pt.x - rect.left()) / rect.width().max(1.0) * w as f32) as u32, ((pt.y - rect.top()) / rect.height().max(1.0) * h as f32) as u32);
+        let (id, _) = self.direct.canvas.pick(x.min(w.saturating_sub(1)), y.min(h.saturating_sub(1)))?;
+        Some(id as usize - 1).filter(|k| self.direct.built.contains(k))
+    }
+
     /// Dessine sur la carte les volumes (fumée, feu) des géométries de nodes de la scène,
     /// par-dessus l'image de la vue et en respectant sa profondeur : sans relecture tant que le
     /// solveur montre encore cette image. À demi-résolution : la fumée est douce.
     fn volumes_paint(&mut self, ui: &egui::Ui, painter: &egui::Painter, rect: egui::Rect) {
+        let soft = self.soft_for_direct();
         let (Some(scene), Some((lo, hi))) = (self.scene.as_ref(), self.scene_frame) else { return };
         if self.direct.vols.is_empty() || self.engine != 0 || rect.width() < 2.0 || rect.height() < 2.0 {
             return;
@@ -2759,14 +2972,20 @@ impl Viewer {
             let z = mul(depth_row, f);
             crate::gpudraw::from_rows([mul(qx, 2.0 * pr.focal / w), mul(qy, 2.0 * pr.focal / h), [z[0], z[1], z[2], z[3] - near * f], depth_row])
         };
-        let light = scene.lights().iter().map(|l| lamp_of(l, c, longest)).find(|l| !l.point).map(|l| l.at).unwrap_or_else(|| self.look.light.dir());
-        let soft = self.direct.soft.clone();
+        let sun = main_sun(scene, &self.look, c, longest);
+        let light = sun.at;
         let negate = || soft.as_ref().map(|s| s.2.iter().map(|d| if *d == f32::MIN { f32::MAX } else { -*d }).collect::<Vec<f32>>()).unwrap_or_default();
         let uv = egui::Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
+        // Ce que la carte a dessiné devant (un tissu) arrête la fumée, et la fumée pose son ombre
+        // sur le sol et les autres objets quand la vue montre des ombres
+        let front = self.direct.drawn.then(|| self.direct.canvas.front()).flatten();
+        let floor = self.prepared.as_ref().map(|p| (p.1, p.2.floor));
+        let none = || (vec![], vec![]);
         let (items, vols) = (&self.direct.items, &mut self.direct.vols);
         for (k, canvas) in vols.iter_mut() {
             let Some(vol) = items.iter().find(|i| i.k == *k).and_then(|i| i.geo.volume.clone()) else { continue };
-            let cam = crate::gpudraw::Cam { view_proj, depth_row, light, eye: [0.0; 3], soft: soft.as_ref().map(|s| crate::gpudraw::Soft { w: s.0 as u32, h: s.1 as u32, version: s.3, depth: &negate, bias: 0.0 }) };
+            let shadow = self.look.shadows.then(|| crate::gpudraw::Shadow { occluders: None, ..direct_shadow(&self.look, &sun, (lo, hi), floor, &none) });
+            let cam = crate::gpudraw::Cam { view_proj, depth_row, light, eye: [0.0; 3], soft: soft.as_ref().map(|s| crate::gpudraw::Soft { w: s.0 as u32, h: s.1 as u32, version: s.3, depth: &negate, bias: 0.0 }), shadow, outline: 0.0, front: front.clone(), scene: None };
             if crate::gpuvolume::paint_volume(canvas, size, &cam, &vol, &crate::geoscene::world_matrix(scene, *k)).is_none() {
                 ui.ctx().request_repaint();
             }
@@ -3602,6 +3821,9 @@ pub struct Viewer {
     ids_rev: u64,
     /// Contour orange de la sélection, par-dessus l'image
     outline: Option<(u64, egui::TextureHandle)>,
+    /// Sous chaque pixel du contour, la profondeur (comme `DirectGeo::soft`) de l'objet entouré ;
+    /// `f32::MIN` ailleurs. Clé du contour, et cette image
+    outline_depth: Option<(u64, std::sync::Arc<Vec<f32>>)>,
     /// Calcul en cours : (clé, résultat)
     job: Option<(u64, Receiver<Prepared>)>,
     turntable: bool,
@@ -3814,6 +4036,7 @@ impl Viewer {
             pending_hdr: None,
             ids_rev: 0,
             outline: None,
+            outline_depth: None,
             scene_sel: None,
             obj_menu: None,
             obj_action: None,
@@ -4525,7 +4748,7 @@ impl Viewer {
         let (w, h) = (*w, *h);
         use std::hash::{Hash, Hasher};
         let mut hs = std::collections::hash_map::DefaultHasher::new();
-        (self.ids_rev, active, &self.scene_multi).hash(&mut hs);
+        (self.ids_rev, active, &self.scene_multi, self.direct.soft.as_ref().map(|s| s.3)).hash(&mut hs);
         let key = hs.finish();
         if self.outline.as_ref().map(|o| o.0) != Some(key) {
             let total = self.scene_ranges.last().map(|r| r.2).unwrap_or(0);
@@ -4549,6 +4772,19 @@ impl Viewer {
                     row[y * w + x] = line[lo..=hi].iter().copied().max().unwrap_or(0);
                 }
             }
+            // Ce que la carte dessine par-dessus (un tissu) doit savoir à quelle profondeur est
+            // l'objet entouré : sa profondeur la plus proche, dilatée de même
+            let depth = self.direct.soft.as_ref().filter(|s| s.0 == w && s.1 == h && s.2.len() == w * h).map(|s| s.2.clone());
+            let mut row_d = vec![f32::MIN; if depth.is_some() { w * h } else { 0 }];
+            if let Some(d) = &depth {
+                for y in 0..h {
+                    for x in 0..w {
+                        let (lo, hi) = (x.saturating_sub(r), (x + r).min(w - 1));
+                        row_d[y * w + x] = (lo..=hi).filter(|xx| sel[y * w + xx] > 0).map(|xx| d[y * w + xx]).fold(f32::MIN, f32::max);
+                    }
+                }
+            }
+            let mut under = vec![f32::MIN; row_d.len()];
             let mut px = vec![0u8; w * h * 4];
             let (hot, warm) = ([255u8, 170, 64], [235u8, 110, 20]);
             for x in 0..w {
@@ -4559,9 +4795,13 @@ impl Viewer {
                         let c = if best == 2 { hot } else { warm };
                         let i = (y * w + x) * 4;
                         px[i..i + 4].copy_from_slice(&[c[0], c[1], c[2], 255]);
+                        if !under.is_empty() {
+                            under[y * w + x] = (lo..=hi).map(|yy| row_d[yy * w + x]).fold(f32::MIN, f32::max);
+                        }
                     }
                 }
             }
+            self.outline_depth = (!under.is_empty()).then(|| (key, std::sync::Arc::new(under)));
             let img = egui::ColorImage::from_rgba_unmultiplied([w, h], &px);
             match &mut self.outline {
                 Some((k, t)) => {
@@ -10635,8 +10875,9 @@ impl Viewer {
             };
             if let Some(pt) = ui.input(|i| i.pointer.latest_pos()).filter(|_| egui::DragAndDrop::payload::<String>(ui.ctx()).is_some_and(|r| is_mat(&r))) {
                 if let Some((_, _, prep)) = &self.prepared {
+                    // Un objet dessiné par la carte, devant le reste, reçoit le matériau comme les autres
                     let hit = pick(prep, &self.cam, rect.width(), rect.height(), pt.x - rect.left(), pt.y - rect.top());
-                    let obj = hit.and_then(|(tri, _)| self.scene_ranges.iter().find(|r| (r.1..r.2).contains(&(tri as usize))).map(|r| r.0));
+                    let obj = self.direct_pick(pt, rect, false).or_else(|| hit.and_then(|(tri, _)| self.scene_ranges.iter().find(|r| (r.1..r.2).contains(&(tri as usize))).map(|r| r.0)));
                     if let Some(k) = obj {
                         if let Some(rel) = crate::drop_rel(&resp, is_mat) {
                             if let Some(o) = self.scene.as_mut().and_then(|s| s.objects.get_mut(k)) {
@@ -10651,8 +10892,12 @@ impl Viewer {
             }
             if resp.clicked() && !skip_pick && !self.stack.iter().any(|m| m.on) && self.applied.is_none() {
                 if let (Some((_, _, prep)), Some(pt)) = (&self.prepared, resp.interact_pointer_pos()) {
-                    let hit = pick(prep, &self.cam, rect.width(), rect.height(), pt.x - rect.left(), pt.y - rect.top());
-                    let hit = hit.and_then(|(tri, _)| self.scene_ranges.iter().find(|r| (r.1..r.2).contains(&(tri as usize))).map(|r| r.0));
+                    // D'abord ce que la carte a dessiné devant le reste (son image des identifiants),
+                    // sinon le rayon dans le modèle de la scène
+                    let hit = self.direct_pick(pt, rect, true).or_else(|| {
+                        let hit = pick(prep, &self.cam, rect.width(), rect.height(), pt.x - rect.left(), pt.y - rect.top());
+                        hit.and_then(|(tri, _)| self.scene_ranges.iter().find(|r| (r.1..r.2).contains(&(tri as usize))).map(|r| r.0))
+                    });
                     if ui.input(|i| i.modifiers.shift) {
                         // Maj + clic : ajoute l'objet à la sélection et en fait l'actif, ou le retire s'il y était
                         if let Some(k) = hit {
@@ -11036,9 +11281,10 @@ impl Viewer {
         if let Some(t) = &self.tex {
             painter.image(t.id(), rect, egui::Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
         }
+        // Le contour de sélection d'abord : ce que la carte dessine devant l'objet entouré le cache
+        self.draw_outline(ui, &painter, rect);
         self.direct_paint(ui, &painter, rect);
         self.volumes_paint(ui, &painter, rect);
-        self.draw_outline(ui, &painter, rect);
         if self.paint3d.is_some() {
             self.paint_ui(ui, rect, &resp);
         }
