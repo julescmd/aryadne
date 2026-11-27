@@ -4293,5 +4293,9 @@
   "branche un volume sur le solveur de fumée": "connect a volume to the smoke solver",
   "à chaque image : la source pose de la fumée chaude, le solveur la fait monter": "every frame: the source lays down hot smoke, the solver makes it rise",
   "le carburant chaud brûle : chaleur, flammes, un peu de fumée": "hot fuel burns: heat, flames, a little smoke",
-  "l'obstacle, montré en points : le même centre et le même rayon que dans le solveur": "the obstacle, shown as points: same center and radius as in the solver"
+  "l'obstacle, montré en points : le même centre et le même rayon que dans le solveur": "the obstacle, shown as points: same center and radius as in the solver",
+  "voxels": "voxels",
+  "sur la carte graphique": "on the graphics card",
+  "sur le processeur": "on the CPU",
+  "divergence": "divergence"
 }

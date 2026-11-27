@@ -2499,6 +2499,8 @@ struct DirectGeo {
     soft: Option<(usize, usize, std::sync::Arc<Vec<f32>>, u64)>,
     /// Triangles par objet et par morceau : (objet, premier sommet) → (clé des faces, triangles)
     tris: std::collections::HashMap<(usize, usize), (u64, std::sync::Arc<Vec<[u32; 3]>>)>,
+    /// Volumes (fumée, feu) à dessiner par-dessus la vue : objet, et l'image que la carte en donne
+    vols: Vec<(usize, crate::gpuvolume::Canvas)>,
 }
 
 struct DirectItem {
@@ -2563,6 +2565,16 @@ impl Viewer {
             }
         }
         self.direct.items.retain(|i| seen.contains(&i.k));
+        // Les volumes de ces géométries : dessinés par la carte, par-dessus l'image de la vue
+        let smoky: Vec<usize> = self.direct.items.iter().filter(|i| i.geo.volume.as_ref().is_some_and(|v| !v.blank())).map(|i| i.k).collect();
+        self.direct.vols.retain(|v| smoky.contains(&v.0));
+        for k in smoky {
+            if !self.direct.vols.iter().any(|v| v.0 == k) {
+                self.direct.vols.push((k, Default::default()));
+                // La profondeur de l'image de la vue est à garder : on la refait
+                self.last = None;
+            }
+        }
         // La liste a changé : le modèle de la scène est à refaire, avec ou sans ces objets
         if want.iter().map(|w| w.0).ne(self.direct.built.iter().copied()) && self.scene_rx.is_none() {
             self.scene_dirty = true;
@@ -2712,6 +2724,95 @@ impl Viewer {
     }
 }
 
+impl Viewer {
+    /// Dessine sur la carte les volumes (fumée, feu) des géométries de nodes de la scène,
+    /// par-dessus l'image de la vue et en respectant sa profondeur : sans relecture tant que le
+    /// solveur montre encore cette image. À demi-résolution : la fumée est douce.
+    fn volumes_paint(&mut self, ui: &egui::Ui, painter: &egui::Painter, rect: egui::Rect) {
+        let (Some(scene), Some((lo, hi))) = (self.scene.as_ref(), self.scene_frame) else { return };
+        if self.direct.vols.is_empty() || self.engine != 0 || rect.width() < 2.0 || rect.height() < 2.0 {
+            return;
+        }
+        let longest = (hi[0] - lo[0]).max(hi[1] - lo[1]).max(hi[2] - lo[2]).max(1e-9);
+        let c = [(lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0, (lo[2] + hi[2]) / 2.0];
+        let ppp = ui.ctx().pixels_per_point();
+        let k = if crate::gpusim::hardware() { 0.5 } else { 0.25 };
+        let size = [(rect.width() * ppp * k).round().max(1.0) as u32, (rect.height() * ppp * k).round().max(1.0) as u32];
+        let (w, h) = (size[0] as f32, size[1] as f32);
+        // La même caméra que `direct_paint`
+        let pr = Proj::new(&self.cam, w, h);
+        let row = |r: V3, t: f32| [r[0] / longest, r[1] / longest, r[2] / longest, t - dot(r, c) / longest];
+        let (qx, qy, qz) = (row(pr.r[0], pr.pan[0]), row(pr.r[1], pr.pan[1]), row(pr.r[2], -pr.dist));
+        let depth_row = [-qz[0], -qz[1], -qz[2], -qz[3]];
+        let (near, far) = (0.02f32, pr.dist + 20.0);
+        let mul = |r: [f32; 4], k: f32| [r[0] * k, r[1] * k, r[2] * k, r[3] * k];
+        let view_proj = if pr.ortho {
+            let z = mul(depth_row, 1.0 / (far - near));
+            crate::gpudraw::from_rows([mul(qx, 2.0 * pr.scale / w), mul(qy, 2.0 * pr.scale / h), [z[0], z[1], z[2], z[3] - near / (far - near)], [0.0, 0.0, 0.0, 1.0]])
+        } else {
+            let f = far / (far - near);
+            let z = mul(depth_row, f);
+            crate::gpudraw::from_rows([mul(qx, 2.0 * pr.focal / w), mul(qy, 2.0 * pr.focal / h), [z[0], z[1], z[2], z[3] - near * f], depth_row])
+        };
+        let light = scene.lights().iter().map(|l| lamp_of(l, c, longest)).find(|l| !l.point).map(|l| l.at).unwrap_or_else(|| self.look.light.dir());
+        let soft = self.direct.soft.clone();
+        let negate = || soft.as_ref().map(|s| s.2.iter().map(|d| if *d == f32::MIN { f32::MAX } else { -*d }).collect::<Vec<f32>>()).unwrap_or_default();
+        let uv = egui::Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
+        let (items, vols) = (&self.direct.items, &mut self.direct.vols);
+        for (k, canvas) in vols.iter_mut() {
+            let Some(vol) = items.iter().find(|i| i.k == *k).and_then(|i| i.geo.volume.clone()) else { continue };
+            let cam = crate::gpudraw::Cam { view_proj, depth_row, light, eye: [0.0; 3], soft: soft.as_ref().map(|s| crate::gpudraw::Soft { w: s.0 as u32, h: s.1 as u32, version: s.3, depth: &negate, bias: 0.0 }) };
+            if crate::gpuvolume::paint_volume(canvas, size, &cam, &vol, &crate::geoscene::world_matrix(scene, *k)).is_none() {
+                ui.ctx().request_repaint();
+            }
+            if let Some(tex) = canvas.texture() {
+                painter.image(tex, rect, uv, Color32::WHITE);
+            }
+        }
+    }
+}
+
+/// Pose les volumes (fumée, feu) par-dessus une image rendue de la scène, sur le processeur, en
+/// s'arrêtant aux surfaces. `distance` : pour chaque pixel, la distance de la première surface le
+/// long de son rayon, dans l'espace de la scène préparée (`f32::MAX` : rien). `light` : direction
+/// vers la lumière principale. C'est ce qui met la fumée dans le rendu final et l'export vidéo.
+pub fn volumes_over(rgba: &mut [u8], w: usize, h: usize, distance: &[f32], cam: &Camera, frame_box: (V3, V3), vols: &[(std::sync::Arc<crate::volume::Volume>, crate::volume::Mat)], light: V3) {
+    if vols.is_empty() || distance.len() < w * h {
+        return;
+    }
+    let (lo, hi) = frame_box;
+    let l = (hi[0] - lo[0]).max(hi[1] - lo[1]).max(hi[2] - lo[2]).max(1e-9);
+    let c = [(lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0, (lo[2] + hi[2]) / 2.0];
+    // Du monde vers l'espace de la scène préparée : centrée sur le cadre, ramenée à sa plus grande taille
+    let k = 1.0 / l;
+    let to_prep: crate::volume::Mat = [[k, 0.0, 0.0, 0.0], [0.0, k, 0.0, 0.0], [0.0, 0.0, k, 0.0], [-c[0] * k, -c[1] * k, -c[2] * k, 1.0]];
+    let placed: Vec<_> = vols.iter().map(|(v, m)| (v.clone(), crate::volume::mat_mul(&to_prep, m))).collect();
+    let rays = |x: usize, y: usize| {
+        let (o, d) = pathtrace::camera_ray(cam, w, h, x, y);
+        (o, d, distance[y * w + x])
+    };
+    crate::volume::composite(rgba, w, h, &placed, &crate::volume::View { rays: &rays, light });
+}
+
+/// Distance de la première surface le long du rayon de chaque pixel, d'après la profondeur d'une
+/// image du rendu rapide (`Frame::depth`).
+fn frame_distance(frame: &Frame, cam: &Camera) -> Vec<f32> {
+    use rayon::prelude::*;
+    let (w, h) = (frame.w, frame.h);
+    let fwd = cam.unrotate([0.0, 0.0, -1.0]);
+    (0..w * h)
+        .into_par_iter()
+        .map(|i| {
+            let z = frame.depth[i];
+            if z == f32::MIN {
+                return f32::MAX;
+            }
+            let (_, d) = pathtrace::camera_ray(cam, w, h, i % w, i / w);
+            -z / dot(d, fwd).max(1e-6)
+        })
+        .collect()
+}
+
 /// La scène telle qu'elle est posée (image courante comprise), prête pour le rendu dans le cadre
 /// `frame_box` : ses maillages réunis, les UV que ses objets apportent, un matériau par objet.
 fn scene_prepared(sc: &crate::scene::Scene, path: &std::path::Path, frame_box: (V3, V3), floor: f32) -> Result<Prepared, String> {
@@ -2799,6 +2900,13 @@ fn encode_animation(ff: std::path::PathBuf, scene: crate::scene::Scene, path: &s
                     crate::matchmove::composite(&mut frame.rgba, &frame.ids, w, h, (0.0, 0.0, w as f32, h as f32), buf, w, h);
                 }
             }
+        }
+        // La fumée et le feu des géométries de nodes, par-dessus, image par image
+        let vols = crate::geoscene::volumes(&sc, path);
+        if !vols.is_empty() {
+            let light = lk.lamps.iter().find(|l| !l.point).map(|l| l.at).unwrap_or_else(|| lk.light.dir());
+            let distance = frame_distance(&frame, &cam);
+            volumes_over(&mut frame.rgba, w, h, &distance, &cam, (lo, hi), &vols, light);
         }
         if stdin.write_all(&frame.rgba).is_err() {
             let mut msg = String::new();
@@ -6214,7 +6322,19 @@ impl Viewer {
             self.render_dialog = if go || close { None } else { Some((w, h, spp)) };
             if go {
                 if let Some((_, _, prep)) = &self.prepared {
-                    self.final_job = Some(pathtrace::Job::start(prep.clone(), self.cam, look.clone(), self.trace_set, w, h, spp, ctx.clone()));
+                    // Les volumes de la scène (fumée, feu) sont posés par-dessus chaque image du rendu
+                    let post: Option<Box<dyn Fn(&mut Vec<u8>) + Send>> = match (self.scene.as_ref(), self.scene_frame) {
+                        (Some(scene), Some(frame_box)) => {
+                            let vols = crate::geoscene::volumes(scene, &self.path);
+                            let (c, longest) = ([(frame_box.0[0] + frame_box.1[0]) / 2.0, (frame_box.0[1] + frame_box.1[1]) / 2.0, (frame_box.0[2] + frame_box.1[2]) / 2.0], (0..3).map(|k| frame_box.1[k] - frame_box.0[k]).fold(1e-9f32, f32::max));
+                            let light = scene.lights().iter().map(|l| lamp_of(l, c, longest)).find(|l| !l.point).map(|l| l.at).unwrap_or_else(|| look.light.dir());
+                            let (prep, cam) = (prep.clone(), self.cam);
+                            let distance = std::sync::OnceLock::new();
+                            (!vols.is_empty()).then(|| Box::new(move |img: &mut Vec<u8>| volumes_over(img, w, h, distance.get_or_init(|| pathtrace::primary_distance(&prep, &cam, w, h)), &cam, frame_box, &vols, light)) as Box<dyn Fn(&mut Vec<u8>) + Send>)
+                        }
+                        _ => None,
+                    };
+                    self.final_job = Some(pathtrace::Job::start_with(prep.clone(), self.cam, look.clone(), self.trace_set, w, h, spp, ctx.clone(), post));
                     self.final_tex = None;
                 }
             }
@@ -10648,7 +10768,7 @@ impl Viewer {
             }
             let img = egui::ColorImage::from_rgba_unmultiplied([frame.w, frame.h], &frame.rgba);
             // La profondeur de l'image sert au dessin direct des géométries simulées
-            self.direct.soft = (!self.direct.built.is_empty()).then(|| (frame.w, frame.h, std::sync::Arc::new(std::mem::take(&mut frame.depth)), self.ids_rev + 1));
+            self.direct.soft = (!self.direct.built.is_empty() || !self.direct.vols.is_empty()).then(|| (frame.w, frame.h, std::sync::Arc::new(std::mem::take(&mut frame.depth)), self.ids_rev + 1));
             self.ids = Some((frame.w, frame.h, frame.ids));
             self.ids_rev += 1;
             match &mut self.tex {
@@ -10753,6 +10873,7 @@ impl Viewer {
             painter.image(t.id(), rect, egui::Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
         }
         self.direct_paint(ui, &painter, rect);
+        self.volumes_paint(ui, &painter, rect);
         self.draw_outline(ui, &painter, rect);
         if self.paint3d.is_some() {
             self.paint_ui(ui, rect, &resp);

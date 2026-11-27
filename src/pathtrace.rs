@@ -284,7 +284,53 @@ pub struct Job {
     pub denoise: bool,
 }
 
+/// Le rayon de la caméra au centre d'un pixel, dans l'espace de la scène préparée : départ, direction unitaire.
+pub fn camera_ray(cam: &Camera, w: usize, h: usize, x: usize, y: usize) -> (V3, V3) {
+    let focal = w.min(h) as f32 * 1.2 * cam.zoom;
+    let (cx, cy) = (w as f32 / 2.0, h as f32 / 2.0);
+    let (x, y) = (x as f32 + 0.5, y as f32 + 0.5);
+    if cam.ortho {
+        let k = focal / cam.dist;
+        (cam.unrotate([(x - cx) / k - cam.pan[0], -(y - cy) / k - cam.pan[1], cam.dist]), cam.unrotate([0.0, 0.0, -1.0]))
+    } else {
+        (cam.unrotate([-cam.pan[0], -cam.pan[1], cam.dist]), cam.unrotate(norm([(x - cx) / focal, -(y - cy) / focal, -1.0])))
+    }
+}
+
+/// Distance de la première surface le long du rayon de chaque pixel (`f32::MAX` : aucune)
+pub fn primary_distance(m: &Prepared, cam: &Camera, w: usize, h: usize) -> Vec<f32> {
+    let bvh = m.bvh.get_or_init(|| crate::bvh::Bvh::new(&m.pos, &m.tris));
+    (0..w * h)
+        .into_par_iter()
+        .map(|i| {
+            let (o, d) = camera_ray(cam, w, h, i % w, i / w);
+            bvh.closest(o, d, 1e-4, 1e9).map(|hit| hit.t).unwrap_or(f32::MAX)
+        })
+        .collect()
+}
+
 impl Job {
+    /// Comme `start`, avec une retouche appliquée à chaque image avant de la montrer (les
+    /// volumes de la scène, posés par-dessus : `model3d::volumes_over`).
+    #[allow(clippy::too_many_arguments)]
+    pub fn start_with(m: std::sync::Arc<Prepared>, cam: Camera, look: Look, set: Settings, w: usize, h: usize, target: u32, ctx: eframe::egui::Context, post: Option<Box<dyn Fn(&mut Vec<u8>) + Send>>) -> Job {
+        let mut job = Job::start(m, cam, look, set, w, h, target, ctx);
+        if let Some(post) = post {
+            // Les images passent par un relais qui les retouche
+            let (tx, rx) = std::sync::mpsc::channel();
+            let inner = std::mem::replace(&mut job.rx, rx);
+            std::thread::spawn(move || {
+                while let Ok((spp, mut img)) = inner.recv() {
+                    post(&mut img);
+                    if tx.send((spp, img)).is_err() {
+                        return;
+                    }
+                }
+            });
+        }
+        job
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn start(m: std::sync::Arc<Prepared>, cam: Camera, look: Look, set: Settings, w: usize, h: usize, target: u32, ctx: eframe::egui::Context) -> Job {
         let (tx, rx) = std::sync::mpsc::channel();

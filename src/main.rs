@@ -9,6 +9,7 @@ mod gpudraw;
 #[allow(dead_code)]
 mod gpusim;
 mod gpusmoke;
+mod gpuvolume;
 mod smoke;
 mod volume;
 mod rig;

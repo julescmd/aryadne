@@ -58,6 +58,10 @@ pub struct GeoView {
     /// Triangles de la géométrie montrée, et pour chaque sommet s'il appartient à une face : refaits
     /// seulement quand les faces changent (clé des faces, nombre de points)
     tris: Option<(u64, usize, std::sync::Arc<Vec<[u32; 3]>>, std::sync::Arc<Vec<bool>>)>,
+    /// Le volume (fumée, feu) dessiné par la carte, et l'image qu'il donne
+    vol_canvas: crate::gpuvolume::Canvas,
+    /// Sans dessin par la carte : le volume rendu en petit sur le processeur, avec la clé de ce rendu
+    vol_soft: Option<(u64, egui::TextureHandle)>,
 }
 
 /// Un obstacle réglé dans un node « Solveur » : boule (centre, rayon) ou boîte (centre, demi-tailles).
@@ -127,7 +131,7 @@ fn point_color(g: &Geo, i: usize, base: Color32) -> Color32 {
 impl GeoView {
     pub fn new(g: &Graph) -> GeoView {
         let start = g.time.unwrap_or_default().start;
-        GeoView { engine: Engine::default(), frame: start, playing: false, last_tick: None, acc: 0.0, yaw: 0.6, pitch: 0.35, dist: 5.0, target: [0.0, 0.8, 0.0], framed: false, auto: true, seen: None, result: None, key: None, error: None, stats: Stats::default(), ms: 0.0, thumbs: HashMap::new(), solo: None, zones: vec![], table: None, obstacles: vec![], canvas: Default::default(), want_frame: false, pending: None, direct: false, tris: None }
+        GeoView { engine: Engine::default(), frame: start, playing: false, last_tick: None, acc: 0.0, yaw: 0.6, pitch: 0.35, dist: 5.0, target: [0.0, 0.8, 0.0], framed: false, auto: true, seen: None, result: None, key: None, error: None, stats: Stats::default(), ms: 0.0, thumbs: HashMap::new(), solo: None, zones: vec![], table: None, obstacles: vec![], canvas: Default::default(), want_frame: false, pending: None, direct: false, tris: None, vol_canvas: Default::default(), vol_soft: None }
     }
 
     /// Les caches figés sur le disque, d'après le réglage « cache » des fins de zone.
@@ -229,7 +233,7 @@ impl GeoView {
             self.seen = None;
             self.auto = true;
         }
-        if (!self.framed || self.auto) && g.n > 0 {
+        if (!self.framed || self.auto) && (g.n > 0 || g.volume.is_some()) {
             self.want_frame = !self.frame_on(&g);
         }
         self.result = Some(g);
@@ -239,10 +243,21 @@ impl GeoView {
     /// reste entière à l'écran, sans que la caméra saute à chaque image. Rend faux si la boîte
     /// englobante n'est pas encore connue (géométrie sur la carte) : à redemander plus tard.
     fn frame_on(&mut self, g: &Geo) -> bool {
-        if g.n == 0 {
+        if g.n == 0 && g.volume.is_none() {
             return true;
         }
-        let Some((lo, hi)) = g.bounds_now() else { return false };
+        // La boîte d'un volume compte, même vide : le cadre ne saute pas quand la fumée arrive
+        let vol = g.volume.as_ref().map(|v| v.bounds());
+        let pts = if g.n > 0 { g.bounds_now() } else { None };
+        if g.n > 0 && pts.is_none() {
+            return false;
+        }
+        let Some((lo, hi)) = (match (pts, vol) {
+            (Some((a, b)), Some((c, d))) => Some(([a[0].min(c[0]), a[1].min(c[1]), a[2].min(c[2])], [b[0].max(d[0]), b[1].max(d[1]), b[2].max(d[2])])),
+            (a, b) => a.or(b),
+        }) else {
+            return false;
+        };
         let (lo, hi) = match self.seen {
             Some((a, b)) => ([a[0].min(lo[0]), a[1].min(lo[1]), a[2].min(lo[2])], [b[0].max(hi[0]), b[1].max(hi[1]), b[2].max(hi[2])]),
             None => (lo, hi),
@@ -379,6 +394,69 @@ impl GeoView {
             return (vec![], false);
         }
         (ranges, direct)
+    }
+
+    /// Dessine le volume par-dessus l'aperçu. Sur la carte : depuis les tampons du solveur, sans
+    /// relecture, à demi-résolution (la fumée est douce). Sans dessin par la carte : un petit
+    /// rendu sur le processeur, refait seulement quand le volume ou la caméra changent.
+    fn paint_volume(&mut self, ui: &egui::Ui, painter: &egui::Painter, rect: Rect, vol: &crate::volume::Volume) {
+        if rect.width() < 2.0 || rect.height() < 2.0 {
+            return;
+        }
+        let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
+        if crate::gpudraw::shared() {
+            let ppp = ui.ctx().pixels_per_point();
+            // Un rendu logiciel n'a pas la force de marcher dans chaque pixel
+            let k = if crate::gpusim::hardware() { 0.5 } else { 0.25 };
+            let size = [(rect.width() * ppp * k).round().max(1.0) as u32, (rect.height() * ppp * k).round().max(1.0) as u32];
+            let (vp, depth_row, light, eye) = self.camera(size[0] as f32, size[1] as f32);
+            let cam = crate::gpudraw::Cam { view_proj: vp, depth_row, light, eye, soft: None };
+            match crate::gpuvolume::paint_volume(&mut self.vol_canvas, size, &cam, vol, &crate::gpudraw::IDENTITY) {
+                Some((_, direct)) => self.direct |= direct,
+                // Les voxels ne sont pas encore arrivés : l'image d'avant reste
+                None => ui.ctx().request_repaint(),
+            }
+            if let Some(tex) = self.vol_canvas.texture() {
+                painter.image(tex, rect, uv, Color32::WHITE);
+            }
+            return;
+        }
+        if !vol.ready() {
+            ui.ctx().request_repaint();
+        } else {
+            let (w, h) = (((rect.width() / 5.0) as usize).clamp(8, 220), ((rect.height() / 5.0) as usize).clamp(8, 160));
+            let key = {
+                use std::hash::{Hash, Hasher};
+                let mut hs = std::collections::hash_map::DefaultHasher::new();
+                (vol.version, self.yaw.to_bits(), self.pitch.to_bits(), self.dist.to_bits(), self.target.map(f32::to_bits), w, h).hash(&mut hs);
+                hs.finish()
+            };
+            if self.vol_soft.as_ref().is_none_or(|v| v.0 != key) {
+                let (vp, _, light, _) = self.camera(w as f32, h as f32);
+                if let Some(inv) = crate::volume::mat_inv(&vp) {
+                    let rays = |x: usize, y: usize| {
+                        let (nx, ny) = ((x as f32 + 0.5) / w as f32 * 2.0 - 1.0, 1.0 - (y as f32 + 0.5) / h as f32 * 2.0);
+                        let (a, b) = (crate::volume::mat_point(&inv, [nx, ny, 0.0]), crate::volume::mat_point(&inv, [nx, ny, 1.0]));
+                        let d = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+                        let len = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt().max(1e-12);
+                        (a, [d[0] / len, d[1] / len, d[2] / len], f32::MAX)
+                    };
+                    let mut px = vec![0u8; w * h * 4];
+                    crate::volume::composite(&mut px, w, h, &[(std::sync::Arc::new(vol.clone()), crate::gpudraw::IDENTITY)], &crate::volume::View { rays: &rays, light });
+                    let img = egui::ColorImage::from_rgba_premultiplied([w, h], &px);
+                    match &mut self.vol_soft {
+                        Some((k, t)) => {
+                            t.set(img, egui::TextureOptions::LINEAR);
+                            *k = key;
+                        }
+                        None => self.vol_soft = Some((key, ui.ctx().load_texture("geo-volume", img, egui::TextureOptions::LINEAR))),
+                    }
+                }
+            }
+        }
+        if let Some((_, t)) = &self.vol_soft {
+            painter.image(t.id(), rect, uv, Color32::WHITE);
+        }
     }
 
     /// Projette un point du monde dans le rectangle. Rend aussi sa profondeur (négative : derrière la caméra).
@@ -560,6 +638,10 @@ impl GeoView {
             if let Some(tex) = self.canvas.texture().filter(|_| !on_card.is_empty()) {
                 painter.image(tex, rect, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
             }
+            // La fumée et le feu, par-dessus tout
+            if let Some(vol) = g.volume.clone().filter(|v| !v.blank()) {
+                self.paint_volume(ui, &painter, rect, &vol);
+            }
         }
         // Ce qu'on regarde, et ce que le calcul a coûté
         if let Some((_, e)) = &self.error {
@@ -570,6 +652,14 @@ impl GeoView {
             if !g.edges.is_empty() {
                 line += &format!(" · {} {}", g.edges.len(), crate::i18n::t_mid("arêtes"));
             }
+            if let Some(v) = &g.volume {
+                if g.n == 0 {
+                    line.clear();
+                } else {
+                    line += " · ";
+                }
+                line += &format!("{} × {} × {} {}", v.res[0], v.res[1], v.res[2], crate::i18n::t_mid("voxels"));
+            }
             painter.text(rect.left_top() + vec2(10.0, 8.0), egui::Align2::LEFT_TOP, line, egui::FontId::proportional(11.5), Color32::from_gray(190));
             let s = self.stats;
             let mut cost = format!("{} {} · {} {}", s.computed, crate::i18n::t_mid("refaits"), s.reused, crate::i18n::t_mid("repris du cache"));
@@ -579,6 +669,13 @@ impl GeoView {
             cost += &format!(" · {:.1} ms", self.ms);
             if self.direct {
                 cost += &format!(" · {}", crate::i18n::t_mid("sans relecture"));
+            }
+            // La fumée : où elle se calcule, et ce qui reste de divergence après la pression
+            if let Some(st) = crate::geo::smoke_status().filter(|_| g.volume.is_some() && s.steps > 0) {
+                cost += &format!(" · {} {}", crate::i18n::t_mid("fumée"), crate::i18n::t_mid(if st.on_gpu { "sur la carte graphique" } else { "sur le processeur" }));
+                if st.ms > 0.0 {
+                    cost += &format!(", {:.1} ms, {} {:.1e}", st.ms, crate::i18n::t_mid("divergence"), st.after);
+                }
             }
             painter.text(rect.left_bottom() + vec2(10.0, -8.0), egui::Align2::LEFT_BOTTOM, cost, egui::FontId::proportional(10.5), Color32::from_gray(130));
         }

@@ -194,6 +194,31 @@ pub fn wants_direct(g: &Geo) -> bool {
     }
 }
 
+/// Les volumes (fumée, feu) des objets visibles de la scène à son image courante, chacun avec sa
+/// place dans le monde. Pour le rendu final et l'export : le calcul va jusqu'au bout.
+pub fn volumes(scene: &Scene, scene_path: &Path) -> Vec<(Arc<crate::volume::Volume>, crate::volume::Mat)> {
+    let mut out = vec![];
+    for (k, o) in scene.objects.iter().enumerate() {
+        if !scene.shown(k) || crate::scene::kind(o) != crate::scene::Kind::Model || !is_geo(&o.file) {
+            continue;
+        }
+        if let Some(v) = geo_of(scene, scene_path, k).ok().and_then(|g| g.volume).filter(|v| !v.blank()) {
+            out.push((v, world_matrix(scene, k)));
+        }
+    }
+    out
+}
+
+/// Place de l'objet `k` dans le monde : ses trois axes et son origine (colonnes d'abord).
+pub fn world_matrix(scene: &Scene, k: usize) -> crate::volume::Mat {
+    let o = scene.world(k, [0.0; 3]);
+    let axis = |v: [f32; 3]| {
+        let p = scene.world(k, v);
+        [p[0] - o[0], p[1] - o[1], p[2] - o[2], 0.0]
+    };
+    [axis([1.0, 0.0, 0.0]), axis([0.0, 1.0, 0.0]), axis([0.0, 0.0, 1.0]), [o[0], o[1], o[2], 1.0]]
+}
+
 /// La durée de la simulation d'un fichier `.arygeo` (pour l'afficher dans la scène).
 pub fn time_of(file: &Path) -> Option<TimeRange> {
     TIMES.lock().unwrap_or_else(|e| e.into_inner()).as_ref().and_then(|m| m.get(file)).copied()
@@ -222,6 +247,14 @@ pub fn still(file: &Path) -> Result<Arc<crate::model3d::Model>, String> {
 /// géométrie sans face (particules, fils) est montrée par un petit tétraèdre à chaque point.
 pub fn to_model(g: &Geo) -> Result<crate::model3d::Model, String> {
     if g.n == 0 {
+        // Un volume seul (fumée, feu) : la scène le dessine à part. Deux triangles minuscules aux
+        // coins de sa boîte donnent à l'objet sa place et sa taille, sans rien montrer.
+        if let Some(v) = &g.volume {
+            let (lo, hi) = v.bounds();
+            let e = v.voxel * 1e-3;
+            let pos = vec![lo, [lo[0] + e, lo[1], lo[2]], [lo[0], lo[1], lo[2] + e], hi, [hi[0] - e, hi[1], hi[2]], [hi[0], hi[1], hi[2] - e]];
+            return crate::model3d::Model::exact(pos, vec![[0, 1, 2], [3, 4, 5]], None, Some(vec![7, 7]));
+        }
         return Err("cette géométrie est vide à cette image".into());
     }
     let p = g.vec3("P");
@@ -397,6 +430,14 @@ mod tests {
         g.connect(obj, 0, solver, 6);
         g.connect(obj, 1, solver, 7);
         g.save(&dir.join("Nappe.arygeo")).unwrap();
+        // Un feu, pour l'essayer dans une scène
+        crate::geo::example("feu de camp").unwrap().save(&dir.join("Feu.arygeo")).unwrap();
+        if std::env::var_os("ARY_DEMO_FEU").is_some() {
+            let path = dir.join("Feu.aryscene");
+            let mut sc = Scene::default();
+            sc.add_geo(&path, &dir.join("Feu.arygeo"));
+            let _ = sc.write(&path);
+        }
     }
 
     #[test]
@@ -483,6 +524,49 @@ mod tests {
         sc.objects[k].pos = [0.0, 5.0, 0.0];
         let moved = crate::scene::build(&sc, &path).0.unwrap();
         assert!((moved.positions[0][1] - m20.positions[0][1] - 5.0).abs() < 1e-4);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Une fumée dans une scène : l'objet a sa place, son volume sort pour le rendu, et le rendu
+    /// final le pose par-dessus l'image, derrière ce qui est devant lui.
+    #[test]
+    fn a_scene_renders_its_smoke() {
+        let dir = tmp("fumee");
+        let mut g = crate::geo::example("fumée contre un obstacle").unwrap();
+        for n in g.nodes.iter_mut() {
+            if n.op == "vol_box" {
+                n.values[2] = [24.0; 4];
+            }
+            if n.op == "sim_smoke" {
+                n.params.insert("calcul".into(), crate::nodes::Param::S("processeur".into()));
+            }
+        }
+        g.save(&dir.join("fumee.arygeo")).unwrap();
+        let path = dir.join("plan.aryscene");
+        let mut sc = Scene::default();
+        let k = sc.add_geo(&path, &dir.join("fumee.arygeo"));
+        sc.apply_frame(8.0);
+        let (m, errs) = crate::scene::build(&sc, &path);
+        assert!(errs[k].is_none() && m.is_ok(), "{:?}", errs[k]);
+        let vols = volumes(&sc, &path);
+        assert_eq!(vols.len(), 1);
+        assert_eq!(vols[0].1, world_matrix(&sc, k));
+        // Un volume seul donne quand même un objet à la scène, de la taille de sa boîte
+        let mut only = Geo::default();
+        only.volume = Some(vols[0].0.clone());
+        let alone = to_model(&only).unwrap();
+        assert!(alone.tris.len() == 2 && alone.max[1] - alone.min[1] > 2.0);
+        // Rendu : une image blanche, la fumée l'assombrit ; une surface collée à la caméra la cache
+        let (w, h) = (96, 96);
+        let cam = crate::model3d::Camera { dist: 0.9, ..Default::default() };
+        let frame_box = ([-1.5, -1.0, -1.5], [1.5, 2.0, 1.5]);
+        let mut img = vec![255u8; w * h * 4];
+        crate::model3d::volumes_over(&mut img, w, h, &vec![f32::MAX; w * h], &cam, frame_box, &vols, [0.3, 0.8, 0.5]);
+        let dark = img.chunks(4).filter(|p| p[0] < 240).count();
+        assert!(dark > 20, "la fumée se voit dans le rendu : {dark} pixels");
+        let mut hidden = vec![255u8; w * h * 4];
+        crate::model3d::volumes_over(&mut hidden, w, h, &vec![0.0; w * h], &cam, frame_box, &vols, [0.3, 0.8, 0.5]);
+        assert!(hidden.iter().all(|x| *x == 255));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

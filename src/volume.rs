@@ -440,6 +440,134 @@ impl Sampler {
     }
 }
 
+// ---------- matrices et composition ----------
+
+/// Matrice 4×4, colonnes d'abord (comme `gpudraw`)
+pub type Mat = [[f32; 4]; 4];
+
+pub fn mat_mul(a: &Mat, b: &Mat) -> Mat {
+    let mut m = [[0.0; 4]; 4];
+    for (c, col) in m.iter_mut().enumerate() {
+        for (r, x) in col.iter_mut().enumerate() {
+            *x = (0..4).map(|k| a[k][r] * b[c][k]).sum();
+        }
+    }
+    m
+}
+
+/// Un point passé par la matrice (avec sa division)
+pub fn mat_point(m: &Mat, p: [f32; 3]) -> [f32; 3] {
+    let f = |r: usize| m[0][r] * p[0] + m[1][r] * p[1] + m[2][r] * p[2] + m[3][r];
+    let w = f(3);
+    let w = if w.abs() < 1e-20 { 1.0 } else { w };
+    [f(0) / w, f(1) / w, f(2) / w]
+}
+
+/// Une direction passée par la matrice
+pub fn mat_dir(m: &Mat, d: [f32; 3]) -> [f32; 3] {
+    [0, 1, 2].map(|r| m[0][r] * d[0] + m[1][r] * d[1] + m[2][r] * d[2])
+}
+
+/// L'inverse, par élimination de Gauss. Rien si la matrice n'en a pas.
+pub fn mat_inv(m: &Mat) -> Option<Mat> {
+    // Lignes de [M | I], en double précision
+    let mut a = [[0.0f64; 8]; 4];
+    for r in 0..4 {
+        for c in 0..4 {
+            a[r][c] = m[c][r] as f64;
+        }
+        a[r][4 + r] = 1.0;
+    }
+    for i in 0..4 {
+        let piv = (i..4).max_by(|x, y| a[*x][i].abs().total_cmp(&a[*y][i].abs()))?;
+        if a[piv][i].abs() < 1e-30 {
+            return None;
+        }
+        a.swap(i, piv);
+        let d = a[i][i];
+        for x in a[i].iter_mut() {
+            *x /= d;
+        }
+        for r in 0..4 {
+            if r != i {
+                let f = a[r][i];
+                for c in 0..8 {
+                    a[r][c] -= f * a[i][c];
+                }
+            }
+        }
+    }
+    let mut out = [[0.0f32; 4]; 4];
+    for r in 0..4 {
+        for c in 0..4 {
+            out[c][r] = a[r][4 + c] as f32;
+        }
+    }
+    Some(out)
+}
+
+impl Volume {
+    /// Du monde vers la grille, en voxels. `model` : place de la géométrie dans le monde.
+    pub fn to_grid(&self, model: &Mat) -> Option<Mat> {
+        let inv = mat_inv(model)?;
+        let k = 1.0 / self.voxel.max(1e-12);
+        let local: Mat = [[k, 0.0, 0.0, 0.0], [0.0, k, 0.0, 0.0], [0.0, 0.0, k, 0.0], [-self.origin[0] * k, -self.origin[1] * k, -self.origin[2] * k, 1.0]];
+        Some(mat_mul(&local, &inv))
+    }
+}
+
+/// Le point de vue d'un rendu sur le processeur
+pub struct View<'a> {
+    /// Le rayon d'un pixel (colonne, ligne) : départ, direction unitaire, distance de ce qui est
+    /// déjà dessiné à ce pixel (`f32::MAX` : rien)
+    pub rays: &'a (dyn Fn(usize, usize) -> ([f32; 3], [f32; 3], f32) + Sync),
+    /// Direction vers la lumière principale
+    pub light: [f32; 3],
+}
+
+/// Pose des volumes par-dessus une image déjà rendue (RGBA 8 bits, sRGB), pixel par pixel, en
+/// s'arrêtant à ce qui est déjà dessiné. Chaque volume vient avec sa place dans l'espace des rayons.
+pub fn composite(rgba: &mut [u8], w: usize, h: usize, vols: &[(Arc<Volume>, Mat)], view: &View) {
+    use rayon::prelude::*;
+    let items: Vec<(Sampler, Mat, [f32; 3], Look)> = vols
+        .iter()
+        .filter(|(v, _)| !v.blank())
+        .filter_map(|(v, model)| {
+            let inv = mat_inv(model)?;
+            let l = mat_dir(&inv, view.light);
+            let n = (l[0] * l[0] + l[1] * l[1] + l[2] * l[2]).sqrt().max(1e-12);
+            Some((Sampler::new(v), inv, [l[0] / n, l[1] / n, l[2] / n], v.look))
+        })
+        .collect();
+    if items.is_empty() || rgba.len() < w * h * 4 {
+        return;
+    }
+    let lin = |v: u8| (v as f32 / 255.0).powf(2.2);
+    let srgb = |x: f32| (x.clamp(0.0, 1.0).powf(1.0 / 2.2) * 255.0 + 0.5) as u8;
+    rgba.par_chunks_mut(w * 4).take(h).enumerate().for_each(|(y, row)| {
+        for x in 0..w {
+            let (o, d, far) = (view.rays)(x, y);
+            let jitter = crate::smoke::rnd((y * w + x) as u32, 17);
+            for (s, inv, light, look) in &items {
+                let (ol, dl) = (mat_point(inv, o), mat_dir(inv, d));
+                let k = (dl[0] * dl[0] + dl[1] * dl[1] + dl[2] * dl[2]).sqrt().max(1e-12);
+                let far = if far >= f32::MAX * 0.5 { f32::MAX } else { far * k };
+                let (col, trans) = s.march(ol, [dl[0] / k, dl[1] / k, dl[2] / k], far, *light, look, jitter);
+                if trans >= 1.0 && col == [0.0; 3] {
+                    continue;
+                }
+                let px = &mut row[x * 4..x * 4 + 4];
+                let back = px[3] as f32 / 255.0;
+                for c in 0..3 {
+                    px[c] = srgb(col[c] + trans * lin(px[c]) * back.max(if back > 0.0 { 1.0 } else { 0.0 }));
+                }
+                let cover = (1.0 - trans).max(col[0].max(col[1]).max(col[2])).clamp(0.0, 1.0);
+                px[3] = ((back + (1.0 - back) * cover) * 255.0 + 0.5) as u8;
+            }
+        }
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
