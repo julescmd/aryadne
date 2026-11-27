@@ -7942,11 +7942,17 @@ impl Viewer {
                 })
                 .0
                 .on_hover_text(crate::i18n::t("Montage d'animation : actions réutilisables posées en bandes (cycles, fondus, empilement)"));
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    changed |= ui.add(egui::DragValue::new(&mut scene.fps).range(1.0..=1000.0).suffix(" i/s")).changed();
-                    changed |= ui.add(egui::DragValue::new(&mut scene.end).prefix(format!("{} ", crate::i18n::t("fin")))).changed();
-                    changed |= ui.add(egui::DragValue::new(&mut scene.start).prefix(format!("{} ", crate::i18n::t("début")))).changed();
-                });
+                // Début, fin, cadence à droite ; serrés quand la place manque, plutôt que par-dessus les icônes
+                let room = ui.available_width();
+                if room > 70.0 {
+                    let full = room > 230.0;
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        changed |= ui.add(egui::DragValue::new(&mut scene.fps).range(1.0..=1000.0).suffix(if full { " i/s" } else { "" })).on_hover_text(crate::i18n::t("images par seconde")).changed();
+                        let (end, start) = if full { (format!("{} ", crate::i18n::t("fin")), format!("{} ", crate::i18n::t("début"))) } else { (String::new(), String::new()) };
+                        changed |= ui.add(egui::DragValue::new(&mut scene.end).prefix(end)).on_hover_text(crate::i18n::t("fin")).changed();
+                        changed |= ui.add(egui::DragValue::new(&mut scene.start).prefix(start)).on_hover_text(crate::i18n::t("début")).changed();
+                    });
+                }
             });
             if self.anim_tools {
                 let (r2, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 30.0), egui::Sense::hover());
