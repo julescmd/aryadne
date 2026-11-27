@@ -1000,6 +1000,11 @@ impl Sim {
         self.stats()
     }
 
+    /// Octets tenus sur la carte (zéro sur le processeur)
+    pub fn gpu_bytes(&self) -> u64 {
+        self.gpu.as_ref().map(|g| g.bytes()).unwrap_or(0)
+    }
+
     /// La carte a rendu une erreur : on continue sur le processeur, depuis l'état donné
     pub fn fall_back(&mut self, g: &Grids) {
         self.gpu = None;

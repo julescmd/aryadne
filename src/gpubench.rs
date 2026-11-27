@@ -131,6 +131,62 @@ pub struct Rapport {
     pub ecart_tissu: Option<f32>,
     /// VBD contre XPBD à budget égal
     pub comparaison: Option<crate::gpucloth::Comparison>,
+    /// Fumée du solveur des nodes (pression par multigrille), par taille
+    pub fumee: Vec<Fumee>,
+}
+
+/// Mesure du solveur de fumée des nodes sur une grille cubique : un pas complet (advection
+/// MacCormack, sources, forces, pression MGPCG, projection).
+#[derive(Clone, Debug)]
+pub struct Fumee {
+    pub cote: usize,
+    /// Calculé sur la carte (sinon : elle n'y tient pas, mesuré sur le processeur)
+    pub carte: bool,
+    /// Par nombre d'itérations de pression : temps d'un pas (ms), plus grande divergence avant
+    /// et après la pression (par seconde)
+    pub par_iterations: Vec<(usize, f64, f32, f32)>,
+    /// Un pas à 4 itérations avec le transfert de l'état vers le processeur, pour le cache
+    pub avec_cache_ms: f64,
+    /// Mémoire tenue sur la carte, en octets
+    pub octets: u64,
+}
+
+/// Mesure la fumée des nodes sur une grille de côté `cote` : une bouffée chaude qui monte.
+fn fumee(cote: usize, pas: usize) -> Fumee {
+    use crate::smoke::{Emit, Op, Params, Shape, Sim};
+    let res = [cote; 3];
+    let h = 1.0 / cote as f32;
+    let ops = vec![Op::Emit(Emit { shape: Shape::Ball([0.5, 0.2, 0.5], 0.1), density: 1.0, temperature: 1.0, fuel: 0.0, velocity: [0.0; 3], add: false, soft: 0.02, noise: 0.5, seed: 1, dt: 1.0 / 24.0 })];
+    let mut sim = Sim::new(res, [0.0; 3], h, true);
+    let mut out = Fumee { cote, carte: sim.on_gpu(), par_iterations: vec![], avec_cache_ms: 0.0, octets: sim.gpu_bytes() };
+    // Quelques pas pour que la fumée soit en route, puis l'état de départ commun à toutes les mesures
+    let warm = Params::default();
+    for _ in 0..pas.max(2) {
+        sim.step(1.0 / 24.0, &warm, &ops);
+    }
+    let start = sim.shot().grids();
+    for iters in [2usize, 4, 8] {
+        let par = Params { iterations: iters, ..Default::default() };
+        sim.load(&start);
+        sim.wait();
+        let t0 = Instant::now();
+        for _ in 0..pas {
+            sim.step(1.0 / 24.0, &par, &ops);
+        }
+        let (st, _) = sim.stats_now();
+        out.par_iterations.push((iters, t0.elapsed().as_secs_f64() * 1000.0 / pas as f64, st.before, st.after));
+    }
+    // Avec le transfert de chaque image vers le processeur (ce que demande le cache)
+    let par = Params::default();
+    sim.load(&start);
+    sim.wait();
+    let t0 = Instant::now();
+    for _ in 0..pas {
+        sim.step(1.0 / 24.0, &par, &ops);
+        let _ = sim.shot().grids();
+    }
+    out.avec_cache_ms = t0.elapsed().as_secs_f64() * 1000.0 / pas as f64;
+    out
 }
 
 /// Mesure d'un tissu carré : une « passe » met à jour tous les sommets une fois (toutes les couleurs).
@@ -589,6 +645,18 @@ pub fn run(quick: bool, progress: &dyn Fn(String)) -> Result<Rapport, String> {
     if r.ecart > 1e-4 {
         r.notes.push(format!("{} : {}", crate::i18n::t("écart avec le processeur trop grand"), r.ecart));
     }
+    // 3 bis. La fumée des nodes : pression par multigrille (MGPCG), à comparer au Jacobi ci-dessus
+    for cote in if quick { vec![32usize] } else { vec![128, 256] } {
+        progress(crate::i18n::t("fumée {}³, pression par multigrille").replace("{}", &cote.to_string()));
+        let m = fumee(cote, if quick { 2 } else { 6 });
+        if !m.carte {
+            r.notes.push(crate::i18n::t("fumée {}³ : elle ne tient pas sur cette carte, mesurée sur le processeur").replace("{}", &cote.to_string()));
+        }
+        for (it, ms, _, after) in &m.par_iterations {
+            progress(format!("{}³, {} {} : {:.1} ms, {} {:.1e}", cote, it, crate::i18n::t_mid("itérations"), ms, crate::i18n::t_mid("divergence"), after));
+        }
+        r.fumee.push(m);
+    }
     // Tissu en VBD : d'abord le contrôle, puis la vitesse sur de grands tissus
     r.ecart_tissu = ecart_tissu();
     if r.ecart_tissu.is_some_and(|e| e > 1e-3) {
@@ -636,6 +704,16 @@ impl Rapport {
                 t("efficacité de la pression contre la copie"),
                 j / c * 100.0
             );
+        }
+        if !self.fumee.is_empty() {
+            s += &format!("\n{}\n", t("Fumée des nodes : un pas complet, pression par multigrille (MGPCG). À comparer au pas à 40 itérations de Jacobi ci-dessus."));
+            for f in &self.fumee {
+                s += &format!("- {}³{} · {:.0} {}\n", f.cote, if f.carte { String::new() } else { format!(" ({})", tm("sur le processeur")) }, f.octets as f64 / 1048576.0, tm("Mo sur la carte"));
+                for (it, ms, before, after) in &f.par_iterations {
+                    s += &format!("  {} {} : {:.1} ms {} · {} {:.1e} → {:.1e}\n", it, tm("itérations"), ms, tm("par pas"), tm("divergence"), before, after);
+                }
+                s += &format!("  {} : {:.1} ms {}\n", tm("4 itérations, avec le transfert de chaque image pour le cache"), f.avec_cache_ms, tm("par pas"));
+            }
         }
         if !self.tissu.is_empty() {
             s += &format!("\n{} :\n", t("tissu en VBD (une passe = tous les sommets mis à jour une fois)"));
@@ -791,6 +869,11 @@ mod tests {
         assert!(r.mesures.iter().all(|m| m.ms.is_finite() && m.ms > 0.0));
         assert!(!r.notes.iter().any(|n| n.contains("non finies")));
         assert!(r.tissu.iter().all(|m| m.passe_ms > 0.0 && m.passe_processeur_ms > 0.0));
+        // La fumée des nodes : chaque doublement des itérations réduit la divergence qui reste
+        let f = &r.fumee[0];
+        assert!(f.par_iterations.len() == 3 && f.par_iterations.iter().all(|m| m.1 > 0.0 && m.3.is_finite()));
+        assert!(f.par_iterations[2].3 < f.par_iterations[0].3 && f.par_iterations[1].3 < f.par_iterations[1].2 * 0.1, "{:?}", f.par_iterations);
+        assert!(r.texte().contains("MGPCG"));
         assert!(r.ecart_tissu.is_none_or(|e| e < 1e-3), "écart du tissu {:?}", r.ecart_tissu);
         eprintln!("{}", r.texte());
     }

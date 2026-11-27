@@ -4297,5 +4297,11 @@
   "voxels": "voxels",
   "sur la carte graphique": "on the graphics card",
   "sur le processeur": "on the CPU",
-  "divergence": "divergence"
+  "divergence": "divergence",
+  "fumée {}³, pression par multigrille": "smoke {}³, multigrid pressure",
+  "fumée {}³ : elle ne tient pas sur cette carte, mesurée sur le processeur": "smoke {}³: it does not fit on this card, measured on the CPU",
+  "Fumée des nodes : un pas complet, pression par multigrille (MGPCG). À comparer au pas à 40 itérations de Jacobi ci-dessus.": "Node smoke: one full step, multigrid pressure (MGPCG). Compare with the 40 Jacobi iterations step above.",
+  "Mo sur la carte": "MB on the card",
+  "par pas": "per step",
+  "4 itérations, avec le transfert de chaque image pour le cache": "4 iterations, with each frame transferred for the cache"
 }
