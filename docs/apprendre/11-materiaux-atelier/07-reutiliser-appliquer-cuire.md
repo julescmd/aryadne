@@ -39,6 +39,8 @@ Le fichier porte le nom du matériau et l'extension `.arysmart`. Il va dans le d
 Dans la bibliothèque, clique le filtre **Smart materials**. Ta pile y figure, avec un badge d'étincelles.
 ```
 
+![Les étincelles de l'en-tête enregistrent la pile ; le filtre Smart materials la montre ensuite dans la bibliothèque, avec son badge](images/materiau-intelligent.png)
+
 ```etape
 Clique-la. Tous ses calques s'ajoutent d'un coup à la pile, avec leurs masques.
 verifier: atelier.calques >= 5
@@ -78,6 +80,8 @@ Deux chemins s'offrent à toi.
 ```etape
 Sur la ligne **Material**, ouvre la liste, qui affiche **None**. Choisis « metal-use ». Le cube le prend.
 ```
+
+![Le cube choisi, l'onglet Material de Properties ouvert, et la liste des matériaux du coffre où l'on choisit metal-use](images/materiau-sur-le-cube.png)
 
 ```etape
 Clique le petit crayon à côté de la liste : **Open this material in the node editor**. Le matériau s'ouvre dans l'Atelier.
@@ -180,6 +184,8 @@ Le dossier proposé s'appelle `textures`. Il est à côté du matériau. Le bout
 ```etape
 Clique **Export**. Une barre avance, puis un message confirme : « 3 images written to ».
 ```
+
+![La fenêtre Export textures réglée sur 1K, PNG 8-bit et glTF ; après Export, le message « 3 images written to Apprendre/textures »](images/exporter-les-textures.png)
 
 ```etape
 Clique le petit dossier à gauche du message : le dossier s'ouvre. Tes images y sont.

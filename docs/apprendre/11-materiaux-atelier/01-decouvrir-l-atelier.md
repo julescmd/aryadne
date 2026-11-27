@@ -29,6 +29,8 @@ verifier: sous_onglet = materiaux
 | À droite, en haut | La pile de calques |
 | À droite, en bas | Les propriétés du calque choisi |
 
+![L'Atelier en quatre zones : 1 la bibliothèque Materials, 2 l'aperçu, 3 la pile de calques, 4 les propriétés du calque choisi](images/quatre-zones.png)
+
 La pile a déjà un calque, nommé **Graph**. C'est le matériau de départ. Le calque du dessus est en haut de la liste, comme dans un logiciel de retouche.
 
 ## La bibliothèque
@@ -51,6 +53,8 @@ Trouve la pastille **Scratched brushed metal** et clique-la. Un calque s'ajoute 
 verifier: atelier.calques >= 2
 ```
 
+![Le filtre Presets est actif ; un clic sur Scratched brushed metal ajoute un calque en haut de la pile, au-dessus de Graph](images/prereglage-metal.png)
+
 Un préréglage devient un calque à part entière, avec son propre graphe de nodes. Rien n'est écrit ailleurs dans le coffre.
 
 ```astuce
@@ -72,6 +76,8 @@ Le cube sert à juger l'usure des arêtes et la saleté des creux. La sphère mo
 ```etape
 Ouvre **Light** et choisis **Outdoor**. Regarde les reflets changer. Reviens sur **Studio**.
 ```
+
+![Le menu Light ouvert sous l'aperçu : Studio, Soft studio, Outdoor, Sunset, Night, Neutral](images/menu-light.png)
 
 Tu peux aussi déposer un modèle 3D de ton coffre sur l'aperçu. Le matériau s'affiche alors dessus.
 
@@ -105,6 +111,8 @@ Six icônes. Survole-les pour lire leur rôle.
 | Flèche vers le bas | **Move down** |
 | Copie | **Duplicate layer** |
 | Corbeille | **Delete layer** |
+
+![Les six icônes de l'en-tête de la pile, dans l'ordre du tableau](images/en-tete-de-la-pile.png)
 
 ```quiz
 Où se trouve le calque du dessus dans la pile ?

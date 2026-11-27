@@ -70,6 +70,29 @@ impl Layer {
             None => load_master(root, &self.master),
         }
     }
+
+    /// Le remplissage avec les valeurs que ce calque donne aux paramètres exposés : ce que montre sa vignette.
+    pub fn fill_with_params(&self, root: &str) -> Option<Graph> {
+        let mut g = self.fill(root)?;
+        with_params(&mut g, &self.params);
+        Some(g)
+    }
+}
+
+/// Donne aux nodes « Paramètre exposé » d'un graphe (racine et groupes) les valeurs choisies sur le calque.
+pub fn with_params(g: &mut Graph, params: &BTreeMap<String, [f32; 4]>) {
+    if params.is_empty() {
+        return;
+    }
+    for n in g.nodes.iter_mut().chain(g.groups.iter_mut().flat_map(|gr| gr.nodes.iter_mut())) {
+        if n.op == "param" {
+            if let Some(v) = params.get(&param_name(n)) {
+                if let Some(x) = n.values.first_mut() {
+                    *x = *v;
+                }
+            }
+        }
+    }
 }
 
 /// Nom du calque unique d'un ancien matériau en nodes.
@@ -245,6 +268,9 @@ fn generator(g: &mut Graph, kind: &str, amount: f32, contrast: f32, scale: f32, 
     Some(m)
 }
 
+/// Les noms des paramètres d'un calque de remplissage (dans l'ordre du graphe) : ceux-là se traduisent à l'écran.
+pub const FILL_PARAMS: [&str; 3] = ["couleur", "rugosité", "métal"];
+
 /// Le graphe d'un nouveau calque de remplissage : une couleur, une rugosité et un métal, tous trois
 /// exposés (ils se règlent depuis la pile, sans ouvrir les nodes).
 pub fn fill_graph(color: [f32; 3]) -> Graph {
@@ -312,6 +338,13 @@ pub fn mask_graph(mask: &Mask) -> Graph {
     }
     // Un masque se lit en gris mat : ni métal, ni brillance
     set_value(&mut g, out, 1, [1.0; 4]);
+    // La sortie se pose juste après le dernier node : un graphe serré se lit en entier à l'ouverture
+    let right = g.nodes.iter().filter(|n| n.id != out).map(|n| n.pos[0]).fold(f32::NEG_INFINITY, f32::max);
+    if right.is_finite() {
+        if let Some(n) = g.nodes.iter_mut().find(|n| n.id == out) {
+            n.pos[0] = right + 220.0;
+        }
+    }
     g
 }
 
@@ -483,6 +516,30 @@ fn set_choice(g: &mut Graph, id: u32, name: &str, v: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn masque_en_nodes_serre() {
+        // Un générateur seul : la sortie suit de près, sans grand vide entre les deux
+        let g = mask_graph(&Mask { kind: "arêtes".into(), ..Mask::default() });
+        let out = g.nodes.iter().find(|n| n.op == "mat_out").unwrap().pos[0];
+        let generateur = g.nodes.iter().filter(|n| n.op != "mat_out").map(|n| n.pos[0]).fold(f32::NEG_INFINITY, f32::max);
+        assert!(out > generateur && out - generateur <= 260.0, "{generateur} {out}");
+    }
+
+    #[test]
+    fn vignette_avec_les_parametres_du_calque() {
+        // La vignette d'un calque doit montrer la couleur choisie, pas la valeur par défaut du paramètre
+        let mut g = Graph::new_material();
+        let p = g.add("param", [0.0, 0.0]);
+        g.nodes.iter_mut().find(|n| n.id == p).unwrap().label = "couleur".into();
+        let mut params = BTreeMap::new();
+        params.insert("couleur".to_string(), [0.9, 0.0, 0.0, 1.0]);
+        let l = Layer { params, ..Layer::own("plastique", g) };
+        let f = l.fill_with_params("/nulle/part").unwrap();
+        assert_eq!(f.nodes.iter().find(|n| n.id == p).unwrap().values[0], [0.9, 0.0, 0.0, 1.0]);
+        // Le graphe du calque lui-même n'est pas touché
+        assert_ne!(l.fill("/nulle/part").unwrap().nodes.iter().find(|n| n.id == p).unwrap().values[0], [0.9, 0.0, 0.0, 1.0]);
+    }
 
     #[test]
     fn pile_en_graphe() {

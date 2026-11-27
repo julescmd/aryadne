@@ -3370,16 +3370,23 @@ pub fn insert_on_link(g: &mut Graph, k: usize, id: u32) -> bool {
 
 /// Clé de la vignette d'un calque : son maître, ou le contenu de son propre graphe.
 fn layer_key(l: &crate::atelier::Layer) -> String {
+    use std::hash::{Hash, Hasher};
+    // Les valeurs des paramètres (couleur, rugosité…) changent la vignette autant que le graphe
+    let params = || {
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        serde_json::to_string(&l.params).unwrap_or_default().hash(&mut h);
+        h.finish()
+    };
     match &l.graph {
         Some(g) => {
-            use std::hash::{Hash, Hasher};
             let mut h = std::collections::hash_map::DefaultHasher::new();
             serde_json::to_string(&g.0.nodes).unwrap_or_default().hash(&mut h);
             serde_json::to_string(&g.0.links).unwrap_or_default().hash(&mut h);
             serde_json::to_string(&g.0.groups).unwrap_or_default().hash(&mut h);
-            format!("e:{:x}", h.finish())
+            format!("e:{:x}:{:x}", h.finish(), params())
         }
-        None => format!("m:{}", l.master),
+        None if l.params.is_empty() => format!("m:{}", l.master),
+        None => format!("m:{}:{:x}", l.master, params()),
     }
 }
 
@@ -4514,7 +4521,12 @@ impl Editor {
                     }
                 }
                 let name = self.path.file_name().map(|n| crate::formats::strip(&n.to_string_lossy()).to_string()).unwrap_or_default();
-                ui.label(RichText::new(format!("{name} · {} {}", self.graph.nodes.len(), crate::i18n::t_mid("nodes"))).size(11.0).color(p.muted));
+                // Le nom et le compte de nodes : seulement s'ils tiennent, sinon ils passeraient sous les menus
+                let info = format!("{name} · {} {}", self.graph.nodes.len(), crate::i18n::t_mid("nodes"));
+                let w = ui.painter().layout_no_wrap(info.clone(), egui::FontId::proportional(11.0), p.muted).size().x;
+                if w + 8.0 <= ui.available_width() {
+                    ui.label(RichText::new(info).size(11.0).color(p.muted));
+                }
             });
             });
             });
@@ -6687,7 +6699,7 @@ impl Editor {
         }
         if let Some(i) = dup {
             let mut c = stack.layers[i].clone();
-            c.name = format!("{} {}", c.name, crate::i18n::t("(copie)"));
+            c.name = format!("{} {}", c.name, crate::i18n::t_mid("(copie)"));
             stack.layers.insert(i + 1, c);
             self.layer_sel = Some(i + 1);
             changed = true;
@@ -6746,7 +6758,9 @@ impl Editor {
                     for e in &ex {
                         let mut v = l.params.get(&e.name).copied().unwrap_or(e.default);
                         let overridden = l.params.contains_key(&e.name);
-                        let ch = crate::modifiers::row(ui, &e.name, |ui| {
+                        // Les trois réglages d'un calque de remplissage se traduisent ; un nom donné avec F2 reste tel quel
+                        let shown = if crate::atelier::FILL_PARAMS.contains(&e.name.as_str()) { crate::i18n::t(&e.name) } else { e.name.clone() };
+                        let ch = crate::modifiers::row_raw(ui, &shown, |ui| {
                             let r = if e.color {
                                 let mut c = [v[0], v[1], v[2]];
                                 let r = ui.color_edit_button_rgb(&mut c).changed();
@@ -6920,8 +6934,11 @@ impl Editor {
         }
         // Les calques « graphe » : une vignette par contenu
         for (l, k) in stack.layers.iter().zip(lkeys) {
-            if let (Some(g), false) = (&l.graph, self.mthumb.contains_key(k)) {
-                todo.push((k.clone(), (*g.0).clone()));
+            if self.mthumb.contains_key(k) || (l.graph.is_none() && l.params.is_empty()) {
+                continue;
+            }
+            if let Some(g) = l.fill_with_params(&self.root) {
+                todo.push((k.clone(), g));
             }
         }
         for n in smart {
@@ -7142,7 +7159,7 @@ impl Editor {
             self.roto_ui(ui, r);
         }
         if self.preview_rx.is_some() {
-            ui.painter().text(rect.left_top() + vec2(8.0, 8.0), egui::Align2::LEFT_TOP, "calcul…", egui::FontId::monospace(11.0), p.muted);
+            ui.painter().text(rect.left_top() + vec2(8.0, 8.0), egui::Align2::LEFT_TOP, crate::i18n::t_mid("calcul…"), egui::FontId::monospace(11.0), p.muted);
         }
         if is_mat {
             // Barre sous l'aperçu : éclairage, modèle, node isolé

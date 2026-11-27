@@ -36,6 +36,8 @@ Dans la carte **Mask**, clique **Edge wear**. Règle **Amount** vers 0,6.
 Toujours dans **Mask**, clique la pastille **Node graph**. Le masque devient un graphe, et il s'ouvre.
 ```
 
+![Le masque du calque « rouille » ouvert en nodes : le fil d'Ariane indique rouille · mask, et Edge wear entre dans Color de Material output](images/masque-en-graphe.png)
+
 Tu n'es pas reparti de zéro. Le graphe contient déjà ton masque : un node **Edge wear**, avec tes réglages, relié à l'entrée **Color** de la sortie.
 
 Le fil d'Ariane le dit : **← Layers**, puis « rouille · mask ».
@@ -104,6 +106,8 @@ Relie ce second **Math** à l'entrée **Color** de la sortie.
 ```etape
 Clique **← Layers**. La vignette du masque, sur la ligne du calque, montre ton nouveau masque.
 ```
+
+![De retour dans la pile : la pastille Node graph est active, et Open the mask in nodes rouvre le graphe du masque](images/pastille-node-graph.png)
 
 Sur la pile, la carte **Mask** garde deux réglages : **Invert**, et le bouton **Open the mask in nodes**. Un double-clic sur la vignette du masque l'ouvre aussi.
 

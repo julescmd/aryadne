@@ -67,6 +67,8 @@ Monte **Amount** à 0,7. L'usure mord plus loin dans les faces.
 Monte **Contrast** à 0,9. Le bord de la peinture devient net, comme un éclat.
 ```
 
+![Le calque « peinture » avec le masque Edge wear inversé : Amount 0,7, Contrast 0,9, Invert coché. Le métal apparaît sur les arêtes du cube](images/usure-des-aretes.png)
+
 ## Casser la régularité
 
 Une usure trop régulière sonne faux. **Breakup** découpe le masque avec un second motif.
@@ -109,6 +111,8 @@ Dans **Mask**, clique **Dust on top**. Le calque ne se pose que sur les faces to
 Baisse **Opacity** du calque à 60 %. La poussière laisse deviner la peinture.
 ```
 
+![La pile finie : poussière (Dust on top, 60 %), saleté (Cavity dirt), peinture (Edge wear) sur le métal](images/trois-masques.png)
+
 ## Les autres masques
 
 | Masque | Où le calque apparaît |
@@ -131,6 +135,8 @@ Un masque intelligent est un masque déjà réglé : son générateur, ses curse
 ```etape
 Choisis « peinture ». Ouvre **Smart masks** et clique **Chipped paint on edges**.
 ```
+
+![Le menu Smart masks ouvert sous les pastilles de masque, avec Chipped paint on edges en premier](images/masques-intelligents.png)
 
 Le masque est remplacé d'un coup. Recoche **Invert** si la peinture ne reste que sur les arêtes.
 

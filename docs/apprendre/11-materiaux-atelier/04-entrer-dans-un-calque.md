@@ -51,6 +51,8 @@ Ajoute un node **Noise** : Maj+A, tape « noise », Entrée. Mets **Scale** à 1
 verifier: graphe.contient = noise
 ```
 
+![Maj+A ouvre la recherche sous la souris ; « noise » filtre la liste, Entrée pose le premier node](images/maj-a-noise.png)
+
 ```etape
 Ajoute un node **Map range**. Relie la sortie **Value** de **Noise** à son entrée **Value**.
 verifier: graphe.contient = map
@@ -65,6 +67,8 @@ Sur **Map range**, mets **To min** à 0,25 et **To max** à 0,7.
 ```etape
 Relie la sortie de **Map range** à l'entrée **Roughness** de **Material output**. Ce lien remplace celui qui venait du paramètre de rugosité.
 ```
+
+![Dans le calque « peinture » : le fil d'Ariane ← Layers › peinture, et Noise relié à Map range, lui-même relié à Roughness de Material output](images/dans-le-calque.png)
 
 Regarde l'aperçu : le reflet est maintenant taché, plus net par endroits.
 

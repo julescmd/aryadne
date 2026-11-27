@@ -1616,9 +1616,14 @@ const LABEL_W: f32 = 84.0;
 
 /// Une ligne de réglage : le nom (discret) à gauche, le contrôle qui remplit le reste
 pub(crate) fn row<R>(ui: &mut egui::Ui, label: &str, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    row_raw(ui, &crate::i18n::t(label), add)
+}
+
+/// Comme `row`, mais le nom est montré tel quel : un nom choisi par l'utilisateur ne se traduit pas
+pub(crate) fn row_raw<R>(ui: &mut egui::Ui, label: &str, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
     ui.horizontal(|ui| {
         let (r, _) = ui.allocate_exact_size(egui::vec2(LABEL_W, 20.0), egui::Sense::hover());
-        let g = ui.painter().layout(crate::i18n::t(label), egui::FontId::proportional(12.0), crate::theme::pal().muted, LABEL_W);
+        let g = ui.painter().layout(label.to_string(), egui::FontId::proportional(12.0), crate::theme::pal().muted, LABEL_W);
         ui.painter().galley(egui::pos2(r.left(), r.center().y - g.size().y / 2.0), g, crate::theme::pal().muted);
         add(ui)
     })

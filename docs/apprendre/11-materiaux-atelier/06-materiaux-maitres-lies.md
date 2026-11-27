@@ -59,6 +59,8 @@ Relie la sortie **Value** de **Noise** à l'entrée **Bump** de **Material outpu
 verifier: graphe.liens >= 3
 ```
 
+![Le graphe du maître : deux nodes Exposed parameter, « teinte » relié à Color et « brillance » relié à Roughness](images/maitre-parametres.png)
+
 ```etape
 Reviens à la pile avec **← Layers**. Enregistre avec Ctrl+S.
 verifier: fichier.enregistre
@@ -91,6 +93,8 @@ Choisis ce calque. Dans la carte **Layer**, lis la ligne **Master material** : e
 ```etape
 Dans la carte **Parameters**, règle « teinte » sur un rouge et « brillance » sur 0,3.
 ```
+
+![Le filtre Vault master materials, le calque lié « maitre-peinture » avec sa ligne Master material, et ses paramètres teinte et brillance](images/calque-lie.png)
 
 ### Une seconde fois, autrement
 

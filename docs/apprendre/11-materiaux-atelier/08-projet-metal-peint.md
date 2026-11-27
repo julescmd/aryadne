@@ -130,11 +130,15 @@ verifier: atelier.calques >= 5
 Dans **Mask**, clique **Dust on top**. Baisse **Opacity** à 50 %.
 ```
 
+![Les cinq calques du projet, du bas vers le haut : métal, peinture (Edge wear), rouille, saleté (Cavity dirt), poussière (Dust on top)](images/metal-peint-cinq-calques.png)
+
 ## Juge et corrige
 
 ```etape
 Passe l'aperçu sur **Sphere**, puis ouvre **Light** et choisis **Outdoor**. Regarde les reflets du métal.
 ```
+
+![Le même matériau sur la sphère, en lumière Outdoor : la peinture écaillée laisse voir le métal](images/metal-peint-sphere.png)
 
 ```etape
 Clique l'œil de chaque calque, un par un. Vérifie ce que chacun apporte. Rallume tout.

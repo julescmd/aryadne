@@ -17,6 +17,8 @@ L'Atelier marche en deux temps.
 
 Tu n'as pas besoin des nodes pour faire un bon matériau. Ils viennent quand tu veux aller plus loin.
 
+![Un matériau de l'Atelier : cinq calques empilés, de la tôle à la poussière](images/atelier-apercu.png)
+
 ## Les leçons
 
 1. [Découvrir l'Atelier](01-decouvrir-l-atelier.md) : l'écran, la bibliothèque, ton premier calque.

@@ -46,6 +46,8 @@ Dans la carte **Parameters**, clique la pastille de **Color**. Choisis un rouge 
 Mets **Roughness** à 0,3 et laisse **Metal** à 0.
 ```
 
+![Le calque « plastique » ajouté avec + : nom dans la carte Layer, couleur rouge et Roughness 0,3 dans la carte Parameters](images/calque-plastique.png)
+
 Tu obtiens un plastique : coloré, avec un reflet blanc assez net.
 
 ```astuce
@@ -99,6 +101,8 @@ Clique **Move down** une fois. L'or repasse devant.
 ```etape
 Choisis le calque du dessus. Dans la carte **Layer**, baisse **Opacity** à 50 %.
 ```
+
+![La pile finale : or, caoutchouc, plastique, Graph. Les flèches Move up et Move down sont entourées, l'Opacity de l'or est à 50 %](images/pile-ordonnee.png)
 
 Les deux matières se mélangent : la couleur, mais aussi la rugosité et le métal. Un calque couvre tous les canaux à la fois.
 
