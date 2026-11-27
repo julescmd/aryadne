@@ -95,13 +95,15 @@ fn const_input(g: &Graph, n: &crate::nodes::Node, k: usize) -> Option<[f32; 4]> 
 
 fn obstacles_of(g: &Graph) -> Vec<Obstacle> {
     let mut out = vec![];
-    for n in g.nodes.iter().filter(|n| n.op == "sim_solver" && !n.muted) {
-        if let (Some(c), Some(r)) = (const_input(g, n, inp::BALL), const_input(g, n, inp::BALL_RADIUS)) {
+    for n in g.nodes.iter().filter(|n| (n.op == "sim_solver" || n.op == "sim_smoke") && !n.muted) {
+        // Le solveur de fumée range ses obstacles à d'autres places
+        let (ball, ball_r, cube, cube_s) = if n.op == "sim_smoke" { (10, 11, 12, 13) } else { (inp::BALL, inp::BALL_RADIUS, inp::CUBE, inp::CUBE_SIZE) };
+        if let (Some(c), Some(r)) = (const_input(g, n, ball), const_input(g, n, ball_r)) {
             if r[0] > 0.0 {
                 out.push(Obstacle::Ball([c[0], c[1], c[2]], r[0]));
             }
         }
-        if let (Some(c), Some(s)) = (const_input(g, n, inp::CUBE), const_input(g, n, inp::CUBE_SIZE)) {
+        if let (Some(c), Some(s)) = (const_input(g, n, cube), const_input(g, n, cube_s)) {
             if s[..3].iter().all(|x| *x > 0.0) {
                 out.push(Obstacle::Cube([c[0], c[1], c[2]], [s[0] * 0.5, s[1] * 0.5, s[2] * 0.5]));
             }

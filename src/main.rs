@@ -8,6 +8,9 @@ mod gpucloth;
 mod gpudraw;
 #[allow(dead_code)]
 mod gpusim;
+mod gpusmoke;
+mod smoke;
+mod volume;
 mod rig;
 mod scopes;
 mod story;

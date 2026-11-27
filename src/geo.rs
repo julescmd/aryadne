@@ -28,7 +28,7 @@ type Fail = (u32, String);
 
 static VERSION: AtomicU64 = AtomicU64::new(1);
 
-fn next_version() -> u64 {
+pub(crate) fn next_version() -> u64 {
     VERSION.fetch_add(1, Ordering::Relaxed)
 }
 
@@ -238,6 +238,8 @@ pub struct Geo {
     /// aux solveurs ; elles suivent les points à travers les nodes et la simulation.
     pub faces: Arc<Vec<[u32; 4]>>,
     faces_version: u64,
+    /// Un volume (fumée, feu) : il traverse les nodes avec les points, sans en dépendre
+    pub volume: Option<Arc<crate::volume::Volume>>,
 }
 
 impl Geo {
@@ -321,11 +323,12 @@ impl Geo {
         }
         self.edges_version.hash(&mut h);
         self.faces_version.hash(&mut h);
+        self.volume.as_ref().map(|v| v.version).hash(&mut h);
         h.finish()
     }
 
     pub fn bytes(&self) -> usize {
-        self.cols.values().chain(self.ecols.values()).map(|c| c.bytes()).sum::<usize>() + self.edges.len() * 8 + self.faces.len() * 16
+        self.cols.values().chain(self.ecols.values()).map(|c| c.bytes()).sum::<usize>() + self.edges.len() * 8 + self.faces.len() * 16 + self.volume.as_ref().map(|v| v.bytes()).unwrap_or(0)
     }
 
     /// Coupure anticipée : chaque colonne identique à celle de `old` reprend l'ancienne (et son
@@ -365,7 +368,7 @@ impl Geo {
 
     /// Toutes les colonnes sont-elles lisibles sans attendre la carte ? Ne bloque pas.
     pub fn ready(&self) -> bool {
-        self.cols.values().all(|c| c.ready())
+        self.cols.values().all(|c| c.ready()) && self.volume.as_ref().is_none_or(|v| v.ready())
     }
 
     /// Toutes les colonnes sont-elles déjà du côté du processeur ? (Les lire ne coûte alors rien.)
@@ -464,6 +467,11 @@ impl Geo {
                 }
             }
         }
+        // Le volume, en demi-précision : un bloc « VOLU » facultatif, comme les faces
+        if let Some(v) = &self.volume {
+            b.extend_from_slice(b"VOLU");
+            b.extend_from_slice(&v.to_bytes());
+        }
         b
     }
 
@@ -522,6 +530,10 @@ impl Geo {
                 faces.push([u32_at(&mut at)?, u32_at(&mut at)?, u32_at(&mut at)?, u32_at(&mut at)?]);
             }
             g.set_faces(faces);
+        }
+        if b.get(at..at + 4) == Some(b"VOLU") {
+            let (v, _) = crate::volume::Volume::from_bytes(&b[at + 4..]).ok_or_else(bad)?;
+            g.volume = Some(Arc::new(v));
         }
         Ok(g)
     }
@@ -1974,9 +1986,230 @@ impl Run<'_> {
                 solver.step(&mut g, dt, &p);
                 g
             }
+            "vol_box" => {
+                let (c, size) = (v3(num!(0)), v3(num!(1)));
+                let res = (num!(2)[0].round() as usize).clamp(8, 1024);
+                let longest = size[0].max(size[1]).max(size[2]);
+                if longest <= 0.0 {
+                    return Err((id, "la boîte du volume n'a pas de taille".into()));
+                }
+                let h = longest / res as f32;
+                // Par multiples de 8 voxels : la multigrille de la pression a ainsi au moins trois niveaux
+                let n = [0, 1, 2].map(|k| (((size[k].max(h) / h).ceil() as usize).div_ceil(8) * 8).max(16));
+                if n[0] * n[1] * n[2] > 600 * 600 * 600 {
+                    return Err((id, "volume trop grand : baisse la résolution".into()));
+                }
+                let origin = [0, 1, 2].map(|k| c[k] - n[k] as f32 * h * 0.5);
+                Geo { volume: Some(Arc::new(crate::volume::Volume::empty(n, origin, h))), ..Default::default() }
+            }
+            "vol_source" => {
+                let mut g = gin[0].clone();
+                let Some(vol) = g.volume.clone() else { return Err((id, "branche un volume (node « Volume vide ») sur cette source".into())) };
+                let (c, r, size) = (v3(num!(2)), num!(3)[0].max(0.0), v3(num!(4)));
+                let shape = match pstr(n, "forme") {
+                    "boîte" => crate::smoke::Shape::Cube(c, [size[0] * 0.5, size[1] * 0.5, size[2] * 0.5]),
+                    "points d'une géométrie" => {
+                        let src = &gin[1];
+                        let mut h = hasher();
+                        (src.stamp(), r.to_bits(), vol.res, vol.origin.map(f32::to_bits), vol.voxel.to_bits()).hash(&mut h);
+                        crate::smoke::Shape::Mask(Arc::new(crate::smoke::Mask { w: splat(src, &vol, r), id: h.finish() }))
+                    }
+                    _ => crate::smoke::Shape::Ball(c, r),
+                };
+                let e = crate::smoke::Emit { shape, density: num!(5)[0], temperature: num!(6)[0], fuel: num!(7)[0], velocity: v3(num!(8)), add: pstr(n, "mode") == "ajouter", soft: num!(9)[0].max(0.0), noise: num!(10)[0].clamp(0.0, 1.0), seed: self.frame as u32, dt: num!(11)[0] };
+                g.volume = Some(Arc::new(vol.with_op(crate::smoke::Op::Emit(e))));
+                g
+            }
+            "vol_burn" => {
+                let mut g = gin[0].clone();
+                let Some(vol) = g.volume.clone() else { return Err((id, "branche un volume sur la combustion".into())) };
+                let b = crate::smoke::Burn { ignition: num!(1)[0], rate: num!(2)[0].max(0.0), heat: num!(3)[0], smoke: num!(4)[0].max(0.0), expansion: num!(5)[0].max(0.0), cooling: num!(6)[0].max(0.0), dt: num!(7)[0] };
+                g.volume = Some(Arc::new(vol.with_op(crate::smoke::Op::Burn(b))));
+                g
+            }
+            "vol_look" => {
+                let mut g = gin[0].clone();
+                if let Some(vol) = g.volume.clone() {
+                    let col = num!(2);
+                    let look = crate::volume::Look { density: num!(1)[0].max(0.0), color: [col[0], col[1], col[2]], glow: num!(3)[0].max(0.0), shadow: num!(4)[0].max(0.0) };
+                    g.volume = Some(Arc::new(vol.with_look(look)));
+                }
+                g
+            }
+            "sim_smoke" => {
+                let mut g = gin[0].clone();
+                let Some(vol) = g.volume.clone() else { return Err((id, "branche un volume sur le solveur de fumée".into())) };
+                let dt = num!(1)[0];
+                let (ball_c, ball_r) = (v3(num!(10)), num!(11)[0]);
+                let (cube_c, cube_s) = (v3(num!(12)), v3(num!(13)));
+                let par = crate::smoke::Params {
+                    substeps: (num!(2)[0].round() as usize).clamp(1, 64),
+                    iterations: (num!(3)[0].round() as usize).clamp(1, 200),
+                    maccormack: pstr(n, "advection") != "simple",
+                    buoyancy: num!(4)[0],
+                    weight: num!(5)[0],
+                    vorticity: num!(6)[0].max(0.0),
+                    dissipation: num!(7)[0].max(0.0),
+                    cooling: num!(8)[0].max(0.0),
+                    damping: num!(14)[0].max(0.0),
+                    wind: v3(num!(9)),
+                    borders: match pstr(n, "bords") {
+                        "tous ouverts" => 1,
+                        "fermés, haut ouvert" => 2,
+                        _ => 0,
+                    },
+                    ball: (ball_r > 0.0).then_some((ball_c, ball_r)),
+                    cube: cube_s.iter().all(|s| *s > 0.0).then_some((cube_c, [cube_s[0] * 0.5, cube_s[1] * 0.5, cube_s[2] * 0.5])),
+                };
+                if dt > 0.0 {
+                    if let Some(out) = smoke_step(&vol, dt, &par, pstr(n, "calcul") != "processeur") {
+                        g.volume = Some(out);
+                    }
+                }
+                g
+            }
             other => return Err((id, format!("ce node ne donne pas de géométrie : {other}"))),
         })
     }
+}
+
+// ---------- fumée ----------
+
+/// Une fumée déjà préparée : ses tampons sur la carte (ou son état sur le processeur).
+struct SmokeSession {
+    key: ([usize; 3], [u32; 4], bool),
+    sim: crate::smoke::Sim,
+    /// L'état rendu au dernier pas : s'il revient tel quel (avec des opérations en attente), le
+    /// solveur a déjà cet état et rien n'est renvoyé
+    last: Option<Arc<crate::smoke::Shot>>,
+    used: u64,
+    /// Le dernier pas : version du volume reçu, pas de temps, réglages, et ce qu'il a rendu
+    memo: Option<(u64, u32, crate::smoke::Params, Arc<crate::volume::Volume>)>,
+}
+
+static SMOKES: std::sync::Mutex<Vec<SmokeSession>> = std::sync::Mutex::new(Vec::new());
+static SMOKE_STATUS: std::sync::Mutex<Option<SmokeStatus>> = std::sync::Mutex::new(None);
+
+/// Ce qu'a fait le dernier pas de fumée, pour le montrer dans l'aperçu.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SmokeStatus {
+    pub on_gpu: bool,
+    pub card: String,
+    pub res: [usize; 3],
+    pub substeps: usize,
+    pub iterations: usize,
+    /// Plus grande divergence avant et après la pression (par seconde), au dernier pas fini
+    pub before: f32,
+    pub after: f32,
+    /// Temps du dernier pas fini
+    pub ms: f32,
+}
+
+pub fn smoke_status() -> Option<SmokeStatus> {
+    SMOKE_STATUS.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+/// Oublie les fumées préparées (leur mémoire sur la carte est rendue)
+pub fn smoke_clear() {
+    SMOKES.lock().unwrap_or_else(|e| e.into_inner()).clear();
+}
+
+/// Avance un volume d'une image. Rien si la carte calcule encore le pas d'avant et que le moteur
+/// accepte d'attendre la prochaine image de l'interface (`SIM_WAIT` est alors levé).
+fn smoke_step(vol: &Arc<crate::volume::Volume>, dt: f32, par: &crate::smoke::Params, want_gpu: bool) -> Option<Arc<crate::volume::Volume>> {
+    let key = (vol.res, [vol.origin[0].to_bits(), vol.origin[1].to_bits(), vol.origin[2].to_bits(), vol.voxel.to_bits()], want_gpu);
+    let defer = SIM_DEFER.with(|d| d.get());
+    let mut all = SMOKES.lock().unwrap_or_else(|e| e.into_inner());
+    let clock = all.iter().map(|s| s.used).max().unwrap_or(0) + 1;
+    // La session qui a rendu l'état reçu ; sinon une de la même grille ; sinon une nouvelle
+    let mine = |s: &SmokeSession| s.key == key && vol.shot().is_some_and(|x| s.last.as_ref().is_some_and(|l| Arc::ptr_eq(l, x)));
+    let at = match all.iter().position(mine).or_else(|| all.iter().position(|s| s.key == key)) {
+        Some(k) => k,
+        None => {
+            // Deux fumées restent prêtes ; la plus ancienne cède sa place (et sa mémoire sur la carte)
+            if all.len() >= 2 {
+                if let Some(old) = (0..all.len()).min_by_key(|k| all[*k].used) {
+                    all.swap_remove(old);
+                }
+            }
+            all.push(SmokeSession { key, sim: crate::smoke::Sim::new(vol.res, vol.origin, vol.voxel, want_gpu), last: None, used: 0, memo: None });
+            all.len() - 1
+        }
+    };
+    let s = &mut all[at];
+    s.used = clock;
+    // Le même pas que le dernier (miniature, tableau) : son résultat, sans recalcul
+    if let Some(m) = s.memo.as_ref().filter(|m| m.0 == vol.version && m.1 == dt.to_bits() && m.2 == *par) {
+        return Some(m.3.clone());
+    }
+    if s.sim.busy() {
+        if defer {
+            SIM_WAIT.with(|x| x.set(true));
+            return None;
+        }
+        s.sim.wait();
+    }
+    // La carte a rendu une erreur depuis : on continue sur le processeur
+    let lost = s.sim.on_gpu() && crate::gpusim::gpu().is_none();
+    let known = !lost && vol.shot().is_some_and(|x| s.last.as_ref().is_some_and(|l| Arc::ptr_eq(l, x)));
+    if lost {
+        s.sim.fall_back(&vol.base_grids());
+    } else if !known {
+        s.sim.load(&vol.base_grids());
+    }
+    s.sim.step(dt, par, &vol.ops);
+    let shot = s.sim.shot();
+    s.last = Some(shot.clone());
+    let out = Arc::new(crate::volume::Volume::from_shot(vol.res, vol.origin, vol.voxel, shot).with_look(vol.look));
+    s.memo = Some((vol.version, dt.to_bits(), *par, out.clone()));
+    let on_gpu = s.sim.on_gpu();
+    let (st, ms) = s.sim.stats();
+    *SMOKE_STATUS.lock().unwrap_or_else(|e| e.into_inner()) = Some(SmokeStatus { on_gpu, card: if on_gpu { crate::gpusim::gpu().map(|c| c.name.clone()).unwrap_or_default() } else { String::new() }, res: vol.res, substeps: par.substeps, iterations: par.iterations, before: st.before, after: st.after, ms });
+    Some(out)
+}
+
+/// Part de chaque voxel prise par les points d'une géométrie (et par ses faces, échantillonnées) :
+/// une boule de rayon `r` autour de chacun, à bord doux.
+fn splat(src: &Geo, vol: &crate::volume::Volume, r: f32) -> Vec<f32> {
+    let [nx, ny, nz] = vol.res;
+    let mut w = vec![0.0f32; nx * ny * nz];
+    if src.n == 0 {
+        return w;
+    }
+    let h = vol.voxel;
+    let r = r.max(h * 0.5);
+    let p = src.vec3("P");
+    let mut pts: Vec<[f32; 3]> = (0..src.n).map(|i| [p[0][i], p[1][i], p[2][i]]).collect();
+    // Les faces : des points en plus, à peu près un par voxel
+    let (tris, _) = src.triangles();
+    for t in tris.iter().take(200_000) {
+        let (a, b, c) = (pts[t[0] as usize], pts[t[1] as usize], pts[t[2] as usize]);
+        let len = |u: [f32; 3], v: [f32; 3]| ((u[0] - v[0]).powi(2) + (u[1] - v[1]).powi(2) + (u[2] - v[2]).powi(2)).sqrt();
+        let k = ((len(a, b).max(len(b, c)).max(len(a, c)) / h).ceil() as usize).clamp(1, 64);
+        for i in 0..=k {
+            for j in 0..=k - i {
+                let (u, v) = (i as f32 / k as f32, j as f32 / k as f32);
+                pts.push([0, 1, 2].map(|x| a[x] + (b[x] - a[x]) * u + (c[x] - a[x]) * v));
+            }
+        }
+    }
+    let reach = (r / h).ceil() as i32 + 1;
+    for q in &pts {
+        let g = [0, 1, 2].map(|k| (q[k] - vol.origin[k]) / h - 0.5);
+        let c = g.map(|x| x.round() as i32);
+        for z in (c[2] - reach).max(0)..=(c[2] + reach).min(nz as i32 - 1) {
+            for y in (c[1] - reach).max(0)..=(c[1] + reach).min(ny as i32 - 1) {
+                for x in (c[0] - reach).max(0)..=(c[0] + reach).min(nx as i32 - 1) {
+                    let d = (((x as f32 - g[0]).powi(2) + (y as f32 - g[1]).powi(2) + (z as f32 - g[2]).powi(2)).sqrt()) * h;
+                    // Plein jusqu'au rayon, puis un voxel de bord doux
+                    let cover = ((r - d) / h + 1.0).clamp(0.0, 1.0);
+                    let i = x as usize + nx * (y as usize + ny * z as usize);
+                    w[i] = w[i].max(cover);
+                }
+            }
+        }
+    }
+    w
 }
 
 /// Nombre pseudo-aléatoire stable entre 0 et 1, d'après un numéro d'élément, un canal et une graine.
@@ -1997,13 +2230,15 @@ fn shift_face(f: [u32; 4], base: u32) -> [u32; 4] {
 
 /// Réunit deux géométries. Un attribut absent d'un côté y vaut zéro.
 fn merge(a: &Geo, b: &Geo) -> Geo {
+    // Le volume suit : celui de A, sinon celui de B
+    let volume = a.volume.clone().or_else(|| b.volume.clone());
     if b.n == 0 {
-        return a.clone();
+        return Geo { volume, ..a.clone() };
     }
     if a.n == 0 {
-        return b.clone();
+        return Geo { volume, ..b.clone() };
     }
-    let mut g = Geo { n: a.n + b.n, ..Default::default() };
+    let mut g = Geo { n: a.n + b.n, volume, ..Default::default() };
     let names: std::collections::BTreeSet<&String> = a.cols.keys().chain(b.cols.keys()).collect();
     for name in names {
         let (ca, cb) = (a.cols.get(name), b.cols.get(name));
@@ -2047,7 +2282,7 @@ fn merge(a: &Geo, b: &Geo) -> Geo {
 /// Ne garde que les points marqués ; les arêtes et les faces dont un sommet disparaît partent avec lui.
 fn filter(g: &Geo, keep: &[bool]) -> Geo {
     let n = keep.iter().filter(|k| **k).count();
-    let mut out = Geo { n, ..Default::default() };
+    let mut out = Geo { n, volume: g.volume.clone(), ..Default::default() };
     for (name, c) in &g.cols {
         out.set(name, Column::new(c.data().iter().map(|comp| comp.iter().zip(keep).filter(|(_, k)| **k).map(|(x, _)| *x).collect()).collect()));
     }
@@ -2176,7 +2411,10 @@ pub fn starter() -> Graph {
 }
 
 /// Exemples proposés dans l'éditeur : chacun montre une façon de se servir des nodes de géométrie.
-pub const EXAMPLES: [&str; 6] = ["tissu sur une boule", "tissu sur la carte graphique", "tissu qui se replie", "drapeau dans le vent", "fontaine de particules", "vagues animées"];
+pub const EXAMPLES: [&str; 9] = ["tissu sur une boule", "tissu sur la carte graphique", "tissu qui se replie", "drapeau dans le vent", "fontaine de particules", "vagues animées", "fumée qui monte", "feu de camp", "fumée contre un obstacle"];
+
+#[path = "geo_fumee.rs"]
+mod fumee;
 
 pub fn example(name: &str) -> Option<Graph> {
     match name {
@@ -2186,6 +2424,9 @@ pub fn example(name: &str) -> Option<Graph> {
         "drapeau dans le vent" => Some(flag()),
         "fontaine de particules" => Some(fountain()),
         "vagues animées" => Some(waves()),
+        "fumée qui monte" => Some(fumee::rising()),
+        "feu de camp" => Some(fumee::campfire()),
+        "fumée contre un obstacle" => Some(fumee::obstacle()),
         _ => None,
     }
 }
@@ -2563,6 +2804,10 @@ mod tests {
     fn exemples_se_calculent() {
         for name in EXAMPLES {
             let g = example(name).unwrap();
+            // Les fumées ont leur propre essai (`fumee_par_les_nodes`)
+            if g.nodes.iter().any(|n| n.op == "sim_smoke") {
+                continue;
+            }
             let mut e = Engine::default();
             let a = e.eval(&g, 1, "").map_err(|x| format!("{name} : {}", x.1)).unwrap();
             let b = e.eval(&g, 30, "").map_err(|x| format!("{name} : {}", x.1)).unwrap();
