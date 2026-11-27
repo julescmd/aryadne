@@ -174,6 +174,7 @@ pub const TROPHY: &str = "\u{f0373}";
 pub const CIRCLE_HELP: &str = "\u{f0082}";
 pub const ROCKET: &str = "\u{f0286}";
 pub const TARGET: &str = "\u{f0180}";
+pub const IMAGE_DOWN: &str = "\u{f053c}";
 pub const FLIP_HORIZONTAL_2: &str = "\u{f035e}";
 pub const GLOBE: &str = "\u{f00e8}";
 pub const UNDO_2: &str = "\u{f02a1}";

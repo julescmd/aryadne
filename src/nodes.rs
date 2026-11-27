@@ -3163,6 +3163,8 @@ pub struct Editor {
     pv_shape: Option<u8>,
     boxy: Option<std::sync::Arc<crate::model3d::Prepared>>,
     pv_model: Option<(String, std::sync::Arc<crate::model3d::Prepared>)>,
+    /// Atelier : la fenêtre « exporter les textures », quand elle est ouverte
+    tex_export: Option<crate::texexport::Dialog>,
     pv_key: u64,
     /// Node dont la sortie remplace le matériau dans l'aperçu (« prévisualiser la node »)
     solo: Option<u32>,
@@ -3448,7 +3450,7 @@ impl Editor {
             frame: 0.0,
             frame_sel: false,
             frame_rename: None,
-            frame_sel_request: false, pv_yaw: 0.4, pv_pitch: 0.25, pv_dist: 2.0, pv_env: 0, pv_shape: None, boxy: None, pv_model: None, pv_key: 0, solo: None, roto_drag: None,
+            frame_sel_request: false, pv_yaw: 0.4, pv_pitch: 0.25, pv_dist: 2.0, pv_env: 0, pv_shape: None, boxy: None, pv_model: None, tex_export: None, pv_key: 0, solo: None, roto_drag: None,
         };
         if ed.graph.kind == GraphKind::Geometry {
             ed.geo = Some(Box::new(crate::geoview::GeoView::new(&ed.graph)));
@@ -6430,6 +6432,23 @@ impl Editor {
         }
         if let Some(m) = &self.message {
             ui.painter().text(prev.left_top() + vec2(12.0, 12.0), egui::Align2::LEFT_TOP, m, egui::FontId::proportional(11.5), p.muted);
+        }
+        // Exporter les textures : le bouton en haut à droite de l'aperçu, et sa fenêtre
+        {
+            let r = Rect::from_min_size(pos2(prev.right() - 44.0, prev.top() + 10.0), vec2(34.0, 30.0));
+            let on = self.tex_export.is_some();
+            let b = egui::Button::new(RichText::new(crate::lucide::IMAGE_DOWN).size(16.0).color(if on { p.on_accent } else { p.text })).fill(if on { p.accent } else { p.panel }).stroke(egui::Stroke::new(1.0, p.line)).corner_radius(8);
+            if ui.put(r, b).on_hover_text(crate::i18n::t("Exporter les textures : cuit ce matériau en images (couleur, rugosité, métal, normale, hauteur, occlusion) pour Unreal, Unity, Blender ou glTF")).clicked() {
+                self.tex_export = match self.tex_export.take() {
+                    Some(_) => None,
+                    None => Some(crate::texexport::Dialog::new(&self.root, &self.path, self.pv_model.as_ref().map(|m| m.0.as_str()))),
+                };
+            }
+            if let Some(mut d) = self.tex_export.take() {
+                if d.ui(ctx, &self.root, self.program.as_ref().ok(), self.pv_model.as_ref().map(|m| &m.1)) {
+                    self.tex_export = Some(d);
+                }
+            }
         }
         let head = |ui: &mut egui::Ui, title: &str| {
             ui.label(RichText::new(crate::i18n::t(title)).size(11.0).strong().color(p.muted));

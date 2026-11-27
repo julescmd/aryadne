@@ -1011,6 +1011,11 @@ impl Prepared {
         self.tris.len()
     }
 
+    /// Le maillage tel qu'il est montré : positions, triangles, arêtes réelles de chaque triangle
+    pub fn mesh_parts(&self) -> (&[V3], &[[u32; 3]], &[u8]) {
+        (&self.pos, &self.tris, &self.edges)
+    }
+
     /// UV venues de la scène (une entrée par triangle). Un triangle sans UV (NaN) reçoit la
     /// projection par défaut des matériaux, calculée ici depuis ses sommets : le rendu est le même
     /// qu'avant pour les objets qui n'apportent pas d'UV.

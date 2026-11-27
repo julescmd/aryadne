@@ -826,7 +826,7 @@ pub fn set_density(t: &Topo, d: &mut EditData, px_per_unit: f32, scale: f32) {
 /// Découpe d'un polygone en triangles (indices dans le polygone). Un éventail depuis un coin
 /// suffit pour un polygone convexe ; pour un polygone creux il retourne des triangles, d'où des
 /// éclats blancs à l'affichage. On essaie donc chaque coin, puis on découpe « par oreilles ».
-fn poly_tris(pos: &[V3], p: &[u32]) -> Vec<[usize; 3]> {
+pub(crate) fn poly_tris(pos: &[V3], p: &[u32]) -> Vec<[usize; 3]> {
     let n = p.len();
     if n < 3 {
         return vec![];

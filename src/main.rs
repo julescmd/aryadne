@@ -90,6 +90,7 @@ mod workspace;
 mod retopo;
 mod bvh;
 mod convert;
+mod texexport;
 mod uvedit;
 mod zoomview;
 mod i18n;
