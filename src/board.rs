@@ -1633,13 +1633,12 @@ impl Board {
         }
 
         if self.data.items.is_empty() {
-            painter.text(
-                rect.center(),
-                egui::Align2::CENTER_CENTER,
-                "board vide\n\nglisse des images ou des notes ici, ou colle une image (Ctrl+V)\ndouble-clic : texte · B : dessin · molette : zoom · clic droit / milieu : déplacer la vue",
-                egui::FontId::monospace(13.0),
-                p.muted,
-            );
+            // Le texte revient à la ligne dans la largeur du board : il ne déborde plus sous les panneaux
+            let text = crate::i18n::t("board vide\n\nglisse des images ou des notes ici, ou colle une image (Ctrl+V)\ndouble-clic : texte · B : dessin · molette : zoom · clic droit / milieu : déplacer la vue");
+            let mut job = egui::text::LayoutJob::simple(text, egui::FontId::proportional(13.0), p.muted, (rect.width() - 48.0).max(120.0));
+            job.halign = egui::Align::Center;
+            let gal = painter.layout_job(job);
+            painter.galley(rect.center() - egui::vec2(0.0, gal.size().y / 2.0), gal, p.muted);
         }
         if self.drag.is_some() || self.editing.is_some() {
             ui.ctx().request_repaint();

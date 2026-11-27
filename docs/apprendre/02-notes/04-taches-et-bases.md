@@ -38,6 +38,8 @@ La page réunit toutes les cases `- [ ]` de toutes tes notes, groupées par note
 Coche la tâche « Trouver la musique du générique » dans la page **Tasks**.
 ```
 
+![L'outil Tasks (Alt+2) : toutes les cases du coffre, rangées par note, avec les échéances en haut](images/outil-tasks.png)
+
 ```etape
 Reviens à l'outil **Notes** avec `Alt+1`. Dans la note de suivi, la ligne est cochée.
 verifier: texte.contient = [x] Trouver
@@ -89,6 +91,8 @@ verifier: texte.contient = base
 Passe en lecture avec `Ctrl+E`. Le tableau montre la fiche SH010 de la leçon précédente, avec son statut et sa durée.
 ```
 
+![Le bloc base en lecture : un tableau d'une note, plan-sh010, avec son statut « en cours » et sa durée 4](images/bloc-base-tableau.png)
+
 ```astuce
 Le tableau est vide ? Vérifie que la fiche `plan-sh010` est bien dans le dossier `Apprendre/` et que son en-tête contient `type: plan`.
 ```
@@ -103,6 +107,8 @@ verifier: texte.contient = kanban
 ```etape
 Passe en lecture. Chaque statut est une colonne. Glisse la carte SH010 dans une autre colonne.
 ```
+
+![Le même bloc en view: kanban, group: statut : une colonne « en cours » avec la carte plan-sh010](images/bloc-base-kanban.png)
 
 Glisser une carte change la propriété dans la note elle-même. Ouvre la fiche SH010 : son `statut` a changé.
 

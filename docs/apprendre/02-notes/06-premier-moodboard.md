@@ -53,6 +53,8 @@ Ici, **View** est le menu du board, dans la barre au-dessus de la toile. Ce n'es
 Zoome sur une image avec la molette. Ouvre ensuite le menu **View** du board et clique **Frame all**.
 ```
 
+![Le menu View du board : Frame all, Actual size, Everything in grayscale, Always on top, Slideshow](images/moodboard-view.png)
+
 ## Choisir, déplacer, redimensionner
 
 L'outil **Select** (`V`) est actif au départ.
@@ -76,6 +78,8 @@ Agrandis une image par une de ses poignées. Recadre une autre image avec `Alt` 
 ```etape
 Choisis toutes les images avec `Ctrl+A`. Ouvre le menu **Arrange** et clique **Packed rows**.
 ```
+
+![Cinq images choisies sur le board, le menu Arrange ouvert sur Packed rows ; l'onglet Colors montre déjà la palette de la sélection](images/moodboard-arrange.png)
 
 | Commande | Effet |
 |---|---|

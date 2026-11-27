@@ -55,6 +55,8 @@ Le panneau **Inspector (moodboard)** a deux onglets : **Properties** et **Colors
 Ouvre l'onglet **Colors** de l'inspecteur. **Board palette** montre les couleurs dominantes de tout le board.
 ```
 
+![L'onglet Colors de l'inspecteur : Board palette, les cinq couleurs dominantes du board, et le bouton On the board](images/palette-du-board.png)
+
 ```etape
 Choisis deux images. La palette devient **Selection palette** : les couleurs de ces images seulement.
 ```
@@ -84,6 +86,8 @@ Une image qui marche en gris marche en couleur. Le board te le montre en un clic
 ```etape
 Ouvre le menu **View** du board et coche **Everything in grayscale**. Regarde quelles images gardent une lecture claire.
 ```
+
+![Le board avec Everything in grayscale : les images se lisent en valeurs, sans couleur](images/tout-en-gris.png)
 
 ```etape
 Décoche **Everything in grayscale**.

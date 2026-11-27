@@ -39,6 +39,8 @@ Tu peux aussi cliquer l'icône de loupe dans le rail, ou passer par **Edit › S
 Tape `Anselme` dans le champ. La liste montre chaque fichier et chaque ligne qui contient ce mot.
 ```
 
+![La recherche du coffre (Ctrl+Maj+F) pour « Anselme » : chaque fichier et chaque ligne trouvée, le mot surligné](images/recherche-dans-le-coffre.png)
+
 Ce que cherche cette page :
 
 - les notes, le code, les fichiers texte ;
@@ -86,6 +88,8 @@ L'outil **Brain** dessine le graphe du coffre.
 Clique l'outil **Brain**, ou appuie sur `Alt+3`.
 ```
 
+![L'outil Brain : chaque note est une bulle, chaque lien un trait. Folders et Local graph sont dans la barre du haut](images/cerveau.png)
+
 ```raccourci
 `Ctrl+G` ouvre aussi le cerveau, sauf dans un texte, où il va à une ligne, et dans la retouche, le vectoriel et les nodes, où il groupe.
 ```
@@ -117,7 +121,7 @@ Active **Local graph**. Le graphe ne montre plus que ta dernière note et son en
 ```
 
 ```etape
-Active **Folders**, puis clique un dossier. Tu entres dedans. Le fil d'Ariane en haut te fait remonter.
+**Folders** est coché par défaut : les dossiers sont des bulles carrées. Clique un dossier. Tu entres dedans. Le fil d'Ariane en haut te fait remonter.
 ```
 
 ```astuce

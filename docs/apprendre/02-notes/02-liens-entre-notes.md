@@ -29,6 +29,8 @@ Un lien s'écrit entre doubles crochets : `[[Nom de la note]]`.
 Sous le titre « Personnages », va à la fin de la phrase. Tape `[[`. Une liste des notes du coffre s'affiche.
 ```
 
+![Après [[, la liste des notes du coffre s'ouvre sous le curseur : Tab ou Entrée insère le nom choisi](images/taper-un-lien.png)
+
 ```etape
 Continue en tapant `Anselme]]`. Tu as écrit `[[Anselme]]`.
 verifier: texte.contient = [[Anselme]]
@@ -57,6 +59,8 @@ verifier: fichier.enregistre
 ```etape
 Dans le panneau de droite, clique l'onglet **Links**.
 ```
+
+![L'onglet Links de la fiche Anselme : Backlinks (la note du court métrage), Unlinked mentions avec Link et Link all, puis Related notes](images/onglet-links.png)
 
 L'onglet montre trois listes.
 

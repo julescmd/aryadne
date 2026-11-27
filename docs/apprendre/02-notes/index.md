@@ -12,6 +12,10 @@ objectifs: Écrire des notes en Markdown ; Relier tes notes entre elles ; Ranger
 
 Tout se passe dans l'étape **Notes**, puis dans l'outil **Moodboard** de l'étape **2D**.
 
+![Une note en lecture : titres, texte en gras, cases à cocher et citation](images/notes-apercu.png)
+
+![Un moodboard : cinq images de référence rangées d'un clic avec Packed rows](images/notes-moodboard-apercu.png)
+
 ## Les leçons
 
 1. [Ta première note](01-premiere-note.md) : 15 min

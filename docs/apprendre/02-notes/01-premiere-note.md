@@ -61,6 +61,8 @@ Ajoute un titre `## À faire`. Écris dessous trois lignes qui commencent par `-
 verifier: texte.contient = - [ ]
 ```
 
+![La note en texte : un titre #, deux sous-titres ##, un mot en gras, trois cases - [ ] et une citation >](images/note-en-markdown.png)
+
 ```astuce
 Quand tu appuies sur `Entrée` au bout d'une ligne de liste, Aryadne commence la ligne suivante de la même façon.
 ```
@@ -72,6 +74,8 @@ Une note a deux visages : le texte que tu écris, et la lecture.
 ```etape
 Appuie sur `Ctrl+E`. La note s'affiche en lecture : les titres sont grands, les cases sont de vraies cases.
 ```
+
+![La même note en lecture (Ctrl+E, ou l'icône entourée) : les titres sont grands, les cases sont de vraies cases](images/note-en-lecture.png)
 
 En haut de la note, deux petites icônes font le même geste : le livre pour **Reading**, le crayon pour **Text**.
 

@@ -43,6 +43,8 @@ En lecture, double-clique la valeur de `statut`. Remplace-la par `en cours`. Val
 verifier: texte.contient = en cours
 ```
 
+![Les propriétés en lecture : la valeur de statut, double-cliquée, devient un champ où taper « en cours »](images/proprietes.png)
+
 ```astuce
 Clic droit sur le nom d'une propriété : **Rename across the vault…** la renomme dans toutes les notes. **Remove from all notes** la retire partout.
 ```
@@ -76,9 +78,11 @@ Commence simple. Un dossier par projet, des liens entre les notes, quelques tags
 ## La note du jour
 
 ```etape
-Appuie sur `Ctrl+J`. La note du jour s'ouvre. Elle porte la date et se range dans `journal/`.
+Appuie sur `Ctrl+J`. La note du jour s'ouvre. Elle porte la date et se range dans `notes/journal/`.
 verifier: fichier.ouvert = md
 ```
+
+![La note du jour créée par Ctrl+J, rangée dans notes/journal/ et titrée à la date du jour](images/note-du-jour.png)
 
 ```attention
 `Ctrl+J` ne crée la note du jour que si la souris n'est pas sur un éditeur qui garde cette touche pour lui. Sur la vue 3D, `Ctrl+J` joint des objets. La palette marche partout : **Daily note**.
@@ -95,6 +99,8 @@ Un modèle est une note du dossier `modèles/` de ton coffre. Trois mots y sont 
 ```etape
 Ouvre **File › New › From a template…**. Choisis un modèle et donne un titre.
 ```
+
+![Le menu File, New, avec From a template… sous Note et Daily note](images/depuis-un-modele.png)
 
 Pour créer ton propre modèle, écris une note dans `modèles/`. Elle apparaîtra dans cette liste.
 

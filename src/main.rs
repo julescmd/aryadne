@@ -6200,7 +6200,7 @@ impl App {
                     ui.add(egui::TextEdit::singleline(&mut self.refs.filter).hint_text(crate::i18n::t("filtrer par nom ou dossier")).desired_width(200.0));
                     ui.separator();
                     for (s, label) in [(RefSort::Recent, "récentes"), (RefSort::Name, "nom"), (RefSort::Color, "couleur")] {
-                        if ui.selectable_label(self.refs.sort == s, label).clicked() {
+                        if ui.selectable_label(self.refs.sort == s, crate::i18n::t(label)).clicked() {
                             self.refs.sort = s;
                         }
                     }
