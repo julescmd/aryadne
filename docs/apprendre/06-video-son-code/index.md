@@ -12,6 +12,8 @@ objectifs: Monter une vidéo et l'exporter ; Sous-titrer et monter par le texte 
 
 Trois étapes de la barre : **Video**, **Sound** et **Code**.
 
+![Un montage dans l'étape Video : le moniteur au-dessus, la timeline et ses plans dessous](images/video-apercu.png)
+
 ## Les leçons
 
 ### Vidéo

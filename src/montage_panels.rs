@@ -585,7 +585,7 @@ impl Editor {
                         ui.add_space(22.0);
                         ch_text |= ui.add(egui::TextEdit::multiline(&mut c.text).desired_rows(2).desired_width(f32::INFINITY)).changed();
                     });
-                    ch_text |= row(ui, "Taille", &mut |ui| scrub(ui, &mut c.text_size, 0.5, 6.0..=1000.0, " px", 0));
+                    ch_text |= row(ui, "Taille du texte", &mut |ui| scrub(ui, &mut c.text_size, 0.5, 6.0..=1000.0, " px", 0));
                     ch_text |= row(ui, "Couleur", &mut |ui| ui.color_edit_button_srgb(&mut c.text_color).changed() | ui.checkbox(&mut c.outline, crate::i18n::t("contour")).changed());
                     ui.horizontal(|ui| {
                         ui.add_space(22.0);

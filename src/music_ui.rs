@@ -515,11 +515,11 @@ impl Editor {
         let mut changed = false;
         ui.style_mut().visuals.widgets.inactive.weak_bg_fill = p.field;
         changed |= ui.add(egui::DragValue::new(&mut self.song.bpm).range(40.0..=240.0).speed(0.5).max_decimals(0).suffix(" bpm")).changed();
-        egui::ComboBox::from_id_salt("music-key").selected_text(format!("{} {}", music::NOTE_NAMES[self.song.key as usize % 12], crate::i18n::t_mid(if self.song.minor { "mineur" } else { "majeur" }))).width(110.0).show_ui(&mut ui, |ui| {
+        egui::ComboBox::from_id_salt("music-key").selected_text(format!("{} {}", music::pitch_class_name(self.song.key as usize), crate::i18n::t_mid(if self.song.minor { "mineur" } else { "majeur" }))).width(110.0).show_ui(&mut ui, |ui| {
             for k in 0..12u8 {
                 for minor in [false, true] {
                     let on = self.song.key == k && self.song.minor == minor;
-                    if ui.selectable_label(on, format!("{} {}", music::NOTE_NAMES[k as usize], crate::i18n::t_mid(if minor { "mineur" } else { "majeur" }))).clicked() {
+                    if ui.selectable_label(on, format!("{} {}", music::pitch_class_name(k as usize), crate::i18n::t_mid(if minor { "mineur" } else { "majeur" }))).clicked() {
                         self.song.key = k;
                         self.song.minor = minor;
                         changed = true;

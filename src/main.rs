@@ -4554,7 +4554,7 @@ impl App {
                         let n = ed.diags.len();
                         egui::Frame::new().fill(p.missing.gamma_multiply(0.12)).inner_margin(egui::Margin::symmetric(12, 4)).show(ui, |ui| {
                             ui.set_width(ui.available_width());
-                            let t = format!("⚠ ligne {} : {}{}", d.line + 1, d.msg, if n > 1 { format!("  (+{} autre(s))", n - 1) } else { String::new() });
+                            let t = format!("⚠ {} {} : {}{}", crate::i18n::t_mid("ligne"), d.line + 1, d.msg, if n > 1 { format!("  (+{} {})", n - 1, crate::i18n::t_mid("autre(s)")) } else { String::new() });
                             if ui.add(egui::Button::new(RichText::new(t).color(p.missing).size(11.5)).frame(false)).on_hover_text(crate::i18n::t("aller à l'erreur")).clicked() {
                                 ed.jump = Some(d.line);
                             }
@@ -4669,7 +4669,7 @@ impl App {
                                     _ => p.muted,
                                 };
                                 ui.label(RichText::new(match sy.kind { "fn" | "méthode" => "ƒ", "type" | "impl" => "◇", "titre" => "#", _ => "·" }).color(col).size(11.0));
-                                let r = ui.add(egui::Button::new(RichText::new(&sy.name).size(11.5)).frame(false)).on_hover_text(format!("ligne {}", sy.line + 1));
+                                let r = ui.add(egui::Button::new(RichText::new(&sy.name).size(11.5)).frame(false)).on_hover_text(format!("{} {}", crate::i18n::t_mid("ligne"), sy.line + 1));
                                 if r.clicked() {
                                     jump = Some(sy.line);
                                 }

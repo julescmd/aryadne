@@ -31,6 +31,8 @@ verifier: fichier.ouvert = aryseq
 | **Inspector (edit)** | Trois onglets : **Clip**, **Effects**, **Advanced** |
 | **Edit timeline** | Les pistes. L'image, V1, V2, au-dessus. Le son, A1, A2, en dessous |
 
+![L'outil Edit : 1 Media, 2 le moniteur, 3 l'inspecteur du plan choisi, 4 la timeline avec ses trois plans sur V1](images/montage-ecran.png)
+
 ## Importer des médias
 
 ```etape

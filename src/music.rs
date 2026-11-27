@@ -109,8 +109,16 @@ fn four() -> u32 {
 
 pub const NOTE_NAMES: [&str; 12] = ["do", "do♯", "ré", "ré♯", "mi", "fa", "fa♯", "sol", "sol♯", "la", "la♯", "si"];
 
+/// Les mêmes notes en lettres, pour l'interface anglaise (C, D, E…)
+pub const NOTE_LETTERS: [&str; 12] = ["C", "C♯", "D", "D♯", "E", "F", "F♯", "G", "G♯", "A", "A♯", "B"];
+
+/// Nom d'une classe de hauteur (0 = do) dans la langue de l'interface : « la » en français, « A » en anglais.
+pub fn pitch_class_name(k: usize) -> &'static str {
+    if crate::i18n::current() == "en" { NOTE_LETTERS[k % 12] } else { NOTE_NAMES[k % 12] }
+}
+
 pub fn note_name(p: u8) -> String {
-    format!("{}{}", NOTE_NAMES[p as usize % 12], p as i32 / 12 - 1)
+    format!("{}{}", pitch_class_name(p as usize), p as i32 / 12 - 1)
 }
 
 const MAJOR: [u8; 7] = [0, 2, 4, 5, 7, 9, 11];

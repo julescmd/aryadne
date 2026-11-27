@@ -45,6 +45,8 @@ Dans la marge de gauche, des marques montrent les lignes ajoutées, changées et
 Appuie sur `Ctrl+F`. Tape `notes`. Passe d'un résultat au suivant avec `F3`.
 ```
 
+![Ctrl+F dans le script : le champ de recherche, 1/7 résultats, et chaque « notes » surligné dans le code](images/chercher-dans-le-code.png)
+
 ```etape
 Appuie sur `Ctrl+H`. Le remplacement s'ouvre. Ferme-le avec `Échap` sans rien remplacer.
 ```

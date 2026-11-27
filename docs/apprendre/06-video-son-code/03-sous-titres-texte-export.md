@@ -36,8 +36,10 @@ Sans l'un ni l'autre, la transcription ne marche pas. Tu peux alors suivre cette
 ## Transcrire
 
 ```etape
-Ouvre le menu **Subtitles**, puis **Transcribe speech**. Attends la fin du calcul.
+Dans la barre de la timeline, ouvre le menu **Auto**, puis **Subtitles**, puis **Transcribe speech**. Fenêtre large : le bouton **Subtitles** est directement dans la barre. Attends la fin du calcul.
 ```
+
+![Le menu Auto de la barre de la timeline : Cut silences, Cut to the beat, 9:16 version, et Subtitles avec Transcribe speech, Text-based editing…, Export as SRT](images/menu-auto-sous-titres.png)
 
 Aryadne écoute le mixage et pose une réplique par titre, en bas de l'image.
 
@@ -59,7 +61,7 @@ Un sous-titre est un titre comme un autre. Clique-le pour corriger son texte dan
 ## Monter par le texte
 
 ```etape
-Ouvre **Subtitles › Text-based editing…**. Une fenêtre liste chaque réplique sur une ligne.
+Ouvre **Auto › Subtitles › Text-based editing…**. Une fenêtre liste chaque réplique sur une ligne.
 ```
 
 Cette commande n'est disponible qu'une fois les sous-titres posés.
@@ -89,7 +91,7 @@ La barre du montage porte quatre boutons : **Cut silences**, **Cut to the beat**
 **Cut silences** retire les passages sans voix du clip choisi et de son son lié. La suite se resserre.
 
 ```etape
-Choisis un clip de parole. Lance **Cut silences**. Relis : les blancs ont disparu.
+Choisis un clip de parole. Lance **Cut silences**, dans le menu **Auto**. Relis : les blancs ont disparu.
 ```
 
 ```attention
@@ -107,7 +109,7 @@ Un montage sans aucun silence fatigue vite. Annule avec `Ctrl+Z` si le résultat
 | **Sync by sound**, **Make a multicam** | Cale plusieurs prises sur leur son, puis en fait des angles. `1` à `9` coupent vers un angle |
 
 ```etape
-Lance **9:16 version**. Une copie verticale du montage est créée. Vérifie chaque plan : le sujet est-il dans le cadre ?
+Lance **9:16 version**, dans le même menu **Auto**. Une copie verticale du montage est créée. Vérifie chaque plan : le sujet est-il dans le cadre ?
 ```
 
 ```attention
@@ -139,6 +141,8 @@ Reviens au montage horizontal. Appuie sur `Ctrl+M`, ou clique **Export as…**.
 ```etape
 Choisis le MP4 H.264 et lance l'export.
 ```
+
+![La flèche à côté d'Export ouvre Export as… : MP4 H.264, Light MP4, ProRes 422 HQ, WebM, GIF, PNG, audio seul](images/export-as.png)
 
 Plusieurs exports se suivent dans une file. Tu peux lancer le MP4, puis le GIF, sans attendre.
 

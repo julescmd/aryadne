@@ -35,6 +35,8 @@ verifier: onglet = video
 | Zoom | `Z` | Clic pour zoomer, `Alt+clic` pour dézoomer |
 | Texte | `T` | Pose un titre |
 
+![La barre d'outils de la timeline, dans l'ordre du tableau : de 1 Sélection à 10 Texte](images/outils-timeline.png)
+
 ## Ajuster une coupe
 
 ```etape
@@ -50,13 +52,15 @@ Ces deux outils règlent le rythme sans rien décaler. Reviens à la sélection 
 ## Un titre
 
 ```etape
-Place la tête de lecture au début. Appuie sur `T` et clique dans le moniteur. Tape ton titre.
+Place la tête de lecture au début. Appuie sur `T` et clique dans le moniteur : un clip **titre** se pose. Dans l'inspecteur, onglet **Advanced**, section **Text**, tape ton titre.
 ```
+
+![L'outil Texte (T) a posé un clip titre sur V1 ; son texte se tape dans l'onglet Advanced, section Text. Le titre apparaît après son fondu d'entrée](images/titre.png)
 
 Le titre est un clip, sur une piste au-dessus de l'image. Choisis-le : l'onglet **Clip** de l'inspecteur montre son texte, sa **Scale**, sa **Color**, son contour et sa police.
 
 ```etape
-Change la police et la couleur du titre. Glisse le bord du clip pour qu'il dure trois secondes.
+Dans la même section, change la police et la couleur du titre. Glisse le bord du clip pour qu'il dure trois secondes.
 ```
 
 ## Une transition

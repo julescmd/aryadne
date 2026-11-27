@@ -2086,7 +2086,7 @@ impl App {
                     let _ = t.join();
                     let code = ch.lock().ok().and_then(|mut c| c.wait().ok()).and_then(|s| s.code());
                     if let Ok(mut s) = o.lock() {
-                        s.push_str(&format!("\n— terminé (code {}) —\n", code.map(|c| c.to_string()).unwrap_or("?".into())));
+                        s.push_str(&format!("\n— {} (code {}) —\n", crate::i18n::t_mid("terminé"), code.map(|c| c.to_string()).unwrap_or("?".into())));
                     }
                     d.store(true, std::sync::atomic::Ordering::Relaxed);
                     if let Some(c) = &ctx {
@@ -2110,7 +2110,7 @@ impl App {
         let running = !r.done.load(std::sync::atomic::Ordering::Relaxed);
         crate::dock::panel(ui, "run-output", "sortie du programme", egui::Panel::bottom("run-output").resizable(true).default_size(180.0).min_size(60.0).max_size((ui.available_height() * 0.7).max(80.0)), egui::Frame::new().fill(egui::Color32::from_gray(22)).inner_margin(8), |ui| {
             ui.horizontal(|ui| {
-                ui.label(RichText::new(format!("sortie · {}", vault::display_rel(&r.rel))).color(egui::Color32::from_gray(170)).size(11.0));
+                ui.label(RichText::new(format!("{} · {}", crate::i18n::t_mid("sortie"), vault::display_rel(&r.rel))).color(egui::Color32::from_gray(170)).size(11.0));
                 if running {
                     ui.add(egui::Spinner::new().size(10.0));
                 }

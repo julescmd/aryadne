@@ -4403,5 +4403,10 @@
   "L (largeur)": "W",
   "i/s": "fps",
   "Pair-impair": "Even-odd",
-  "ppp": "dpi"
+  "ppp": "dpi",
+  "Fondu enchaîné": "Crossfade",
+  "Taille du texte": "Size",
+  "autre(s)": "more",
+  "terminé": "done",
+  "commenter": "comment"
 }

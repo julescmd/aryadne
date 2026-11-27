@@ -34,6 +34,8 @@ verifier: onglet = son
 | **Inspector (audio)** | Trois onglets : **Effects**, **Clip**, **Spectrum** |
 | **Status (audio)** | La sélection, la durée, la fréquence du projet |
 
+![L'outil Audio : 1 Sounds, 2 les pistes, avec la voix sur Track 1 et la musique sur Track 2, 3 le transport, 4 l'inspecteur, 5 la barre d'état](images/audio-ecran.png)
+
 ## Poser des sons
 
 ```etape
@@ -45,7 +47,7 @@ Clique la voix dans la liste. Elle se pose sur la piste active, à la tête de l
 ```
 
 ```etape
-Choisis une autre piste. Clique la musique : elle se pose sur cette piste.
+Clique dans la deuxième piste pour la choisir : la tête de lecture vient aussi à cet endroit. Clique la musique : elle se pose sur cette piste, à la tête de lecture.
 ```
 
 ```astuce

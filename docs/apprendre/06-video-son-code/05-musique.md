@@ -66,6 +66,8 @@ Dans l'arrangement, clique la région de la piste de batterie pour la choisir.
 Dans l'inspecteur, ouvre l'onglet **Ideas**. Sous **Rhythms**, clique **Four on the floor**. La région se remplit d'un nouveau rythme.
 ```
 
+![La région de batterie choisie dans l'arrangement ; l'onglet Ideas propose Pop, Four on the floor et Trap. Le piano roll, en bas, montre le nouveau rythme](images/idees-de-rythme.png)
+
 ```etape
 Écoute. Essaie **Pop** et **Trap**. Garde celui que tu préfères.
 ```

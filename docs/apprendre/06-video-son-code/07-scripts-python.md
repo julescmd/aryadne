@@ -47,6 +47,8 @@ Clique **Try it yourself**. Le script d'inventaire s'ouvre.
 verifier: fichier.ouvert = py
 ```
 
+![F5 lance le script : le panneau du bas montre sa sortie, 24 notes dans le coffre et 20 tâches à faire](images/sortie-du-script.png)
+
 Tout commence par ces deux lignes :
 
 ```

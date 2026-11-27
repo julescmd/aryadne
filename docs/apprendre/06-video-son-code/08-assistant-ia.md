@@ -61,6 +61,8 @@ verifier: fichier.ouvert = md
 Appuie sur `Ctrl+L`, ou clique le bouton **Assistant** en haut à droite. Le panneau de l'assistant s'ouvre à côté de la note.
 ```
 
+![Le bouton Assistant, en haut à droite, ouvre son panneau à côté de la note : les actions rapides, le modèle choisi et le champ de question](images/assistant.png)
+
 L'assistant voit le fichier ouvert, ta sélection, ou le board courant.
 
 ```etape
