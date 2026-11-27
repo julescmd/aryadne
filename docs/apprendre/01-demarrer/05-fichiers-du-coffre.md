@@ -56,9 +56,13 @@ Le bouton `…` du panneau règle l'affichage : tri, extensions visibles, liste 
 Avec la note choisie, appuie sur `F2`. Renomme-la `rangee`. Valide avec `Entrée`.
 ```
 
+![La fenêtre Rename or move : le chemin de la note, à modifier puis à valider](images/renommer-f2.png)
+
 ```etape
 Fais un clic droit sur le dossier `Apprendre`, puis **New folder here**. Nomme-le `archives`.
 ```
+
+![Le menu du clic droit sur le dossier Apprendre, dans le panneau des fichiers : New folder here est encadré](images/clic-droit-dossier.png)
 
 ```etape
 Glisse la note `rangee` sur le dossier `archives`.

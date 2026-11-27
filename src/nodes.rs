@@ -6425,7 +6425,8 @@ impl Editor {
         let right_w = if panel_away { 0.0 } else { 330.0f32.min(avail.width() * 0.34) };
         let lib = Rect::from_min_max(avail.min, pos2(avail.min.x + left_w, avail.max.y));
         let panel = Rect::from_min_max(pos2(avail.max.x - right_w, avail.min.y), avail.max);
-        let prev = Rect::from_min_max(pos2(lib.right() + 1.0, avail.min.y), pos2(panel.left() - 1.0, avail.max.y));
+        // La barre de l'aperçu (lumière, sphère, cube) se dessine sous lui : on lui garde sa place en bas
+        let prev = Rect::from_min_max(pos2(lib.right() + 1.0, avail.min.y), pos2(panel.left() - 1.0, avail.max.y - 30.0));
         self.preview_ui(ui, prev, ctx);
         if let Err((_, e)) = &self.program {
             ui.painter().text(prev.left_bottom() + vec2(12.0, -14.0), egui::Align2::LEFT_BOTTOM, format!("⚠ {e}"), egui::FontId::proportional(11.5), p.missing);

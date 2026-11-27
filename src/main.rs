@@ -7415,9 +7415,9 @@ impl App {
         };
 
         match &dialog {
-            Dialog::NewFile { dir } => text_dialog(&format!("nouveau fichier dans /{dir}"), "nom.md, script.py, sous/dossier/notes.md…", self),
-            Dialog::NewDir { dir } => text_dialog(&format!("nouveau dossier dans /{dir}"), "nom du dossier", self),
-            Dialog::Rename { from } => text_dialog(&format!("renommer ou déplacer {from}"), "nouveau/chemin.md", self),
+            Dialog::NewFile { dir } => text_dialog(&format!("{} /{dir}", crate::i18n::t("nouveau fichier dans")), &crate::i18n::t_mid("nom.md, script.py, sous/dossier/notes.md…"), self),
+            Dialog::NewDir { dir } => text_dialog(&format!("{} /{dir}", crate::i18n::t("nouveau dossier dans")), &crate::i18n::t_mid("nom du dossier"), self),
+            Dialog::Rename { from } => text_dialog(&format!("{} {from}", crate::i18n::t("renommer ou déplacer")), &crate::i18n::t_mid("nouveau/chemin.md"), self),
             Dialog::ConfirmTrash { rel } => {
                 let r = egui::Modal::new(egui::Id::unique("trash")).frame(frame).show(ctx, |ui| {
                     ui.set_width(420.0);

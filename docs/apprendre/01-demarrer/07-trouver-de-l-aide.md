@@ -53,6 +53,8 @@ Trois chemins l'ouvrent :
 Ferme le panneau des leçons avec l'icône de toque du rail. Rouvre-le de la même façon.
 ```
 
+![L'icône de toque, en bas du rail à gauche, ouvre et ferme le panneau des leçons](images/icone-apprendre-du-rail.png)
+
 Dans le panneau :
 
 - chaque leçon commence par ce que tu vas réussir à faire ;
@@ -74,6 +76,10 @@ La documentation est livrée avec Aryadne. Elle s'ouvre comme une note, sans int
 ```etape
 Ouvre **File › Help › Documentation**. Le sommaire de la documentation s'ouvre en lecture.
 ```
+
+![Le sous-menu File, Help : Home, Learn, Documentation (encadré), Keyboard shortcuts, Time spent per project, Check for updates](images/menu-help.png)
+
+![Le sommaire de la documentation, ouvert en lecture dans un onglet](images/documentation.png)
 
 Elle a deux parties : le guide d'utilisation, un fichier par outil, et une partie technique pour ceux qui lisent le code.
 
@@ -107,6 +113,8 @@ Différence avec ce programme : la documentation décrit chaque bouton. Les leç
 ```etape
 Ouvre **File › Help › Home**.
 ```
+
+![L'écran d'accueil Home : reprendre le travail, créer un fichier d'un clic, les fichiers récents](images/ecran-home.png)
 
 L'écran d'accueil montre :
 

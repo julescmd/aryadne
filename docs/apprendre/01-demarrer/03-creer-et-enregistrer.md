@@ -17,6 +17,8 @@ Ouvre **File › New › Note**. Une note vide s'ouvre sous le nom `untitled.md`
 verifier: fichier.ouvert = md
 ```
 
+![Le menu File ouvert sur New : Note est la première ligne](images/menu-file-new.png)
+
 ```raccourci
 `Ctrl+N` crée une note de la même façon.
 ```
@@ -44,6 +46,8 @@ Pour les autres genres de fichiers, une fenêtre te laisse régler le départ.
 ```etape
 Ouvre **File › New › Other… (choose the kind)**. La fenêtre **New file** s'affiche.
 ```
+
+![La fenêtre New file : les genres de fichiers à gauche, les options et le bouton Create à droite](images/fenetre-new-file.png)
 
 Dans cette fenêtre :
 
@@ -105,6 +109,8 @@ verifier: texte.contient = safran
 ```etape
 Ouvre **File › Version history**. La liste des versions s'affiche.
 ```
+
+![La fenêtre History de la note recette : la liste des versions à gauche, le champ Name this version et le bouton Restore this version encadrés](images/historique-des-versions.png)
 
 Dans cette fenêtre :
 

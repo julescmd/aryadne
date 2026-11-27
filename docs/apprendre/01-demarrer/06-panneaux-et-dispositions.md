@@ -35,6 +35,8 @@ Chaque éditeur ajoute ses propres panneaux. La 3D a les siens, le montage aussi
 Ouvre **Edit › Window**. Sous **Panels**, décoche puis recoche **Outline and links**. Le panneau de droite disparaît, puis revient.
 ```
 
+![Le sous-menu Edit, Window : les cases Outline and links et Document in its own window sont encadrées](images/menu-window.png)
+
 ## Déplacer un panneau
 
 La fenêtre est découpée en cases. Chaque panneau a un onglet.
@@ -77,6 +79,8 @@ Aryadne retient l'écran de chaque fenêtre détachée. Si cet écran est débra
 Ouvre un deuxième fichier avec `Ctrl+P`. Appuie ensuite sur `Ctrl+\`. Les deux fichiers s'affichent côte à côte.
 ```
 
+![Deux notes affichées côte à côte dans la zone du document](images/deux-fichiers-cote-a-cote.png)
+
 ```etape
 Appuie encore sur `Ctrl+\` pour revenir à un seul fichier.
 ```
@@ -99,6 +103,8 @@ Une disposition est un arrangement de panneaux qui porte un nom. Chaque étape a
 ```etape
 Ouvre **Edit › Layout**. Dans le champ de nom, tape `Lecture`. Clique **Save**.
 ```
+
+![Le sous-menu Edit, Layout : la disposition Main, puis le champ de nom et le bouton Save encadrés](images/menu-layout.png)
 
 Ton arrangement actuel est gardé sous ce nom. Il reste lié à l'étape en cours.
 

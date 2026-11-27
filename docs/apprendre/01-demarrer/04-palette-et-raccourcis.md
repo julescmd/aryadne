@@ -38,6 +38,8 @@ La palette mélange les commandes et les fichiers du coffre.
 Tape `theme` dans la palette. Choisis **Toggle light / dark theme** et appuie sur `Entrée`. Le thème change.
 ```
 
+![La palette de commandes après avoir tapé theme : la commande Toggle light / dark theme est en tête de liste](images/palette-de-commandes.png)
+
 ```etape
 Refais le même geste pour revenir au thème d'avant.
 ```
@@ -73,6 +75,8 @@ verifier: fichier.ouvert = md
 Appuie sur `Ctrl+P`, tape `palette`, puis `Entrée`. Ta note d'exercice revient à l'écran.
 ```
 
+![La recherche de fichiers Ctrl+P après avoir tapé palette : Apprendre/palette.md est proposé en premier](images/ouvrir-un-fichier-ctrl-p.png)
+
 ```attention
 Si aucun fichier ne correspond à ce que tu as tapé, `Entrée` crée une note de ce nom. Vérifie la liste avant de valider.
 ```
@@ -105,6 +109,10 @@ Les raccourcis globaux se changent. Ceux des éditeurs sont fixes.
 ```etape
 Ouvre **Edit › Keyboard shortcuts…**. Regarde la liste **Global shortcuts**. Ferme la fenêtre sans rien changer.
 ```
+
+![Le menu Edit ouvert, avec la ligne Keyboard shortcuts encadrée](images/menu-edit.png)
+
+![La page Shortcuts des réglages : la liste Global shortcuts, une ligne par commande avec sa combinaison](images/raccourcis-clavier.png)
 
 Pour changer un raccourci, clique-le dans cette liste et appuie sur les nouvelles touches. Les conflits sont signalés.
 

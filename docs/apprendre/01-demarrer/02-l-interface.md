@@ -31,6 +31,8 @@ verifier: fichier.ouvert = md
 | Document | Le fichier, avec ses panneaux autour |
 | Barre du bas | L'aide du moment, l'état d'enregistrement, le minuteur, la version |
 
+![La fenêtre d'Aryadne avec ses six zones numérotées dans l'ordre du tableau : 1 barre de titre, 2 barre des étapes, 3 rail, 4 onglets, 5 document, 6 barre du bas](images/zones-de-la-fenetre.png)
+
 ## La barre de titre
 
 Aryadne dessine sa propre barre de titre. Elle porte deux menus.
@@ -39,12 +41,16 @@ Aryadne dessine sa propre barre de titre. Elle porte deux menus.
 - **Edit** : **Undo**, **Redo**, copier et coller, **Search the vault**, **Command palette**, puis trois sous-menus : **View**, **Layout** et **Window**.
 
 ```etape
-Ouvre **File**, puis survole **New**. Regarde la liste des fichiers que tu peux créer. Ferme le menu avec `Échap`.
+Ouvre **File**, puis survole **New**. Regarde la liste des fichiers que tu peux créer. Ferme le menu en cliquant à côté.
 ```
+
+![Le menu File ouvert sur New : la liste des fichiers qu'on peut créer](images/menu-file-new.png)
 
 ```etape
 Ouvre **Edit**, puis survole **View**. Repère **Full screen** et **Light theme** ou **Dark theme**. Ferme le menu.
 ```
+
+![Le sous-menu Edit, View : Files, Assistant, Terminal, Side by side, Compact mode, Full screen, Light theme, Keep on top](images/menu-edit-view.png)
 
 ```astuce
 Tire la barre de titre pour déplacer la fenêtre. Un double-clic dessus l'agrandit.
@@ -70,6 +76,8 @@ verifier: onglet = 3d
 ```
 
 L'étape active montre ses outils à côté de son nom. En 3D : **Scene**, **Materials**, **Simulation**.
+
+![La barre des étapes : l'étape 3D est active et montre ses outils Scene, Materials et Simulation](images/barre-des-etapes.png)
 
 ```etape
 Clique l'outil **Materials**, puis reviens sur **Scene**.
@@ -121,6 +129,8 @@ La barre du bas change selon ce que tu fais. Au centre, elle rappelle les raccou
 ```etape
 Pose la souris sur les onglets, puis sur le panneau des fichiers. Lis le texte au centre de la barre du bas : il change.
 ```
+
+![La barre du bas quand la souris survole les onglets : elle rappelle les raccourcis de l'endroit](images/barre-du-bas.png)
 
 ```astuce
 La barre n'affiche que trois raccourcis. Survole ce texte pour voir la liste complète.

@@ -10,6 +10,8 @@ objectifs: Ouvrir un coffre ; Te repérer dans la fenêtre ; Créer, enregistrer
 
 À la fin de ce parcours, tu sais ouvrir Aryadne, créer un fichier, l'enregistrer et le retrouver. Tu sais où regarder quand tu cherches un outil ou un raccourci. Tout le reste du programme s'appuie sur ces gestes.
 
+![La leçon se lit dans le panneau Learn, à droite ; tu fais les gestes dans le logiciel, à gauche](images/lecon-a-cote-du-travail.png)
+
 Aucune connaissance n'est demandée. Compte une heure et demie, en sept leçons courtes.
 
 ## Les leçons

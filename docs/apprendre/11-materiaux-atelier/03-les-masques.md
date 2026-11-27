@@ -18,7 +18,7 @@ nom: masques
 ## Prépare la base
 
 ```etape
-Au-dessus de l'aperçu, clique **Cube**. Les masques d'usure se jugent sur des arêtes et des creux.
+Sous l'aperçu, clique **Cube**. Les masques d'usure se jugent sur des arêtes et des creux.
 ```
 
 ```etape

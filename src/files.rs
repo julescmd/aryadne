@@ -744,10 +744,10 @@ impl App {
             }
             if let Ok(path) = vault::safe(&self.root(), &e.rel) {
                 let ok = if e.is_dir { true } else { convert::kind_of(&path).is_some() };
-                if ok && ui.button(if e.is_dir { "convertir / compresser le dossier…" } else { "convertir / compresser…" }).clicked() {
+                if ok && ui.button(crate::i18n::t(if e.is_dir { "convertir / compresser le dossier…" } else { "convertir / compresser…" })).clicked() {
                     self.convert = convert::Dlg::new(vec![path]);
                     if self.convert.is_none() {
-                        self.toast = Some(("rien à convertir ici (images, vidéos, sons)".into(), Instant::now()));
+                        self.toast = Some((crate::i18n::t("rien à convertir ici (images, vidéos, sons)"), Instant::now()));
                     }
                 }
             }
@@ -764,7 +764,7 @@ impl App {
                     self.dialog = Some(Dialog::MoveIn { rel: e.rel.clone(), copy: true });
                 }
             }
-            if !e.is_dir && ui.button(if e.rel.to_lowercase().ends_with(".blend") { "ouvrir dans Blender" } else { "ouvrir avec l'app par défaut" }).clicked() {
+            if !e.is_dir && ui.button(crate::i18n::t(if e.rel.to_lowercase().ends_with(".blend") { "ouvrir dans Blender" } else { "ouvrir avec l'app par défaut" })).clicked() {
                 let r = vault::safe(&self.root(), &e.rel).and_then(|p| settings::open_external(&p));
                 if let Err(err) = r {
                     self.error = Some(err);
@@ -799,7 +799,7 @@ impl App {
                 ui.ctx().copy_text(full);
             }
             let label = if link_root { "retirer le lien (le fichier reste en place)" } else { "supprimer" };
-            if ui.button(RichText::new(label).color(p.missing)).clicked() {
+            if ui.button(RichText::new(crate::i18n::t(label)).color(p.missing)).clicked() {
                 if link_root {
                     let r = vault::trash(&self.root(), &e.rel);
                     if self.report(r).is_some() {

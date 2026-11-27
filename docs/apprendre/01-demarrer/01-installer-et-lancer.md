@@ -22,6 +22,8 @@ Lance l'exécutable d'Aryadne.
 
 Au premier lancement, un écran d'accueil s'affiche avec un seul bouton : **Open or create a vault** (ouvrir ou créer un coffre).
 
+![L'écran d'accueil d'Aryadne, avec le bouton Open or create a vault encadré](images/ecran-d-accueil.png)
+
 ```etape
 Clique **Open or create a vault**. Choisis un dossier vide, ou crée-en un. Par exemple `Documents/MonCoffre`.
 ```
@@ -58,6 +60,8 @@ nom: premiers-pas
 
 Le bouton ci-dessus ouvre une note vide dans le dossier `Apprendre/` de ton coffre.
 
+![Le bouton Try it yourself dans le panneau de la leçon](images/bouton-essayer.png)
+
 ```etape
 Clique **Try it yourself**. Une note vide s'ouvre.
 verifier: fichier.ouvert = md
@@ -73,6 +77,8 @@ Appuie sur `Ctrl+S` pour enregistrer.
 verifier: fichier.enregistre
 ```
 
+![La note premiers-pas avec le mot bonjour ; à droite, les trois étapes se sont cochées toutes seules](images/premiere-note.png)
+
 ```astuce
 Les notes s'enregistrent aussi toutes seules après un court délai. `Ctrl+S` reste un bon réflexe.
 ```
@@ -86,6 +92,8 @@ Tu peux avoir plusieurs coffres : un par projet, par exemple.
 - **Recent vaults** liste les derniers coffres ouverts.
 
 Le même choix existe dans **File › Vault › Change vault…**.
+
+![Le menu du coffre ouvert : le bouton du coffre est entouré en haut à gauche, Change vault est encadré en bas](images/menu-du-coffre.png)
 
 ```quiz
 Qu'est-ce qu'un coffre ?

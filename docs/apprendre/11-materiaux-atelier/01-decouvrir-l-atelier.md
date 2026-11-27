@@ -64,7 +64,7 @@ La recherche de la bibliothèque lit le nom français des préréglages, même q
 ## L'aperçu
 
 ```etape
-Au-dessus de l'aperçu, clique **Cube**. Le matériau s'affiche sur un cube aux arêtes adoucies.
+Sous l'aperçu, clique **Cube**. Le matériau s'affiche sur un cube aux arêtes adoucies.
 ```
 
 Le cube sert à juger l'usure des arêtes et la saleté des creux. La sphère montre mieux les reflets.

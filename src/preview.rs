@@ -643,6 +643,47 @@ fn embed(ui: &mut egui::Ui, rel: &str, sec: Option<&str>, ctx: &Ctx, out: &mut O
     ui.add_space(4.0);
 }
 
+fn zoom_id() -> egui::Id {
+    egui::Id::new("image agrandie")
+}
+
+/// L'image agrandie d'un clic : par-dessus toute la fenêtre, sur fond assombri, à sa taille réelle si elle tient.
+/// Un clic n'importe où ou Échap la referme.
+fn zoomed(ctx: &egui::Context, uri: &str, w: f32, h: f32) {
+    if ctx.data(|d| d.get_temp::<String>(zoom_id())).as_deref() != Some(uri) {
+        return;
+    }
+    let screen = ctx.content_rect();
+    let mut close = ctx.input(|i| i.key_pressed(egui::Key::Escape));
+    egui::Area::new(zoom_id()).order(egui::Order::Foreground).fixed_pos(screen.min).show(ctx, |ui| {
+        let (rect, resp) = ui.allocate_exact_size(screen.size(), egui::Sense::click());
+        ui.painter().rect_filled(rect, 0.0, egui::Color32::from_black_alpha(200));
+        let size = zoom_size(egui::vec2(w, h), rect.size() - egui::vec2(48.0, 48.0));
+        egui::Image::new(uri.to_string()).corner_radius(6).paint_at(ui, egui::Rect::from_center_size(rect.center(), size));
+        // Le clic qui a ouvert l'image ne doit pas la refermer dans la même passe
+        let passe = ui.ctx().cumulative_pass_nr();
+        if resp.on_hover_cursor(egui::CursorIcon::ZoomOut).clicked() && ui.ctx().data(|d| d.get_temp::<u64>(zoom_id().with("passe"))) != Some(passe) {
+            close = true;
+        }
+    });
+    if ctx.data(|d| d.get_temp::<u64>(zoom_id().with("passe"))).is_none() {
+        let passe = ctx.cumulative_pass_nr();
+        ctx.data_mut(|d| d.insert_temp(zoom_id().with("passe"), passe));
+    }
+    if close {
+        ctx.data_mut(|d| {
+            d.remove::<String>(zoom_id());
+            d.remove::<u64>(zoom_id().with("passe"));
+        });
+    }
+}
+
+/// Taille d'affichage d'une image agrandie : jamais plus grande que nature, toujours dans la place offerte.
+fn zoom_size(image: egui::Vec2, room: egui::Vec2) -> egui::Vec2 {
+    let k = (room.x / image.x.max(1.0)).min(room.y / image.y.max(1.0)).min(1.0).max(0.0);
+    image * k
+}
+
 fn image(ui: &mut egui::Ui, target: &str, width: Option<f32>, ctx: &Ctx) {
     let p = theme::pal();
     let src = if target.starts_with("http://") || target.starts_with("https://") {
@@ -668,7 +709,21 @@ fn image(ui: &mut egui::Ui, target: &str, width: Option<f32>, ctx: &Ctx) {
             let (w, h) = image::image_dimensions(&path).map(|(w, h)| (w as f32, h as f32)).unwrap_or((max, max * 0.6));
             let tw = width.unwrap_or(w).min(max);
             let uri = if path.starts_with("http") { path } else { format!("file://{path}") };
-            ui.add(egui::Image::new(uri).fit_to_exact_size(egui::vec2(tw, tw * h / w.max(1.0))).corner_radius(4));
+            let local = !uri.starts_with("http");
+            let mut img = egui::Image::new(uri.clone()).fit_to_exact_size(egui::vec2(tw, tw * h / w.max(1.0))).corner_radius(4);
+            // Une capture réduite à la largeur du panneau se lit mal : un clic l'agrandit par-dessus la fenêtre
+            let shrunk = local && tw < w - 1.0;
+            if shrunk {
+                img = img.sense(egui::Sense::click());
+            }
+            let r = ui.add(img);
+            if shrunk {
+                ui.painter().rect_stroke(r.rect, 4.0, egui::Stroke::new(1.0, if r.hovered() { p.accent } else { p.line }), egui::StrokeKind::Inside);
+                if r.on_hover_cursor(egui::CursorIcon::ZoomIn).on_hover_text(crate::i18n::t("cliquer pour agrandir")).clicked() {
+                    ui.ctx().data_mut(|d| d.insert_temp(zoom_id(), uri.clone()));
+                }
+            }
+            zoomed(ui.ctx(), &uri, w, h);
         }
         None => {
             ui.label(RichText::new(format!("{}  {target}", crate::lucide::IMAGE)).color(p.missing));
@@ -1154,6 +1209,15 @@ fn code_block(ui: &mut egui::Ui, code: &str, lang: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn image_agrandie_tient_dans_la_fenetre() {
+        // Plus petite que la place : taille réelle. Plus grande : réduite en gardant ses proportions.
+        assert_eq!(zoom_size(egui::vec2(400.0, 200.0), egui::vec2(1000.0, 800.0)), egui::vec2(400.0, 200.0));
+        assert_eq!(zoom_size(egui::vec2(2000.0, 1000.0), egui::vec2(1000.0, 800.0)), egui::vec2(1000.0, 500.0));
+        assert_eq!(zoom_size(egui::vec2(1000.0, 2000.0), egui::vec2(1000.0, 800.0)), egui::vec2(400.0, 800.0));
+        assert_eq!(zoom_size(egui::vec2(100.0, 100.0), egui::vec2(-10.0, 50.0)), egui::vec2(0.0, 0.0));
+    }
 
     #[test]
     fn cocher_une_case() {
