@@ -29,6 +29,8 @@ En bas du panneau **Layers**, clique le bouton **New Layer**. Un nouveau calque 
 verifier: calques >= 2
 ```
 
+![Le bouton New Layer (Ctrl+Maj+N), en bas du panneau Layers](images/bouton-new-layer.png)
+
 Le même geste est dans le menu **Layer ▾ › New layer**.
 
 ```attention
@@ -112,6 +114,8 @@ verifier: calques >= 4
 ```etape
 Sur le calque `ombre`, peins un côté du rond avec un gris moyen. La couleur du dessous s'assombrit sans disparaître.
 ```
+
+![Les calques trait, ombre (en Multiply), couleur et background : l'ombre fonce la couleur du dessous sans la cacher](images/trois-calques.png)
 
 ```astuce
 **Multiply** assombrit toujours. **Screen** éclaircit toujours. Avec ces deux modes, tu fais la plupart des ombres et des lumières.

@@ -12,6 +12,8 @@ objectifs: Peindre et retoucher une image ; Travailler en calques et en masques 
 
 Tout se passe dans l'étape **2D**, outil **Retouch**. Le fichier est un `.aryimg`.
 
+![Une image à calques dans l'outil Retouch : le trait au-dessus, l'ombre en Multiply, la couleur dessous](images/retouche-apercu.png)
+
 ## Les leçons
 
 1. [Ta première image](01-premiere-image.md) : 15 min

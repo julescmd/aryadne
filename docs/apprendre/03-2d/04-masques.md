@@ -18,7 +18,7 @@ nom: masques
 ```
 
 ```etape
-Clique **Try it yourself**. Ajoute une photo avec **Layer ▾ › Layer from an image…**.
+Clique **Try it yourself**. Ajoute une photo avec **Layer ▾ › Layer from an image…**, ou glisse une image du coffre depuis le panneau des fichiers.
 verifier: calques >= 2
 ```
 
@@ -27,6 +27,8 @@ verifier: calques >= 2
 ```etape
 Fais un clic droit sur le calque de la photo, dans le panneau **Layers**. Choisis **Add Layer Mask (Reveal All)**.
 ```
+
+![Le clic droit sur un calque : Add Layer Mask (Reveal All), et plus bas Create Clipping Mask et Blending Options](images/menu-masque.png)
 
 Une deuxième vignette apparaît à côté de celle du calque : c'est le masque. Il est blanc, donc tout est visible.
 
@@ -39,6 +41,8 @@ Clique la vignette du masque. Tu peins maintenant dans le masque, pas dans la ph
 ```etape
 Prends le pinceau avec `B`. Remets noir et blanc avec `D`. Peins en noir sur un bord de la photo : cette zone disparaît.
 ```
+
+![La vignette du masque, à droite de celle du calque, est choisie : le noir peint dans le masque cache la photo sans l'effacer](images/peindre-dans-le-masque.png)
 
 ```etape
 Échange les couleurs avec `X`. Peins en blanc au même endroit : la photo revient.

@@ -29,6 +29,8 @@ Ouvre **Layer ▾ › Frame-by-frame animation**. Un panneau d'animation s'ouvre
 verifier: calques >= 2
 ```
 
+![Le menu Layer, avec Frame-by-frame animation en tête](images/animation-image-par-image.png)
+
 Aryadne a créé un groupe « Animation » et son premier dessin. Le calque de fond reste en dehors du groupe.
 
 Le panneau d'animation, de gauche à droite :
@@ -68,6 +70,8 @@ Clique le bouton **Onion skin** pour la couper, puis encore pour la remettre.
 ```etape
 Dessine la balle un peu plus bas et un peu plus à droite.
 ```
+
+![Le panneau d'animation en bas : le bouton + ajoute une image, l'icône Onion skin montre en rose le dessin d'avant](images/pelure-d-oignon.png)
 
 ## Six dessins pour un rebond
 

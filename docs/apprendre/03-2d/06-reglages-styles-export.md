@@ -16,7 +16,7 @@ nom: reglages
 ```
 
 ```etape
-Clique **Try it yourself**. Ajoute une photo avec **Layer ▾ › Layer from an image…**.
+Clique **Try it yourself**. Ajoute une photo avec **Layer ▾ › Layer from an image…**, ou glisse une image du coffre depuis le panneau des fichiers.
 verifier: calques >= 2
 ```
 
@@ -34,9 +34,13 @@ En bas du panneau **Layers**, clique le bouton **New adjustment layer**. Choisis
 verifier: calques >= 3
 ```
 
+![Le bouton New adjustment layer ouvre la liste des réglages : Hue/Saturation est le quatrième](images/calque-de-reglage.png)
+
 ```etape
 Le calque de réglage est choisi. Bouge ses curseurs **Hue** et **Saturation** : toute l'image change.
 ```
+
+![Le calque Hue/Saturation au-dessus de la photo : Hue à 0,27 vire toute l'image au violet, sans toucher à la photo](images/teinte-saturation.png)
 
 ```etape
 Clique l'œil du calque de réglage. L'image d'origine revient, intacte. Remets l'œil.

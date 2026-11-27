@@ -987,7 +987,7 @@ impl Editor {
                         ui.label("×");
                         ch |= ui.add(egui::DragValue::new(&mut self.project.height).range(16..=32768).suffix(" px")).changed();
                     });
-                    ch |= ui.add(egui::DragValue::new(&mut self.project.fps).range(1.0..=1000.0).suffix(" i/s")).changed();
+                    ch |= ui.add(egui::DragValue::new(&mut self.project.fps).range(1.0..=1000.0).suffix(format!(" {}", crate::i18n::t_mid("i/s")))).changed();
                     for (w, h, label) in [(1920, 1080, "HD 1080p"), (3840, 2160, "4K UHD"), (1080, 1920, "vertical 9:16"), (1080, 1080, "carré")] {
                         if ui.button(label).clicked() {
                             (self.project.width, self.project.height) = (w, h);

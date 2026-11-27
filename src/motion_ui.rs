@@ -1463,7 +1463,7 @@ impl Editor {
                 Kind::Noise { w, h, scale, speed, contrast, color, color2, turbulent, seed } => {
                     section(ui, "Bruit fractal");
                     ui.horizontal(|ui| {
-                        changed |= ui.add(egui::DragValue::new(w).speed(2.0).range(1.0..=8000.0).prefix("L ")).changed();
+                        changed |= ui.add(egui::DragValue::new(w).speed(2.0).range(1.0..=8000.0).prefix(format!("{} ", crate::i18n::t_mid("L (largeur)").replace(" (largeur)", "")))).changed();
                         changed |= ui.add(egui::DragValue::new(h).speed(2.0).range(1.0..=8000.0).prefix("H ")).changed();
                         changed |= ui.color_edit_button_srgb(color).changed();
                         changed |= ui.color_edit_button_srgb(color2).changed();

@@ -34,6 +34,8 @@ Pour créer une image toi-même : **File › New › Other… (choose the kind)*
 | Le panneau **Layers** | Les calques |
 | La section **History** | Les états de l'image. Clique son titre pour la déplier |
 
+![L'outil Retouch : 1 la barre du haut et les options du pinceau, 2 la colonne d'outils, 3 la toile, 4 le panneau Layers, 5 History](images/ecran-retouch.png)
+
 ## Naviguer
 
 | Geste | Effet |
@@ -75,6 +77,8 @@ Deux pastilles : **Foreground color**, la couleur avec laquelle tu peins, et **B
 ```etape
 Clique la pastille **Foreground color**. Choisis un bleu. Peins un trait.
 ```
+
+![La pastille Foreground color, en bas de la colonne d'outils, ouvre le sélecteur de couleur](images/couleur-de-premier-plan.png)
 
 ```raccourci
 `X` échange les deux couleurs. `D` remet le noir et le blanc. `I` prend la pipette **Eyedropper** : un clic sur la toile reprend sa couleur.

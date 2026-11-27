@@ -4398,5 +4398,8 @@
   "il faut « nom = expression »": "expected « name = expression »",
   "texte en trop après l'expression": "extra text after the expression",
   "board vide\n\nglisse des images ou des notes ici, ou colle une image (Ctrl+V)\ndouble-clic : texte · B : dessin · molette : zoom · clic droit / milieu : déplacer la vue": "Empty board\n\nDrop images or notes here, or paste an image (Ctrl+V)\nDouble-click: text · B: draw · wheel: zoom · right / middle click: move the view",
-  "récentes": "recent"
+  "récentes": "recent",
+  "fond (calque)": "background",
+  "L (largeur)": "W",
+  "i/s": "fps"
 }

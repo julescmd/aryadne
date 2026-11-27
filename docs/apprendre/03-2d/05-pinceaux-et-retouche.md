@@ -35,8 +35,10 @@ Dans la barre du haut, le bouton à l'icône de pinceau ouvre les pinceaux prêt
 | **Round brush** | Le pinceau rond de base |
 
 ```etape
-Ouvre les pinceaux prêts. Choisis **Pencil**. Trace quelques lignes.
+Ouvre les pinceaux prêts : la petite icône de pinceau, au début de la deuxième ligne de la barre. Choisis **Pencil**. Trace quelques lignes.
 ```
+
+![L'icône de pinceau de la barre ouvre les pinceaux prêts : Pencil, Ink, Marker, Chalk, Airbrush, Dry paint, Round brush](images/pinceaux-prets.png)
 
 ```etape
 Choisis **Chalk**. Trace un trait large. Compare avec le crayon.
@@ -78,6 +80,8 @@ Deux boutons de symétrie reflètent ton trait : de l'autre côté de l'axe vert
 Active la symétrie verticale. Dessine la moitié d'un visage ou d'un vase : l'autre moitié se trace toute seule.
 ```
 
+![La symétrie verticale active (icône entourée) : l'axe rose partage la toile, et chaque trait se double de son reflet](images/symetrie.png)
+
 ```etape
 Active aussi la symétrie horizontale. Dessine un motif dans un coin : il se répète dans les quatre.
 ```
@@ -109,7 +113,7 @@ Désactive **Perspective**.
 ## Retoucher une photo
 
 ```etape
-Ajoute une photo avec **Layer ▾ › Layer from an image…**.
+Ajoute une photo avec **Layer ▾ › Layer from an image…**, ou glisse une image du coffre depuis le panneau des fichiers.
 verifier: calques >= 2
 ```
 

@@ -22,6 +22,10 @@ Clique **Try it yourself**. Ouvre ensuite **Layer ▾ › Layer from an image…
 verifier: calques >= 2
 ```
 
+```astuce
+Une image déjà dans ton coffre ? Glisse-la depuis le panneau des fichiers sur la toile : elle arrive en nouveau calque.
+```
+
 ## Les quatre outils de sélection
 
 | Outil | Touche | Usage |
@@ -61,6 +65,8 @@ Tiens `Alt` et entoure un bout de trop : il est retiré.
 Appuie sur `W`. Clique dans une zone de couleur unie, un ciel par exemple. La baguette prend toute la zone.
 ```
 
+![La baguette magique (W) : un clic sur la lune la sélectionne d'un trait pointillé. Tolerance règle la marge de couleur](images/baguette-magique.png)
+
 ```astuce
 La baguette prend trop, ou pas assez ? Change **Tolerance** dans la barre du haut. Plus haut, elle accepte des couleurs plus éloignées.
 ```
@@ -98,6 +104,8 @@ Choisis le format 1:1. Ajuste le cadre sur ton sujet. Appuie sur `Entrée` pour 
 ```etape
 Appuie sur `Ctrl+T` : **Free transform**. Des poignées entourent le calque.
 ```
+
+![Ctrl+T : des poignées entourent le calque, et la barre du haut donne la largeur, la hauteur et l'angle](images/transformation-libre.png)
 
 | Geste | Effet |
 |---|---|

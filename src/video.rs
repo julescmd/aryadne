@@ -708,7 +708,7 @@ impl Viewer {
             ui.separator();
             ui.label(crate::i18n::t("cadence"));
             let mut fps = self.play_fps;
-            if ui.add(egui::DragValue::new(&mut fps).range(1.0..=1000.0).speed(0.2).suffix(" i/s")).changed() {
+            if ui.add(egui::DragValue::new(&mut fps).range(1.0..=1000.0).speed(0.2).suffix(format!(" {}", crate::i18n::t_mid("i/s")))).changed() {
                 self.play_fps = fps;
                 self.clock = None;
             }
@@ -1261,7 +1261,7 @@ impl Viewer {
                     }
                 }
                 ui.label(crate::i18n::t("cadence"));
-                ui.add(egui::DragValue::new(&mut ex.fps).range(1.0..=1000.0).speed(0.2).suffix(" i/s"));
+                ui.add(egui::DragValue::new(&mut ex.fps).range(1.0..=1000.0).speed(0.2).suffix(format!(" {}", crate::i18n::t_mid("i/s"))));
                 ui.label(crate::i18n::t("en"));
                 for n in [1usize, 2, 3, 4, 8] {
                     if ui.selectable_label(ex.every == n, format!("{n}s")).clicked() {

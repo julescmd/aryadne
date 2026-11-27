@@ -918,7 +918,8 @@ impl Doc {
     }
 
     pub fn new(w: usize, h: usize, white: bool) -> Doc {
-        let base = if white { Layer::filled("fond", w, h, [255, 255, 255, 255]) } else { Layer::blank("calque 1", w, h) };
+        // Noms donnés dans la langue de l'interface : ce sont ceux que l'utilisateur lira dans Layers
+        let base = if white { Layer::filled(&crate::i18n::t_mid("fond (calque)").replace(" (calque)", ""), w, h, [255, 255, 255, 255]) } else { Layer::blank(&format!("{} 1", crate::i18n::t_mid("calque")), w, h) };
         Doc { w, h, layers: vec![base], active: 0, groups: vec![], guides: vec![], anim: None, palette: vec![] }
     }
 
@@ -1603,6 +1604,8 @@ pub struct Editor {
     pub message: Option<String>,
     adjust: Option<(Adjust, Layer, [f32; 2])>,
     renaming: Option<usize>,
+    /// Le champ de renommage vient de s'ouvrir : il demande le focus à la prochaine image
+    rename_fresh: bool,
     /// Texte en cours de saisie, avant d'être posé en calque
     text: Option<TextDraft>,
     /// Largeur du panneau des calques à la dernière image
@@ -1767,6 +1770,7 @@ impl Editor {
             message: None,
             adjust: None,
             renaming: None,
+            rename_fresh: false,
             xf: None,
             next_label: None,
             pressure: 1.0,
@@ -3138,7 +3142,7 @@ impl Editor {
                 let mut h = x.s[1] * 100.0;
                 let mut a = x.r.to_degrees();
                 let mut ch = false;
-                ch |= ui.add(egui::DragValue::new(&mut w).speed(0.5).max_decimals(1).suffix(" %").prefix("L ")).on_hover_text(crate::i18n::t("largeur")).changed();
+                ch |= ui.add(egui::DragValue::new(&mut w).speed(0.5).max_decimals(1).suffix(" %").prefix(format!("{} ", crate::i18n::t_mid("L (largeur)").replace(" (largeur)", "")))).on_hover_text(crate::i18n::t("largeur")).changed();
                 ch |= ui.add(egui::DragValue::new(&mut h).speed(0.5).max_decimals(1).suffix(" %").prefix("H ")).on_hover_text(crate::i18n::t("hauteur")).changed();
                 ch |= ui.add(egui::DragValue::new(&mut a).speed(0.5).max_decimals(1).suffix("°").prefix(format!("{} ", crate::lucide::ROTATE_CW))).on_hover_text(crate::i18n::t("angle (Maj : par 15°)")).changed();
                 if ui.button(egui::RichText::new(crate::lucide::FLIP_HORIZONTAL_2).size(14.0)).on_hover_text(crate::i18n::t("retourner horizontalement")).clicked() {
@@ -4619,7 +4623,7 @@ impl Editor {
                 }
                 ui.separator();
                 if let Some(a) = &mut self.doc.anim {
-                    ui.add(egui::DragValue::new(&mut a.fps).range(1.0..=60.0).speed(0.2).suffix(" i/s")).on_hover_text(crate::i18n::t("images par seconde"));
+                    ui.add(egui::DragValue::new(&mut a.fps).range(1.0..=60.0).speed(0.2).suffix(format!(" {}", crate::i18n::t_mid("i/s")))).on_hover_text(crate::i18n::t("images par seconde"));
                     let on = a.onion;
                     if ui.add(egui::Button::new(egui::RichText::new(crate::lucide::LAYERS).size(14.0)).selected(on).min_size(vec2(26.0, 22.0))).on_hover_text(crate::i18n::t("pelure d'oignon : l'image d'avant en rouge, celle d'après en vert")).clicked() {
                         a.onion = !on;
@@ -4727,7 +4731,7 @@ impl Editor {
         self.checkpoint();
         let n = self.doc.layers.len() + 1;
         let group = self.doc.layers[self.doc.active].group;
-        self.doc.layers.insert(self.doc.active + 1, Layer { group, ..Layer::blank(&format!("calque {n}"), self.doc.w, self.doc.h) });
+        self.doc.layers.insert(self.doc.active + 1, Layer { group, ..Layer::blank(&format!("{} {n}", crate::i18n::t_mid("calque")), self.doc.w, self.doc.h) });
         self.doc.active += 1;
         self.all();
     }
@@ -5325,9 +5329,14 @@ impl Editor {
                     let mut name = self.doc.layers[i].name.clone();
                     let mut cu = ui.new_child(egui::UiBuilder::new().max_rect(name_r).layout(egui::Layout::left_to_right(egui::Align::Center)));
                     let r = cu.add(egui::TextEdit::singleline(&mut name).desired_width(name_r.width()));
-                    r.request_focus();
+                    // Le champ prend le clavier une seule fois, à l'ouverture : redemander le focus à chaque image
+                    // le gardait ouvert après Entrée ou un clic ailleurs, et la frappe suivante finissait dans le nom
+                    let fresh = std::mem::take(&mut self.rename_fresh);
+                    if fresh {
+                        r.request_focus();
+                    }
                     self.doc.layers[i].name = name;
-                    if r.lost_focus() {
+                    if r.lost_focus() || (!fresh && !r.has_focus()) {
                         self.renaming = None;
                         self.save_due = Some(Instant::now());
                     }
@@ -5354,6 +5363,7 @@ impl Editor {
                 }
                 if resp.double_clicked() {
                     self.renaming = Some(i);
+                    self.rename_fresh = true;
                 }
                 // Clic droit : le menu du calque
                 resp.context_menu(|ui| {
