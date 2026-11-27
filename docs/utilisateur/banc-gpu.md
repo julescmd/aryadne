@@ -97,8 +97,11 @@ Le reste :
 | `With the deferred transfer for the cache` | La même chose, plus la copie demandée pour le cache des images. C'est ce que fait l'aperçu. L'écart avec la valeur d'avant est ce que coûte ce cache |
 | `With readback as before, not counting its drawing` | Le pas, puis la relecture attendue, comme Aryadne le faisait. Le dessin qui suivait n'est pas compté |
 | `Draw only` | Le dessin seul : normales et rasterisation |
+| `With shadows, textured material and selection outline` | Comme la première valeur, avec tout ce qu'a le tissu dans une scène 3D : l'ombre du soleil (reçue, avec une boule et un sol comme autres objets, et posée au sol), un matériau cuit en textures de 1024 × 1024 et le contour de sélection. Suivi du dessin seul dans ces conditions |
 
 Sur une vraie carte, la première valeur doit être nettement plus petite que la troisième. Sur un rendu logiciel, le dessin lui-même est lent et la comparaison ne dit rien.
+
+Le banc complet mesure ces lignes sur deux tissus : 250 000 et 1 000 000 de sommets. L'écart entre `Draw only` et le dessin complet est ce que coûtent les ombres, le matériau et la sélection. Il dépend surtout de la taille de l'image, peu du nombre de sommets, sauf pour la carte d'ombre du tissu, refaite à chaque image.
 
 Si un tissu ne tient pas sur la carte : « Cloth of N vertices: it does not fit on this card, measured on the CPU ».
 
@@ -150,7 +153,7 @@ Pour forcer le repli sur le processeur sans débrancher la carte (essai de déve
 
 ## Limites
 
-- Le banc mesure le calcul, pas l'affichage. La vue 3D d'Aryadne reste sur le processeur.
+- Le banc mesure le calcul et le dessin du tissu par la carte. Le reste de la vue 3D d'Aryadne (les objets ordinaires) est dessiné par le processeur et n'est pas mesuré ici.
 - Les chiffres varient avec la charge de la machine. Ferme les autres logiciels lourds et lance deux fois.
 - Sur un rendu logiciel, le banc passe tout seul à de petites tailles : les chiffres ne se comparent pas à ceux d'une vraie carte.
 

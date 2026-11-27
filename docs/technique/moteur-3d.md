@@ -191,4 +191,6 @@ La vue 3D d'une scène est un rasteriseur logiciel. Une simulation lourde n'y pa
 
 La caméra est la même : `direct_paint` écrit la projection de `Proj` en matrices, sur des points du monde (le cadre de la scène, `scene_frame`, donne le centre et l'échelle).
 
+Ces objets se choisissent au clic (image des identifiants de la carte), ont le contour orange, le matériau assigné (cuit en textures), l'éclairage de la vue et, avec les ombres portées, l'ombre du soleil principal reçue et posée sur l'image du rasteriseur. Le contour du rasteriseur est posé avant eux, avec la profondeur de l'objet entouré : un tissu devant le cache.
+
 Détails et limites : [Simulation sur carte graphique](simulation-gpu.md#afficher-sans-relire).

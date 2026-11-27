@@ -127,12 +127,20 @@ Onglet `Object`, section `Simulation` :
 | `Start (frames)` | Décalage de départ. 10 : la simulation part à la dixième image. -10 : elle a dix images d'avance |
 | `Simulation frame` | L'image de la simulation montrée, et sa durée |
 
-**Géométrie lourde.** À partir de 20 000 points, la géométrie est dessinée directement par la carte graphique dans la vue, sans revenir vers le processeur : c'est ce qui garde la vue fluide avec un gros tissu. Elle passe bien devant et derrière les autres objets. En échange, dans la vue seulement :
+**Géométrie lourde.** À partir de 20 000 points, la géométrie est dessinée directement par la carte graphique dans la vue, sans revenir vers le processeur : c'est ce qui garde la vue fluide avec un gros tissu. Elle se comporte comme les autres objets :
 
-- elle n'a pas d'ombres, et pas de matériau (elle prend la couleur de l'objet, ou son attribut `Cd`) ;
-- elle n'a pas de contour de sélection, et ne se choisit pas au clic : choisis-la dans la liste de la scène.
+- **Clic.** Elle se choisit au clic, avec le contour orange et le gizmo. Une fumée ou un feu se choisit aussi au clic, là où il est bien visible.
+- **Matériau.** Le matériau assigné (liste `Material`, ou glissé sur l'objet) est cuit en textures dès qu'il change : couleur, rugosité, métal. Il suit les UV de la géométrie (une `Grid` en a). Sans UV, l'objet prend la couleur, la rugosité et le métal moyens du matériau. Sans matériau, la couleur de l'objet ou son attribut `Cd`.
+- **Lumière.** Elle est éclairée comme le reste de la vue : l'environnement (HDRI, intensité, exposition) et le premier soleil de la scène.
+- **Ombres.** Avec `Cast shadows` (onglet `World`), elle reçoit l'ombre du soleil principal, la sienne comme celle des autres objets, et pose la sienne sur le sol et sur les autres objets. Une fumée pose une ombre douce au sol. Ces ombres ont la même force que celles des autres objets.
 
-Le rendu final et les exports ne changent pas : ombres, matériau, tout y est. En dessous de 20 000 points, rien de tout cela ne s'applique. En mode d'affichage compatible non plus (voir [Réglages](reglages.md#affichage--carte-graphique-ou-mode-compatible)).
+Quelques écarts restent, dans la vue seulement :
+
+- une seule lumière fait de l'ombre : le premier soleil de la scène, sinon la lumière de la vue ;
+- un matériau qui dépend de la position (un dégradé en hauteur, par exemple) est vu comme sur un carreau plat ;
+- la peinture posée sur l'objet ne se voit pas ; la fumée n'a pas de contour de sélection, seulement le gizmo.
+
+Le rendu final et les exports ne changent pas : ils traitent cette géométrie comme tout autre objet. En dessous de 20 000 points, rien de tout cela ne s'applique. En mode d'affichage compatible non plus (voir [Réglages](reglages.md#affichage--carte-graphique-ou-mode-compatible)).
 
 Elle ne se modifie pas en mode édition : elle se modifie dans son graphe. Détail : [Géométrie et simulation en nœuds](noeuds-geometrie.md#dans-une-scène-3d).
 

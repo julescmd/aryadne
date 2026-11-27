@@ -142,6 +142,6 @@ Les champs sont rangés en demi-précision : 14 octets par voxel dans un fichier
 - Obstacles : une boule et une boîte par solveur. Pas encore de maillage quelconque.
 - Un obstacle qui bouge arrête la fumée mais ne la pousse pas.
 - Dans l'onglet **Simulation**, la fumée est dessinée par-dessus les points et les surfaces. Dans une scène 3D, la profondeur est respectée.
-- Dans la vue 3D et les rendus, la fumée ne projette pas d'ombre sur les objets et ne les éclaire pas. Elle s'ombre elle-même.
+- La fumée s'ombre elle-même. Dans la vue 3D, avec `Cast shadows`, elle pose aussi une ombre douce sur le sol et sur les objets, et un tissu dessiné par la carte devant elle la cache. Dans les rendus, elle ne projette pas d'ombre sur les objets. Elle n'éclaire rien, même quand elle brûle.
 - `Move, rotate` déplace les points, pas le volume. Pour placer une fumée, règle `Center` de `Empty volume`, ou déplace l'objet dans la scène.
 - En 256 et plus, garder chaque image pour le cache coûte du temps : le banc le mesure.

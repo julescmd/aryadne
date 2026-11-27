@@ -440,7 +440,8 @@ Un triangle couvre l'image. Pour chaque pixel, le fragment lance un rayon (inver
 | Fumée | Opacité `1 − exp(−densité × opacité × pas)` |
 | Ombre | Six pas de deux voxels vers la lumière principale |
 | Flamme | Champ `flamme` × lueur, couleur d'après la température (`volume::flame_color`, la même formule dans le noyau) |
-| Profondeur | Celle d'une image calculée ailleurs (`gpudraw::Soft`) arrête le rayon |
+| Profondeur | Celle d'une image calculée ailleurs (`gpudraw::Soft`) arrête le rayon, comme celle d'un maillage dessiné par la carte (`Cam::front`, l'image des identifiants de `gpudraw`) |
+| Ombre portée | Là où le rayon finit (une surface de l'image calculée ailleurs, sinon le plan du sol `Shadow::floor`), 24 pas vers la lumière additionnent la densité. L'ombre est posée sous la fumée, en noir avec cette opacité (`Cam::shadow`) |
 
 `Source::Live` lit le tampon du solveur tel quel. `Source::Data` envoie les voxels d'un volume repris du cache, quand sa version change.
 
@@ -471,6 +472,7 @@ Dans une scène, un volume seul donne un objet de deux triangles minuscules aux 
 | `gpusmoke::carte_contre_processeur` | Quatre images avec sources, combustion, obstacles, vent : écart sous 2 %, même divergence de départ |
 | `gpusmoke::sans_maccormack_et_par_un_masque` | Advection simple, source par masque, grille non cubique |
 | `gpuvolume::la_carte_dessine_comme_le_processeur` | Même image des deux côtés, et occultation par la profondeur |
+| `gpuvolume::ombre_de_la_fumee_au_sol` | Une boule de fumée pose son ombre au sol du côté opposé à la lumière, rien sans ombres |
 | `geo::fumee::fumee_par_les_nodes` | Les trois exemples, le cache en mémoire et sur le disque |
 | `geoscene::a_scene_renders_its_smoke` | Une fumée dans une scène et dans le rendu |
 
@@ -479,7 +481,7 @@ Dans une scène, un volume seul donne un objet de deux triangles minuscules aux 
 - Grille dense. Pas de tuiles creuses, pas de montée en résolution.
 - Obstacles analytiques seulement (une boule, une boîte), sans vitesse propre.
 - La relecture de chaque image pour le cache est toujours demandée : 16 octets par voxel. En 256³, c'est 270 Mo par image. Le banc mesure ce que ça coûte.
-- Le dessin ne lit que la lumière principale. La fumée ne projette pas d'ombre sur les surfaces et ne les éclaire pas.
+- Le dessin ne lit que la lumière principale. Dans la vue, la fumée pose une ombre douce sur le sol et sur l'image du rasteriseur ; pas sur un maillage dessiné par la carte, et pas dans le rendu final. Elle n'éclaire rien.
 - Le rendu final de la fumée se fait sur le processeur.
 
 ## Écrire un nouveau solveur sur la carte
@@ -559,11 +561,17 @@ L'interface et le solveur partagent la file de la carte. Avant d'envoyer un pas,
 | `Source::Live` | Le tampon de positions du solveur sert de tampon de sommets. Aucune copie |
 | `Source::Data` | Positions venues du processeur, envoyées quand leur version change. Une image reprise du cache a ainsi le même aspect |
 | Normales | Un noyau de calcul somme, pour chaque sommet, les normales de ses triangles. Il relit le tampon de positions |
-| Ombrage | Une lumière, un peu de ciel, les deux faces éclairées |
+| Ombrage | La lumière principale (GGX), le ciel, les deux faces éclairées. `Cam::scene` (`Lighting`) donne l'éclairage de la scène : ciel vu d'en haut et d'en bas, soleil, exposition, puis la courbe de tons du rasteriseur. Sans lui, un éclairage fixe de studio |
+| `Surface` | Rugosité et métal du morceau, et ses textures cuites (`Baked` : couleur sRGB, rugosité et métal, moyennes). Les textures ne servent qu'avec des UV (`Part::uv`) ; elles sont envoyées une fois par clé, avec leurs niveaux réduits |
 | `Soft` | La profondeur d'une image calculée ailleurs. Un pixel du maillage caché par elle n'est pas dessiné |
+| Image des identifiants | `Rg32Uint` sans lissage : les bits de la profondeur et le code du morceau (`id_code` : numéro × 4 + contour). `Canvas::pick(x, y)` en relit un pixel au clic ; `Canvas::front()` la donne à la fumée |
+| Contour | Une passe plein écran lit l'image des identifiants : un pixel hors d'un morceau choisi, à moins de `Cam::outline` pixels de lui, devient orange (clair : actif) |
+| Ombres | `Cam::shadow` (`Shadow`). Deux cartes de profondeur vues de la lumière, orthographiques sur une boule du monde (`light_matrix`) : celle des maillages dessinés ici, refaite à chaque image, et celle des autres objets (`Occluders`), envoyés à la carte et redessinés seulement quand eux ou la lumière changent. Le maillage lit les deux (4 lectures comparées). Une passe plein écran pose ensuite l'ombre des maillages sur l'image calculée ailleurs : le point du monde vient de sa profondeur, sa normale des pixels voisins ; sans surface, le plan du sol. Elle ne pose rien là où les autres objets font déjà de l'ombre (leur ombre est dans l'image), ni sur le maillage lui-même |
 | `Canvas::pixels()` | Relit l'image. Pour les tests et le banc seulement |
 
-Par maillage, la carte garde les triangles, le voisinage des sommets (48 octets par sommet pour une grille), les normales et les couleurs : environ 90 Mo pour un million de sommets.
+Par maillage, la carte garde les triangles, le voisinage des sommets (48 octets par sommet pour une grille), les normales, les couleurs et les UV : environ 100 Mo pour un million de sommets. En plus, par vue : l'image des identifiants (8 octets par pixel) et sa profondeur, deux cartes d'ombre de 2048² (1024² sur un rendu logiciel), et les textures de huit matériaux au plus.
+
+Ordre d'une image : normales, cartes d'ombre, image des identifiants, maillages, puis ombre posée (sous) et contour (dessus).
 
 Le dessin ne passe pas par un `PaintCallback` d'egui mais par une texture à part, enregistrée auprès d'egui (`register_native_texture`). Elle a son propre tampon de profondeur et son lissage, sans toucher à la passe de l'interface, et le même code sert sans interface.
 
@@ -576,7 +584,19 @@ Le dessin ne passe pas par un `PaintCallback` d'egui mais par une texture à par
 
 Dans la scène, la vue est un rasteriseur logiciel. Elle retire ces objets de son modèle (`scene::build_ranges_without`), calcule elle-même leur géométrie par tranches (`geoscene::geo_live`), et les dessine par-dessus son image en donnant à `gpudraw` la profondeur de cette image. L'occultation est juste dans les deux sens.
 
-**Limites dans la scène**, assumées : l'objet dessiné par la carte n'a ni ombres portées ou reçues, ni matériau (sa couleur ou son attribut `Cd`), ni contour de sélection, et ne se choisit pas au clic dans la vue. En dessous de 20 000 points, il passe par le rendu logiciel et garde tout cela. Le rendu final et les exports relisent la géométrie et la traitent comme tout autre objet.
+Ce que la scène lui donne (`model3d`) :
+
+| Élément | Comment |
+|---|---|
+| Sélection | `Viewer::direct_pick` lit un pixel de l'image des identifiants (numéro = rang de l'objet + 1), et pour une fumée un pixel de son image (assez opaque et pas noir : pas son ombre). Ensuite seulement, le rayon dans le modèle du rasteriseur |
+| Contour | Celui de `gpudraw`. Le contour du rasteriseur est posé avant le dessin de la carte ; sous ses pixels, la profondeur donnée à la carte est celle de l'objet entouré (`soft_for_direct`) : un tissu derrière l'objet ne cache pas son contour, un tissu devant le cache |
+| Matériau | Le graphe assigné est cuit à plat (`texexport::bake_flat`, carré des UV, 1024² ou 512² sur un rendu logiciel) dans un fil à part, quand son programme change (`DirectMat`). L'ancienne texture reste montrée pendant la cuisson |
+| Lumière | `main_sun` : le premier soleil de la scène, sinon la lumière de la vue. `scene_lighting` : l'irradiance de l'HDRI vers le haut et vers le bas, son intensité, l'exposition |
+| Ombres | Avec `Look::shadows`. Les autres objets sont le modèle préparé du rasteriseur (centré, à l'échelle du cadre), envoyés quand sa version change. Le sol (`Prepared::floor`) reçoit l'ombre quand l'arrière-plan est caché, comme dans le rasteriseur. La force de l'ombre posée sur l'image (`shadow_strength`) est celle que le rasteriseur donnerait à une surface claire tournée vers le haut privée de ce soleil, avec la même courbe de tons : les deux ombres se raccordent |
+
+Limites assumées : une seule lumière fait de l'ombre ; un matériau qui dépend de la position est vu comme sur un carreau plat ; la peinture posée sur l'objet n'est pas montrée ; la fumée n'a pas de contour ; les autres objets ne reçoivent l'ombre de la fumée que par l'image du rasteriseur (un tissu dessiné par la carte ne la reçoit pas). En dessous de 20 000 points, l'objet passe par le rendu logiciel. Le rendu final et les exports relisent la géométrie et la traitent comme tout autre objet.
+
+Tests (`gpudraw`) : `choisi_au_clic_et_entoure`, `ombre_recue_sur_la_carte` (par un autre morceau et par `Occluders`), `ombre_portee_sur_l_image_d_ailleurs` (sol et surface), `materiau_en_textures`, `matrice_de_la_lumiere`, `codes_et_textures` ; `texexport::cuisson_a_plat_pour_la_carte`.
 
 `ARY_DIRECT=toujours` ou `jamais` force le choix. `ARY_DBG_RELECTURE=1` écrit dans le terminal la pile d'appels de chaque relecture : de quoi trouver quel node fait revenir une colonne.
 
@@ -588,7 +608,7 @@ Dans la scène, la vue est un rasteriseur logiciel. Elle retire ces objets de so
 - **Fumée : grille creuse, montée en résolution, obstacles en maillage.** Voir les limites de la fumée plus haut.
 - **Fluides, corps rigides, cheveux, destruction** : rien n'est branché.
 - **Affichage direct des particules et des fils.** Seules les surfaces (géométries avec faces) sont dessinées depuis la carte. Points et arêtes passent encore par le processeur.
-- **Ombres et matériaux dans le dessin direct.** Voir les limites de `gpudraw`.
+- **Dessin direct : plusieurs lumières qui font de l'ombre, matériau évalué en 3D**, et l'ombre de la fumée sur un maillage dessiné par la carte. Voir les limites plus haut.
 - **Sauter le transfert quand le cache ne sert pas.** Chaque pas demande encore sa relecture (jamais attendue). Le banc mesure ce qu'elle coûte : ligne « avec le transfert différé pour le cache ».
 - **Cache disque sur la carte.** Le cache figé passe par les colonnes du processeur.
 
