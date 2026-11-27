@@ -4401,5 +4401,7 @@
   "récentes": "recent",
   "fond (calque)": "background",
   "L (largeur)": "W",
-  "i/s": "fps"
+  "i/s": "fps",
+  "Pair-impair": "Even-odd",
+  "ppp": "dpi"
 }

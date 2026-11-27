@@ -525,7 +525,7 @@ pub struct Variable {
 impl Doc {
     /// Les noms des modes (au moins un)
     pub fn mode_names(&self) -> Vec<String> {
-        if self.modes.is_empty() { vec!["clair".into()] } else { self.modes.clone() }
+        if self.modes.is_empty() { vec![crate::i18n::t_mid("clair")] } else { self.modes.clone() }
     }
 
     /// La valeur d'une variable dans un mode (le premier si ce mode n'a pas de valeur)
@@ -632,7 +632,7 @@ impl Doc {
 impl Doc {
     pub fn starter() -> Doc {
         Doc {
-            boards: vec![Board { name: "Plan de travail 1".into(), x: 0.0, y: 0.0, w: 1080.0, h: 1080.0, bg: Some([255, 255, 255, 255]), grid: None, persp: None, device: 0, mode: 0 }],
+            boards: vec![Board { name: format!("{} 1", crate::i18n::t("Plan de travail")), x: 0.0, y: 0.0, w: 1080.0, h: 1080.0, bg: Some([255, 255, 255, 255]), grid: None, persp: None, device: 0, mode: 0 }],
             shapes: vec![],
             next_id: 1,
             swatches: vec![[24, 24, 27, 255], [255, 255, 255, 255], [236, 108, 89, 255], [244, 191, 80, 255], [86, 166, 122, 255], [84, 128, 220, 255], [150, 110, 210, 255]],
@@ -910,7 +910,7 @@ impl Doc {
                 pc.push(gid);
             }
         }
-        let g = Shape { id: gid, name: name.into(), kind: Kind::Group { children, op }, x: b[0], y: b[1], parent, ..Shape::base() };
+        let g = Shape { id: gid, name: crate::i18n::t(name), kind: Kind::Group { children, op }, x: b[0], y: b[1], parent, ..Shape::base() };
         let at = *members.last().unwrap() + 1;
         self.shapes.insert(at.min(self.shapes.len()), g);
         Some(gid)

@@ -14,6 +14,8 @@ L'outil est dans l'esprit d'Illustrator et de Figma. Les formes restent nettes �
 
 Tout se passe dans l'étape **2D**, outil **Vector**. Le fichier est un `.aryvec`.
 
+![L'outil Vector : la colonne d'outils, le plan de travail avec ses formes, les calques à gauche et les propriétés à droite](images/vectoriel-apercu.png)
+
 ## Les leçons
 
 1. [Tes premières formes](01-premieres-formes.md) : 15 min

@@ -69,6 +69,8 @@ verifier: calques >= 2
 Donne au soleil un **Fill** jaune. Dans **Stroke**, choisis un orange et monte l'épaisseur.
 ```
 
+![Le soleil choisi : Fill jaune, et Stroke ajouté avec + Outline, épaisseur 14 px](images/remplissage-et-contour.png)
+
 ```raccourci
 `Maj` contraint la forme : carré avec le rectangle, cercle avec l'ellipse, angles de 45° avec la ligne.
 ```
@@ -82,14 +84,16 @@ Donne au soleil un **Fill** jaune. Dans **Stroke**, choisis un orange et monte l
 | **Line** | `L` | |
 
 ```etape
-Appuie sur `S`. Trace une étoile dans le ciel. Dans les options de l'outil, change **Points** et **Inner**.
+Appuie sur `S`. Trace une étoile dans le ciel. Dans le panneau des propriétés, change **Points** et **Inner**.
 verifier: calques >= 3
 ```
 
 ```etape
-Appuie sur `Y`. Dans les options de l'outil, règle **Sides** sur 3. Trace ce triangle en bas du plan : une colline. Donne-lui un vert.
+Appuie sur `Y`. Trace un polygone en bas du plan. Dans le panneau des propriétés, règle **Sides** sur 3 : un triangle, ta colline. Donne-lui un vert.
 verifier: calques >= 4
 ```
+
+![Un polygone tracé avec Y : Sides à 3 dans le panneau des propriétés en fait un triangle](images/polygone-sides.png)
 
 ## Sélectionner et déplacer
 

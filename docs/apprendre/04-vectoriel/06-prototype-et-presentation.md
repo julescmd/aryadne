@@ -42,8 +42,10 @@ Montre tes écrans dans un cadre de téléphone : sur le plan de travail, règle
 ## Relier un bouton à un écran
 
 ```etape
-Choisis le rectangle du bouton de `Accueil`. Dans ses propriétés, trouve le réglage **Prototype: on click, go to this artboard**. Choisis `Détail`.
+Choisis le rectangle du bouton de `Accueil`. Dans ses propriétés, sous **Location**, ouvre la liste à maillon (**No link** au départ). Au survol : **Prototype: on click, go to this artboard**. Choisis `Détail`.
 ```
+
+![Le bouton choisi sur Accueil : sous Location, la liste à maillon (No link par défaut) propose les plans de travail. Ici, Détail](images/lien-de-prototype.png)
 
 ```etape
 Fais de même pour le bouton « Retour » : il mène à `Accueil`.
@@ -74,6 +76,8 @@ L'état de survol ne se voit pas pendant que tu dessines. Il ne joue qu'en prés
 ```etape
 Clique le bouton **Present the prototype**. Le premier plan de travail s'affiche seul.
 ```
+
+![La présentation : le plan Accueil seul, et en bas « Esc: exit, arrows: artboards »](images/presenter.png)
 
 ```etape
 Passe la souris sur le bouton : il s'éclaircit et se soulève. Clique : tu arrives sur `Détail`. Clique « Retour ».

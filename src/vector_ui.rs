@@ -760,16 +760,16 @@ impl Editor {
                     let n = self.doc.mode_names().len();
                     let c = self.doc.swatches.get(self.doc.vars.len() % self.doc.swatches.len().max(1)).copied().unwrap_or([120, 120, 130, 255]);
                     let mut k = self.doc.vars.len() + 1;
-                    while self.doc.vars.iter().any(|v| v.name == format!("couleur {k}")) {
+                    while self.doc.vars.iter().any(|v| v.name == format!("{} {k}", crate::i18n::t_mid("couleur"))) {
                         k += 1;
                     }
-                    self.doc.vars.push(crate::vector::Variable { name: format!("couleur {k}"), values: vec![c; n] });
+                    self.doc.vars.push(crate::vector::Variable { name: format!("{} {k}", crate::i18n::t_mid("couleur")), values: vec![c; n] });
                 }
                 if ui.small_button(l::COLUMNS_2).on_hover_text(crate::i18n::t("Ajouter un mode (une colonne de valeurs, ex. sombre)")).clicked() {
                     if self.doc.modes.is_empty() {
-                        self.doc.modes.push(crate::i18n::t("clair"));
+                        self.doc.modes.push(crate::i18n::t_mid("clair"));
                     }
-                    let name = if self.doc.modes.len() == 1 { crate::i18n::t("sombre") } else { format!("{} {}", crate::i18n::t("mode"), self.doc.modes.len() + 1) };
+                    let name = if self.doc.modes.len() == 1 { crate::i18n::t_mid("sombre") } else { format!("{} {}", crate::i18n::t("mode"), self.doc.modes.len() + 1) };
                     self.doc.modes.push(name);
                     for v in &mut self.doc.vars {
                         // Le nouveau mode part des couleurs du premier, inversées en clarté pour un sombre
@@ -884,7 +884,7 @@ impl Editor {
                     ui.add(egui::DragValue::new(&mut b.y).prefix("y "));
                 });
                 ui.horizontal(|ui| {
-                    ui.add(egui::DragValue::new(&mut b.w).range(1.0..=20000.0).prefix("l "));
+                    ui.add(egui::DragValue::new(&mut b.w).range(1.0..=20000.0).prefix(format!("{} ", crate::i18n::t_mid("L (largeur)").replace(" (largeur)", ""))));
                     ui.add(egui::DragValue::new(&mut b.h).range(1.0..=20000.0).prefix("h "));
                 });
                 ui.horizontal(|ui| {
@@ -901,7 +901,7 @@ impl Editor {
                 });
                 egui::ComboBox::from_id_salt("vec-board-preset").selected_text(crate::i18n::t("Format…")).show_ui(ui, |ui| {
                     for (name, w, h) in BOARD_PRESETS {
-                        if ui.button(crate::i18n::t(name)).clicked() {
+                        if ui.button(crate::i18n::t_mid(name)).clicked() {
                             b.w = w;
                             b.h = h;
                         }
@@ -911,7 +911,7 @@ impl Editor {
                 let mut decline = None;
                 egui::ComboBox::from_id_salt("vec-board-decline").selected_text(format!("{} {}", l::COPY, crate::i18n::t("Décliner…"))).show_ui(ui, |ui| {
                     for (name, w, h) in BOARD_PRESETS {
-                        if ui.button(crate::i18n::t(name)).on_hover_text(crate::i18n::t("Une copie du plan dans ce format, à côté")).clicked() {
+                        if ui.button(crate::i18n::t_mid(name)).on_hover_text(crate::i18n::t("Une copie du plan dans ce format, à côté")).clicked() {
                             decline = Some((name, w, h));
                         }
                     }
@@ -1156,7 +1156,7 @@ impl Editor {
             match &mut s.kind {
                 Kind::Rect { w, h, r } => {
                     ui.horizontal(|ui| {
-                        ch |= ui.add(egui::DragValue::new(w).range(1.0..=100000.0).prefix("l ")).changed();
+                        ch |= ui.add(egui::DragValue::new(w).range(1.0..=100000.0).prefix(format!("{} ", crate::i18n::t_mid("L (largeur)").replace(" (largeur)", "")))).changed();
                         ch |= ui.add(egui::DragValue::new(h).range(1.0..=100000.0).prefix("h ")).changed();
                     });
                     ui.horizontal(|ui| {
@@ -1175,7 +1175,7 @@ impl Editor {
                 }
                 Kind::Ellipse { w, h } | Kind::Image { w, h, .. } => {
                     ui.horizontal(|ui| {
-                        ch |= ui.add(egui::DragValue::new(w).range(1.0..=100000.0).prefix("l ")).changed();
+                        ch |= ui.add(egui::DragValue::new(w).range(1.0..=100000.0).prefix(format!("{} ", crate::i18n::t_mid("L (largeur)").replace(" (largeur)", "")))).changed();
                         ch |= ui.add(egui::DragValue::new(h).range(1.0..=100000.0).prefix("h ")).changed();
                     });
                 }
@@ -1244,6 +1244,11 @@ impl Editor {
                     if self.focus_text {
                         te.request_focus();
                         self.focus_text = false;
+                        // Tout le texte choisi : la frappe remplace « Text » au lieu de s'y ajouter
+                        if let Some(mut st) = egui::TextEdit::load_state(ui.ctx(), te.id) {
+                            st.cursor.set_char_range(Some(egui::text::CCursorRange::select_all_str(text)));
+                            st.store(ui.ctx(), te.id);
+                        }
                     }
                     ch |= te.changed();
                     ui.horizontal(|ui| {
@@ -2328,7 +2333,9 @@ impl Editor {
         let p = crate::theme::pal();
         ui.add_space(6.0);
         ui.label(egui::RichText::new(format!("{} · {}", crate::i18n::t("Exporter"), self.doc.boards[bi].name)).size(11.5).strong().color(p.muted));
-        ui.horizontal(|ui| {
+        // Les boutons reviennent à la ligne : avec « animation » (deux plans ou plus), la ligne débordait
+        // et élargissait le panneau hors de la fenêtre
+        ui.horizontal_wrapped(|ui| {
             for k in [1.0f32, 2.0, 3.0] {
                 if ui.selectable_label(self.export_scale == k, format!("{k}×")).clicked() {
                     self.export_scale = k;
@@ -2349,7 +2356,7 @@ impl Editor {
                 });
                 crate::modifiers::row(ui, &crate::i18n::t("résolution"), |ui| {
                     for d in [150.0f32, 300.0] {
-                        if ui.selectable_label(self.print.dpi == d, format!("{d:.0} ppp")).clicked() {
+                        if ui.selectable_label(self.print.dpi == d, format!("{d:.0} {}", crate::i18n::t_mid("ppp"))).clicked() {
                             self.print.dpi = d;
                         }
                     }
@@ -3734,7 +3741,7 @@ impl Editor {
                 if let Some(s) = self.doc.shapes.iter_mut().find(|s| s.id == g) {
                     s.component = true;
                     s.instance_of = 0;
-                    if s.name.is_empty() || s.name == "Groupe" {
+                    if s.name.is_empty() || s.name == "Groupe" || s.name == crate::i18n::t("Groupe") {
                         s.name = crate::i18n::t("Composant");
                     }
                 }

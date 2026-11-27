@@ -64,6 +64,8 @@ Appuie sur `A`. Clique la feuille. Ses points apparaissent.
 Glisse un point pour le déplacer. Glisse une de ses poignées pour changer la courbe.
 ```
 
+![Un tracé à la plume vu en sélection directe (A) : ses points, et les poignées d'un point courbe. Closed indique un tracé fermé](images/plume-et-poignees.png)
+
 | Action | Geste |
 |---|---|
 | Déplacer un point ou une poignée | Glisser |

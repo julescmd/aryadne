@@ -40,6 +40,8 @@ Le menu propose trois cibles :
 Choisis **Copy as** SwiftUI. Le code est dans le presse-papiers.
 ```
 
+![L'icône de code </>, à côté du nom de la forme : Copy as CSS, Copy as SwiftUI, Copy as egui](images/copier-le-code.png)
+
 ```etape
 Crée une note avec `Ctrl+N` et colle avec `Ctrl+V`. Lis le code : tu y retrouves la taille, la couleur et le rayon des coins de ton bouton.
 verifier: fichier.ouvert = md

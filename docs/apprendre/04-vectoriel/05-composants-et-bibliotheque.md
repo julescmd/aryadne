@@ -28,11 +28,15 @@ Un composant est une forme, ou un groupe, que tu réutilises. Ses copies sont de
 Choisis le groupe du bouton. Appuie sur `Ctrl+Alt+K` : **Create component**.
 ```
 
+![Le groupe du bouton devenu Component (Ctrl+Alt+K) : la section Component le marque Main](images/creer-un-composant.png)
+
 ## Poser des instances
 
 ```etape
 Tiens `Alt` et glisse le composant maître : tu poses une instance. Fais-le trois fois.
 ```
+
+![Deux instances posées avec Alt + glisser : dans Layers, elles s'appellent Component · Instance](images/instances.png)
 
 Le bouton **New instance** fait la même chose.
 

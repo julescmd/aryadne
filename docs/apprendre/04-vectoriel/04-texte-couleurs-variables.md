@@ -53,6 +53,8 @@ Aryadne indique le contraste entre le texte et son fond, selon la règle WCAG : 
 Donne au titre une couleur proche de celle du fond. Regarde l'indicateur de lisibilité baisser. Remets une couleur contrastée.
 ```
 
+![La section Text du titre : son contenu, la police, la taille, Spacing, et l'indicateur Contrast qui note la lisibilité (AA)](images/texte-et-contraste.png)
+
 ### Du texte sur un tracé
 
 Un texte peut suivre une forme. Dans les réglages du texte, le menu à l'icône de courbe liste les tracés du dessin. Choisis-en un : les lettres suivent sa forme.
@@ -79,12 +81,14 @@ Dans le panneau **Variables**, clique **New color variable**. Nomme-la `fond`.
 ```
 
 ```etape
-Clique **Add a mode**. Une deuxième colonne de valeurs apparaît. Les deux modes s'appellent clair et sombre.
+Clique **Add a mode**. Une deuxième colonne de valeurs apparaît. Les deux modes s'appellent **Light** (clair) et **Dark** (sombre).
 ```
 
 ```etape
 Donne à `fond` un blanc cassé dans le premier mode, et un gris très foncé dans le deuxième.
 ```
+
+![Le panneau Variables : la variable fond a une valeur par mode, Light et Dark. Le plan de travail choisit son mode juste au-dessus](images/variables-et-modes.png)
 
 ```etape
 Crée une deuxième variable, `texte` : presque noir dans le premier mode, presque blanc dans le deuxième.

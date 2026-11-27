@@ -36,6 +36,8 @@ verifier: calques >= 2
 Choisis les deux cercles avec `V`. Dans le panneau des propriétés, section **Combine**, clique **Subtract**.
 ```
 
+![Deux cercles choisis : dans Combine, la troisième icône est Subtract, « the top shapes cut into the bottom one »](images/combine-subtract.png)
+
 La forme du dessus creuse celle du dessous. Il reste un croissant.
 
 ## Les opérations
@@ -57,6 +59,8 @@ Ces opérations sont non destructives. Les formes d'origine restent dans un grou
 ```etape
 Dans le panneau **Layers (vector)**, déplie le groupe créé. Choisis le cercle du dessus. Déplace-le : le croissant change d'épaisseur.
 ```
+
+![Le croissant obtenu : dans Layers, un groupe Subtract garde les deux cercles intacts](images/croissant.png)
 
 ```astuce
 Garde tes combinaisons modifiables le plus longtemps possible. Tu ajusteras la forme sans tout refaire.
