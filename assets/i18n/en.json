@@ -4246,5 +4246,9 @@
   "L'affichage sur carte n'a pas démarré la dernière fois : Aryadne est resté en mode compatible. Choisis « carte graphique » pour réessayer.": "Graphics card display did not start last time: Aryadne stayed in compatibility mode. Choose \"graphics card\" to try again.",
   "L'affichage sur carte a refusé de démarrer : Aryadne est en mode compatible. Choisis « carte graphique » pour réessayer au prochain démarrage.": "Graphics card display refused to start: Aryadne is in compatibility mode. Choose \"graphics card\" to try again at the next start.",
   "Choisi par la variable d'environnement ARY_RENDU.": "Chosen by the ARY_RENDU environment variable.",
-  "sans relecture": "no readback"
+  "sans relecture": "no readback",
+  "image affichée sans relecture (pas à 16 passes + dessin direct)": "displayed frame without readback (16-pass step + direct draw)",
+  "avec le transfert différé pour le cache": "with the deferred transfer for the cache",
+  "dessin seul": "draw only",
+  "avec relecture comme avant, sans son dessin": "with readback as before, not counting its drawing"
 }

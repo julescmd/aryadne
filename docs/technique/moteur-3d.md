@@ -184,3 +184,11 @@ Intel Open Image Denoise est téléchargé une fois dans le dossier de l'utilisa
 - **`model3d.rs` mêle** le rendu, la scène, les modes et l'interface dans un seul fichier.
 
 La suite prévue est résumée dans la [feuille de route du moteur](feuille-de-route-moteur.md).
+
+## Géométries de nodes dessinées par la carte
+
+La vue 3D d'une scène est un rasteriseur logiciel. Une simulation lourde n'y passe pas : la relire à chaque image coûterait plus que de la calculer. `Viewer::direct_update` et `Viewer::direct_paint` (structure `DirectGeo`) retirent du modèle de la scène les géométries de nodes d'au moins 20 000 points, et les dessinent avec `gpudraw` par-dessus l'image, en lui donnant la profondeur du rendu logiciel (`Frame::depth`).
+
+La caméra est la même : `direct_paint` écrit la projection de `Proj` en matrices, sur des points du monde (le cadre de la scène, `scene_frame`, donne le centre et l'échelle).
+
+Détails et limites : [Simulation sur carte graphique](simulation-gpu.md#afficher-sans-relire).

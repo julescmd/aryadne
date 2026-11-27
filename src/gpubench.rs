@@ -158,6 +158,24 @@ pub struct Tissu {
     /// Octets lus et écrits par passe, et mémoire gardée sur la carte
     pub octets: f64,
     pub memoire: u64,
+    /// Une image affichée, de trois façons (seulement sur la carte)
+    pub affichage: Option<Affichage>,
+}
+
+/// Le temps d'une image **affichée** : un pas au budget de 16 passes avec niveaux grossiers, puis
+/// de quoi la montrer. C'est ce que l'artiste attend entre deux images de l'aperçu.
+#[derive(Clone, Debug, Default)]
+pub struct Affichage {
+    /// Pas, puis dessin direct depuis les tampons du solveur (1280 × 720). Rien ne quitte la carte.
+    pub direct_ms: f64,
+    /// Comme l'aperçu le fait : en plus, une relecture est demandée pour le cache des images, mais
+    /// jamais attendue ni copiée
+    pub cliche_ms: f64,
+    /// Comme avant : pas, puis relecture attendue et copiée vers le processeur (le dessin
+    /// logiciel qui suivait n'est pas compté)
+    pub relu_ms: f64,
+    /// Le dessin seul : normales et rasterisation
+    pub dessin_ms: f64,
 }
 
 /// Une image de tissu au budget de `budget` passes, découpée comme le solveur le conseille.
@@ -224,6 +242,7 @@ fn tissu(cote: usize, images: usize) -> Tissu {
         }
         (t.elapsed().as_secs_f64() * 1000.0 / images as f64, c.launches())
     };
+    let count = images;
     let (ms, lances) = mesure(&par);
     let (passe_ms, lancements) = (ms / PASSES as f64, lances as f64 / PASSES as f64);
     let images = plans.iter().map(|(budget, niveaux, auto, par)| {
@@ -233,7 +252,91 @@ fn tissu(cote: usize, images: usize) -> Tissu {
     let t = Instant::now();
     c.sync();
     let relecture_ms = t.elapsed().as_secs_f64() * 1000.0;
-    Tissu { points: n, couleurs, lancements, octets_avant, niveaux, correction, images, carte: carte && c.on_gpu(), preparation_ms, passe_ms, relecture_ms, passe_processeur_ms, octets, memoire }
+    let affichage = plans.iter().find(|p| p.0 == 16 && p.1 && !p.2).or(plans.first()).and_then(|plan| affichage(&mut c, cote, &plan.3, dt, count.max(2)));
+    Tissu { points: n, couleurs, lancements, octets_avant, niveaux, correction, images, carte: carte && c.on_gpu(), preparation_ms, passe_ms, relecture_ms, passe_processeur_ms, octets, memoire, affichage }
+}
+
+/// Mesure une image affichée, sans relecture et avec (voir `Affichage`). `None` hors de la carte.
+fn affichage(c: &mut crate::gpucloth::Cloth, cote: usize, par: &crate::gpucloth::Params, dt: f32, images: usize) -> Option<Affichage> {
+    use crate::gpudraw::{from_rows, paint, Cam, Canvas, Part, Source, IDENTITY};
+    let g = crate::gpusim::gpu().filter(|_| c.on_gpu())?;
+    let n = cote * cote;
+    let tris = || {
+        let mut t = Vec::with_capacity((cote - 1) * (cote - 1) * 2);
+        for z in 0..cote - 1 {
+            for x in 0..cote - 1 {
+                let i = (z * cote + x) as u32;
+                t.push([i, i + 1, i + cote as u32 + 1]);
+                t.push([i, i + cote as u32 + 1, i + cote as u32]);
+            }
+        }
+        t
+    };
+    // Une vue de trois quarts sur le tissu pendu (2 m de côté, accroché à 1,6 m)
+    let (w, h) = (1280.0f32, 720.0f32);
+    let (yaw, pitch, dist, target) = (0.6f32, 0.35f32, 4.5f32, [0.0f32, 0.8, 0.0]);
+    let ((sy, cy), (sp, cp)) = (yaw.sin_cos(), pitch.sin_cos());
+    let (x, y, z) = ([cy, 0.0, -sy], [-sy * sp, cp, -cy * sp], [sy * cp, sp, cy * cp]);
+    let dot = |a: [f32; 3], b: [f32; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+    let (kx, ky, near, far) = (2.0 * h * 0.9 / w, 2.0 * 0.9, 0.05f32, 100.0f32);
+    let f = far / (far - near);
+    let depth = [-z[0], -z[1], -z[2], dist + dot(z, target)];
+    let vp = from_rows([[x[0] * kx, x[1] * kx, x[2] * kx, -dot(x, target) * kx], [y[0] * ky, y[1] * ky, y[2] * ky, -dot(y, target) * ky], [depth[0] * f, depth[1] * f, depth[2] * f, (depth[3] - near) * f], depth]);
+    let cam = Cam { view_proj: vp, depth_row: depth, light: [0.3, 0.8, 0.5], eye: [target[0] + z[0] * dist, target[1] + z[1] * dist, target[2] + z[2] * dist], soft: None };
+    let mut canvas = Canvas::default();
+    let mut draw = |c: &mut crate::gpucloth::Cloth| {
+        let Some(live) = c.live() else { return false };
+        paint(&mut canvas, [w as u32, h as u32], &cam, &[Part { n, source: Source::Live(&live), tris: (0xBA2C_0000 + cote as u64, &tris), colors: None, base: [0.79, 0.71, 0.64], model: IDENTITY }])
+    };
+    let gravity = [0.0, -9.81 * dt, 0.0];
+    // Échauffement : pipelines, tampons du maillage
+    c.push_uniform(gravity, 1.0);
+    c.step(dt, par);
+    if !draw(c) {
+        eprintln!("banc : le dessin direct n'a rien donné (carte : {}, erreur : {})", c.on_gpu(), g.broken());
+        return None;
+    }
+    c.sync();
+    let per = |t: Instant| t.elapsed().as_secs_f64() * 1000.0 / images as f64;
+    // 1. Rien ne quitte la carte
+    let t = Instant::now();
+    for _ in 0..images {
+        c.push_uniform(gravity, 1.0);
+        c.step(dt, par);
+        draw(c);
+    }
+    g.finish();
+    let direct_ms = per(t);
+    c.sync();
+    // 2. Comme l'aperçu : un cliché par image, pour le cache, jamais attendu
+    let t = Instant::now();
+    let mut kept = Vec::with_capacity(images);
+    for _ in 0..images {
+        c.push_uniform(gravity, 1.0);
+        c.step(dt, par);
+        kept.push(c.shot());
+        draw(c);
+    }
+    g.finish();
+    let cliche_ms = per(t);
+    drop(kept);
+    c.sync();
+    // 3. Comme avant : chaque image est relue et copiée avant de continuer
+    let t = Instant::now();
+    for _ in 0..images {
+        c.push_uniform(gravity, 1.0);
+        c.step(dt, par);
+        let _ = c.read();
+    }
+    let relu_ms = per(t);
+    // 4. Le dessin seul
+    let t = Instant::now();
+    for _ in 0..images {
+        draw(c);
+    }
+    g.finish();
+    let dessin_ms = per(t);
+    (c.on_gpu() && !g.broken()).then_some(Affichage { direct_ms, cliche_ms, relu_ms, dessin_ms })
 }
 
 /// Le même petit tissu sur la carte et sur le processeur : écart maximal des positions après trois images.
@@ -558,6 +661,9 @@ impl Rapport {
                 s += &format!("  {} : {} · {} {:.1} {}\n", t("niveaux grossiers"), m.niveaux, tm("une correction coûte"), m.correction, tm("passes"));
             }
             s += &format!("  {} : {:.0} {} · {} : {:.1} ms\n", t("à 24 images par seconde"), 1000.0 / 24.0 / m.passe_ms, tm("passes par image"), tm("relecture"), m.relecture_ms);
+            if let Some(a) = &m.affichage {
+                s += &format!("  {} : {:.1} ms ({:.0} {}) · {} : {:.1} ms · {} : {:.1} ms ({:.0} {}) · {} : {:.1} ms\n", t("image affichée sans relecture (pas à 16 passes + dessin direct)"), a.direct_ms, 1000.0 / a.direct_ms.max(1e-6), tm("images/s"), tm("avec le transfert différé pour le cache"), a.cliche_ms, tm("avec relecture comme avant, sans son dessin"), a.relu_ms, 1000.0 / a.relu_ms.max(1e-6), tm("images/s"), tm("dessin seul"), a.dessin_ms);
+            }
             s += &format!("  {} : {:.2} ms {} (×{:.1}) · {} : {:.0} ms · {} : {:.0} Mo\n", t("processeur"), m.passe_processeur_ms, tm("par passe"), m.passe_processeur_ms / m.passe_ms, tm("préparation"), m.preparation_ms, tm("mémoire sur la carte"), m.memoire as f64 / 1e6);
         }
         if let Some(e) = self.ecart_tissu {

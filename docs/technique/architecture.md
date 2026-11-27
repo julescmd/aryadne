@@ -168,8 +168,10 @@ Le board est un cas à part : c'est une page (`View::Boards`), pas une variante 
 | `geo` | Moteur de géométrie et de simulation |
 | `geoview` | Aperçu 3D, lecture, tableau des attributs |
 | `geoscene` | Géométrie de nodes dans une scène 3D : image de scène vers image de simulation, maillage, obstacles venus de la scène, suite d'OBJ |
+| `gfx` | Moteur d'affichage de l'interface (wgpu ou OpenGL), repli, carte partagée |
 | `gpusim` | Socle de simulation sur carte graphique |
 | `gpucloth` | Tissu en VBD |
+| `gpudraw` | Dessin d'un maillage depuis les tampons d'un solveur |
 | `gpubench` | Banc de mesure |
 | `expr` | Expressions des propriétés animées (Motion) |
 
@@ -203,7 +205,27 @@ Trois moyens reviennent partout.
 | `std::thread` + canal ou `Arc<Mutex>` | Un travail long, relu à chaque image | Chargement d'un modèle, rendu final, export |
 | Calcul borné dans le temps | Faire un peu de travail par image | Simulation : `Engine::deadline` arrête le calcul et le reprend à l'image suivante |
 
-La carte graphique des simulations est ouverte à part de celle de l'interface (qui dessine en OpenGL). Voir [Simulation sur carte graphique](simulation-gpu.md).
+L'interface dessine avec wgpu, et les simulations travaillent sur **la même carte** : une vue affiche l'état d'un solveur sans le relire. Voir [Simulation sur carte graphique](simulation-gpu.md).
+
+### Le moteur d'affichage (`gfx`)
+
+| Moteur | Quand |
+|---|---|
+| `wgpu` | Par défaut. Vulkan, DirectX 12 ou Metal ; OpenGL si rien d'autre n'existe |
+| `glow` (OpenGL pur) | Mode compatible : réglage, variable `ARY_RENDU=glow`, ou repli |
+
+`gfx::pick` choisit, dans cet ordre : la variable `ARY_RENDU`, le réglage `Prefs::renderer`, le souvenir d'un démarrage raté, sinon wgpu.
+
+Deux replis, dans `main` :
+
+- wgpu refuse de démarrer : `eframe::run_native` rend une erreur, et `main` relance aussitôt avec `glow` (la boucle d'événements de winit est réutilisée) ;
+- le logiciel meurt avant sa première image : le témoin `rendu-en-cours`, posé avant le démarrage et effacé à la deuxième image, est encore là au lancement suivant. `gfx::carry_over` le change en `rendu-repli` (qui contient la version), et cette version démarre en mode compatible tant que le fichier existe.
+
+Les deux témoins sont dans le dossier de configuration. Choisir « carte graphique » dans les réglages efface `rendu-repli`.
+
+Toutes les fenêtres natives détachées marchent avec les deux moteurs : egui-wgpu garde un seul `RenderState` pour toutes les fenêtres.
+
+Mesuré sous Xvfb avec llvmpipe (compilation de mise au point) : première image après environ 1,0 s avec wgpu contre 0,8 s avec glow, et 270 Mo de mémoire contre 245 Mo. Avec `ARY_DBG`, le terminal donne le moteur, la carte et le délai de la première image.
 
 ## Écriture des fichiers
 

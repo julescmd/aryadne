@@ -72,9 +72,21 @@ Le reste :
 | `Coarse levels` | Nombre de versions plus grossières du tissu, et coût d'une correction en passes |
 | `At 24 frames per second` › `Passes per frame` | Combien de passes tiennent dans une image à 24 images par seconde |
 | `Readback` | Temps pour relire les positions depuis la carte |
+| `Displayed frame without readback` | Voir plus bas |
 | `CPU` › `Per pass` | Le même calcul sur le processeur, pour comparer |
 | `Setup` | Préparation au chargement : voisinages, couleurs, rangement, niveaux grossiers |
 | `Memory on the card` | Mémoire occupée par ce tissu |
+
+**L'image affichée.** Une ligne mesure ce que tu attends vraiment entre deux images de l'aperçu : un pas au budget de 16 passes, puis de quoi le montrer.
+
+| Valeur | Sens |
+|---|---|
+| `Displayed frame without readback (16-pass step + direct draw)` | Le pas, puis le dessin du tissu en 1280 × 720 directement depuis la carte. Rien ne la quitte |
+| `With the deferred transfer for the cache` | La même chose, plus la copie demandée pour le cache des images. C'est ce que fait l'aperçu. L'écart avec la valeur d'avant est ce que coûte ce cache |
+| `With readback as before, not counting its drawing` | Le pas, puis la relecture attendue, comme Aryadne le faisait. Le dessin qui suivait n'est pas compté |
+| `Draw only` | Le dessin seul : normales et rasterisation |
+
+Sur une vraie carte, la première valeur doit être nettement plus petite que la troisième. Sur un rendu logiciel, le dessin lui-même est lent et la comparaison ne dit rien.
 
 Si un tissu ne tient pas sur la carte : « Cloth of N vertices: it does not fit on this card, measured on the CPU ».
 
@@ -116,7 +128,7 @@ Ce sont des extrapolations. Elles disent un ordre de grandeur, pas une promesse.
 - **Rendu logiciel.** Si le rapport dit « Software rendering (no real graphics card) », Aryadne n'a pas trouvé de vraie carte. Les chiffres disent seulement que le code marche. Vérifie tes pilotes.
 - **Le débit de copie** est ta référence. Un calcul qui atteint une bonne part de ce débit est bien écrit pour ta carte.
 - **Passes par image.** Si le tissu d'un million de sommets fait plus de 32 passes par image à 24 i/s, il se simule en temps réel sur ta machine. En dessous, il faudra moins de points, ou mettre la simulation en cache.
-- **Relecture.** Si elle pèse lourd devant une passe, c'est le retour des positions vers l'affichage qui limite, pas le calcul.
+- **Relecture.** Elle ne pèse plus sur l'affichage quand Aryadne dessine avec la carte (voir [Réglages](reglages.md#affichage--carte-graphique-ou-mode-compatible)). Elle compte encore pour le rendu final, les exports et le mode compatible.
 
 ## Sans carte
 

@@ -1,11 +1,13 @@
 # Simulation sur carte graphique
 
-Trois modules.
+Cinq modules.
 
 | Module | Rôle |
 |---|---|
+| `gfx` | Le moteur d'affichage de l'interface (wgpu ou OpenGL), et la carte qu'il partage avec les simulations |
 | `gpusim` | Le socle : tout ce que les solveurs partagent, et rien d'autre |
 | `gpucloth` | Le tissu en Vertex Block Descent, avec sa version processeur |
+| `gpudraw` | Le dessin d'un maillage directement depuis les tampons d'un solveur |
 | `gpubench` | Le banc de mesure |
 
 La bibliothèque est **wgpu** : la même interface pour Vulkan, Metal et DirectX 12. Les noyaux de calcul sont écrits en **WGSL**, dans des chaînes de caractères du code Rust.
@@ -36,7 +38,17 @@ La version processeur sert trois fois : de repli quand il n'y a pas de carte, de
 
 Une carte est refusée si elle offre moins de 8 tampons de stockage par noyau, ou des groupes de moins de 64 fils.
 
-L'interface d'Aryadne dessine de son côté en OpenGL. Les deux ne se gênent pas.
+### La carte de l'interface
+
+L'interface d'Aryadne dessine avec wgpu (c'est le moteur par défaut d'eframe 0.37). `gpu()` prend **le même appareil** qu'elle : `gfx::ui()` rend son `RenderState`, et `Gpu::shared` vaut vrai. C'est ce qui permet à une vue de dessiner les tampons d'un solveur sans les relire.
+
+Pour cela, `gfx::wgpu_setup()` fait demander à l'interface toutes les limites de la carte, pas celles par défaut de WebGPU.
+
+`gpu()` ouvre son propre appareil dans trois cas : l'interface est en mode compatible OpenGL (`glow`), il n'y a pas d'interface (`--banc-gpu`, tests), ou l'appareil de l'interface est trop limité. En mode compatible, wgpu n'a alors droit qu'à Vulkan, DirectX 12 et Metal : le contexte OpenGL de la fenêtre appartient à l'interface. Sur une machine qui n'a qu'OpenGL, les simulations passent donc sur le processeur dans ce mode.
+
+Conséquence du partage : les commandes de calcul et celles de l'affichage passent par **la même file**. Un pas de simulation de 20 ms retarde de 20 ms l'image d'interface qui le suit. C'est voulu (l'image montre ce pas), mais il ne faut jamais empiler les pas : voir « Un seul pas en route » plus bas.
+
+`Gpu::msaa4` dit si la carte sait lisser un dessin à quatre échantillons par pixel (garanti par WebGPU, pas par tous les pilotes OpenGL).
 
 ### Erreurs : ne jamais fermer le logiciel
 
@@ -89,8 +101,12 @@ Une carte refuse plus de 65 535 groupes par dimension. Avec des groupes de 64 fi
 | Méthode | Usage |
 |---|---|
 | `ready()` | Les données sont-elles arrivées ? Ne bloque pas. À appeler à chaque image de l'interface |
+| `block()` | Attend qu'elles soient arrivées, sans les copier |
+| `peek(f)` | Regarde les octets arrivés sans les copier ni rendre la relecture. Ne bloque pas |
 | `wait()` | Attend la carte et rend les octets |
 | `take::<T>()` | Les données, dans leur type |
+
+Une colonne porte aussi l'usage « tampon de sommets » : une vue la dessine telle quelle.
 
 `Gpu::finish()` attend que la carte ait fini tout ce qui lui a été envoyé.
 
@@ -337,13 +353,102 @@ Pour l'usage, voir [Banc de mesure](../utilisateur/banc-gpu.md).
 7. **Le trait `Solver`** dans `geo.rs`, et l'inscription dans `solvers()` et `SOLVER_NAMES`. Voir [Ajouter un solveur](ajouter.md#ajouter-un-solveur).
 8. **Une mesure dans le banc.**
 
+## Afficher sans relire
+
+Avant, chaque image de simulation revenait vers le processeur pour être dessinée. Sur une RTX 4070, un tissu d'un million de sommets coûtait 20 ms de calcul et 14 ms de relecture. Trois mécanismes font disparaître cette relecture du chemin de l'affichage.
+
+### 1. Les clichés (`gpucloth::Shot`)
+
+`Cloth::shot()` rend l'état du tissu à la fin d'un pas, sous la forme d'un **cliché**.
+
+| Méthode | Sens |
+|---|---|
+| `live` | De quoi dessiner depuis la carte : le tampon de positions, le centre, l'ordre de rangement (`Live`) |
+| `Live::current()` | Les tampons montrent-ils encore cet état ? Faux dès que le tissu a avancé |
+| `ready()` | `state()` rendrait-il la main sans attendre ? Ne bloque pas |
+| `wait()` | Attend la fin du calcul, sans rien copier |
+| `state()` | Positions et vitesses dans l'ordre de la géométrie. La première demande copie les données |
+| `bounds_now(pas)` | Boîte englobante approchée, lue dans les octets arrivés, sans les copier |
+
+Sur la carte, le cliché **demande** la relecture (noyau `pack`, copie vers un tampon lisible) mais ne l'attend pas. Tant que personne n'appelle `state()`, rien n'est copié vers le processeur.
+
+Ce transfert demandé à chaque pas sert le cache des images : revenir en arrière dans la barre de temps relit le cliché, sans resimuler. Il occupe la carte, pas le processeur. Ce qu'il coûte se lit dans le banc : l'écart entre « sans relecture » et « avec le transfert différé pour le cache ».
+
+`Cloth::live()` donne de quoi dessiner sans demander aucune relecture (le banc s'en sert).
+
+**Si la carte échoue.** Le tissu garde le dernier cliché arrivé entier (`base`) et les pas envoyés depuis (`ahead`). `recover()` repart de ce cliché et refait ces pas sur le processeur. Un cliché dont la relecture échoue rend le dernier état connu, pas un tissu en miettes.
+
+### 2. Les colonnes paresseuses (`geo::Column`)
+
+Une colonne de géométrie peut ne pas avoir ses données du côté du processeur.
+
+| Forme | Contenu |
+|---|---|
+| `Lazy::Shot` | Positions ou vitesses d'un cliché, avec éventuellement des forces uniformes posées dessus |
+| `Lazy::Concat` | Plusieurs colonnes l'une après l'autre |
+
+`Column::data()` lit les données, une seule fois. Sa taille, sa version et `ready()` se connaissent sans lire. `Column::parts()` rend les morceaux d'une colonne : une vue y cherche ce qu'elle peut dessiner sans rien lire.
+
+Trois nodes en profitent :
+
+| Node | Ce qu'il fait d'une colonne encore sur la carte |
+|---|---|
+| Solveur (tissu sur carte) | Rend `P` et `v` paresseuses |
+| Forces | Si le vent est le même partout, il **note** les forces sur la colonne (`Force`) au lieu de la lire. Le solveur les applique sur la carte, par le noyau `tissu-impulsion`, avec les mêmes arrondis que le calcul du processeur |
+| Réunir | Met les colonnes bout à bout sans les copier |
+
+Tout autre node qui lit les positions (transformer, supprimer des points, un champ qui dépend de `P`) fait revenir la colonne. C'est correct, juste plus lent : la relecture n'a lieu que quand un node en a besoin.
+
+Le solveur garde aussi son dernier pas en mémoire (`ClothSession::memo`). Redemandé avec les mêmes entrées (miniature d'un node de la zone, tableau des attributs), il rend le même cliché sans recalculer.
+
+### 3. Un seul pas en route
+
+L'interface et le solveur partagent la file de la carte. Avant d'envoyer un pas, le solveur regarde si le précédent est fini (`Cloth::busy()`).
+
+| Contexte | Si la carte calcule encore |
+|---|---|
+| Aperçu, vue de la scène (calcul par tranches) | Le moteur rend la main. L'image sera redemandée à la prochaine image de l'interface |
+| Rendu final, cache figé, tests | `Cloth::wait()` attend la fin du calcul, sans rien copier |
+
+### Le dessin (`gpudraw`)
+
+`paint(canvas, taille, caméra, morceaux)` dessine des maillages dans une texture (`Canvas`), que l'interface affiche comme une image.
+
+| Élément | Sens |
+|---|---|
+| `Source::Live` | Le tampon de positions du solveur sert de tampon de sommets. Aucune copie |
+| `Source::Data` | Positions venues du processeur, envoyées quand leur version change. Une image reprise du cache a ainsi le même aspect |
+| Normales | Un noyau de calcul somme, pour chaque sommet, les normales de ses triangles. Il relit le tampon de positions |
+| Ombrage | Une lumière, un peu de ciel, les deux faces éclairées |
+| `Soft` | La profondeur d'une image calculée ailleurs. Un pixel du maillage caché par elle n'est pas dessiné |
+| `Canvas::pixels()` | Relit l'image. Pour les tests et le banc seulement |
+
+Par maillage, la carte garde les triangles, le voisinage des sommets (48 octets par sommet pour une grille), les normales et les couleurs : environ 90 Mo pour un million de sommets.
+
+Le dessin ne passe pas par un `PaintCallback` d'egui mais par une texture à part, enregistrée auprès d'egui (`register_native_texture`). Elle a son propre tampon de profondeur et son lissage, sans toucher à la passe de l'interface, et le même code sert sans interface.
+
+### Où le dessin direct sert
+
+| Vue | Ce qui est dessiné par la carte |
+|---|---|
+| Aperçu de l'onglet Simulation (`geoview`) | Toute géométrie qui a des faces. Points et fils restent dessinés par le processeur, sous l'image |
+| Vue 3D d'une scène (`model3d`, `DirectGeo`) | Les géométries de nodes d'au moins 20 000 points (`geoscene::DIRECT_MIN`) |
+
+Dans la scène, la vue est un rasteriseur logiciel. Elle retire ces objets de son modèle (`scene::build_ranges_without`), calcule elle-même leur géométrie par tranches (`geoscene::geo_live`), et les dessine par-dessus son image en donnant à `gpudraw` la profondeur de cette image. L'occultation est juste dans les deux sens.
+
+**Limites dans la scène**, assumées : l'objet dessiné par la carte n'a ni ombres portées ou reçues, ni matériau (sa couleur ou son attribut `Cd`), ni contour de sélection, et ne se choisit pas au clic dans la vue. En dessous de 20 000 points, il passe par le rendu logiciel et garde tout cela. Le rendu final et les exports relisent la géométrie et la traitent comme tout autre objet.
+
+`ARY_DIRECT=toujours` ou `jamais` force le choix. `ARY_DBG_RELECTURE=1` écrit dans le terminal la pile d'appels de chaque relecture : de quoi trouver quel node fait revenir une colonne.
+
 ## Ce qui manque
 
 - **Auto-collision par triangles.** Elle se fait entre sommets, avec une épaisseur de l'ordre de la maille. Des faces, puis des bornes de déplacement par sommet (OGC), permettraient une épaisseur fine.
 - **Frottement entre les couches** du tissu.
 - **Collision avec un maillage** quelconque.
 - **Fumée, fluides, corps rigides, cheveux, destruction** : rien n'est branché. Le banc contient seulement des noyaux d'essai pour la fumée.
-- **Affichage sans relecture.** L'état est relu de la carte vers le processeur pour être affiché, puisque la vue est sur le processeur. Avec une vue sur carte graphique, cette relecture disparaîtrait.
+- **Affichage direct des particules et des fils.** Seules les surfaces (géométries avec faces) sont dessinées depuis la carte. Points et arêtes passent encore par le processeur.
+- **Ombres et matériaux dans le dessin direct.** Voir les limites de `gpudraw`.
+- **Sauter le transfert quand le cache ne sert pas.** Chaque pas demande encore sa relecture (jamais attendue). Le banc mesure ce qu'elle coûte : ligne « avec le transfert différé pour le cache ».
 - **Cache disque sur la carte.** Le cache figé passe par les colonnes du processeur.
 
 La suite est résumée dans la [feuille de route du moteur](feuille-de-route-moteur.md).

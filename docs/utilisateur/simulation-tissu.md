@@ -110,7 +110,7 @@ Sous les réglages, une ligne résume le dernier pas :
 - le nombre de `points` ;
 - le nombre de `colors` ;
 - le nombre de `passes` ;
-- le temps du pas en millisecondes.
+- le temps du pas en millisecondes. Sur la carte, c'est celui du dernier pas fini, arrondi au temps d'une image de l'interface.
 
 Sans carte utilisable : « No usable graphics card: cloth computed on the CPU ». Avant la première lecture : « Press play to see where the computation runs ».
 
@@ -127,6 +127,25 @@ Sans carte utilisable : « No usable graphics card: cloth computed on the CPU »
 7. **Le tissu ne se calme pas.** Monte `Fold damping`. Si tout le tissu oscille, monte `Damping`, ou `Air friction` dans le nœud `Forces`.
 8. **Le tissu passe à travers lui-même.** Active `Self-collision`.
 9. **C'est trop lent.** Réduis le nombre de points de la grille, ou passe au solveur sur carte graphique.
+
+## Ce que montre l'aperçu
+
+Une géométrie qui a des faces (une grille, un tissu) est montrée en **surface ombrée**, dessinée par la carte graphique. La lumière suit la vue. Les points seuls et les fils restent montrés en points et en traits.
+
+Avec le solveur sur carte graphique, le tissu est dessiné **directement depuis la carte** : ses positions ne reviennent pas vers le processeur. La ligne sous l'aperçu se termine alors par `no readback`. C'est ce qui garde l'aperçu fluide sur un tissu de plusieurs centaines de milliers de points.
+
+Pendant la lecture, pour ne rien faire revenir de la carte :
+
+- les miniatures des nœuds de la simulation gardent leur dernière image. Elles se mettent à jour à l'arrêt ;
+- le tableau des attributs garde ses dernières valeurs. Il se met à jour à l'arrêt.
+
+Ce qui fait revenir les positions vers le processeur, donc ralentit un gros tissu :
+
+- un nœud placé **après** le solveur qui lit les positions (`Move, rotate`, `Delete points`, un champ branché sur `Location`). `Merge`, `Set an attribute` avec une couleur fixe, et `Forces` avec un vent fixe ne lisent rien ;
+- un vent qui varie d'un point à l'autre, branché sur `Forces` ;
+- le mode d'affichage compatible (voir [Réglages](reglages.md#affichage--carte-graphique-ou-mode-compatible)) : l'aperçu repasse alors en points et en arêtes.
+
+Un point de la boule de l'exemple qui devrait passer devant le tissu est dessiné dessous : les points sont dessinés avant la surface.
 
 ## Lecture et cache
 
@@ -149,7 +168,7 @@ Pour connaître ce que ta carte sait faire, lance le [banc de mesure](banc-gpu.m
 - **Auto-collision entre points.** Pas entre faces : l'épaisseur ne peut pas être plus fine que la maille, et il n'y a pas de frottement entre les couches.
 - **Obstacles simples.** Un sol, une boule, une boîte. Le nœud `Scene object` y met la boîte d'un objet de la scène 3D, même animé. Pas de collision avec la forme exacte d'un personnage ou d'un modèle.
 - **Pas de couture ni de patron.** On ne coud pas deux pièces de tissu.
-- **Aperçu en points et en arêtes.** Dans l'onglet **Simulation**. Posé dans une scène 3D, le tissu est une surface : ombrée, avec un matériau, rendue et exportée. Voir [Dans une scène 3D](noeuds-geometrie.md#dans-une-scène-3d).
+- **Aperçu sans matériau.** Dans l'onglet **Simulation**, le tissu est une surface ombrée d'une seule couleur (ou celle de son attribut `Cd`). Posé dans une scène 3D, il reçoit un matériau, il est rendu et exporté. Voir [Dans une scène 3D](noeuds-geometrie.md#dans-une-scène-3d).
 - **Taille.** Un tissu trop gros pour les tampons de la carte est calculé sur le processeur. La limite dépend de la carte.
 - **Avec très peu d'itérations par sous-pas** (moins de 4), l'accélération du calcul est coupée pour éviter que le tissu explose. C'est voulu.
 

@@ -152,7 +152,7 @@ Cinq conclusions :
 - Le cache d'ombres par sommet est fait (`Prepared::vshadow`), ainsi que celui du sol.
 - Les pièges de wgpu sont traités dans `gpusim` : limites réelles demandées à la carte, colonnes en pages, lancement sur deux dimensions.
 - Le cône d'influence n'est pas fait.
-- Le partage de la carte entre l'interface et le moteur n'est pas fait : l'interface dessine en OpenGL, la simulation a sa propre carte wgpu.
+- Le partage de la carte entre l'interface et le moteur est fait : l'interface dessine avec wgpu, et les simulations prennent son appareil (`gfx`, `gpusim`). Le tissu s'affiche depuis ses tampons, sans relecture (`gpudraw`).
 
 Le rapport propose de faire **le graphe avant les fluides**, parce que la façon de mettre en cache et de recalculer conditionne l'écriture des solveurs de fluides.
 
@@ -162,7 +162,7 @@ Synthèse des cinq ordres proposés, confrontée à l'état du code. C'est une l
 
 1. **Mesurer.** Lancer le banc sur la machine de travail, et recaler les rapports sur ces chiffres. Les rapports listent ce qui manque encore : débit de relecture, coût fixe d'un lancement, reproductibilité d'un noyau.
 2. **Finir le tissu.** L'auto-collision entre sommets est faite ; restent l'auto-collision par triangles (épaisseur fine), la collision avec un personnage (champ de distance), le cache compressé.
-3. **Afficher l'état du solveur sans relecture.** Cela demande la vue sur carte graphique : c'est l'étape 3 du plan. Elle sert en même temps les gros modèles et les simulations.
+3. **Afficher l'état du solveur sans relecture.** Fait pour les surfaces : aperçu de l'onglet Simulation, et géométries de nodes lourdes dans la vue d'une scène. Restent les points et les fils, et la vue 3D elle-même, toujours logicielle (les gros modèles n'en profitent pas encore).
 4. **Fixer le format de cache** avant d'écrire d'autres solveurs.
 5. **Fumée dense**, puis le solveur de pression, puis la grille creuse.
 6. **Rigides et destruction, cheveux**, sur le même socle VBD.

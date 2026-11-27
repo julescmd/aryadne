@@ -3243,6 +3243,15 @@ impl Cloth {
         self.last_ms
     }
 
+    /// De quoi dessiner l'état courant directement depuis la carte, sans demander aucune
+    /// relecture. `None` si le calcul se fait sur le processeur.
+    pub fn live(&mut self) -> Option<Live> {
+        let gc = self.gpu.as_ref().filter(|gc| gc.pos.pages.len() == 1 && gpusim::gpu().is_some())?;
+        let pos = gc.pos.pages[0].clone();
+        let (perm, inv) = self.order.get_or_insert_with(|| (Arc::new(self.topo.perm.clone()), Arc::new(self.topo.inv.clone()))).clone();
+        Some(Live { pos, origin: self.origin, perm, inv, cloth: self.id, generation: self.generation.load(Ordering::Acquire), now: self.generation.clone() })
+    }
+
     /// Le cliché de l'état courant. Sur la carte, la relecture est demandée mais pas attendue :
     /// rien ne bloque, et rien n'est copié tant que personne ne lit l'état.
     pub fn shot(&mut self) -> Arc<Shot> {
@@ -3251,14 +3260,9 @@ impl Cloth {
         }
         let n = self.topo.n;
         let pending = if self.ahead.is_empty() { None } else { self.request() };
-        let order = pending.as_ref().map(|_| self.order.get_or_insert_with(|| (Arc::new(self.topo.perm.clone()), Arc::new(self.topo.inv.clone()))).clone());
-        let shot = match (pending.zip(order), self.gpu.as_ref(), gpusim::gpu()) {
-            (Some((pending, (perm, inv))), Some(gc), Some(g)) => {
-                // De quoi dessiner ces tampons tels quels (une vue de l'interface ne le peut que si elle est sur la même carte)
-                let _ = g;
-                let live = (gc.pos.pages.len() == 1).then(|| {
-                    Live { pos: gc.pos.pages[0].clone(), origin: self.origin, perm, inv, cloth: self.id, generation: self.generation.load(Ordering::Acquire), now: self.generation.clone() }
-                });
+        let live = if pending.is_some() { self.live() } else { None };
+        let shot = match (pending, self.gpu.as_ref(), gpusim::gpu()) {
+            (Some(pending), Some(_), Some(_)) => {
                 let shot = Arc::new(Shot { n, pending: Mutex::new(Some(pending)), state: OnceLock::new(), failed: AtomicBool::new(false), good: self.good.clone(), live });
                 self.shots.push_back((shot.clone(), self.ahead.len(), std::time::Instant::now()));
                 shot

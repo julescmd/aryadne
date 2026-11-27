@@ -127,6 +127,13 @@ Onglet `Object`, section `Simulation` :
 | `Start (frames)` | Décalage de départ. 10 : la simulation part à la dixième image. -10 : elle a dix images d'avance |
 | `Simulation frame` | L'image de la simulation montrée, et sa durée |
 
+**Géométrie lourde.** À partir de 20 000 points, la géométrie est dessinée directement par la carte graphique dans la vue, sans revenir vers le processeur : c'est ce qui garde la vue fluide avec un gros tissu. Elle passe bien devant et derrière les autres objets. En échange, dans la vue seulement :
+
+- elle n'a pas d'ombres, et pas de matériau (elle prend la couleur de l'objet, ou son attribut `Cd`) ;
+- elle n'a pas de contour de sélection, et ne se choisit pas au clic : choisis-la dans la liste de la scène.
+
+Le rendu final et les exports ne changent pas : ombres, matériau, tout y est. En dessous de 20 000 points, rien de tout cela ne s'applique. En mode d'affichage compatible non plus (voir [Réglages](reglages.md#affichage--carte-graphique-ou-mode-compatible)).
+
 Elle ne se modifie pas en mode édition : elle se modifie dans son graphe. Détail : [Géométrie et simulation en nœuds](noeuds-geometrie.md#dans-une-scène-3d).
 
 Une **image** ajoutée devient un plan de référence dans la scène, avec une `Opacity` réglable.
