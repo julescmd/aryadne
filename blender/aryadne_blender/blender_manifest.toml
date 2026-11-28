@@ -1,0 +1,22 @@
+schema_version = "1.0.0"
+
+id = "aryadne_blender"
+version = "0.1.0"
+name = "Aryadne : affichage lourd"
+tagline = "Affiche des millions de triangles avec le moteur Aryadne"
+maintainer = "julescmd"
+type = "add-on"
+website = "https://github.com/julescmd/aryadne"
+tags = ["3D View", "Mesh"]
+
+blender_version_min = "4.2.0"
+
+# Champ exigé par Blender pour installer une extension. La licence n'est pas encore choisie :
+# cette valeur provisoire ne fixe rien, Jules la remplacera.
+license = ["LicenseRef-a-choisir"]
+
+[permissions]
+files = "Échange maillages et images avec le moteur Aryadne"
+
+[build]
+paths_exclude_pattern = ["__pycache__/", "*.pyc", "tests/"]

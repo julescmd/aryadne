@@ -156,26 +156,37 @@ pub struct Lampe {
     pub douceur: f32,
 }
 
-/// Image de matcap en valeurs linéaires (lignes de haut en bas)
+/// Image de matcap en valeurs linéaires (lignes de haut en bas) : passe diffuse (teintée par la
+/// couleur de l'objet) et passe spéculaire (ajoutée), comme les matcaps EXR de Blender
 pub struct Matcap {
     w: usize,
     h: usize,
-    px: Vec<[f32; 3]>,
+    diffuse: Vec<[f32; 3]>,
+    speculaire: Vec<[f32; 3]>,
 }
 
 impl Matcap {
     pub fn charger(chemin: &str) -> Result<Matcap, String> {
+        let p = std::path::Path::new(chemin);
+        if p.extension().is_some_and(|e| e.eq_ignore_ascii_case("exr")) {
+            let d = crate::nodes::load_exr_pass(p, "diffuse", 1024).or_else(|_| crate::nodes::load_exr_pass(p, "", 1024)).map_err(|e| format!("matcap illisible ({chemin}) : {e}"))?;
+            let s = crate::nodes::load_exr_pass(p, "specular", 1024).ok().filter(|s| s.w == d.w && s.h == d.h);
+            let rgb = |v: &[f32; 4]| [v[0], v[1], v[2]];
+            return Ok(Matcap { w: d.w, h: d.h, diffuse: d.px.iter().map(rgb).collect(), speculaire: s.map(|s| s.px.iter().map(rgb).collect()).unwrap_or_default() });
+        }
         let im = image::open(chemin).map_err(|e| format!("matcap illisible ({chemin}) : {e}"))?.to_rgb32f();
         let (w, h) = (im.width() as usize, im.height() as usize);
-        Ok(Matcap { w, h, px: im.pixels().map(|p| p.0).collect() })
+        Ok(Matcap { w, h, diffuse: im.pixels().map(|p| p.0).collect(), speculaire: vec![] })
     }
-    /// Couleur pour une normale de vue (x à droite, y en haut)
-    fn sample(&self, n: V3, miroir: bool) -> [f32; 3] {
+    /// Couleur pour une normale de vue (x à droite, y en haut) et une couleur de base
+    fn sample(&self, n: V3, miroir: bool, base: [f32; 3]) -> [f32; 3] {
         let u = (if miroir { -n[0] } else { n[0] }) * 0.5 + 0.5;
         let v = 0.5 - n[1] * 0.5;
         let x = ((u * self.w as f32) as usize).min(self.w - 1);
         let y = ((v * self.h as f32) as usize).min(self.h - 1);
-        self.px[y * self.w + x]
+        let d = self.diffuse[y * self.w + x];
+        let s = self.speculaire.get(y * self.w + x).copied().unwrap_or([0.0; 3]);
+        [0, 1, 2].map(|k| d[k] * base[k] + s[k])
     }
 }
 
@@ -398,11 +409,19 @@ impl Moteur {
         if let Some(p) = v["matcap"].as_str() {
             let m = match self.matcaps.get(p) {
                 Some(m) => m.clone(),
-                None => {
-                    let m = std::sync::Arc::new(Matcap::charger(p)?);
-                    self.matcaps.insert(p.to_string(), m.clone());
-                    m
-                }
+                None => match Matcap::charger(p) {
+                    Ok(m) => {
+                        let m = std::sync::Arc::new(m);
+                        self.matcaps.insert(p.to_string(), m.clone());
+                        m
+                    }
+                    Err(e) => {
+                        // Sans son image, le matcap prend la couleur de base : l'image se fait quand même
+                        eprintln!("{e}");
+                        self.eclairage.matcap = None;
+                        return Ok(());
+                    }
+                },
             };
             self.eclairage.matcap = Some(m);
         }
@@ -661,7 +680,7 @@ pub fn rendre(objets: &BTreeMap<String, Objet>, vue: &Vue, ecl: &Eclairage, rgba
                     d = d.min(w1 * a2 / len(c, a));
                 }
                 // Couverture d'une ligne d'un pixel, adoucie
-                (1.0 - (d - 0.5).max(0.0)).clamp(0.0, 1.0)
+                (1.0 - d).clamp(0.0, 1.0) * 0.8
             } else {
                 0.0
             };
@@ -711,10 +730,7 @@ pub fn rendre(objets: &BTreeMap<String, Objet>, vue: &Vue, ecl: &Eclairage, rgba
             let col = match ecl.mode {
                 Mode::Plat | Mode::Fil => base,
                 Mode::Matcap => match &ecl.matcap {
-                    Some(mc) => {
-                        let s = mc.sample(n, ecl.matcap_miroir);
-                        [base[0] * s[0], base[1] * s[1], base[2] * s[2]]
-                    }
+                    Some(mc) => mc.sample(n, ecl.matcap_miroir, base),
                     None => base,
                 },
                 Mode::Studio => ombrer(&lampes, ecl, n, &mat),
@@ -755,7 +771,7 @@ fn ombrer(lampes: &[(Lampe, V3)], ecl: &Eclairage, n: V3, mat: &Mat) -> [f32; 3]
             let gloss = (1.0 - mat.rugosite.clamp(0.0, 1.0)) * (1.0 - s);
             let shin = (10.0 * gloss + 1.0).exp2();
             let nh = (n[0] * hv[0] + n[1] * hv[1] + n[2] * hv[2]).max(0.0);
-            let sp = nh.powf(shin) * (shin + 2.0) / 8.0 * d.min(1.0);
+            let sp = nh.powf(shin) * (shin + 2.0) / 32.0 * d.min(1.0);
             for k in 0..3 {
                 sl[k] += l.speculaire[k] * sp;
             }
