@@ -290,6 +290,7 @@ dependencies = [
  "image",
  "libloading",
  "lzma-rs",
+ "memmap2",
  "open",
  "pollster",
  "rayon",

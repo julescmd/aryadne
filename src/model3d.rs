@@ -884,7 +884,7 @@ fn preset_radiance(i: usize, d: V3) -> [f32; 3] {
 // ---------- maillage préparé ----------
 
 /// Normales lissées par sommet (moyenne des faces), pondérées par l'aire.
-fn vertex_normals(pos: &[V3], tris: &[[u32; 3]]) -> Vec<V3> {
+pub(crate) fn vertex_normals(pos: &[V3], tris: &[[u32; 3]]) -> Vec<V3> {
     let mut n = vec![[0.0f32; 3]; pos.len()];
     for t in tris {
         let (a, b, c) = (pos[t[0] as usize], pos[t[1] as usize], pos[t[2] as usize]);
@@ -1680,7 +1680,7 @@ impl Prepared {
 }
 
 /// Poids à l'écran → poids dans l'espace (perspective juste) : rend 1/profondeur interpolé et les deux premiers poids
-fn persp_bary(w: [f32; 3], inv_depth: [f32; 3]) -> (f32, [f32; 2]) {
+pub(crate) fn persp_bary(w: [f32; 3], inv_depth: [f32; 3]) -> (f32, [f32; 2]) {
     let z = w[0] * inv_depth[0] + w[1] * inv_depth[1] + w[2] * inv_depth[2];
     (z, [w[0] * inv_depth[0] / z, w[1] * inv_depth[1] / z])
 }
@@ -1720,43 +1720,43 @@ fn pixols(m: &Prepared, cam: &Camera, w: usize, h: usize) -> std::sync::Arc<Pixo
     p
 }
 
-/// Passe de visibilité : triangle le plus proche à chaque pixel. Un triangle plus petit qu'un
-/// pixel est posé comme un point (son centre), sans tests d'arêtes : sur un maillage très dense,
-/// c'est presque tous les triangles, et aucun ne passe entre les centres de pixels.
-fn raster(m: &Prepared, cam: &Camera, w: usize, h: usize) -> Pixols {
+/// Clé de profondeur rendue ordonnable comme un entier (plus grand = plus près), dans les 32 bits hauts
+#[inline]
+fn depth_order(z: f32) -> u64 {
+    let b = z.to_bits();
+    (if b >> 31 == 1 { !b } else { b | 0x8000_0000 }) as u64
+}
+
+/// Buffer de visibilité : par pixel, profondeur (rendue ordonnable comme un entier) dans les 32 bits
+/// hauts et numéro du triangle (plus `first`) dans les bas. Un maximum atomique garde le plus proche :
+/// chaque triangle écrit directement, sans ranger d'abord les triangles par bande (méthode de Nanite).
+/// `screen` : x, y en pixels et z ; en perspective z est une profondeur de vue négative (on compare
+/// 1/-z), sinon z est déjà la clé (plus grand = plus près). Un x NaN écarte le triangle.
+/// Plusieurs maillages peuvent écrire dans le même buffer, chacun avec son `first`.
+/// `cull` : 0 garde les deux faces, 1 ne garde que l'aire positive à l'écran, -1 que la négative.
+pub(crate) fn visibility_pass(screen: &[[f32; 3]], tris: &[[u32; 3]], w: usize, h: usize, persp: bool, first: u32, cull: i8, vis: &[std::sync::atomic::AtomicU64]) {
     use rayon::prelude::*;
-    let pr = Proj::new(cam, w as f32, h as f32);
-    let screen: Vec<[f32; 3]> = m.pos.par_iter().map(|v| pr.screen(*v)).collect();
-    use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
-    // Buffer de visibilité : par pixel, profondeur (rendue ordonnable comme un entier) dans les 32 bits
-    // hauts et numéro du triangle dans les bas. Un maximum atomique garde le plus proche : chaque
-    // triangle écrit directement, sans ranger d'abord les triangles par bande (méthode de Nanite)
-    let vis: Vec<AtomicU64> = (0..w * h).into_par_iter().map(|_| AtomicU64::new(0)).collect();
-    let order = |z: f32| -> u64 {
-        let b = z.to_bits();
-        (if b >> 31 == 1 { !b } else { b | 0x8000_0000 }) as u64
-    };
+    use std::sync::atomic::Ordering::Relaxed;
     let put = |x: i64, y: i64, z: f32, ti: usize| {
-        let v = (order(z) << 32) | ti as u64;
+        let v = (depth_order(z) << 32) | (first as u64 + ti as u64);
         let cell = &vis[y as usize * w + x as usize];
         if cell.load(Relaxed) < v {
             cell.fetch_max(v, Relaxed);
         }
     };
-    let persp = !cam.ortho;
     let (wf, hf) = (w as f32, h as f32);
-    m.tris.par_chunks(4096).enumerate().for_each(|(ci, chunk)| {
+    tris.par_chunks(4096).enumerate().for_each(|(ci, chunk)| {
         for (j, t) in chunk.iter().enumerate() {
             let ti = ci * 4096 + j;
-            let (a, b, c) = (screen[t[0] as usize], screen[t[1] as usize], screen[t[2] as usize]);
+            let (Some(&a), Some(&b), Some(&c)) = (screen.get(t[0] as usize), screen.get(t[1] as usize), screen.get(t[2] as usize)) else { continue };
             let (lx, hx) = (a[0].min(b[0]).min(c[0]), a[0].max(b[0]).max(c[0]));
             let (ly, hy) = (a[1].min(b[1]).min(c[1]), a[1].max(b[1]).max(c[1]));
             // NaN (derrière la caméra : les comparaisons sont fausses) ou hors de l'image
-            if !(hx >= 0.0 && lx <= wf && hy >= 0.0 && ly <= hf) {
+            if !(hx >= 0.0 && lx <= wf && hy >= 0.0 && ly <= hf) || a[0].is_nan() || b[0].is_nan() || c[0].is_nan() {
                 continue;
             }
             let area = (b[0] - a[0]) * (c[1] - a[1]) - (c[0] - a[0]) * (b[1] - a[1]);
-            if !(area.abs() >= 1e-9) {
+            if !(area.abs() >= 1e-9) || (cull != 0 && (area > 0.0) != (cull > 0)) {
                 continue;
             }
             // En perspective, ce qui varie linéairement à l'écran est 1/profondeur
@@ -1790,6 +1790,19 @@ fn raster(m: &Prepared, cam: &Camera, w: usize, h: usize) -> Pixols {
             }
         }
     });
+}
+
+/// Passe de visibilité : triangle le plus proche à chaque pixel. Un triangle plus petit qu'un
+/// pixel est posé comme un point (son centre), sans tests d'arêtes : sur un maillage très dense,
+/// c'est presque tous les triangles, et aucun ne passe entre les centres de pixels.
+fn raster(m: &Prepared, cam: &Camera, w: usize, h: usize) -> Pixols {
+    use rayon::prelude::*;
+    let pr = Proj::new(cam, w as f32, h as f32);
+    let screen: Vec<[f32; 3]> = m.pos.par_iter().map(|v| pr.screen(*v)).collect();
+    use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+    let vis: Vec<AtomicU64> = (0..w * h).into_par_iter().map(|_| AtomicU64::new(0)).collect();
+    visibility_pass(&screen, &m.tris, w, h, !cam.ortho, 0, 0, &vis);
+    let persp = !cam.ortho;
     // Les poids de chaque pixel, recalculés depuis son triangle (pour un point, ramenés dans le triangle)
     let mut depth = vec![f32::MIN; w * h];
     let mut tri = vec![u32::MAX; w * h];

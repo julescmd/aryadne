@@ -3,6 +3,7 @@
 mod cloud;
 mod gfx;
 mod gpubench;
+mod moteur;
 mod titlebar;
 mod gpucloth;
 mod gpudraw;
@@ -145,6 +146,11 @@ fn main() -> eframe::Result {
             Ok(r) => println!("\n{}", r.texte()),
             Err(e) => eprintln!("{e}"),
         }
+        return Ok(());
+    }
+    // `aryadne --moteur` : moteur de rendu piloté par un autre programme (add-on Blender), sans interface
+    if std::env::args().any(|a| a == "--moteur") {
+        moteur::run();
         return Ok(());
     }
     let prefs = settings::Prefs::load();
