@@ -53,3 +53,28 @@ jobs:
         with:
           files: ${{ matrix.out }}
           generate_release_notes: true
+
+  # L'extension Blender (add-on) : un simple .zip du dossier, installable dans Blender 4.2 et plus
+  extension-blender:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Zip de l'extension
+        run: |
+          VERSION=$(grep '^version' blender/aryadne_blender/blender_manifest.toml | cut -d'"' -f2)
+          cd blender/aryadne_blender
+          zip -r "../../aryadne_blender-$VERSION.zip" . -x '__pycache__/*' '*.pyc'
+          cd ../..
+          echo "ZIP=aryadne_blender-$VERSION.zip" >> "$GITHUB_ENV"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: aryadne-blender-extension
+          path: ${{ env.ZIP }}
+
+      - name: Release (tags v*)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ env.ZIP }}
