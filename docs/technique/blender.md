@@ -108,6 +108,18 @@ Le buffer de visibilité atomique (`model3d::visibility_pass`) est le même que 
 
 Le mode serveur ne simplifie rien : la limite de 2 M triangles de l'import (`MAX_TRIS`) ne s'applique pas.
 
+## Mesures
+
+Machine de test : 2 cœurs, sans carte graphique (rendu logiciel llvmpipe pour Blender), moteur en release, image 1280 × 720.
+
+| Triangles | Envoi du maillage (total) | dont lecture Blender | dont lecture moteur | Image (rendu) | dont tracé | Aller-retour |
+|---|---|---|---|---|---|---|
+| 1 M | 333 ms | 258 ms | 29 ms | 62 ms | 39 ms | 65 ms |
+| 5 M | 2,1 s | 1,6 s | 154 ms | 93 ms | 62 ms | 97 ms |
+| 10 M | 4,0 s | 3,0 s | 331 ms | 177 ms | 132 ms | 180 ms |
+
+L'envoi n'a lieu qu'à l'activation et quand la géométrie change. Son temps est surtout la lecture côté Blender (`foreach_get` et le calcul des arêtes réelles des quadrilatères). L'image se refait à chaque mouvement de la vue, en taille réduite pendant le mouvement.
+
 ## Essai sans interface
 
 `blender/tests/essai_sans_interface.py` tourne avec le module `bpy` (roue Python de Blender). Après un premier rendu Workbench, le module `gpu` marche en arrière-plan (EGL) : l'essai rend la vue 3D de Blender hors écran (`GPUOffScreen.draw_view3d`), y compose l'image du moteur avec le vrai shader de l'add-on, et écrit des PNG côte à côte, Blender seul à gauche, Blender et moteur à droite. Il vérifie aussi le clic, l'enregistrement, le mode édition et la désactivation.
